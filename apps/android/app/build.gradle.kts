@@ -199,6 +199,58 @@ android {
             "\"${project.findProperty("lakko.bootstrap.config.path") as String? ?: ""}\"",
         )
 
+        // ADR-0038 (S4) — signed "update available" notice config. All sourced
+        // from gradle properties (`apps/android/local.properties` or
+        // `-P lakko.release.*=...`) so they never land in version control.
+        //
+        // `LAKKO_RELEASE_KEY` — base64url (no-pad) of the 32-byte Ed25519
+        // publisher release verifying key (the dedicated, OFFLINE publisher key,
+        // ADR-0038 §3). Empty when unset → the whole feature is DORMANT (no
+        // fetch, no verify, no banner). Pin-only: there is NO serving-tier
+        // fallback (unlike `DeviceAttestKey`'s JWKS), so an unpinned build simply
+        // has the notice off — fail-safe-toward-silence.
+        buildConfigField(
+            "String",
+            "LAKKO_RELEASE_KEY",
+            "\"${project.findProperty("lakko.release.key") as String? ?: ""}\"",
+        )
+        // `LAKKO_RELEASE_MANIFEST_URL` — the signed-manifest URL (a raw 89-byte
+        // Ed25519 blob, not JSON — it carries a 64-byte signature). Default is the
+        // pinned static serve path on the `lakko.me` vhost; the Ed25519 signature
+        // (not the URL) is the security boundary.
+        buildConfigField(
+            "String",
+            "LAKKO_RELEASE_MANIFEST_URL",
+            "\"${project.findProperty("lakko.release.manifest.url") as String? ?: "https://lakko.me/.well-known/lakko-release"}\"",
+        )
+        // `LAKKO_PLAY_STORE_URL` — the outbound Play deep-link the Update button
+        // opens. DEFAULT EMPTY because no production Play listing exists yet; when
+        // empty the Update button is hidden and (per the S4 gate) the banner stays
+        // dormant unless `LAKKO_RELEASE_CHECK_DEV_OVERRIDE` is set.
+        buildConfigField(
+            "String",
+            "LAKKO_PLAY_STORE_URL",
+            "\"${project.findProperty("lakko.play.store.url") as String? ?: ""}\"",
+        )
+        // `LAKKO_CURRENT_RELEASE` — this build's monotone release integer, compared
+        // as an integer against the manifest's `latest_release` /
+        // `min_supported_release`. Default 1 (the first release). Decoupled from
+        // the cosmetic `versionName` / `versionCode` (ADR-0038 §2).
+        buildConfigField(
+            "String",
+            "LAKKO_CURRENT_RELEASE",
+            "\"${project.findProperty("lakko.current.release") as String? ?: "1"}\"",
+        )
+        // `LAKKO_RELEASE_CHECK_DEV_OVERRIDE` — force the banner to show even
+        // without a Play store URL, for pre-launch dogfood testing (UX §5 optional
+        // hardening). Default false. A text-only informational notice (no Update
+        // button) then appears once per NEW version.
+        buildConfigField(
+            "boolean",
+            "LAKKO_RELEASE_CHECK_DEV_OVERRIDE",
+            "${(project.findProperty("lakko.release.check.dev.override") as String?)?.toBoolean() ?: false}",
+        )
+
         // G3-4-mobile — wire androidx.test runner for the
         // `app/src/androidTest/` instrumented test source set.
         // `./gradlew :app:connectedDebugAndroidTest` boots a

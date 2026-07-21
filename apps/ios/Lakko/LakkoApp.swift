@@ -150,8 +150,21 @@ struct AppRoot: View {
     @EnvironmentObject private var deviceGroupSync: DeviceGroupSyncRepository
     @EnvironmentObject private var inviteIntake: InviteIntake
 
+    /// ADR-0038 S4 — the "update available" notice controller. `@StateObject`
+    /// wrapping the process-wide singleton so the banner mount below observes its
+    /// published ``UpdateBannerDecision``.
+    @StateObject private var releaseChecker = ReleaseUpdateChecker.shared
+
     var body: some View {
         content
+            // ADR-0038 S4 — fetch + verify the signed release manifest at launch
+            // (throttled to once per 24h internally), then publish the banner
+            // decision. Dormant when no release key is pinned; fail-safe toward
+            // showing no banner on any fetch / verify failure. Runs once on
+            // AppRoot appear (view identity is stable across auth-state flips).
+            .task {
+                await releaseChecker.checkOnLaunch()
+            }
             // ADR-0037 §6 (G-11) — a rolled-back / tampered backup was refused
             // at restore. User-visible alarm; the served (older / altered) state
             // was NOT loaded.
@@ -249,6 +262,17 @@ struct AppRoot: View {
                 if authRepository.identityAlert != nil {
                     IdentitySecurityBanner(
                         onDismiss: { authRepository.dismissIdentityAlert() }
+                    )
+                }
+                // ADR-0038 S4 — the "update available" notice, mounted BELOW the
+                // security banner (severity ordering: security alert first, the
+                // informational update notice second — UX §3). Shown only when the
+                // verified manifest resolves to an actionable update.
+                if case .shown(let showUpdateButton) = releaseChecker.decision {
+                    UpdateAvailableBanner(
+                        showUpdateButton: showUpdateButton,
+                        onUpdate: { releaseChecker.openStore() },
+                        onDismiss: { releaseChecker.dismiss() }
                     )
                 }
                 SessionRoot(

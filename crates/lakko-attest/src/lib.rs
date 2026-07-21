@@ -56,11 +56,28 @@
 //! gate) and binds `account_id` directly.
 //!
 //! [ADR-0037]: ../../../docs/adr/0037-backup-head-rollback-commitment.md
+//!
+//! # Release manifest
+//!
+//! The crate also hosts a fourth attestation format, [`ReleaseManifest`] (see
+//! the [`release_manifest`] module, [ADR-0038]): a signed "an update is
+//! available" notice carrying the current and minimum-supported app release
+//! numbers, so a client renders a trustworthy update prompt without trusting the
+//! host it fetched the manifest from. It shares this crate's fixed-layout binary
+//! discipline and its own distinct domain separator, so all four attestation
+//! kinds are cryptographically non-interchangeable even under a shared signing
+//! key. It is the odd one out in two respects: it is **global** (binds no
+//! `account_id` — a release manifest is app-wide, not per-account), and it is
+//! **not** signed by `services/auth` — a dedicated, offline **publisher release
+//! key** signs it and clients only ever verify it (auth is never in the loop).
+//!
+//! [ADR-0038]: ../../../docs/adr/0038-update-available-notice.md
 
 #![forbid(unsafe_code)]
 
 pub mod backup_head;
 pub mod genesis;
+pub mod release_manifest;
 
 pub use backup_head::{
     verify_backup_head, verify_backup_head_binding, BackupHead, BackupHeadError, BACKUP_HEAD_LEN,
@@ -68,6 +85,10 @@ pub use backup_head::{
 pub use genesis::{
     verify_genesis_binding, verify_genesis_fresh, GenesisAttestError, GenesisAttestation,
     GENESIS_ATTESTATION_LEN,
+};
+pub use release_manifest::{
+    release_status, release_status_for, verify_release_manifest, ReleaseManifest,
+    ReleaseManifestError, UpdateStatus, RELEASE_MANIFEST_LEN,
 };
 
 use lakko_crypto::signing::{Signature, SigningKey, VerifyingKey, SIGNATURE_LEN};
@@ -265,7 +286,7 @@ pub fn verify_bound(
 /// of its own.
 #[doc(hidden)]
 pub mod fuzz_api {
-    use super::{ActionAttestation, BackupHead, GenesisAttestation, SigningKey};
+    use super::{ActionAttestation, BackupHead, GenesisAttestation, ReleaseManifest, SigningKey};
 
     /// Try to [`ActionAttestation::open`] the bytes against a FIXED verifying
     /// key. The bytes are attacker-controlled — an attestation rides alongside a
@@ -307,6 +328,20 @@ pub mod fuzz_api {
     pub fn open_backup_head(bytes: &[u8]) -> bool {
         let vk = SigningKey::from_seed(&[0x11; 32]).verifying_key();
         BackupHead::open(bytes, &vk).is_ok()
+    }
+
+    /// Try to [`ReleaseManifest::open`] the bytes against a FIXED verifying key.
+    /// The bytes are attacker-controlled — a release manifest is fetched from a
+    /// host a malicious network could tamper (ADR-0038), reaching this bounded
+    /// parser before any state is consulted — and the parser must stay
+    /// panic-free on any input. The fuzzer cannot forge a valid signature
+    /// against the fixed key, so it exercises the length / version /
+    /// field-slicing / signature-parse / verify-fail path. Returns `true` on a
+    /// (vanishingly rare) success.
+    #[must_use]
+    pub fn open_release_manifest(bytes: &[u8]) -> bool {
+        let vk = SigningKey::from_seed(&[0x11; 32]).verifying_key();
+        ReleaseManifest::open(bytes, &vk).is_ok()
     }
 }
 

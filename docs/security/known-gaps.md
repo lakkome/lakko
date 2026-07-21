@@ -2658,3 +2658,37 @@ genesis** proof that PREVENTS it, additive to (never replacing) the self-sig.
   append-gate → first-observation verify) on a deployed environment. Operator+auth
   collusion stays out of scope (a compromised attest signing key already co-signs
   the root — the same trust tier). See ADR-0036.
+
+### G-32: Update-notice suppress/replay residual (ADR-0038) — **ACCEPTED (LOW), 2026-07**
+
+ADR-0038 adds a signed "update available" notice: the client fetches a **global**,
+Ed25519-signed `ReleaseManifest` (89 bytes) as a raw static blob from
+`/.well-known/lakko-release`, verifies it against a build-time-pinned **dedicated
+publisher** key, and — if its build-time `CURRENT_RELEASE` is behind — shows a
+dismissible banner (mobile) with a store deep-link. The signature is an
+**anti-forgery** control: a malicious serving tier / MITM **cannot** forge a higher
+`latest_release` or `min_supported_release` (a phishing nudge toward a hostile store
+link, or manufactured urgency) without the offline release signing key.
+
+**Residual (accepted, LOW).** The same adversary CAN **suppress** the notice (strip
+the file → 404 → the client renders no banner) or **replay** a genuine-but-old
+manifest (→ an older asserted `latest`). Both are LOW: they keep the user on a
+version they **already run** — no confidentiality or integrity break, and the store
+link the button opens is unaffected. The client's own fail action on an unverifiable
+manifest is *also* "show no banner" (fail-toward-silence), so a suppressor gains
+nothing a stripped file would not already give them. Freshness is **DISABLED in v1**
+(`max_staleness = i64::MAX`), so a replayed old manifest is not rejected as stale — a
+deliberate call given the fail-action is silence and the re-sign-cadence operational
+coupling (a static manifest whose `signed_at` ages would otherwise make the check go
+dormant everywhere unless the publisher re-signs on a cron).
+
+This is an **availability / anti-phishing** posture, **not** an E2EE control: its
+"fail-safe" means *fail toward no nag*, distinct from invariant #4's
+fail-closed-refuse-the-connection — it touches no message-path or key-material
+invariant. Invariant #1 holds trivially (the manifest is global — no `account_id`, no
+per-user field); invariant #2 holds (a public Ed25519-signed static artifact nginx
+serves opaquely, no key material). Because it adds no E2EE / MLS / call invariant, it
+takes **no indexed C-number** — the invariant index stays at 8 I + 58 C + 15 T. A
+future tightening (a persisted highest-`latest_release`-seen floor, or a re-enabled
+generous freshness window) is a clean addition if the residual is ever judged worth
+closing. See ADR-0038 § "Freshness model + residual".

@@ -24,6 +24,8 @@
 	<string>1.0</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
+	<key>LakkoAppStoreUrl</key>
+	<string></string>
 	<key>LakkoBackupHeadStalenessSecs</key>
 	<string></string>
 	<key>LakkoBootstrapConfigPath</key>
@@ -32,6 +34,14 @@
 	<string></string>
 	<key>LakkoBootstrapTrustAnchor</key>
 	<string></string>
+	<key>LakkoCurrentRelease</key>
+	<string>1</string>
+	<key>LakkoReleaseCheckDevOverride</key>
+	<string>false</string>
+	<key>LakkoReleaseKey</key>
+	<string></string>
+	<key>LakkoReleaseManifestUrl</key>
+	<string>https://lakko.me/.well-known/lakko-release</string>
 	<key>LakkoTransparencyOperatorKey</key>
 	<string></string>
 	<key>LakkoTransparencyUrl</key>

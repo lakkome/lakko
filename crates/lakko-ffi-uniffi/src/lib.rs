@@ -45,6 +45,7 @@ pub mod discovery;
 pub mod mnemonic;
 pub mod pairing;
 pub mod pow;
+pub mod release;
 pub mod sframe;
 pub mod sfu_signaling;
 pub mod shamir;
@@ -222,6 +223,17 @@ pub enum FfiError {
     /// the wire.
     #[error("transport error: {0}")]
     Transport(String),
+
+    /// Release-manifest verify error (ADR-0038, "update available" notice).
+    /// Covers every [`lakko_attest::ReleaseManifestError`] cause — a malformed /
+    /// wrong-length / wrong-version manifest, a signature that does not verify, a
+    /// stale manifest, or a bad verifying key. Unlike the backup-head split
+    /// (ADR-0037), staleness is NOT carved into a distinct variant: the ADR-0038
+    /// UX fails toward "up to date" on ANY verify failure (an unverified manifest
+    /// must never drive an update nag), so the caller catches this one variant and
+    /// treats it as up-to-date. Message for logs, variant for the wire.
+    #[error("release manifest error: {0}")]
+    Release(String),
 
     /// Lock contention / poisoned mutex on the shared Group state.
     #[error("internal lock error")]

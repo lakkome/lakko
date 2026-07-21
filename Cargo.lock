@@ -2749,6 +2749,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lakko-release-manifest-tool"
+version = "0.0.0"
+dependencies = [
+ "base64 0.22.1",
+ "lakko-attest",
+ "lakko-crypto",
+]
+
+[[package]]
 name = "lakko-sframe-native"
 version = "0.0.0"
 dependencies = [

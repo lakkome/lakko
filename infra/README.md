@@ -391,10 +391,43 @@ Two `server_name`s share one nginx config (`infra/nginx/sites-available/lakko.co
 | Vhost | Routes | Purpose |
 |---|---|---|
 | `lakko.me` | `/`, `/assets/*`, `/sw.js`, `/manifest.webmanifest` | The web SPA root + hashed assets + the service worker + the PWA manifest |
+| `lakko.me` | `/.well-known/lakko-release` (ADR-0038) | The signed "update available" manifest — a raw 89-byte Ed25519 blob served from a **separate** root `/var/www/lakko-release/` (NOT the SPA root) with `Cache-Control: no-store` |
 | `lakko.me` | `/api/auth/*`, `/api/ds/*`, `/api/discovery/*`, `/api/storage/*` (1.19c1), `/api/push/*` (1.20b) | Same-origin proxy to the backend services so the web client's `connect-src 'self'` CSP stays valid |
 | `api.lakko.me` | `/auth/*`, `/ds/*`, `/storage/*`, `/discovery/*`, `/push-gw/*` | Canonical external API entry point for the iOS / Android / Tauri clients (different CSP boundary; CORS not needed because Lakko clients never cross the `lakko.me ↔ api.lakko.me` origin pair) |
 
 Every `/api/*` path on `lakko.me` must be mirrored against a real upstream — the **vite dev proxy in `apps/web/vite.config.ts` is the source of truth for what the client expects**. If you add a new dev-proxy entry, the matching production `location /api/...` block here is mandatory. The 1.22 smoke probe will catch a missing route by failing the corresponding `/api/.../health` assertion.
+
+### Release manifest (ADR-0038)
+
+The "update available" notice is a raw **89-byte** Ed25519-signed blob, minted **offline** by `tools/release-manifest` and client-verified against a pinned publisher key. It is served as a static file at **`https://lakko.me/.well-known/lakko-release`** (an nginx `alias` to `/var/www/lakko-release/lakko-release.bin`, `Cache-Control: no-store`). The signing key is a **dedicated publisher key** — `services/auth` is never in the loop; neither the host serving the blob nor the zero-trust backend can forge one.
+
+The manifest lives **outside** `/var/www/lakko-web/` on purpose: `just deploy-web` rsyncs the SPA with `--delete`, which would wipe the manifest on the next web deploy if it shared the SPA root.
+
+**One-time bootstrap on the VPS** (a `lakkome`-owned dir so publishing needs no sudo; nginx reads it as `www-data`):
+
+```bash
+sudo install -d -o lakkome -g www-data -m 755 /var/www/lakko-release
+```
+
+**Generate the keypair — once, ideally on an air-gapped machine:**
+
+```bash
+just gen-release-key
+# -> writes release-signing-key.seed (mode 0600) — keep OFFLINE, never commit
+# -> prints the base64url public key; paste it into each client build config
+#    (S4/S5): VITE_LAKKO_RELEASE_KEY / Info.plist LakkoReleaseKey /
+#    BuildConfig.LAKKO_RELEASE_KEY
+```
+
+**Mint + publish a manifest — on each release:**
+
+```bash
+just mint-release-manifest <latest> <min_supported>   # e.g. 42 30
+# -> writes release-manifest.bin (raw 89 bytes)
+scp release-manifest.bin lakkome@lakko.me:/var/www/lakko-release/lakko-release.bin
+```
+
+Served **immediately** — no service restart, no nginx reload. Clients fetch the raw blob, verify the Ed25519 signature against the pinned key, and render the notice; an **absent** manifest (before the first publish, or a 404) means **no notice** (fail-open). `latest` is the newest published release number; `min_supported` is the oldest release the backend still accepts (a client below it is told it must update). `no-store` means a freshly-published manifest is picked up on the next fetch.
 
 ## Backup / restore
 

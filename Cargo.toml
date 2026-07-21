@@ -45,6 +45,7 @@ members = [
     "services/transparency",
     "services/witness",
     "services/transport-rendezvous",
+    "tools/release-manifest",
 ]
 # Fuzz crates require nightly + libfuzzer-sys; they opt out of this
 # workspace via their own `[workspace]` block and are listed here only so

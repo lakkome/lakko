@@ -715,6 +715,25 @@ deploy-web:
     # the freshly-deployed origin.
     curl -fsS --max-time 10 "https://{{vps_host}}/health?cb=$(date +%s)"
 
+# ADR-0038 S3 — generate the OFFLINE release-signing keypair. Writes the
+# 32-byte private seed to release-signing-key.seed (mode 0600 — keep it
+# OFFLINE, never commit) and PRINTS the base64url public key to paste into
+# each client build config (VITE_LAKKO_RELEASE_KEY / Info.plist
+# LakkoReleaseKey / BuildConfig.LAKKO_RELEASE_KEY, wired in S4/S5). Run once,
+# ideally on an air-gapped machine. Refuses to overwrite an existing seed.
+gen-release-key:
+    cargo run -q -p lakko-release-manifest-tool -- keygen
+
+# ADR-0038 S3 — mint a signed release manifest and write the raw 89-byte
+# blob to release-manifest.bin. Copy it to the server (the tool prints the
+# scp reminder; served at https://lakko.me/.well-known/lakko-release with no
+# service restart / nginx reload). See infra/README.md :: "Release manifest".
+# Example: just mint-release-manifest 42 30
+mint-release-manifest latest min_supported:
+    cargo run -q -p lakko-release-manifest-tool -- \
+        mint --latest {{latest}} --min-supported {{min_supported}} \
+        --key release-signing-key.seed --out release-manifest.bin
+
 # Restart all Lakko services via the systemd target.
 restart:
     ssh {{vps_user}}@{{vps_host}} 'sudo systemctl restart lakko.target'

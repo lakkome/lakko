@@ -54,3 +54,15 @@ path = "fuzz_targets/backup_head_open.rs"
 test = false
 doc = false
 bench = false
+
+# `ReleaseManifest::open` is the signed update-notice parser (ADR-0038): a
+# fixed-layout 89-byte Ed25519-signed blob (global, not account-bound) fetched
+# from a host a malicious network could tamper, so a malformed envelope is fully
+# attacker-controlled and reaches this bounded parser before any state is
+# consulted. Any panic / overflow / slice-out-of-bounds here is a vulnerability.
+[[bin]]
+name = "release_manifest_open"
+path = "fuzz_targets/release_manifest_open.rs"
+test = false
+doc = false
+bench = false

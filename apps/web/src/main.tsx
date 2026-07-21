@@ -17,6 +17,7 @@ import { render } from "solid-js/web";
 import App from "./App";
 import "./styles.css";
 import { registerServiceWorker } from "./sw/register";
+import { runBootUpdateCheck } from "./update/release-check";
 import { bootstrapTheme } from "./ui/theme";
 
 const root = document.getElementById("root");
@@ -38,3 +39,11 @@ render(() => <App />, root);
 // Skipped in dev builds (Vite HMR + SW conflict) and in browsers
 // without `navigator.serviceWorker`.
 void registerServiceWorker();
+
+// ADR-0038 S5 — the shared "update available" verify core. Fetches +
+// verifies the signed release manifest and, if a newer release exists,
+// emits a single console.info. Web renders NO banner (it defers to the
+// SW-driven SwUpdateBanner, which is the web's real update path); this
+// is the shared-core landing + a dormant future hook. Dormant unless
+// VITE_LAKKO_RELEASE_KEY is pinned; swallows its own errors.
+void runBootUpdateCheck();

@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-release-manifest-tool"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Offline publisher tool (ADR-0038) — generate the Ed25519 release-signing keypair and mint the signed release manifest served as the 'update available' notice."
+
+[[bin]]
+name = "lakko-release-manifest"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+lakko-attest.workspace = true
+lakko-crypto.workspace = true
+base64 = "0.22"

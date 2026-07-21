@@ -80,6 +80,7 @@ pub mod pairing;
 pub mod pow_solver;
 pub mod presence;
 pub mod push;
+pub mod release;
 pub mod sframe;
 pub mod sfu_signaling;
 pub mod shamir;

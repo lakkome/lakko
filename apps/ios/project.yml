@@ -118,6 +118,29 @@ targets:
         # cadence; too tight → false stale refusals, too loose → a wider
         # within-window fresh-install replay residual.
         LakkoBackupHeadStalenessSecs: ""
+        # ADR-0038 S4 — signed "update available" notice. All security-bearing
+        # slots default EMPTY so the feature is DORMANT (no fetch, no verify, no
+        # banner) until a deployment provisions them per build configuration —
+        # there is no insecure default (fail-safe-toward-silence, ADR-0038 §2).
+        #   * LakkoReleaseKey — base64url of the 32-byte Ed25519 verifying key the
+        #     signed release manifest is checked against (the dedicated, offline
+        #     PUBLISHER key). EMPTY → the whole check is off. Pin-only: there is no
+        #     serving-tier fallback (unlike the DeviceAttestKey JWKS).
+        #   * LakkoReleaseManifestUrl — the manifest URL (a raw 89-byte signed
+        #     blob). Defaulted to the top-level lakko.me path.
+        #   * LakkoAppStoreUrl — the outbound App Store deep-link. EMPTY because no
+        #     production App Store id exists yet; empty → the Update button is
+        #     hidden and (per the S4 gate) the banner stays dormant unless the dev
+        #     override below is set.
+        #   * LakkoCurrentRelease — this build's monotone release integer, compared
+        #     as an integer against the manifest's latest / min-supported release.
+        #   * LakkoReleaseCheckDevOverride — force the banner to show even without a
+        #     store URL, for pre-launch dogfood testing. Default off.
+        LakkoReleaseKey: ""
+        LakkoReleaseManifestUrl: "https://lakko.me/.well-known/lakko-release"
+        LakkoAppStoreUrl: ""
+        LakkoCurrentRelease: "1"
+        LakkoReleaseCheckDevOverride: "false"
         # G-29 — background contact-inbox refresh. `BGAppRefreshTask`
         # (registered on the scene via `.backgroundTask(.appRefresh(_:))`
         # in LakkoApp, scheduled by `ContactBackgroundRefresh`) needs the

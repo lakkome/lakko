@@ -54,6 +54,9 @@ import me.lakko.app.transport.AntiCensorshipManager
 import me.lakko.app.ui.devices.DevicesScreen
 import me.lakko.app.ui.home.HomeScreen
 import me.lakko.app.ui.transport.AntiCensorshipSettingsScreen
+import me.lakko.app.ui.updates.UpdateAvailableBanner
+import me.lakko.app.updates.ReleaseUpdateChecker
+import me.lakko.app.updates.UpdateBannerDecision
 
 /**
  * Single-activity Compose host.
@@ -153,6 +156,15 @@ class MainActivity : ComponentActivity() {
         val antiCensorship = AntiCensorshipManager(applicationContext, lifecycleScope)
         antiCensorship.armFromSettings()
 
+        // ADR-0038 S4 (G-11-adjacent) — the "update available" notice controller.
+        // On launch (throttled to once per 24h internally) it fetches + verifies
+        // the signed release manifest against the build-time-pinned publisher key
+        // and publishes an UpdateBannerDecision the AppRoot mounts. Dormant when no
+        // release key is pinned; fail-safe toward showing no banner on any fetch /
+        // verify failure. The fetch rides the anti-censorship tunnel when armed.
+        val releaseChecker = ReleaseUpdateChecker(applicationContext, lifecycleScope)
+        releaseChecker.checkOnLaunch()
+
         // Read the launching Intent — a cold-start tap on
         // `https://lakko.me/i/<slug>` carries the URL in
         // `intent.data`; a cold-start tap on a Lakko push
@@ -178,6 +190,7 @@ class MainActivity : ComponentActivity() {
                         inviteIntake = inviteIntake,
                         pushIntake = pushIntake,
                         antiCensorship = antiCensorship,
+                        releaseChecker = releaseChecker,
                     )
                 }
             }
@@ -309,6 +322,7 @@ private fun AppRoot(
     inviteIntake: InviteIntake,
     pushIntake: PushIntake,
     antiCensorship: AntiCensorshipManager,
+    releaseChecker: ReleaseUpdateChecker,
 ) {
     val state by authRepository.state.collectAsStateWithLifecycle()
 
@@ -365,10 +379,23 @@ private fun AppRoot(
             // ADR-0017 defence-in-depth — surface the identity-changed
             // security alert above the session content.
             val identityAlert by authRepository.identityAlert.collectAsState()
+            // ADR-0038 S4 — the "update available" notice, mounted BELOW the
+            // security banner (severity ordering: security alert first, the
+            // informational update notice second — UX §3). Shown only when the
+            // verified manifest resolves to an actionable update.
+            val updateDecision by releaseChecker.decision.collectAsState()
+            val context = androidx.compose.ui.platform.LocalContext.current
             androidx.compose.foundation.layout.Column {
                 if (identityAlert != null) {
                     me.lakko.app.ui.auth.IdentitySecurityBanner(
                         onDismiss = { authRepository.dismissIdentityAlert() },
+                    )
+                }
+                (updateDecision as? UpdateBannerDecision.Shown)?.let { shown ->
+                    UpdateAvailableBanner(
+                        showUpdateButton = shown.showUpdateButton,
+                        onUpdate = { releaseChecker.openStore(context) },
+                        onDismiss = { releaseChecker.dismiss() },
                     )
                 }
                 SessionRoot(
