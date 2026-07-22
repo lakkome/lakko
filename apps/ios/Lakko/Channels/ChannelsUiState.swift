@@ -26,8 +26,18 @@ public final class ChannelsUiState: ObservableObject {
     /// Per-channel server epoch cache.
     @Published public private(set) var epochByChannel: [String: UInt32] = [:]
 
-    /// Per-channel publisher keys (local-only).
+    /// Per-channel publisher keys (local-only). The `signingKeySeed` half is
+    /// persisted in the hardware-backed Keychain
+    /// (``ChannelPublisherKeyStore``, G-29) via ``persistPublisherSigningSeeds``
+    /// so a relaunch keeps signing under the same key (invariant #7); the
+    /// content-key `seed` re-derives from the MLS PublisherGroup on open.
     @Published public private(set) var keysByChannel: [String: ChannelPublisherKeys] = [:]
+
+    /// Per-channel persisted publisher **signing** seed, restored from the
+    /// Keychain on launch (G-29). The publisher-open path
+    /// (``ChannelsComposer/freshPublisherKeys``) reuses the seed here so this
+    /// device continues signing the channel under the same Ed25519 key.
+    private var publisherSigningSeedByChannel: [String: Data] = [:]
 
     /// Per-channel monotone publish counter. Reset on
     /// ``setKeys(channelId:keys:)`` — fresh keys imply a
@@ -70,6 +80,9 @@ public final class ChannelsUiState: ObservableObject {
         // launch can poll for envelopes without the user
         // re-subscribing manually.
         self.subscriberKeysByChannel = Self.loadSubscriberKeys()
+        // Restore persisted publisher signing seeds so a relaunched publisher
+        // keeps signing its channels under the same Ed25519 key (G-29).
+        self.publisherSigningSeedByChannel = Self.loadPublisherSigningSeeds()
     }
 
     // MARK: - Mutations
@@ -88,6 +101,10 @@ public final class ChannelsUiState: ObservableObject {
         epochByChannel[channelId] = nil
         keysByChannel[channelId] = nil
         counterByChannel[channelId] = nil
+        // Drop this channel's persisted publisher signing seed (G-29) — the
+        // device is no longer a publisher for it.
+        publisherSigningSeedByChannel[channelId] = nil
+        persistPublisherSigningSeeds()
     }
 
     public func updateLocalMeta(
@@ -114,10 +131,22 @@ public final class ChannelsUiState: ObservableObject {
         epochByChannel[channelId] = epoch
     }
 
-    /// Install fresh publisher keys; resets counter to 0.
+    /// Install fresh publisher keys; resets counter to 0. Persists the
+    /// `signingKeySeed` half to the hardware-backed Keychain (G-29) so a
+    /// relaunch reuses it via ``persistedPublisherSigningSeed(channelId:)``.
     public func setKeys(channelId: String, keys: ChannelPublisherKeys) {
         keysByChannel[channelId] = keys
         counterByChannel[channelId] = 0
+        publisherSigningSeedByChannel[channelId] = keys.signingKeySeed
+        persistPublisherSigningSeeds()
+    }
+
+    /// The persisted per-channel publisher signing seed, or `nil` when this
+    /// device has never published to `channelId`. The publisher-open path
+    /// hands it to ``ChannelsComposer/freshPublisherKeys`` so signing
+    /// continues under the same key across a relaunch (G-29).
+    public func persistedPublisherSigningSeed(channelId: String) -> Data? {
+        publisherSigningSeedByChannel[channelId]
     }
 
     /// Atomically read-and-bump the per-channel publish
@@ -174,7 +203,9 @@ public final class ChannelsUiState: ObservableObject {
         counterByChannel = [:]
         subscriberKeysByChannel = [:]
         subscribedSeedsByChannel = [:]
+        publisherSigningSeedByChannel = [:]
         persistSubscriberKeys()
+        persistPublisherSigningSeeds()
     }
 
     // MARK: - Subscriber-keypair persistence
@@ -242,6 +273,52 @@ public final class ChannelsUiState: ObservableObject {
                 secret: secret,
                 publicKey: pub
             )
+        }
+        return out
+    }
+
+    // MARK: - Publisher signing-seed persistence (G-29)
+
+    /// One row in the persisted Keychain blob.
+    private struct PersistedPublisherKey: Codable {
+        let channelId: String
+        /// Hex-encoded 32-byte Ed25519 signing seed.
+        let signingSeedHex: String
+    }
+
+    private func persistPublisherSigningSeeds() {
+        // G-29 — the Ed25519 signing seed is hardware-backed-Keychain material,
+        // not `UserDefaults` plaintext (invariant #7). An empty set wipes the
+        // item (remove-channel / reset / logout).
+        if publisherSigningSeedByChannel.isEmpty {
+            ChannelPublisherKeyStore.delete()
+            return
+        }
+        let rows: [PersistedPublisherKey] =
+            publisherSigningSeedByChannel.map { (channelId, seed) in
+                PersistedPublisherKey(
+                    channelId: channelId,
+                    signingSeedHex: ChannelsComposer.bytesToHex(seed)
+                )
+            }
+        guard let data = try? JSONEncoder().encode(rows) else { return }
+        ChannelPublisherKeyStore.save(data)
+    }
+
+    private static func loadPublisherSigningSeeds() -> [String: Data] {
+        guard
+            let data = ChannelPublisherKeyStore.load(),
+            let rows = try? JSONDecoder().decode(
+                [PersistedPublisherKey].self,
+                from: data
+            )
+        else {
+            return [:]
+        }
+        var out: [String: Data] = [:]
+        for row in rows {
+            guard let seed = Data(hexString: row.signingSeedHex) else { continue }
+            out[row.channelId] = seed
         }
         return out
     }

@@ -32,9 +32,17 @@ import org.json.JSONObject
  * `ChannelKeyStore.encryptedPrefs`), so the secret half is
  * encrypted at rest (G-29, invariant #7), never plaintext;
  * `null` (the test default) disables persistence.
+ *
+ * Publisher **signing** seeds are persisted the same way into
+ * [publisherPrefs] (`ChannelPublisherKeyStore.encryptedPrefs`)
+ * so a relaunched publisher keeps signing its channels under
+ * the same Ed25519 key (G-29); `null` disables persistence.
+ * The content-key `seed` re-derives from the MLS PublisherGroup
+ * on open, so it is not persisted here.
  */
 public class ChannelsUiState(
     private val prefs: SharedPreferences? = null,
+    private val publisherPrefs: SharedPreferences? = null,
 ) {
 
     public companion object {
@@ -44,6 +52,13 @@ public class ChannelsUiState(
          *  once. */
         public const val SUBSCRIBER_KEYS_PREF_KEY: String =
             "lakko.channels.subscriber-keys.v1"
+
+        /** Storage key for publisher signing-seed persistence
+         *  (G-29). Same name the iOS side keys its Keychain
+         *  rows under so an on-device audit grep finds both
+         *  publisher stores at once. */
+        public const val PUBLISHER_SIGNING_SEEDS_PREF_KEY: String =
+            "lakko.channels.publisher-signing-seeds.v1"
     }
 
     private val _channels = MutableStateFlow<List<ChannelHandle>>(emptyList())
@@ -94,6 +109,16 @@ public class ChannelsUiState(
     public val subscribedSeedsByChannel: StateFlow<Map<String, Map<UInt, ByteArray>>> =
         _subscribedSeedsByChannel.asStateFlow()
 
+    /** Per-channel persisted publisher **signing** seed (G-29),
+     *  restored from [publisherPrefs] on construction. The
+     *  publisher-open path ([ChannelsComposer.freshPublisherKeys])
+     *  reuses the seed here so this device continues signing the
+     *  channel under the same Ed25519 key across a relaunch.
+     *  In-memory mirror of the encrypted store; never exposed as
+     *  a flow (it drives the open path, not the UI). */
+    private var publisherSigningSeedByChannel: Map<String, ByteArray> =
+        loadPublisherSigningSeeds()
+
     public fun addChannel(handle: ChannelHandle) {
         _channels.update { list ->
             // Id-idempotent: re-adding refreshes the local
@@ -109,6 +134,10 @@ public class ChannelsUiState(
         _epochByChannel.update { it - channelId }
         _keysByChannel.update { it - channelId }
         _counterByChannel.update { it - channelId }
+        // Drop this channel's persisted publisher signing seed (G-29) — the
+        // device is no longer a publisher for it.
+        publisherSigningSeedByChannel = publisherSigningSeedByChannel - channelId
+        persistPublisherSigningSeeds()
     }
 
     public fun updateLocalMeta(
@@ -138,11 +167,25 @@ public class ChannelsUiState(
         _epochByChannel.update { it + (channelId to epoch) }
     }
 
-    /** Install fresh publisher keys; resets counter to 0. */
+    /** Install fresh publisher keys; resets counter to 0.
+     *  Persists the `signingKeySeed` half to the Keystore-backed
+     *  store (G-29) so a relaunch reuses it via
+     *  [persistedPublisherSigningSeed]. */
     public fun setKeys(channelId: String, keys: ChannelPublisherKeys) {
         _keysByChannel.update { it + (channelId to keys) }
         _counterByChannel.update { it + (channelId to 0u) }
+        publisherSigningSeedByChannel =
+            publisherSigningSeedByChannel + (channelId to keys.signingKeySeed)
+        persistPublisherSigningSeeds()
     }
+
+    /** The persisted per-channel publisher signing seed, or `null`
+     *  when this device has never published to [channelId]. The
+     *  publisher-open path hands it to
+     *  [ChannelsComposer.freshPublisherKeys] so signing continues
+     *  under the same Ed25519 key across a relaunch (G-29). */
+    public fun persistedPublisherSigningSeed(channelId: String): ByteArray? =
+        publisherSigningSeedByChannel[channelId]
 
     /** Atomically read-and-bump the per-channel publish
      *  counter. Returns the value the NEXT post should
@@ -200,7 +243,9 @@ public class ChannelsUiState(
         _counterByChannel.value = emptyMap()
         _subscriberKeysByChannel.value = emptyMap()
         _subscribedSeedsByChannel.value = emptyMap()
+        publisherSigningSeedByChannel = emptyMap()
         persistSubscriberKeys()
+        persistPublisherSigningSeeds()
     }
 
     // -----------------------------------------------------------------
@@ -237,6 +282,39 @@ public class ChannelsUiState(
             val secret = hexToBytes(secretHex) ?: continue
             val pub = hexToBytes(publicHex) ?: continue
             out[channelId] = ChannelSubscriberKeys(secret = secret, publicKey = pub)
+        }
+        return out
+    }
+
+    // -----------------------------------------------------------------
+    // Publisher signing-seed persistence (G-29)
+    // -----------------------------------------------------------------
+
+    /** JSON array of `{channelId, signingSeedHex}` rows — the same
+     *  hex-row shape the subscriber blob uses, so an on-device audit
+     *  grep reads both publisher + subscriber stores identically. */
+    private fun persistPublisherSigningSeeds() {
+        val sink = publisherPrefs ?: return
+        val arr = JSONArray()
+        for ((channelId, seed) in publisherSigningSeedByChannel) {
+            val row = JSONObject()
+            row.put("channelId", channelId)
+            row.put("signingSeedHex", ChannelsComposer.bytesToHex(seed))
+            arr.put(row)
+        }
+        sink.edit().putString(PUBLISHER_SIGNING_SEEDS_PREF_KEY, arr.toString()).apply()
+    }
+
+    private fun loadPublisherSigningSeeds(): Map<String, ByteArray> {
+        val raw = publisherPrefs?.getString(PUBLISHER_SIGNING_SEEDS_PREF_KEY, null)
+            ?: return emptyMap()
+        val arr = runCatching { JSONArray(raw) }.getOrNull() ?: return emptyMap()
+        val out = LinkedHashMap<String, ByteArray>(arr.length())
+        for (i in 0 until arr.length()) {
+            val row = arr.optJSONObject(i) ?: continue
+            val channelId = row.optString("channelId").takeIf { it.isNotEmpty() } ?: continue
+            val seed = hexToBytes(row.optString("signingSeedHex")) ?: continue
+            out[channelId] = seed
         }
         return out
     }

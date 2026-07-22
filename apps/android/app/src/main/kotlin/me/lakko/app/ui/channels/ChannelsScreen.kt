@@ -47,6 +47,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.platform.LocalContext
 import me.lakko.app.channels.ChannelKeyStore
+import me.lakko.app.channels.ChannelPublisherKeyStore
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -115,15 +116,19 @@ private sealed class Route {
 
 /**
  * Build the process-scoped [ChannelsUiState], persisting the subscriber
- * keypairs into the hardware-backed Keystore (G-29) rather than plaintext
- * `SharedPreferences`. Reads `LocalContext` (composable scope) before the
- * non-composable `remember` block builds the encrypted prefs.
+ * keypairs AND the publisher signing seeds into the hardware-backed Keystore
+ * (G-29) rather than plaintext `SharedPreferences`. Reads `LocalContext`
+ * (composable scope) before the non-composable `remember` block builds the
+ * encrypted prefs.
  */
 @Composable
 private fun rememberChannelsUiState(): ChannelsUiState {
     val context = LocalContext.current
     return remember {
-        ChannelsUiState(prefs = ChannelKeyStore.encryptedPrefs(context))
+        ChannelsUiState(
+            prefs = ChannelKeyStore.encryptedPrefs(context),
+            publisherPrefs = ChannelPublisherKeyStore.encryptedPrefs(context),
+        )
     }
 }
 
@@ -528,6 +533,11 @@ private fun NewChannelScreen(
                                 ChannelsComposer.freshPublisherKeys(
                                     identity = identity,
                                     channelIdHex = id,
+                                    // G-29 — reuse the persisted per-channel
+                                    // signing seed if this device published to
+                                    // `id` before (null for a fresh id).
+                                    existingSigningSeed =
+                                        state.persistedPublisherSigningSeed(id),
                                 )
                             } finally {
                                 identity.close()
@@ -1927,6 +1937,10 @@ private fun JoinCoPublisherScreen(
                                     request.groupId,
                                     request.joinerKey,
                                     request.channelIdHex,
+                                    // G-29 — reuse the persisted signing seed
+                                    // on a re-poll.
+                                    state.persistedPublisherSigningSeed(
+                                        request.channelIdHex),
                                 )
                                 if (keys == null) {
                                     delay(3_000L)

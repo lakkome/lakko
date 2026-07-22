@@ -24,9 +24,11 @@ import uniffi.lakko_ffi_uniffi.verifyAndDecryptChannelPost as uniffiVerifyAndDec
  * `apps/web/src/channels/composer.ts::ChannelPublisherKeys`
  * and the iOS `ChannelPublisherKeys` value type.
  *
- * Persisted in-memory in `ChannelsUiState`; a follow-up
- * sprint moves the `signingKeySeed` into the device
- * Keystore via `androidx.security.crypto`.
+ * Held in `ChannelsUiState`; the `signingKeySeed` half is
+ * persisted in the Keystore-backed [ChannelPublisherKeyStore]
+ * (G-29) so a relaunch keeps signing under the same key
+ * (invariant #7). The content-key `seed` re-derives from the
+ * persisted MLS PublisherGroup exporter on each open.
  */
 public data class ChannelPublisherKeys(
     /** 32-byte content-key seed. **Demo only** —
@@ -134,17 +136,24 @@ public object ChannelsComposer {
      * composer calls lands in a follow-up sub-sprint
      * (working name `G4-2-mls-persistence`).
      *
-     * `signingKeySeed` stays randomly minted by the
-     * underlying Android NDK CSPRNG — ADR-0010 treats the
-     * signing key as a long-lived per-channel publisher
-     * identity, not as something derived from the
-     * call-time exporter. It belongs in
-     * `androidx.security.crypto` once the migration
-     * sub-sprint lands.
+     * The `signingKeySeed` is a long-lived per-channel
+     * publisher identity (ADR-0010) — NOT derived from the
+     * call-time exporter. When [existingSigningSeed] is
+     * supplied (the Keystore-encrypted seed [ChannelsUiState]
+     * persisted on a prior open, G-29), the publisher key is
+     * reconstructed from it so this device keeps signing under
+     * the same key across a relaunch; otherwise a fresh seed is
+     * minted by the underlying Android NDK CSPRNG. The caller
+     * persists the returned `signingKeySeed` (via
+     * [ChannelsUiState.setKeys] -> [ChannelPublisherKeyStore])
+     * so a subsequent open reuses it. A corrupt / wrong-length
+     * [existingSigningSeed] falls back to a fresh seed rather
+     * than failing the open.
      */
     public fun freshPublisherKeys(
         identity: Identity,
         channelIdHex: String,
+        existingSigningSeed: ByteArray? = null,
     ): ChannelPublisherKeys {
         val channelId = channelIdFromHex(channelIdHex)
 
@@ -176,7 +185,13 @@ public object ChannelsComposer {
             throw ChannelsComposerException.Ffi(e.message ?: "PublisherGroup channel_id codec failed")
         }
 
-        val signer = ChannelSigningKey.generate()
+        // Reuse the persisted per-channel signing seed when present (G-29
+        // cross-relaunch continuity) so subscribers keep verifying against the
+        // same Ed25519 key; a corrupt / wrong-length persisted seed falls back
+        // to a fresh key rather than failing the open.
+        val signer = existingSigningSeed?.let { seedBytes ->
+            runCatching { ChannelSigningKey.fromSeed(seedBytes) }.getOrNull()
+        } ?: ChannelSigningKey.generate()
         try {
             return ChannelPublisherKeys(
                 seed = seed,

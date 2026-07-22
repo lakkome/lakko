@@ -422,7 +422,10 @@ struct NewChannelScreen: View {
             let identity = try Identity.fromSeed(seed: accountIdentitySeed)
             let keys = try ChannelsComposer.freshPublisherKeys(
                 identity: identity,
-                channelIdHex: id
+                channelIdHex: id,
+                // G-29 — reuse the persisted per-channel signing seed if this
+                // device has published to `id` before (nil for a fresh id).
+                existingSigningSeed: state.persistedPublisherSigningSeed(channelId: id)
             )
             state.addChannel(.init(
                 id: id,
@@ -1617,7 +1620,10 @@ struct JoinCoPublisherScreen: View {
                     identity: identity,
                     groupId: request.groupId,
                     joinerKey: request.joinerKey,
-                    channelIdHex: request.channelIdHex
+                    channelIdHex: request.channelIdHex,
+                    // G-29 — reuse the persisted signing seed on a re-poll.
+                    existingSigningSeed: state.persistedPublisherSigningSeed(
+                        channelId: request.channelIdHex)
                 )
                 if keys == nil {
                     try? await Task.sleep(nanoseconds: Self.pollIntervalNs)

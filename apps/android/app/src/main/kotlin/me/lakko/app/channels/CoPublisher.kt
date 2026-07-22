@@ -228,6 +228,9 @@ public object CoPublisher {
         groupId: ByteArray,
         joinerKey: ByteArray,
         channelIdHex: String,
+        // G-29 — reuse the persisted per-channel signing seed if this device
+        // has co-published to the channel before (null on a first join).
+        existingSigningSeed: ByteArray? = null,
     ): ChannelPublisherKeys? {
         val raw = ds.fetchGroup(groupId, after = 0L, waitSecs = 0)
         for (m in raw.messages) {
@@ -244,7 +247,8 @@ public object CoPublisher {
             // channel id and derives the shared content-key seed + a fresh
             // per-device signing key so this device can publish.
             Group.joinFromWelcome(rendezvous.welcome, identity).close()
-            return ChannelsComposer.freshPublisherKeys(identity, channelIdHex)
+            return ChannelsComposer.freshPublisherKeys(
+                identity, channelIdHex, existingSigningSeed)
         }
         return null
     }

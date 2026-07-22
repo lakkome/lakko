@@ -27,9 +27,12 @@ import LakkoCore
 /// `crates/lakko-ffi-uniffi/src/channels.rs` by name
 /// without translating.
 
-/// Local publisher keys for a single channel. Persisted
-/// in-memory in `ChannelsUiState`; a follow-up sprint
-/// moves the `signingKeySeed` into the device Keychain.
+/// Local publisher keys for a single channel. Held in
+/// `ChannelsUiState`; the `signingKeySeed` half is persisted
+/// in the hardware-backed Keychain (``ChannelPublisherKeyStore``,
+/// G-29) so a relaunch keeps signing under the same key
+/// (invariant #7). The content-key `seed` re-derives from the
+/// persisted MLS PublisherGroup exporter on each open.
 public struct ChannelPublisherKeys: Equatable, Sendable {
     /// 32-byte content-key seed. **Demo only** — production
     /// seeds come from PublisherGroup
@@ -103,17 +106,23 @@ public enum ChannelsComposer {
     /// note in [`docs/security/known-gaps.md`](../../../../docs/security/known-gaps.md)
     /// G-27.
     ///
-    /// `signingKeySeed` stays randomly minted by the
-    /// underlying iOS Security CSPRNG —
-    /// [ADR-0010](../../../../docs/adr/0010-channels-two-tier-broadcast.md)
-    /// treats the signing key as a long-lived per-channel
-    /// publisher identity, not as something derived from
-    /// the call-time exporter. It belongs in the Keychain
-    /// alongside the device root key once the migration
-    /// sub-sprint lands.
+    /// The `signingKeySeed` is a long-lived per-channel publisher identity
+    /// ([ADR-0010](../../../../docs/adr/0010-channels-two-tier-broadcast.md)) —
+    /// NOT derived from the call-time exporter. When `existingSigningSeed`
+    /// is supplied (the hardware-backed seed ``ChannelsUiState`` persisted on
+    /// a prior open, G-29), the publisher key is reconstructed from it so this
+    /// device keeps signing under the same key across a relaunch; otherwise a
+    /// fresh seed is minted by the underlying iOS Security CSPRNG. The caller
+    /// persists the returned `signingKeySeed` (via ``ChannelsUiState/setKeys``
+    /// → ``ChannelPublisherKeyStore``) so a subsequent open reuses it.
+    ///
+    /// A corrupt / wrong-length `existingSigningSeed` falls back to a fresh
+    /// seed rather than failing the open — the channel stays usable, and the
+    /// caller re-persists the fresh seed.
     public static func freshPublisherKeys(
         identity: Identity,
-        channelIdHex: String
+        channelIdHex: String,
+        existingSigningSeed: Data? = nil
     ) throws -> ChannelPublisherKeys {
         let channelId = try channelIdFromHex(channelIdHex)
 
@@ -153,7 +162,17 @@ public enum ChannelsComposer {
         // `lakko_mls::publisher_group::CHANNEL_EXPORTER_LABEL`).
         let seed = seedBytes
 
-        let signer = ChannelSigningKey.generate()
+        // Reuse the persisted per-channel signing seed when present (G-29
+        // cross-relaunch continuity) so subscribers keep verifying against the
+        // same Ed25519 key; a corrupt / wrong-length persisted seed falls back
+        // to a fresh key rather than failing the open.
+        let signer: ChannelSigningKey
+        if let existingSigningSeed,
+           let reused = try? ChannelSigningKey.fromSeed(seed: existingSigningSeed) {
+            signer = reused
+        } else {
+            signer = ChannelSigningKey.generate()
+        }
         return ChannelPublisherKeys(
             seed: seed,
             signingKeySeed: signer.toSeed()

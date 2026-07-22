@@ -202,7 +202,10 @@ public enum CoPublisher {
         identity: Identity,
         groupId: Data,
         joinerKey: Data,
-        channelIdHex: String
+        channelIdHex: String,
+        // G-29 — reuse the persisted per-channel signing seed if this device
+        // has co-published to the channel before (nil on a first join).
+        existingSigningSeed: Data? = nil
     ) async throws -> ChannelPublisherKeys? {
         let raw = try await ds.fetchGroup(groupId: groupId, after: 0, waitSecs: 0)
         for m in raw.messages {
@@ -216,7 +219,9 @@ public enum CoPublisher {
             // per-device signing key so this device can publish.
             _ = try Group.joinFromWelcome(welcome: rendezvous.welcome, identity: identity)
             return try ChannelsComposer.freshPublisherKeys(
-                identity: identity, channelIdHex: channelIdHex)
+                identity: identity,
+                channelIdHex: channelIdHex,
+                existingSigningSeed: existingSigningSeed)
         }
         return nil
     }
