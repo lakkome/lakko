@@ -59,6 +59,22 @@ public class ChannelsUiState(
          *  publisher stores at once. */
         public const val PUBLISHER_SIGNING_SEEDS_PREF_KEY: String =
             "lakko.channels.publisher-signing-seeds.v1"
+
+        /** Storage key for the per-channel publish **counter**
+         *  persistence. The AEAD key+nonce for each post is
+         *  HKDF-derived from `(seed, channel_id, epoch_id,
+         *  sender_pubkey, message_counter)` and the content
+         *  `seed` is STABLE across a relaunch (re-derived from
+         *  the persisted MLS PublisherGroup exporter). An
+         *  in-memory-only counter therefore restarts at 0 on
+         *  relaunch WITHIN the same epoch + seed and reuses the
+         *  same `(key, nonce)` on a new plaintext — catastrophic
+         *  ChaCha20 keystream reuse. Persisting the counter at
+         *  rest (alongside the signing seed) makes it
+         *  forever-monotone; `epoch_id` is in the HKDF, so no
+         *  per-epoch reset is needed. */
+        public const val PUBLISHER_COUNTERS_PREF_KEY: String =
+            "lakko.channels.publisher-counters.v1"
     }
 
     private val _channels = MutableStateFlow<List<ChannelHandle>>(emptyList())
@@ -81,9 +97,15 @@ public class ChannelsUiState(
     public val keysByChannel: StateFlow<Map<String, ChannelPublisherKeys>> =
         _keysByChannel.asStateFlow()
 
-    private val _counterByChannel = MutableStateFlow<Map<String, ULong>>(emptyMap())
-    /** Per-channel monotone publish counter. Reset on
-     *  ``setKeys``. */
+    private val _counterByChannel =
+        MutableStateFlow<Map<String, ULong>>(loadPublisherCounters())
+    /** Per-channel forever-monotone publish counter, restored
+     *  from [publisherPrefs] on construction so it survives a
+     *  relaunch. Seeded to 0 only for a channel with no persisted
+     *  value ([setKeys] is load-else-0); NEVER reset on a key
+     *  install or an epoch rotation — resetting it against the
+     *  stable content seed would repeat a `(key, nonce)` pair
+     *  (AEAD nonce reuse). Advanced + persisted by [nextCounter]. */
     public val counterByChannel: StateFlow<Map<String, ULong>> =
         _counterByChannel.asStateFlow()
 
@@ -133,7 +155,12 @@ public class ChannelsUiState(
         _postsByChannel.update { it - channelId }
         _epochByChannel.update { it - channelId }
         _keysByChannel.update { it - channelId }
-        _counterByChannel.update { it - channelId }
+        // Deliberately KEEP this channel's publish counter (in-memory + at
+        // rest): un-publishing does NOT destroy the MLS PublisherGroup content
+        // seed, so a re-add of the same channel_id re-derives the same content
+        // seed + epoch. The counter must stay a forever-monotone floor so a
+        // re-add can never rewind it to 0 and re-collide the AEAD nonce (robust
+        // even though the signing seed below IS dropped; matches the web client).
         // Drop this channel's persisted publisher signing seed (G-29) — the
         // device is no longer a publisher for it.
         publisherSigningSeedByChannel = publisherSigningSeedByChannel - channelId
@@ -167,13 +194,22 @@ public class ChannelsUiState(
         _epochByChannel.update { it + (channelId to epoch) }
     }
 
-    /** Install fresh publisher keys; resets counter to 0.
-     *  Persists the `signingKeySeed` half to the Keystore-backed
-     *  store (G-29) so a relaunch reuses it via
+    /** Install publisher keys for a channel. Seeds the publish
+     *  counter to 0 **only** when this channel has no persisted
+     *  counter yet — an existing (relaunch-restored) counter is
+     *  preserved so it stays forever-monotone. Resetting it to 0
+     *  here would repeat a `(key, nonce)` pair on the stable
+     *  content seed + epoch (catastrophic AEAD nonce reuse), so
+     *  this mirrors the load-else-generate posture of the
+     *  publisher signing seed just below. Persists the
+     *  `signingKeySeed` half to the Keystore-backed store (G-29)
+     *  so a relaunch reuses it via
      *  [persistedPublisherSigningSeed]. */
     public fun setKeys(channelId: String, keys: ChannelPublisherKeys) {
         _keysByChannel.update { it + (channelId to keys) }
-        _counterByChannel.update { it + (channelId to 0u) }
+        _counterByChannel.update { map ->
+            if (map.containsKey(channelId)) map else map + (channelId to 0u)
+        }
         publisherSigningSeedByChannel =
             publisherSigningSeedByChannel + (channelId to keys.signingKeySeed)
         persistPublisherSigningSeeds()
@@ -188,14 +224,18 @@ public class ChannelsUiState(
         publisherSigningSeedByChannel[channelId]
 
     /** Atomically read-and-bump the per-channel publish
-     *  counter. Returns the value the NEXT post should
-     *  carry. */
+     *  counter and persist the advanced floor BEFORE returning.
+     *  Returns the value the NEXT post should carry. Persisting
+     *  before hand-off means a crash right after a post can only
+     *  ever SKIP a counter, never hand the same value out twice —
+     *  the safe direction for AEAD nonce uniqueness. */
     public fun nextCounter(channelId: String): ULong {
         var value: ULong = 0u
         _counterByChannel.update { map ->
             value = map[channelId] ?: 0u
             map + (channelId to (value + 1u))
         }
+        persistPublisherCounters()
         return value
     }
 
@@ -246,6 +286,7 @@ public class ChannelsUiState(
         publisherSigningSeedByChannel = emptyMap()
         persistSubscriberKeys()
         persistPublisherSigningSeeds()
+        persistPublisherCounters()
     }
 
     // -----------------------------------------------------------------
@@ -315,6 +356,41 @@ public class ChannelsUiState(
             val channelId = row.optString("channelId").takeIf { it.isNotEmpty() } ?: continue
             val seed = hexToBytes(row.optString("signingSeedHex")) ?: continue
             out[channelId] = seed
+        }
+        return out
+    }
+
+    // -----------------------------------------------------------------
+    // Publisher counter persistence (AEAD nonce-reuse defence)
+    // -----------------------------------------------------------------
+
+    /** JSON array of `{channelId, counter}` rows, the counter as a
+     *  decimal string (JSON has no unsigned-64 type). Persisted into
+     *  [publisherPrefs] (the same Keystore-backed store as the signing
+     *  seeds) whenever the counter map changes, so the forever-monotone
+     *  floor survives a relaunch. */
+    private fun persistPublisherCounters() {
+        val sink = publisherPrefs ?: return
+        val arr = JSONArray()
+        for ((channelId, counter) in _counterByChannel.value) {
+            val row = JSONObject()
+            row.put("channelId", channelId)
+            row.put("counter", counter.toString())
+            arr.put(row)
+        }
+        sink.edit().putString(PUBLISHER_COUNTERS_PREF_KEY, arr.toString()).apply()
+    }
+
+    private fun loadPublisherCounters(): Map<String, ULong> {
+        val raw = publisherPrefs?.getString(PUBLISHER_COUNTERS_PREF_KEY, null)
+            ?: return emptyMap()
+        val arr = runCatching { JSONArray(raw) }.getOrNull() ?: return emptyMap()
+        val out = LinkedHashMap<String, ULong>(arr.length())
+        for (i in 0 until arr.length()) {
+            val row = arr.optJSONObject(i) ?: continue
+            val channelId = row.optString("channelId").takeIf { it.isNotEmpty() } ?: continue
+            val counter = row.optString("counter").toULongOrNull() ?: continue
+            out[channelId] = counter
         }
         return out
     }

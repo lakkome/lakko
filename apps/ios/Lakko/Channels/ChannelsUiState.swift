@@ -39,11 +39,20 @@ public final class ChannelsUiState: ObservableObject {
     /// device continues signing the channel under the same Ed25519 key.
     private var publisherSigningSeedByChannel: [String: Data] = [:]
 
-    /// Per-channel monotone publish counter. Reset on
-    /// ``setKeys(channelId:keys:)`` — fresh keys imply a
-    /// fresh `(epoch, sender)` pair, which starts a fresh
-    /// counter sequence per the `lakko-channels`
-    /// invariants.
+    /// Per-channel **forever-monotone** publish counter, persisted at rest in
+    /// the hardware-backed Keychain (``ChannelPublishCounterStore``) so it never
+    /// restarts at 0 across a relaunch. The AEAD key + nonce `lakko-channels`
+    /// seals each post under are HKDF-derived from
+    /// `(seed, channel_id, epoch_id, sender_pubkey, message_counter)`, and the
+    /// content `seed` re-derives STABLY from the persisted MLS PublisherGroup
+    /// exporter — so an in-memory counter reset to 0 after a relaunch would
+    /// reuse a `(key, nonce)` pair on different plaintexts (ChaCha20 keystream
+    /// reuse). ``nextCounter(channelId:)`` write-throughs every bump; the
+    /// counter is NEVER reset on a rotation — `epoch_id` is folded into the
+    /// HKDF, so a single monotone sequence per channel is safe across epochs.
+    /// (Multi-device publisher sharing of one counter is a SEPARATE pre-existing
+    /// concern — the `lakko-channels` contract is per-client storage — out of
+    /// scope here.)
     @Published public private(set) var counterByChannel: [String: UInt64] = [:]
 
     /// Per-channel subscriber-side X25519 keypair (Phase 4b
@@ -83,6 +92,10 @@ public final class ChannelsUiState: ObservableObject {
         // Restore persisted publisher signing seeds so a relaunched publisher
         // keeps signing its channels under the same Ed25519 key (G-29).
         self.publisherSigningSeedByChannel = Self.loadPublisherSigningSeeds()
+        // Restore persisted per-channel publish counters so a relaunched
+        // publisher never restarts the AEAD counter at 0 under the stable
+        // content seed + epoch (nonce-reuse defence).
+        self.counterByChannel = Self.loadPublishCounters()
     }
 
     // MARK: - Mutations
@@ -100,7 +113,13 @@ public final class ChannelsUiState: ObservableObject {
         postsByChannel[channelId] = nil
         epochByChannel[channelId] = nil
         keysByChannel[channelId] = nil
-        counterByChannel[channelId] = nil
+        // Deliberately KEEP this channel's publish counter (in-memory + at
+        // rest): un-publishing does NOT destroy the MLS PublisherGroup content
+        // seed, so a re-add of the same channel_id re-derives the same content
+        // seed + epoch. The counter must stay a forever-monotone floor so a
+        // re-add can never rewind it to 0 and re-collide the AEAD nonce. (This
+        // is robust even though the signing seed below IS dropped — matches the
+        // web client, and does not rely on the sender_pubkey changing.)
         // Drop this channel's persisted publisher signing seed (G-29) — the
         // device is no longer a publisher for it.
         publisherSigningSeedByChannel[channelId] = nil
@@ -131,12 +150,22 @@ public final class ChannelsUiState: ObservableObject {
         epochByChannel[channelId] = epoch
     }
 
-    /// Install fresh publisher keys; resets counter to 0. Persists the
-    /// `signingKeySeed` half to the hardware-backed Keychain (G-29) so a
-    /// relaunch reuses it via ``persistedPublisherSigningSeed(channelId:)``.
+    /// Install fresh publisher keys. Persists the `signingKeySeed` half to the
+    /// hardware-backed Keychain (G-29) so a relaunch reuses it via
+    /// ``persistedPublisherSigningSeed(channelId:)``.
+    ///
+    /// The publish counter is **load-else-0**: it starts at 0 only for a channel
+    /// this device has never published to, and otherwise keeps its persisted
+    /// forever-monotone value (mirroring the publisher-seed reuse-else-generate
+    /// in ``ChannelsComposer/freshPublisherKeys``). Resetting to 0 here would
+    /// reuse the AEAD `(key, nonce)` — the content seed re-derives STABLY from
+    /// the MLS PublisherGroup, so the counter must never wind back.
     public func setKeys(channelId: String, keys: ChannelPublisherKeys) {
         keysByChannel[channelId] = keys
-        counterByChannel[channelId] = 0
+        if counterByChannel[channelId] == nil {
+            counterByChannel[channelId] = 0
+        }
+        persistPublishCounters()
         publisherSigningSeedByChannel[channelId] = keys.signingKeySeed
         persistPublisherSigningSeeds()
     }
@@ -152,9 +181,17 @@ public final class ChannelsUiState: ObservableObject {
     /// Atomically read-and-bump the per-channel publish
     /// counter. Returns the value the NEXT post should
     /// carry; the state is updated to one past that.
+    ///
+    /// The new floor is **write-through**-persisted to the Keychain BEFORE the
+    /// value is returned: a crash right after a post must still have advanced
+    /// the persisted floor, so the same counter is never handed out twice
+    /// across a relaunch (a skipped value on a crash is safe — the crate needs
+    /// strict monotonicity, not gapless; a REUSED value is the catastrophic
+    /// AEAD nonce reuse this defends against).
     public func nextCounter(channelId: String) -> UInt64 {
         let current = counterByChannel[channelId] ?? 0
         counterByChannel[channelId] = current + 1
+        persistPublishCounters()
         return current
     }
 
@@ -206,6 +243,10 @@ public final class ChannelsUiState: ObservableObject {
         publisherSigningSeedByChannel = [:]
         persistSubscriberKeys()
         persistPublisherSigningSeeds()
+        // Wipe the persisted publish counters (logout / reset). A fresh account
+        // on this device starts every channel's counter at 0 again — safe
+        // because a fresh account also mints fresh publisher keys + seeds.
+        persistPublishCounters()
     }
 
     // MARK: - Subscriber-keypair persistence
@@ -319,6 +360,54 @@ public final class ChannelsUiState: ObservableObject {
         for row in rows {
             guard let seed = Data(hexString: row.signingSeedHex) else { continue }
             out[row.channelId] = seed
+        }
+        return out
+    }
+
+    // MARK: - Publish-counter persistence (AEAD nonce-reuse defence)
+
+    /// One row in the persisted Keychain blob.
+    private struct PersistedPublishCounter: Codable {
+        let channelId: String
+        /// Forever-monotone per-channel publish counter.
+        let counter: UInt64
+    }
+
+    private func persistPublishCounters() {
+        // The counter is the AEAD nonce input `lakko-channels` requires to be
+        // strictly monotone within `(channel_id, epoch_id, sender_pubkey)`
+        // BETWEEN SESSIONS; the content seed re-derives stably from the MLS
+        // PublisherGroup, so a relaunch that restarts it at 0 reuses a
+        // `(key, nonce)` pair (ChaCha20 keystream reuse). Kept in the same
+        // hardware-backed Keychain as the publisher signing seed for a single
+        // consistent store (the counter is not itself secret — it rides in the
+        // clear post header on the wire). An empty set wipes the item
+        // (remove-all / reset / logout).
+        if counterByChannel.isEmpty {
+            ChannelPublishCounterStore.delete()
+            return
+        }
+        let rows: [PersistedPublishCounter] =
+            counterByChannel.map { (channelId, counter) in
+                PersistedPublishCounter(channelId: channelId, counter: counter)
+            }
+        guard let data = try? JSONEncoder().encode(rows) else { return }
+        ChannelPublishCounterStore.save(data)
+    }
+
+    private static func loadPublishCounters() -> [String: UInt64] {
+        guard
+            let data = ChannelPublishCounterStore.load(),
+            let rows = try? JSONDecoder().decode(
+                [PersistedPublishCounter].self,
+                from: data
+            )
+        else {
+            return [:]
+        }
+        var out: [String: UInt64] = [:]
+        for row in rows {
+            out[row.channelId] = row.counter
         }
         return out
     }

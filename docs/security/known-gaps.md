@@ -2703,3 +2703,50 @@ takes **no indexed C-number** — the invariant index stays at 8 I + 58 C + 15 T
 future tightening (a persisted highest-`latest_release`-seen floor, or a re-enabled
 generous freshness window) is a clean addition if the residual is ever judged worth
 closing. See ADR-0038 § "Freshness model + residual".
+
+### G-33: Channel publish-counter not persisted → AEAD nonce reuse across relaunch — **CLOSED (2026-07)**
+
+`lakko-channels` seals each `ChannelPost` with ChaCha20-Poly1305 under a key + nonce
+HKDF-derived from `(content_seed, channel_id, epoch_id, sender_pubkey, message_counter)`
+(`crates/lakko-channels/src/post.rs`), and the crate documents that `message_counter`
+MUST be strictly monotone within `(channel_id, epoch_id, sender_pubkey)` and "lives in
+client storage **between sessions**" (`post.rs:142-145`). The channel content seed is
+**stable across an app relaunch/reload** (it re-derives from the persisted MLS
+PublisherGroup exporter, and `epoch_id` is unchanged), so the counter is the ONLY input
+that must be unique per post within an epoch. All three clients held the publish counter
+**in memory only** (web `channels-state.ts` signal; iOS/Android `ChannelsUiState`
+`counterByChannel`), restarting it at 0 on every relaunch + on `freshPublisherKeys`. A
+relaunched publisher therefore re-issued an **identical `(key, nonce)`** on new
+plaintexts within the same epoch — catastrophic ChaCha20 keystream reuse
+(`P_a XOR P_b = C_a XOR C_b`) + Poly1305 forgery, exactly against the zero-trust server +
+subscribers who hold the ciphertext.
+
+**Fix (all 3 clients).** Persist the per-channel counter **at rest** and make it a
+**forever-monotone floor** (safe: `epoch_id` is in the HKDF, so a monotone-across-epochs
+counter is monotone within each epoch, and needs no per-epoch reset): web
+`publish-counter-store.ts` (`localStorage`, non-secret operational metadata — the counter
+rides in the clear in the post header), iOS `ChannelPublishCounterStore` (Keychain,
+`AfterFirstUnlockThisDeviceOnly`), Android an `EncryptedSharedPreferences` row alongside
+the publisher signing seed. **Load-on-init** restores the floor; **write-through** in
+`nextCounter` persists `value+1` before returning `value` (a crash after a post can only
+SKIP a counter, never re-issue one); `freshPublisherKeys` is **load-else-0** (seed 0 only
+for a channel never published to, else keep the persisted floor — mirrors the G-29
+publisher-seed reuse-else-generate); **no reset on epoch rotation**; and — the load-bearing
+correction — `removeChannel` **KEEPS** the counter (un-publishing does NOT destroy the MLS
+content seed, so a re-add of the same `channel_id` re-derives the same seed + epoch; the
+counter must stay a floor so a re-add can never rewind it to 0 and re-collide, robust even
+though the signing seed IS dropped on removeChannel). Verified: web vitest (19-case
+`publish-counter-store.test.ts`, incl. the reload-regression), iOS `xcodebuild` +
+Android `:app:testDebugUnitTest` (`ChannelPublishCounterTest`, incl. removeChannel-keeps).
+Touches C-40..C-42 (channel publisher path); invariant #7 (the counter now persists in
+hardware-backed storage on native).
+
+**Residuals (accepted, narrow).** (a) **`reset()` drops the persisted counters** — safe
+ONLY when paired with a full-device wipe (`forgetDevice`, which also clears the OpenMLS
+provider so the content seed is gone); a `reset()` followed by a same-epoch
+backup-restore of the PublisherGroup could in principle re-collide. `reset()` currently
+has no soft-logout caller, so this is not live; flagged so it is never wired to a soft
+logout. (b) **Multi-device publisher** (one account publishing the same channel from two
+devices) keeps independent counters and could collide — a pre-existing concern the crate's
+per-client-storage contract explicitly scopes out; closing it needs a synced publisher
+counter (a separate arc).

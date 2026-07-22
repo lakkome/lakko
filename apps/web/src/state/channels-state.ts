@@ -22,6 +22,12 @@ import {
   type ChannelSubscriberKeys,
 } from "../channels/composer";
 import type { ChannelHandle, ChannelPostView } from "../channels/api";
+import {
+  clearAllCounters,
+  issueAndAdvance,
+  loadAllCounters,
+  seedCounter,
+} from "../channels/publish-counter-store";
 
 interface ChannelsStateInternal {
   /** User's local channel list, ordered by `addedAtMs`
@@ -44,8 +50,15 @@ interface ChannelsStateInternal {
   readonly keysByChannel: Accessor<ReadonlyMap<string, ChannelPublisherKeys>>;
   /** Per-channel monotone publish counter. Bumped on
    *  every successful publish so the next post carries
-   *  `message_counter = previous + 1`. Reset on epoch
-   *  rotation. */
+   *  `message_counter = previous + 1`. FOREVER monotone —
+   *  NOT reset on epoch rotation (the `epoch_id` is folded
+   *  into the post AEAD's HKDF, so a rotation already
+   *  disambiguates the key + nonce). Seeded at startup from
+   *  the persisted floor (`publish-counter-store.ts`) and
+   *  written through on every `nextCounter`, so a page
+   *  reload resumes the floor instead of rewinding to 0 and
+   *  re-using an AEAD `(key, nonce)` under the reload-stable
+   *  channel seed. */
   readonly counterByChannel: Accessor<ReadonlyMap<string, bigint>>;
   /** Per-channel subscriber-side X25519 keypair the
    *  device generated for joining a channel as a
@@ -85,7 +98,7 @@ const [keysByChannel, setKeysByChannel] = createSignal<
 >(new Map());
 const [counterByChannel, setCounterByChannel] = createSignal<
   ReadonlyMap<string, bigint>
->(new Map());
+>(loadAllCounters());
 const [subscriberKeysByChannel, setSubscriberKeysByChannel] = createSignal<
   ReadonlyMap<string, ChannelSubscriberKeys>
 >(loadSubscriberKeysFromStorage());
@@ -134,6 +147,12 @@ export const channelsActions = {
       next.delete(channelId);
       return next;
     });
+    // Clear only the in-memory counter — the PERSISTED floor is
+    // deliberately kept. Un-follow does NOT destroy the PublisherGroup
+    // (the seed source persists in the OpenMLS provider), so re-joining
+    // the same channel later re-derives the SAME seed; the counter must
+    // resume, not rewind to 0, or the AEAD `(key, nonce)` reuses.
+    // `setKeys` re-seeds the in-memory value from the persisted floor.
     setCounterByChannel((map) => {
       const next = new Map(map);
       next.delete(channelId);
@@ -166,10 +185,18 @@ export const channelsActions = {
       return next;
     });
   },
-  /** Install fresh publisher keys for a channel. Resets
-   *  the publish counter to 0 — every (epoch, sender)
-   *  pair starts a new counter sequence per
-   *  `lakko_channels::post` invariants. */
+  /** Install fresh publisher keys for a channel. Seeds the
+   *  publish counter LOAD-ELSE-0: a genuinely new channel
+   *  (no in-memory and no persisted counter) starts at 0;
+   *  an existing channel keeps its floor. It must NOT clobber
+   *  a persisted counter to 0 — the channel content seed is
+   *  STABLE across a reload / re-open (it re-derives from the
+   *  persistent PublisherGroup MLS exporter), so rewinding the
+   *  counter to 0 would re-use an AEAD `(key, nonce)` under
+   *  the same seed + epoch (catastrophic keystream reuse).
+   *  Mirrors the publisher-seed reuse-else-generate pattern.
+   *  `nextCounter` owns the write-through; `setKeys` only
+   *  seeds the in-memory value. */
   setKeys(channelId: string, keys: ChannelPublisherKeys): void {
     setKeysByChannel((map) => {
       const next = new Map(map);
@@ -178,7 +205,7 @@ export const channelsActions = {
     });
     setCounterByChannel((map) => {
       const next = new Map(map);
-      next.set(channelId, 0n);
+      next.set(channelId, seedCounter(map.get(channelId), channelId));
       return next;
     });
   },
@@ -191,13 +218,20 @@ export const channelsActions = {
    *  const wire = await composePost(keys, id, epoch, counter, plaintext);
    *  await publishPost(id, wire);
    *  ```
-   */
+   *
+   *  Write-through: the ADVANCED floor (`value + 1`) is persisted
+   *  BEFORE this returns, so a crash / reload right after a post can
+   *  never hand out `value` again. Burning a counter value is safe;
+   *  re-issuing one re-uses the AEAD nonce (catastrophic), so the
+   *  store is advanced first and the caller composes with the returned
+   *  (pre-increment) `value`. */
   nextCounter(channelId: string): bigint {
     let value = 0n;
     setCounterByChannel((map) => {
+      const issued = issueAndAdvance(map.get(channelId), channelId);
+      value = issued.value;
       const next = new Map(map);
-      value = next.get(channelId) ?? 0n;
-      next.set(channelId, value + 1n);
+      next.set(channelId, issued.advanced);
       return next;
     });
     return value;
@@ -266,8 +300,18 @@ export const channelsActions = {
     }
     return bestEpoch === undefined ? undefined : inner.get(bestEpoch);
   },
-  /** Wipe everything — used on logout. Drops subscriber
-   *  keypairs from localStorage as well. */
+  /** Wipe everything — the full-account-wipe path. Drops
+   *  subscriber keypairs AND the persisted publish counters
+   *  from localStorage.
+   *
+   *  SAFETY: dropping the persisted counters is correct ONLY
+   *  when the PublisherGroup seed source is also destroyed —
+   *  i.e. a full device wipe (`forgetDevice`) that clears the
+   *  OpenMLS provider. It must NOT be wired to a soft
+   *  `logout()` that leaves the PublisherGroup intact, or a
+   *  later re-login would re-derive the same channel seed with
+   *  a counter rewound to 0 and re-use an AEAD `(key, nonce)`.
+   *  (`reset()` currently has no callers.) */
   reset(): void {
     setChannels([]);
     setPostsByChannel(new Map());
@@ -277,6 +321,7 @@ export const channelsActions = {
     setSubscriberKeysByChannel(new Map());
     setSubscribedSeedsByChannel(new Map());
     persistSubscriberKeys(new Map());
+    clearAllCounters();
   },
 };
 
