@@ -27,6 +27,11 @@ anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# ADR-0039 F1 — concurrent K-of-N witness fan-out on the hot
+# `GET /transparency/root` path (`futures::future::join_all` over a dynamic N
+# of independent, timeout-bounded `cosign` calls, so a stalled witness cannot
+# serialise the read path).
+futures.workspace = true
 
 axum = { version = "0.8", features = ["macros", "http2"] }
 tower = "0.5"

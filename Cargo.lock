@@ -3040,6 +3040,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "dotenvy",
+ "futures",
  "http-body-util",
  "lakko-attest",
  "lakko-crypto",

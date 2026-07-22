@@ -388,10 +388,12 @@ private fun witnessGateRefuses(
         val cosigs = root.witnessCosigs.filter { it.size == WITNESS_COSIG_LEN }
         witnessGate.verify(cosigs, witnessKeys, threshold, root.treeRoot, root.logSize)
         false
-    } catch (_: FfiException) {
+    } catch (_: Throwable) {
         // Fewer than `threshold` distinct pinned witnesses produced a valid
         // co-signature over the served root (or a bad-length / zero-threshold
-        // input) → fail closed.
+        // input) → fail closed. Catch Throwable (not just FfiException) so ANY
+        // unexpected error from the quorum verifier fails closed, matching the
+        // web / iOS catch-all robustness (ADR-0039 F3).
         true
     }
 }

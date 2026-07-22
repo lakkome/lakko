@@ -458,10 +458,15 @@ impl LogStore {
     /// row (to the current head). A fresh witness (no row) starts from the
     /// genesis base `0`, exactly the pre-S3 first-cosig posture.
     ///
-    /// Each `cosign` is BEST-EFFORT — a failure (unreachable, a 409 fork-refusal,
-    /// a decode error, or a wrong-length blob) means that witness contributes
-    /// NOTHING this round (logged at `warn`, witness index + kind only) and the
-    /// fan-out continues to the next.
+    /// The N `cosign` calls are fanned out CONCURRENTLY (ADR-0039 F1 —
+    /// `futures::future::join_all`) and each is TIMEOUT-bounded (the witness
+    /// client's connect + total deadline), so a witness that accepts-but-stalls
+    /// can no longer serialise / block this hot read path (with N witnesses the
+    /// latencies previously added up sequentially). Each `cosign` is BEST-EFFORT
+    /// — a failure (unreachable, a timeout, a 409 fork-refusal, a decode error,
+    /// or a wrong-length blob) means that witness contributes NOTHING this round
+    /// (logged at `warn`, witness index + kind only) while the others still
+    /// contribute.
     ///
     /// Returns `(signed_root, cosigs)` — a `Vec` of 0..N co-signatures. An EMPTY
     /// bundle (no witness configured, all witnesses down/refused this round, or a
@@ -534,54 +539,12 @@ impl LogStore {
             (head_root, head_size, proofs)
         };
 
-        let mut cosigs: Vec<Vec<u8>> = Vec::with_capacity(witnesses.len());
-        for (witness_index, witness) in witnesses.iter().enumerate() {
-            match witness.cosign(&head_root, &proofs[witness_index]).await {
-                Ok(cosig) if cosig.len() == WITNESS_COSIG_LEN => {
-                    cosigs.push(cosig);
-                    // This witness co-signed the current head → advance ITS
-                    // high-water so its next proof starts from here. A persist
-                    // failure only means the next round re-proves from the OLD
-                    // base (a redundant-but-valid catch-up), never a strand.
-                    if let Err(e) = persist_witness_high_water(
-                        pool,
-                        u32::try_from(witness_index).unwrap_or(u32::MAX),
-                        &head_root.tree_root,
-                        head_size,
-                    )
-                    .await
-                    {
-                        tracing::error!(
-                            witness_index,
-                            error = %e,
-                            "persist witness high-water failed (advance deferred to the next round)"
-                        );
-                    }
-                },
-                Ok(cosig) => {
-                    // A wrong-length blob would break the fixed-chunk bundle
-                    // framing (and a client would reject it anyway) — drop it.
-                    // Left the high-water untouched → the witness re-proves next
-                    // round.
-                    tracing::warn!(
-                        witness_index,
-                        cosig_len = cosig.len(),
-                        "witness returned a wrong-length co-signature — dropping it from the bundle"
-                    );
-                },
-                Err(e) => {
-                    // Left this witness's high-water untouched → the next growth
-                    // re-sends a proof from its own (still-old) base and it
-                    // auto-rejoins. No permanent stranding (ADR-0039 S3b).
-                    tracing::warn!(
-                        witness_index,
-                        error = %e,
-                        head_size,
-                        "witness cosign failed — this witness contributes no co-signature this round"
-                    );
-                },
-            }
-        }
+        // ADR-0039 F1 — fan the N `cosign` calls out CONCURRENTLY (bounded by
+        // each client's request timeout) and fold the index-ordered results,
+        // advancing only the high-waters of the witnesses that co-signed (S3b
+        // per-witness semantics unchanged). Extracted so this hot-path method
+        // stays readable.
+        let cosigs = fan_out_cosigs(pool, witnesses, &head_root, head_size, &proofs).await;
 
         if cosigs.is_empty() {
             // Every witness was down/refused — serve an empty bundle (the client
@@ -685,6 +648,92 @@ fn clamp_hash(bytes: &[u8]) -> [u8; 32] {
     let n = bytes.len().min(32);
     out[..n].copy_from_slice(&bytes[..n]);
     out
+}
+
+/// Fan the witness `cosign` calls out CONCURRENTLY (ADR-0039 F1) then fold the
+/// results, returning the collected 0..N co-signature bundle.
+///
+/// Each of the N calls is independent, timeout-bounded I/O over its OWN client,
+/// so a witness that accepts-but-stalls can no longer serialise / block the hot
+/// `GET /transparency/root` read path (with N witnesses the per-request
+/// latencies previously added up sequentially). Every future borrows the local
+/// `head_root` + its own `proofs[i]` slice immutably, so the fan-out is
+/// borrow-clean; `join_all` preserves input order, so results come back
+/// index-ordered (deterministic bundle order + logs).
+///
+/// AFTER the concurrent network phase the results are folded SEQUENTIALLY: for
+/// each SUCCESS the witness's high-water advances to the head it just co-signed
+/// and its cosig joins the bundle; a failure/timeout/wrong-length leaves that
+/// witness's high-water UNTOUCHED (S3b anti-stranding — it re-proves from its
+/// own base next growth and auto-rejoins) and contributes nothing. The DB
+/// high-water writes stay sequential — they are cheap and this avoids pool
+/// contention from N simultaneous upserts. A reqwest timeout surfaces in the
+/// `Err` arm identically to a down/refusing witness (best-effort).
+async fn fan_out_cosigs(
+    pool: &MySqlPool,
+    witnesses: &[WitnessClient],
+    head_root: &SignedRoot,
+    head_size: u64,
+    proofs: &[Vec<TreeHash>],
+) -> Vec<Vec<u8>> {
+    let cosign_results = futures::future::join_all(witnesses.iter().enumerate().map(
+        |(witness_index, witness)| {
+            let proof = &proofs[witness_index];
+            async move { (witness_index, witness.cosign(head_root, proof).await) }
+        },
+    ))
+    .await;
+
+    let mut cosigs: Vec<Vec<u8>> = Vec::with_capacity(witnesses.len());
+    for (witness_index, result) in cosign_results {
+        match result {
+            Ok(cosig) if cosig.len() == WITNESS_COSIG_LEN => {
+                cosigs.push(cosig);
+                // This witness co-signed the current head → advance ITS
+                // high-water so its next proof starts from here. A persist
+                // failure only means the next round re-proves from the OLD base
+                // (a redundant-but-valid catch-up), never a strand.
+                if let Err(e) = persist_witness_high_water(
+                    pool,
+                    u32::try_from(witness_index).unwrap_or(u32::MAX),
+                    &head_root.tree_root,
+                    head_size,
+                )
+                .await
+                {
+                    tracing::error!(
+                        witness_index,
+                        error = %e,
+                        "persist witness high-water failed (advance deferred to the next round)"
+                    );
+                }
+            },
+            Ok(cosig) => {
+                // A wrong-length blob would break the fixed-chunk bundle framing
+                // (and a client would reject it anyway) — drop it. Left the
+                // high-water untouched → the witness re-proves next round.
+                tracing::warn!(
+                    witness_index,
+                    cosig_len = cosig.len(),
+                    "witness returned a wrong-length co-signature — dropping it from the bundle"
+                );
+            },
+            Err(e) => {
+                // Left this witness's high-water untouched → the next growth
+                // re-sends a proof from its own (still-old) base and it
+                // auto-rejoins. No permanent stranding (ADR-0039 S3b). A reqwest
+                // timeout (ADR-0039 F1) surfaces here identically to a
+                // down/refusing witness — best-effort, contributes nothing.
+                tracing::warn!(
+                    witness_index,
+                    error = %e,
+                    head_size,
+                    "witness cosign failed — this witness contributes no co-signature this round"
+                );
+            },
+        }
+    }
+    cosigs
 }
 
 /// UPSERT the single `witnessed_root` row with the last co-signed

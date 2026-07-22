@@ -13,12 +13,33 @@
 //! An empty witness list (the integration unconfigured) is the transition
 //! fallback: roots are served without a co-signature bundle and clients keep the
 //! operator-only posture.
+//!
+//! ## Request timeouts (ADR-0039 F1 — availability)
+//!
+//! Every witness HTTP client is built with a bounded connect + total timeout
+//! (`LAKKO_TRANSPARENCY_WITNESS_TIMEOUT_SECS`, default
+//! [`DEFAULT_WITNESS_TIMEOUT_SECS`]). A witness that accepts a connection but
+//! then STALLS (not down, not refusing) can no longer hold a `cosign` call open
+//! indefinitely — the request errors out at the deadline and is treated exactly
+//! like a down/refusing witness (best-effort: contributes nothing to the
+//! bundle). This keeps the hot `GET /transparency/root` read path bounded.
+
+use std::time::Duration;
 
 use anyhow::Context as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use lakko_transparency::{SignedRoot, TreeHash};
 use serde::{Deserialize, Serialize};
+
+/// Default total per-request witness cosign timeout (seconds), used when
+/// `LAKKO_TRANSPARENCY_WITNESS_TIMEOUT_SECS` is unset, unparseable, or zero.
+const DEFAULT_WITNESS_TIMEOUT_SECS: u64 = 10;
+
+/// Connect-phase timeout ceiling (seconds). The TCP/TLS connect is bounded by
+/// the smaller of this and the total budget, so a witness that stalls the
+/// connect handshake cannot block longer than the total timeout.
+const WITNESS_CONNECT_TIMEOUT_SECS: u64 = 5;
 
 /// A configured witness cosign client.
 pub(crate) struct WitnessClient {
@@ -74,19 +95,35 @@ impl WitnessClient {
             std::env::var("LAKKO_TRANSPARENCY_WITNESS_URL").ok(),
             std::env::var("LAKKO_TRANSPARENCY_WITNESS_COSIGN_SECRET").ok(),
         )?;
+        // ADR-0039 F1 — the per-request timeout applies to EVERY configured
+        // witness client (fail-safe to the default on unset/unparseable/zero).
+        let timeout_secs = parse_witness_timeout_secs(
+            std::env::var("LAKKO_TRANSPARENCY_WITNESS_TIMEOUT_SECS").ok(),
+        );
         let mut clients = Vec::with_capacity(endpoints.len());
         for (base_url, cosign_secret_b64) in endpoints {
-            clients.push(Self::build(&base_url, &cosign_secret_b64).ok_or_else(|| {
-                anyhow::anyhow!("failed to build the HTTP client for a configured witness endpoint")
-            })?);
+            clients.push(
+                Self::build(&base_url, &cosign_secret_b64, timeout_secs).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "failed to build the HTTP client for a configured witness endpoint"
+                    )
+                })?,
+            );
         }
         Ok(clients)
     }
 
-    /// Construct one client for an `(base_url, cosign_secret_b64)` pair.
-    /// `None` only when the reqwest client fails to build.
-    fn build(base_url: &str, cosign_secret_b64: &str) -> Option<Self> {
-        let http = reqwest::Client::builder().build().ok()?;
+    /// Construct one client for an `(base_url, cosign_secret_b64)` pair, with a
+    /// bounded connect + total timeout (ADR-0039 F1). `None` only when the
+    /// reqwest client fails to build.
+    fn build(base_url: &str, cosign_secret_b64: &str, timeout_secs: u64) -> Option<Self> {
+        let http = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(
+                timeout_secs.min(WITNESS_CONNECT_TIMEOUT_SECS),
+            ))
+            .timeout(Duration::from_secs(timeout_secs))
+            .build()
+            .ok()?;
         Some(Self {
             base_url: base_url.trim().trim_end_matches('/').to_string(),
             cosign_secret_b64: cosign_secret_b64.trim().to_string(),
@@ -210,14 +247,55 @@ fn split_csv(s: &str) -> anyhow::Result<Vec<String>> {
     Ok(parts)
 }
 
+/// Resolve the total per-request witness timeout (seconds) from
+/// `LAKKO_TRANSPARENCY_WITNESS_TIMEOUT_SECS` (ADR-0039 F1). Pure so it is
+/// unit-testable without touching the process env.
+///
+/// Fail-safe to [`DEFAULT_WITNESS_TIMEOUT_SECS`] when the value is unset,
+/// non-numeric, or zero — a zero timeout would DISABLE the guard, defeating the
+/// hardening, so it is treated as "use the default" rather than "no timeout".
+fn parse_witness_timeout_secs(raw: Option<String>) -> u64 {
+    raw.and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_WITNESS_TIMEOUT_SECS)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::parse_witness_endpoints;
+    use super::{
+        parse_witness_endpoints, parse_witness_timeout_secs, DEFAULT_WITNESS_TIMEOUT_SECS,
+    };
 
     /// Terse `Some(owned)` for the `Option<String>` parse args.
     #[allow(clippy::unnecessary_wraps)]
     fn s(v: &str) -> Option<String> {
         Some(v.to_string())
+    }
+
+    #[test]
+    fn timeout_parse_uses_a_valid_value_and_fails_safe_otherwise() {
+        // A valid positive value is honoured verbatim.
+        assert_eq!(parse_witness_timeout_secs(s("3")), 3);
+        assert_eq!(parse_witness_timeout_secs(s("  20 ")), 20);
+
+        // Unset / non-numeric / zero all fail safe to the default (a zero
+        // timeout would disable the guard, so it is NOT taken literally).
+        assert_eq!(
+            parse_witness_timeout_secs(None),
+            DEFAULT_WITNESS_TIMEOUT_SECS
+        );
+        assert_eq!(
+            parse_witness_timeout_secs(s("not-a-number")),
+            DEFAULT_WITNESS_TIMEOUT_SECS
+        );
+        assert_eq!(
+            parse_witness_timeout_secs(s("0")),
+            DEFAULT_WITNESS_TIMEOUT_SECS
+        );
+        assert_eq!(
+            parse_witness_timeout_secs(s("")),
+            DEFAULT_WITNESS_TIMEOUT_SECS
+        );
     }
 
     #[test]
