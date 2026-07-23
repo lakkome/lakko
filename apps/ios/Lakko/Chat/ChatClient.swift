@@ -57,6 +57,23 @@ public final class ChatClient {
     private var ownPublishedIds: Set<Int64> = []
     private let lockQueue = DispatchQueue(label: "me.lakko.chat.client.ownPublished")
 
+    /// Fail-closed MLS-ratchet persister wired by ``ChatRepository``.
+    ///
+    /// ``sendMessage(identity:group:plaintext:)`` invokes it AFTER
+    /// `createApplicationMessage` (which advances the sender ratchet to
+    /// generation N+1) and BEFORE the DS publish. If it THROWS,
+    /// `sendMessage` throws and never publishes — the gen-N ciphertext
+    /// never leaves the device, so the ratchet is safe to re-consume
+    /// generation N after a reload (nonce-reuse-on-crash defence, mirror
+    /// of the web `ChatClient.onPersist` / `persistDurableOrThrow`).
+    ///
+    /// `nil` for tests / standalone callers with no reload-from-snapshot
+    /// path — such callers persist nothing, so a reload restores no group
+    /// and cannot re-consume a generation; they are outside this bug's
+    /// blast radius, and the invocation is skipped. Production
+    /// (``ChatRepository``) always wires it, so the gate is live there.
+    public var ratchetPersister: (() async throws -> Void)?
+
     public init(ds: DsClient = DsClient()) {
         self.ds = ds
     }
@@ -68,6 +85,13 @@ public final class ChatClient {
     /// MLS ratchet state; dropping it would lose every subsequent
     /// message. 1.14f5 wires snapshot persistence so a restart can
     /// rehydrate the state from disk.
+    ///
+    /// With ``ratchetPersister`` wired (production, via ``ChatRepository``),
+    /// the post-advance (generation N+1) ratchet snapshot is durably
+    /// persisted **before** the DS publish, and a failed persist ABORTS
+    /// the send (fail-closed) so the gen-N ciphertext never reaches the DS
+    /// without its N+1 ratchet state on disk — see the persist-before-
+    /// publish comment below for the nonce-reuse-on-crash rationale.
     public func sendMessage(
         identity: Identity,
         group: Group,
@@ -77,6 +101,11 @@ public final class ChatClient {
             throw ChatError.argument("plaintext must be non-empty")
         }
 
+        // `createApplicationMessage` ADVANCES the MLS sender ratchet: it
+        // consumes the current generation N (deriving the AEAD key+nonce
+        // from N) and leaves the in-memory OpenMLS provider at generation
+        // N+1. Because the provider is in-memory, that N+1 state lives
+        // ONLY in the snapshot until it is persisted.
         let wireBytes: Data
         do {
             wireBytes = try group.createApplicationMessage(
@@ -98,6 +127,33 @@ public final class ChatClient {
                 "group.groupId unavailable",
                 underlying: error
             )
+        }
+
+        // SECURITY (nonce-reuse-on-crash) — PERSIST BEFORE PUBLISH,
+        // FAIL-CLOSED. The N+1 ratchet state produced just above MUST be
+        // durably on disk before the gen-N ciphertext reaches the DS.
+        // Otherwise a crash (or a silently-failed persist) between the
+        // publish and the persist would reload the ratchet at N, and the
+        // next send would re-consume generation N — an identical
+        // (key, nonce) on a different plaintext (C1 XOR C2 = P1 XOR P2
+        // plaintext leak to the zero-trust server + Poly1305 tag forgery).
+        // So AWAIT the durable persist; if it does NOT land, ABORT — do
+        // NOT publish — so the gen-N ciphertext never leaves this device
+        // (only one gen-N ciphertext can ever exist on the wire, so gen N
+        // stays safe to re-consume after a reload). A crash in the NEW
+        // window (after this persist, before the publish) merely SKIPS
+        // generation N; RFC 9420 receivers tolerate sender-ratchet gaps,
+        // so there is no reuse either way. Mirror of the web
+        // `persistDurableOrThrow()` call in `apps/web/src/chat/client.ts`.
+        if let ratchetPersister {
+            do {
+                try await ratchetPersister()
+            } catch {
+                throw ChatError.wrapped(
+                    "MLS snapshot persist failed — send aborted to prevent nonce reuse",
+                    underlying: error
+                )
+            }
         }
 
         let publish: PublishResult

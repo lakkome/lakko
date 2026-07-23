@@ -97,6 +97,21 @@ public final class ChatRepository: ObservableObject {
         self.snapshotStore = snapshotStore
         self.knownGroupsStore = knownGroupsStore
         self.messageLogStore = messageLogStore
+        // SECURITY (nonce-reuse-on-crash) — wire the fail-closed MLS
+        // ratchet persister into the ChatClient so EVERY application send
+        // (chat / edit / delete / reaction / typing / read-receipt /
+        // call-signaling — they all ratchet via `createApplicationMessage`)
+        // durably persists the post-advance (N+1) ratchet BEFORE the DS
+        // publish, and aborts the send if it cannot. See
+        // ``persistSnapshotDurableOrThrow()``.
+        self.chatClient.ratchetPersister = { [weak self] in
+            guard let self else {
+                throw ChatError.argument(
+                    "ChatRepository deallocated — send aborted before publish"
+                )
+            }
+            try await self.persistSnapshotDurableOrThrow()
+        }
     }
 
     // MARK: - Lifecycle
@@ -984,7 +999,13 @@ public final class ChatRepository: ObservableObject {
             createdAt: result.createdAt,
             authorLeaf: ownLeaf
         )
-        persistSnapshotBestEffort()
+        // The MLS ratchet snapshot was already durably persisted
+        // (fail-closed) inside `chatClient.sendMessage` BEFORE the publish,
+        // and neither the publish nor `appendOutgoing` advances MLS state,
+        // so re-persisting the snapshot here is unnecessary. Only the
+        // plaintext timeline changed (the just-appended row), so save that
+        // best-effort — its loss cannot cause nonce reuse.
+        persistMessageLogBestEffort()
         state = state.with(threads: buildThreadList())
         // 1.20e — fan a wake out to every device subscribed to
         // this group. Fire-and-forget — the message is already
@@ -1267,6 +1288,38 @@ public final class ChatRepository: ObservableObject {
     private func persistKnownGroupBestEffort(groupIdHex: String) {
         guard let accountIdB64 = currentAccountIdB64 else { return }
         knownGroupsStore.add(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+    }
+
+    /// Durably persist the canonical Identity's MLS provider snapshot and
+    /// RE-THROW on any failure — the fail-closed counterpart of
+    /// ``persistSnapshotBestEffort()``.
+    ///
+    /// Wired into ``ChatClient/ratchetPersister`` and invoked BEFORE the
+    /// DS publish on every application send. A swallowed persist failure
+    /// here would re-open the AEAD nonce-reuse-on-crash window:
+    /// `createApplicationMessage` has already advanced the sender ratchet
+    /// to generation N+1, and the OpenMLS provider is in-memory, so that
+    /// N+1 state lives ONLY in this snapshot. If it does not durably land,
+    /// the gen-N ciphertext must NOT be published — the caller aborts, and
+    /// after a reload the ratchet is safe to re-consume generation N (only
+    /// one gen-N ciphertext can ever exist on the wire).
+    ///
+    /// The plaintext message-log is NOT persisted here: its absence cannot
+    /// cause nonce reuse (it is not MLS state), and it is written
+    /// best-effort AFTER the send completes so it captures the just-sent
+    /// row. When there is no canonical identity / account in scope (tests,
+    /// pre-bootstrap) there is nothing durable to persist and no
+    /// reload-from-snapshot path that could re-consume a generation, so
+    /// this resolves as a no-op (mirror of the web no-op-when-`onPersist`-
+    /// unset posture).
+    private func persistSnapshotDurableOrThrow() throws {
+        guard let identity = canonicalIdentity,
+              let accountIdB64 = currentAccountIdB64 else { return }
+        let blob = try identity.snapshotStorage()
+        try snapshotStore.putSnapshotDurable(
+            accountIdB64: accountIdB64,
+            blob: blob
+        )
     }
 
     private func persistSnapshotBestEffort() {

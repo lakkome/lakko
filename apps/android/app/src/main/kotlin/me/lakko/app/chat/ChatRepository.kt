@@ -1074,12 +1074,19 @@ public class ChatRepository(
                 IllegalStateException("unknown group"),
             )
         groupsLock.withLock {
+            // SECURITY (nonce-reuse-on-crash) — persist the
+            // advanced (N+1) ratchet DURABLY before the DS
+            // publish; a persist failure aborts the send inside
+            // `chatClient.sendMessage` so no gen-N ciphertext
+            // leaves the device. This path appends no local
+            // bubble, so there is no after-publish message-log
+            // persist to run.
             chatClient.sendMessage(
                 identity = identity,
                 group = record.group,
                 plaintext = plaintextBytes,
+                persistRatchet = { persistSnapshotDurableOrThrow() },
             )
-            persistSnapshotBestEffort()
         }
     }
 
@@ -1112,10 +1119,21 @@ public class ChatRepository(
             } catch (e: Throwable) {
                 throw ChatError("envelope compose failed", e)
             }
+            // SECURITY (nonce-reuse-on-crash) — the (N+1) ratchet
+            // is persisted DURABLY, fail-closed, BEFORE the DS
+            // publish via `persistRatchet`; a persist failure
+            // throws out of `chatClient.sendMessage` (before any
+            // publish), surfacing to the ViewModel as a failed
+            // send. The AFTER-publish persist below is the
+            // best-effort plaintext message log only (it needs
+            // the DS messageId that only exists post-publish) —
+            // the security-critical ratchet snapshot already
+            // landed durably above.
             val result = chatClient.sendMessage(
                 identity = identity,
                 group = record.group,
                 plaintext = envelopeBytes,
+                persistRatchet = { persistSnapshotDurableOrThrow() },
             )
             // ADR-0023 — stamp our own leaf as the author so a
             // later edit/delete op of this row (ours or a peer's
@@ -1132,7 +1150,7 @@ public class ChatRepository(
                 createdAt = result.createdAt,
                 authorLeaf = ownLeaf,
             )
-            persistSnapshotBestEffort()
+            persistMessageLogBestEffort()
             publishThreadList()
             // 1.20e — fan a wake out to every device subscribed
             // to this group. Off the user-visible critical path
@@ -1176,10 +1194,13 @@ public class ChatRepository(
                 target = targetMessageId,
                 newText = newText,
             )
+            // SECURITY (nonce-reuse-on-crash) — persist the (N+1)
+            // ratchet durably, fail-closed, BEFORE publish.
             chatClient.sendMessage(
                 identity = identity,
                 group = record.group,
                 plaintext = envelopeBytes,
+                persistRatchet = { persistSnapshotDurableOrThrow() },
             )
             val ownLeaf = try {
                 record.group.ownLeafIndex()
@@ -1193,7 +1214,7 @@ public class ChatRepository(
                 emoji = null,
                 ownLeaf = ownLeaf,
             )
-            persistSnapshotBestEffort()
+            persistMessageLogBestEffort()
             publishThreadList()
         }
     }
@@ -1219,10 +1240,13 @@ public class ChatRepository(
             val envelopeBytes = uniffi.lakko_ffi_uniffi.composeDeleteEnvelope(
                 target = targetMessageId,
             )
+            // SECURITY (nonce-reuse-on-crash) — persist the (N+1)
+            // ratchet durably, fail-closed, BEFORE publish.
             chatClient.sendMessage(
                 identity = identity,
                 group = record.group,
                 plaintext = envelopeBytes,
+                persistRatchet = { persistSnapshotDurableOrThrow() },
             )
             val ownLeaf = try {
                 record.group.ownLeafIndex()
@@ -1236,7 +1260,7 @@ public class ChatRepository(
                 emoji = null,
                 ownLeaf = ownLeaf,
             )
-            persistSnapshotBestEffort()
+            persistMessageLogBestEffort()
             publishThreadList()
         }
     }
@@ -1267,10 +1291,13 @@ public class ChatRepository(
                 target = targetMessageId,
                 emoji = emoji,
             )
+            // SECURITY (nonce-reuse-on-crash) — persist the (N+1)
+            // ratchet durably, fail-closed, BEFORE publish.
             chatClient.sendMessage(
                 identity = identity,
                 group = record.group,
                 plaintext = envelopeBytes,
+                persistRatchet = { persistSnapshotDurableOrThrow() },
             )
             val ownLeaf = try {
                 record.group.ownLeafIndex()
@@ -1284,7 +1311,7 @@ public class ChatRepository(
                 emoji = emoji,
                 ownLeaf = ownLeaf,
             )
-            persistSnapshotBestEffort()
+            persistMessageLogBestEffort()
             publishThreadList()
         }
     }
@@ -1311,10 +1338,18 @@ public class ChatRepository(
                 isTyping = isTyping,
             )
             groupsLock.withLock {
+                // SECURITY (nonce-reuse-on-crash) — a typing tick
+                // still advances the MLS sender ratchet, so
+                // persist the (N+1) state durably, fail-closed,
+                // BEFORE publish. A persist failure aborts the
+                // publish (no gen-N ciphertext on the wire) and is
+                // swallowed below — a dropped typing tick is
+                // invisible (the receiver auto-expires anyway).
                 chatClient.sendMessage(
                     identity = identity,
                     group = record.group,
                     plaintext = envelopeBytes,
+                    persistRatchet = { persistSnapshotDurableOrThrow() },
                 )
             }
         } catch (cause: Throwable) {
@@ -1341,10 +1376,18 @@ public class ChatRepository(
                 upTo = upTo,
             )
             groupsLock.withLock {
+                // SECURITY (nonce-reuse-on-crash) — a read-receipt
+                // still advances the MLS sender ratchet, so
+                // persist the (N+1) state durably, fail-closed,
+                // BEFORE publish. A persist failure aborts the
+                // publish (no gen-N ciphertext on the wire) and is
+                // swallowed below — the next watermark advance
+                // re-publishes.
                 chatClient.sendMessage(
                     identity = identity,
                     group = record.group,
                     plaintext = envelopeBytes,
+                    persistRatchet = { persistSnapshotDurableOrThrow() },
                 )
             }
         } catch (cause: Throwable) {
@@ -1540,7 +1583,14 @@ public class ChatRepository(
 
     /** Save the canonical Identity's MLS snapshot, swallowing
      *  any failure. The in-memory state stays good — the next
-     *  mutation will retry the persist naturally. */
+     *  mutation will retry the persist naturally.
+     *
+     *  Only safe on the RECEIVE / non-critical mutation paths
+     *  (poll, group create/join, add-member, external-join
+     *  approve). It MUST NOT be used on the SEND path — see
+     *  [persistSnapshotDurableOrThrow]: publishing a gen-N
+     *  ciphertext without its N+1 ratchet state durably on disk
+     *  re-opens the AEAD nonce-reuse-on-crash window. */
     private fun persistSnapshotBestEffort() {
         val identity = canonicalIdentity.get() ?: return
         val accountIdB64 = currentAccountIdB64.get() ?: return
@@ -1556,6 +1606,60 @@ public class ChatRepository(
         // persist so every mutation that ratchets the group
         // also writes the resulting plaintext-message log.
         persistMessageLogBestEffort()
+    }
+
+    /**
+     * Persist the canonical Identity's MLS provider snapshot
+     * DURABLY and RE-THROW on any failure — the fail-closed
+     * counterpart of [persistSnapshotBestEffort], used on the
+     * SEND path BEFORE the DS publish (threaded into
+     * [ChatClient.sendMessage] as its `persistRatchet` hook).
+     *
+     * SECURITY (nonce-reuse-on-crash): `createApplicationMessage`
+     * consumes the current MLS sender-ratchet generation N and
+     * leaves the in-memory OpenMLS provider at N+1. That N+1
+     * state must be durably on disk BEFORE the gen-N ciphertext
+     * reaches the DS. If this persist were swallowed (as
+     * [persistSnapshotBestEffort] does) a crash between the
+     * publish and a later persist would reload the ratchet at N,
+     * and the next send would re-consume generation N — an
+     * identical AEAD (key, nonce) on a different plaintext
+     * (C1 XOR C2 = P1 XOR P2 plaintext leak to the zero-trust
+     * server + Poly1305 tag forgery). So this variant AWAITs the
+     * Keystore-wrapped write and THROWS on failure; the caller
+     * ([ChatClient.sendMessage]) aborts the send before
+     * publishing, so the gen-N ciphertext never leaves the device
+     * and generation N stays safe to re-consume after a reload. A
+     * crash in the new window (after this persist, before the
+     * publish) merely SKIPS generation N — RFC 9420 receivers
+     * tolerate sender-ratchet gaps, so there is no reuse either
+     * way.
+     *
+     * Unlike [persistSnapshotBestEffort] this persists ONLY the
+     * MLS ratchet snapshot — the plaintext message log stays a
+     * best-effort AFTER-publish write
+     * ([persistMessageLogBestEffort]), because it is not
+     * security-critical and needs the DS messageId that only
+     * exists post-publish.
+     *
+     * @throws IllegalStateException if the session has no
+     *         canonical Identity / account id — cannot persist,
+     *         so fail closed rather than silently skip.
+     * @throws java.io.IOException / GeneralSecurityException /
+     *         FfiException surfaced by the snapshot + Keystore
+     *         write.
+     */
+    private fun persistSnapshotDurableOrThrow() {
+        val identity = canonicalIdentity.get()
+            ?: throw IllegalStateException(
+                "cannot persist MLS snapshot — no canonical Identity",
+            )
+        val accountIdB64 = currentAccountIdB64.get()
+            ?: throw IllegalStateException(
+                "cannot persist MLS snapshot — no account id",
+            )
+        val blob = identity.snapshotStorage()
+        snapshotStore.putSnapshot(applicationContext, accountIdB64, blob)
     }
 
     /** Capture `(cursor, messages)` per known group + write

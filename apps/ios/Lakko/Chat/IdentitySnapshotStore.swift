@@ -123,6 +123,45 @@ public final class IdentitySnapshotStore {
         }
     }
 
+    /// Durably persist `blob` for `accountIdB64`, RE-THROWING on any
+    /// failure — the fail-closed counterpart of
+    /// ``putSnapshot(accountIdB64:blob:)``.
+    ///
+    /// Used on the security-critical send path (see
+    /// `ChatRepository.persistSnapshotDurableOrThrow`): the MLS ratchet
+    /// snapshot MUST be durably on disk BEFORE the gen-N ciphertext is
+    /// published, so a write failure has to SURFACE (abort the send)
+    /// rather than be swallowed. A swallowed failure here would re-open
+    /// the AEAD nonce-reuse-on-crash window — see the persist-before-
+    /// publish rationale in ``ChatClient/sendMessage(identity:group:plaintext:)``.
+    ///
+    /// The load-bearing step is the `.atomic` file write: it stages a
+    /// temp file and renames it into place, so a reader never observes a
+    /// torn envelope. `excludeFromBackup` failures are non-critical for
+    /// durability and stay best-effort (`try?`).
+    public func putSnapshotDurable(accountIdB64: String, blob: Data) throws {
+        guard let envelopeDir = envelopeDir else {
+            throw IdentitySnapshotStoreError.unavailable(
+                "no application-support directory to persist the MLS snapshot"
+            )
+        }
+        let wrapKey = try loadOrCreateWrapKey()
+        let sealed = try AES.GCM.seal(blob, using: wrapKey)
+        // `combined` lays out `nonce || ciphertext || tag` per RFC 5116
+        // §3.1 — same envelope shape ``putSnapshot`` produces.
+        guard let combined = sealed.combined else {
+            throw IdentitySnapshotStoreError.sealFailed
+        }
+        try FileManager.default.createDirectory(
+            at: envelopeDir,
+            withIntermediateDirectories: true
+        )
+        try? Self.excludeFromBackup(envelopeDir)
+        let url = envelopeURL(accountIdB64: accountIdB64)
+        try combined.write(to: url, options: .atomic)
+        try? Self.excludeFromBackup(url)
+    }
+
     /// Read + unwrap the snapshot for `accountIdB64`. Returns
     /// `nil` on missing file, Keychain failure, or AES-GCM auth
     /// failure (e.g. wrap-key rotated since the envelope was
@@ -245,4 +284,12 @@ public final class IdentitySnapshotStore {
 
 public enum IdentitySnapshotStoreError: Error {
     case keychain(status: OSStatus, operation: String)
+    /// The durable-persist location could not be resolved — there is no
+    /// safe place to write the MLS snapshot, so the fail-closed send path
+    /// must abort. Only ``IdentitySnapshotStore/putSnapshotDurable(accountIdB64:blob:)``
+    /// raises it (the best-effort ``putSnapshot(accountIdB64:blob:)`` swallows it).
+    case unavailable(String)
+    /// AES-GCM produced no combined envelope (should be unreachable);
+    /// surfaced so the fail-closed persist never silently drops the write.
+    case sealFailed
 }

@@ -4,6 +4,7 @@
 package me.lakko.app.chat
 
 import java.util.Collections
+import kotlin.coroutines.cancellation.CancellationException
 import me.lakko.app.ds.DsClient
 import me.lakko.app.ds.DsClientArgError
 import me.lakko.app.ds.DsHttpError
@@ -98,17 +99,55 @@ public class ChatClient(
      *
      * Caller keeps [group] alive — the [Group] handle carries
      * the MLS ratchet state; dropping it would lose every
-     * subsequent message. 1.15f3 wires snapshot persistence so
-     * a restart can rehydrate the state from disk.
+     * subsequent message.
      *
+     * ## SECURITY: persist BEFORE publish, fail-closed
+     *
+     * `createApplicationMessage` ADVANCES the MLS sender
+     * ratchet: it consumes the current generation N (deriving
+     * the AEAD key+nonce from N) and leaves the in-memory
+     * OpenMLS provider at generation N+1. Because that provider
+     * is in-memory, the N+1 state lives ONLY in the snapshot
+     * until it is persisted to disk.
+     *
+     * [persistRatchet] is invoked AFTER the ratchet has advanced
+     * to N+1 and BEFORE the gen-N ciphertext is published to the
+     * DS. It MUST durably persist that N+1 state and THROW on any
+     * failure. If it throws, this method propagates the failure
+     * and does NOT publish — so the gen-N ciphertext never leaves
+     * the device. Only one gen-N ciphertext can ever exist on the
+     * wire, so generation N stays safe to re-consume after a
+     * reload.
+     *
+     * Otherwise a crash (or a silently-failed persist) between
+     * the publish and the persist would reload the ratchet at N,
+     * and the next send would re-consume generation N — an
+     * identical AEAD (key, nonce) on a different plaintext
+     * (C1 XOR C2 = P1 XOR P2 plaintext leak to the zero-trust
+     * server + Poly1305 tag forgery). A crash in the NEW window
+     * (after [persistRatchet], before the publish) merely SKIPS
+     * generation N; RFC 9420 receivers tolerate sender-ratchet
+     * gaps, so there is no reuse either way. Mirror of the web
+     * reference `apps/web/src/chat/client.ts`
+     * (`persistDurableOrThrow` before `publishGroup`).
+     *
+     * @param persistRatchet durable, fail-closed persist of the
+     *        post-advance (N+1) MLS provider snapshot. Required —
+     *        there is deliberately no default, so a new caller
+     *        cannot silently skip it and re-open the nonce-reuse
+     *        window. A [CancellationException] it raises is
+     *        re-thrown verbatim (structured concurrency); any
+     *        other failure aborts the send.
      * @throws ChatClientArgError on empty plaintext.
-     * @throws ChatError wrapping any underlying MLS / DS / FFI
-     *         failure.
+     * @throws ChatError wrapping any underlying MLS / persist /
+     *         DS / FFI failure (a persist failure aborts the send
+     *         BEFORE the publish).
      */
     public suspend fun sendMessage(
         identity: Identity,
         group: Group,
         plaintext: ByteArray,
+        persistRatchet: suspend () -> Unit,
     ): SendMessageResult {
         if (plaintext.isEmpty()) {
             throw ChatClientArgError("plaintext must be non-empty")
@@ -124,6 +163,27 @@ public class ChatClient(
             group.groupId()
         } catch (e: FfiException) {
             throw ChatError("group.groupId unavailable", e)
+        }
+
+        // SECURITY (nonce-reuse-on-crash) — PERSIST BEFORE
+        // PUBLISH, FAIL-CLOSED. The N+1 ratchet state produced by
+        // `createApplicationMessage` above must be durably on disk
+        // before the gen-N ciphertext reaches the DS. If the
+        // persist fails, ABORT — do NOT publish — so gen N stays
+        // safe to re-consume after a reload. Re-throw a
+        // CancellationException verbatim so a cancelled send is
+        // not misreported as a persist failure (structured
+        // concurrency); convert any genuine persist failure into
+        // a send-aborting ChatError.
+        try {
+            persistRatchet()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            throw ChatError(
+                "MLS snapshot persist failed — send aborted to prevent nonce reuse",
+                e,
+            )
         }
 
         val publish = try {

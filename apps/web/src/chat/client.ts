@@ -296,7 +296,11 @@ export class ChatClient {
 
   /** Run the persist hook, swallow + log failures. The
    *  in-memory MLS state is still good even if the snapshot
-   *  write missed; the next mutation will retry. */
+   *  write missed; the next mutation will retry.
+   *
+   *  Only safe on the RECEIVE / non-critical paths (`pollMessages`,
+   *  contact ops). It MUST NOT be used on the send path — see
+   *  `persistDurableOrThrow`. */
   private async persistBestEffort(): Promise<void> {
     if (this.onPersist === undefined) return;
     try {
@@ -307,6 +311,29 @@ export class ChatClient {
     }
   }
 
+  /** Persist the canonical Identity's provider snapshot durably,
+   *  AWAIT the IDB write, and RE-THROW on failure — the
+   *  fail-closed counterpart of `persistBestEffort`.
+   *
+   *  This is the security-critical variant used by `sendMessage`
+   *  BEFORE it publishes. A swallowed persist failure here would
+   *  re-open the AEAD nonce-reuse-on-crash window: if the
+   *  post-`createApplicationMessage` (generation N+1) ratchet
+   *  state is not durably on disk, the gen-N ciphertext must not
+   *  be published, so the caller can safely abort and re-consume
+   *  generation N after a reload.
+   *
+   *  When `onPersist` is unset (tests / standalone callers with
+   *  no reload-from-IDB path) this is a no-op that resolves: such
+   *  callers persist nothing, so a reload restores no group and
+   *  cannot re-consume a generation — they are outside this bug's
+   *  blast radius. Production paths (`<ChatProvider>`) always wire
+   *  `onPersist`, so the fail-closed gate is live there. */
+  private async persistDurableOrThrow(): Promise<void> {
+    if (this.onPersist === undefined) return;
+    await this.onPersist();
+  }
+
   /**
    * Encrypt `plaintext` for the current group epoch and post
    * the wire bytes to the DS. Returns the DS-assigned id.
@@ -314,7 +341,11 @@ export class ChatClient {
    * Caller is responsible for keeping `group` alive — the
    * Group instance carries the MLS ratchet state. With
    * `identityProvider` wired (1.16e6c2), the underlying provider
-   * storage is persisted to IDB after each successful publish.
+   * storage is persisted to IDB **before** the publish, and a
+   * failed persist ABORTS the send (fail-closed) so the gen-N
+   * ciphertext never reaches the DS without its N+1 ratchet state
+   * durably on disk — see the persist-before-publish comment
+   * below for the nonce-reuse-on-crash rationale.
    */
   async sendMessage(
     identity: IdentitySecrets | null,
@@ -326,6 +357,12 @@ export class ChatClient {
     }
     const myIdentity = await this.resolveIdentity(identity);
 
+    // `createApplicationMessage` ADVANCES the MLS sender ratchet:
+    // it consumes the current generation N (deriving the AEAD
+    // key+nonce from N) and leaves the in-memory OpenMLS provider
+    // at generation N+1. Because the provider is in-memory
+    // (MemoryStorage), that N+1 state lives ONLY in the snapshot
+    // until it is persisted.
     let wireBytes: Uint8Array;
     try {
       wireBytes = group.createApplicationMessage(myIdentity, plaintext);
@@ -340,6 +377,32 @@ export class ChatClient {
       throw new ChatError("group.groupId unavailable", err);
     }
 
+    // SECURITY (nonce-reuse-on-crash) — PERSIST BEFORE PUBLISH,
+    // FAIL-CLOSED. The N+1 ratchet state produced just above MUST
+    // be durably on disk before the gen-N ciphertext reaches the
+    // DS. Otherwise a crash (or a silently-failed persist) between
+    // the publish and the persist would reload the ratchet at N,
+    // and the next send would re-consume generation N — an
+    // identical (key, nonce) on a different plaintext
+    // (C1 XOR C2 = P1 XOR P2 plaintext leak to the zero-trust
+    // server + Poly1305 tag forgery). So: snapshot the
+    // post-advance state and AWAIT it; if it does not durably
+    // land, ABORT — do NOT call `publishGroup` — so the gen-N
+    // ciphertext never leaves this device. Only one gen-N
+    // ciphertext can ever exist on the wire, so gen N stays safe
+    // to re-consume after a reload. A crash in the NEW window
+    // (after this persist, before the publish) merely SKIPS
+    // generation N; RFC 9420 receivers tolerate sender-ratchet
+    // gaps, so there is no reuse either way.
+    try {
+      await this.persistDurableOrThrow();
+    } catch (err) {
+      throw new ChatError(
+        "MLS snapshot persist failed — send aborted to prevent nonce reuse",
+        err,
+      );
+    }
+
     let publish;
     try {
       publish = await this.ds.publishGroup(groupId, wireBytes);
@@ -347,11 +410,6 @@ export class ChatClient {
       throw new ChatError("DS publish failed", err);
     }
     this.ownPublishedIds.add(publish.id);
-
-    // 1.16e6c2: createApplicationMessage advanced the message
-    // secret tree on disk (well, in the canonical provider's
-    // storage). Snapshot it.
-    await this.persistBestEffort();
 
     // 1.20e — fan a wake out to every device subscribed to
     // this group. Fire-and-forget — failures here would not

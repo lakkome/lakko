@@ -2751,7 +2751,7 @@ devices) keeps independent counters and could collide — a pre-existing concern
 per-client-storage contract explicitly scopes out; closing it needs a synced publisher
 counter (a separate arc).
 
-### G-34: System-wide AEAD (key, nonce)-reuse audit — **T1 CLOSED + S1/S2 HARDENED (2026-07); one narrow chat-snapshot-cadence residual noted**
+### G-34: System-wide AEAD (key, nonce)-reuse audit — **T1 CLOSED + S1/S2 HARDENED + T2 (chat-ratchet nonce reuse) CLOSED (2026-07)**
 
 Following the G-33 channel publish-counter finding (a real ChaCha20 `(key, nonce)` reuse
 across relaunch), a **system-wide hunt for the same misuse class** swept every AEAD site:
@@ -2801,12 +2801,28 @@ seed never repeats across a rejoin, and the call group is never persisted. V2: O
 provider persistence — the provider is an in-memory `MemoryStorage` snapshotted after every
 mutation (the chat ratchet survives relaunch), but the **call group is never snapshotted**
 (it is founded fresh each session), so the call path is outside it and cannot resurrect a
-stale call-ratchet state. **Scoped, non-blocking residual noted:** the chat-ratchet "no
-generation-nonce repeat" property depends on the snapshot being **flushed durably between a
-send and the next send** — a write cadence discipline, not a write-through-DB guarantee. A
-crash in the window between a send and its snapshot flush could in principle replay a
-message-key generation. This is a separate future look (durable-flush-before-send, or a
-pre-send generation reservation), not part of this pass.
+stale call-ratchet state.
+
+**T2 — chat-ratchet nonce reuse on crash — CLOSED (2026-07).** The residual first noted here
+turned out REAL and CRITICAL (verified firsthand on all three clients): the chat send path
+published the generation-N MLS application-message ciphertext to the DS **before** persisting
+the post-`createApplicationMessage` (N+1) sender-ratchet snapshot, and the persist was
+best-effort (swallowed failures). The OpenMLS provider is in-memory, so the snapshot is the
+only durable ratchet copy — a crash (or a silently-failed persist) between publish and persist
+reloaded the ratchet at generation N, and the next send re-consumed generation N: an identical
+AEAD `(key, nonce)` on a different plaintext (`C1 XOR C2 = P1 XOR P2` **message-plaintext** leak
+to the zero-trust server + Poly1305 tag forgery, RFC 9420 §9). Unlike T1 (obfuscation-layer),
+this is the real E2EE message layer. **Fixed** by reordering every ratchet-advancing send to
+`create -> persist(durable, awaited, FAIL-CLOSED) -> publish`: if the N+1 snapshot does not
+durably land, the send is aborted and never publishes, so the gen-N ciphertext never leaves the
+device and generation N stays safe to re-consume; a crash in the new window merely skips
+generation N (receivers tolerate sender-ratchet gaps). Web `apps/web/src/chat/client.ts`
+(`persistDurableOrThrow`), iOS `ChatClient`/`ChatRepository` + `IdentitySnapshotStore.putSnapshotDurable`
+(persister wired once so every send is fail-closed by construction), Android `ChatClient`/`ChatRepository`
+(required `persistRatchet` param gating all 7 send call sites). Strengthens invariant #4 (no
+send without durable ratchet state). Residual: the commit paths (add/remove/role/approve) share
+the same publish-before-persist ordering — a DISTINCT hazard (epoch desync / rolled-back-commit
+resend, not same-generation nonce reuse) worth its own separate analysis, not part of this fix.
 
 **Rest of the crypto surface: CLEAN.** Backup derives a fresh CSPRNG salt → Argon2id KEK
 **per envelope** (v1 `envelope::seal`) so key + nonce are fresh; attachments use a fresh
