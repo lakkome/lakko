@@ -97,7 +97,23 @@ impl CallKeyRing {
     ///
     /// Pass `u64::MAX` for a previous key that never auto-expires (the caller
     /// then owns the drop via [`Self::drop_previous`]).
+    ///
+    /// **A rotation to an IDENTICAL seed is a no-op** (S2 defense-in-depth): the
+    /// current key is left in place and no previous key is stashed (an already-
+    /// retained previous key, if any, is left untouched). Rotating to the same
+    /// seed would leave `current` unchanged in value yet — the catastrophic case
+    /// — a caller that then re-derives a
+    /// [`ParticipantKey`](crate::sframe::ParticipantKey) would resume from a
+    /// FRESH counter 0 under the UNCHANGED seed, reusing a `(key, nonce)` pair
+    /// with frames already sealed on it. A genuine MLS epoch advance always
+    /// yields a distinct exporter seed; an equal seed means no epoch advanced.
     pub fn rekey(&mut self, next: CallKey, expires_at_ms: u64) {
+        // S2 no-op guard — see the doc-comment. Constant-time seed compare
+        // (`CallKey::seed_eq`), so nothing about the live key material leaks
+        // through a variable-time branch on the byte prefix.
+        if self.current.seed_eq(&next) {
+            return;
+        }
         let prior = std::mem::replace(&mut self.current, next);
         self.previous = Some(RetainedCallKey {
             key: prior,
@@ -117,6 +133,11 @@ impl CallKeyRing {
 
     /// Clock-aware rotate straight from a 32-byte seed — the entry point the FFI
     /// wraps for the client media workers on a mid-call epoch change.
+    ///
+    /// A `seed` identical to the current one is a **no-op** (S2) — see
+    /// [`Self::rekey`]. The caller (the client media layer) is still expected to
+    /// invoke this only on a genuine epoch change; the no-op is defense-in-depth
+    /// against a spurious same-seed refresh resetting the seal counter.
     pub fn rekey_from_seed_at(&mut self, seed: [u8; CALL_KEY_LEN], now_ms: u64, overlap_ms: u64) {
         self.rekey_at(CallKey::from_seed(seed), now_ms, overlap_ms);
     }
@@ -298,6 +319,67 @@ mod tests {
             ring.try_open_framed_with_overlap(kid_of(LEAF), &new_wire)
                 .expect("new opens via current"),
             b"new-epoch"
+        );
+    }
+
+    /// S2 defense-in-depth (crypto audit): a rotation to an IDENTICAL seed is a
+    /// no-op — no previous key is stashed, the current key is unchanged, and no
+    /// overlap window opens. A same-seed rekey means no MLS epoch advanced, so
+    /// the ring must not present the "rotation happened" state that would tempt a
+    /// caller to re-derive a fresh counter-0 key under the unchanged seed. A
+    /// DISTINCT seed still rotates normally.
+    #[test]
+    fn rekey_from_seed_at_is_a_noop_when_the_seed_is_unchanged() {
+        let mut ring = CallKeyRing::from_seed(SEED_A);
+        let current_before = *ring.current().as_bytes();
+
+        // Same seed → no-op: nothing stashed, current unchanged, no window.
+        ring.rekey_from_seed_at(SEED_A, 1_000, OVERLAP_DEFAULT_MS);
+        assert!(
+            ring.previous().is_none(),
+            "same-seed rekey must stash no previous key"
+        );
+        assert!(!ring.has_live_previous(1_000), "no overlap window opens");
+        assert_eq!(
+            *ring.current().as_bytes(),
+            current_before,
+            "current seed unchanged by a same-seed rekey"
+        );
+
+        // The `rekey` entry point (used by `GroupCallSession`) is equally a no-op.
+        ring.rekey(CallKey::from_seed(SEED_A), 2_000);
+        assert!(ring.previous().is_none());
+
+        // The seal side keeps advancing on ONE key across a spurious same-seed
+        // refresh — no reset to counter 0. A receiver holding the single current
+        // key opens both frames by their DISTINCT header counters.
+        let mut pk = ring.participant_key(kid_of(LEAF)).expect("pk");
+        let wire1 = pk.seal_framed(b"frame-1").expect("seal 1");
+        ring.rekey_from_seed_at(SEED_A, 3_000, OVERLAP_DEFAULT_MS); // spurious no-op
+        let wire2 = pk.seal_framed(b"frame-2").expect("seal 2");
+        let (h1, _) = SframeHeader::decode(&wire1).unwrap();
+        let (h2, _) = SframeHeader::decode(&wire2).unwrap();
+        assert_eq!(h1.ctr, 1);
+        assert_eq!(
+            h2.ctr, 2,
+            "counter kept advancing — no reset to 0 on the unchanged seed"
+        );
+        assert_eq!(
+            ring.try_open_framed_with_overlap(kid_of(LEAF), &wire1)
+                .unwrap(),
+            b"frame-1"
+        );
+        assert_eq!(
+            ring.try_open_framed_with_overlap(kid_of(LEAF), &wire2)
+                .unwrap(),
+            b"frame-2"
+        );
+
+        // Sanity: a DISTINCT seed still genuinely rotates (stashes a previous).
+        ring.rekey_from_seed_at(SEED_B, 4_000, OVERLAP_DEFAULT_MS);
+        assert!(
+            ring.previous().is_some(),
+            "a distinct seed genuinely rotates and retains the previous key"
         );
     }
 

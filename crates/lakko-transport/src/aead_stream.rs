@@ -158,11 +158,35 @@ pub struct AeadStreamWriter<W: AsyncWrite + Unpin> {
 impl<W: AsyncWrite + Unpin> AeadStreamWriter<W> {
     /// Construct from an underlying stream + the
     /// per-direction key. The nonce counter starts at 0.
+    /// Equivalent to [`Self::new_with_counter`] with a
+    /// `start_counter` of 0.
     pub fn new(inner: W, key: AeadKey) -> Self {
+        Self::new_with_counter(inner, key, 0)
+    }
+
+    /// Construct from an underlying stream + the
+    /// per-direction key, **resuming** the nonce counter at
+    /// `start_counter` instead of 0.
+    ///
+    /// Use this when a handshake prelude sealed under the
+    /// **same** key already consumed `start_counter` nonces,
+    /// so the chunked body must continue past them. Restarting
+    /// the body counter at 0 would reuse the prelude's
+    /// `(key, nonce)` pairs on fresh plaintext — a
+    /// catastrophic AEAD failure (keystream-XOR leak +
+    /// authenticator forgery). SS-2022 seals its prelude fixed
+    /// header at nonce 0 and its variable header at nonce 1, so
+    /// the body resumes at 2 — see
+    /// [`crate::shadowsocks::SS_PRELUDE_NONCE_COUNT`].
+    ///
+    /// The [`AeadStreamError::NonceWrap`] overflow guard is
+    /// unchanged: seals continue to `checked_add` the counter
+    /// from `start_counter`.
+    pub fn new_with_counter(inner: W, key: AeadKey, start_counter: u64) -> Self {
         Self {
             inner,
             key,
-            nonce_counter: 0,
+            nonce_counter: start_counter,
         }
     }
 
@@ -257,11 +281,31 @@ pub struct AeadStreamReader<R: AsyncRead + Unpin> {
 impl<R: AsyncRead + Unpin> AeadStreamReader<R> {
     /// Construct from an underlying stream + the
     /// per-direction key. The nonce counter starts at 0.
+    /// Equivalent to [`Self::new_with_counter`] with a
+    /// `start_counter` of 0.
     pub fn new(inner: R, key: AeadKey) -> Self {
+        Self::new_with_counter(inner, key, 0)
+    }
+
+    /// Construct from an underlying stream + the
+    /// per-direction key, **resuming** the nonce counter at
+    /// `start_counter` instead of 0.
+    ///
+    /// The read-side mirror of
+    /// [`AeadStreamWriter::new_with_counter`]: when a handshake
+    /// prelude sealed under the **same** key already consumed
+    /// `start_counter` nonces, the body reader must resume at
+    /// the same offset so its counter tracks the peer's writer
+    /// (SS-2022 resumes at 2 — see
+    /// [`crate::shadowsocks::SS_PRELUDE_NONCE_COUNT`]).
+    ///
+    /// The [`AeadStreamError::NonceWrap`] overflow guard is
+    /// unchanged.
+    pub fn new_with_counter(inner: R, key: AeadKey, start_counter: u64) -> Self {
         Self {
             inner,
             key,
-            nonce_counter: 0,
+            nonce_counter: start_counter,
         }
     }
 
@@ -413,6 +457,48 @@ mod tests {
         for expected in &messages {
             let got = reader.read_chunk().await.unwrap().unwrap();
             assert_eq!(&got, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn new_with_counter_shifts_first_chunk_nonce() {
+        // A writer resumed at counter 2 seals its first
+        // chunk's length frame at nonce 2 (payload at 3),
+        // NOT at 0/1. Prove it: a reader that restarts at 0
+        // (the SS-2022 prelude/body reuse bug) cannot open
+        // the frame, while a reader resuming at 2 can.
+        let key = fresh_key(0x5A);
+        let mut wire: Vec<u8> = Vec::new();
+        {
+            let mut writer = AeadStreamWriter::new_with_counter(&mut wire, key.clone(), 2);
+            writer
+                .write_chunk(b"body resumes at offset two")
+                .await
+                .unwrap();
+            writer.flush().await.unwrap();
+        }
+
+        // Wrong offset (0) — AEAD authenticator rejects the
+        // very first frame because its nonce is 2, not 0.
+        {
+            let (mut w, r) = duplex(4096);
+            w.write_all(&wire).await.unwrap();
+            drop(w);
+            let mut wrong = AeadStreamReader::new(r, key.clone());
+            assert!(matches!(
+                wrong.read_chunk().await,
+                Err(AeadStreamError::AeadOpen)
+            ));
+        }
+
+        // Matching offset (2) opens the frame verbatim.
+        {
+            let (mut w, r) = duplex(4096);
+            w.write_all(&wire).await.unwrap();
+            drop(w);
+            let mut right = AeadStreamReader::new_with_counter(r, key, 2);
+            let got = right.read_chunk().await.unwrap().unwrap();
+            assert_eq!(got, b"body resumes at offset two");
         }
     }
 

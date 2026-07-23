@@ -2750,3 +2750,75 @@ logout. (b) **Multi-device publisher** (one account publishing the same channel 
 devices) keeps independent counters and could collide — a pre-existing concern the crate's
 per-client-storage contract explicitly scopes out; closing it needs a synced publisher
 counter (a separate arc).
+
+### G-34: System-wide AEAD (key, nonce)-reuse audit — **T1 CLOSED + S1/S2 HARDENED (2026-07); one narrow chat-snapshot-cadence residual noted**
+
+Following the G-33 channel publish-counter finding (a real ChaCha20 `(key, nonce)` reuse
+across relaunch), a **system-wide hunt for the same misuse class** swept every AEAD site:
+calls / SFrame, backup / crypto / recovery, MLS / DeviceGroup / pairing, and
+transport / push / attachments. The class is: a fixed AEAD key paired with a
+non-unique nonce (a fixed / persisted / reset-to-zero counter, salt, or IV) on distinct
+plaintexts, which yields keystream reuse (`P_a XOR P_b = C_a XOR C_b`) + Poly1305 forgery.
+Outcomes below; the invariant index is unchanged (this is a free-form audit-record entry,
+adds no indexed C/I/T invariant — still **8 I + 58 C + 15 T**).
+
+**T1 — CLOSED (this pass).** Shadowsocks-2022 reused the AEAD counter between the
+handshake **prelude** and the **body** stream: both began the per-direction AEAD nonce at
+0, so the first body chunk reused `(subkey, nonce 0)` (and the second `nonce 1`) already
+consumed by the sealed prelude — an on-path censor holding both ciphertexts recovers the
+XOR of the two plaintexts and can forge under the reused `(key, nonce)`. Severity HIGH
+**in the SS-2022 layer**, but this is a **transport / obfuscation** layer only: the inner
+application traffic stays MLS-E2EE, so invariant #2 (server / on-path sees only
+ciphertext + public artefacts) holds and there is **no message-plaintext exposure**; the
+adversary is a censor, and the anti-censorship stack is built-but-not-deployed (Phase 5,
+[ADR-0026](../adr/0026-anti-censorship-wiring.md)). **Fixed:** the body stream now
+continues the nonce counter past the prelude (`SS_PRELUDE_NONCE_COUNT = 2`), matching the
+SS-2022 single-continuous-counter wire model; both ends shift symmetrically (a closed
+ecosystem, [ADR-0011](../adr/0011-rust-sfu.md) / no external SS peer). Touchpoints:
+`crates/lakko-transport/src/{shadowsocks,aead_stream}.rs` + nonce-continuity tests
+(`prelude_and_body_use_disjoint_nonces_same_subkey`,
+`handshake_then_first_body_frame_does_not_reuse_prelude_nonce`, and the
+`SS_PRELUDE_NONCE_COUNT` resume-layout pins).
+
+**S1 / S2 — HARDENED (this pass, defense-in-depth, no active bug).** The SFrame
+counter-0 / fresh-seed invariant (a new call seed must never repeat under a leaf's
+counter, which restarts at 0 per fresh `ParticipantKey`) was **caller-enforced with no
+core guardrail** and carried a misleading "harmless" doc on the rekey path. There was no
+live reuse — the seed IS fresh per epoch (see V1 / V2 below) — but a future caller feeding
+`rekey` the same seed twice, or re-deriving a `ParticipantKey` on an unchanged seed, would
+silently reset a counter under an unchanged key. Now `CallKeyRing::rekey` +
+`GroupCallSession::rotate_call_key` **no-op on an unchanged seed** (constant-time compare),
+the counter-0 / fresh-seed invariant is documented on
+`CallKey::{from_seed, participant_key*}`, and property tests capture it. Touchpoints:
+`crates/lakko-calls/src/{sframe,call_key_ring,group_call}.rs`.
+
+**V1 + V2 — VERIFIED FALSE-ALARM (recorded so they are not re-discovered).** V1: a
+suspected SFrame call-media nonce reuse on a link-based / multi-joiner **crash-rejoin at a
+fixed `call_id`** is **not a bug** — the SFrame seed is the MLS exporter output bound to a
+**fresh-random group epoch secret** (`InitSecret::random` at `Group::create`), not to
+`call_id`. Every host / join founds a group with independent key material, so the exporter
+seed never repeats across a rejoin, and the call group is never persisted. V2: OpenMLS
+provider persistence — the provider is an in-memory `MemoryStorage` snapshotted after every
+mutation (the chat ratchet survives relaunch), but the **call group is never snapshotted**
+(it is founded fresh each session), so the call path is outside it and cannot resurrect a
+stale call-ratchet state. **Scoped, non-blocking residual noted:** the chat-ratchet "no
+generation-nonce repeat" property depends on the snapshot being **flushed durably between a
+send and the next send** — a write cadence discipline, not a write-through-DB guarantee. A
+crash in the window between a send and its snapshot flush could in principle replay a
+message-key generation. This is a separate future look (durable-flush-before-send, or a
+pre-send generation reservation), not part of this pass.
+
+**Rest of the crypto surface: CLEAN.** Backup derives a fresh CSPRNG salt → Argon2id KEK
+**per envelope** (v1 `envelope::seal`) so key + nonce are fresh; attachments use a fresh
+key + nonce per blob; contacts sealed-box uses a fresh ephemeral per message; REALITY's
+authenticator is an HMAC (no nonce); ECH is HPKE; ADR-0035 gives every `(leaf, stream)` a
+disjoint `(key, nonce_salt)` space; the rekey-overlap ring only retains a **different**-seed
+previous key; and all randomness is `OsRng`. Two latent footguns were **doc-hardened**
+(INFO, no behavior change): `lakko-backup` `chain.rs::seal_v2` (DORMANT — superseded by
+`head_frame` per [ADR-0037](../adr/0037-backup-head-rollback-commitment.md) — takes a
+caller-supplied salt + nonce with no fresh-random wrapper; every caller is `#[cfg(test)]`)
+now warns the caller MUST pass fresh CSPRNG salt AND nonce and points at v1
+`envelope::seal`; `lakko-sframe-native` `lakko_sframe_wrap_frame` (stamps a **bare-leaf**
+KID, not the ADR-0035 composite `(leaf << 8) | stream`; touches no key / nonce — the KID is
+cosmetic / routing for pre-sealed bytes — and has **no production caller**, test-only) now
+notes the keyed media path must use `seal_framed` / `open_framed`.

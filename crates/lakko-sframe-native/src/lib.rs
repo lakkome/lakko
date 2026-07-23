@@ -802,6 +802,26 @@ pub unsafe extern "C" fn lakko_sframe_call_key_ring_open_framed_with_overlap(
 /// || ciphertext`. The platform shim hands this back to libwebrtc
 /// as the encrypted-frame payload.
 ///
+/// # KID note — bare leaf, NOT the ADR-0035 composite
+///
+/// This function stamps the header KID as the **bare**
+/// `sender_leaf` (`kid = u64::from(sender_leaf)`), NOT the
+/// ADR-0035 keyed composite `(sender_leaf << 8) | stream_index`.
+/// It touches no key or nonce — it only frames bytes the caller
+/// has ALREADY sealed — so this is not a `(key, nonce)`-reuse
+/// hazard: the KID here is cosmetic / routing metadata. It is
+/// intended only for pre-sealed opaque bytes. Do NOT mix it with
+/// the raw [`lakko_sframe_seal`] on the keyed media path: a frame
+/// whose key was derived under a composite KID but whose header is
+/// stamped with a bare-leaf KID would carry a header disagreeing
+/// with the key-derivation KID, so the receiver's header-as-AAD
+/// open would fail. The live media path uses
+/// [`lakko_sframe_seal_framed`] / [`lakko_sframe_open_framed`]
+/// (and the ring's `_open_framed_with_overlap`), which compose and
+/// stamp the correct composite KID in one place — callers on that
+/// path MUST use those, never `seal` + `wrap_frame`. As of this
+/// writing `wrap_frame` has NO production caller (test-only).
+///
 /// # Safety
 ///
 /// - `ciphertext_ptr` may be null only when `ciphertext_len == 0`.

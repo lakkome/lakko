@@ -122,6 +122,16 @@ impl CallKey {
     /// Construct a [`CallKey`] from a known-good seed.
     /// Test-only and FFI-only — production callers go through
     /// [`Self::derive`].
+    ///
+    /// # Invariant — counter-0 ⟺ fresh seed
+    ///
+    /// Every [`ParticipantKey`] derived from this seed starts at frame
+    /// counter 0, so a given `seed` MUST be used to seal at a given KID under
+    /// exactly ONE key lifetime. Constructing a second [`CallKey`] from the same
+    /// seed and re-deriving the same KID's [`ParticipantKey`] restarts the
+    /// counter at 0 → identical `(key, nonce)` at every counter → catastrophic
+    /// AEAD nonce reuse. Pair every counter reset with a **fresh** seed (a fresh
+    /// `call_id` / MLS epoch); see [`Self::participant_key`].
     #[must_use]
     pub fn from_seed(seed: [u8; CALL_KEY_LEN]) -> Self {
         Self {
@@ -134,6 +144,21 @@ impl CallKey {
     #[must_use]
     pub fn as_bytes(&self) -> &[u8; CALL_KEY_LEN] {
         self.seed.as_bytes()
+    }
+
+    /// Constant-time equality of two call-key seeds.
+    ///
+    /// The rotation path ([`crate::CallKeyRing::rekey`],
+    /// [`crate::GroupCallSession::refresh_call_key`]) uses this to detect a
+    /// spurious **same-seed** refresh: a rotation to an unchanged seed is a
+    /// no-op (S2 defense-in-depth), so a later [`Self::participant_key`] never
+    /// hands back a fresh counter-0 key under a seed already used for sealing.
+    /// Constant-time (via the inner [`SecretBytes`] comparison) so the check
+    /// never leaks the seed through a variable-time byte compare of live key
+    /// material.
+    #[must_use]
+    pub fn seed_eq(&self, other: &Self) -> bool {
+        self.seed == other.seed
     }
 
     /// Derive a per-`(sender_leaf, stream)` key from a composite SFrame `kid`
@@ -157,6 +182,23 @@ impl CallKey {
     /// video streams `(leaf, 1)` and `(leaf, 2)` — therefore key into disjoint
     /// `(key, nonce_salt)` spaces, so their independent counters cannot reuse a
     /// `(key, nonce)` pair.
+    ///
+    /// # Invariant — counter-0 ⟺ fresh seed (caller-enforced)
+    ///
+    /// The returned [`ParticipantKey`] starts at frame counter 0, and its AEAD
+    /// `(key, nonce_salt)` is a pure function of `(seed, kid)`. A fresh
+    /// counter-0 key is safe to seal with **ONLY** when its seed has never
+    /// before been used to seal at this KID. The AEAD nonce is
+    /// `nonce_salt XOR counter`, so any two keys sharing a `(seed, kid)` reuse
+    /// the identical `(key, nonce)` at every counter — a catastrophic AEAD
+    /// violation (ChaCha20 keystream reuse + Poly1305 forgery). The caller MUST
+    /// ensure a counter reset co-occurs with a **fresh seed** (a fresh
+    /// `call_id` / MLS epoch); the core **cannot** enforce this across
+    /// [`ParticipantKey`] lifetimes, because a legitimately fresh seed also
+    /// yields a counter-0 key and is indistinguishable here. The companion guard
+    /// on the rotation path ([`crate::CallKeyRing::rekey`]) makes a refresh to an
+    /// **unchanged** seed a no-op, so a spurious refresh can never reset the seal
+    /// counter under a live key.
     ///
     /// # Errors
     ///
@@ -190,6 +232,10 @@ impl CallKey {
     /// from a `(sender_leaf, stream_index)` pair (ADR-0035). Sender-side callers
     /// that assign a stream ordinal reach for this; receivers that already hold
     /// the KID from the SFrame header use [`Self::participant_key`] directly.
+    ///
+    /// The counter-0 ⟺ fresh-seed invariant documented on
+    /// [`Self::participant_key`] applies verbatim: a counter reset here MUST
+    /// co-occur with a fresh seed.
     ///
     /// # Errors
     ///
@@ -597,6 +643,59 @@ mod tests {
         let boundary_b = key.participant_key_for(0, 255).unwrap(); // kid 255
         assert_ne!(boundary_a.kid(), boundary_b.kid());
         assert_ne!(boundary_a.key_bytes(), boundary_b.key_bytes());
+    }
+
+    /// S1 hazard, made explicit + regression-caught (crypto audit): two FRESH
+    /// [`ParticipantKey`]s derived from the SAME seed and the SAME KID BOTH
+    /// start at counter 0, so sealing the same plaintext on each reuses the
+    /// identical `(key, nonce)` at counter 1 — catastrophic AEAD nonce reuse.
+    /// The core cannot prevent a caller from re-deriving a key across
+    /// [`ParticipantKey`] lifetimes (each derivation is legitimately counter-0
+    /// for a FRESH seed); the invariant on [`CallKey::participant_key`] states
+    /// the contract the caller MUST uphold — a counter reset co-occurs with a
+    /// fresh seed. This test pins WHY: it demonstrates the reuse that WOULD occur
+    /// if a caller wrongly re-derived under an unchanged seed (the exact
+    /// regression the S2 same-seed-refresh no-op defends against upstream).
+    #[test]
+    fn two_participant_keys_from_the_same_seed_and_kid_start_at_the_same_counter_0() {
+        let seed = [0x77; CALL_KEY_LEN];
+        let key = CallKey::from_seed(seed);
+        let kid = SframeHeader::kid_for(2, 0).unwrap();
+
+        // Two independently-derived keys from the same (seed, kid).
+        let mut first = key.participant_key(kid).unwrap();
+        let mut second = key.participant_key(kid).unwrap();
+
+        // Both hold the identical AEAD key + nonce salt + a counter starting at 0.
+        assert_eq!(first.key_bytes(), second.key_bytes());
+        assert_eq!(first.nonce_salt(), second.nonce_salt());
+        assert_eq!(first.counter(), 0);
+        assert_eq!(second.counter(), 0);
+
+        // Sealing the SAME plaintext under the SAME AAD on each → both consume
+        // counter 1 → identical (key, nonce) → identical ciphertext. THIS is the
+        // catastrophic reuse the counter-0 ⟺ fresh-seed invariant forbids.
+        let aad = b"same-header";
+        let pt = b"same media plaintext";
+        let (c1, ct1) = first.seal(aad, pt).unwrap();
+        let (c2, ct2) = second.seal(aad, pt).unwrap();
+        assert_eq!(c1, 1);
+        assert_eq!(c2, 1);
+        assert_eq!(
+            ct1, ct2,
+            "two counter-0 keys off one (seed, kid) reuse (key, nonce) — the hazard \
+             the caller MUST avoid by pairing every counter reset with a fresh seed"
+        );
+
+        // Contrast: a DIFFERENT seed at the same kid is safe — a disjoint key
+        // space, so the same plaintext at counter 1 seals differently (no reuse).
+        let other = CallKey::from_seed([0x88; CALL_KEY_LEN]);
+        let mut safe = other.participant_key(kid).unwrap();
+        let (_c, ct_safe) = safe.seal(aad, pt).unwrap();
+        assert_ne!(
+            ct1, ct_safe,
+            "a fresh seed gives a disjoint key space — counter-0 across seeds is safe"
+        );
     }
 
     #[test]

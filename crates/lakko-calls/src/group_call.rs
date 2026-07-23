@@ -198,16 +198,27 @@ impl GroupCallSession {
     /// processed locally; the `needs_rekey` flag flips so
     /// the platform schedules the SFrame transform swap.
     ///
-    /// **Not idempotent across epoch boundaries.** Calling
-    /// at the same epoch produces the same seed, and the
-    /// previous-key slot ends up populated with that
-    /// identical seed (harmless — frames sealed under it
-    /// decode under either slot). Calling across N epochs
-    /// in rapid succession only retains the **most recent
-    /// previous** epoch's seed; older overlap windows fall
-    /// off. The 1-second overlap budget assumes ≤ 1 commit
-    /// per second per call, which matches the SFU's commit
-    /// debouncing.
+    /// **Idempotent across the same epoch — a same-seed
+    /// refresh is a no-op.** Calling at the same epoch
+    /// re-derives the identical seed; the core **refuses to
+    /// rotate** in that case (S2 defense-in-depth) — no
+    /// previous key is stashed, no counter is reset, and
+    /// `needs_rekey` stays unset. This is load-bearing on the
+    /// SEND side: were a same-seed refresh to rotate, the next
+    /// [`Self::own_participant_key`] would hand back a **fresh
+    /// counter-0** key under the **unchanged** seed, and
+    /// resuming sealing on it would reuse a `(key, nonce)` pair
+    /// with frames already sealed — catastrophic AEAD nonce
+    /// reuse. (A same-seed refresh is harmless only on the
+    /// RECEIVE / overlap-open side, where a late frame decodes
+    /// under either slot; the caller MUST NOT resume sealing
+    /// from a key freshly derived off an unchanged seed.) Only
+    /// a genuine epoch advance (a distinct exporter seed)
+    /// rotates. Calling across N epochs in rapid succession
+    /// only retains the **most recent previous** epoch's seed;
+    /// older overlap windows fall off. The 1-second overlap
+    /// budget assumes ≤ 1 commit per second per call, which
+    /// matches the SFU's commit debouncing.
     ///
     /// # Errors
     ///
@@ -248,6 +259,17 @@ impl GroupCallSession {
         expires_at_ms: u64,
     ) -> Result<()> {
         let next = CallKey::derive(group, identity, &self.call_id)?;
+        // S2 defense-in-depth (crypto audit): a same-seed refresh (no MLS epoch
+        // advanced) is a total no-op. `CallKeyRing::rekey` already refuses to
+        // stash a previous key for an unchanged seed; suppressing `needs_rekey`
+        // here is the load-bearing companion — raising it on a same-seed refresh
+        // would prompt the platform to re-derive a fresh counter-0 seal key under
+        // the UNCHANGED seed and resume sealing, reusing a (key, nonce) pair with
+        // frames already sealed on it. Only a genuine rotation (a distinct seed)
+        // touches the ledger. Constant-time seed compare (`CallKey::seed_eq`).
+        if self.ring.current().seed_eq(&next) {
+            return Ok(());
+        }
         // C-10: the ring overwrites any earlier stash — only the most-recent
         // previous epoch is retained.
         self.ring.rekey(next, expires_at_ms);
@@ -615,13 +637,27 @@ mod tests {
         (session, group_a, id_a)
     }
 
+    /// Advance the keying group's MLS epoch by adding a throwaway member, so the
+    /// next `refresh_call_key*` derives a DISTINCT seed — a genuine rotation.
+    /// The S2 same-seed-refresh no-op (crypto audit) means the overlap-window
+    /// *timing* tests must drive a real rotation, not a same-epoch refresh (a
+    /// same-seed refresh is now correctly a no-op that stashes no previous key).
+    fn advance_epoch(group: &mut Group, adder: &Identity, device_tag: &str) {
+        let newcomer = MlsIdentity::generate(device_tag).unwrap();
+        let kp = newcomer.create_key_package().unwrap();
+        let _ = group.add_member(adder, kp).unwrap();
+    }
+
     // ---- G-18: clock-injected overlap-window expiry --------------------------
 
     #[test]
     fn refresh_at_retains_previous_until_expiry_then_prune_drops_it() {
-        let (mut s, g, id) = fixture_session();
+        let (mut s, mut g, id) = fixture_session();
         assert!(s.previous_call_key().is_none(), "no previous at creation");
 
+        // Advance the epoch so the refresh derives a DISTINCT seed — a genuine
+        // rotation (a same-seed refresh is now a no-op, S2).
+        advance_epoch(&mut g, &id, "device-C");
         // Rotate at t=1000 with a 1 s window → previous expires at 2000.
         s.refresh_call_key_at(&g, &id, 1_000, OVERLAP_DEFAULT_MS)
             .unwrap();
@@ -645,13 +681,15 @@ mod tests {
     #[test]
     fn refresh_at_clamps_the_overlap_window() {
         // Below the floor clamps up to OVERLAP_MIN_MS.
-        let (mut s, g, id) = fixture_session();
+        let (mut s, mut g, id) = fixture_session();
+        advance_epoch(&mut g, &id, "device-C");
         s.refresh_call_key_at(&g, &id, 1_000, 1).unwrap();
         assert!(s.has_live_previous(1_000 + OVERLAP_MIN_MS - 1));
         assert!(!s.has_live_previous(1_000 + OVERLAP_MIN_MS));
 
         // Above the ceiling clamps down to OVERLAP_MAX_MS.
-        let (mut s2, g2, id2) = fixture_session();
+        let (mut s2, mut g2, id2) = fixture_session();
+        advance_epoch(&mut g2, &id2, "device-C2");
         s2.refresh_call_key_at(&g2, &id2, 0, u64::MAX).unwrap();
         assert!(s2.has_live_previous(OVERLAP_MAX_MS - 1));
         assert!(!s2.has_live_previous(OVERLAP_MAX_MS));
@@ -659,7 +697,9 @@ mod tests {
 
     #[test]
     fn refresh_without_clock_never_auto_expires() {
-        let (mut s, g, id) = fixture_session();
+        let (mut s, mut g, id) = fixture_session();
+        // Advance the epoch so the refresh is a genuine rotation (distinct seed).
+        advance_epoch(&mut g, &id, "device-C");
         // The legacy no-clock path retains the previous key with no expiry.
         s.refresh_call_key(&g, &id).unwrap();
         // The no-clock path parks the expiry at the u64::MAX sentinel, which no
@@ -677,11 +717,14 @@ mod tests {
 
     #[test]
     fn second_rotation_resets_the_window_to_the_latest() {
-        let (mut s, g, id) = fixture_session();
+        let (mut s, mut g, id) = fixture_session();
+        advance_epoch(&mut g, &id, "device-C");
         s.refresh_call_key_at(&g, &id, 1_000, OVERLAP_DEFAULT_MS)
             .unwrap();
-        // A second rotation at t=5000 replaces the retained previous (C-10:
-        // only the most-recent previous epoch is kept) and resets the window.
+        // A second rotation at t=5000 (another epoch advance → another distinct
+        // seed) replaces the retained previous (C-10: only the most-recent
+        // previous epoch is kept) and resets the window.
+        advance_epoch(&mut g, &id, "device-D");
         s.refresh_call_key_at(&g, &id, 5_000, OVERLAP_DEFAULT_MS)
             .unwrap();
         assert!(
@@ -699,13 +742,48 @@ mod tests {
 
     #[test]
     fn refresh_at_saturates_near_clock_max() {
-        let (mut s, g, id) = fixture_session();
+        let (mut s, mut g, id) = fixture_session();
+        advance_epoch(&mut g, &id, "device-C");
         // now_ms + overlap must not overflow.
         s.refresh_call_key_at(&g, &id, u64::MAX, OVERLAP_DEFAULT_MS)
             .unwrap();
         assert!(s.previous_call_key().is_some());
         // Expiry saturated to u64::MAX → not "live" exactly at MAX, but no panic.
         assert!(!s.has_live_previous(u64::MAX));
+    }
+
+    /// S2 defense-in-depth (crypto audit): a `refresh_call_key*` that re-derives
+    /// the SAME seed (no MLS epoch advanced) is a total no-op — it stashes NO
+    /// previous key, leaves the current seed unchanged, and does NOT raise
+    /// `needs_rekey`. Raising `needs_rekey` would prompt the platform to
+    /// re-derive a fresh counter-0 seal key under the UNCHANGED seed, reusing a
+    /// `(key, nonce)` pair with frames already sealed on it. A genuine rotation
+    /// (a distinct seed) is unaffected (proven by the timing tests above).
+    #[test]
+    fn same_seed_refresh_is_a_noop_and_does_not_flag_rekey() {
+        let (mut s, g, id) = fixture_session();
+        let seed_before = *s.call_key().as_bytes();
+
+        // Refresh against the SAME group at the SAME epoch → identical seed.
+        s.refresh_call_key(&g, &id).unwrap();
+        assert!(!s.needs_rekey(), "same-seed refresh must not flag a rekey");
+        assert!(
+            s.previous_call_key().is_none(),
+            "same-seed refresh must stash no previous key"
+        );
+        assert_eq!(
+            *s.call_key().as_bytes(),
+            seed_before,
+            "current seed unchanged by a same-seed refresh"
+        );
+
+        // The clock-aware variant is equally a no-op — no window opens.
+        s.refresh_call_key_at(&g, &id, 1_000, OVERLAP_DEFAULT_MS)
+            .unwrap();
+        assert!(!s.needs_rekey());
+        assert!(s.previous_call_key().is_none());
+        assert!(!s.has_live_previous(1_000));
+        assert_eq!(*s.call_key().as_bytes(), seed_before);
     }
 
     #[test]

@@ -101,6 +101,25 @@ pub const SS_FIXED_HEADER_LEN: usize = 1 + 8 + 2;
 /// Sealed fixed-header wire length — plaintext + tag.
 pub const SS_FIXED_HEADER_SEALED_LEN: usize = SS_FIXED_HEADER_LEN + TAG_LEN;
 
+/// Number of AEAD nonces the SS-2022 handshake prelude
+/// consumes on each direction's subkey before the chunked
+/// body stream begins.
+///
+/// The prelude seals the fixed header at nonce 0 and the
+/// variable header at nonce 1 — identical in both
+/// directions ([`encode_request`] and [`encode_response`]
+/// each use `nonce_from_counter(0)` then
+/// `nonce_from_counter(1)`) — so the body's chunked-AEAD
+/// stream MUST resume its nonce counter at this value
+/// under the very same per-session subkey. Restarting the
+/// body at 0 would reuse `(subkey, nonce 0)` and
+/// `(subkey, nonce 1)` on fresh plaintext, a catastrophic
+/// ChaCha20-Poly1305 `(key, nonce)` reuse (keystream-XOR
+/// leak + Poly1305 forgery on the first body chunk). This
+/// matches the SS-2022 spec, where one continuous nonce
+/// counter spans the prelude and the body.
+pub const SS_PRELUDE_NONCE_COUNT: u64 = 2;
+
 /// Header type byte for client-to-server prelude.
 pub const SS_HEADER_TYPE_CLIENT: u8 = 0;
 /// Header type byte for server-to-client prelude.
@@ -701,6 +720,18 @@ impl ShadowsocksConnection {
     /// Construct from already-handshaked halves. The
     /// `tx_subkey` is the client-direction subkey, the
     /// `rx_subkey` is the server-direction subkey.
+    ///
+    /// Both body streams **resume** their AEAD nonce counter
+    /// at [`SS_PRELUDE_NONCE_COUNT`] rather than 0: on each
+    /// end, the handshake prelude has already sealed a fixed
+    /// header (nonce 0) + variable header (nonce 1) under the
+    /// same per-direction subkey. Both callers reach here with
+    /// that invariant — the client (`connect`) sealed its
+    /// request prelude on `tx_subkey` and opened the response
+    /// prelude on `rx_subkey`; the server (`accept_inbound`)
+    /// did the mirror — so continuing the body counter past
+    /// the prelude keeps every `(subkey, nonce)` pair unique
+    /// and matches the SS-2022 single-continuous-counter wire.
     #[must_use]
     pub fn new(
         write_half: OwnedWriteHalf,
@@ -709,8 +740,16 @@ impl ShadowsocksConnection {
         rx_subkey: AeadKey,
     ) -> Self {
         Self {
-            tx: Mutex::new(Some(AeadStreamWriter::new(write_half, tx_subkey))),
-            rx: Mutex::new(Some(AeadStreamReader::new(read_half, rx_subkey))),
+            tx: Mutex::new(Some(AeadStreamWriter::new_with_counter(
+                write_half,
+                tx_subkey,
+                SS_PRELUDE_NONCE_COUNT,
+            ))),
+            rx: Mutex::new(Some(AeadStreamReader::new_with_counter(
+                read_half,
+                rx_subkey,
+                SS_PRELUDE_NONCE_COUNT,
+            ))),
         }
     }
 }
@@ -1282,6 +1321,87 @@ mod tests {
         assert_eq!(decoded, header);
     }
 
+    /// Assert a prelude occupies exactly the first two
+    /// nonces on its subkey: the sealed fixed header opens at
+    /// nonce 0, the sealed variable header opens at nonce 1
+    /// (and NOT at nonce 0 — proof the two sections use
+    /// distinct nonces).
+    fn assert_prelude_occupies_two_nonces(wire: &[u8], subkey: &AeadKey) {
+        let sealed_fixed = &wire[SS_SALT_LEN..SS_SALT_LEN + SS_FIXED_HEADER_SEALED_LEN];
+        assert!(aead::open(ALG, subkey, &nonce_from_counter(0), &[], sealed_fixed).is_ok());
+        let sealed_var = &wire[SS_SALT_LEN + SS_FIXED_HEADER_SEALED_LEN..];
+        assert!(aead::open(ALG, subkey, &nonce_from_counter(1), &[], sealed_var).is_ok());
+        assert!(aead::open(ALG, subkey, &nonce_from_counter(0), &[], sealed_var).is_err());
+    }
+
+    /// Seal a body first-chunk length frame at the body's
+    /// resume counter ([`SS_PRELUDE_NONCE_COUNT`]) and prove
+    /// it does not open at any prelude nonce (0 or 1) under
+    /// the same subkey — only at its true nonce. This is the
+    /// no-`(key, nonce)`-reuse property in isolation.
+    fn assert_body_first_chunk_disjoint_from_prelude(subkey: &AeadKey) {
+        let sealed = aead::seal(
+            ALG,
+            subkey,
+            &nonce_from_counter(SS_PRELUDE_NONCE_COUNT),
+            &[],
+            &7u16.to_be_bytes(),
+        )
+        .unwrap();
+        assert!(aead::open(ALG, subkey, &nonce_from_counter(0), &[], &sealed).is_err());
+        assert!(aead::open(ALG, subkey, &nonce_from_counter(1), &[], &sealed).is_err());
+        assert!(aead::open(
+            ALG,
+            subkey,
+            &nonce_from_counter(SS_PRELUDE_NONCE_COUNT),
+            &[],
+            &sealed
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn prelude_and_body_use_disjoint_nonces_same_subkey() {
+        // Regression for the SS-2022 (key, nonce) reuse bug:
+        // the prelude seals the fixed header at nonce 0 and
+        // the variable header at nonce 1 under the SAME
+        // per-direction subkey the chunked body then uses, so
+        // the body MUST continue at SS_PRELUDE_NONCE_COUNT. If
+        // it restarted at 0 the first body chunk would reseal
+        // fresh plaintext under (subkey, nonce 0/1) —
+        // catastrophic keystream reuse + Poly1305 forgery.
+        // Verified in BOTH directions (per the task's caution
+        // that each direction's prelude count be confirmed
+        // independently — request and response both consume 2).
+        assert_eq!(SS_PRELUDE_NONCE_COUNT, 2);
+        let psk = fresh_psk(0x42);
+
+        // client -> server direction (request prelude).
+        let (req_wire, _rsalt, tx_subkey) = encode_request(
+            &psk,
+            &RequestHeader {
+                timestamp: 1_700_000_000,
+                variable: b"req-var".to_vec(),
+            },
+        )
+        .unwrap();
+        assert_prelude_occupies_two_nonces(&req_wire, &tx_subkey);
+        assert_body_first_chunk_disjoint_from_prelude(&tx_subkey);
+
+        // server -> client direction (response prelude).
+        let (resp_wire, _ssalt, rx_subkey) = encode_response(
+            &psk,
+            &ResponseHeader {
+                timestamp: 1_700_000_000,
+                request_salt: [0x11u8; SS_SALT_LEN],
+                variable: b"resp-var".to_vec(),
+            },
+        )
+        .unwrap();
+        assert_prelude_occupies_two_nonces(&resp_wire, &rx_subkey);
+        assert_body_first_chunk_disjoint_from_prelude(&rx_subkey);
+    }
+
     #[test]
     fn decode_request_rejects_wrong_psk() {
         let psk = fresh_psk(0x10);
@@ -1475,6 +1595,111 @@ mod tests {
         conn.send(Bytes::from_static(b"second")).await.unwrap();
         conn.close().await.unwrap();
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn handshake_then_first_body_frame_does_not_reuse_prelude_nonce() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        // Drive the real handshake through the production
+        // connect() path, capture the client's FIRST body
+        // frame off the wire, and prove it is sealed at the
+        // prelude continuation counter (SS_PRELUDE_NONCE_COUNT)
+        // — NOT at nonce 0/1, which the request prelude already
+        // used on the same client->server subkey. This proves
+        // the fix flows through ShadowsocksConnection::new, not
+        // just the primitive.
+        const FIRST_FRAME: &[u8] = b"first body frame after the prelude";
+
+        let psk = [0x42u8; KEY_LEN];
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let bound = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (sock, _) = listener.accept().await.unwrap();
+            let (mut rd, mut wr) = sock.into_split();
+
+            // Read the client request prelude off the wire.
+            let mut head = vec![0u8; SS_SALT_LEN + SS_FIXED_HEADER_SEALED_LEN];
+            rd.read_exact(&mut head).await.unwrap();
+            let mut salt = [0u8; SS_SALT_LEN];
+            salt.copy_from_slice(&head[..SS_SALT_LEN]);
+            let subkey_peek = derive_session_subkey(&psk, &salt);
+            let fixed_pt = aead::open(
+                ALG,
+                &subkey_peek,
+                &nonce_from_counter(0),
+                &[],
+                &head[SS_SALT_LEN..],
+            )
+            .unwrap();
+            let var_len = u16::from_be_bytes(fixed_pt[9..11].try_into().unwrap()) as usize;
+            let mut sealed_var = vec![0u8; var_len + TAG_LEN];
+            rd.read_exact(&mut sealed_var).await.unwrap();
+            let mut full = head.clone();
+            full.extend_from_slice(&sealed_var);
+            let mut window = ReplayWindow::new();
+            let (_req, request_salt, tx_subkey) =
+                decode_request(&psk, &full, now_unix(), &mut window).unwrap();
+
+            // Send a valid response prelude so connect() returns
+            // and the client sends its first body frame.
+            let (resp_wire, _rs, _rx) = encode_response(
+                &psk,
+                &ResponseHeader {
+                    timestamp: now_unix(),
+                    request_salt,
+                    variable: Vec::new(),
+                },
+            )
+            .unwrap();
+            wr.write_all(&resp_wire).await.unwrap();
+            wr.flush().await.unwrap();
+
+            // Read exactly the first body frame: sealed length
+            // (LENGTH_PREFIX + TAG) + sealed payload (N + TAG).
+            let total =
+                (crate::aead_stream::LENGTH_PREFIX_LEN + TAG_LEN) + (FIRST_FRAME.len() + TAG_LEN);
+            let mut body = vec![0u8; total];
+            rd.read_exact(&mut body).await.unwrap();
+            (tx_subkey, body)
+        });
+
+        let cfg = ShadowsocksConfig {
+            remote: bound.to_string(),
+            method: "2022-blake3-chacha20-poly1305".into(),
+            psk_b64: B64_STANDARD.encode(psk),
+        };
+        let transport = ShadowsocksTransport::new(cfg).unwrap();
+        let mut conn = transport.connect(&Endpoint::Direct(bound)).await.unwrap();
+        conn.send(Bytes::from_static(FIRST_FRAME)).await.unwrap();
+
+        let (tx_subkey, body) = server.await.unwrap();
+
+        // A body reader that (buggily) restarts at 0 MUST fail
+        // — proof the frame did not reuse a prelude nonce.
+        {
+            let (mut w, r) = tokio::io::duplex(4096);
+            w.write_all(&body).await.unwrap();
+            drop(w);
+            let mut wrong = AeadStreamReader::new(r, tx_subkey.clone());
+            assert!(
+                matches!(wrong.read_chunk().await, Err(AeadStreamError::AeadOpen)),
+                "first body frame opened at nonce 0 — prelude/body (key, nonce) reuse present"
+            );
+        }
+        // A body reader resuming at SS_PRELUDE_NONCE_COUNT opens
+        // it verbatim.
+        {
+            let (mut w, r) = tokio::io::duplex(4096);
+            w.write_all(&body).await.unwrap();
+            drop(w);
+            let mut right =
+                AeadStreamReader::new_with_counter(r, tx_subkey, SS_PRELUDE_NONCE_COUNT);
+            let got = right.read_chunk().await.unwrap().unwrap();
+            assert_eq!(&got[..], FIRST_FRAME);
+        }
+        let _ = conn.close().await;
     }
 
     #[tokio::test]

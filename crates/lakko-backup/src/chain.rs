@@ -4,6 +4,35 @@
 //! Tamper-evident chain across backup versions (G-11
 //! mitigation).
 //!
+//! ## Status: DORMANT — superseded by [`crate::head_frame`]
+//!
+//! This v2 chain is **not wired to any FFI surface or
+//! client** — every caller of [`seal_v2`] / [`open_v2`] is
+//! `#[cfg(test)]`. The backup-rollback threat it was
+//! designed against is now closed in production by the
+//! ADR-0037 auth-signed backup head ([`crate::head_frame`],
+//! backed by `crates/lakko-attest/src/backup_head.rs`),
+//! which binds an auth-assigned monotone `backup_version`
+//! and needs no chain walk. Do NOT wire this module into a
+//! live path without first re-reviewing the safety note
+//! below.
+//!
+//! ## Warning — [`seal_v2`] takes CALLER-supplied salt + nonce
+//!
+//! Unlike the v1 [`crate::envelope::seal`] (which sources a
+//! FRESH CSPRNG salt AND nonce on every call), [`seal_v2`]
+//! accepts both as arguments and does NOT generate them.
+//! The AEAD key is `Argon2id(phrase, salt)` and the AEAD
+//! nonce is `nonce` verbatim, so a caller that ever reuses a
+//! `(salt, nonce)` pair across two `seal_v2` calls under the
+//! same `phrase` reuses an identical `(key, nonce)` on
+//! distinct plaintexts — catastrophic ChaCha20 keystream
+//! reuse (`P_a XOR P_b = C_a XOR C_b`) + Poly1305 forgery.
+//! An integrator wiring this must pass a fresh CSPRNG salt
+//! AND a fresh CSPRNG nonce per call, NEVER a fixed or
+//! persisted value. For the safe fresh-random API prefer the
+//! v1 [`crate::envelope::seal`].
+//!
 //! ## Threat
 //!
 //! `services/storage` (or any cache between client and
@@ -195,6 +224,21 @@ pub fn envelope_hash(wire: &[u8]) -> [u8; 32] {
 ///
 /// `phrase` is the BIP39 recovery phrase bytes — same
 /// shape as [`crate::envelope::seal`].
+///
+/// # Warning — caller MUST pass fresh randomness
+///
+/// This function does NOT generate `salt` or `nonce`; both
+/// are taken verbatim. The AEAD key is
+/// `Argon2id(phrase, salt)` and the AEAD nonce is `nonce`,
+/// so reusing a `(salt, nonce)` pair across two calls under
+/// the same `phrase` reuses an identical `(key, nonce)` on
+/// distinct plaintexts — catastrophic ChaCha20 keystream
+/// reuse + Poly1305 forgery. The caller MUST supply a FRESH
+/// CSPRNG `salt` AND a FRESH CSPRNG `nonce` on every call,
+/// never a fixed or persisted value. This module is dormant
+/// and superseded by [`crate::head_frame`] for rollback (see
+/// the module header); for a safe fresh-random API prefer
+/// the v1 [`crate::envelope::seal`].
 ///
 /// # Errors
 ///
