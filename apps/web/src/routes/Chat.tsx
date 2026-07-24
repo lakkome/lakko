@@ -323,6 +323,17 @@ function ChatView(props: {
       if (s.kind !== "session") return;
       await chats.persistSnapshot(s.account.accountId);
     },
+    // ADR-0040 (G-35) — the FAIL-CLOSED persist the four commit paths run BEFORE
+    // publishing: the outbox entry + the N+1 snapshot in one atomic write. A
+    // throw here (no session, no device key, IDB failure) aborts the commit so
+    // the group is never advanced on the wire without a re-publishable record.
+    onPersistWithCommit: async (entry) => {
+      const s = auth.state();
+      if (s.kind !== "session") {
+        throw new Error("no active session — commit aborted (ADR-0040)");
+      }
+      await chats.persistSnapshotWithCommit(s.account.accountId, entry);
+    },
   });
 
   const [rows, setRows] = createSignal<TimelineRow[]>([]);
@@ -2236,6 +2247,19 @@ function ChatView(props: {
   onMount(() => {
     void (async (): Promise<void> => {
       await hydrateFromLog();
+      // ADR-0040 (G-35) — re-publish any pending commit that crashed mid-window
+      // on a previous run BEFORE the first poll, re-arming the own-echo filter
+      // for the re-published commit so `refresh()` (below) drops it instead of
+      // hitting CannotDecryptOwnMessage. Best-effort — a re-publish failure
+      // leaves the entry un-acked for the next mount's sweep.
+      try {
+        await contacts.sweepPendingCommits(props.entry.group, (id) =>
+          chat.markOwnPublishedCommit(id),
+        );
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("commit-outbox sweep failed", err);
+      }
       await refresh();
     })();
   });

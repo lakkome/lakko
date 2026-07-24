@@ -952,6 +952,26 @@ public class AuthRepository(
                         }
                     }
 
+                    // ADR-0040 (G-35) — purge any durable pending-commit
+                    // outbox for this account BEFORE the fresh
+                    // `chatRepository.bootstrap` sweep runs, so a prior
+                    // session's un-acked commits (staged against a now-replaced
+                    // snapshot) are never re-published against the restored
+                    // state. Best-effort; runs whether or not a server backup
+                    // was restored.
+                    try {
+                        me.lakko.app.chat.CommitOutboxStore.deleteForAccount(
+                            applicationContext,
+                            accountIdB64,
+                        )
+                    } catch (cause: Throwable) {
+                        Log.w(
+                            "lakko-auth",
+                            "recover: CommitOutboxStore.deleteForAccount failed",
+                            cause,
+                        )
+                    }
+
                     // Stash the NEW export key + the phrase seed.
                     // ADR-0017: the phrase seed is UNCHANGED across a
                     // recover, so the canonical AccountIdentity rebuilt

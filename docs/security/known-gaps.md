@@ -2838,3 +2838,103 @@ now warns the caller MUST pass fresh CSPRNG salt AND nonce and points at v1
 KID, not the ADR-0035 composite `(leaf << 8) | stream`; touches no key / nonce — the KID is
 cosmetic / routing for pre-sealed bytes — and has **no production caller**, test-only) now
 notes the keyed media path must use `seal_framed` / `open_framed`.
+
+### G-35: MLS group-commit publish-before-persist → deterministic single-device epoch-desync brick — **CLOSED (2026-07, [ADR-0040](../adr/0040-durable-pending-commit-outbox.md) durable pending-commit outbox, S2–S5 landed on web + iOS + Android)**
+
+The G-34 T2 fix reordered the chat **send** path to
+`create → persist(durable, fail-closed) → publish`, and it explicitly named the
+residual it did not close (this entry above, `known-gaps.md` G-34 §T2): the four
+group-membership **commit** paths — add / remove / role-change / external-join
+approve — share the same publish-before-persist ordering, but with a **DISTINCT and
+worse** failure mode than a same-generation nonce reuse. This entry records that
+hazard and its accepted fix. Like G-33 / G-34, this is a **free-form audit record**
+— it adds **no** indexed C / I / T invariant (still **8 I + 58 C + 15 T**).
+
+**The hazard (deterministic, verified firsthand).** Each commit path runs
+`lakko-mls` create-commit, which **eagerly merges** epoch N → N+1 into the in-memory
+provider *inside* the create call (`crates/lakko-mls/src/group.rs`:
+`merge_pending_commit` at `:280` add, `:361` remove, `:392` role/GCE;
+`approve_external_join` `:498` delegates to `add_member` at `:516`), then the client
+publishes the commit (+ a `WelcomeRendezvous` for add / approve) to the DS, then
+persists the N+1 snapshot **best-effort** (failures swallowed — web
+`contacts/client.ts` `persistBestEffort` `:443`, iOS / Android
+`persistSnapshotBestEffort`). The OpenMLS provider is **in-memory**
+(`identity.rs:56`, "in-memory for Phase 0"), so the snapshot is the only durable
+epoch copy. A crash **or** a silent best-effort persist failure **between publish
+and persist** makes the commit C durable on the DS (peers advance to N+1) while the
+local snapshot rolls back to N. On restart the device does **not** self-heal: the
+in-memory own-published echo-suppression set is lost (web `chat/client.ts:248`
+`ownPublishedIds`, iOS `ChatClient.swift:57`, Android `ChatClient.kt:88`), so the
+poll loop re-fetches C and OpenMLS **unconditionally rejects processing one's own
+commit** (`own_leaf_index() == sender leaf` → `CannotDecryptOwnMessage`,
+`openmls-0.8.1/src/framing/validation.rs:111-112`). The device is **permanently
+stuck at epoch N** for that group — silent, no error surfaced, recoverable only by
+another admin re-adding it. **Blast radius: one device (the committer).** There is
+also a residual **2^-32** handshake-ratchet nonce-reuse surface if the bricked
+device issues a **second** commit at N (bounded by the MLS `reuse_guard`, RFC 9420
+§6.3.2) — secondary to the deterministic desync.
+
+**Why the naive fix is worse (the load-bearing point).** The G-34 T2 shape (a bare
+persist-before-publish reorder) works for **application messages** because a skipped
+ratchet generation is harmless (receivers tolerate gaps). A **commit cannot be
+skipped** — N → N+1 is a group-wide barrier — so a bare reorder here merely **flips**
+the desync to **device-AHEAD**: the device is durably at N+1 while C never reached
+the DS and C's bytes are unrecoverable from the merged snapshot, stranding the
+**WHOLE group** at N with no path forward — arguably worse than the single-device
+brick. The fix therefore needs **durability of the pending commit**, not an ordering
+change. (Contrast: the DeviceGroup pairing path already uses persist-before-publish,
+G-5 / G-7, and is safe there because the ahead-state self-heals via joiner-retry and
+the single-founder case has no other member — neither holds for a chat membership
+commit.)
+
+**The accepted fix — ADR-0040 Option A: a durable pending-commit outbox
+(client-only, no `lakko-mls` core / FFI change).** Keep the eager merge. Persist a
+per-`(account, group)` outbox entry holding the commit wire-bytes **and** the
+Welcome/rendezvous wire-bytes (the two-artifact coverage), marked un-acked,
+**together with** the N+1 snapshot in one atomic write **before any publish**
+(fail-closed — a failed write aborts the op with no publish, and the device rolls
+back cleanly to N); publish; mark acked; and on restart **re-publish** un-acked
+entries idempotently (peers at N+1 drop the duplicate as wrong-epoch; the committer
+re-arms its echo filter). This makes the device never durably ahead-without-publish
+nor behind-with-publish, so every crash-window outcome is either "clean N, no op" or
+"N+1 with a re-publishable commit." Alternatives rejected: **Option B** (defer the
+eager merge in the core until publish is confirmed — cleaner but touches the
+sacrosanct MLS core + FFI, deferred as a future refinement); the **bare reorder**
+(flips to the whole-group brick); and **do-nothing** (deterministic silent brick).
+Strengthens **invariant #4** (no group-epoch advance published without durable local
+recording of the commit); invariants #1 / #2 / #3 hold (the outbox stores opaque
+commit + Welcome artefacts; no `lakko-mls` state-machine change).
+
+**Status: CLOSED (2026-07).** ADR-0040 Option A landed end-to-end on all three
+clients. **Web (S2)** — `apps/web/src/chat/commit-outbox.ts` (a durable per-`(account,
+group)` store in the `lakko-mls` IndexedDB, bumped v1 → v2) + `mls-store.ts`
+`saveSnapshotWithCommitEntry` writing the outbox entry + N+1 snapshot in **one atomic
+`transaction([snapshots, commit-outbox])`** (Open Question 1 resolved: a single
+cross-store IDB transaction, so "N+1 snapshot with no entry" is impossible and the
+sweep needs no torn-write reconciliation) + the four commit-path reorders in
+`contacts/client.ts` + `sweepPendingCommits` in `Chat.tsx onMount` before the first
+poll. **iOS (S3)** — `apps/ios/Lakko/Chat/CommitOutbox.swift` (one JSON file per
+in-flight commit under Application Support, backup-excluded) + `ChatRepository`
+entry-first-then-snapshot + the `planSweep` torn-write discard + a once-per-session
+sweep at the top of `pollGroup`. **Android (S4)** — `apps/android/.../chat/CommitOutbox.kt`
+(file-per-entry under `noBackupFilesDir`) + `runCrashSafeCommit` + the `reconcileVerdict`
+torn-write discard + `sweepPendingCommits` at group-open. Open Question 1 (step-2
+atomicity) resolved per-platform: web = one atomic IDB transaction; iOS / Android =
+entry-first-then-snapshot with a restart-sweep **discard** of any un-acked entry whose
+durably-restored `Group.epoch()` did not reach the entry's `target_epoch` (a torn
+write whose commit was never published → drop the orphan, stay at N clean). Open
+Question 2 (orphan `messageId`) resolved via the **already-present** receive-loop
+benign-drop of a re-fetched own commit (`CannotDecryptOwnMessage`: web
+`chat/client.ts` catch-and-continue; iOS `ChatClient.swift:247` catch-all; Android
+`ChatClient.kt:277` `FfiException` catch) rather than recording the `messageId` in the
+durable write — the sweep additionally re-arms the echo filter for the re-published id.
+The two-artifact add / approve paths carry both the commit and the Welcome (add →
+mailbox) / rendezvous (approve → group journal); the sweep re-publishes each to its
+destination and echo-re-arms only the group-journal artefacts. No `lakko-mls` core /
+FFI change (invariant #3 untouched); still **8 I + 58 C + 15 T**. Verified firsthand:
+web `tsc` clean + vitest 338 (15 new) + vite build; iOS `xcodebuild` build + test 12/12;
+Android `:app:compileDebugKotlin` + `CommitOutboxTest` 10/10. Residual: a live
+crash-injection / power-loss e2e on a deployed multi-device environment (a runtime
+gate, like G-26) — the reorder + torn-write + sweep are proven by the per-platform
+unit suites. Option B (defer the eager merge in the MLS core until publish is
+confirmed) stays deferred as a future refinement.

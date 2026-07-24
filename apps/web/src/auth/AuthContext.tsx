@@ -106,6 +106,7 @@ import {
 import { clearAll as clearContactsStore } from "../contacts/local-store";
 import { useChats } from "../chat/ChatContext";
 import { deleteMlsSnapshot } from "../chat/mls-store";
+import { deleteOutboxForAccount } from "../chat/commit-outbox";
 import { deleteMessageLog } from "../chat/message-log-store";
 import { rehydrateMlsState } from "../chat/rehydrate";
 import { subscribeToPush, unsubscribeFromPush } from "../push/subscribe";
@@ -2172,6 +2173,15 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           // eslint-disable-next-line no-console
           console.warn("deleteMlsSnapshot during recover failed", err);
         }
+        // ADR-0040 (G-35) — purge any pending-commit outbox entries for the old
+        // session too; they reference the now-discarded MLS snapshot and must
+        // never be swept into the fresh state.
+        try {
+          await deleteOutboxForAccount(accountIdB64);
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("deleteOutboxForAccount during recover failed", err);
+        }
 
         // ADR-0017: build the new canonical Identity from the
         // (UNCHANGED) BIP39 phrase seed — NOT the rotated export
@@ -2594,6 +2604,13 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // contract `forgetDevice` advertises.
         try {
           await deleteMlsSnapshot(cached.accountIdB64);
+        } catch {
+          // Ignore — same best-effort policy as above.
+        }
+        // ADR-0040 (G-35) — wipe the pending-commit outbox for this account so a
+        // future signup on the same accountId never sweeps a stale entry.
+        try {
+          await deleteOutboxForAccount(cached.accountIdB64);
         } catch {
           // Ignore — same best-effort policy as above.
         }

@@ -1325,6 +1325,22 @@ public class ChatViewModel(
     }
 
     /**
+     * ADR-0040 (G-35) — run the durable pending-commit outbox sweep for this
+     * thread ONCE on open, BEFORE the first poll. Re-publishes any commit that
+     * crashed mid-window on a previous run (re-arming the own-echo filter so the
+     * first poll drops the re-fetched commit instead of hitting
+     * `CannotDecryptOwnMessage`) and discards a torn-write orphan. Best-effort —
+     * a failure leaves the entries for the next open's sweep.
+     */
+    public suspend fun sweepPendingCommitsOnOpen() {
+        try {
+            repo.sweepPendingCommits(groupIdHex)
+        } catch (_: Throwable) {
+            // best-effort — the next open retries.
+        }
+    }
+
+    /**
      * One long-poll tick for the per-thread continuous-polling
      * loop the composable drives via
      * `LaunchedEffect(Unit) { while (isActive) { pollOnce(...) } }`.

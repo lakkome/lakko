@@ -69,7 +69,8 @@ import { base64Encode } from "../auth/account-id";
 import { getDeviceKey } from "../auth/key-store";
 import { PushClient } from "../push/client";
 import { getOrCreateDevicePushId } from "../push/device-id";
-import { saveMlsSnapshot } from "./mls-store";
+import { saveMlsSnapshot, saveSnapshotWithCommitEntry } from "./mls-store";
+import type { NewCommitEntry, PendingCommitEntry } from "./commit-outbox";
 
 /**
  * 1.20e — Subscribe this device to push wakes for the given
@@ -151,6 +152,18 @@ export interface ChatApi {
    *  caller can decide whether to retry (transient) or surface
    *  the error (persistent — disk full, etc.). */
   persistSnapshot(accountIdB64: string): Promise<void>;
+  /** ADR-0040 (G-35) — persist the canonical Identity's provider snapshot AND a
+   *  durable pending-commit outbox entry in ONE atomic IndexedDB transaction,
+   *  awaited, FAIL-CLOSED (throws). A group-membership commit path calls this
+   *  BEFORE it publishes the commit; a throw MUST abort the publish so the group
+   *  is never advanced on the wire without a durable, re-publishable record of
+   *  the commit. Unlike `persistSnapshot` (which no-ops when there is no
+   *  identity / device key), this THROWS in those cases — a commit we cannot
+   *  durably record must not be published. */
+  persistSnapshotWithCommit(
+    accountIdB64: string,
+    entry: NewCommitEntry,
+  ): Promise<void>;
   /** Wipe every active group AND the canonical Identity —
    *  called from `AuthProvider.logout` / `forgetDevice`. */
   clear(): void;
@@ -239,6 +252,38 @@ export function ChatProvider(props: { children: JSX.Element }): JSX.Element {
         deviceKey,
         snapshotBytes,
         knownGroupIds,
+      );
+    },
+    async persistSnapshotWithCommit(accountIdB64, entry) {
+      // FAIL-CLOSED (unlike persistSnapshot's no-op returns): a commit path is
+      // calling us BEFORE it publishes, so if we cannot durably record the
+      // commit + snapshot, we MUST throw so the caller aborts the publish.
+      const id = identity();
+      if (id === null) {
+        throw new Error(
+          "persistSnapshotWithCommit: no canonical Identity — commit aborted",
+        );
+      }
+      const deviceKey = await getDeviceKey(accountIdB64);
+      if (deviceKey === null) {
+        throw new Error(
+          "persistSnapshotWithCommit: no device key — commit aborted",
+        );
+      }
+      const snapshotBytes = id.snapshotStorage();
+      const knownGroupIds = groups().map((g) => g.groupIdB64);
+      const full: PendingCommitEntry = {
+        ...entry,
+        accountId: accountIdB64,
+        acked: false,
+      };
+      // ONE atomic transaction over the snapshot + outbox stores.
+      await saveSnapshotWithCommitEntry(
+        accountIdB64,
+        deviceKey,
+        snapshotBytes,
+        knownGroupIds,
+        full,
       );
     },
     clear() {

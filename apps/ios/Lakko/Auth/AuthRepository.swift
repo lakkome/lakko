@@ -916,6 +916,13 @@ public final class AuthRepository: ObservableObject {
                 blob: restoredSnapshot
             )
         }
+        // ADR-0040 (G-35) — purge any stale pending-commit outbox for this
+        // account on recover. Recover REPLACES the local MLS snapshot (with the
+        // server-restored blob, or leaves the prior one), so any outbox entry
+        // from a previous session references DISCARDED local epochs; the
+        // restart sweep would mis-reconcile it against the freshly-restored
+        // group. Drop the outbox so the new bootstrap sweeps a clean slate.
+        CommitOutboxStore().deleteOutboxForAccount(accountIdB64: accountIdB64)
 
         // ADR-0017: also carry the phrase seed (the canonical identity
         // seed downstream callers rebuild from). Cleared on logout.

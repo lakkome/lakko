@@ -19,14 +19,25 @@
  * Schema (one row per `accountIdB64`):
  *
  * ```text
- *   db   "lakko-mls"  v1
- *   ├── store "snapshots"  keyPath: "accountId"  (string)
- *         row {
- *           accountId:        <b64-uuidv7>,
- *           ciphertext:       Uint8Array,    // [12-byte IV | AES-GCM ciphertext+tag]
- *           knownGroupIds:    string[]       // base64 of MLS group_id bytes
- *         }
+ *   db   "lakko-mls"  v2
+ *   ├── store "snapshots"      keyPath: "accountId"  (string)
+ *   │     row {
+ *   │       accountId:        <b64-uuidv7>,
+ *   │       ciphertext:       Uint8Array,    // [12-byte IV | AES-GCM ciphertext+tag]
+ *   │       knownGroupIds:    string[]       // base64 of MLS group_id bytes
+ *   │     }
+ *   └── store "commit-outbox"  keyPath: "id"  (string)   // ADR-0040 (G-35)
+ *         durable pending-commit entries — see commit-outbox.ts. Co-located in
+ *         THIS db (not a separate one) so an entry + the N+1 snapshot commit in
+ *         ONE atomic `transaction([snapshots, commit-outbox], "readwrite")` via
+ *         `saveSnapshotWithCommitEntry`, making the forbidden "snapshot at N+1
+ *         with no outbox entry" state impossible by construction.
  * ```
+ *
+ * The DB version was bumped v1 -> v2 to add the `commit-outbox` store. All
+ * `lakko-mls` opens funnel through `openMlsDb` here, so the bump is global; the
+ * `onupgradeneeded` guard creates each store only when missing (fresh install
+ * creates both; an existing v1 gains only `commit-outbox`).
  *
  * Why one blob per account rather than per group: the OpenMLS
  * provider serialises **all** groups + signing keys + key
@@ -46,9 +57,14 @@
  * little code.
  */
 
+import type { PendingCommitEntry } from "./commit-outbox";
+
 const DB_NAME = "lakko-mls";
-const DB_VERSION = 1;
+/** v2 adds the ADR-0040 `commit-outbox` store alongside `snapshots`. */
+const DB_VERSION = 2;
 const STORE = "snapshots";
+/** ADR-0040 (G-35) — the durable pending-commit outbox store (keyPath `id`). */
+export const OUTBOX_STORE = "commit-outbox";
 
 /** Length of the AES-GCM IV we prepend to each ciphertext. */
 const IV_LEN = 12;
@@ -77,7 +93,14 @@ interface PersistedRow {
   knownGroupIds: string[];
 }
 
-function openDb(): Promise<IDBDatabase> {
+/**
+ * Open the `lakko-mls` database (v2), creating the `snapshots` and
+ * `commit-outbox` (ADR-0040) stores on first upgrade. Exported so the
+ * `commit-outbox` helpers share the exact same opener + version — a single
+ * canonical open path keeps the two stores in one database, which is what makes
+ * the entry + snapshot single-transaction write atomic.
+ */
+export function openMlsDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     if (typeof indexedDB === "undefined") {
       reject(new Error("IndexedDB unavailable in this environment"));
@@ -89,6 +112,9 @@ function openDb(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(STORE)) {
         db.createObjectStore(STORE, { keyPath: "accountId" });
       }
+      if (!db.objectStoreNames.contains(OUTBOX_STORE)) {
+        db.createObjectStore(OUTBOX_STORE, { keyPath: "id" });
+      }
     };
     req.onsuccess = (): void => resolve(req.result);
     req.onerror = (): void =>
@@ -96,7 +122,9 @@ function openDb(): Promise<IDBDatabase> {
   });
 }
 
-function awaitTx<T>(tx: IDBTransaction, value: T): Promise<T> {
+/** Resolve when `tx` completes; reject on abort / error. Exported for the
+ *  `commit-outbox` writes (they run in the same database). */
+export function awaitTx<T>(tx: IDBTransaction, value: T): Promise<T> {
   return new Promise((resolve, reject) => {
     tx.oncomplete = (): void => resolve(value);
     tx.onabort = (): void => reject(tx.error ?? new Error("idb tx aborted"));
@@ -180,10 +208,58 @@ export async function saveMlsSnapshot(
     ciphertext,
     knownGroupIds: [...knownGroupIds],
   };
-  const db = await openDb();
+  const db = await openMlsDb();
   try {
     const tx = db.transaction(STORE, "readwrite");
     tx.objectStore(STORE).put(row);
+    await awaitTx(tx, undefined);
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * ADR-0040 (G-35) — persist the MLS snapshot AND a durable pending-commit outbox
+ * entry in ONE atomic IndexedDB transaction spanning both stores of the
+ * `lakko-mls` database, awaited, THROWING on failure (fail-closed).
+ *
+ * This is the load-bearing atomicity primitive for the crash-safe commit paths:
+ * a group-membership commit path calls this BEFORE publishing the commit. Because
+ * IndexedDB multi-store transactions are all-or-nothing, the entry (holding the
+ * commit + Welcome / rendezvous wire-bytes) and the N+1 snapshot land together or
+ * not at all — so the forbidden state "durably at N+1 with no re-publishable
+ * commit recorded" (which would strand the whole group) can never occur, and an
+ * un-acked entry read on restart UNCONDITIONALLY means the device is at N+1 (no
+ * torn-write reconciliation needed).
+ *
+ * A throw here MUST abort the commit path (do NOT publish): on the next launch
+ * the device is at N with no entry — clean, as if the op never happened.
+ *
+ * @param entry  the FULL outbox entry (its `accountId` + `acked: false` already
+ *               set by the caller) — stored as plain base64: opaque MLS public
+ *               artefacts, no plaintext / PII (invariants #1 / #2), unlike the
+ *               device-key-encrypted snapshot row.
+ */
+export async function saveSnapshotWithCommitEntry(
+  accountIdB64: string,
+  deviceKey: CryptoKey,
+  snapshotBytes: Uint8Array,
+  knownGroupIds: readonly string[],
+  entry: PendingCommitEntry,
+): Promise<void> {
+  const ciphertext = await encryptSnapshot(deviceKey, snapshotBytes);
+  const snapshotRow: PersistedRow = {
+    accountId: accountIdB64,
+    ciphertext,
+    knownGroupIds: [...knownGroupIds],
+  };
+  const db = await openMlsDb();
+  try {
+    // ONE transaction over BOTH stores — atomic: both puts land on
+    // `tx.oncomplete`, or neither does on any abort/error.
+    const tx = db.transaction([STORE, OUTBOX_STORE], "readwrite");
+    tx.objectStore(STORE).put(snapshotRow);
+    tx.objectStore(OUTBOX_STORE).put(entry);
     await awaitTx(tx, undefined);
   } finally {
     db.close();
@@ -201,7 +277,7 @@ export async function loadMlsSnapshot(
   accountIdB64: string,
   deviceKey: CryptoKey,
 ): Promise<MlsSnapshotRecord | null> {
-  const db = await openDb();
+  const db = await openMlsDb();
   let row: PersistedRow | undefined;
   try {
     const tx = db.transaction(STORE, "readonly");
@@ -230,7 +306,7 @@ export async function loadMlsSnapshot(
  * device wipe leaves no per-account residue.
  */
 export async function deleteMlsSnapshot(accountIdB64: string): Promise<void> {
-  const db = await openDb();
+  const db = await openMlsDb();
   try {
     const tx = db.transaction(STORE, "readwrite");
     tx.objectStore(STORE).delete(accountIdB64);
@@ -246,7 +322,7 @@ export async function deleteMlsSnapshot(accountIdB64: string): Promise<void> {
  * `forgetDevice` path stays per-account.
  */
 export async function clearAllMlsSnapshots(): Promise<void> {
-  const db = await openDb();
+  const db = await openMlsDb();
   try {
     const tx = db.transaction(STORE, "readwrite");
     tx.objectStore(STORE).clear();

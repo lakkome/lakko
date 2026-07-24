@@ -77,6 +77,11 @@ import {
   parseEnvelope,
   wrapEnvelope,
 } from "./envelope";
+import { loadUnacked, markAcked } from "../chat/commit-outbox";
+import type {
+  NewCommitEntry,
+  PendingCommitEntry,
+} from "../chat/commit-outbox";
 
 /** Optional wires the route layer hands to ContactsClient
  *  (Phase 1.16e6c2). See `ChatClientOptions` in
@@ -94,6 +99,16 @@ export interface ContactsClientOptions {
    *  provider snapshot to disk. Best-effort — exceptions are
    *  logged and swallowed; the in-memory state stays good. */
   onPersist?: () => Promise<void>;
+  /** ADR-0040 (G-35) — the FAIL-CLOSED persist used by the four
+   *  group-membership commit paths BEFORE they publish: persist a durable
+   *  pending-commit outbox entry (the commit + Welcome / rendezvous wire-bytes)
+   *  AND the N+1 MLS snapshot in ONE atomic transaction. A throw MUST abort the
+   *  commit op (no publish). Wired to `ChatApi.persistSnapshotWithCommit`. When
+   *  unset (tests / standalone callers with no reload-from-IDB path) the commit
+   *  paths treat the persist as a no-op — such callers persist nothing, so a
+   *  reload restores no group and cannot desync: they are outside this bug's
+   *  blast radius, mirroring `ChatClient.persistDurableOrThrow`. */
+  onPersistWithCommit?: (entry: NewCommitEntry) => Promise<void>;
 }
 
 /** Result of `ContactsClient.sendContactRequest`. */
@@ -393,9 +408,20 @@ function readProofExpiresAtSecs(proofBytes: Uint8Array): number {
   return Number(expiresBig);
 }
 
+/** ADR-0040 (G-35) — a fresh random id (16 bytes hex) for one outbox entry.
+ *  Built from `crypto.getRandomValues` (present in browsers + the vitest node
+ *  env) rather than `crypto.randomUUID` for maximal runtime compatibility. */
+function newOutboxEntryId(): string {
+  const b = crypto.getRandomValues(new Uint8Array(16));
+  return Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+}
+
 export class ContactsClient {
   private readonly identityProvider: (() => WasmIdentity | null) | undefined;
   private readonly onPersist: (() => Promise<void>) | undefined;
+  private readonly onPersistWithCommit:
+    | ((entry: NewCommitEntry) => Promise<void>)
+    | undefined;
 
   constructor(
     private readonly discovery: DiscoveryClient = new DiscoveryClient(),
@@ -404,6 +430,7 @@ export class ContactsClient {
   ) {
     this.identityProvider = options.identityProvider;
     this.onPersist = options.onPersist;
+    this.onPersistWithCommit = options.onPersistWithCommit;
   }
 
   /**
@@ -447,6 +474,112 @@ export class ContactsClient {
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn("ContactsClient: MLS snapshot persist failed", err);
+    }
+  }
+
+  /**
+   * ADR-0040 (G-35) — the FAIL-CLOSED persist a commit path runs BEFORE any
+   * publish. Durably records the pending-commit outbox entry (commit + Welcome /
+   * rendezvous bytes) AND the N+1 MLS snapshot in one atomic write; a throw
+   * propagates so the caller ABORTS the publish (no half-applied membership
+   * change leaves the device).
+   *
+   * A no-op resolve when `onPersistWithCommit` is unset — the degenerate
+   * test / standalone path (no reload-from-IDB), outside the desync blast radius,
+   * mirroring `ChatClient.persistDurableOrThrow`.
+   */
+  private async persistCommitOrThrow(entry: NewCommitEntry): Promise<void> {
+    if (this.onPersistWithCommit === undefined) return;
+    await this.onPersistWithCommit(entry);
+  }
+
+  /** ADR-0040 (G-35) — mark an outbox entry acked after BOTH artifacts have
+   *  published. Best-effort: a failure here just leaves an acked-worthy entry
+   *  un-acked, so the next restart sweep re-publishes it idempotently (peers
+   *  drop the wrong-epoch duplicate; the committer's echo filter is re-armed). */
+  private async ackCommitBestEffort(
+    id: string,
+    commitMessageId?: number,
+    secondMessageId?: number,
+  ): Promise<void> {
+    try {
+      await markAcked(id, commitMessageId, secondMessageId);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("ContactsClient: commit-outbox ack failed", err);
+    }
+  }
+
+  /**
+   * ADR-0040 (G-35) — restart / group-open sweep. Re-publishes every un-acked
+   * pending-commit outbox entry for `group` IDEMPOTENTLY, re-arming the
+   * committer's own-echo filter (`markOwnPublished`) for the re-published commit.
+   *
+   * Correctness: the entry + N+1 snapshot were written in ONE atomic
+   * transaction, so an un-acked entry ALWAYS means the device is durably at N+1 —
+   * re-publish is unconditionally safe (no torn-write / epoch reconciliation).
+   *   - A crash "after step-2 persist, before publish" -> the commit never
+   *     reached the DS; the re-publish is the FIRST publish -> peers catch up.
+   *   - A crash "after publish, before ack" -> the re-publish is a DUPLICATE;
+   *     peers already at N+1 drop it as a wrong-epoch (past) commit, and the
+   *     committer's own poll drops it via the re-armed echo filter (else it would
+   *     hit `CannotDecryptOwnMessage`).
+   * A re-publish failure (offline DS) leaves the entry un-acked for the next
+   * sweep. MUST run BEFORE the first `pollMessages` so the re-armed messageId is
+   * in place when the poll re-fetches the commit.
+   */
+  async sweepPendingCommits(
+    group: WasmGroup,
+    markOwnPublished: (messageId: number) => void,
+  ): Promise<void> {
+    const groupIdBytes = group.groupId;
+    const groupIdB64 = base64Encode(groupIdBytes);
+    let entries: PendingCommitEntry[];
+    try {
+      entries = await loadUnacked(groupIdB64);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("ContactsClient: commit-outbox sweep load failed", err);
+      return;
+    }
+    for (const entry of entries) {
+      try {
+        const commitBytes = base64Decode(entry.commitB64);
+        const commitPub = await this.ds.publishGroup(groupIdBytes, commitBytes);
+        // Echo re-arm: the device is durably at N+1, so feeding its own
+        // re-fetched commit into processIncoming would raise
+        // CannotDecryptOwnMessage. Suppress it on the very next poll.
+        markOwnPublished(commitPub.id);
+
+        let secondMessageId: number | undefined;
+        if (entry.secondArtifactB64 !== undefined) {
+          const secondBytes = base64Decode(entry.secondArtifactB64);
+          if (
+            entry.secondArtifactKind === "welcome" &&
+            entry.secondArtifactMailboxB64 !== undefined
+          ) {
+            // Welcome -> the new member's mailbox (NOT this device's group
+            // journal), so no echo re-arm — the committer never re-fetches it.
+            const pseudonym = base64Decode(entry.secondArtifactMailboxB64);
+            const pub2 = await this.ds.publishMailbox(pseudonym, secondBytes);
+            secondMessageId = pub2.id;
+          } else {
+            // Rendezvous -> the group journal. Existing members / the committer
+            // drop it (not an MLS message) via their receive loop's catch.
+            const pub2 = await this.ds.publishGroup(groupIdBytes, secondBytes);
+            secondMessageId = pub2.id;
+          }
+        }
+        await this.ackCommitBestEffort(entry.id, commitPub.id, secondMessageId);
+      } catch (err) {
+        // Offline / DS down -> leave un-acked; the next sweep retries. Safe.
+        // eslint-disable-next-line no-console
+        console.warn(
+          "ContactsClient: commit-outbox re-publish failed, will retry",
+          entry.id,
+          err,
+        );
+      }
     }
   }
 
@@ -1553,41 +1686,69 @@ export class ContactsClient {
     }
     const commitBytes = added.commit;
     const welcomeBytes = added.welcome;
+    const groupIdBytes = group.groupId;
 
-    // 4. **Broadcast the commit** to the DS group journal. This
-    //    is the new step that differentiates this method from
-    //    `startGroupWith` — without it the existing members' local
-    //    state never moves past the pre-add epoch and the new
-    //    member's Welcome can't be reconciled when it arrives.
-    let commitPublish;
+    // 4. Compute the second artifact's EXACT publishable bytes + its mailbox
+    //    destination UP-FRONT, so the outbox entry holds the very bytes the
+    //    restart sweep will re-publish (no drift). The Welcome ships to the new
+    //    member's stranger inbox, addressed by their public-pubkey pseudonym.
+    const wasm = await loadWasm();
+    const welcomePseudonym = wasm.IdentityPseudonym.fromIdentity(
+      recipientSignaturePubkey,
+    ).asBytes();
+    const welcomeEnvelope = wrapEnvelope(KIND_WELCOME, welcomeBytes);
+
+    // 5. ADR-0040 (G-35) — DURABLE PENDING-COMMIT OUTBOX. The core `addMember`
+    //    above eager-merged epoch N -> N+1 in the in-memory provider. Persist the
+    //    outbox entry (commit + Welcome bytes, both artifacts) AND the N+1
+    //    snapshot in ONE atomic write, BEFORE any publish, FAIL-CLOSED. If it
+    //    throws -> ABORT: do NOT publish (the group is never advanced on the wire
+    //    without a durable, re-publishable record of this commit). On the next
+    //    launch the device is at N with no entry — clean, as if the op never
+    //    happened. See `sweepPendingCommits` for the restart re-publish.
+    const entryId = newOutboxEntryId();
     try {
-      commitPublish = await this.ds.publishGroup(group.groupId, commitBytes);
+      await this.persistCommitOrThrow({
+        id: entryId,
+        groupId: base64Encode(groupIdBytes),
+        targetEpoch: group.epoch.toString(),
+        commitB64: base64Encode(commitBytes),
+        secondArtifactB64: base64Encode(welcomeEnvelope),
+        secondArtifactKind: "welcome",
+        secondArtifactMailboxB64: base64Encode(welcomePseudonym),
+      });
     } catch (err) {
       throw ContactsError.wrap(err);
     }
 
-    // 5. Ship the Welcome to the new member's stranger inbox.
-    //    Identical to `startGroupWith`'s step 4.
+    // 6. Publish artifact 1 — the commit to the DS group journal. Without it the
+    //    existing members' local state never moves past the pre-add epoch.
+    let commitPublish;
+    try {
+      commitPublish = await this.ds.publishGroup(groupIdBytes, commitBytes);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+
+    // 7. Publish artifact 2 — the Welcome to the new member's stranger inbox
+    //    (the SAME bytes stored in the outbox entry).
     let welcomePublish;
     try {
-      welcomePublish = await this.sendWelcome(
-        recipientSignaturePubkey,
-        welcomeBytes,
+      welcomePublish = await this.ds.publishMailbox(
+        welcomePseudonym,
+        welcomeEnvelope,
       );
     } catch (err) {
       throw ContactsError.wrap(err);
     }
 
-    // 6. Snapshot the post-add provider state: new leaf, new
-    //    epoch keys, pruned init keys for the consumed KeyPackage.
-    //    Auto-persist follows the 1.16e6c2 best-effort policy —
-    //    a failure here doesn't unwind the network publishes
-    //    (those are already public on the DS).
-    await this.persistBestEffort();
+    // 8. Both artifacts durable on the wire -> ack (best-effort; a crash here
+    //    just triggers a harmless idempotent re-publish on the next sweep).
+    await this.ackCommitBestEffort(entryId, commitPublish.id, welcomePublish.id);
 
     return {
       commitMessageId: commitPublish.id,
-      welcomeMessageId: welcomePublish.messageId,
+      welcomeMessageId: welcomePublish.id,
     };
   }
 
@@ -1629,15 +1790,31 @@ export class ContactsClient {
     } catch (err) {
       throw ContactsError.wrap(err);
     }
+    const groupIdBytes = group.groupId;
 
-    let commitPublish;
+    // ADR-0040 (G-35) — persist the outbox entry (commit only; remove has no
+    // Welcome) + the N+1 snapshot atomically BEFORE the publish, FAIL-CLOSED. A
+    // throw aborts the op (no publish); see `addMemberToGroup` / `sweepPendingCommits`.
+    const entryId = newOutboxEntryId();
     try {
-      commitPublish = await this.ds.publishGroup(group.groupId, commitBytes);
+      await this.persistCommitOrThrow({
+        id: entryId,
+        groupId: base64Encode(groupIdBytes),
+        targetEpoch: group.epoch.toString(),
+        commitB64: base64Encode(commitBytes),
+      });
     } catch (err) {
       throw ContactsError.wrap(err);
     }
 
-    await this.persistBestEffort();
+    let commitPublish;
+    try {
+      commitPublish = await this.ds.publishGroup(groupIdBytes, commitBytes);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+
+    await this.ackCommitBestEffort(entryId, commitPublish.id);
 
     return { commitMessageId: commitPublish.id };
   }
@@ -1680,15 +1857,30 @@ export class ContactsClient {
     } catch (err) {
       throw ContactsError.wrap(err);
     }
+    const groupIdBytes = group.groupId;
 
-    let commitPublish;
+    // ADR-0040 (G-35) — persist the outbox entry (commit only; a role change has
+    // no Welcome) + the N+1 snapshot atomically BEFORE the publish, FAIL-CLOSED.
+    const entryId = newOutboxEntryId();
     try {
-      commitPublish = await this.ds.publishGroup(group.groupId, commitBytes);
+      await this.persistCommitOrThrow({
+        id: entryId,
+        groupId: base64Encode(groupIdBytes),
+        targetEpoch: group.epoch.toString(),
+        commitB64: base64Encode(commitBytes),
+      });
     } catch (err) {
       throw ContactsError.wrap(err);
     }
 
-    await this.persistBestEffort();
+    let commitPublish;
+    try {
+      commitPublish = await this.ds.publishGroup(groupIdBytes, commitBytes);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+
+    await this.ackCommitBestEffort(entryId, commitPublish.id);
 
     return { commitMessageId: commitPublish.id };
   }
@@ -1723,28 +1915,51 @@ export class ContactsClient {
     } catch (err) {
       throw ContactsError.wrap(err);
     }
+    const groupIdBytes = group.groupId;
 
-    let commitPublish;
-    try {
-      commitPublish = await this.ds.publishGroup(group.groupId, added.commit);
-    } catch (err) {
-      throw ContactsError.wrap(err);
-    }
-
+    // Compute the second artifact (the rendezvous) BEFORE the persist so the
+    // outbox entry can hold both artifacts (two-artifact coverage).
     let rendezvous: Uint8Array;
     try {
       rendezvous = wasm.wrapWelcomeRendezvous(proposalRef, added.welcome);
     } catch (err) {
       throw ContactsError.wrap(err);
     }
-    let welcomePublish;
+
+    // ADR-0040 (G-35) — persist the outbox entry (commit + rendezvous, both
+    // artifacts) + the N+1 snapshot atomically BEFORE any publish, FAIL-CLOSED.
+    // The rendezvous rides the same group journal as the commit.
+    const entryId = newOutboxEntryId();
     try {
-      welcomePublish = await this.ds.publishGroup(group.groupId, rendezvous);
+      await this.persistCommitOrThrow({
+        id: entryId,
+        groupId: base64Encode(groupIdBytes),
+        targetEpoch: group.epoch.toString(),
+        commitB64: base64Encode(added.commit),
+        secondArtifactB64: base64Encode(rendezvous),
+        secondArtifactKind: "rendezvous",
+      });
     } catch (err) {
       throw ContactsError.wrap(err);
     }
 
-    await this.persistBestEffort();
+    // Publish artifact 1 — the commit so every existing member admits the joiner.
+    let commitPublish;
+    try {
+      commitPublish = await this.ds.publishGroup(groupIdBytes, added.commit);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+
+    // Publish artifact 2 — the wrapped Welcome rendezvous to the same journal.
+    let welcomePublish;
+    try {
+      welcomePublish = await this.ds.publishGroup(groupIdBytes, rendezvous);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+
+    await this.ackCommitBestEffort(entryId, commitPublish.id, welcomePublish.id);
 
     return {
       commitMessageId: commitPublish.id,

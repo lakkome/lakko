@@ -168,6 +168,12 @@ public fun ChatScreen(
     }
 
     LaunchedEffect(Unit) {
+        // ADR-0040 (G-35) — re-publish any pending commit that crashed
+        // mid-window on a previous run BEFORE the first poll, re-arming the
+        // own-echo filter for the re-published commit so the refresh below
+        // drops it instead of hitting CannotDecryptOwnMessage. Best-effort —
+        // a re-publish failure leaves the entry un-acked for the next open.
+        viewModel.sweepPendingCommitsOnOpen()
         // First tick: manual-style refresh so the spinner
         // blips briefly while the immediate fetch resolves.
         viewModel.onRefreshClicked()

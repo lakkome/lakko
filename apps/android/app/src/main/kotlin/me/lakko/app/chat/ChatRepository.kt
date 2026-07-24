@@ -566,15 +566,33 @@ public class ChatRepository(
             } catch (e: FfiException) {
                 throw ChatError("setGroupRoles failed", e)
             }
-            val commitPublish = try {
-                dsClient.publishGroup(record.groupId, commitBytes)
-            } catch (e: Throwable) {
-                throw ChatError("DS publishGroup (role change) failed", e)
-            }
-            chatClient.markOwnPublishedCommit(commitPublish.id)
-            persistSnapshotBestEffort()
-            publishThreadList()
-            commitPublish.id
+            // ADR-0040 (G-35) — durable pending-commit outbox: persist the entry
+            // (commit only; a role change has no Welcome) THEN the N+1 snapshot,
+            // BOTH fail-closed, BEFORE any publish. A throw aborts the op (no
+            // publish); the restart sweep reconciles the crash window. See
+            // [sweepPendingCommits].
+            val entry = PendingCommitEntry(
+                id = newOutboxEntryId(),
+                accountId = requireAccountId(),
+                groupId = outboxB64(record.groupId),
+                targetEpoch = record.group.epoch().toString(),
+                commitB64 = outboxB64(commitBytes),
+            )
+            runCrashSafeCommit(
+                persistEntryOrThrow = { CommitOutboxStore.putEntry(applicationContext, entry) },
+                persistSnapshotOrThrow = { persistSnapshotDurableOrThrow() },
+                publish = {
+                    val commitPublish = try {
+                        dsClient.publishGroup(record.groupId, commitBytes)
+                    } catch (e: Throwable) {
+                        throw ChatError("DS publishGroup (role change) failed", e)
+                    }
+                    chatClient.markOwnPublishedCommit(commitPublish.id)
+                    ackCommitBestEffort(entry.id, commitPublish.id, null)
+                    publishThreadList()
+                    commitPublish.id
+                },
+            )
         }
     }
 
@@ -609,30 +627,57 @@ public class ChatRepository(
                     "no live Group handle for $groupIdHex",
                     IllegalStateException("missing group record"),
                 )
+            // 1. create-commit — eager-merges epoch N -> N+1 in the in-memory provider.
             val addResult = try {
                 record.group.addMemberFromWire(identity, keyPackageBytes)
             } catch (e: FfiException) {
                 throw ChatError("addMemberFromWire failed", e)
             }
-            val commitPublish = try {
-                dsClient.publishGroup(record.groupId, addResult.commit)
-            } catch (e: Throwable) {
-                throw ChatError("DS publishGroup (add-member commit) failed", e)
-            }
-            chatClient.markOwnPublishedCommit(commitPublish.id)
+            // Compute the second artifact (Welcome) + its mailbox destination
+            // UP-FRONT so the outbox entry holds the EXACT bytes the restart
+            // sweep will re-publish (no drift). The Welcome ships to the new
+            // member's stranger inbox, addressed by their pubkey pseudonym.
             val welcomeEnvelope = wrapEnvelope(KIND_WELCOME, addResult.welcome)
             val recipientPseudonym =
                 uniffi.lakko_ffi_uniffi.IdentityPseudonym
                     .fromIdentity(recipientSignaturePubkey)
                     .use { it.asBytes() }
-            try {
-                dsClient.publishMailbox(recipientPseudonym, welcomeEnvelope)
-            } catch (e: Throwable) {
-                throw ChatError("DS publishMailbox (Welcome) failed", e)
-            }
-            persistSnapshotBestEffort()
-            publishThreadList()
-            commitPublish.id
+            // 2. ADR-0040 (G-35) — durable pending-commit outbox: persist the
+            //    entry (commit + Welcome, BOTH artifacts) THEN the N+1 snapshot,
+            //    BOTH fail-closed, BEFORE any publish. A throw aborts the op (no
+            //    publish); the restart sweep re-publishes both. See [sweepPendingCommits].
+            val entry = PendingCommitEntry(
+                id = newOutboxEntryId(),
+                accountId = requireAccountId(),
+                groupId = outboxB64(record.groupId),
+                targetEpoch = record.group.epoch().toString(),
+                commitB64 = outboxB64(addResult.commit),
+                secondArtifactB64 = outboxB64(welcomeEnvelope),
+                secondArtifactKind = SecondArtifactKind.WELCOME,
+                secondArtifactMailboxB64 = outboxB64(recipientPseudonym),
+            )
+            runCrashSafeCommit(
+                persistEntryOrThrow = { CommitOutboxStore.putEntry(applicationContext, entry) },
+                persistSnapshotOrThrow = { persistSnapshotDurableOrThrow() },
+                publish = {
+                    // 3. publish artifact 1 (commit) then artifact 2 (Welcome).
+                    val commitPublish = try {
+                        dsClient.publishGroup(record.groupId, addResult.commit)
+                    } catch (e: Throwable) {
+                        throw ChatError("DS publishGroup (add-member commit) failed", e)
+                    }
+                    chatClient.markOwnPublishedCommit(commitPublish.id)
+                    val welcomePublish = try {
+                        dsClient.publishMailbox(recipientPseudonym, welcomeEnvelope)
+                    } catch (e: Throwable) {
+                        throw ChatError("DS publishMailbox (Welcome) failed", e)
+                    }
+                    // 4. both artifacts on the wire -> ack (best-effort).
+                    ackCommitBestEffort(entry.id, commitPublish.id, welcomePublish.id)
+                    publishThreadList()
+                    commitPublish.id
+                },
+            )
         }
     }
 
@@ -660,15 +705,32 @@ public class ChatRepository(
             } catch (e: FfiException) {
                 throw ChatError("removeMember failed", e)
             }
-            val commitPublish = try {
-                dsClient.publishGroup(record.groupId, commitBytes)
-            } catch (e: Throwable) {
-                throw ChatError("DS publishGroup (remove-member commit) failed", e)
-            }
-            chatClient.markOwnPublishedCommit(commitPublish.id)
-            persistSnapshotBestEffort()
-            publishThreadList()
-            commitPublish.id
+            // ADR-0040 (G-35) — durable pending-commit outbox: persist the entry
+            // (commit only; a remove has no Welcome) THEN the N+1 snapshot, BOTH
+            // fail-closed, BEFORE the publish. A throw aborts the op (no publish);
+            // the restart sweep reconciles the crash window. See [sweepPendingCommits].
+            val entry = PendingCommitEntry(
+                id = newOutboxEntryId(),
+                accountId = requireAccountId(),
+                groupId = outboxB64(record.groupId),
+                targetEpoch = record.group.epoch().toString(),
+                commitB64 = outboxB64(commitBytes),
+            )
+            runCrashSafeCommit(
+                persistEntryOrThrow = { CommitOutboxStore.putEntry(applicationContext, entry) },
+                persistSnapshotOrThrow = { persistSnapshotDurableOrThrow() },
+                publish = {
+                    val commitPublish = try {
+                        dsClient.publishGroup(record.groupId, commitBytes)
+                    } catch (e: Throwable) {
+                        throw ChatError("DS publishGroup (remove-member commit) failed", e)
+                    }
+                    chatClient.markOwnPublishedCommit(commitPublish.id)
+                    ackCommitBestEffort(entry.id, commitPublish.id, null)
+                    publishThreadList()
+                    commitPublish.id
+                },
+            )
         }
     }
 
@@ -766,30 +828,57 @@ public class ChatRepository(
                     "no live Group handle for $groupIdHex",
                     IllegalStateException("missing group record"),
                 )
+            // 1. create-commit — reuses the audited add path, eager-merges N -> N+1.
             val addResult = try {
                 record.group.approveExternalJoin(identity, proposalRef)
             } catch (e: FfiException) {
                 throw ChatError("approveExternalJoin failed", e)
             }
-            val commitPublish = try {
-                dsClient.publishGroup(record.groupId, addResult.commit)
-            } catch (e: Throwable) {
-                throw ChatError("DS publishGroup (approve commit) failed", e)
-            }
-            chatClient.markOwnPublishedCommit(commitPublish.id)
+            // Compute the second artifact (the rendezvous) UP-FRONT so the outbox
+            // entry can hold both artifacts (two-artifact coverage). The
+            // rendezvous rides the SAME group journal as the commit.
             val rendezvous = try {
                 uniffi.lakko_ffi_uniffi.wrapWelcomeRendezvous(proposalRef, addResult.welcome)
             } catch (e: FfiException) {
                 throw ChatError("wrapWelcomeRendezvous failed", e)
             }
-            try {
-                dsClient.publishGroup(record.groupId, rendezvous)
-            } catch (e: Throwable) {
-                throw ChatError("DS publishGroup (Welcome rendezvous) failed", e)
-            }
-            persistSnapshotBestEffort()
-            publishThreadList()
-            commitPublish.id
+            // 2. ADR-0040 (G-35) — durable pending-commit outbox: persist the
+            //    entry (commit + rendezvous, BOTH artifacts) THEN the N+1
+            //    snapshot, BOTH fail-closed, BEFORE any publish. A throw aborts
+            //    the op (no publish); the restart sweep re-publishes both. See
+            //    [sweepPendingCommits].
+            val entry = PendingCommitEntry(
+                id = newOutboxEntryId(),
+                accountId = requireAccountId(),
+                groupId = outboxB64(record.groupId),
+                targetEpoch = record.group.epoch().toString(),
+                commitB64 = outboxB64(addResult.commit),
+                secondArtifactB64 = outboxB64(rendezvous),
+                secondArtifactKind = SecondArtifactKind.RENDEZVOUS,
+            )
+            runCrashSafeCommit(
+                persistEntryOrThrow = { CommitOutboxStore.putEntry(applicationContext, entry) },
+                persistSnapshotOrThrow = { persistSnapshotDurableOrThrow() },
+                publish = {
+                    // 3. publish artifact 1 (commit) so every existing member
+                    //    admits the joiner, then artifact 2 (the rendezvous).
+                    val commitPublish = try {
+                        dsClient.publishGroup(record.groupId, addResult.commit)
+                    } catch (e: Throwable) {
+                        throw ChatError("DS publishGroup (approve commit) failed", e)
+                    }
+                    chatClient.markOwnPublishedCommit(commitPublish.id)
+                    val rendezvousPublish = try {
+                        dsClient.publishGroup(record.groupId, rendezvous)
+                    } catch (e: Throwable) {
+                        throw ChatError("DS publishGroup (Welcome rendezvous) failed", e)
+                    }
+                    // 4. both artifacts on the wire -> ack (best-effort).
+                    ackCommitBestEffort(entry.id, commitPublish.id, rendezvousPublish.id)
+                    publishThreadList()
+                    commitPublish.id
+                },
+            )
         }
     }
 
@@ -1538,6 +1627,14 @@ public class ChatRepository(
             } catch (_: Throwable) {
                 // best-effort
             }
+            // ADR-0040 (G-35) — purge the durable pending-commit
+            // outbox so a prior session's un-acked commits never
+            // get swept into a later one on this device.
+            try {
+                CommitOutboxStore.deleteForAccount(applicationContext, accountIdB64)
+            } catch (_: Throwable) {
+                // best-effort
+            }
         }
     }
 
@@ -1660,6 +1757,93 @@ public class ChatRepository(
             )
         val blob = identity.snapshotStorage()
         snapshotStore.putSnapshot(applicationContext, accountIdB64, blob)
+    }
+
+    // -----------------------------------------------------------------
+    // ADR-0040 (G-35) — durable pending-commit outbox helpers
+    // -----------------------------------------------------------------
+
+    /** A fresh random id for one outbox entry (32 hex chars = 16 bytes). */
+    private fun newOutboxEntryId(): String =
+        java.util.UUID.randomUUID().toString().replace("-", "")
+
+    /** The current session's base64 account id, or FAIL-CLOSED. A commit path
+     *  cannot durably record an outbox entry without the account scope, so a
+     *  missing id aborts the op (before any publish) rather than silently
+     *  skipping the durability guarantee. */
+    private fun requireAccountId(): String =
+        currentAccountIdB64.get()
+            ?: throw IllegalStateException(
+                "cannot record pending commit — no account id",
+            )
+
+    /** Mark an outbox entry acked after BOTH artifacts have published.
+     *  Best-effort: a failure here just leaves the entry un-acked, so the next
+     *  restart sweep re-publishes it idempotently (peers drop the wrong-epoch
+     *  duplicate; the committer's echo filter is re-armed). */
+    private fun ackCommitBestEffort(id: String, commitMessageId: Long, secondMessageId: Long?) {
+        try {
+            CommitOutboxStore.markAcked(
+                applicationContext,
+                id,
+                commitMessageId,
+                secondMessageId,
+            )
+        } catch (_: Throwable) {
+            // best-effort — the next sweep reconciles.
+        }
+    }
+
+    /**
+     * ADR-0040 (G-35) — restart / group-open sweep. Re-publishes every un-acked
+     * pending-commit outbox entry for [groupIdHex] IDEMPOTENTLY, re-arming the
+     * committer's own-echo filter ([ChatClient.markOwnPublishedCommit]) for the
+     * re-published commit, and DISCARDING a torn-write orphan (an un-acked entry
+     * whose restored snapshot did not advance to the entry's `targetEpoch` — the
+     * commit was never published; see [reconcileVerdict]). MUST run BEFORE the
+     * first [pollGroup] so the re-armed messageId is in place when the poll
+     * re-fetches the commit — else the poll would feed the device its own commit
+     * and hit `CannotDecryptOwnMessage` (a benign drop-and-continue in
+     * [ChatClient.pollMessages], but the re-arm avoids the round-trip).
+     *
+     * Idempotent + safe to call repeatedly: acked entries are GC-deleted, a
+     * re-publish failure (offline DS) leaves the entry un-acked for the next
+     * sweep, and a duplicate re-publish is dropped by peers (wrong epoch) and by
+     * the committer (echo filter).
+     */
+    public suspend fun sweepPendingCommits(groupIdHex: String) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        val record = groups[groupIdHex] ?: return
+        val groupIdB64 = outboxB64(record.groupId)
+        val entries = try {
+            CommitOutboxStore.loadForGroup(applicationContext, accountIdB64, groupIdB64)
+        } catch (_: Throwable) {
+            return
+        }
+        if (entries.isEmpty()) return
+        groupsLock.withLock {
+            val currentEpoch = try {
+                record.group.epoch()
+            } catch (_: Throwable) {
+                return@withLock
+            }
+            sweepPendingCommitEntries(
+                entries = entries,
+                currentEpoch = currentEpoch,
+                republishCommit = { commit -> dsClient.publishGroup(record.groupId, commit).id },
+                republishRendezvous = { bytes -> dsClient.publishGroup(record.groupId, bytes).id },
+                republishWelcome = { mailbox, bytes -> dsClient.publishMailbox(mailbox, bytes).id },
+                markOwnPublished = { id -> chatClient.markOwnPublishedCommit(id) },
+                onAck = { id, commitId, secondId -> ackCommitBestEffort(id, commitId, secondId) },
+                onDiscard = { id ->
+                    try {
+                        CommitOutboxStore.deleteEntry(applicationContext, id)
+                    } catch (_: Throwable) {
+                        // best-effort GC / discard — the next sweep retries.
+                    }
+                },
+            )
+        }
     }
 
     /** Capture `(cursor, messages)` per known group + write

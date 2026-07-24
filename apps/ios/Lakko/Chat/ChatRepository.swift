@@ -68,6 +68,14 @@ public final class ChatRepository: ObservableObject {
     /// Survives app launches; mutated on every append /
     /// poll / send.
     private let messageLogStore: MessageLogStore
+    /// ADR-0040 (G-35) — durable pending-commit outbox. The four
+    /// group-membership commit paths write a `PendingCommitEntry`
+    /// (commit + Welcome / rendezvous bytes) here BEFORE they
+    /// publish, and the first `pollGroup` of a session sweeps it to
+    /// re-publish any commit that crashed mid-window. See
+    /// ``persistCommitEntryThenSnapshotOrThrow(_:)`` +
+    /// ``sweepPendingCommits(record:)``.
+    private let commitOutbox: CommitOutboxStore
 
     /// The canonical ``Identity`` for the current session. `nil`
     /// until ``bootstrap(secrets:)`` populates it.
@@ -83,13 +91,20 @@ public final class ChatRepository: ObservableObject {
     /// `Task.detached` for the off-actor work.
     private var groups: [String: GroupRecord] = [:]
 
+    /// ADR-0040 (G-35) — hex group ids already swept this session, so the
+    /// pending-commit outbox sweep runs at most once per group per session (on
+    /// the first ``pollGroup(groupIdHex:waitSecs:)`` for that group). Reset by
+    /// ``wipeInMemoryState()`` on a logout / account switch.
+    private var sweptGroupsThisSession: Set<String> = []
+
     public init(
         chatClient: ChatClient = ChatClient(),
         dsClient: DsClient = DsClient(),
         discovery: DiscoveryClient = DiscoveryClient(),
         snapshotStore: IdentitySnapshotStore = IdentitySnapshotStore(),
         knownGroupsStore: KnownGroupsStore = KnownGroupsStore(),
-        messageLogStore: MessageLogStore = MessageLogStore()
+        messageLogStore: MessageLogStore = MessageLogStore(),
+        commitOutbox: CommitOutboxStore = CommitOutboxStore()
     ) {
         self.chatClient = chatClient
         self.dsClient = dsClient
@@ -97,6 +112,7 @@ public final class ChatRepository: ObservableObject {
         self.snapshotStore = snapshotStore
         self.knownGroupsStore = knownGroupsStore
         self.messageLogStore = messageLogStore
+        self.commitOutbox = commitOutbox
         // SECURITY (nonce-reuse-on-crash) — wire the fail-closed MLS
         // ratchet persister into the ChatClient so EVERY application send
         // (chat / edit / delete / reaction / typing / read-receipt /
@@ -231,6 +247,10 @@ public final class ChatRepository: ObservableObject {
         if let accountIdB64 = accountIdB64 {
             snapshotStore.deleteSnapshot(accountIdB64: accountIdB64)
             knownGroupsStore.clear(accountIdB64: accountIdB64)
+            // ADR-0040 (G-35) — drop any pending-commit outbox entries for the
+            // account alongside the snapshot they were paired with, so a wiped
+            // device leaves no stale commit to be swept later.
+            commitOutbox.deleteOutboxForAccount(accountIdB64: accountIdB64)
             // Phase 2a3f1 — drop the plaintext message log too.
             // The Keychain wrap key is shared across accounts
             // (per-installation, not per-account) so we leave
@@ -243,6 +263,9 @@ public final class ChatRepository: ObservableObject {
     private func wipeInMemoryState() {
         groups.removeAll()
         canonicalIdentity = nil
+        // ADR-0040 (G-35) — a new session must re-sweep the outbox for every
+        // group on its first poll.
+        sweptGroupsThisSession.removeAll()
     }
 
     // MARK: - Group operations
@@ -614,6 +637,20 @@ public final class ChatRepository: ObservableObject {
         } catch {
             throw ChatError.wrapped("setGroupRoles failed", underlying: error)
         }
+        // ADR-0040 (G-35) — the core `setGroupRoles` above eager-merged epoch
+        // N -> N+1. Persist the outbox entry (commit only; a role change has no
+        // Welcome) + the N+1 snapshot BEFORE the publish, FAIL-CLOSED. A throw
+        // ABORTS the op (no publish) — the group is never advanced on the wire
+        // without a durable, re-publishable record of this commit.
+        let entryId = newOutboxEntryId()
+        try persistCommitEntryThenSnapshotOrThrow(
+            NewCommitEntry(
+                id: entryId,
+                groupId: base64Encode(record.groupId),
+                targetEpoch: String(try record.group.epoch()),
+                commitB64: base64Encode(commitBytes)
+            )
+        )
         let commitPublish: PublishResult
         do {
             commitPublish = try await dsClient.publishGroup(
@@ -624,7 +661,7 @@ public final class ChatRepository: ObservableObject {
             throw ChatError.wrapped("DS publishGroup (role change) failed", underlying: error)
         }
         chatClient.markOwnPublishedCommit(messageId: commitPublish.id)
-        persistSnapshotBestEffort()
+        ackCommitBestEffort(entryId: entryId, commitMessageId: commitPublish.id)
         return commitPublish.id
     }
 
@@ -664,6 +701,41 @@ public final class ChatRepository: ObservableObject {
             throw ChatError.wrapped("addMemberFromWire failed", underlying: error)
         }
 
+        // Compute the second artifact (the Welcome envelope) + its mailbox
+        // destination UP-FRONT, so the outbox entry holds the EXACT bytes the
+        // restart sweep will re-publish (no drift). The Welcome ships to the new
+        // member's stranger inbox, addressed by their pubkey pseudonym.
+        let welcomeEnvelope = wrapEnvelope(kind: .welcome, body: addResult.welcome)
+        let recipientPseudonym: Data
+        do {
+            recipientPseudonym = try IdentityPseudonym
+                .fromIdentity(pubkey: recipientSignaturePubkey)
+                .asBytes()
+        } catch {
+            throw ChatError.wrapped("IdentityPseudonym derivation failed", underlying: error)
+        }
+
+        // ADR-0040 (G-35) — the core `addMemberFromWire` above eager-merged epoch
+        // N -> N+1. Persist the outbox entry (commit + Welcome, BOTH artifacts) +
+        // the N+1 snapshot BEFORE any publish, FAIL-CLOSED. A throw ABORTS the op
+        // (no publish); the sweep re-publishes both artifacts on restart so a
+        // crash between the two publishes never strands the new member without a
+        // Welcome.
+        let entryId = newOutboxEntryId()
+        try persistCommitEntryThenSnapshotOrThrow(
+            NewCommitEntry(
+                id: entryId,
+                groupId: base64Encode(record.groupId),
+                targetEpoch: String(try record.group.epoch()),
+                commitB64: base64Encode(addResult.commit),
+                secondArtifactB64: base64Encode(welcomeEnvelope),
+                secondArtifactKind: .welcome,
+                secondArtifactMailboxB64: base64Encode(recipientPseudonym)
+            )
+        )
+
+        // Publish artifact 1 — the commit to the group journal so existing
+        // members advance their epoch.
         let commitPublish: PublishResult
         do {
             commitPublish = try await dsClient.publishGroup(
@@ -675,17 +747,11 @@ public final class ChatRepository: ObservableObject {
         }
         chatClient.markOwnPublishedCommit(messageId: commitPublish.id)
 
-        let welcomeEnvelope = wrapEnvelope(kind: .welcome, body: addResult.welcome)
-        let recipientPseudonym: Data
+        // Publish artifact 2 — the Welcome to the new member's mailbox (the SAME
+        // bytes stored in the outbox entry).
+        let welcomePublish: PublishResult
         do {
-            recipientPseudonym = try IdentityPseudonym
-                .fromIdentity(pubkey: recipientSignaturePubkey)
-                .asBytes()
-        } catch {
-            throw ChatError.wrapped("IdentityPseudonym derivation failed", underlying: error)
-        }
-        do {
-            _ = try await dsClient.publishMailbox(
+            welcomePublish = try await dsClient.publishMailbox(
                 pseudonym: recipientPseudonym,
                 payload: welcomeEnvelope
             )
@@ -693,7 +759,11 @@ public final class ChatRepository: ObservableObject {
             throw ChatError.wrapped("DS publishMailbox (Welcome) failed", underlying: error)
         }
 
-        persistSnapshotBestEffort()
+        ackCommitBestEffort(
+            entryId: entryId,
+            commitMessageId: commitPublish.id,
+            secondMessageId: welcomePublish.id
+        )
         state = state.with(threads: buildThreadList())
         return commitPublish.id
     }
@@ -720,6 +790,19 @@ public final class ChatRepository: ObservableObject {
         } catch {
             throw ChatError.wrapped("removeMember failed", underlying: error)
         }
+        // ADR-0040 (G-35) — the core `removeMember` above eager-merged epoch
+        // N -> N+1. Persist the outbox entry (commit only; a remove has no
+        // Welcome) + the N+1 snapshot BEFORE the publish, FAIL-CLOSED. A throw
+        // ABORTS the op (no publish).
+        let entryId = newOutboxEntryId()
+        try persistCommitEntryThenSnapshotOrThrow(
+            NewCommitEntry(
+                id: entryId,
+                groupId: base64Encode(record.groupId),
+                targetEpoch: String(try record.group.epoch()),
+                commitB64: base64Encode(commitBytes)
+            )
+        )
         let commitPublish: PublishResult
         do {
             commitPublish = try await dsClient.publishGroup(
@@ -730,7 +813,7 @@ public final class ChatRepository: ObservableObject {
             throw ChatError.wrapped("DS publishGroup (remove-member commit) failed", underlying: error)
         }
         chatClient.markOwnPublishedCommit(messageId: commitPublish.id)
-        persistSnapshotBestEffort()
+        ackCommitBestEffort(entryId: entryId, commitMessageId: commitPublish.id)
         state = state.with(threads: buildThreadList())
         return commitPublish.id
     }
@@ -799,6 +882,40 @@ public final class ChatRepository: ObservableObject {
         } catch {
             throw ChatError.wrapped("approveExternalJoin failed", underlying: error)
         }
+
+        // Compute the second artifact (the rendezvous) UP-FRONT so the outbox
+        // entry can hold BOTH artifacts. The rendezvous rides the same group
+        // journal as the commit.
+        let rendezvous: Data
+        do {
+            rendezvous = try wrapWelcomeRendezvous(
+                joinerSignatureKey: proposalRef,
+                welcome: addResult.welcome
+            )
+        } catch {
+            throw ChatError.wrapped("wrapWelcomeRendezvous failed", underlying: error)
+        }
+
+        // ADR-0040 (G-35) — the core `approveExternalJoin` above (which reuses
+        // the audited add path) eager-merged epoch N -> N+1. Persist the outbox
+        // entry (commit + rendezvous, BOTH artifacts) + the N+1 snapshot BEFORE
+        // any publish, FAIL-CLOSED. A throw ABORTS the op (no publish); the sweep
+        // re-publishes both so a crash between the two publishes never strands
+        // the joiner without a Welcome.
+        let entryId = newOutboxEntryId()
+        try persistCommitEntryThenSnapshotOrThrow(
+            NewCommitEntry(
+                id: entryId,
+                groupId: base64Encode(record.groupId),
+                targetEpoch: String(try record.group.epoch()),
+                commitB64: base64Encode(addResult.commit),
+                secondArtifactB64: base64Encode(rendezvous),
+                secondArtifactKind: .rendezvous
+            )
+        )
+
+        // Publish artifact 1 — the commit so every existing member admits the
+        // joiner.
         let commitPublish: PublishResult
         do {
             commitPublish = try await dsClient.publishGroup(
@@ -810,17 +927,11 @@ public final class ChatRepository: ObservableObject {
         }
         chatClient.markOwnPublishedCommit(messageId: commitPublish.id)
 
-        let rendezvous: Data
+        // Publish artifact 2 — the wrapped Welcome rendezvous to the same
+        // journal (the SAME bytes stored in the outbox entry).
+        let rendezvousPublish: PublishResult
         do {
-            rendezvous = try wrapWelcomeRendezvous(
-                joinerSignatureKey: proposalRef,
-                welcome: addResult.welcome
-            )
-        } catch {
-            throw ChatError.wrapped("wrapWelcomeRendezvous failed", underlying: error)
-        }
-        do {
-            _ = try await dsClient.publishGroup(
+            rendezvousPublish = try await dsClient.publishGroup(
                 groupId: record.groupId,
                 payload: rendezvous
             )
@@ -828,7 +939,11 @@ public final class ChatRepository: ObservableObject {
             throw ChatError.wrapped("DS publishGroup (Welcome rendezvous) failed", underlying: error)
         }
 
-        persistSnapshotBestEffort()
+        ackCommitBestEffort(
+            entryId: entryId,
+            commitMessageId: commitPublish.id,
+            secondMessageId: rendezvousPublish.id
+        )
         state = state.with(threads: buildThreadList())
         return commitPublish.id
     }
@@ -1232,6 +1347,19 @@ public final class ChatRepository: ObservableObject {
     ) async throws {
         guard let identity = canonicalIdentity else { return }
         guard let record = groups[groupIdHex] else { return }
+        // ADR-0040 (G-35) — sweep the durable pending-commit outbox ONCE per
+        // group per session, BEFORE the first poll. Re-publishing a crashed
+        // mid-window commit re-arms the own-echo filter for the re-published
+        // commit's messageId, so the `pollMessages` below drops it instead of
+        // feeding it to `processIncoming` (which would raise
+        // `CannotDecryptOwnMessage`). The guard-insert is synchronous + on the
+        // main actor, so the sweep runs at most once even under overlapping poll
+        // tasks; an interleaving poll's own-commit re-fetch is still a benign
+        // drop-and-continue in `ChatClient.pollMessages`.
+        if !sweptGroupsThisSession.contains(groupIdHex) {
+            sweptGroupsThisSession.insert(groupIdHex)
+            await sweepPendingCommits(record: record)
+        }
         let result = try await chatClient.pollMessages(
             identity: identity,
             group: record.group,
@@ -1320,6 +1448,187 @@ public final class ChatRepository: ObservableObject {
             accountIdB64: accountIdB64,
             blob: blob
         )
+    }
+
+    // MARK: - ADR-0040 (G-35) durable pending-commit outbox
+
+    /// Persist the pending-commit outbox entry AND the N+1 MLS snapshot durably,
+    /// FAIL-CLOSED, BEFORE any publish — the load-bearing step of every
+    /// group-membership commit path.
+    ///
+    /// iOS has NO cross-store atomic transaction (the outbox is a per-entry file,
+    /// the snapshot a separate AES-GCM file), so this uses the ADR-0040-sanctioned
+    /// **entry-first, then snapshot** ordering. Both writes are fail-closed
+    /// (throw): if EITHER throws, the caller ABORTS before publishing, so the
+    /// group is never advanced on the wire without a durable, re-publishable
+    /// record of the commit.
+    ///
+    /// The one torn middle state — outbox entry landed, snapshot still at N —
+    /// provably means the commit was NEVER published (publish is strictly after
+    /// BOTH writes), and ``sweepPendingCommits(record:)`` DISCARDS such an orphan
+    /// entry (its `targetEpoch` was not reached by the durably-restored group).
+    /// The forbidden state "snapshot at N+1 with no outbox entry" is impossible:
+    /// the entry is written strictly first.
+    ///
+    /// Unlike the send-path ``persistSnapshotDurableOrThrow()`` (a no-op when
+    /// there is no identity / account — that path has no reload that could
+    /// re-consume a generation), this THROWS when the identity / device key is
+    /// unavailable: a commit we cannot durably record must NOT be published.
+    private func persistCommitEntryThenSnapshotOrThrow(_ entry: NewCommitEntry) throws {
+        guard let identity = canonicalIdentity,
+              let accountIdB64 = currentAccountIdB64 else {
+            throw ChatError.argument(
+                "ChatRepository not bootstrapped — commit aborted before publish"
+            )
+        }
+        // 1) ENTRY FIRST (fail-closed). Holds the commit + Welcome / rendezvous
+        //    bytes so a crash before / during publish can re-publish them.
+        try commitOutbox.putNewDurable(accountIdB64: accountIdB64, entry: entry)
+        // 2) SNAPSHOT SECOND (fail-closed). Advances the durable MLS state to
+        //    N+1. A throw here leaves the torn entry-then-snapshot state the
+        //    sweep discards (the commit is never published because we abort).
+        let blob = try identity.snapshotStorage()
+        try snapshotStore.putSnapshotDurable(accountIdB64: accountIdB64, blob: blob)
+    }
+
+    /// Mark an outbox entry acked after BOTH artifacts have published.
+    /// Best-effort: a failure leaves the entry un-acked, so the next restart
+    /// sweep re-publishes it idempotently (peers drop the wrong-epoch duplicate;
+    /// the committer's echo filter is re-armed).
+    private func ackCommitBestEffort(
+        entryId: String,
+        commitMessageId: Int64?,
+        secondMessageId: Int64? = nil
+    ) {
+        guard let accountIdB64 = currentAccountIdB64 else { return }
+        commitOutbox.markAckedBestEffort(
+            accountIdB64: accountIdB64,
+            id: entryId,
+            commitMessageId: commitMessageId,
+            secondMessageId: secondMessageId
+        )
+    }
+
+    /// Restart / group-open sweep (ADR-0040, G-35). Runs ONCE per group per
+    /// session (from ``pollGroup(groupIdHex:waitSecs:)``, before the first poll).
+    ///
+    /// The pure ``planSweep(currentEpoch:entries:)`` classifies each un-acked
+    /// entry against the group's durably-restored `Group.epoch()`
+    /// (torn-write reconciliation):
+    ///
+    ///   - `currentEpoch >= targetEpoch` -> the commit WAS applied durably ->
+    ///     re-publish idempotently + re-arm the own-echo filter, then ack.
+    ///   - `currentEpoch <  targetEpoch` -> a torn entry-then-snapshot write
+    ///     whose snapshot was lost -> the commit was NEVER published -> DISCARD
+    ///     the orphan entry, stay at N (clean).
+    private func sweepPendingCommits(record: GroupRecord) async {
+        guard let accountIdB64 = currentAccountIdB64 else { return }
+        let groupIdB64 = base64Encode(record.groupId)
+        let entries = commitOutbox.loadUnacked(
+            accountIdB64: accountIdB64,
+            groupIdB64: groupIdB64
+        )
+        guard !entries.isEmpty else { return }
+        // The durably-restored epoch. A failure to read it is treated as 0
+        // (fail-safe -> nothing is <= 0 unless targetEpoch is 0 too, so a
+        // genuine pending entry is discarded rather than blindly re-published
+        // against an unknown-epoch group).
+        let currentEpoch = (try? record.group.epoch()) ?? 0
+        for action in Self.planSweep(currentEpoch: currentEpoch, entries: entries) {
+            switch action {
+            case .discardTornWrite(let entry):
+                // The snapshot never reached targetEpoch -> the commit was never
+                // published -> drop the orphan, the device stays at N.
+                commitOutbox.deleteEntryBestEffort(
+                    accountIdB64: accountIdB64,
+                    id: entry.id
+                )
+            case .republish(let entry):
+                await republishPendingCommit(
+                    record: record,
+                    accountIdB64: accountIdB64,
+                    entry: entry
+                )
+            }
+        }
+    }
+
+    /// Pure sweep planner (ADR-0040 torn-write reconciliation) — see
+    /// ``sweepPendingCommits(record:)``. Split out from the executing sweep so
+    /// the load-bearing decision is directly unit-testable.
+    ///
+    /// An unparseable `targetEpoch` is treated as unreachable (`UInt64.max`) ->
+    /// discard — a malformed entry can never be blindly re-published.
+    ///
+    /// `nonisolated` — a pure function over its arguments with no actor state, so
+    /// callers (and unit tests) invoke it from any context.
+    nonisolated static func planSweep(
+        currentEpoch: UInt64,
+        entries: [PendingCommitEntry]
+    ) -> [CommitSweepAction] {
+        entries.map { entry in
+            let target = UInt64(entry.targetEpoch) ?? UInt64.max
+            return currentEpoch >= target
+                ? .republish(entry)
+                : .discardTornWrite(entry)
+        }
+    }
+
+    /// Re-publish one un-acked entry idempotently + re-arm the echo filter, then
+    /// ack. A re-publish failure (offline / DS down) leaves the entry un-acked
+    /// for the next sweep — safe. A corrupt (undecodable) commit is dropped.
+    private func republishPendingCommit(
+        record: GroupRecord,
+        accountIdB64: String,
+        entry: PendingCommitEntry
+    ) async {
+        guard let commitBytes = base64Decode(entry.commitB64) else {
+            // Cannot re-publish garbage — drop the corrupt entry.
+            commitOutbox.deleteEntryBestEffort(accountIdB64: accountIdB64, id: entry.id)
+            return
+        }
+        do {
+            let commitPub = try await dsClient.publishGroup(
+                groupId: record.groupId,
+                payload: commitBytes
+            )
+            // Echo re-arm: the device is durably at N+1, so feeding its own
+            // re-fetched commit into `processIncoming` would raise
+            // `CannotDecryptOwnMessage`. Suppress it on the very next poll.
+            chatClient.markOwnPublishedCommit(messageId: commitPub.id)
+
+            var secondId: Int64?
+            if let secondB64 = entry.secondArtifactB64,
+               let secondBytes = base64Decode(secondB64) {
+                if entry.secondArtifactKind == .welcome,
+                   let mailboxB64 = entry.secondArtifactMailboxB64,
+                   let pseudonym = base64Decode(mailboxB64) {
+                    // Welcome -> the new member's mailbox (NOT this device's
+                    // group journal), so no echo re-arm — the committer never
+                    // re-fetches it.
+                    secondId = try await dsClient.publishMailbox(
+                        pseudonym: pseudonym,
+                        payload: secondBytes
+                    ).id
+                } else {
+                    // Rendezvous -> the group journal. Existing members / the
+                    // committer drop it (not an MLS message) in their receive
+                    // loop's catch.
+                    secondId = try await dsClient.publishGroup(
+                        groupId: record.groupId,
+                        payload: secondBytes
+                    ).id
+                }
+            }
+            ackCommitBestEffort(
+                entryId: entry.id,
+                commitMessageId: commitPub.id,
+                secondMessageId: secondId
+            )
+        } catch {
+            // Offline / DS down -> leave un-acked; the next sweep retries. Safe.
+            NSLog("commit-outbox re-publish failed, will retry: \(entry.id) \(error)")
+        }
     }
 
     private func persistSnapshotBestEffort() {
