@@ -646,11 +646,15 @@ public final class ChatRepository: ObservableObject {
         } catch {
             throw ChatError.wrapped("setGroupRoles failed", underlying: error)
         }
-        // ADR-0040 (G-35) — the core `setGroupRoles` above eager-merged epoch
+        // ADR-0040 (G-35) F1 — the core `setGroupRoles` above eager-merged epoch
         // N -> N+1. Persist the outbox entry (commit only; a role change has no
         // Welcome) + the N+1 snapshot BEFORE the publish, FAIL-CLOSED. A throw
         // ABORTS the op (no publish) — the group is never advanced on the wire
-        // without a durable, re-publishable record of this commit.
+        // without a durable, re-publishable record of this commit. There is NO
+        // pre-persist artifact compute here (a role change has no Welcome), so the
+        // reset-guarded `do` below trivially covers every post-merge statement —
+        // the same F1 invariant the add / approve paths enforce by widening the
+        // guard over their second-artifact compute.
         let entryId = newOutboxEntryId()
         do {
             try persistCommitEntryThenSnapshotOrThrow(
@@ -722,28 +726,40 @@ public final class ChatRepository: ObservableObject {
             throw ChatError.wrapped("addMemberFromWire failed", underlying: error)
         }
 
-        // Compute the second artifact (the Welcome envelope) + its mailbox
-        // destination UP-FRONT, so the outbox entry holds the EXACT bytes the
-        // restart sweep will re-publish (no drift). The Welcome ships to the new
-        // member's stranger inbox, addressed by their pubkey pseudonym.
-        let welcomeEnvelope = wrapEnvelope(kind: .welcome, body: addResult.welcome)
+        // ADR-0040 (G-35) F1 — the core `addMemberFromWire` above eager-merged
+        // epoch N -> N+1. EVERYTHING from here through the FAIL-CLOSED persist runs
+        // INSIDE the reset-guarded `do` below — INCLUDING the second-artifact
+        // compute — because ANY throw after the eager merge and before publish must
+        // roll the in-memory group back to the durable N. A Welcome-envelope /
+        // pseudonym compute that threw OUTSIDE this guard would leave the group at
+        // the un-published N+1, so a later same-session commit builds on N+1 and
+        // publishes commit(N+1 -> N+2), which peers still at N drop as wrong-epoch,
+        // stranding the WHOLE group (the "device-ahead" hazard). `entryId` is
+        // minted before the guard (non-throwing) so the post-publish ack can
+        // reference it; the Welcome + pseudonym are deferred lets assigned inside
+        // the guard and consumed after it at publish (the reset-`catch` always
+        // throws, so reaching the publish implies both were assigned).
+        let entryId = newOutboxEntryId()
+        let welcomeEnvelope: Data
         let recipientPseudonym: Data
         do {
-            recipientPseudonym = try IdentityPseudonym
-                .fromIdentity(pubkey: recipientSignaturePubkey)
-                .asBytes()
-        } catch {
-            throw ChatError.wrapped("IdentityPseudonym derivation failed", underlying: error)
-        }
-
-        // ADR-0040 (G-35) — the core `addMemberFromWire` above eager-merged epoch
-        // N -> N+1. Persist the outbox entry (commit + Welcome, BOTH artifacts) +
-        // the N+1 snapshot BEFORE any publish, FAIL-CLOSED. A throw ABORTS the op
-        // (no publish); the sweep re-publishes both artifacts on restart so a
-        // crash between the two publishes never strands the new member without a
-        // Welcome.
-        let entryId = newOutboxEntryId()
-        do {
+            // Compute the second artifact (the Welcome envelope) + its mailbox
+            // destination so the outbox entry holds the EXACT bytes the restart
+            // sweep will re-publish (no drift). The Welcome ships to the new
+            // member's stranger inbox, addressed by their pubkey pseudonym.
+            welcomeEnvelope = wrapEnvelope(kind: .welcome, body: addResult.welcome)
+            do {
+                recipientPseudonym = try IdentityPseudonym
+                    .fromIdentity(pubkey: recipientSignaturePubkey)
+                    .asBytes()
+            } catch {
+                throw ChatError.wrapped("IdentityPseudonym derivation failed", underlying: error)
+            }
+            // Persist the outbox entry (commit + Welcome, BOTH artifacts) + the N+1
+            // snapshot BEFORE any publish, FAIL-CLOSED. A throw ABORTS the op (no
+            // publish); the sweep re-publishes both artifacts on restart so a crash
+            // between the two publishes never strands the new member without a
+            // Welcome.
             try persistCommitEntryThenSnapshotOrThrow(
                 NewCommitEntry(
                     id: entryId,
@@ -756,12 +772,13 @@ public final class ChatRepository: ObservableObject {
                 )
             )
         } catch {
-            // ADR-0040 (G-35) F1 — the FAIL-CLOSED persist aborted AFTER the core
-            // `addMemberFromWire` eager-merged epoch N -> N+1 in memory. Roll the
-            // in-memory group back to the durable snapshot (still N) so this abort
-            // is "as if the op never happened" in memory too, then re-throw so the
-            // UI sees the failure. Without the reset a second same-session commit
-            // would build on the un-published N+1 and strand the whole group. See
+            // ADR-0040 (G-35) F1 — the artifact compute OR the FAIL-CLOSED persist
+            // aborted AFTER the core `addMemberFromWire` eager-merged epoch
+            // N -> N+1 in memory. Roll the in-memory group back to the durable
+            // snapshot (still N) so this abort is "as if the op never happened" in
+            // memory too, then re-throw so the UI sees the failure. Without the
+            // reset a second same-session commit would build on the un-published
+            // N+1 and strand the whole group. See
             // ``resetGroupToDurableSnapshot(groupIdHex:)``.
             try resetGroupToDurableSnapshot(groupIdHex: groupIdHex)
             throw error
@@ -823,10 +840,14 @@ public final class ChatRepository: ObservableObject {
         } catch {
             throw ChatError.wrapped("removeMember failed", underlying: error)
         }
-        // ADR-0040 (G-35) — the core `removeMember` above eager-merged epoch
+        // ADR-0040 (G-35) F1 — the core `removeMember` above eager-merged epoch
         // N -> N+1. Persist the outbox entry (commit only; a remove has no
         // Welcome) + the N+1 snapshot BEFORE the publish, FAIL-CLOSED. A throw
-        // ABORTS the op (no publish).
+        // ABORTS the op (no publish). There is NO pre-persist artifact compute here
+        // (a remove has no Welcome), so the reset-guarded `do` below trivially
+        // covers every post-merge statement — the same F1 invariant the add /
+        // approve paths enforce by widening the guard over their second-artifact
+        // compute.
         let entryId = newOutboxEntryId()
         do {
             try persistCommitEntryThenSnapshotOrThrow(
@@ -928,27 +949,36 @@ public final class ChatRepository: ObservableObject {
             throw ChatError.wrapped("approveExternalJoin failed", underlying: error)
         }
 
-        // Compute the second artifact (the rendezvous) UP-FRONT so the outbox
-        // entry can hold BOTH artifacts. The rendezvous rides the same group
-        // journal as the commit.
+        // ADR-0040 (G-35) F1 — the core `approveExternalJoin` above (which reuses
+        // the audited add path) eager-merged epoch N -> N+1. EVERYTHING from here
+        // through the FAIL-CLOSED persist runs INSIDE the reset-guarded `do` below
+        // — INCLUDING the rendezvous compute — because ANY throw after the eager
+        // merge and before publish must roll the in-memory group back to the
+        // durable N. A `wrapWelcomeRendezvous` that threw OUTSIDE this guard would
+        // leave the group at the un-published N+1, so a later same-session commit
+        // builds on N+1 and strands the whole group (the "device-ahead" hazard).
+        // `entryId` is minted before the guard (non-throwing) so the post-publish
+        // ack can reference it; the rendezvous is a deferred let assigned inside
+        // the guard and consumed after it at publish (the reset-`catch` always
+        // throws, so reaching the publish implies it was assigned).
+        let entryId = newOutboxEntryId()
         let rendezvous: Data
         do {
-            rendezvous = try wrapWelcomeRendezvous(
-                joinerSignatureKey: proposalRef,
-                welcome: addResult.welcome
-            )
-        } catch {
-            throw ChatError.wrapped("wrapWelcomeRendezvous failed", underlying: error)
-        }
-
-        // ADR-0040 (G-35) — the core `approveExternalJoin` above (which reuses
-        // the audited add path) eager-merged epoch N -> N+1. Persist the outbox
-        // entry (commit + rendezvous, BOTH artifacts) + the N+1 snapshot BEFORE
-        // any publish, FAIL-CLOSED. A throw ABORTS the op (no publish); the sweep
-        // re-publishes both so a crash between the two publishes never strands
-        // the joiner without a Welcome.
-        let entryId = newOutboxEntryId()
-        do {
+            // Compute the second artifact (the rendezvous) so the outbox entry can
+            // hold BOTH artifacts. The rendezvous rides the same group journal as
+            // the commit.
+            do {
+                rendezvous = try wrapWelcomeRendezvous(
+                    joinerSignatureKey: proposalRef,
+                    welcome: addResult.welcome
+                )
+            } catch {
+                throw ChatError.wrapped("wrapWelcomeRendezvous failed", underlying: error)
+            }
+            // Persist the outbox entry (commit + rendezvous, BOTH artifacts) + the
+            // N+1 snapshot BEFORE any publish, FAIL-CLOSED. A throw ABORTS the op
+            // (no publish); the sweep re-publishes both so a crash between the two
+            // publishes never strands the joiner without a Welcome.
             try persistCommitEntryThenSnapshotOrThrow(
                 NewCommitEntry(
                     id: entryId,
@@ -960,13 +990,14 @@ public final class ChatRepository: ObservableObject {
                 )
             )
         } catch {
-            // ADR-0040 (G-35) F1 — the FAIL-CLOSED persist aborted AFTER the core
-            // `approveExternalJoin` (which reuses the audited add path) eager-merged
-            // epoch N -> N+1 in memory. Roll the in-memory group back to the durable
-            // snapshot (still N) so this abort is "as if the op never happened" in
-            // memory too, then re-throw so the UI sees the failure. Without the reset
-            // a second same-session commit would build on the un-published N+1 and
-            // strand the whole group. See ``resetGroupToDurableSnapshot(groupIdHex:)``.
+            // ADR-0040 (G-35) F1 — the rendezvous compute OR the FAIL-CLOSED
+            // persist aborted AFTER the core `approveExternalJoin` (which reuses the
+            // audited add path) eager-merged epoch N -> N+1 in memory. Roll the
+            // in-memory group back to the durable snapshot (still N) so this abort
+            // is "as if the op never happened" in memory too, then re-throw so the
+            // UI sees the failure. Without the reset a second same-session commit
+            // would build on the un-published N+1 and strand the whole group. See
+            // ``resetGroupToDurableSnapshot(groupIdHex:)``.
             try resetGroupToDurableSnapshot(groupIdHex: groupIdHex)
             throw error
         }

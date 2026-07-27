@@ -316,9 +316,12 @@ class CommitOutboxTest {
         var durableEpoch: Long = 0
         val published: MutableList<Long> = mutableListOf()
 
-        /** One commit op through the real [runCrashSafeCommit]. [entryOk] /
-         *  [snapshotOk] gate the two durable writes; [publishOk] gates the publish. */
+        /** One commit op through the real [withPrePersistReset] + [runCrashSafeCommit].
+         *  [prePersistOk] gates the reset-guarded pre-persist prelude (second-artifact
+         *  compute + entry build); [entryOk] / [snapshotOk] gate the two durable writes;
+         *  [publishOk] gates the publish. */
         suspend fun commit(
+            prePersistOk: Boolean = true,
             entryOk: Boolean = true,
             snapshotOk: Boolean = true,
             publishOk: Boolean = true,
@@ -326,6 +329,14 @@ class CommitOutboxTest {
             // eager merge N -> N+1 in memory (the core create-commit call).
             inMemoryEpoch += 1
             val target = inMemoryEpoch
+            // ADR-0040 F1 residual — the reset-guarded pre-persist prelude (the
+            // second-artifact compute + outbox-entry build that runs AFTER the eager
+            // merge and BEFORE runCrashSafeCommit). A throw here resets the un-published
+            // eager merge to the durable N; runCrashSafeCommit is never reached, so
+            // nothing is published.
+            withPrePersistReset(reset = { inMemoryEpoch = durableEpoch }) {
+                if (!prePersistOk) throw IOException("pre-persist artifact-compute failed")
+            }
             return runCrashSafeCommit(
                 persistEntryOrThrow = { if (!entryOk) throw IOException("entry write failed") },
                 persistSnapshotOrThrow = {
@@ -420,6 +431,84 @@ class CommitOutboxTest {
         assertEquals(poison, thrown)
         assertTrue(
             "the original persist failure is attached",
+            thrown.suppressed.any { it is IOException },
+        )
+    }
+
+    // -----------------------------------------------------------------
+    // 6. ADR-0040 F1 residual (lakko-security) — reset the eager-merged
+    //    in-memory group on a PRE-PERSIST throw (between the eager merge and
+    //    runCrashSafeCommit: the second-artifact compute + entry build)
+    // -----------------------------------------------------------------
+
+    @Test
+    fun `F1 residual — a pre-persist artifact-compute failure resets the in-memory epoch to N`() {
+        val g = GroupEpochModel()
+        // op A: eager-merges to epoch 1, then the pre-persist prelude (Welcome /
+        // rendezvous compute + entry build) THROWS -> reset + abort BEFORE persist.
+        assertThrows(IOException::class.java) { runBlocking { g.commit(prePersistOk = false) } }
+        assertEquals("in-memory epoch reset to the durable N (0)", 0L, g.inMemoryEpoch)
+        assertEquals("durable snapshot untouched at N (0)", 0L, g.durableEpoch)
+        assertTrue("nothing published — runCrashSafeCommit never reached", g.published.isEmpty())
+    }
+
+    @Test
+    fun `F1 residual — after a pre-persist failure a subsequent same-session commit builds on N`() {
+        val g = GroupEpochModel()
+        // op A eager-merges to epoch 1, its pre-persist prelude throws -> reset to 0.
+        assertThrows(IOException::class.java) { runBlocking { g.commit(prePersistOk = false) } }
+        assertEquals(0L, g.inMemoryEpoch)
+        // op B succeeds: eager-merges 0 -> 1 (NOT 1 -> 2), publishes commit(0->1).
+        runBlocking { g.commit() }
+        assertEquals("op B built on N (0), reaching N+1 = 1", 1L, g.inMemoryEpoch)
+        assertEquals("durable snapshot advanced to 1", 1L, g.durableEpoch)
+        // The crux: WITHOUT the pre-persist reset, op B would eager-merge 1 -> 2 and
+        // publish commit(1->2), which peers still at 0 drop as wrong-epoch — the
+        // whole-group strand this residual closes.
+        assertEquals("op B published commit for epoch 1, not 2", listOf(1L), g.published)
+    }
+
+    @Test
+    fun `F1 residual — a pre-persist success leaves the eager merge intact`() {
+        val g = GroupEpochModel()
+        // Happy path through the pre-persist guard: the prelude succeeds, so the
+        // eager merge stands and the commit advances normally to N+1.
+        runBlocking { g.commit() }
+        assertEquals("pre-persist success keeps the eager merge (N+1 = 1)", 1L, g.inMemoryEpoch)
+        assertEquals(listOf(1L), g.published)
+    }
+
+    @Test
+    fun `F1 residual — withPrePersistReset returns the prelude value and never resets on success`() {
+        var resetCalls = 0
+        val value = withPrePersistReset(reset = { resetCalls += 1 }) { 42 }
+        assertEquals("prelude value returned", 42, value)
+        assertEquals("reset never called on success", 0, resetCalls)
+    }
+
+    @Test
+    fun `F1 residual — withPrePersistReset resets then re-throws the prelude failure`() {
+        var resetCalls = 0
+        val boom = IOException("prelude failed")
+        val thrown = assertThrows(IOException::class.java) {
+            withPrePersistReset<Int>(reset = { resetCalls += 1 }) { throw boom }
+        }
+        assertEquals("the original prelude failure is re-thrown", boom, thrown)
+        assertEquals("reset fired exactly once", 1, resetCalls)
+    }
+
+    @Test
+    fun `F1 residual — withPrePersistReset surfaces a failed reset with the prelude failure attached`() {
+        val poison = IllegalStateException("durable snapshot gone — poisoned group")
+        val prelude = IOException("prelude failed")
+        val thrown = assertThrows(IllegalStateException::class.java) {
+            withPrePersistReset<Int>(reset = { throw poison }) { throw prelude }
+        }
+        // Mirrors runCrashSafeCommit's fail-safe: a poisoned-group reset failure is
+        // surfaced as the hard error, with the original prelude failure attached.
+        assertEquals(poison, thrown)
+        assertTrue(
+            "the original prelude failure is attached",
             thrown.suppressed.any { it is IOException },
         )
     }

@@ -1747,28 +1747,35 @@ export class ContactsClient {
     }
     const commitBytes = added.commit;
     const welcomeBytes = added.welcome;
-    const groupIdBytes = group.groupId;
 
-    // 4. Compute the second artifact's EXACT publishable bytes + its mailbox
-    //    destination UP-FRONT, so the outbox entry holds the very bytes the
-    //    restart sweep will re-publish (no drift). The Welcome ships to the new
-    //    member's stranger inbox, addressed by their public-pubkey pseudonym.
-    const wasm = await loadWasm();
-    const welcomePseudonym = wasm.IdentityPseudonym.fromIdentity(
-      recipientSignaturePubkey,
-    ).asBytes();
-    const welcomeEnvelope = wrapEnvelope(KIND_WELCOME, welcomeBytes);
-
-    // 5. ADR-0040 (G-35) — DURABLE PENDING-COMMIT OUTBOX. The core `addMember`
-    //    above eager-merged epoch N -> N+1 in the in-memory provider. Persist the
-    //    outbox entry (commit + Welcome bytes, both artifacts) AND the N+1
-    //    snapshot in ONE atomic write, BEFORE any publish, FAIL-CLOSED. If it
-    //    throws -> ABORT: do NOT publish (the group is never advanced on the wire
-    //    without a durable, re-publishable record of this commit). On the next
-    //    launch the device is at N with no entry — clean, as if the op never
-    //    happened. See `sweepPendingCommits` for the restart re-publish.
-    const entryId = newOutboxEntryId();
+    // 4+5. ADR-0040 (G-35) + F1 — from just after the eager-merge above through
+    //    the successful atomic persist is ONE fail-closed region. The core
+    //    `addMember` eager-merged epoch N -> N+1 in the in-memory provider, so ANY
+    //    throw before the publish — the Welcome-artifact computation
+    //    (`IdentityPseudonym.fromIdentity` / `wrapEnvelope`, which CAN throw) OR
+    //    the persist itself — must reset the in-memory group back to the durable N
+    //    snapshot before aborting; otherwise a later same-session commit builds on
+    //    the un-published N+1 and strands the WHOLE group ("device-ahead"). Compute
+    //    the second artifact's EXACT publishable bytes + its mailbox destination
+    //    UP-FRONT (so the outbox entry holds the very bytes the restart sweep
+    //    re-publishes — no drift), then persist the entry (commit + Welcome bytes,
+    //    both artifacts) AND the N+1 snapshot in ONE atomic write, FAIL-CLOSED. A
+    //    throw ABORTS: no publish, group reset to N — on the next launch the device
+    //    is at N with no entry, clean, as if the op never happened. Publish stays
+    //    OUTSIDE this region: a publish failure must NOT reset (the durable entry
+    //    is re-published idempotently by `sweepPendingCommits`).
+    let groupIdBytes: Uint8Array;
+    let welcomePseudonym: Uint8Array;
+    let welcomeEnvelope: Uint8Array;
+    let entryId: string;
     try {
+      groupIdBytes = group.groupId;
+      const wasm = await loadWasm();
+      welcomePseudonym = wasm.IdentityPseudonym.fromIdentity(
+        recipientSignaturePubkey,
+      ).asBytes();
+      welcomeEnvelope = wrapEnvelope(KIND_WELCOME, welcomeBytes);
+      entryId = newOutboxEntryId();
       await this.persistCommitOrThrow({
         id: entryId,
         groupId: base64Encode(groupIdBytes),
@@ -1779,9 +1786,6 @@ export class ContactsClient {
         secondArtifactMailboxB64: base64Encode(welcomePseudonym),
       });
     } catch (err) {
-      // ADR-0040 F1 — the eager-merged N+1 is un-published; reset the in-memory
-      // group back to the durable N snapshot so a subsequent same-session commit
-      // builds on N, not the unpublished N+1 (else the whole group is stranded).
       await this.resetGroupAfterPersistAbort(group);
       throw ContactsError.wrap(err);
     }
@@ -1855,13 +1859,23 @@ export class ContactsClient {
     } catch (err) {
       throw ContactsError.wrap(err);
     }
-    const groupIdBytes = group.groupId;
-
-    // ADR-0040 (G-35) — persist the outbox entry (commit only; remove has no
-    // Welcome) + the N+1 snapshot atomically BEFORE the publish, FAIL-CLOSED. A
-    // throw aborts the op (no publish); see `addMemberToGroup` / `sweepPendingCommits`.
-    const entryId = newOutboxEntryId();
+    // ADR-0040 (G-35) + F1 — from just after the eager-merge above through the
+    // successful atomic persist is ONE fail-closed region: the core `removeMember`
+    // eager-merged epoch N -> N+1, and although a remove has no throwing
+    // pre-persist artifact, the reset-guarded try starts right after the
+    // create-commit (uniform with `addMemberToGroup` / `approveExternalJoin`) so
+    // the invariant — ANY throw before the publish resets the in-memory group back
+    // to the durable N snapshot — holds identically on all four commit paths and
+    // cannot be reintroduced by a future pre-persist addition. Persist the outbox
+    // entry (commit only; remove has no Welcome) + the N+1 snapshot atomically,
+    // FAIL-CLOSED. A throw ABORTS: no publish, group reset to N. Publish stays
+    // OUTSIDE this region (a publish failure must NOT reset — the durable entry is
+    // re-published by `sweepPendingCommits`).
+    let groupIdBytes: Uint8Array;
+    let entryId: string;
     try {
+      groupIdBytes = group.groupId;
+      entryId = newOutboxEntryId();
       await this.persistCommitOrThrow({
         id: entryId,
         groupId: base64Encode(groupIdBytes),
@@ -1869,8 +1883,6 @@ export class ContactsClient {
         commitB64: base64Encode(commitBytes),
       });
     } catch (err) {
-      // ADR-0040 F1 — reset the in-memory group back to the durable N snapshot so
-      // a subsequent same-session commit builds on N, not the unpublished N+1.
       await this.resetGroupAfterPersistAbort(group);
       throw ContactsError.wrap(err);
     }
@@ -1925,12 +1937,22 @@ export class ContactsClient {
     } catch (err) {
       throw ContactsError.wrap(err);
     }
-    const groupIdBytes = group.groupId;
-
-    // ADR-0040 (G-35) — persist the outbox entry (commit only; a role change has
-    // no Welcome) + the N+1 snapshot atomically BEFORE the publish, FAIL-CLOSED.
-    const entryId = newOutboxEntryId();
+    // ADR-0040 (G-35) + F1 — from just after the eager-merge above through the
+    // successful atomic persist is ONE fail-closed region: the core `setGroupRoles`
+    // eager-merged epoch N -> N+1, and although a role change has no throwing
+    // pre-persist artifact, the reset-guarded try starts right after the
+    // create-commit (uniform with `addMemberToGroup` / `approveExternalJoin`) so
+    // the invariant — ANY throw before the publish resets the in-memory group back
+    // to the durable N snapshot — holds identically on all four commit paths and
+    // cannot be reintroduced by a future pre-persist addition. Persist the outbox
+    // entry (commit only; a role change has no Welcome) + the N+1 snapshot
+    // atomically, FAIL-CLOSED. A throw ABORTS: no publish, group reset to N.
+    // Publish stays OUTSIDE this region (a publish failure must NOT reset).
+    let groupIdBytes: Uint8Array;
+    let entryId: string;
     try {
+      groupIdBytes = group.groupId;
+      entryId = newOutboxEntryId();
       await this.persistCommitOrThrow({
         id: entryId,
         groupId: base64Encode(groupIdBytes),
@@ -1938,8 +1960,6 @@ export class ContactsClient {
         commitB64: base64Encode(commitBytes),
       });
     } catch (err) {
-      // ADR-0040 F1 — reset the in-memory group back to the durable N snapshot so
-      // a subsequent same-session commit builds on N, not the unpublished N+1.
       await this.resetGroupAfterPersistAbort(group);
       throw ContactsError.wrap(err);
     }
@@ -1986,22 +2006,26 @@ export class ContactsClient {
     } catch (err) {
       throw ContactsError.wrap(err);
     }
-    const groupIdBytes = group.groupId;
-
-    // Compute the second artifact (the rendezvous) BEFORE the persist so the
-    // outbox entry can hold both artifacts (two-artifact coverage).
+    // ADR-0040 (G-35) + F1 — from just after the eager-merge above through the
+    // successful atomic persist is ONE fail-closed region. The core
+    // `approveExternalJoin` reused the audited `add_member` and eager-merged epoch
+    // N -> N+1, so ANY throw before the publish — the rendezvous-artifact
+    // computation (`wrapWelcomeRendezvous`, which CAN throw) OR the persist itself
+    // — must reset the in-memory group back to the durable N snapshot before
+    // aborting; otherwise a later same-session commit builds on the un-published
+    // N+1 and strands the WHOLE group ("device-ahead"). Compute the rendezvous (the
+    // second artifact, riding the same group journal as the commit) UP-FRONT so the
+    // outbox entry holds both artifacts, then persist the entry + the N+1 snapshot
+    // in ONE atomic write, FAIL-CLOSED. A throw ABORTS: no publish, group reset to
+    // N. Publish stays OUTSIDE this region (a publish failure must NOT reset — the
+    // durable entry is re-published idempotently by `sweepPendingCommits`).
+    let groupIdBytes: Uint8Array;
     let rendezvous: Uint8Array;
+    let entryId: string;
     try {
+      groupIdBytes = group.groupId;
       rendezvous = wasm.wrapWelcomeRendezvous(proposalRef, added.welcome);
-    } catch (err) {
-      throw ContactsError.wrap(err);
-    }
-
-    // ADR-0040 (G-35) — persist the outbox entry (commit + rendezvous, both
-    // artifacts) + the N+1 snapshot atomically BEFORE any publish, FAIL-CLOSED.
-    // The rendezvous rides the same group journal as the commit.
-    const entryId = newOutboxEntryId();
-    try {
+      entryId = newOutboxEntryId();
       await this.persistCommitOrThrow({
         id: entryId,
         groupId: base64Encode(groupIdBytes),
@@ -2011,8 +2035,6 @@ export class ContactsClient {
         secondArtifactKind: "rendezvous",
       });
     } catch (err) {
-      // ADR-0040 F1 — reset the in-memory group back to the durable N snapshot so
-      // a subsequent same-session commit builds on N, not the unpublished N+1.
       await this.resetGroupAfterPersistAbort(group);
       throw ContactsError.wrap(err);
     }

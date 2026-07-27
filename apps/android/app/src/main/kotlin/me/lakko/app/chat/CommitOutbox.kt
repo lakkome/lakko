@@ -234,6 +234,46 @@ internal suspend fun <R> runCrashSafeCommit(
 }
 
 /**
+ * ADR-0040 F1 residual (lakko-security) — reset-guard the PRE-PERSIST window.
+ *
+ * The core create-commit call EAGERLY MERGES the in-memory OpenMLS provider N ->
+ * N+1 before [runCrashSafeCommit] ever runs. Between that merge and the
+ * [runCrashSafeCommit] call each two-artifact path still does work that can throw
+ * — compute the Welcome envelope + its mailbox pseudonym (add) / wrap the Welcome
+ * rendezvous (approve) — and every path builds the outbox entry (`requireAccountId`
+ * / `group.epoch()`). A throw there aborted the op while leaving the in-memory
+ * group at the UN-published N+1: a subsequent same-session commit would then build
+ * on N+1 and publish `commit(N+1 -> N+2)`, which peers still at N drop as
+ * wrong-epoch — the whole-group strand ADR-0040 F1 already closes for the
+ * persist-abort window, re-opened on this rarer pre-persist window.
+ *
+ * This runs [prelude] (the pre-persist artifact-compute + entry build) and, on ANY
+ * throw, invokes [reset] (the caller resets the in-memory group to the durable
+ * snapshot at N, dropping the un-published eager merge) then re-throws the original
+ * failure. NO outbox entry exists yet at this point, so the caller resets the group
+ * DIRECTLY (not via the persist-abort handler, which also deletes an entry).
+ *
+ * Mirrors [runCrashSafeCommit]'s fail-safe: if [reset] ITSELF throws (a poisoned
+ * group — the durable snapshot could not be loaded), THAT hard error propagates
+ * with the original prelude failure attached as a suppressed exception, rather than
+ * masking the poisoned state. Pure (no I/O, `reset` injected) so it is
+ * unit-testable without the FFI Group / Identity.
+ */
+internal fun <T> withPrePersistReset(reset: () -> Unit, prelude: () -> T): T {
+    return try {
+        prelude()
+    } catch (preludeFailure: Throwable) {
+        try {
+            reset()
+        } catch (resetFailure: Throwable) {
+            resetFailure.addSuppressed(preludeFailure)
+            throw resetFailure
+        }
+        throw preludeFailure
+    }
+}
+
+/**
  * The pure restart-sweep orchestration (ADR-0040 §5), over injected effects so
  * it is unit-testable without the FFI Group / DS / echo filter. For each entry:
  *

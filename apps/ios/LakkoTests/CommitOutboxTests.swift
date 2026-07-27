@@ -317,7 +317,10 @@ final class CommitOutboxCommitPathAbortTests: XCTestCase {
         let snapshotStore: IdentitySnapshotStore
     }
 
-    private func makeFounderRepo(outbox: CommitOutboxStore) throws -> Fixture {
+    private func makeFounderRepo(
+        outbox: CommitOutboxStore,
+        discovery: DiscoveryClient = DiscoveryClient()
+    ) throws -> Fixture {
         let seed = Data(repeating: 0x11, count: 32)
         let founder = try Identity.fromSeed(seed: seed)
         let group = try Group.create(identity: founder)
@@ -343,7 +346,7 @@ final class CommitOutboxCommitPathAbortTests: XCTestCase {
         let repo = ChatRepository(
             chatClient: ChatClient(),
             dsClient: makeRecordingDs(),
-            discovery: DiscoveryClient(),
+            discovery: discovery,
             snapshotStore: snapshotStore,
             knownGroupsStore: knownGroupsStore,
             messageLogStore: MessageLogStore(),
@@ -473,4 +476,146 @@ final class CommitOutboxCommitPathAbortTests: XCTestCase {
         XCTAssertEqual(entries.first?.targetEpoch, "1")
         XCTAssertEqual(entries.first?.acked, false)
     }
+
+    // MARK: - (F1 residual) An ARTIFACT-compute throw after the merge also resets
+
+    /// F1 pre-persist residual — on the two-artifact add path the SECOND artifact
+    /// (the Welcome mailbox pseudonym) is computed AFTER the core
+    /// `addMemberFromWire` eager-merges epoch N -> N+1 but BEFORE any publish. If
+    /// that compute throws it must ALSO roll the in-memory group back to N — the
+    /// same "device-ahead" hazard as a persist-abort, just a rarer path. Before
+    /// the widened reset guard this throw aborted WITHOUT resetting, leaving the
+    /// group at the un-published N+1.
+    ///
+    /// This drives a REAL add: a stub discovery feeds a valid KeyPackage (so
+    /// `fetchKeyPackage` succeeds and `addMemberFromWire` eager-merges to epoch 1),
+    /// then a MALFORMED `recipientSignaturePubkey` (3 bytes, not 32) makes
+    /// `IdentityPseudonym.fromIdentity` throw — the second-artifact compute, NOT
+    /// the persist (a WORKING outbox is supplied, and its remaining-empty state
+    /// proves the persist was never reached). The group must reset to N (0).
+    func testAddPathArtifactComputeThrowAfterMergeResetsToEpochN() async throws {
+        // A real member identity + its KeyPackage — what `addMemberFromWire`
+        // consumes to eager-merge the founder group to epoch 1.
+        let member = try Identity.fromSeed(seed: Data(repeating: 0x55, count: 32))
+        let keyPackageBytes = try member.createKeyPackage()
+
+        // Stub discovery: answer `GET /discovery/keypackage/...` with a 200 whose
+        // body carries the base64 KeyPackage, so `fetchKeyPackage` returns it.
+        StubKeyPackageURLProtocol.responseBody = try JSONEncoder().encode(
+            KeyPackageFetchResponse(keypackage: base64Encode(keyPackageBytes))
+        )
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [StubKeyPackageURLProtocol.self]
+        let discovery = DiscoveryClient(
+            baseURL: "http://127.0.0.1:9",
+            session: URLSession(configuration: config),
+            antiCensorship: .disarmed
+        )
+
+        // A WORKING outbox (temp dir): if the persist ran it would SUCCEED (leaving
+        // an entry). The throw must come earlier, at the pseudonym compute, so the
+        // outbox stays empty.
+        let outboxDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("commit-outbox-f1-artifact-\(UUID().uuidString)")
+        let outbox = CommitOutboxStore(rootDir: outboxDir)
+        let fx = try makeFounderRepo(outbox: outbox, discovery: discovery)
+        defer {
+            fx.snapshotStore.deleteSnapshot(accountIdB64: fx.accountIdB64)
+            try? FileManager.default.removeItem(at: outboxDir)
+        }
+
+        // Pre-condition: the rehydrated founder group is at epoch 0 (= N).
+        XCTAssertEqual(fx.repo.epoch(groupIdHex: fx.groupIdHex), 0)
+
+        // A valid 16-byte recipient account id (so `fetchKeyPackage`'s length gate
+        // passes) but a MALFORMED 3-byte signature pubkey (so the pseudonym
+        // derivation — the second artifact — throws AFTER the eager merge).
+        let recipientAccountId = Data(repeating: 0x66, count: 16)
+        let malformedPubkey = Data([0x01, 0x02, 0x03])
+
+        do {
+            _ = try await fx.repo.addMemberToGroup(
+                groupIdHex: fx.groupIdHex,
+                recipientAccountId: recipientAccountId,
+                recipientSignaturePubkey: malformedPubkey
+            )
+            XCTFail("addMemberToGroup must throw when the second-artifact pseudonym compute fails")
+        } catch {
+            // The failure is the artifact compute, NOT the outbox persist.
+            XCTAssertFalse(
+                error is CommitOutboxStoreError,
+                "the failure must be the pseudonym compute, not the outbox persist, got \(error)"
+            )
+        }
+
+        // THE RESIDUAL ASSERTION: the eager merge advanced the in-memory group to
+        // epoch 1, but the artifact-compute throw ROLLED IT BACK to the durable N (0).
+        XCTAssertEqual(
+            fx.repo.epoch(groupIdHex: fx.groupIdHex), 0,
+            "in-memory group must reset to N (0) after an artifact-compute throw, not stay at the un-published N+1 (1)"
+        )
+
+        // The persist was never reached — the outbox holds no entry (confirming the
+        // throw was the second-artifact compute, strictly before the persist).
+        XCTAssertEqual(
+            outbox.loadUnacked(accountIdB64: fx.accountIdB64).count, 0,
+            "the outbox must be empty — the throw preceded the persist, so nothing was recorded"
+        )
+
+        // And a SECOND same-session commit still builds on N (0): with the malformed
+        // pubkey it throws the same way and the group never reaches the stranding
+        // N+1 -> N+2.
+        do {
+            _ = try await fx.repo.addMemberToGroup(
+                groupIdHex: fx.groupIdHex,
+                recipientAccountId: recipientAccountId,
+                recipientSignaturePubkey: malformedPubkey
+            )
+            XCTFail("second addMemberToGroup must also throw")
+        } catch {
+            XCTAssertFalse(error is CommitOutboxStoreError)
+        }
+        XCTAssertEqual(
+            fx.repo.epoch(groupIdHex: fx.groupIdHex), 0,
+            "a second same-session commit must still build on N (0), never on a stranded N+1"
+        )
+    }
+}
+
+/// Answers every request with a fixed 200 + a JSON body set in
+/// ``responseBody`` — used to feed `DiscoveryClient.fetchKeyPackage` a real
+/// KeyPackage so the add path reaches its eager merge (after which a malformed
+/// recipient signature pubkey makes the second-artifact compute throw).
+final class StubKeyPackageURLProtocol: URLProtocol {
+
+    private static let lock = NSLock()
+    private static var _responseBody = Data()
+
+    static var responseBody: Data {
+        get { lock.lock(); defer { lock.unlock() }; return _responseBody }
+        set { lock.lock(); _responseBody = newValue; lock.unlock() }
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard let url = request.url,
+              let response = HTTPURLResponse(
+                url: url,
+                statusCode: 200,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "application/json"]
+              )
+        else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+            return
+        }
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: StubKeyPackageURLProtocol.responseBody)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
 }

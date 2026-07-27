@@ -31,15 +31,32 @@ vi.mock("../chat/commit-outbox", () => ({
   loadUnacked: (...a: unknown[]) => loadUnacked(...(a as [])),
 }));
 
-// `approveExternalJoin` computes the rendezvous via `loadWasm().wrapWelcomeRendezvous`.
-// Stub it so the reorder is exercised without the real wasm core.
+// `approveExternalJoin` computes the rendezvous via `loadWasm().wrapWelcomeRendezvous`
+// and `addMemberToGroup` computes the Welcome pseudonym via
+// `loadWasm().IdentityPseudonym.fromIdentity(...).asBytes()`. Stub them so the
+// reorder is exercised without the real wasm core. The `hoisted` flags let a test
+// force the ARTIFACT-COMPUTE (not the persist) to throw AFTER the eager-merge —
+// the ADR-0040 F1 pre-persist residual — so we can assert the reset still fires.
+const hoisted = vi.hoisted(() => ({
+  wrapRendezvousThrows: false,
+  fromIdentityThrows: false,
+}));
 vi.mock("../wasm", () => ({
   loadWasm: async () => ({
-    wrapWelcomeRendezvous: (ref: Uint8Array, welcome: Uint8Array): Uint8Array =>
-      new Uint8Array([0xff, ...ref.slice(0, 2), ...welcome]),
+    wrapWelcomeRendezvous: (ref: Uint8Array, welcome: Uint8Array): Uint8Array => {
+      if (hoisted.wrapRendezvousThrows) {
+        throw new Error("wrapWelcomeRendezvous failed (artifact compute)");
+      }
+      return new Uint8Array([0xff, ...ref.slice(0, 2), ...welcome]);
+    },
     IdentityPseudonym: {
       fromIdentity: (_pk: Uint8Array) => ({
-        asBytes: (): Uint8Array => new Uint8Array(32).fill(7),
+        asBytes: (): Uint8Array => {
+          if (hoisted.fromIdentityThrows) {
+            throw new Error("IdentityPseudonym.fromIdentity failed (artifact compute)");
+          }
+          return new Uint8Array(32).fill(7);
+        },
       }),
     },
   }),
@@ -103,6 +120,8 @@ function makeClient(
 
 afterEach(() => {
   vi.clearAllMocks();
+  hoisted.wrapRendezvousThrows = false;
+  hoisted.fromIdentityThrows = false;
 });
 
 describe("ADR-0040 — commit path persist-before-publish (fail-closed)", () => {
@@ -575,5 +594,137 @@ describe("ADR-0040 F1 — reset the in-memory group on a commit persist-abort", 
     expect(abortHookGids).toEqual([GID_B64]);
     expect(epoch).toBe(5n);
     expect(publishGroup).not.toHaveBeenCalled();
+  });
+
+  // The F1 pre-persist RESIDUAL: in the two-artifact paths, code between the
+  // eager-merge and the persist can ALSO throw (the Welcome-envelope / rendezvous
+  // computation). Before the widened reset region it aborted WITHOUT a reset,
+  // leaving the group ahead at the un-published N+1. These two tests force the
+  // ARTIFACT-COMPUTE (not the persist) to throw and assert the reset still fires.
+
+  it("approveExternalJoin: the rendezvous compute throws AFTER the merge -> epoch rolls back to N; the retry builds on N, not the poisoned N+1", async () => {
+    const N = 5n;
+    let epoch = N;
+    const group = {
+      get groupId(): Uint8Array {
+        return GID;
+      },
+      get epoch(): bigint {
+        return epoch;
+      },
+      approveExternalJoin: vi.fn((_id: unknown, _ref: Uint8Array) => {
+        epoch += 1n; // eager merge N -> N+1
+        return {
+          commit: new Uint8Array([7, 7]),
+          welcome: new Uint8Array([8, 8]),
+        };
+      }),
+    } as unknown as WasmGroup;
+
+    const publishGroup = vi.fn(async () => ({ id: 1, createdAt: "t" }));
+    const abortHookGids: string[] = [];
+    const persistTargetEpochs: string[] = [];
+    const client = new ContactsClient(
+      {} as unknown as DiscoveryClient,
+      { publishGroup } as unknown as DsClient,
+      {
+        identityProvider: () => IDENTITY_TOKEN,
+        onPersistWithCommit: async (e) => {
+          persistTargetEpochs.push((e as { targetEpoch: string }).targetEpoch);
+        },
+        onCommitPersistAbort: async (gid) => {
+          abortHookGids.push(gid);
+          epoch = N;
+        },
+      },
+    );
+
+    // Op A — the merge advances 5 -> 6, then `wrapWelcomeRendezvous` throws
+    // BEFORE the persist runs (the exact residual). The op must STILL reset to N.
+    hoisted.wrapRendezvousThrows = true;
+    await expect(
+      client.approveExternalJoin(null, group, new Uint8Array(32).fill(3)),
+    ).rejects.toBeInstanceOf(ContactsError);
+
+    expect(abortHookGids).toEqual([GID_B64]);
+    expect(epoch).toBe(N); // rolled back off the poisoned N+1
+    expect(publishGroup).not.toHaveBeenCalled();
+    // The throw was BEFORE the persist, so the persist never ran.
+    expect(persistTargetEpochs).toEqual([]);
+
+    // Op B — the user retries in the SAME session with the artifact compute
+    // healthy. It must build on the reset N (5) and eager-merge 5 -> 6, NOT 6 -> 7.
+    hoisted.wrapRendezvousThrows = false;
+    const res = await client.approveExternalJoin(
+      null,
+      group,
+      new Uint8Array(32).fill(3),
+    );
+    expect(epoch).toBe(6n);
+    expect(persistTargetEpochs).toEqual(["6"]); // N+1 of the reset N, not "7"
+    expect(publishGroup).toHaveBeenCalledTimes(2); // commit + rendezvous
+    expect(res.commitMessageId).toBe(1);
+  });
+
+  it("addMemberToGroup: the Welcome-artifact compute throws AFTER the merge -> epoch rolls back to N; neither artifact reaches the DS", async () => {
+    const N = 5n;
+    let epoch = N;
+    const group = {
+      get groupId(): Uint8Array {
+        return GID;
+      },
+      get epoch(): bigint {
+        return epoch;
+      },
+      addMember: vi.fn((_id: unknown, _kp: Uint8Array) => {
+        epoch += 1n; // eager merge N -> N+1
+        return {
+          commit: new Uint8Array([1, 2, 3]),
+          welcome: new Uint8Array([4, 4]),
+        };
+      }),
+    } as unknown as WasmGroup;
+
+    const publishGroup = vi.fn(async () => ({ id: 1, createdAt: "t" }));
+    const publishMailbox = vi.fn(async () => ({ id: 2, createdAt: "t" }));
+    const abortHookGids: string[] = [];
+    let persistCalled = false;
+    const client = new ContactsClient(
+      // addMemberToGroup fetches the new member's KeyPackage first.
+      {
+        fetchKeyPackage: async () => new Uint8Array([9, 9, 9]),
+      } as unknown as DiscoveryClient,
+      { publishGroup, publishMailbox } as unknown as DsClient,
+      {
+        identityProvider: () => IDENTITY_TOKEN,
+        onPersistWithCommit: async () => {
+          persistCalled = true;
+        },
+        onCommitPersistAbort: async (gid) => {
+          abortHookGids.push(gid);
+          epoch = N;
+        },
+      },
+    );
+
+    // The merge advances 5 -> 6, then `IdentityPseudonym.fromIdentity(...).asBytes()`
+    // throws BEFORE the persist runs — the residual. The op must STILL reset to N.
+    hoisted.fromIdentityThrows = true;
+    await expect(
+      client.addMemberToGroup(
+        null,
+        group,
+        new Uint8Array(16).fill(1),
+        new Uint8Array(32).fill(2),
+      ),
+    ).rejects.toBeInstanceOf(ContactsError);
+
+    // Reset fired off the poisoned N+1; the persist never ran (throw was before
+    // it); NEITHER artifact reached the DS.
+    expect(persistCalled).toBe(false);
+    expect(abortHookGids).toEqual([GID_B64]);
+    expect(epoch).toBe(N);
+    expect(publishGroup).not.toHaveBeenCalled();
+    expect(publishMailbox).not.toHaveBeenCalled();
   });
 });

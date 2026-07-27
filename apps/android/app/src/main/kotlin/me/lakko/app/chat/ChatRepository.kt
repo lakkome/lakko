@@ -571,13 +571,23 @@ public class ChatRepository(
             // BOTH fail-closed, BEFORE any publish. A throw aborts the op (no
             // publish); the restart sweep reconciles the crash window. See
             // [sweepPendingCommits].
-            val entry = PendingCommitEntry(
-                id = newOutboxEntryId(),
-                accountId = requireAccountId(),
-                groupId = outboxB64(record.groupId),
-                targetEpoch = record.group.epoch().toString(),
-                commitB64 = outboxB64(commitBytes),
-            )
+            //
+            // ADR-0040 F1 residual (lakko-security) — reset-guard the pre-persist
+            // entry build: `requireAccountId` / `group.epoch()` can throw AFTER the
+            // eager merge (N -> N+1) and BEFORE runCrashSafeCommit, which would else
+            // strand the in-memory group at the un-published N+1. No outbox entry
+            // exists yet -> reset the group DIRECTLY. See [withPrePersistReset].
+            val entry = withPrePersistReset(
+                reset = { resetGroupToDurableSnapshotOrThrow(groupIdHex) },
+            ) {
+                PendingCommitEntry(
+                    id = newOutboxEntryId(),
+                    accountId = requireAccountId(),
+                    groupId = outboxB64(record.groupId),
+                    targetEpoch = record.group.epoch().toString(),
+                    commitB64 = outboxB64(commitBytes),
+                )
+            }
             runCrashSafeCommit(
                 persistEntryOrThrow = { CommitOutboxStore.putEntry(applicationContext, entry) },
                 persistSnapshotOrThrow = { persistSnapshotDurableOrThrow() },
@@ -644,25 +654,39 @@ public class ChatRepository(
             // UP-FRONT so the outbox entry holds the EXACT bytes the restart
             // sweep will re-publish (no drift). The Welcome ships to the new
             // member's stranger inbox, addressed by their pubkey pseudonym.
-            val welcomeEnvelope = wrapEnvelope(KIND_WELCOME, addResult.welcome)
-            val recipientPseudonym =
-                uniffi.lakko_ffi_uniffi.IdentityPseudonym
-                    .fromIdentity(recipientSignaturePubkey)
-                    .use { it.asBytes() }
+            //
             // 2. ADR-0040 (G-35) — durable pending-commit outbox: persist the
             //    entry (commit + Welcome, BOTH artifacts) THEN the N+1 snapshot,
             //    BOTH fail-closed, BEFORE any publish. A throw aborts the op (no
             //    publish); the restart sweep re-publishes both. See [sweepPendingCommits].
-            val entry = PendingCommitEntry(
-                id = newOutboxEntryId(),
-                accountId = requireAccountId(),
-                groupId = outboxB64(record.groupId),
-                targetEpoch = record.group.epoch().toString(),
-                commitB64 = outboxB64(addResult.commit),
-                secondArtifactB64 = outboxB64(welcomeEnvelope),
-                secondArtifactKind = SecondArtifactKind.WELCOME,
-                secondArtifactMailboxB64 = outboxB64(recipientPseudonym),
-            )
+            //
+            // ADR-0040 F1 residual (lakko-security) — reset-guard the WHOLE
+            // pre-persist region (second-artifact compute + entry build): any throw
+            // here (wrapEnvelope / IdentityPseudonym.fromIdentity / requireAccountId
+            // / group.epoch()) runs AFTER the eager merge (N -> N+1) and BEFORE
+            // runCrashSafeCommit, and would else strand the in-memory group at the
+            // un-published N+1. No outbox entry exists yet -> reset the group
+            // DIRECTLY. See [withPrePersistReset].
+            val (welcomeEnvelope, recipientPseudonym, entry) = withPrePersistReset(
+                reset = { resetGroupToDurableSnapshotOrThrow(groupIdHex) },
+            ) {
+                val welcomeEnvelope = wrapEnvelope(KIND_WELCOME, addResult.welcome)
+                val recipientPseudonym =
+                    uniffi.lakko_ffi_uniffi.IdentityPseudonym
+                        .fromIdentity(recipientSignaturePubkey)
+                        .use { it.asBytes() }
+                val entry = PendingCommitEntry(
+                    id = newOutboxEntryId(),
+                    accountId = requireAccountId(),
+                    groupId = outboxB64(record.groupId),
+                    targetEpoch = record.group.epoch().toString(),
+                    commitB64 = outboxB64(addResult.commit),
+                    secondArtifactB64 = outboxB64(welcomeEnvelope),
+                    secondArtifactKind = SecondArtifactKind.WELCOME,
+                    secondArtifactMailboxB64 = outboxB64(recipientPseudonym),
+                )
+                Triple(welcomeEnvelope, recipientPseudonym, entry)
+            }
             runCrashSafeCommit(
                 persistEntryOrThrow = { CommitOutboxStore.putEntry(applicationContext, entry) },
                 persistSnapshotOrThrow = { persistSnapshotDurableOrThrow() },
@@ -723,13 +747,23 @@ public class ChatRepository(
             // (commit only; a remove has no Welcome) THEN the N+1 snapshot, BOTH
             // fail-closed, BEFORE the publish. A throw aborts the op (no publish);
             // the restart sweep reconciles the crash window. See [sweepPendingCommits].
-            val entry = PendingCommitEntry(
-                id = newOutboxEntryId(),
-                accountId = requireAccountId(),
-                groupId = outboxB64(record.groupId),
-                targetEpoch = record.group.epoch().toString(),
-                commitB64 = outboxB64(commitBytes),
-            )
+            //
+            // ADR-0040 F1 residual (lakko-security) — reset-guard the pre-persist
+            // entry build: `requireAccountId` / `group.epoch()` can throw AFTER the
+            // eager merge (N -> N+1) and BEFORE runCrashSafeCommit, which would else
+            // strand the in-memory group at the un-published N+1. No outbox entry
+            // exists yet -> reset the group DIRECTLY. See [withPrePersistReset].
+            val entry = withPrePersistReset(
+                reset = { resetGroupToDurableSnapshotOrThrow(groupIdHex) },
+            ) {
+                PendingCommitEntry(
+                    id = newOutboxEntryId(),
+                    accountId = requireAccountId(),
+                    groupId = outboxB64(record.groupId),
+                    targetEpoch = record.group.epoch().toString(),
+                    commitB64 = outboxB64(commitBytes),
+                )
+            }
             runCrashSafeCommit(
                 persistEntryOrThrow = { CommitOutboxStore.putEntry(applicationContext, entry) },
                 persistSnapshotOrThrow = { persistSnapshotDurableOrThrow() },
@@ -858,25 +892,38 @@ public class ChatRepository(
             // Compute the second artifact (the rendezvous) UP-FRONT so the outbox
             // entry can hold both artifacts (two-artifact coverage). The
             // rendezvous rides the SAME group journal as the commit.
-            val rendezvous = try {
-                uniffi.lakko_ffi_uniffi.wrapWelcomeRendezvous(proposalRef, addResult.welcome)
-            } catch (e: FfiException) {
-                throw ChatError("wrapWelcomeRendezvous failed", e)
-            }
+            //
             // 2. ADR-0040 (G-35) — durable pending-commit outbox: persist the
             //    entry (commit + rendezvous, BOTH artifacts) THEN the N+1
             //    snapshot, BOTH fail-closed, BEFORE any publish. A throw aborts
             //    the op (no publish); the restart sweep re-publishes both. See
             //    [sweepPendingCommits].
-            val entry = PendingCommitEntry(
-                id = newOutboxEntryId(),
-                accountId = requireAccountId(),
-                groupId = outboxB64(record.groupId),
-                targetEpoch = record.group.epoch().toString(),
-                commitB64 = outboxB64(addResult.commit),
-                secondArtifactB64 = outboxB64(rendezvous),
-                secondArtifactKind = SecondArtifactKind.RENDEZVOUS,
-            )
+            //
+            // ADR-0040 F1 residual (lakko-security) — reset-guard the WHOLE
+            // pre-persist region (wrapWelcomeRendezvous + entry build): any throw
+            // here runs AFTER the eager merge (N -> N+1) and BEFORE
+            // runCrashSafeCommit, and would else strand the in-memory group at the
+            // un-published N+1. No outbox entry exists yet -> reset the group
+            // DIRECTLY. See [withPrePersistReset].
+            val (rendezvous, entry) = withPrePersistReset(
+                reset = { resetGroupToDurableSnapshotOrThrow(groupIdHex) },
+            ) {
+                val rendezvous = try {
+                    uniffi.lakko_ffi_uniffi.wrapWelcomeRendezvous(proposalRef, addResult.welcome)
+                } catch (e: FfiException) {
+                    throw ChatError("wrapWelcomeRendezvous failed", e)
+                }
+                val entry = PendingCommitEntry(
+                    id = newOutboxEntryId(),
+                    accountId = requireAccountId(),
+                    groupId = outboxB64(record.groupId),
+                    targetEpoch = record.group.epoch().toString(),
+                    commitB64 = outboxB64(addResult.commit),
+                    secondArtifactB64 = outboxB64(rendezvous),
+                    secondArtifactKind = SecondArtifactKind.RENDEZVOUS,
+                )
+                Pair(rendezvous, entry)
+            }
             runCrashSafeCommit(
                 persistEntryOrThrow = { CommitOutboxStore.putEntry(applicationContext, entry) },
                 persistSnapshotOrThrow = { persistSnapshotDurableOrThrow() },
