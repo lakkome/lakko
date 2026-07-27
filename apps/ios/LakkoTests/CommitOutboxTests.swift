@@ -302,4 +302,175 @@ final class CommitOutboxCommitPathAbortTests: XCTestCase {
             "the DS publish must NOT be attempted after a failed outbox persist"
         )
     }
+
+    // MARK: - (F1) The abort RESETS the in-memory group to epoch N
+
+    /// The pieces an F1 reset test asserts against — a real single-member founder
+    /// group (its role table seeded by `Group.create`, so `setMemberAdmin` crafts a
+    /// real `setGroupRoles` commit) rehydrated into a repo with an injectable
+    /// commit outbox + recording DS.
+    private struct Fixture {
+        let repo: ChatRepository
+        let groupIdHex: String
+        let accountIdB64: String
+        let otherKey: Data
+        let snapshotStore: IdentitySnapshotStore
+    }
+
+    private func makeFounderRepo(outbox: CommitOutboxStore) throws -> Fixture {
+        let seed = Data(repeating: 0x11, count: 32)
+        let founder = try Identity.fromSeed(seed: seed)
+        let group = try Group.create(identity: founder)
+        let groupId = try group.groupId()
+        let groupIdHex = DsClient.pseudonymHex(groupId)
+        let snapshotBlob = try founder.snapshotStorage()
+
+        var accountIdBytes = Data(count: 16)
+        accountIdBytes.withUnsafeMutableBytes {
+            _ = SecRandomCopyBytes(kSecRandomDefault, 16, $0.baseAddress!)
+        }
+        let accountIdB64 = base64Encode(accountIdBytes)
+
+        let snapshotStore = IdentitySnapshotStore()
+        let knownGroupsStore = KnownGroupsStore(
+            defaults: UserDefaults(suiteName: "commit-outbox-f1-\(UUID().uuidString)")!
+        )
+        // Pre-seed the restore path so `bootstrap` rehydrates the founder group
+        // (at epoch 0) — this durable snapshot is what a reset rolls back TO.
+        snapshotStore.putSnapshot(accountIdB64: accountIdB64, blob: snapshotBlob)
+        knownGroupsStore.add(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+
+        let repo = ChatRepository(
+            chatClient: ChatClient(),
+            dsClient: makeRecordingDs(),
+            discovery: DiscoveryClient(),
+            snapshotStore: snapshotStore,
+            knownGroupsStore: knownGroupsStore,
+            messageLogStore: MessageLogStore(),
+            commitOutbox: outbox
+        )
+        repo.bootstrap(
+            secrets: IdentitySecrets(
+                accountId: accountIdBytes,
+                exportKey: Data(repeating: 0x22, count: 32),
+                accountIdentitySeed: seed,
+                sessionToken: "t",
+                sessionExpiresAtMs: 0
+            )
+        )
+        XCTAssertEqual(
+            repo.memberCount(groupIdHex: groupIdHex), 1,
+            "founder group must rehydrate for the commit path to reach the persist gate"
+        )
+        let otherKey = try Identity.fromSeed(seed: Data(repeating: 0x33, count: 32))
+            .signaturePublicKey()
+        return Fixture(
+            repo: repo,
+            groupIdHex: groupIdHex,
+            accountIdB64: accountIdB64,
+            otherKey: otherKey,
+            snapshotStore: snapshotStore
+        )
+    }
+
+    /// F1 — after a commit persist-ABORT, the in-memory group is RESET to the
+    /// durable snapshot (epoch N=0), NOT left at the eager-merged N+1. Otherwise a
+    /// second same-session commit would build on the un-published N+1 and publish
+    /// commit(N+1 -> N+2), which peers still at N drop as wrong-epoch — stranding
+    /// the whole group (the "device-ahead" outcome worse than the brick).
+    func testPersistAbortResetsInMemoryGroupToEpochN() async throws {
+        // `rootDir: nil` -> `putNewDurable` throws on the entry write, so the
+        // FAIL-CLOSED persist aborts the commit AFTER the eager merge.
+        let fx = try makeFounderRepo(outbox: CommitOutboxStore(rootDir: nil))
+        defer { fx.snapshotStore.deleteSnapshot(accountIdB64: fx.accountIdB64) }
+
+        // Pre-condition: a freshly created + rehydrated founder group is at epoch 0.
+        XCTAssertEqual(fx.repo.epoch(groupIdHex: fx.groupIdHex), 0)
+
+        do {
+            _ = try await fx.repo.setMemberAdmin(
+                groupIdHex: fx.groupIdHex,
+                memberSignaturePubkey: fx.otherKey,
+                makeAdmin: true
+            )
+            XCTFail("setMemberAdmin must throw when the outbox persist fails")
+        } catch {
+            XCTAssertTrue(
+                error is CommitOutboxStoreError,
+                "abort must be attributed to the fail-closed outbox persist, got \(error)"
+            )
+        }
+
+        // THE F1 ASSERTION: the eager merge advanced the in-memory group to epoch
+        // 1, but the abort ROLLED IT BACK to the durable N (0).
+        XCTAssertEqual(
+            fx.repo.epoch(groupIdHex: fx.groupIdHex), 0,
+            "in-memory group must reset to N (0) after a persist-abort, not stay at the un-published N+1 (1)"
+        )
+
+        // A SECOND commit attempt in the SAME session still builds on N: it aborts
+        // the same way and the group stays at 0 — it never reaches the stranding
+        // N+1 -> N+2 that the bug produced.
+        do {
+            _ = try await fx.repo.setMemberAdmin(
+                groupIdHex: fx.groupIdHex,
+                memberSignaturePubkey: fx.otherKey,
+                makeAdmin: true
+            )
+            XCTFail("second setMemberAdmin must also throw")
+        } catch {
+            XCTAssertTrue(error is CommitOutboxStoreError)
+        }
+        XCTAssertEqual(
+            fx.repo.epoch(groupIdHex: fx.groupIdHex), 0,
+            "a second same-session commit must still build on N (0), never on a stranded N+1"
+        )
+    }
+
+    /// F1 — the reset fires ONLY on the persist-abort. When the persist SUCCEEDS
+    /// (durable N+1 + a re-publishable outbox entry) and only the PUBLISH fails,
+    /// the in-memory group correctly STAYS at N+1 — the restart sweep re-publishes
+    /// the recorded commit, and rolling back here would strand the group instead.
+    func testPersistSuccessButPublishFailureKeepsGroupAtEpochNPlus1() async throws {
+        let outboxDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("commit-outbox-f1-\(UUID().uuidString)")
+        let outbox = CommitOutboxStore(rootDir: outboxDir)
+        let fx = try makeFounderRepo(outbox: outbox)
+        defer {
+            fx.snapshotStore.deleteSnapshot(accountIdB64: fx.accountIdB64)
+            try? FileManager.default.removeItem(at: outboxDir)
+        }
+
+        XCTAssertEqual(fx.repo.epoch(groupIdHex: fx.groupIdHex), 0)
+
+        // The recording DS points at 127.0.0.1:9 (connection refused): the persist
+        // SUCCEEDS, then `publishGroup` throws.
+        do {
+            _ = try await fx.repo.setMemberAdmin(
+                groupIdHex: fx.groupIdHex,
+                memberSignaturePubkey: fx.otherKey,
+                makeAdmin: true
+            )
+            XCTFail("setMemberAdmin must throw on the DS publish failure")
+        } catch {
+            XCTAssertFalse(
+                error is CommitOutboxStoreError,
+                "the failure must be the DS publish, not the outbox persist, got \(error)"
+            )
+        }
+
+        // The group STAYS at N+1 (1) — the reset must NOT fire on a publish failure
+        // (the commit is durably recorded; the sweep re-publishes it on restart).
+        XCTAssertEqual(
+            fx.repo.epoch(groupIdHex: fx.groupIdHex), 1,
+            "a persist-success / publish-fail must leave the group at N+1 for the restart sweep"
+        )
+
+        // And the durable outbox holds exactly one un-acked entry at target epoch 1,
+        // ready for the idempotent restart re-publish.
+        let entries = outbox.loadUnacked(accountIdB64: fx.accountIdB64)
+        XCTAssertEqual(entries.count, 1, "the persisted-but-unpublished commit must be recorded for re-publish")
+        XCTAssertEqual(entries.first?.targetEpoch, "1")
+        XCTAssertEqual(entries.first?.acked, false)
+    }
 }

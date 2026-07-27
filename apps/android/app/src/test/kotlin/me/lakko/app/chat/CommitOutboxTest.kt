@@ -292,5 +292,137 @@ class CommitOutboxTest {
         assertEquals(listOf("good"), CommitOutboxStore.loadAllIn(dir).map { it.id })
     }
 
+    // -----------------------------------------------------------------
+    // 5. ADR-0040 F1 (lakko-security) — reset the eager-merged in-memory
+    //    group on a fail-closed persist-abort
+    // -----------------------------------------------------------------
+
+    /**
+     * A host-JVM model of one group-membership commit op, exercising the F1 reset
+     * contract over the pure [runCrashSafeCommit] orchestration. The real FFI
+     * `Group` / `Identity` cannot load on the host JVM (they need
+     * `liblakko_ffi_uniffi.so` via JNA), so the repository-level assertion over a
+     * live handle is instrumented-only; this models the exact invariant.
+     *
+     * [inMemoryEpoch] models the OpenMLS provider's in-memory epoch; [durableEpoch]
+     * models the epoch captured by the last SUCCESSFUL snapshot persist. A commit
+     * eager-merges (bumps [inMemoryEpoch]) BEFORE the durable persist — exactly
+     * like the core create-commit call — and [runCrashSafeCommit]'s
+     * `onPersistAbort` resets [inMemoryEpoch] back to [durableEpoch] on a
+     * fail-closed abort (the ADR-0040 F1 fix).
+     */
+    private class GroupEpochModel {
+        var inMemoryEpoch: Long = 0
+        var durableEpoch: Long = 0
+        val published: MutableList<Long> = mutableListOf()
+
+        /** One commit op through the real [runCrashSafeCommit]. [entryOk] /
+         *  [snapshotOk] gate the two durable writes; [publishOk] gates the publish. */
+        suspend fun commit(
+            entryOk: Boolean = true,
+            snapshotOk: Boolean = true,
+            publishOk: Boolean = true,
+        ): Long {
+            // eager merge N -> N+1 in memory (the core create-commit call).
+            inMemoryEpoch += 1
+            val target = inMemoryEpoch
+            return runCrashSafeCommit(
+                persistEntryOrThrow = { if (!entryOk) throw IOException("entry write failed") },
+                persistSnapshotOrThrow = {
+                    if (!snapshotOk) throw IOException("snapshot write failed")
+                    durableEpoch = target // durable snapshot now at N+1
+                },
+                publish = {
+                    if (!publishOk) throw IOException("DS publish failed")
+                    published.add(target)
+                    target
+                },
+                // F1 reset: drop the un-published eager merge back to the durable
+                // snapshot (the epoch the last successful persist captured).
+                onPersistAbort = { inMemoryEpoch = durableEpoch },
+            )
+        }
+    }
+
+    @Test
+    fun `F1 — snapshot persist-abort resets the in-memory epoch to the durable N`() {
+        val g = GroupEpochModel()
+        // op A: eager-merges to epoch 1, the snapshot persist FAILS -> abort + reset.
+        assertThrows(IOException::class.java) { runBlocking { g.commit(snapshotOk = false) } }
+        assertEquals("in-memory epoch reset to the durable N (0)", 0L, g.inMemoryEpoch)
+        assertEquals("durable snapshot untouched at N (0)", 0L, g.durableEpoch)
+        assertTrue("nothing published on a persist-abort", g.published.isEmpty())
+    }
+
+    @Test
+    fun `F1 — entry persist-abort also resets the in-memory epoch`() {
+        val g = GroupEpochModel()
+        assertThrows(IOException::class.java) { runBlocking { g.commit(entryOk = false) } }
+        assertEquals("entry-first abort also resets to N (0)", 0L, g.inMemoryEpoch)
+        assertTrue("nothing published", g.published.isEmpty())
+    }
+
+    @Test
+    fun `F1 — after a persist-abort a subsequent same-session commit builds on N`() {
+        val g = GroupEpochModel()
+        // op A aborts at eager-merged epoch 1 -> reset to 0.
+        assertThrows(IOException::class.java) { runBlocking { g.commit(snapshotOk = false) } }
+        assertEquals(0L, g.inMemoryEpoch)
+        // op B succeeds: eager-merges 0 -> 1 (NOT 1 -> 2), publishes commit(0->1).
+        runBlocking { g.commit() }
+        assertEquals("op B built on N (0), reaching N+1 = 1", 1L, g.inMemoryEpoch)
+        assertEquals("durable snapshot advanced to 1", 1L, g.durableEpoch)
+        // The crux: WITHOUT the reset, op B would eager-merge 1 -> 2 and publish
+        // commit(1->2), which peers still at 0/1 drop as wrong-epoch — stranding the
+        // group. WITH the reset it publishes commit(0->1) exactly once.
+        assertEquals("op B published commit for epoch 1, not 2", listOf(1L), g.published)
+    }
+
+    @Test
+    fun `F1 — happy-path commit leaves the in-memory epoch at N+1 and never resets`() {
+        val g = GroupEpochModel()
+        runBlocking { g.commit() }
+        assertEquals("happy path advances to N+1 = 1", 1L, g.inMemoryEpoch)
+        assertEquals("durable snapshot at N+1 = 1", 1L, g.durableEpoch)
+        assertEquals("commit published exactly once", listOf(1L), g.published)
+    }
+
+    @Test
+    fun `F1 — a publish failure does NOT reset (the commit is durably recorded)`() {
+        val g = GroupEpochModel()
+        // eager-merge to 1, both persists OK, the publish FAILS.
+        assertThrows(IOException::class.java) { runBlocking { g.commit(publishOk = false) } }
+        // The device is legitimately at N+1 with a durable commit -> the restart
+        // sweep re-publishes it. Resetting here would be WRONG (it would lose a
+        // durably-recorded commit), so onPersistAbort must NOT fire on a publish
+        // failure (runCrashSafeCommit's abort catch wraps ONLY the two persists).
+        assertEquals("in-memory stays at N+1 after a publish failure", 1L, g.inMemoryEpoch)
+        assertEquals("durable snapshot recorded the N+1 commit", 1L, g.durableEpoch)
+        assertTrue("nothing successfully published", g.published.isEmpty())
+    }
+
+    @Test
+    fun `F1 — a failed reset surfaces the poisoned-group error, persist failure attached`() {
+        val poison = IllegalStateException("durable snapshot gone — poisoned group")
+        val thrown = assertThrows(IllegalStateException::class.java) {
+            runBlocking {
+                runCrashSafeCommit<Long>(
+                    persistEntryOrThrow = {},
+                    persistSnapshotOrThrow = { throw IOException("snapshot write failed") },
+                    publish = { 0L },
+                    onPersistAbort = { throw poison },
+                )
+            }
+        }
+        // Fail-safe: the reset failure (poisoned group) is surfaced as the hard
+        // error — NOT masked by the benign-looking persist failure, which is
+        // attached as a suppressed exception for diagnostics.
+        assertEquals(poison, thrown)
+        assertTrue(
+            "the original persist failure is attached",
+            thrown.suppressed.any { it is IOException },
+        )
+    }
+
     private fun fail(msg: String): Nothing = throw AssertionError(msg)
 }

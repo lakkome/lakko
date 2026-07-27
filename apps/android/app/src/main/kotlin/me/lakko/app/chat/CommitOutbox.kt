@@ -177,17 +177,58 @@ internal fun reconcileVerdict(currentEpoch: ULong, entry: PendingCommitEntry): S
  * invoked (abort before publish): on the next launch the device is at N with an
  * orphan-or-absent entry the sweep reconciles to "clean". The publish only ever
  * touches the wire AFTER both durable writes have returned.
+ *
+ * ## ADR-0040 F1 (lakko-security) — reset the eager-merged in-memory group
+ *
+ * The core create-commit call EAGERLY MERGES the in-memory OpenMLS provider from
+ * epoch N -> N+1 BEFORE this durable persist runs. So when a durable write throws
+ * and this function aborts before publish, the in-memory group is left at the
+ * un-published N+1 while the durable snapshot is still at N. If that persist
+ * failure is TRANSIENT (a Keystore / file hiccup that then clears — not a crash)
+ * and the user issues a SECOND membership commit in the SAME session, op B would
+ * merge N+1 -> N+2 and publish `commit(N+1->N+2)`, which peers still at N drop as
+ * wrong-epoch — stranding the WHOLE group (the "device-ahead" outcome ADR-0040
+ * warns is worse than the single-device brick).
+ *
+ * [onPersistAbort] closes that window: it fires EXACTLY when one of the two
+ * persists throws — BEFORE the exception propagates and while [publish] is
+ * provably un-run (this catch wraps ONLY the two persists) — so the caller can
+ * reset the in-memory group back to the durable snapshot (N), dropping the
+ * un-published eager merge. It does NOT fire when [publish] throws: a publish
+ * failure means the commit is durably recorded (entry + N+1 snapshot both landed)
+ * and the device is legitimately at N+1, so the restart sweep re-publishes it —
+ * resetting there would be wrong. If [onPersistAbort] ITSELF throws (a poisoned
+ * group — the durable snapshot could not be loaded), THAT hard error propagates
+ * (with the persist failure attached) rather than masking the poisoned state.
  */
 internal suspend fun <R> runCrashSafeCommit(
     persistEntryOrThrow: () -> Unit,
     persistSnapshotOrThrow: () -> Unit,
     publish: suspend () -> R,
+    onPersistAbort: () -> Unit = {},
 ): R {
-    // 1. durable outbox entry (commit + second-artifact bytes, un-acked).
-    persistEntryOrThrow()
-    // 2. durable N+1 MLS snapshot. A throw from EITHER 1 or 2 propagates out of
-    //    this function WITHOUT reaching `publish` below — abort before publish.
-    persistSnapshotOrThrow()
+    try {
+        // 1. durable outbox entry (commit + second-artifact bytes, un-acked).
+        persistEntryOrThrow()
+        // 2. durable N+1 MLS snapshot. A throw from EITHER 1 or 2 is caught below
+        //    WITHOUT reaching `publish` — abort before publish.
+        persistSnapshotOrThrow()
+    } catch (persistFailure: Throwable) {
+        // ADR-0040 F1 — reset the eager-merged in-memory group (N+1) back to the
+        // durable snapshot (N) BEFORE re-throwing, so a subsequent same-session
+        // commit builds on N (the epoch peers are still at), not the unpublished
+        // N+1. `publish` was never reached, so the aborted commit never hit the DS.
+        try {
+            onPersistAbort()
+        } catch (resetFailure: Throwable) {
+            // Fail-safe: the reset failed (poisoned group). Surface THAT as the
+            // hard error, with the original persist failure attached, rather than
+            // returning a benign-looking persist error over a poisoned group.
+            resetFailure.addSuppressed(persistFailure)
+            throw resetFailure
+        }
+        throw persistFailure
+    }
     // 3. only now is it safe to advance the group on the wire.
     return publish()
 }

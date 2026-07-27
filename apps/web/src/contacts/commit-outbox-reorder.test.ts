@@ -365,3 +365,215 @@ describe("ADR-0040 — restart sweep re-publishes + re-arms the echo filter", ()
     expect(markAcked).not.toHaveBeenCalled();
   });
 });
+
+describe("ADR-0040 F1 — reset the in-memory group on a commit persist-abort", () => {
+  const GID = new Uint8Array([9, 9, 9, 9]);
+  const GID_B64 = base64Encode(GID);
+
+  /** A stateful stand-in for an MLS group whose remove-commit eager-merges the
+   *  epoch N -> N+1 (exactly as the real core does inside `removeMember`),
+   *  exposing the live epoch so the tests can observe whether the F1 reset rolled
+   *  it back. `setEpoch` models the real reload-from-durable-snapshot (which
+   *  `chats.resetGroupToDurableSnapshot` performs by replacing the cached group
+   *  with one `Group.load`ed at epoch N). */
+  function statefulGroup(startEpoch: bigint): {
+    group: WasmGroup;
+    epoch: () => bigint;
+    setEpoch: (e: bigint) => void;
+  } {
+    let epoch = startEpoch;
+    const group = {
+      get groupId(): Uint8Array {
+        return GID;
+      },
+      get epoch(): bigint {
+        return epoch;
+      },
+      removeMember: vi.fn((_id: unknown, _leaf: number) => {
+        epoch += 1n; // eager merge N -> N+1
+        return new Uint8Array([1, 2, 3]);
+      }),
+    } as unknown as WasmGroup;
+    return {
+      group,
+      epoch: () => epoch,
+      setEpoch: (e: bigint) => {
+        epoch = e;
+      },
+    };
+  }
+
+  it("a transient persist failure rolls the in-memory epoch back to N; the retry builds on N, not the poisoned N+1", async () => {
+    const N = 5n;
+    const g = statefulGroup(N);
+    const publishGroup = vi.fn(async () => ({ id: 1, createdAt: "t" }));
+
+    const persistTargetEpochs: string[] = [];
+    let persistCalls = 0;
+    const abortHookGids: string[] = [];
+
+    const client = new ContactsClient(
+      {} as unknown as DiscoveryClient,
+      { publishGroup } as unknown as DsClient,
+      {
+        identityProvider: () => IDENTITY_TOKEN,
+        onPersistWithCommit: async (e) => {
+          persistCalls += 1;
+          persistTargetEpochs.push((e as { targetEpoch: string }).targetEpoch);
+          // The FIRST persist fails (a transient IndexedDB quota hiccup that
+          // then clears — the exact F1 scenario, NOT a crash).
+          if (persistCalls === 1) {
+            throw new Error("IndexedDB quota hiccup (transient)");
+          }
+        },
+        // Model chats.resetGroupToDurableSnapshot: reload the group at the last
+        // durable epoch (N). The observable effect is the epoch roll-back.
+        onCommitPersistAbort: async (gid) => {
+          abortHookGids.push(gid);
+          g.setEpoch(N);
+        },
+      },
+    );
+
+    // Op A: create-commit eager-merges 5 -> 6, then the persist throws -> abort.
+    await expect(
+      client.removeMemberFromGroup(null, g.group, 1),
+    ).rejects.toBeInstanceOf(ContactsError);
+
+    // The reset hook fired for THIS group id, and the in-memory epoch is back at
+    // N (5) — NOT the poisoned, un-published N+1 (6).
+    expect(abortHookGids).toEqual([GID_B64]);
+    expect(g.epoch()).toBe(N);
+    // The commit never reached the DS (fail-closed abort).
+    expect(publishGroup).not.toHaveBeenCalled();
+    // The aborted op's entry recorded the eager-merged N+1 (6).
+    expect(persistTargetEpochs[0]).toBe("6");
+
+    // Op B — the user retries in the SAME session. It must build on the reset N
+    // (5) and eager-merge 5 -> 6, NOT 6 -> 7. A 6 -> 7 commit would publish while
+    // peers are still at N and strand the whole group (the F1 bug).
+    const res = await client.removeMemberFromGroup(null, g.group, 1);
+    expect(g.epoch()).toBe(6n);
+    expect(persistTargetEpochs[1]).toBe("6"); // N+1 of the reset N, not "7"
+    expect(publishGroup).toHaveBeenCalledTimes(1);
+    expect(res.commitMessageId).toBe(1);
+  });
+
+  it("the happy path leaves the group at N+1 and never fires the reset hook", async () => {
+    const g = statefulGroup(5n);
+    const publishGroup = vi.fn(async () => ({ id: 7, createdAt: "t" }));
+    const abortHook = vi.fn(async () => {});
+    const client = new ContactsClient(
+      {} as unknown as DiscoveryClient,
+      { publishGroup } as unknown as DsClient,
+      {
+        identityProvider: () => IDENTITY_TOKEN,
+        onPersistWithCommit: async () => {},
+        onCommitPersistAbort: abortHook,
+      },
+    );
+
+    await client.removeMemberFromGroup(null, g.group, 1);
+
+    // Published + persisted -> the group correctly stays at N+1; no reset.
+    expect(g.epoch()).toBe(6n);
+    expect(abortHook).not.toHaveBeenCalled();
+    expect(publishGroup).toHaveBeenCalledTimes(1);
+  });
+
+  it("FAIL-SAFE: when the reset itself fails, the op rejects with a hard error (never swallowed) and does not publish", async () => {
+    const g = statefulGroup(5n);
+    const publishGroup = vi.fn(async () => ({ id: 1, createdAt: "t" }));
+    const client = new ContactsClient(
+      {} as unknown as DiscoveryClient,
+      { publishGroup } as unknown as DsClient,
+      {
+        identityProvider: () => IDENTITY_TOKEN,
+        onPersistWithCommit: async () => {
+          throw new Error("IndexedDB write failed");
+        },
+        onCommitPersistAbort: async () => {
+          // e.g. no durable snapshot for the group — the reset cannot recover it.
+          throw new Error("no durable snapshot");
+        },
+      },
+    );
+
+    // The reset-failure error (not the original persist error) surfaces — a hard,
+    // distinct signal that the group may still be poisoned. Never swallowed.
+    await expect(
+      client.removeMemberFromGroup(null, g.group, 1),
+    ).rejects.toThrowError(/reset FAILED/);
+    expect(publishGroup).not.toHaveBeenCalled();
+  });
+
+  it("with no reset hook wired (standalone / test callers), a persist failure still aborts cleanly", async () => {
+    const g = statefulGroup(5n);
+    const publishGroup = vi.fn(async () => ({ id: 1, createdAt: "t" }));
+    const client = new ContactsClient(
+      {} as unknown as DiscoveryClient,
+      { publishGroup } as unknown as DsClient,
+      {
+        identityProvider: () => IDENTITY_TOKEN,
+        onPersistWithCommit: async () => {
+          throw new Error("disk full");
+        },
+        // onCommitPersistAbort intentionally UNSET.
+      },
+    );
+
+    await expect(
+      client.removeMemberFromGroup(null, g.group, 1),
+    ).rejects.toBeInstanceOf(ContactsError);
+    expect(publishGroup).not.toHaveBeenCalled();
+    // No cache to reset -> the in-memory epoch stays at the un-published N+1.
+    // Such callers persist nothing + hold no cached group, so they are outside
+    // the desync blast radius (the documented no-op path).
+    expect(g.epoch()).toBe(6n);
+  });
+
+  it("approveExternalJoin (two-artifact): a persist failure resets the group before either publish", async () => {
+    let epoch = 5n;
+    const group = {
+      get groupId(): Uint8Array {
+        return GID;
+      },
+      get epoch(): bigint {
+        return epoch;
+      },
+      approveExternalJoin: vi.fn((_id: unknown, _ref: Uint8Array) => {
+        epoch += 1n; // eager merge N -> N+1
+        return {
+          commit: new Uint8Array([7, 7]),
+          welcome: new Uint8Array([8, 8]),
+        };
+      }),
+    } as unknown as WasmGroup;
+
+    const publishGroup = vi.fn(async () => ({ id: 1, createdAt: "t" }));
+    const abortHookGids: string[] = [];
+    const client = new ContactsClient(
+      {} as unknown as DiscoveryClient,
+      { publishGroup } as unknown as DsClient,
+      {
+        identityProvider: () => IDENTITY_TOKEN,
+        onPersistWithCommit: async () => {
+          throw new Error("quota exceeded");
+        },
+        onCommitPersistAbort: async (gid) => {
+          abortHookGids.push(gid);
+          epoch = 5n;
+        },
+      },
+    );
+
+    await expect(
+      client.approveExternalJoin(null, group, new Uint8Array(32).fill(3)),
+    ).rejects.toBeInstanceOf(ContactsError);
+
+    // Reset fired; epoch rolled back to N; NEITHER artifact reached the DS.
+    expect(abortHookGids).toEqual([GID_B64]);
+    expect(epoch).toBe(5n);
+    expect(publishGroup).not.toHaveBeenCalled();
+  });
+});

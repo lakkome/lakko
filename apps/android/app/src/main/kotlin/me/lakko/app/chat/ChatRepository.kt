@@ -581,6 +581,13 @@ public class ChatRepository(
             runCrashSafeCommit(
                 persistEntryOrThrow = { CommitOutboxStore.putEntry(applicationContext, entry) },
                 persistSnapshotOrThrow = { persistSnapshotDurableOrThrow() },
+                // ADR-0040 F1 (lakko-security) — on a fail-closed persist-abort,
+                // reset the eager-merged in-memory group (N+1) back to the durable
+                // snapshot (N) so a subsequent same-session commit builds on N, not
+                // the unpublished N+1. Fires ONLY on the persist-abort, never on a
+                // publish failure (that commit is durably recorded — the sweep
+                // re-publishes it). See [onCommitPersistAbort].
+                onPersistAbort = { onCommitPersistAbort(groupIdHex, entry.id) },
                 publish = {
                     val commitPublish = try {
                         dsClient.publishGroup(record.groupId, commitBytes)
@@ -659,6 +666,13 @@ public class ChatRepository(
             runCrashSafeCommit(
                 persistEntryOrThrow = { CommitOutboxStore.putEntry(applicationContext, entry) },
                 persistSnapshotOrThrow = { persistSnapshotDurableOrThrow() },
+                // ADR-0040 F1 (lakko-security) — on a fail-closed persist-abort,
+                // reset the eager-merged in-memory group (N+1) back to the durable
+                // snapshot (N) so a subsequent same-session commit builds on N, not
+                // the unpublished N+1. Fires ONLY on the persist-abort, never on a
+                // publish failure (that commit is durably recorded — the sweep
+                // re-publishes it). See [onCommitPersistAbort].
+                onPersistAbort = { onCommitPersistAbort(groupIdHex, entry.id) },
                 publish = {
                     // 3. publish artifact 1 (commit) then artifact 2 (Welcome).
                     val commitPublish = try {
@@ -719,6 +733,13 @@ public class ChatRepository(
             runCrashSafeCommit(
                 persistEntryOrThrow = { CommitOutboxStore.putEntry(applicationContext, entry) },
                 persistSnapshotOrThrow = { persistSnapshotDurableOrThrow() },
+                // ADR-0040 F1 (lakko-security) — on a fail-closed persist-abort,
+                // reset the eager-merged in-memory group (N+1) back to the durable
+                // snapshot (N) so a subsequent same-session commit builds on N, not
+                // the unpublished N+1. Fires ONLY on the persist-abort, never on a
+                // publish failure (that commit is durably recorded — the sweep
+                // re-publishes it). See [onCommitPersistAbort].
+                onPersistAbort = { onCommitPersistAbort(groupIdHex, entry.id) },
                 publish = {
                     val commitPublish = try {
                         dsClient.publishGroup(record.groupId, commitBytes)
@@ -859,6 +880,13 @@ public class ChatRepository(
             runCrashSafeCommit(
                 persistEntryOrThrow = { CommitOutboxStore.putEntry(applicationContext, entry) },
                 persistSnapshotOrThrow = { persistSnapshotDurableOrThrow() },
+                // ADR-0040 F1 (lakko-security) — on a fail-closed persist-abort,
+                // reset the eager-merged in-memory group (N+1) back to the durable
+                // snapshot (N) so a subsequent same-session commit builds on N, not
+                // the unpublished N+1. Fires ONLY on the persist-abort, never on a
+                // publish failure (that commit is durably recorded — the sweep
+                // re-publishes it). See [onCommitPersistAbort].
+                onPersistAbort = { onCommitPersistAbort(groupIdHex, entry.id) },
                 publish = {
                     // 3. publish artifact 1 (commit) so every existing member
                     //    admits the joiner, then artifact 2 (the rendezvous).
@@ -1795,6 +1823,93 @@ public class ChatRepository(
     }
 
     /**
+     * ADR-0040 F1 (lakko-security) — the persist-abort handler [runCrashSafeCommit]
+     * invokes when a commit path's durable write throws (BEFORE any publish). Two
+     * steps, in order:
+     *
+     *   1. **best-effort** drop the just-written outbox [entryId]. `publish` never
+     *      ran, so the commit provably never reached the DS; deleting the entry
+     *      keeps the post-abort durable state "N, no entry" (matching the web
+     *      atomic-transaction reference). A leftover entry is ALSO safe — the
+     *      restart sweep DISCARDs it via [reconcileVerdict] (snapshot at N below
+     *      the entry's N+1 targetEpoch) — so a delete failure is swallowed.
+     *   2. **fail-safe (hard)** reset the in-memory group to the durable snapshot
+     *      (N) via [resetGroupToDurableSnapshotOrThrow]. A throw here is the
+     *      poisoned-group signal — [runCrashSafeCommit] surfaces it as the hard
+     *      error (never masks it).
+     */
+    private fun onCommitPersistAbort(groupIdHex: String, entryId: String) {
+        try {
+            CommitOutboxStore.deleteEntry(applicationContext, entryId)
+        } catch (_: Throwable) {
+            // best-effort — the restart sweep DISCARDs a torn orphan entry anyway.
+        }
+        resetGroupToDurableSnapshotOrThrow(groupIdHex)
+    }
+
+    /**
+     * ADR-0040 F1 (lakko-security) — reload the in-memory MLS state for [groupIdHex]
+     * from the durable snapshot, dropping the un-published eager merge.
+     *
+     * The core create-commit call eagerly merged the OpenMLS provider N -> N+1
+     * before the (now-failed) durable persist, so the in-memory provider + the
+     * cached [Group] handle sit at the unpublished N+1 while the durable snapshot
+     * on disk is still at N (its write failed / never ran). [Identity.restoreStorage]
+     * overwrites the whole provider from that N snapshot, then [loadGroup] rebuilds
+     * a fresh handle reading the restored (N) provider, which replaces the cached
+     * reference — so a subsequent same-session commit builds on N.
+     *
+     * Whole-provider restore note: `restoreStorage` is provider-wide (there is no
+     * per-group restore in the FFI). In the normal case the durable snapshot equals
+     * every OTHER group's current in-memory state (best-effort receive-path persists
+     * succeed), so only THIS group is rolled back; a group whose prior best-effort
+     * persist silently failed could be rolled back too — a pre-existing best-effort
+     * receive-path edge, out of scope for this commit-path fix, and self-healing on
+     * that group's next successful persist / poll.
+     *
+     * FAIL-SAFE: if the durable snapshot cannot be loaded, or has no such group,
+     * this THROWS a hard [ChatError] rather than leaving the eager-merged (N+1)
+     * handle in place — surfacing a "restart to recover" error to the caller. A
+     * restart then re-bootstraps cleanly from the durable snapshot (at N). "Should
+     * not happen" for an existing committed group, which always has a durable
+     * snapshot.
+     *
+     * Runs under [groupsLock] (every commit call site holds it), so the provider
+     * restore + handle swap are serialised against all other MLS ops.
+     */
+    private fun resetGroupToDurableSnapshotOrThrow(groupIdHex: String) {
+        val identity = canonicalIdentity.get()
+            ?: throw IllegalStateException(
+                "cannot reset group after commit-abort — no canonical Identity",
+            )
+        val accountIdB64 = currentAccountIdB64.get()
+            ?: throw IllegalStateException(
+                "cannot reset group after commit-abort — no account id",
+            )
+        val record = groups[groupIdHex]
+            ?: throw IllegalStateException(
+                "cannot reset group after commit-abort — no live handle for $groupIdHex",
+            )
+        // The durable snapshot is still at N (the commit's persist failed), so
+        // restoring the provider from it DROPS the eager-merged N+1 for this group.
+        val blob = snapshotStore.getSnapshot(applicationContext, accountIdB64)
+            ?: throw ChatError(
+                "group state poisoned after commit-abort — no durable snapshot to " +
+                    "reset from; restart to recover",
+                IllegalStateException("missing durable snapshot for account"),
+            )
+        identity.restoreStorage(blob)
+        val fresh = loadGroup(identity, record.groupId)
+            ?: throw ChatError(
+                "group state poisoned after commit-abort — durable snapshot has no " +
+                    "group $groupIdHex; restart to recover",
+                IllegalStateException("loadGroup returned null after restore"),
+            )
+        // Swap the fresh (N) handle in; the record keeps its timeline + cursor.
+        record.replaceGroup(fresh)
+    }
+
+    /**
      * ADR-0040 (G-35) — restart / group-open sweep. Re-publishes every un-acked
      * pending-commit outbox entry for [groupIdHex] IDEMPOTENTLY, re-arming the
      * committer's own-echo filter ([ChatClient.markOwnPublishedCommit]) for the
@@ -1975,9 +2090,33 @@ public enum class Direction { Outgoing, Incoming, System }
  *  UniFFI Object and shouldn't participate in `equals` /
  *  `hashCode`. */
 private class GroupRecord(
-    val group: Group,
+    group: Group,
     val groupId: ByteArray,
 ) {
+    /** Live MLS [Group] handle. `private set` — swapped only via [replaceGroup]
+     *  (ADR-0040 F1) after a commit persist-abort resets the in-memory provider to
+     *  the durable snapshot; otherwise stable for the record's lifetime. */
+    var group: Group = group
+        private set
+
+    /**
+     * ADR-0040 F1 (lakko-security) — swap in a freshly-[loadGroup]ed handle after a
+     * commit persist-abort reset the in-memory MLS provider to the durable snapshot
+     * (N). Preserves this record's timeline / cursor / typing / read-watermark
+     * state (only the MLS handle is replaced) and closes the stale (eager-merged
+     * N+1) handle to release its Rust-side Arc.
+     */
+    fun replaceGroup(fresh: Group) {
+        val old = group
+        if (old === fresh) return
+        group = fresh
+        try {
+            old.close()
+        } catch (_: Throwable) {
+            // best-effort — releasing the stale Rust Arc must not mask the reset.
+        }
+    }
+
     private val messages: MutableList<ChatMessage> =
         Collections.synchronizedList(mutableListOf())
 

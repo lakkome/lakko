@@ -571,6 +571,15 @@ public final class ChatRepository: ObservableObject {
         return (try? record.group.memberCount()).map { Int($0) }
     }
 
+    /// Current MLS epoch of the live group for `groupIdHex`, or `nil` when there
+    /// is no handle. Exposed so the ADR-0040 (G-35) F1 reset can be asserted —
+    /// after a commit persist-abort the in-memory group must read back at the
+    /// pre-commit epoch N (not the eager-merged N+1).
+    public func epoch(groupIdHex: String) -> UInt64? {
+        guard let record = groups[groupIdHex] else { return nil }
+        return try? record.group.epoch()
+    }
+
     /// Roster of the live MLS group for `groupIdHex` — `(leafIndex,
     /// signaturePublicKey)` per member at the current epoch — or `nil` when
     /// there is no handle. The group-chat UI matches each `signaturePublicKey`
@@ -643,14 +652,26 @@ public final class ChatRepository: ObservableObject {
         // ABORTS the op (no publish) — the group is never advanced on the wire
         // without a durable, re-publishable record of this commit.
         let entryId = newOutboxEntryId()
-        try persistCommitEntryThenSnapshotOrThrow(
-            NewCommitEntry(
-                id: entryId,
-                groupId: base64Encode(record.groupId),
-                targetEpoch: String(try record.group.epoch()),
-                commitB64: base64Encode(commitBytes)
+        do {
+            try persistCommitEntryThenSnapshotOrThrow(
+                NewCommitEntry(
+                    id: entryId,
+                    groupId: base64Encode(record.groupId),
+                    targetEpoch: String(try record.group.epoch()),
+                    commitB64: base64Encode(commitBytes)
+                )
             )
-        )
+        } catch {
+            // ADR-0040 (G-35) F1 — the FAIL-CLOSED persist aborted AFTER the core
+            // `setGroupRoles` eager-merged epoch N -> N+1 in memory. Roll the
+            // in-memory group back to the durable snapshot (still N) so this abort
+            // is "as if the op never happened" in memory too, then re-throw so the
+            // UI sees the failure. Without the reset a second same-session commit
+            // would build on the un-published N+1 and strand the whole group. See
+            // ``resetGroupToDurableSnapshot(groupIdHex:)``.
+            try resetGroupToDurableSnapshot(groupIdHex: groupIdHex)
+            throw error
+        }
         let commitPublish: PublishResult
         do {
             commitPublish = try await dsClient.publishGroup(
@@ -722,17 +743,29 @@ public final class ChatRepository: ObservableObject {
         // crash between the two publishes never strands the new member without a
         // Welcome.
         let entryId = newOutboxEntryId()
-        try persistCommitEntryThenSnapshotOrThrow(
-            NewCommitEntry(
-                id: entryId,
-                groupId: base64Encode(record.groupId),
-                targetEpoch: String(try record.group.epoch()),
-                commitB64: base64Encode(addResult.commit),
-                secondArtifactB64: base64Encode(welcomeEnvelope),
-                secondArtifactKind: .welcome,
-                secondArtifactMailboxB64: base64Encode(recipientPseudonym)
+        do {
+            try persistCommitEntryThenSnapshotOrThrow(
+                NewCommitEntry(
+                    id: entryId,
+                    groupId: base64Encode(record.groupId),
+                    targetEpoch: String(try record.group.epoch()),
+                    commitB64: base64Encode(addResult.commit),
+                    secondArtifactB64: base64Encode(welcomeEnvelope),
+                    secondArtifactKind: .welcome,
+                    secondArtifactMailboxB64: base64Encode(recipientPseudonym)
+                )
             )
-        )
+        } catch {
+            // ADR-0040 (G-35) F1 — the FAIL-CLOSED persist aborted AFTER the core
+            // `addMemberFromWire` eager-merged epoch N -> N+1 in memory. Roll the
+            // in-memory group back to the durable snapshot (still N) so this abort
+            // is "as if the op never happened" in memory too, then re-throw so the
+            // UI sees the failure. Without the reset a second same-session commit
+            // would build on the un-published N+1 and strand the whole group. See
+            // ``resetGroupToDurableSnapshot(groupIdHex:)``.
+            try resetGroupToDurableSnapshot(groupIdHex: groupIdHex)
+            throw error
+        }
 
         // Publish artifact 1 — the commit to the group journal so existing
         // members advance their epoch.
@@ -795,14 +828,26 @@ public final class ChatRepository: ObservableObject {
         // Welcome) + the N+1 snapshot BEFORE the publish, FAIL-CLOSED. A throw
         // ABORTS the op (no publish).
         let entryId = newOutboxEntryId()
-        try persistCommitEntryThenSnapshotOrThrow(
-            NewCommitEntry(
-                id: entryId,
-                groupId: base64Encode(record.groupId),
-                targetEpoch: String(try record.group.epoch()),
-                commitB64: base64Encode(commitBytes)
+        do {
+            try persistCommitEntryThenSnapshotOrThrow(
+                NewCommitEntry(
+                    id: entryId,
+                    groupId: base64Encode(record.groupId),
+                    targetEpoch: String(try record.group.epoch()),
+                    commitB64: base64Encode(commitBytes)
+                )
             )
-        )
+        } catch {
+            // ADR-0040 (G-35) F1 — the FAIL-CLOSED persist aborted AFTER the core
+            // `removeMember` eager-merged epoch N -> N+1 in memory. Roll the
+            // in-memory group back to the durable snapshot (still N) so this abort
+            // is "as if the op never happened" in memory too, then re-throw so the
+            // UI sees the failure. Without the reset a second same-session commit
+            // would build on the un-published N+1 and strand the whole group. See
+            // ``resetGroupToDurableSnapshot(groupIdHex:)``.
+            try resetGroupToDurableSnapshot(groupIdHex: groupIdHex)
+            throw error
+        }
         let commitPublish: PublishResult
         do {
             commitPublish = try await dsClient.publishGroup(
@@ -903,16 +948,28 @@ public final class ChatRepository: ObservableObject {
         // re-publishes both so a crash between the two publishes never strands
         // the joiner without a Welcome.
         let entryId = newOutboxEntryId()
-        try persistCommitEntryThenSnapshotOrThrow(
-            NewCommitEntry(
-                id: entryId,
-                groupId: base64Encode(record.groupId),
-                targetEpoch: String(try record.group.epoch()),
-                commitB64: base64Encode(addResult.commit),
-                secondArtifactB64: base64Encode(rendezvous),
-                secondArtifactKind: .rendezvous
+        do {
+            try persistCommitEntryThenSnapshotOrThrow(
+                NewCommitEntry(
+                    id: entryId,
+                    groupId: base64Encode(record.groupId),
+                    targetEpoch: String(try record.group.epoch()),
+                    commitB64: base64Encode(addResult.commit),
+                    secondArtifactB64: base64Encode(rendezvous),
+                    secondArtifactKind: .rendezvous
+                )
             )
-        )
+        } catch {
+            // ADR-0040 (G-35) F1 — the FAIL-CLOSED persist aborted AFTER the core
+            // `approveExternalJoin` (which reuses the audited add path) eager-merged
+            // epoch N -> N+1 in memory. Roll the in-memory group back to the durable
+            // snapshot (still N) so this abort is "as if the op never happened" in
+            // memory too, then re-throw so the UI sees the failure. Without the reset
+            // a second same-session commit would build on the un-published N+1 and
+            // strand the whole group. See ``resetGroupToDurableSnapshot(groupIdHex:)``.
+            try resetGroupToDurableSnapshot(groupIdHex: groupIdHex)
+            throw error
+        }
 
         // Publish artifact 1 — the commit so every existing member admits the
         // joiner.
@@ -1489,6 +1546,96 @@ public final class ChatRepository: ObservableObject {
         //    sweep discards (the commit is never published because we abort).
         let blob = try identity.snapshotStorage()
         try snapshotStore.putSnapshotDurable(accountIdB64: accountIdB64, blob: blob)
+    }
+
+    /// ADR-0040 (G-35) F1 — reset the in-memory MLS group for `groupIdHex` back
+    /// to the last DURABLE snapshot (epoch N), dropping the un-published eager
+    /// merge a commit path performed just before its FAIL-CLOSED persist aborted.
+    ///
+    /// Every group-membership create-commit (`setGroupRoles` / `addMemberFromWire`
+    /// / `removeMember` / `approveExternalJoin`) EAGER-MERGES epoch N -> N+1 into
+    /// the shared in-memory OpenMLS provider BEFORE
+    /// ``persistCommitEntryThenSnapshotOrThrow(_:)`` durably records it. When that
+    /// persist THROWS, the op correctly aborts before any publish — but the
+    /// in-memory `Group` is left at N+1. A SECOND commit in the SAME session would
+    /// then build on the un-published N+1 and publish commit(N+1 -> N+2); peers
+    /// still at N drop it as wrong-epoch, stranding the WHOLE group (the
+    /// "device-ahead" outcome ADR-0040 flags as worse than the single-device
+    /// brick). This makes the abort "as if the op never happened" IN MEMORY too.
+    ///
+    /// Mechanism: because the durable persist FAILED, the on-disk snapshot is
+    /// still at N — ``IdentitySnapshotStore/putSnapshotDurable(accountIdB64:blob:)``
+    /// writes `.atomic`, so a failure leaves the prior N-envelope intact (and the
+    /// entry-first ordering means a snapshot write is only reached after the entry
+    /// landed; an entry-write failure never touches the snapshot at all). We
+    /// restore that snapshot into the canonical identity's provider —
+    /// `Identity.restoreStorage` REPLACES the whole provider map, discarding the
+    /// eager-merged N+1 — and REBUILD the `Group` handle via `loadGroup`. The
+    /// UniFFI `Group` holds an in-memory `MlsGroup` copy loaded once, so the stale
+    /// N+1 handle must be DISCARDED + reloaded, not mutated in place. This mirrors
+    /// exactly what ``bootstrap(secrets:)`` does on a cold start. The plaintext
+    /// timeline (messages + cursor) is preserved — a membership commit appends no
+    /// timeline row, and the log is independent of MLS state.
+    ///
+    /// Scope note: `restoreStorage` rolls the ENTIRE provider back to the durable
+    /// snapshot (the only rollback primitive available without a `lakko-mls`
+    /// change), but only the affected group's handle is rebuilt. In the normal
+    /// case every other group already equals the durable snapshot (sends persist
+    /// fail-closed; poll advances persist best-effort), so their handles stay
+    /// consistent; the sole divergence is a group whose earlier best-effort persist
+    /// silently failed — a pre-existing risk this reset neither creates nor
+    /// worsens, and which self-heals on its next poll.
+    ///
+    /// FAIL-SAFE: if the durable snapshot is missing / unrestorable / unreloadable
+    /// (should not happen for an existing, rehydrated group), the poisoned N+1
+    /// handle is EVICTED from the map and a hard error is thrown — a later commit
+    /// then fails "no live Group handle" rather than silently building on the
+    /// un-published N+1.
+    private func resetGroupToDurableSnapshot(groupIdHex: String) throws {
+        guard let identity = canonicalIdentity,
+              let accountIdB64 = currentAccountIdB64,
+              let record = groups[groupIdHex] else {
+            throw ChatError.argument(
+                "cannot reset \(groupIdHex) to durable snapshot — repository not bootstrapped"
+            )
+        }
+        guard let blob = snapshotStore.getSnapshot(accountIdB64: accountIdB64) else {
+            // No durable snapshot for an existing group is a hard, unexpected
+            // state. Evict the poisoned N+1 handle so a later commit fails "no
+            // handle" rather than building on the un-published epoch.
+            groups.removeValue(forKey: groupIdHex)
+            state = state.with(threads: buildThreadList())
+            throw ChatError.argument(
+                "no durable MLS snapshot to reset \(groupIdHex) after a commit persist-abort"
+            )
+        }
+        do {
+            // Roll the shared provider back to N (REPLACES the eager-merged N+1).
+            try identity.restoreStorage(snapshot: blob)
+            // Rebuild the handle from the rolled-back provider — the old handle
+            // still holds the stale N+1 in-memory `MlsGroup` copy.
+            guard let reloaded = try loadGroup(
+                identity: identity,
+                groupId: record.groupId
+            ) else {
+                throw ChatError.argument("loadGroup returned nil for an existing group")
+            }
+            let fresh = GroupRecord(group: reloaded, groupId: record.groupId)
+            // Preserve the plaintext timeline (MLS state is independent of the
+            // message log; a membership commit appends no row).
+            fresh.seed(messages: record.messages, cursor: record.cursor)
+            groups[groupIdHex] = fresh
+            state = state.with(threads: buildThreadList())
+        } catch {
+            // The restore / reload itself failed — do NOT leave the poisoned N+1
+            // handle in the map. Evict it + surface a hard error.
+            groups.removeValue(forKey: groupIdHex)
+            state = state.with(threads: buildThreadList())
+            throw ChatError.wrapped(
+                "failed to reset \(groupIdHex) to durable snapshot after a commit persist-abort",
+                underlying: error
+            )
+        }
     }
 
     /// Mark an outbox entry acked after BOTH artifacts have published.

@@ -109,6 +109,18 @@ export interface ContactsClientOptions {
    *  reload restores no group and cannot desync: they are outside this bug's
    *  blast radius, mirroring `ChatClient.persistDurableOrThrow`. */
   onPersistWithCommit?: (entry: NewCommitEntry) => Promise<void>;
+  /** ADR-0040 F1 (lakko-security) — reset the in-memory group back to the last
+   *  durable snapshot after a FAIL-CLOSED commit persist-abort. The core
+   *  create-commit eager-merged epoch N -> N+1 in the shared provider BEFORE the
+   *  persist; when the persist throws the op aborts (no publish) but the
+   *  in-memory group is left at the un-published N+1. Wired to
+   *  `ChatApi.resetGroupToDurableSnapshot` (the route layer owns the group cache,
+   *  so the reload/replace is delegated). A throw here is a fail-safe HARD error
+   *  (the reset itself failed — the group may still be poisoned; do not proceed
+   *  as if the abort were clean). When unset (tests / standalone callers with no
+   *  group cache) it is a no-op — such callers persist nothing and hold no cached
+   *  group, so they cannot desync, mirroring `onPersistWithCommit`. */
+  onCommitPersistAbort?: (groupIdB64: string) => Promise<void>;
 }
 
 /** Result of `ContactsClient.sendContactRequest`. */
@@ -422,6 +434,9 @@ export class ContactsClient {
   private readonly onPersistWithCommit:
     | ((entry: NewCommitEntry) => Promise<void>)
     | undefined;
+  private readonly onCommitPersistAbort:
+    | ((groupIdB64: string) => Promise<void>)
+    | undefined;
 
   constructor(
     private readonly discovery: DiscoveryClient = new DiscoveryClient(),
@@ -431,6 +446,7 @@ export class ContactsClient {
     this.identityProvider = options.identityProvider;
     this.onPersist = options.onPersist;
     this.onPersistWithCommit = options.onPersistWithCommit;
+    this.onCommitPersistAbort = options.onCommitPersistAbort;
   }
 
   /**
@@ -491,6 +507,51 @@ export class ContactsClient {
   private async persistCommitOrThrow(entry: NewCommitEntry): Promise<void> {
     if (this.onPersistWithCommit === undefined) return;
     await this.onPersistWithCommit(entry);
+  }
+
+  /**
+   * ADR-0040 F1 (lakko-security) — RESET the in-memory group back to the last
+   * durable snapshot (epoch N) after a FAIL-CLOSED commit persist-abort, BEFORE
+   * the abort re-throws.
+   *
+   * The core create-commit eager-merged N -> N+1 in the shared in-memory provider
+   * BEFORE `persistCommitOrThrow`. When that atomic persist THROWS the op aborts
+   * (no publish) and — because the write is atomic — the durable snapshot stays at
+   * N with NO outbox entry. But the in-memory group (and the shared provider) is
+   * left at the un-published N+1. Left alone, a SECOND same-session commit would
+   * build on N+1 and publish commit(N+1 -> N+2) while peers are still at N (they
+   * never saw an N -> N+1 commit) — they drop it as wrong-epoch and the WHOLE
+   * group is permanently stranded ("device-ahead", worse than a single-device
+   * brick). The outbox sweep cannot catch this: a clean atomic abort wrote no
+   * entry, so there is nothing to re-publish. So the abort must be "as if the op
+   * never happened" IN MEMORY too — reload the group from the durable N snapshot
+   * and replace the cached reference, dropping the un-published eager merge.
+   *
+   * The route layer owns the group cache, so the reload/replace is delegated
+   * through `onCommitPersistAbort` (-> `ChatApi.resetGroupToDurableSnapshot`).
+   *
+   * FAIL-SAFE: if the reset itself fails (no durable snapshot for an existing
+   * group — should be impossible on these four created-and-persisted paths), the
+   * in-memory group is STILL poisoned at N+1, which is worse than a clean abort;
+   * surface a HARD, distinct error rather than swallow it. No-op when
+   * `onCommitPersistAbort` is unset (tests / standalone callers hold no cache).
+   */
+  private async resetGroupAfterPersistAbort(group: WasmGroup): Promise<void> {
+    if (this.onCommitPersistAbort === undefined) return;
+    // Read group_id BEFORE the reset — it is epoch-invariant and the old (N+1)
+    // group object is not freed by the reload, so this stays valid.
+    const groupIdB64 = base64Encode(group.groupId);
+    try {
+      await this.onCommitPersistAbort(groupIdB64);
+    } catch (resetErr) {
+      throw ContactsError.wrap(
+        new Error(
+          "ADR-0040 F1: in-memory group reset FAILED after a commit persist-abort; " +
+            "the group may be desynced ahead at an un-published N+1 — reload the app " +
+            `to recover. Cause: ${String(resetErr)}`,
+        ),
+      );
+    }
   }
 
   /** ADR-0040 (G-35) — mark an outbox entry acked after BOTH artifacts have
@@ -1718,6 +1779,10 @@ export class ContactsClient {
         secondArtifactMailboxB64: base64Encode(welcomePseudonym),
       });
     } catch (err) {
+      // ADR-0040 F1 — the eager-merged N+1 is un-published; reset the in-memory
+      // group back to the durable N snapshot so a subsequent same-session commit
+      // builds on N, not the unpublished N+1 (else the whole group is stranded).
+      await this.resetGroupAfterPersistAbort(group);
       throw ContactsError.wrap(err);
     }
 
@@ -1804,6 +1869,9 @@ export class ContactsClient {
         commitB64: base64Encode(commitBytes),
       });
     } catch (err) {
+      // ADR-0040 F1 — reset the in-memory group back to the durable N snapshot so
+      // a subsequent same-session commit builds on N, not the unpublished N+1.
+      await this.resetGroupAfterPersistAbort(group);
       throw ContactsError.wrap(err);
     }
 
@@ -1870,6 +1938,9 @@ export class ContactsClient {
         commitB64: base64Encode(commitBytes),
       });
     } catch (err) {
+      // ADR-0040 F1 — reset the in-memory group back to the durable N snapshot so
+      // a subsequent same-session commit builds on N, not the unpublished N+1.
+      await this.resetGroupAfterPersistAbort(group);
       throw ContactsError.wrap(err);
     }
 
@@ -1940,6 +2011,9 @@ export class ContactsClient {
         secondArtifactKind: "rendezvous",
       });
     } catch (err) {
+      // ADR-0040 F1 — reset the in-memory group back to the durable N snapshot so
+      // a subsequent same-session commit builds on N, not the unpublished N+1.
+      await this.resetGroupAfterPersistAbort(group);
       throw ContactsError.wrap(err);
     }
 

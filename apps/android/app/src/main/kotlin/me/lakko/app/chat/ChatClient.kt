@@ -275,9 +275,18 @@ public class ChatClient(
                 // reuses the chat exporter, not a separate Group), so the
                 // call-path caveat does not apply here.
                 group.processIncomingVerifyingRoles(identity, message.payload)
-            } catch (_: FfiException) {
-                // Bad frame, wrong epoch, malformed wire, OR a role-unauthorized
-                // commit refused by the gate. Drop + advance the cursor.
+            } catch (_: Throwable) {
+                // Bad frame, wrong epoch, malformed wire, a role-unauthorized commit
+                // refused by the gate, OR a re-fetched own commit
+                // (`CannotDecryptOwnMessage`, ADR-0040 §5 benign drop). Drop + advance
+                // the cursor. ADR-0040 F3 (lakko-security) — this INNER per-message
+                // catch is `Throwable`, not `FfiException`: `CannotDecryptOwnMessage`
+                // surfaces as an `FfiException` today, but were a binding ever to
+                // surface an own-commit re-fetch as a different `Throwable`, a narrow
+                // catch would let it escape to the OUTER poll-loop catch (which does
+                // NOT commit the batch cursor) and re-fetch the orphan row forever.
+                // Mirrors the blanket iOS / web per-message drop posture. (Only the
+                // per-message drop is widened — the outer poll-loop catch is unchanged.)
                 continue
             }
             events.add(toEvent(message.id, message.createdAt, processed))

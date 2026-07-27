@@ -334,6 +334,19 @@ function ChatView(props: {
       }
       await chats.persistSnapshotWithCommit(s.account.accountId, entry);
     },
+    // ADR-0040 F1 (lakko-security) — on a FAIL-CLOSED commit persist-abort, reset
+    // the in-memory group back to the last durable snapshot (epoch N), dropping
+    // the un-published eager merge. Reloads the group from IDB + replaces the
+    // cached registry reference so the next `props.entry.group` read (reactive
+    // via `chats.get`) sees the epoch-N group — a subsequent commit builds on N,
+    // not the poisoned N+1 that would strand the whole group.
+    onCommitPersistAbort: async (groupIdB64) => {
+      const s = auth.state();
+      if (s.kind !== "session") {
+        throw new Error("no active session — cannot reset group (ADR-0040 F1)");
+      }
+      await chats.resetGroupToDurableSnapshot(s.account.accountId, groupIdB64);
+    },
   });
 
   const [rows, setRows] = createSignal<TimelineRow[]>([]);
