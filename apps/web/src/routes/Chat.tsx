@@ -2737,7 +2737,7 @@ function ChatView(props: {
               })()}
             </strong>
             <div style={{ "font-size": "0.85rem", "margin-top": "0.2rem" }}>
-              Audio · P2P (DTLS-SRTP). SFU + SFrame land in Phase 3b.
+              Audio + video · end-to-end encrypted P2P (DTLS-SRTP).
             </div>
             {/* G3-3-conn-quality — live RTT / bitrate / path readout
                 from the session's getStats poll. Shown only while

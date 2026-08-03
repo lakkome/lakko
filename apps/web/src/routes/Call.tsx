@@ -937,12 +937,36 @@ const ControlsBar: Component = () => {
           glyph="🔄"
           active={false}
           onClick={(): void => {
-            // The WebRTC pod (3a-pod-followup) owns the actual
-            // facingMode toggle on the local MediaStreamTrack;
-            // this UI just emits the intent. Until the pod
-            // lands, the click is a no-op informational beat.
-            // eslint-disable-next-line no-console
-            console.info("call ui: switch camera requested");
+            // Cycle to the next video input (front/back on mobile). The
+            // store's `selectedVideoInput` drives the in-call
+            // device-switch effect (Chat.tsx), which calls
+            // `session.switchVideoInput` + `replaceTrack` (same-kind, no
+            // renegotiation) — so this button reuses the shipped
+            // device-switch path rather than re-capturing here.
+            void (async (): Promise<void> => {
+              try {
+                const devices = await navigator.mediaDevices.enumerateDevices();
+                const cams = devices.filter(
+                  (d) => d.kind === "videoinput" && d.deviceId.length > 0,
+                );
+                if (cams.length < 2) return;
+                const current = callState.settings().selectedVideoInput;
+                const idx =
+                  current === null
+                    ? 0
+                    : Math.max(
+                        0,
+                        cams.findIndex((c) => c.deviceId === current),
+                      );
+                const next = cams[(idx + 1) % cams.length];
+                if (next !== undefined) {
+                  callActions.setSelectedVideoInput(next.deviceId);
+                }
+              } catch (err) {
+                // eslint-disable-next-line no-console
+                console.warn("call ui: switch camera enumerate failed", err);
+              }
+            })();
           }}
         />
       </Show>
