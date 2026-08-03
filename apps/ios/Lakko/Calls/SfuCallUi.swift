@@ -154,7 +154,16 @@ final class SfuCallUi {
                 // `self`, so this is safe to build before `session` is assigned).
                 relay.handler?(state)
             },
-            onServerError: { _, _ in }
+            onServerError: { _, _ in },
+            onRemoteMediaState: { from, cameraOn in
+                // Camera-off-cleanup: a remote peer broadcast its camera on/off
+                // state. Flip that participant's roster `camOn` gate (keyed on
+                // `"peer-<peerId>"`, the same tile id `onRemoteVideoTrack` uses).
+                // This is the ONLY signal that clears a remote camera-OFF mute
+                // (which fires no track event) — and re-shows the tile on
+                // camera-back-on. UI-only; SFrame/seed/MLS untouched.
+                ui.setParticipantCamera(Self.participantId(forPeer: from), cameraOn)
+            }
         )
         self.session = SfuCallSession(config: config, callbacks: callbacks)
     }

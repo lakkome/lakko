@@ -426,6 +426,14 @@ class MultiJoinerCall private constructor(
             // Not a call envelope — the fallback carries verbatim bytes, which
             // for us is a broadcast MLS commit an existing member must apply.
             FfiIncomingEnvelopeKind.INTRO_MESSAGE -> onMaybeCommit(env.payload)
+            // camera-off-cleanup — a camera on/off media-state signal is
+            // intercepted UPSTREAM by SfuCallSession's onSignalRelay classifier
+            // (it fires onRemoteMediaState, which this link-based call path does
+            // not wire), so it never reaches here. Explicit no-op for
+            // exhaustiveness + intent. Consuming it on this path (roster camOn
+            // for the sole-remote tile) is a follow-up, same caveat as
+            // [onRemoteVideoTrack].
+            FfiIncomingEnvelopeKind.MEDIA_STATE -> Unit
         }
     }
 

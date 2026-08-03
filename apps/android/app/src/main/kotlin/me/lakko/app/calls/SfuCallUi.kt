@@ -133,7 +133,9 @@ class SfuCallUi(
                 // renders — the same shape as the web `setParticipantCamera`.
                 // `track` is always non-null on this path (the pod surfaces
                 // only video tracks), so the camera flips on. A camera-off-
-                // while-staying signal has no pod callback yet (follow-up).
+                // while-staying (mute) fires no track event; that case is now
+                // handled by the explicit media-state signal (camera-off-
+                // cleanup) via [SfuCallSession.Callbacks.onRemoteMediaState].
                 streamId?.let { id ->
                     val participantId = participantId(id)
                     ui.setRemoteVideoTrack(track, participantId)
@@ -163,6 +165,18 @@ class SfuCallUi(
                             CallUiState.VideoPublishState.Failed
                     }
                 )
+            },
+            onRemoteMediaState = { peerId, cameraOn ->
+                // camera-off-cleanup — a remote peer signalled its camera
+                // state over the opaque SFU relay. Flip that participant's
+                // camOn so its tile stops rendering a frozen last frame on
+                // mute (and re-renders on unmute). Same target as the
+                // onRemoteVideoTrack camera flag, but driven by an explicit
+                // signal so a mute — which fires no track event — is handled.
+                // `peerId` == the relay sender's SFU peer id == the roster
+                // tile key ("peer-<peerId>"); setParticipantCamera no-ops on
+                // an unknown id (the media-state raced ahead of peer-joined).
+                ui.setParticipantCamera(participantId(peerId), cameraOn)
             },
             onServerError = { _, _ -> },
         )

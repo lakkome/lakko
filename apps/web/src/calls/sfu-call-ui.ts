@@ -249,6 +249,14 @@ export function createSfuCallUi(
     onRemoteTrack: (rt): void => {
       addStream(rt);
     },
+    onRemoteMediaState: (peerId, cameraOn): void => {
+      // camera-off-cleanup: a peer broadcast its camera on/off state. Flip the
+      // matching roster tile's `camOn` deterministically — a mute fires no
+      // track `ended` event, so without this the tile would keep painting a
+      // frozen frame. Complementary to the `ended` pruning in `addStream`
+      // (which handles the genuine track-gone / unpublish / leave case).
+      callActions.setParticipantCamera(peerParticipantId(peerId), cameraOn);
+    },
     onLocalStream: (stream): void => {
       setLocalStream(stream);
     },

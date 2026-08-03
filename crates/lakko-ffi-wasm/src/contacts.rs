@@ -36,6 +36,9 @@ use lakko_contacts::invite::{
     decode_and_verify as rust_invite_decode, sign_owner_list as rust_sign_owner_list,
     sign_revocation as rust_sign_revocation, BLOB_ID_LEN,
 };
+use lakko_contacts::media_state::{
+    compose_media_state as rust_compose_media_state, decode_media_state as rust_decode_media_state,
+};
 use lakko_contacts::ACCOUNT_ID_LEN;
 use lakko_contacts::{
     compose as rust_compose, decode_and_verify as rust_decode, open_envelope as rust_open,
@@ -1119,9 +1122,11 @@ pub fn call_keypackage_min_payload_len() -> usize {
 // ============================================================================
 
 /// Kind tag for [`WasmIncomingEnvelope`]. Mirror of the
-/// underlying Rust enum variants. Pinned numeric values
-/// (`0` / `1` / `2`) match the dispatch order documented in
-/// [`lakko_contacts::incoming_envelope`].
+/// underlying Rust enum variants. The numeric values are
+/// stable wire tags — `MediaState` was appended as `3` so the
+/// pre-existing `IntroMessage = 2` tag stays fixed. (The Rust
+/// dispatch order is welcome → KP-forward → media-state →
+/// intro; the numeric tag is independent of that order.)
 #[wasm_bindgen(js_name = IncomingEnvelopeKind)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum WasmIncomingEnvelopeKind {
@@ -1131,6 +1136,10 @@ pub enum WasmIncomingEnvelopeKind {
     CallKeyPackage = 1,
     /// Plain free-text intro message (ADR-0005 scenario A).
     IntroMessage = 2,
+    /// Camera on/off media-state signal (camera-off-cleanup).
+    /// The decoded flag rides the `cameraOn` getter of
+    /// [`WasmIncomingEnvelope`]; `payload` is empty.
+    MediaState = 3,
 }
 
 /// FFI-portable result of [`dispatchIncomingEnvelope`]. The
@@ -1141,6 +1150,7 @@ pub enum WasmIncomingEnvelopeKind {
 pub struct WasmIncomingEnvelope {
     kind: WasmIncomingEnvelopeKind,
     payload: Vec<u8>,
+    camera_on: Option<bool>,
 }
 
 #[wasm_bindgen(js_class = IncomingEnvelope)]
@@ -1154,50 +1164,96 @@ impl WasmIncomingEnvelope {
     /// The dispatched payload — for `CallWelcome` and
     /// `CallKeyPackage` this is the bytes **after** the
     /// 22- / 25-byte domain separator; for `IntroMessage`
-    /// it is the original plaintext verbatim.
+    /// it is the original plaintext verbatim; for
+    /// `MediaState` it is empty.
     #[wasm_bindgen(getter)]
     pub fn payload(&self) -> Vec<u8> {
         self.payload.clone()
     }
+
+    /// Set only for `MediaState`: whether the sender's camera
+    /// is on. `undefined` (`None`) for every other kind.
+    #[wasm_bindgen(getter, js_name = cameraOn)]
+    pub fn camera_on(&self) -> Option<bool> {
+        self.camera_on
+    }
 }
 
-/// Single-call dispatcher for HPKE-decrypted
-/// `ContactRequest` plaintexts (Phase 3c3-incoming-
-/// dispatcher). Runs the two call-side unwrap helpers in
-/// dispatch order
-/// (welcome → KP-forward → intro-message fallthrough) and
-/// returns the typed variant.
+/// Single-call dispatcher for opaque relay-payload plaintexts
+/// (Phase 3c3-incoming-dispatcher). Runs the classification
+/// helpers in dispatch order
+/// (welcome → KP-forward → media-state → intro-message
+/// fallthrough) and returns the typed variant.
 ///
 /// See [`lakko_contacts::incoming_envelope`] for the full
 /// dispatch contract.
 ///
 /// # Errors
 ///
-/// `JsError` when a domain separator matched but the
-/// payload is shorter than the kind's minimum floor (32
-/// bytes for Welcome, 256 bytes for KP-forward).
+/// `JsError` when a domain separator matched but the payload
+/// is malformed (below the Welcome / KP-forward minimum floor,
+/// or an invalid media-state payload).
 #[wasm_bindgen(js_name = dispatchIncomingEnvelope)]
 pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<WasmIncomingEnvelope, JsError> {
-    let parsed = rust_dispatch_incoming_envelope(plaintext).map_err(|err| {
-        let lakko_contacts::call_welcome::CallWelcomeError::TruncatedPayload { min, got } = err;
-        JsError::new(&format!(
-            "incoming envelope payload is {got} bytes, minimum is {min}",
-        ))
-    })?;
+    let parsed =
+        rust_dispatch_incoming_envelope(plaintext).map_err(|err| JsError::new(&err.to_string()))?;
     Ok(match parsed {
         IncomingEnvelope::CallWelcome(p) => WasmIncomingEnvelope {
             kind: WasmIncomingEnvelopeKind::CallWelcome,
             payload: p.to_vec(),
+            camera_on: None,
         },
         IncomingEnvelope::CallKeyPackage(p) => WasmIncomingEnvelope {
             kind: WasmIncomingEnvelopeKind::CallKeyPackage,
             payload: p.to_vec(),
+            camera_on: None,
+        },
+        IncomingEnvelope::MediaState { camera_on } => WasmIncomingEnvelope {
+            kind: WasmIncomingEnvelopeKind::MediaState,
+            payload: Vec::new(),
+            camera_on: Some(camera_on),
         },
         IncomingEnvelope::IntroMessage(p) => WasmIncomingEnvelope {
             kind: WasmIncomingEnvelopeKind::IntroMessage,
             payload: p.to_vec(),
+            camera_on: None,
         },
     })
+}
+
+/// Compose a camera on/off media-state envelope
+/// (camera-off-cleanup). The sender broadcasts the returned
+/// bytes over the opaque SFU `signal-relay` payload; receivers
+/// classify them (via `dispatchIncomingEnvelope` or
+/// `decodeMediaState`) and reset the sender's tile `camOn`
+/// state.
+///
+/// See [`lakko_contacts::media_state`] for the wire format and
+/// threat-model rationale (the SFU never parses the payload —
+/// invariant #2).
+#[wasm_bindgen(js_name = composeMediaState)]
+#[must_use]
+pub fn compose_media_state(camera_on: bool) -> Vec<u8> {
+    rust_compose_media_state(camera_on)
+}
+
+/// Strictly decode a media-state envelope, returning the
+/// camera flag (camera-off-cleanup). Fail-closed: rejects a
+/// plaintext that does not carry the media-state domain
+/// separator or whose payload is malformed. Use
+/// `dispatchIncomingEnvelope` instead when the plaintext might
+/// be any relay-payload kind.
+///
+/// # Errors
+///
+/// `JsError` when `plaintext` is not a valid media-state
+/// envelope (wrong domain / bad length / unknown version /
+/// out-of-range flag byte).
+#[wasm_bindgen(js_name = decodeMediaState)]
+pub fn decode_media_state(plaintext: &[u8]) -> Result<bool, JsError> {
+    rust_decode_media_state(plaintext)
+        .map(|state| state.camera_on)
+        .map_err(|err| JsError::new(&err.to_string()))
 }
 
 // ============================================================================

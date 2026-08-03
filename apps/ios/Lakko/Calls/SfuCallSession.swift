@@ -133,6 +133,18 @@ final class SfuCallSession {
         /// Defaulted so the in-chat group-call callers (which don't use the
         /// relay handshake) keep their shorter memberwise initialiser.
         var onSignalRelay: ((_ from: String, _ payload: Data) -> Void)? = nil
+        /// Camera-off-cleanup: a remote peer broadcast its camera on/off
+        /// state over the opaque SFU `signal-relay`. `from` is the sender's
+        /// SFU peer id (== the roster tile key); `cameraOn` is the decoded
+        /// flag. A remote camera OFF is a track-`isEnabled = false` MUTE that
+        /// fires NO track event, so a peer can't otherwise tell — this
+        /// app-level signal lets the receiver flip that participant's roster
+        /// `camOn` gate deterministically (fixes both camera-off AND
+        /// camera-back-on). UI-only: the SFU never inspects the payload
+        /// (invariant #2); nothing about SFrame / the seed / MLS changes.
+        /// Defaulted so existing memberwise callers keep their shorter
+        /// initialiser.
+        var onRemoteMediaState: ((_ from: String, _ cameraOn: Bool) -> Void)? = nil
     }
 
     private let config: Config
@@ -147,6 +159,13 @@ final class SfuCallSession {
     /// This device's SFrame KID (MLS leaf). From `config.localLeaf`, or
     /// set by ``publish(seed:localLeaf:)`` on the deferred-publish path.
     private var publishLeaf: UInt32
+    /// Our own camera on/off state, broadcast to the roster over the opaque
+    /// SFU `signal-relay` (camera-off-cleanup). A video-from-start call is
+    /// camera-on at connect; an audio-only call starts camera-off and flips
+    /// on via ``publishVideo()`` / off via ``setCameraEnabled(_:)``. Peers
+    /// learn every change from the broadcast, since a mute (track
+    /// `isEnabled` toggle) fires no track event.
+    private var localCameraOn: Bool
     private var signaling: SfuSignalingClient?
     private var pc: WebRTCPeerConnection?
     /// Local camera capturer — held for the call's lifetime so it
@@ -184,6 +203,19 @@ final class SfuCallSession {
         self.callbacks = callbacks
         self.activeSeed = config.seed
         self.publishLeaf = config.localLeaf ?? 0
+        self.localCameraOn = config.video
+    }
+
+    /// Broadcast our current camera state to every other peer over the
+    /// opaque SFU `signal-relay` (camera-off-cleanup). Best-effort — a no-op
+    /// if signaling is not open. `sendSignalRelayToCall` base64s the
+    /// `composeMediaState` bytes into the relay payload; the SFU forwards it
+    /// verbatim without inspection (invariant #2). Called on every local
+    /// camera transition, once when the call connects, and again whenever a
+    /// new peer joins (so a newcomer is initial-synced deterministically).
+    private func broadcastMediaState() {
+        guard signaling != nil else { return }
+        sendSignalRelayToCall(payload: composeMediaState(cameraOn: localCameraOn))
     }
 
     /// Rotate the call key on a mid-call MLS epoch change (G-18,
@@ -384,6 +416,12 @@ final class SfuCallSession {
     /// track is a no-op.
     func setCameraEnabled(_ on: Bool) {
         pc?.setCameraEnabled(on)
+        // Camera-off-cleanup: a mute (track `isEnabled` toggle) fires no
+        // track event on the receiver, so broadcast the state change so
+        // peers flip our roster `camOn` gate. Covers camera OFF (the in-chat
+        // toggle's off path) and any explicit re-enable.
+        localCameraOn = on
+        broadcastMediaState()
     }
 
     /// Current mid-call camera-on lifecycle state (piece B).
@@ -414,6 +452,10 @@ final class SfuCallSession {
         if connection.currentLocalVideoTrack() != nil {
             connection.setCameraEnabled(true)
             setVideoPublishState(.live)
+            // Camera-back-on is a track re-enable (no track event fires on the
+            // receiver), so broadcast so peers un-hide our tile.
+            localCameraOn = true
+            broadcastMediaState()
             return
         }
         // In-flight guard — a capture is already running; do not double-acquire.
@@ -464,6 +506,11 @@ final class SfuCallSession {
         // Self-preview tile.
         callbacks.onLocalVideoTrack?(liveConn.currentLocalVideoTrack())
         setVideoPublishState(.live)
+        // Camera-off-cleanup: announce camera-on. The fresh track also
+        // reaches peers via the renegotiation below (redundant but robust);
+        // the broadcast is what carries later mute/unmute transitions.
+        localCameraOn = true
+        broadcastMediaState()
         // Renegotiate so the SFU (and thus other peers) learn the new video
         // m-line. Serialized behind any in-flight offer.
         await driveRenegotiationOffer()
@@ -510,7 +557,14 @@ final class SfuCallSession {
             Task { @MainActor in self?.callbacks.onWelcome?(selfPeerId, roster) }
         }
         cb.onPeerJoined = { [weak self] peerId, pseudonym, peerTag in
-            Task { @MainActor in self?.callbacks.onPeerJoined?(peerId, pseudonym, peerTag) }
+            Task { @MainActor in
+                guard let self else { return }
+                self.callbacks.onPeerJoined?(peerId, pseudonym, peerTag)
+                // Camera-off-cleanup: re-announce our current camera state so
+                // the newcomer (which was not in our Welcome-roster broadcast)
+                // is initial-synced deterministically.
+                self.broadcastMediaState()
+            }
         }
         cb.onPeerLeft = { [weak self] peerId in
             Task { @MainActor in self?.callbacks.onPeerLeft?(peerId) }
@@ -533,13 +587,22 @@ final class SfuCallSession {
         return cb
     }
 
-    /// ADR-0032: decode the opaque relay payload (base64url) and hand it to the
-    /// caller. A malformed relay payload is dropped, never fatal (mirror of the
-    /// web `onSignalRelayFrame`, which uses the same `sfuDecodePayload`).
+    /// ADR-0032 + camera-off-cleanup: decode the opaque relay payload
+    /// (base64url), classify it, and dispatch. A camera on/off media-state
+    /// signal is handled in-session (it fires `onRemoteMediaState`, which the
+    /// in-chat `SfuCallUi` maps onto the participant's roster `camOn` gate);
+    /// every other envelope is forwarded verbatim to `onSignalRelay` (the
+    /// multi-joiner handshake dispatcher, which re-classifies it). A malformed
+    /// payload is dropped, never fatal (mirror of the web `onSignalRelayFrame`,
+    /// which uses the same `sfuDecodePayload`).
     private func dispatchSignalRelay(from: String, payloadB64: String) {
-        guard let cb = callbacks.onSignalRelay else { return }
         guard let payload = try? sfuDecodePayload(payloadB64: payloadB64) else { return }
-        cb(from, payload)
+        if let env = try? dispatchIncomingEnvelope(plaintext: payload),
+            env.kind == .mediaState, let cameraOn = env.cameraOn {
+            callbacks.onRemoteMediaState?(from, cameraOn)
+            return
+        }
+        callbacks.onSignalRelay?(from, payload)
     }
 
     private func applyRemoteAnswer(_ sdp: String) async {
@@ -630,6 +693,10 @@ final class SfuCallSession {
         switch rtcState {
         case .connected:
             if state == .connecting { setState(.connected) }
+            // Camera-off-cleanup: announce our initial camera state to the
+            // roster now that the media path is up, so an already-present peer
+            // renders us correctly (a peer joining camera-off is shown off).
+            broadcastMediaState()
         case .failed, .disconnected, .closed:
             fail()
         default:

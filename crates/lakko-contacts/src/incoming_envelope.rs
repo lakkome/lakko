@@ -23,7 +23,10 @@
 //!    `Group::add_member_from_wire(kp_bytes)` + commits +
 //!    ferries the resulting Welcome back via
 //!    [`crate::call_welcome::wrap_call_welcome`].
-//! 3. **Intro-message fallthrough** — plain free-text
+//! 3. [`crate::media_state::try_unwrap_media_state`] — the
+//!    camera on/off signal (camera-off-cleanup). Caller
+//!    resets the sender's tile `camOn` state.
+//! 4. **Intro-message fallthrough** — plain free-text
 //!    `ContactRequest` (ADR-0005 scenario A; "add me as a
 //!    contact"). Caller renders the bytes as a UTF-8 intro
 //!    message.
@@ -53,8 +56,11 @@
 //!   signature pins which identity sent the payload; this
 //!   module sees only the decrypted plaintext.
 
+use thiserror::Error;
+
 use crate::call_kp_forward::try_unwrap_call_kp_forward;
 use crate::call_welcome::{try_unwrap_call_welcome, CallWelcomeError};
+use crate::media_state::{try_unwrap_media_state, MediaStateError};
 
 /// Discriminated dispatch result. Borrow-flavoured slice so
 /// the dispatcher itself is zero-copy; the caller decides
@@ -72,9 +78,38 @@ pub enum IncomingEnvelope<'a> {
     /// resulting Welcome back via
     /// `wrap_call_welcome(welcome)`.
     CallKeyPackage(&'a [u8]),
+    /// App-level camera on/off media-state signal
+    /// (camera-off-cleanup). Rides the same opaque relay
+    /// transport as the call envelopes but carries a fully
+    /// decoded flag rather than a byte slice. Caller resets
+    /// the sender's tile `camOn` state to `camera_on`.
+    MediaState {
+        /// Whether the sender's camera is currently on.
+        camera_on: bool,
+    },
     /// Plain free-text intro message (ADR-0005 scenario A).
     /// Caller renders as a UTF-8 ContactRequest.
     IntroMessage(&'a [u8]),
+}
+
+/// Error surfaced by [`dispatch_incoming_envelope`] when a
+/// domain separator matched but the payload behind it was
+/// malformed. One variant per envelope kind that can fail —
+/// fail-closed: a syntactically-marked but semantically-invalid
+/// payload is logged + dropped by the caller, never silently
+/// mis-rendered as an intro message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum DispatchError {
+    /// A call-side envelope (Welcome / KP-forward) matched its
+    /// domain separator but its payload was truncated below the
+    /// kind's minimum floor.
+    #[error(transparent)]
+    Call(#[from] CallWelcomeError),
+    /// A media-state envelope matched its domain separator but
+    /// its payload was malformed (wrong length / unknown
+    /// version / out-of-range flag byte).
+    #[error(transparent)]
+    MediaState(#[from] MediaStateError),
 }
 
 /// Single-call dispatcher. Runs the two unwrap helpers in
@@ -82,22 +117,20 @@ pub enum IncomingEnvelope<'a> {
 ///
 /// # Errors
 ///
-/// Propagates the **first** truncation error encountered —
-/// if a domain separator matched but the payload was below
-/// the kind's minimum-length floor. Distinct kinds carry
-/// different floors (32 bytes for Welcome, 256 bytes for
-/// KP-forward); a malformed envelope of either kind
-/// surfaces here as `Err(CallWelcomeError::TruncatedPayload)`
-/// — caller logs + drops.
+/// Propagates the **first** malformed-payload error
+/// encountered — a domain separator matched but the payload
+/// behind it was invalid. Distinct kinds carry different
+/// validity rules (32-byte floor for Welcome, 256-byte floor
+/// for KP-forward, exact 2-byte payload for media-state); a
+/// malformed envelope of any kind surfaces here as an
+/// `Err(DispatchError)` — caller logs + drops.
 ///
 /// **Never** returns an error when the plaintext is a plain
 /// intro message — empty plaintexts surface as
 /// `Ok(IntroMessage(&[]))`, which is a valid (degenerate)
 /// ContactRequest payload the UI can render as an empty
 /// message body.
-pub fn dispatch_incoming_envelope(
-    plaintext: &[u8],
-) -> Result<IncomingEnvelope<'_>, CallWelcomeError> {
+pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<IncomingEnvelope<'_>, DispatchError> {
     // 1. Call-Welcome — first joiner.
     if let Some(welcome) = try_unwrap_call_welcome(plaintext)? {
         return Ok(IncomingEnvelope::CallWelcome(welcome));
@@ -106,7 +139,13 @@ pub fn dispatch_incoming_envelope(
     if let Some(kp) = try_unwrap_call_kp_forward(plaintext)? {
         return Ok(IncomingEnvelope::CallKeyPackage(kp));
     }
-    // 3. Plain intro message — ADR-0005 scenario A.
+    // 3. Media-state — camera on/off signal.
+    if let Some(state) = try_unwrap_media_state(plaintext)? {
+        return Ok(IncomingEnvelope::MediaState {
+            camera_on: state.camera_on,
+        });
+    }
+    // 4. Plain intro message — ADR-0005 scenario A.
     Ok(IncomingEnvelope::IntroMessage(plaintext))
 }
 
@@ -160,7 +199,10 @@ mod tests {
         wrapped.extend_from_slice(CALL_WELCOME_ENVELOPE_DOMAIN_V1);
         wrapped.extend_from_slice(&[0u8; 4]);
         let err = dispatch_incoming_envelope(&wrapped).unwrap_err();
-        assert_eq!(err, CallWelcomeError::TruncatedPayload { min: 32, got: 4 },);
+        assert_eq!(
+            err,
+            DispatchError::Call(CallWelcomeError::TruncatedPayload { min: 32, got: 4 }),
+        );
     }
 
     #[test]
@@ -173,7 +215,35 @@ mod tests {
         let err = dispatch_incoming_envelope(&wrapped).unwrap_err();
         assert_eq!(
             err,
-            CallWelcomeError::TruncatedPayload { min: 256, got: 100 },
+            DispatchError::Call(CallWelcomeError::TruncatedPayload { min: 256, got: 100 }),
+        );
+    }
+
+    #[test]
+    fn dispatches_media_state_camera_on() {
+        let wrapped = crate::media_state::compose_media_state(true);
+        let result = dispatch_incoming_envelope(&wrapped).unwrap();
+        assert_eq!(result, IncomingEnvelope::MediaState { camera_on: true });
+    }
+
+    #[test]
+    fn dispatches_media_state_camera_off() {
+        let wrapped = crate::media_state::compose_media_state(false);
+        let result = dispatch_incoming_envelope(&wrapped).unwrap();
+        assert_eq!(result, IncomingEnvelope::MediaState { camera_on: false });
+    }
+
+    #[test]
+    fn malformed_media_state_surfaces_as_error() {
+        // Domain separator matches but the flag byte is out of
+        // range — fail-closed, not an intro-message fallthrough.
+        let mut wrapped = Vec::new();
+        wrapped.extend_from_slice(crate::media_state::MEDIA_STATE_ENVELOPE_DOMAIN_V1);
+        wrapped.extend_from_slice(&[crate::media_state::MEDIA_STATE_VERSION_V1, 0x02]);
+        let err = dispatch_incoming_envelope(&wrapped).unwrap_err();
+        assert_eq!(
+            err,
+            DispatchError::MediaState(MediaStateError::BadFlag(0x02))
         );
     }
 

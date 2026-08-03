@@ -415,6 +415,14 @@ final class MultiJoinerCall {
             // Not a call envelope — the fallback carries verbatim bytes, which
             // for us is a broadcast MLS commit an existing member must apply.
             onMaybeCommit(env.payload)
+        case .mediaState:
+            // Camera-off-cleanup: a camera on/off signal is intercepted +
+            // handled in `SfuCallSession.dispatchSignalRelay` (it fires
+            // `onRemoteMediaState`, never `onSignalRelay`), so it never reaches
+            // this multi-joiner dispatcher. The case is present only to keep the
+            // switch exhaustive. (Wiring the link-join roster's per-tile `camOn`
+            // to `onRemoteMediaState` is an out-of-scope follow-up.)
+            break
         }
     }
 

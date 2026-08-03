@@ -199,8 +199,23 @@ export interface SfuCallCallbacks {
    * `payload` is the decoded bytes (the SFU never inspects them —
    * invariant #2). The multi-joiner orchestrator classifies these with
    * `dispatchIncomingEnvelope` (CallKeyPackage / CallWelcome / commit).
+   *
+   * A `MediaState` relay (camera-off-cleanup) is NOT delivered here — the
+   * session classifies + consumes it internally and fires
+   * {@link onRemoteMediaState} instead. Every other kind falls through to
+   * this callback unchanged.
    */
   onSignalRelay?(from: string, payload: Uint8Array): void;
+  /**
+   * camera-off-cleanup: a peer broadcast its own camera on/off state over the
+   * opaque `signal-relay`. `peerId` is the sending peer's SFU peer id (the
+   * `peer-<peerId>` roster tile key); `cameraOn` is its new camera state. A
+   * mute (`track.enabled=false`) fires no track `ended` event, so without this
+   * signal the tile keeps painting a frozen frame — the receiver flips the
+   * tile's `camOn` deterministically off it. UI-only (invariant #2: the SFU
+   * never parses the payload; a peer only speaks for its own outbound frames).
+   */
+  onRemoteMediaState?(peerId: string, cameraOn: boolean): void;
 }
 
 const DEFAULT_ICE_SERVERS: readonly RTCIceServer[] = [
@@ -260,12 +275,25 @@ export class SfuCallSession {
   /** Mid-call camera-on lifecycle. */
   private videoPublishState: VideoPublishState = "off";
 
+  /**
+   * The local camera on/off state, broadcast to peers over the opaque SFU
+   * `signal-relay` (camera-off-cleanup). Initialised from the initial media
+   * request; updated by every path that flips the local camera
+   * ({@link setCameraEnabled} / {@link publishVideo}). Receivers flip the
+   * matching roster tile's `camOn` off this signal — a mute
+   * (`track.enabled=false`) fires no track event, so the tile would otherwise
+   * keep painting a frozen frame. UI-only (invariant #2: the SFU never parses
+   * the payload; a peer only ever speaks for its own outbound frames).
+   */
+  private localCameraOn: boolean;
+
   constructor(
     private readonly config: SfuCallConfig,
     private readonly callbacks: SfuCallCallbacks = {},
   ) {
     this.activeSeed = config.seed ?? null;
     this.publishLeaf = config.localLeaf ?? 0;
+    this.localCameraOn = config.media.video;
   }
 
   /**
@@ -400,12 +428,18 @@ export class SfuCallSession {
     }
   }
 
-  /** Enable / disable the local camera (local-only gate). */
+  /** Enable / disable the local camera (local-only gate). Also broadcasts the
+   *  new camera state to peers (camera-off-cleanup) so their roster tile flips
+   *  deterministically — a mute fires no track event. On the web path the
+   *  Chat.tsx camera effect routes camera-ON through {@link publishVideo}, so
+   *  in practice this is the OFF edge; the state update is symmetric regardless. */
   setCameraEnabled(on: boolean): void {
-    if (this.localStream === null) return;
-    for (const track of this.localStream.getVideoTracks()) {
-      track.enabled = on;
+    if (this.localStream !== null) {
+      for (const track of this.localStream.getVideoTracks()) {
+        track.enabled = on;
+      }
     }
+    this.setLocalCameraOn(on);
   }
 
   /** Current mid-call camera-on lifecycle state (piece B). */
@@ -417,6 +451,42 @@ export class SfuCallSession {
     if (this.videoPublishState === state) return;
     this.videoPublishState = state;
     this.callbacks.onVideoPublishState?.(state);
+  }
+
+  /** Record the local camera state and, when it changed, broadcast it to
+   *  peers (camera-off-cleanup). */
+  private setLocalCameraOn(on: boolean): void {
+    if (this.localCameraOn === on) return;
+    this.localCameraOn = on;
+    this.announceCameraState();
+  }
+
+  /**
+   * Broadcast the CURRENT local camera state to every other peer over the
+   * opaque SFU `signal-relay` (camera-off-cleanup). Best-effort + fire-and-
+   * forget: a compose failure or a closed socket is swallowed (the signal is
+   * a UI hint, never on the E2EE / media path — invariant #2). No-op when
+   * signaling is not open. `composeMediaState` needs the wasm module, which
+   * `connect()` has already loaded, so the cached module resolves immediately.
+   */
+  private announceCameraState(): void {
+    if (this.signaling === null) return;
+    const on = this.localCameraOn;
+    void (async (): Promise<void> => {
+      let bytes: Uint8Array;
+      try {
+        const wasm = await loadWasm();
+        bytes = wasm.composeMediaState(on);
+      } catch {
+        return;
+      }
+      try {
+        // Re-check after the await — the call may have torn down.
+        this.signaling?.sendSignalRelayToCall(bytes);
+      } catch {
+        // socket gone / not open — the signal is best-effort.
+      }
+    })();
   }
 
   /**
@@ -445,6 +515,8 @@ export class SfuCallSession {
     if (existing?.track != null && existing.track.readyState === "live") {
       existing.track.enabled = true;
       this.setVideoPublishState("live");
+      // Camera is live again — tell peers (camera-off-cleanup).
+      this.setLocalCameraOn(true);
       return;
     }
     // A capture is already in flight — do not double-acquire.
@@ -486,6 +558,9 @@ export class SfuCallSession {
       // report `live`; a background renegotiation failure only affects what
       // REMOTE peers see, not the local preview.
       this.setVideoPublishState("live");
+      // Camera is live — tell peers (camera-off-cleanup) so a peer that was
+      // shown camera-off flips back on.
+      this.setLocalCameraOn(true);
       // Refresh the self-preview stream (it now carries a video track).
       this.callbacks.onLocalStream?.(localStream);
     } catch (err) {
@@ -711,6 +786,12 @@ export class SfuCallSession {
       throw new Error("createOffer produced no SDP body");
     }
     this.signaling?.sendSdpOffer(offer.sdp);
+
+    // Announce the initial camera state to any peers already in the call
+    // (camera-off-cleanup) — so a peer that joined camera-off is shown off
+    // from the start, not only after the first toggle. A newcomer that joins
+    // LATER learns it via the peer-join re-announce in `onPeerJoined`.
+    this.announceCameraState();
   }
 
   // -----------------------------------------------------------------
@@ -728,29 +809,64 @@ export class SfuCallSession {
       frame.account_pseudonym,
       frame.peer_tag,
     );
+    // Re-announce our own current camera state so the newcomer is shown the
+    // right thing immediately (camera-off-cleanup) — deterministic initial
+    // sync for a peer who toggled off/on before this peer arrived. The relay
+    // is a broadcast; existing peers re-applying an unchanged state is a
+    // harmless no-op.
+    this.announceCameraState();
   }
 
   private onPeerLeft(frame: SfuPeerLeft): void {
     this.callbacks.onPeerLeft?.(frame.peer_id);
   }
 
-  /** ADR-0032: decode the opaque relay payload and hand it to the caller.
-   *  The SFU payload is base64; `sfuDecodePayload` (wasm) recovers the raw
-   *  bytes. wasm is already loaded (connect() awaited signaling.connect),
-   *  so the cached module resolves immediately. */
+  /** ADR-0032 + camera-off-cleanup: decode the opaque relay payload, classify
+   *  it, and route it. The SFU payload is base64; `sfuDecodePayload` (wasm)
+   *  recovers the raw bytes; `dispatchIncomingEnvelope` classifies them. wasm
+   *  is already loaded (connect() awaited signaling.connect), so the cached
+   *  module resolves immediately.
+   *
+   *  A `MediaState` envelope (camera on/off) is CONSUMED here — it fires
+   *  {@link SfuCallCallbacks.onRemoteMediaState} to flip the peer's roster
+   *  tile. Every other kind (the ADR-0032 CallWelcome / CallKeyPackage /
+   *  commit) falls through to {@link SfuCallCallbacks.onSignalRelay} verbatim,
+   *  so the multi-joiner orchestrator classifies it itself. */
   private onSignalRelayFrame(frame: SfuSignalRelay): void {
-    const cb = this.callbacks.onSignalRelay;
-    if (cb === undefined) return;
+    const mediaCb = this.callbacks.onRemoteMediaState;
+    const relayCb = this.callbacks.onSignalRelay;
+    if (mediaCb === undefined && relayCb === undefined) return;
     void (async (): Promise<void> => {
+      let wasm: Awaited<ReturnType<typeof loadWasm>>;
       let payload: Uint8Array;
       try {
-        const wasm = await loadWasm();
+        wasm = await loadWasm();
         payload = wasm.sfuDecodePayload(frame.payload_b64);
       } catch {
         // A malformed relay payload is dropped, not fatal.
         return;
       }
-      cb(frame.from, payload);
+      // Classify: consume a MediaState signal (camera-off-cleanup); everything
+      // else passes through to onSignalRelay unchanged.
+      if (mediaCb !== undefined) {
+        let isMediaState = false;
+        let cameraOn: boolean | undefined;
+        try {
+          const env = wasm.dispatchIncomingEnvelope(payload);
+          isMediaState = env.kind === wasm.IncomingEnvelopeKind.MediaState;
+          cameraOn = env.cameraOn;
+          env.free();
+        } catch {
+          // A domain-separator match with a malformed body throws; treat the
+          // payload as opaque and fall through to onSignalRelay.
+          isMediaState = false;
+        }
+        if (isMediaState) {
+          if (cameraOn !== undefined) mediaCb(frame.from, cameraOn);
+          return; // consumed — never double-dispatch to onSignalRelay
+        }
+      }
+      relayCb?.(frame.from, payload);
     })();
   }
 

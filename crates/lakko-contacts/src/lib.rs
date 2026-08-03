@@ -61,6 +61,7 @@ pub mod group_invite;
 pub mod group_join_attribution;
 pub mod incoming_envelope;
 pub mod invite;
+pub mod media_state;
 pub mod pseudonym;
 pub mod request;
 pub mod safety;
@@ -91,12 +92,16 @@ pub use group_join_attribution::{
     compose_attribution as compose_group_join_attribution,
     decode_attribution as decode_group_join_attribution, GroupJoinAttribution,
 };
-pub use incoming_envelope::{dispatch_incoming_envelope, IncomingEnvelope};
+pub use incoming_envelope::{dispatch_incoming_envelope, DispatchError, IncomingEnvelope};
 pub use invite::{
     compute_joiner_tag, owner_list_canonical_bytes, revoke_canonical_bytes, sign_owner_list,
     sign_revocation, InviteCapability, BLOB_ID_LEN, JOINER_TAG_LEN, JOINER_TAG_SALT_DOMAIN_V1,
     MAX_LABEL_LEN, NEVER_EXPIRES, OWNER_LIST_DOMAIN_V1, REVOKE_DOMAIN_V1, REVOKE_REPLAY_WINDOW_MS,
     SINGLE_USE,
+};
+pub use media_state::{
+    compose_media_state, decode_media_state, try_unwrap_media_state, MediaState, MediaStateError,
+    MEDIA_STATE_ENVELOPE_DOMAIN_V1, MEDIA_STATE_PAYLOAD_LEN, MEDIA_STATE_VERSION_V1,
 };
 pub use pseudonym::{Direction, IdentityPseudonym, PerRelationship, StrangerInbox, PSEUDONYM_LEN};
 pub use request::{compose, decode_and_verify, open_envelope, ContactRequest, ACCOUNT_ID_LEN};

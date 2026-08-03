@@ -59,6 +59,9 @@ use lakko_contacts::invite::{
     decode_and_verify as rust_invite_decode, sign_owner_list as rust_sign_owner_list,
     sign_revocation as rust_sign_revocation, BLOB_ID_LEN,
 };
+use lakko_contacts::media_state::{
+    compose_media_state as rust_compose_media_state, decode_media_state as rust_decode_media_state,
+};
 use lakko_contacts::{
     compose as rust_compose, decode_and_verify as rust_decode, open_envelope as rust_open,
     ContactError, ContactRequest as RustContactRequest, Direction as RustDirection,
@@ -1299,6 +1302,10 @@ pub enum FfiIncomingEnvelopeKind {
     CallKeyPackage,
     /// Plain free-text intro message (ADR-0005 scenario A).
     IntroMessage,
+    /// Camera on/off media-state signal (camera-off-cleanup).
+    /// The decoded flag rides the `camera_on` field of
+    /// [`FfiIncomingEnvelope`]; `payload` is empty.
+    MediaState,
 }
 
 /// FFI-portable result of [`dispatch_incoming_envelope`].
@@ -1312,15 +1319,18 @@ pub struct FfiIncomingEnvelope {
     /// The dispatched payload — for `CallWelcome` and
     /// `CallKeyPackage` this is the bytes **after** the
     /// 22- / 25-byte domain separator; for `IntroMessage`
-    /// it is the original plaintext verbatim.
+    /// it is the original plaintext verbatim; for
+    /// `MediaState` it is empty.
     pub payload: Vec<u8>,
+    /// Set only for `MediaState`: whether the sender's camera
+    /// is on. `None` for every other kind.
+    pub camera_on: Option<bool>,
 }
 
-/// Single-call dispatcher for HPKE-decrypted
-/// `ContactRequest` plaintexts. Runs the two call-side
-/// unwrap helpers in dispatch order
-/// (welcome → KP-forward → intro-message fallthrough) and
-/// returns the typed variant.
+/// Single-call dispatcher for opaque relay-payload plaintexts.
+/// Runs the classification helpers in dispatch order
+/// (welcome → KP-forward → media-state → intro-message
+/// fallthrough) and returns the typed variant.
 ///
 /// See [`lakko_contacts::incoming_envelope`] for the full
 /// dispatch contract.
@@ -1328,23 +1338,81 @@ pub struct FfiIncomingEnvelope {
 /// # Errors
 ///
 /// * [`FfiError::Contacts`] when a domain separator matched
-///   but the payload is shorter than the kind's minimum
-///   floor (32 bytes for Welcome, 256 bytes for KP-forward).
+///   but the payload is malformed (below the Welcome /
+///   KP-forward minimum floor, or an invalid media-state
+///   payload).
 #[uniffi::export]
 pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvelope, FfiError> {
-    let parsed = rust_dispatch_incoming_envelope(&plaintext).map_err(|err| match err {
-        CallWelcomeError::TruncatedPayload { min, got } => FfiError::Contacts(format!(
-            "incoming envelope payload is {got} bytes, minimum is {min}",
-        )),
-    })?;
-    let (kind, payload) = match parsed {
-        IncomingEnvelope::CallWelcome(p) => (FfiIncomingEnvelopeKind::CallWelcome, p.to_vec()),
-        IncomingEnvelope::CallKeyPackage(p) => {
-            (FfiIncomingEnvelopeKind::CallKeyPackage, p.to_vec())
+    let parsed = rust_dispatch_incoming_envelope(&plaintext)
+        .map_err(|err| FfiError::Contacts(err.to_string()))?;
+    let (kind, payload, camera_on) = match parsed {
+        IncomingEnvelope::CallWelcome(p) => {
+            (FfiIncomingEnvelopeKind::CallWelcome, p.to_vec(), None)
         },
-        IncomingEnvelope::IntroMessage(p) => (FfiIncomingEnvelopeKind::IntroMessage, p.to_vec()),
+        IncomingEnvelope::CallKeyPackage(p) => {
+            (FfiIncomingEnvelopeKind::CallKeyPackage, p.to_vec(), None)
+        },
+        IncomingEnvelope::MediaState { camera_on } => (
+            FfiIncomingEnvelopeKind::MediaState,
+            Vec::new(),
+            Some(camera_on),
+        ),
+        IncomingEnvelope::IntroMessage(p) => {
+            (FfiIncomingEnvelopeKind::IntroMessage, p.to_vec(), None)
+        },
     };
-    Ok(FfiIncomingEnvelope { kind, payload })
+    Ok(FfiIncomingEnvelope {
+        kind,
+        payload,
+        camera_on,
+    })
+}
+
+// ===========================================================================
+// Media-state envelope — camera-off-cleanup (Phase 1)
+// (camera on/off signal over the opaque relay transport)
+// ===========================================================================
+
+/// Compose a camera on/off media-state envelope
+/// (camera-off-cleanup). The sender broadcasts the returned
+/// bytes over the opaque SFU `signal-relay` payload; receivers
+/// classify them (via [`dispatch_incoming_envelope`] or
+/// [`decode_media_state`]) and reset the sender's tile `camOn`
+/// state.
+///
+/// See [`lakko_contacts::media_state`] for the wire format and
+/// threat-model rationale (reuse the opaque relay-payload
+/// pattern; the SFU never parses the payload — invariant #2).
+///
+/// # Errors
+///
+/// Infallible — returns `Ok` unconditionally for shape
+/// symmetry with [`decode_media_state`].
+#[uniffi::export]
+#[must_use]
+pub fn compose_media_state(camera_on: bool) -> Vec<u8> {
+    rust_compose_media_state(camera_on)
+}
+
+/// Strictly decode a media-state envelope, returning the
+/// camera flag (camera-off-cleanup). Fail-closed: rejects a
+/// plaintext that does not carry the media-state domain
+/// separator or whose payload is malformed.
+///
+/// Use [`dispatch_incoming_envelope`] instead when the
+/// plaintext might be any relay-payload kind (it falls through
+/// to the other kinds rather than erroring).
+///
+/// # Errors
+///
+/// * [`FfiError::Contacts`] when `plaintext` is not a valid
+///   media-state envelope (wrong domain / bad length / unknown
+///   version / out-of-range flag byte).
+#[uniffi::export]
+pub fn decode_media_state(plaintext: Vec<u8>) -> Result<bool, FfiError> {
+    rust_decode_media_state(&plaintext)
+        .map(|state| state.camera_on)
+        .map_err(|err| FfiError::Contacts(err.to_string()))
 }
 
 // ============================================================================
@@ -2108,5 +2176,46 @@ mod tests {
             Err(other) => panic!("expected Contacts error, got {other:?}"),
             Ok(_) => panic!("truncated welcome must surface as Err"),
         }
+    }
+
+    // -------------------------------------------------------------------
+    // Media-state envelope (camera-off-cleanup)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn media_state_compose_then_decode_round_trips() {
+        for camera_on in [true, false] {
+            let wrapped = compose_media_state(camera_on);
+            let decoded = decode_media_state(wrapped).expect("decode should succeed");
+            assert_eq!(decoded, camera_on);
+        }
+    }
+
+    #[test]
+    fn decode_media_state_rejects_non_media_state_plaintext() {
+        let intro = b"hello alice".to_vec();
+        match decode_media_state(intro) {
+            Err(FfiError::Contacts(_)) => {},
+            other => panic!("expected Contacts error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatch_routes_media_state_envelope() {
+        for camera_on in [true, false] {
+            let wrapped = compose_media_state(camera_on);
+            let result = dispatch_incoming_envelope(wrapped).expect("dispatch should succeed");
+            assert_eq!(result.kind, FfiIncomingEnvelopeKind::MediaState);
+            assert_eq!(result.camera_on, Some(camera_on));
+            assert!(result.payload.is_empty());
+        }
+    }
+
+    #[test]
+    fn dispatch_media_state_field_is_none_for_other_kinds() {
+        let welcome = wrap_call_welcome(vec![0xABu8; 256]);
+        let result = dispatch_incoming_envelope(welcome).expect("dispatch should succeed");
+        assert_eq!(result.kind, FfiIncomingEnvelopeKind::CallWelcome);
+        assert_eq!(result.camera_on, None);
     }
 }
