@@ -195,10 +195,37 @@ final class MultiJoinerCall {
                 self?.onSfuPeerJoined(peerId: peerId, pseudonym: pseudonym, peerTag: peerTag)
             },
             onPeerLeft: { [weak self] peerId in self?.onSfuPeerLeft(peerId: peerId) },
-            onRemoteVideoTrack: { [weak self] track, _ in self?.ui.setRemoteVideoTrack(track) },
+            onRemoteVideoTrack: { [weak self] track, streamId in
+                // N-way SFU remote video — the SFU pins the downstream MSID
+                // stream-id to the source peer id, and the roster participant
+                // id is `"peer-<peerId>"`, so route the track to that tile.
+                // A nil stream-id (a camera-off `didRemove rtpReceiver` fires
+                // `onRemoteVideoTrack(nil, nil)` with no MSID) can't target one
+                // map entry, so drop it here rather than mis-clear a tile; the
+                // frozen last frame clears on peer-left. Mirrors `SfuCallUi`.
+                guard let streamId else { return }
+                let id = "peer-\(streamId)"
+                self?.ui.setRemoteVideoTrack(track, forParticipant: id)
+                // Flip the tile's `camOn` so its video surface (gated on
+                // `participant.camOn` in `CallScreen`) actually paints on track
+                // arrival — and stops on a nil track. Mirrors web
+                // `setParticipantCamera`.
+                self?.ui.setParticipantCamera(id, track != nil)
+            },
             onLocalVideoTrack: { [weak self] track in self?.ui.setLocalVideoTrack(track) },
             onServerError: { _, _ in },
-            onSignalRelay: { [weak self] from, payload in self?.onRelay(from: from, payload: payload) }
+            onSignalRelay: { [weak self] from, payload in self?.onRelay(from: from, payload: payload) },
+            onRemoteMediaState: { [weak self] from, cameraOn in
+                // Camera on/off cleanup: a remote peer broadcast its camera
+                // state. Flip that participant's roster `camOn` gate (keyed on
+                // `"peer-<peerId>"`, the same tile id `onRemoteVideoTrack` uses)
+                // — the only signal that clears a remote camera-OFF mute (which
+                // fires no track event) and re-shows the tile on camera-back-on.
+                // The session intercepts media-state upstream, so it never
+                // reaches `onRelay`'s (now-dead) `.mediaState` branch. UI-only;
+                // SFrame/seed/MLS untouched.
+                self?.ui.setParticipantCamera("peer-\(from)", cameraOn)
+            }
         )
         self.session = SfuCallSession(config: config, callbacks: callbacks)
     }
@@ -420,8 +447,8 @@ final class MultiJoinerCall {
             // handled in `SfuCallSession.dispatchSignalRelay` (it fires
             // `onRemoteMediaState`, never `onSignalRelay`), so it never reaches
             // this multi-joiner dispatcher. The case is present only to keep the
-            // switch exhaustive. (Wiring the link-join roster's per-tile `camOn`
-            // to `onRemoteMediaState` is an out-of-scope follow-up.)
+            // switch exhaustive. The per-tile `camOn` wiring now lives on the
+            // `onRemoteMediaState` callback in the `Callbacks(...)` block above.
             break
         }
     }

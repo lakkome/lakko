@@ -185,7 +185,18 @@ class MultiJoinerCall private constructor(
                 onWelcome = { self, roster -> onSfuWelcome(self, roster) },
                 onPeerJoined = { peerId, pseudo, tag -> onSfuPeerJoined(peerId, pseudo, tag) },
                 onPeerLeft = { peerId -> onSfuPeerLeft(peerId) },
-                onRemoteVideoTrack = { track, _ -> onRemoteVideoTrack(track) },
+                onRemoteVideoTrack = { track, streamId -> onRemoteVideoTrack(track, streamId) },
+                onRemoteMediaState = { peerId, cameraOn ->
+                    // camera-off-cleanup — a remote peer signalled its camera
+                    // on/off over the opaque SFU relay (SfuCallSession
+                    // intercepts + fires this instead of onSignalRelay). Flip
+                    // that peer's roster camOn so a mute — which fires no track
+                    // event — stops its tile freezing on the last frame (and
+                    // re-renders on unmute). Same target as the
+                    // onRemoteVideoTrack camera flag, driven by an explicit
+                    // signal. Mirrors SfuCallUi.
+                    ui.setParticipantCamera("$PEER_PREFIX$peerId", cameraOn)
+                },
                 onLocalVideoTrack = { track -> ui.setLocalVideoTrack(track) },
                 onSignalRelay = { from, payload -> onRelay(from, payload) },
             ),
@@ -404,10 +415,21 @@ class MultiJoinerCall private constructor(
         // against the fresh election (this client might now be it).
     }
 
-    private fun onRemoteVideoTrack(track: VideoTrack?) {
-        // Sole-remote video (the 2-party case). Per-tile N-way video needs a
-        // per-participant track map — a follow-up (same caveat as SfuCallUi).
-        ui.setRemoteVideoTrack(track)
+    private fun onRemoteVideoTrack(track: VideoTrack?, streamId: String?) {
+        // N-way remote video — key the track on the source peer's roster id
+        // ("peer-<streamId>"; the MSID stream id == the source peer id per the
+        // SFU contract) so each tile renders its own peer. Also flip that
+        // participant's camera flag so its video surface (gated on camOn)
+        // renders — the same shape as SfuCallUi. `track` is non-null on this
+        // path (the pod surfaces only video tracks), so camera flips on; the
+        // mute case (camera-off while staying, which fires no track event) is
+        // handled by the media-state signal via [onRemoteMediaState]. Guard a
+        // null streamId.
+        streamId?.let { id ->
+            val participantId = "$PEER_PREFIX$id"
+            ui.setRemoteVideoTrack(track, participantId)
+            ui.setParticipantCamera(participantId, track != null)
+        }
     }
 
     // -----------------------------------------------------------------
@@ -427,12 +449,10 @@ class MultiJoinerCall private constructor(
             // for us is a broadcast MLS commit an existing member must apply.
             FfiIncomingEnvelopeKind.INTRO_MESSAGE -> onMaybeCommit(env.payload)
             // camera-off-cleanup — a camera on/off media-state signal is
-            // intercepted UPSTREAM by SfuCallSession's onSignalRelay classifier
-            // (it fires onRemoteMediaState, which this link-based call path does
-            // not wire), so it never reaches here. Explicit no-op for
-            // exhaustiveness + intent. Consuming it on this path (roster camOn
-            // for the sole-remote tile) is a follow-up, same caveat as
-            // [onRemoteVideoTrack].
+            // intercepted UPSTREAM by SfuCallSession's classifier, which fires
+            // onRemoteMediaState (now wired above to flip the peer's roster
+            // camOn) instead of onSignalRelay, so it never reaches here.
+            // Explicit no-op for exhaustiveness + intent.
             FfiIncomingEnvelopeKind.MEDIA_STATE -> Unit
         }
     }

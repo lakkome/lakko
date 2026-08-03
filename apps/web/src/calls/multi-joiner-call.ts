@@ -66,7 +66,7 @@ import { callActions, type Participant } from "../state/call-state";
 import { loadWasm } from "../wasm";
 import { groupIdHex } from "../devices/sync/state";
 import { CallJwtClient } from "./call-jwt-client";
-import { SfuCallSession } from "./sfu-call-session";
+import { SfuCallSession, type SfuRemoteTrack } from "./sfu-call-session";
 import type { SfuPeerSnapshot } from "./sfu-signaling-client";
 import {
   CallPresence,
@@ -231,7 +231,9 @@ export class MultiJoinerCall {
         onPeerJoined: (peerId, pseudo, tag): void =>
           this.onSfuPeerJoined(peerId, pseudo, tag),
         onPeerLeft: (peerId): void => this.onSfuPeerLeft(peerId),
-        onRemoteTrack: (rt): void => this.onRemoteTrack(rt.streamId, rt.stream),
+        onRemoteTrack: (rt): void => this.onRemoteTrack(rt),
+        onRemoteMediaState: (peerId, cameraOn): void =>
+          callActions.setParticipantCamera(`${PEER_PREFIX}${peerId}`, cameraOn),
         onSignalRelay: (from, payload): void => this.onRelay(from, payload),
       },
     );
@@ -442,16 +444,36 @@ export class MultiJoinerCall {
     // is evaluated against the fresh election.
   }
 
-  private onRemoteTrack(streamId: string, stream: MediaStream): void {
+  private onRemoteTrack(rt: SfuRemoteTrack): void {
     this.setRemoteStreams((prev) => {
       const next = new Map(prev);
-      next.set(streamId, stream);
+      next.set(rt.streamId, rt.stream);
       return next;
     });
-    const participantId = `${PEER_PREFIX}${streamId}`;
-    if (stream.getVideoTracks().length > 0) {
+    const participantId = `${PEER_PREFIX}${rt.streamId}`;
+    if (rt.track.kind === "video") {
       callActions.setParticipantCamera(participantId, true);
     }
+    // Prune when the SFU stops forwarding this track (peer left / unpublished).
+    // The `ended` event is the reliable track-gone signal — complementary to
+    // the `onRemoteMediaState` camera-toggle (a mute fires no `ended`). Mirrors
+    // `sfu-call-ui.ts` `addStream` exactly.
+    rt.track.addEventListener("ended", () => {
+      if (rt.track.kind === "video") {
+        callActions.setParticipantCamera(participantId, false);
+      }
+      this.setRemoteStreams((prev) => {
+        // Only drop the stream entry when no live tracks remain on it (a peer
+        // that toggles camera off keeps its audio track + entry).
+        if (rt.stream.getTracks().some((t) => t.readyState === "live")) {
+          return prev;
+        }
+        if (!prev.has(rt.streamId)) return prev;
+        const next = new Map(prev);
+        next.delete(rt.streamId);
+        return next;
+      });
+    });
   }
 
   // -----------------------------------------------------------------
