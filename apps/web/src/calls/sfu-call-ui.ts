@@ -145,6 +145,19 @@ export function createSfuCallUi(
   const [videoPublishState, setVideoPublishState] =
     createSignal<VideoPublishState>("off");
 
+  // Sticky last-known remote camera state, keyed by the roster tile id
+  // (`peer-<peerId>`). Closes the join-time reorder race: a newcomer
+  // subscribing to an already camera-muted peer still receives that peer's
+  // present-but-disabled video track, so `addStream` fires and would flip
+  // `camOn` back on. `onRemoteMediaState` is authoritative and records the
+  // true state here; the video-track-arrival flip DEFERS to it — a track
+  // arrival for a peer we already know is muted keeps it off, an unknown peer
+  // defaults on (they published video). Adapter-local (one adapter per call)
+  // and confined to the same reactive scope the existing
+  // `callActions.setParticipantCamera` calls already run on — no new
+  // concurrency; the whole handle (and this map) is discarded on `hangUp`.
+  const lastKnownCameraOn = new Map<string, boolean>();
+
   const localName = options.localDisplayName ?? "You";
   const nameOf = (
     peerId: string,
@@ -180,7 +193,17 @@ export function createSfuCallUi(
     });
     const participantId = peerParticipantId(rt.streamId);
     if (rt.track.kind === "video") {
-      callActions.setParticipantCamera(participantId, true);
+      // Join-race guard: a track ARRIVAL for a peer we already know is
+      // camera-muted (via a prior `onRemoteMediaState`) must NOT flip it back
+      // on — the disabled track is still present on the SFU and its add can
+      // land after the muted re-announce. Defer to the sticky last-known state;
+      // an unknown peer defaults on (they published video). Native pure
+      // decision `trackPresent ? (lastKnown ?? true) : false` — the track is
+      // present here, and the `false`/removal case is the `ended` handler below.
+      callActions.setParticipantCamera(
+        participantId,
+        lastKnownCameraOn.get(participantId) ?? true,
+      );
     }
     // Prune when the SFU stops forwarding this track (peer left /
     // unpublished). The `ended` event is the reliable signal.
@@ -244,7 +267,11 @@ export function createSfuCallUi(
       );
     },
     onPeerLeft: (peerId): void => {
-      callActions.participantLeft(peerParticipantId(peerId));
+      const id = peerParticipantId(peerId);
+      // Forget the departed peer's sticky camera state so a later rejoin under
+      // the same id starts from a clean slate (join-race guard).
+      lastKnownCameraOn.delete(id);
+      callActions.participantLeft(id);
     },
     onRemoteTrack: (rt): void => {
       addStream(rt);
@@ -255,7 +282,12 @@ export function createSfuCallUi(
       // track `ended` event, so without this the tile would keep painting a
       // frozen frame. Complementary to the `ended` pruning in `addStream`
       // (which handles the genuine track-gone / unpublish / leave case).
-      callActions.setParticipantCamera(peerParticipantId(peerId), cameraOn);
+      const id = peerParticipantId(peerId);
+      // Media-state is authoritative — record it so a later (racy) track
+      // arrival for a muted peer defers to it (the join-race guard in
+      // `addStream`).
+      lastKnownCameraOn.set(id, cameraOn);
+      callActions.setParticipantCamera(id, cameraOn);
     },
     onLocalStream: (stream): void => {
       setLocalStream(stream);

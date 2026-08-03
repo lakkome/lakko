@@ -186,6 +186,16 @@ export class MultiJoinerCall {
    *  joiner: on join; both: refreshed on rekey). */
   private safetyNumber: string | undefined;
   private firedLive = false;
+  /** Sticky last-known camera state per remote roster tile (keyed on
+   *  `peer-<peerId>`). Closes the join-time reorder race: a newcomer
+   *  subscribing to an already camera-muted peer still receives that peer's
+   *  present-but-disabled video track, which fires `onRemoteTrack` and would
+   *  flip `camOn` back on. `onRemoteMediaState` is authoritative and records the
+   *  true state here; the track-arrival path defers to it so a known-muted peer
+   *  is never wrongly shown as camera-on. Adapter-local (one adapter per call);
+   *  both callbacks are delivered on the same session scope, so no extra
+   *  synchronisation is needed. Cleared on `hangUp`. */
+  private readonly lastKnownCameraOn = new Map<string, boolean>();
 
   private constructor(
     private readonly wasm: WasmModule,
@@ -232,8 +242,14 @@ export class MultiJoinerCall {
           this.onSfuPeerJoined(peerId, pseudo, tag),
         onPeerLeft: (peerId): void => this.onSfuPeerLeft(peerId),
         onRemoteTrack: (rt): void => this.onRemoteTrack(rt),
-        onRemoteMediaState: (peerId, cameraOn): void =>
-          callActions.setParticipantCamera(`${PEER_PREFIX}${peerId}`, cameraOn),
+        onRemoteMediaState: (peerId, cameraOn): void => {
+          // Media-state is authoritative — record it so a later (racy) track
+          // arrival for a muted peer defers to it (the join-race guard in
+          // `onRemoteTrack`).
+          const id = `${PEER_PREFIX}${peerId}`;
+          this.lastKnownCameraOn.set(id, cameraOn);
+          callActions.setParticipantCamera(id, cameraOn);
+        },
         onSignalRelay: (from, payload): void => this.onRelay(from, payload),
       },
     );
@@ -337,6 +353,7 @@ export class MultiJoinerCall {
   /** Tear down the call. Idempotent. */
   hangUp(): void {
     this.clearAdmissionTimer();
+    this.lastKnownCameraOn.clear();
     this.session.hangUp();
     this.setRemoteStreams(() => new Map());
     callActions.reset();
@@ -438,7 +455,11 @@ export class MultiJoinerCall {
 
   private onSfuPeerLeft(peerId: string): void {
     this.presence.removePeer(peerId);
-    callActions.participantLeft(`${PEER_PREFIX}${peerId}`);
+    const id = `${PEER_PREFIX}${peerId}`;
+    // Forget the departed peer's sticky camera state so a later rejoin under
+    // the same id starts from a clean slate (join-race guard).
+    this.lastKnownCameraOn.delete(id);
+    callActions.participantLeft(id);
     // The committer may have left → recompute (this client might now be it).
     // No action needed beyond keeping presence current; the next inbound KP
     // is evaluated against the fresh election.
@@ -452,7 +473,16 @@ export class MultiJoinerCall {
     });
     const participantId = `${PEER_PREFIX}${rt.streamId}`;
     if (rt.track.kind === "video") {
-      callActions.setParticipantCamera(participantId, true);
+      // Join-race guard: defer to the sticky last-known state so a track
+      // arrival for a known-muted peer is not flipped back on; an unknown peer
+      // defaults on (they published video). Native pure decision
+      // `trackPresent ? (lastKnown ?? true) : false` — the track is present
+      // here, and the removal case is the `ended` handler below. Mirrors
+      // `sfu-call-ui.ts` `addStream`.
+      callActions.setParticipantCamera(
+        participantId,
+        this.lastKnownCameraOn.get(participantId) ?? true,
+      );
     }
     // Prune when the SFU stops forwarding this track (peer left / unpublished).
     // The `ended` event is the reliable track-gone signal — complementary to

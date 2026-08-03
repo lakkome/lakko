@@ -39,6 +39,7 @@ const hooks = vi.hoisted(() => ({
         peer_tag?: string;
       }>,
     ) => void;
+    onPeerLeft?: (peerId: string) => void;
     onRemoteTrack?: (rt: {
       streamId: string;
       track: unknown;
@@ -241,5 +242,65 @@ describe("MultiJoinerCall — onRemoteTrack ended clears camOn + prunes", () => 
     fireEnded();
     expect(camOn("peerX")).toBe(false);
     expect(call.remoteStreams().has("peerX")).toBe(true);
+  });
+});
+
+// ---- Join-race guard (track-arrival vs media-state reorder) -------------
+
+describe("MultiJoinerCall — camera-state join-race guard", () => {
+  it("media-state(off) THEN track-arrival keeps camOn=false", async () => {
+    // THE RACE: peerX is already camera-muted; its media-state(off) lands
+    // FIRST, then its still-present (disabled) video track arrives at this
+    // newcomer. The track arrival must NOT flip peerX back on.
+    call = await MultiJoinerCall.join(makeOpts());
+    seedRosterWithPeerX();
+
+    hooks.captured?.onRemoteMediaState?.("peerX", false);
+    expect(camOn("peerX")).toBe(false);
+
+    const { rt } = fakeRemote("peerX", "video", []);
+    hooks.captured?.onRemoteTrack?.(rt);
+    expect(camOn("peerX")).toBe(false);
+  });
+
+  it("track-arrival THEN media-state(off) ends camOn=false", async () => {
+    // The other order: the track arrives first (no sticky state → defaults on),
+    // then the authoritative media-state(off) corrects it to false.
+    call = await MultiJoinerCall.join(makeOpts());
+    seedRosterWithPeerX();
+
+    const { rt } = fakeRemote("peerX", "video", []);
+    hooks.captured?.onRemoteTrack?.(rt);
+    expect(camOn("peerX")).toBe(true);
+
+    hooks.captured?.onRemoteMediaState?.("peerX", false);
+    expect(camOn("peerX")).toBe(false);
+  });
+
+  it("track-arrival with no prior media-state defaults camOn=true", async () => {
+    // The happy path: a genuinely camera-on peer whose track arrives with no
+    // prior media-state → camOn=true.
+    call = await MultiJoinerCall.join(makeOpts());
+    seedRosterWithPeerX();
+
+    const { rt } = fakeRemote("peerX", "video", []);
+    hooks.captured?.onRemoteTrack?.(rt);
+    expect(camOn("peerX")).toBe(true);
+  });
+
+  it("peer-left clears sticky state so a re-join defaults camOn=true", async () => {
+    // A muted peer leaves; its sticky entry is cleared. A subsequent re-join's
+    // track arrival must NOT inherit the stale "off" — it defaults on again.
+    call = await MultiJoinerCall.join(makeOpts());
+    seedRosterWithPeerX();
+
+    hooks.captured?.onRemoteMediaState?.("peerX", false);
+    hooks.captured?.onPeerLeft?.("peerX");
+
+    // peerX re-joins (roster re-adds the tile) and its track arrives.
+    seedRosterWithPeerX();
+    const { rt } = fakeRemote("peerX", "video", []);
+    hooks.captured?.onRemoteTrack?.(rt);
+    expect(camOn("peerX")).toBe(true);
   });
 });
