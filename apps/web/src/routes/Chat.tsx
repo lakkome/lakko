@@ -435,6 +435,11 @@ function ChatView(props: {
     null,
   );
   const [remoteHasVideo, setRemoteHasVideo] = createSignal(false);
+  // True while a FRESH incoming 1×1 offer advertised video (`parsed.mediaVideo`).
+  // Gates the "Accept with video" affordance on the ringing banner — an
+  // audio-only offer keeps a single "Accept". Set when the answerer session is
+  // spun up for a first-seen offer; cleared when the call ends.
+  const [remoteWantsVideo, setRemoteWantsVideo] = createSignal(false);
   // B2a — mid-call camera-on lifecycle for the 1×1 path (off / starting /
   // live / failed), fed by the CallSession's `onVideoPublishState`. The SFU
   // path exposes the same via `sfuHandle().videoPublishState()`; the effect
@@ -784,6 +789,7 @@ function ChatView(props: {
           setLocalCallStream(null);
           setVideoCall(false);
           setRemoteHasVideo(false);
+          setRemoteWantsVideo(false);
           setOneToOneVideoState("off");
           // G3-3-conn-quality — drop the stale sample so the
           // next call doesn't briefly flash the previous one.
@@ -977,6 +983,25 @@ function ChatView(props: {
     await activeCall.accept();
   }
 
+  /**
+   * Accept an incoming 1×1 call joining with the camera SENDING (the symmetric /
+   * FaceTime-style affordance). The answerer captures audio-only at accept time
+   * (see `applyIncomingSignaling`); opting into video is `accept()` + camOn=true,
+   * which drives the SAME shipped `addLocalVideo` mid-call camera-on path the
+   * caller uses — no duplicated capture / renegotiation logic. `setVideoCall`
+   * BEFORE accept seeds the synthesised local participant's `camOn` so the
+   * connecting-transition roster carries it; `setCamera(true)` after reinforces
+   * once the store has a live local participant. The camera-sync effect then
+   * fires `addLocalVideo` (fail-safe: a capture failure reverts the toggle and
+   * surfaces a message — the call stays up audio-only).
+   */
+  async function onAcceptWithVideo(): Promise<void> {
+    if (activeCall === null) return;
+    setVideoCall(true);
+    await activeCall.accept();
+    callActions.setCamera(true);
+  }
+
   async function onDeclineCall(): Promise<void> {
     if (activeCall === null) return;
     await activeCall.decline();
@@ -1002,6 +1027,9 @@ function ChatView(props: {
             if (parsed.kind !== "offer") return;
             const session = buildCallSession(parsed.callId);
             activeCall = session;
+            // Surface whether the offerer advertised video, so the ringing
+            // banner can offer "Accept with video" (else audio-only "Accept").
+            setRemoteWantsVideo(parsed.mediaVideo);
           }
           // Ignore stale signaling targeting a different
           // call_id.
@@ -2772,6 +2800,27 @@ function ChatView(props: {
               >
                 Accept
               </button>
+              {/* Symmetric / FaceTime-style: a video offer also offers joining
+                  with the camera sending. Audio-only offers keep just "Accept". */}
+              <Show when={remoteWantsVideo()}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    void onAcceptWithVideo();
+                  }}
+                  style={{
+                    background: "var(--surface)",
+                    color: "var(--surface-fg)",
+                    border: "none",
+                    padding: "0.5rem 0.9rem",
+                    "border-radius": "var(--radius-sm)",
+                    "font-weight": "600",
+                    cursor: "pointer",
+                  }}
+                >
+                  Accept with video
+                </button>
+              </Show>
               <button
                 type="button"
                 onClick={() => {

@@ -11,14 +11,17 @@
  * core only sees opaque SDP + ICE strings flow past, plus
  * `Event::*` raises from `oniceconnectionstatechange` etc.
  *
- * MVP scope (Phase 3a8):
+ * Scope:
  *
- *   * Audio-only.
- *   * 1×1 only — no SFU, no SFrame insertable streams (the
- *     P2P path uses native DTLS-SRTP; SFrame layers in once
- *     a SFU sits between the peers in Phase 3b).
- *   * No video, no screen share, no echo cancellation
- *     tuning beyond `getUserMedia` defaults.
+ *   * Audio + video. Both the outbound caller (`dial` with a
+ *     camera) and the incoming answerer ("Accept with video")
+ *     can send video; either side can also turn the camera on
+ *     mid-call (`addLocalVideo`, perfect-negotiation add-track).
+ *   * 1×1 only — no SFU, no SFrame insertable streams. The P2P
+ *     path uses native DTLS-SRTP; SFrame layers in only when a
+ *     SFU sits between the peers (the group-call path).
+ *   * No screen share, no echo-cancellation tuning beyond
+ *     `getUserMedia` defaults.
  *
  * Architecture:
  *
@@ -317,9 +320,17 @@ export class CallSession {
         // Fresh inbound call — we're the answerer.
         this.isOfferer = false;
         this.setState("ringing");
+        // Answerer capture is audio-only, regardless of the offerer's video
+        // flag. The answerer's camera must NOT turn on just because the OFFERER
+        // advertised video — capturing it here acquired-then-muted the track
+        // (the camera-sync effect promptly disabled the freshly acquired
+        // camera, so the peer saw no answerer video). The answerer opts into
+        // SENDING video explicitly via "Accept with video" (accept → camOn=true
+        // → the shipped `addLocalVideo` mid-call camera-on path). It still
+        // RECEIVES the offerer's video either way (see `ontrack`).
         await this.openPeerConnection({
           audio: parsed.mediaAudio,
-          video: parsed.mediaVideo,
+          video: false,
         });
         if (this.pc === null) return;
         try {
@@ -448,9 +459,9 @@ export class CallSession {
    * flipping the captured audio track's `enabled` flag. This is a
    * local-only gate (the track stays in the PeerConnection; we just
    * stop sending real samples), so it needs no renegotiation and
-   * takes effect immediately. Web 1×1 is audio-only, so this is the
-   * one real in-call control; camera capture is a separate
-   * (deferred) web-video feature.
+   * takes effect immediately. The camera has the same-shaped local
+   * gate ({@link setCameraEnabled}) plus a mid-call acquire path
+   * ({@link addLocalVideo}) for a call that started audio-only.
    */
   setMicrophoneEnabled(on: boolean): void {
     if (this.localStream === null) return;
@@ -717,8 +728,10 @@ export class CallSession {
     };
 
     pc.ontrack = (ev): void => {
-      // Audio-only MVP — `ev.streams[0]` is the remote
-      // audio stream. UI binds it to an `<audio>` element.
+      // `ev.streams[0]` carries the remote peer's tracks (audio,
+      // and video if they are sending it). The UI binds it to an
+      // `<audio>` sink + a remote-video tile; a mid-call camera-on
+      // by the peer arrives as a later `ontrack` on the same stream.
       const remote = ev.streams[0];
       if (remote !== undefined) {
         this.callbacks.onRemoteStream(remote);
