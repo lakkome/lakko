@@ -1208,6 +1208,10 @@ private fun ParticipantTile(
     // the SFU's MSID→leaf stream-id mapping the client consumes).
     val localVideoTrack by state.localVideoTrack.collectAsState()
     val remoteVideoTrack by state.remoteVideoTrack.collectAsState()
+    // N-way SFU per-source-peer video map (keyed on the roster id
+    // `"peer-<streamId>"`). A group tile renders its own peer's track from
+    // here; the single [remoteVideoTrack] above stays for the 1×1 P2P case.
+    val remoteVideoTracks by state.remoteVideoTracks.collectAsState()
     val participants by state.participants.collectAsState()
     val settings by state.settings.collectAsState()
     val soleRemoteId = remember(participants) { state.soleRemoteParticipantId }
@@ -1246,11 +1250,15 @@ private fun ParticipantTile(
             // remote participant (1×1). Remote video is never
             // mirrored — the viewer wants the other party's true
             // orientation.
-            val isSoleRemote = !participant.isLocal && participant.id == soleRemoteId
             val track = when {
                 participant.isLocal -> localVideoTrack
-                isSoleRemote -> remoteVideoTrack
-                else -> null
+                // N-way SFU group path: this peer's own track from the
+                // per-peer map (keyed on the roster id == "peer-<streamId>").
+                // Fall back to the single-remote handle only for the 1×1
+                // sole-remote case (the P2P driveFrom path has no MSID map),
+                // so N-way video renders without regressing 1×1.
+                else -> remoteVideoTracks[participant.id]
+                    ?: if (participant.id == soleRemoteId) remoteVideoTrack else null
             }
             if (track != null && eglContext != null) {
                 LocalVideoPreviewView(

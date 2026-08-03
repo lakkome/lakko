@@ -4,7 +4,6 @@
 package me.lakko.app.calls
 
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -89,18 +88,20 @@ public fun LocalVideoPreviewView(
                 attachedTrackRef.value = newTrack
             }
         },
-    )
-
-    // Tear-down: when this composable leaves the composition,
-    // detach the sink + release the renderer's GL textures so
-    // we do not leak one texture pool per recompose-and-
-    // dispose cycle.
-    DisposableEffect(eglContext) {
-        onDispose {
-            attachedTrackRef.value?.let { /* removeSink runs inside AndroidView teardown */ }
+        // Tear-down: when this preview leaves the composition (a peer left,
+        // a camera turned off, or N-way roster churn removed this tile),
+        // detach the sink from the track AND release the renderer's
+        // EGL/GL resources. `SurfaceViewRenderer` holds a texture pool that
+        // leaks one-per-tile without an explicit `release()` — harmless for
+        // the single 1×1 preview, but it bites once many tiles churn in an
+        // N-way call. `onRelease` hands back the exact view instance, which
+        // `DisposableEffect` (no view handle) could not release.
+        onRelease = { view ->
+            attachedTrackRef.value?.removeSink(view)
             attachedTrackRef.value = null
-        }
-    }
+            view.release()
+        },
+    )
 }
 
 /**

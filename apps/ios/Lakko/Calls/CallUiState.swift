@@ -244,9 +244,21 @@ public final class CallUiState: ObservableObject {
     /// one remote track; `CallScreen` renders it on the **sole
     /// remote participant's** tile (see `soleRemoteParticipantId`).
     /// Untouched by `seedMockState()` so the mock design path
-    /// keeps the legacy placeholder; the N-way SFU path will
-    /// replace this with a per-participant track map.
+    /// keeps the legacy placeholder; the N-way SFU path uses the
+    /// per-participant `remoteVideoTracks` map below instead.
     @Published public private(set) var remoteVideoTrack: RTCVideoTrack?
+
+    /// N-way SFU remote video — per-peer video tracks keyed on the
+    /// roster participant id (`"peer-<streamId>"`, where the SFU pins
+    /// the downstream MSID stream-id to the source peer id). Populated
+    /// by `SfuCallUi` from the session's per-stream
+    /// `onRemoteVideoTrack(track, streamId)` callback so every remote
+    /// tile in a group call renders its own participant's stream, not
+    /// just the sole-remote 1×1 case. `CallScreen` prefers this per-tile
+    /// entry and falls back to the single `remoteVideoTrack` handle only
+    /// for the 1×1 P2P `CallSession` path (which has no MSID). Cleared
+    /// wholesale on `reset()`, and per-entry on peer-left.
+    @Published public private(set) var remoteVideoTracks: [String: RTCVideoTrack] = [:]
 
     /// B2a — mid-call camera-on lifecycle, driven by the bound session
     /// (1×1 `CallSession.videoPublishState` via `driveFrom`; SFU via
@@ -355,6 +367,26 @@ public final class CallUiState: ObservableObject {
     public func setCamera(_ on: Bool) {
         guard let local = participants.first(where: { $0.isLocal }) else { return }
         patch(id: local.id) { p in
+            Participant(
+                id: p.id, displayName: p.displayName, isLocal: p.isLocal,
+                micOn: p.micOn, camOn: on, handRaised: p.handRaised,
+                quality: p.quality, speaking: p.speaking,
+                screenSharing: p.screenSharing
+            )
+        }
+    }
+
+    /// N-way SFU remote video — flip a specific participant's `camOn`
+    /// by roster id (unlike `setCamera`, which only touches the LOCAL
+    /// participant). `SfuCallUi` calls this when a remote video track
+    /// arrives / departs so the tile's video surface — gated on
+    /// `participant.camOn` in `CallScreen` — actually paints (a remote
+    /// participant is created `camOn: false`, so without this the
+    /// per-peer track map populates but the tile never renders).
+    /// A no-op if `id` is not in the roster (e.g. the track raced the
+    /// join). Mirrors the web `setParticipantCamera`.
+    public func setParticipantCamera(_ id: String, _ on: Bool) {
+        patch(id: id) { p in
             Participant(
                 id: p.id, displayName: p.displayName, isLocal: p.isLocal,
                 micOn: p.micOn, camOn: on, handRaised: p.handRaised,
@@ -552,9 +584,25 @@ public final class CallUiState: ObservableObject {
 
     /// G3-1-remote-video — push the remote participant's video
     /// track. Same `bind(to:)`-driven / testbed-explicit dual
-    /// use as [`setLocalVideoTrack`].
+    /// use as [`setLocalVideoTrack`]. This single-handle setter is
+    /// for the 1×1 P2P `CallSession` path only; the N-way SFU path
+    /// uses the keyed setter below.
     public func setRemoteVideoTrack(_ track: RTCVideoTrack?) {
         self.remoteVideoTrack = track
+    }
+
+    /// N-way SFU remote video — set (or, with `nil`, remove) a remote
+    /// peer's video track keyed on its roster participant id. Called by
+    /// `SfuCallUi` from the session's per-stream `onRemoteVideoTrack`
+    /// callback (id = `"peer-<streamId>"`) and on peer-left cleanup.
+    /// A `nil` track removes the entry so a departed / camera-off tile
+    /// stops rendering a stale last frame.
+    public func setRemoteVideoTrack(_ track: RTCVideoTrack?, forParticipant id: String) {
+        if let track {
+            self.remoteVideoTracks[id] = track
+        } else {
+            self.remoteVideoTracks.removeValue(forKey: id)
+        }
     }
 
     /// B2a — push the mid-call camera-on lifecycle. Driven by the
@@ -603,6 +651,8 @@ public final class CallUiState: ObservableObject {
         // re-binds against a fresh CallSession.
         self.localVideoTrack = nil
         self.remoteVideoTrack = nil
+        // N-way SFU per-peer video tracks — drop them all.
+        self.remoteVideoTracks = [:]
         // B2a — no camera-on in flight for a fresh call.
         self.videoPublishState = .off
     }

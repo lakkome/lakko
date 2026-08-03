@@ -231,6 +231,18 @@ public class CallUiState(
     private val _remoteVideoTrack = MutableStateFlow<VideoTrack?>(null)
     public val remoteVideoTrack: StateFlow<VideoTrack?> = _remoteVideoTrack.asStateFlow()
 
+    /** N-way SFU remote video — the per-source-peer video track map,
+     *  keyed on the roster participant id (`"peer-<streamId>"`, where the
+     *  MSID stream id == the source peer id per the SFU contract). The
+     *  group [SfuCallUi] path populates this so `CallScreen` renders each
+     *  peer's own video on its own tile; a `null` track removes the entry
+     *  (peer left / camera off). The single [remoteVideoTrack] above is
+     *  retained for the 1×1 P2P [driveFrom] path (a direct PeerConnection
+     *  has no MSID map). Untouched by [seedMockState]. */
+    private val _remoteVideoTracks = MutableStateFlow<Map<String, VideoTrack>>(emptyMap())
+    public val remoteVideoTracks: StateFlow<Map<String, VideoTrack>> =
+        _remoteVideoTracks.asStateFlow()
+
     /** Job for an active [bindTo] subscription. Cancelled on
      *  [reset] / re-bind to a different session so the previous
      *  flow doesn't keep pushing onto the StateFlow. */
@@ -497,6 +509,34 @@ public class CallUiState(
         _remoteVideoTrack.value = track
     }
 
+    /**
+     * N-way SFU remote video — set / remove a single source peer's video
+     * track, keyed on its roster participant id (`"peer-<streamId>"`). A
+     * `null` [track] removes that peer's entry (peer left / camera off).
+     * Copy-on-write against the current map so Compose collectors observe
+     * a fresh instance. Distinct from the single-track [setRemoteVideoTrack]
+     * overload the 1×1 [driveFrom] path uses — the two do not interfere.
+     */
+    public fun setRemoteVideoTrack(track: VideoTrack?, participantId: String) {
+        _remoteVideoTracks.value =
+            if (track == null) {
+                _remoteVideoTracks.value - participantId
+            } else {
+                _remoteVideoTracks.value + (participantId to track)
+            }
+    }
+
+    /**
+     * N-way SFU — flip a specific participant's camera flag. Used for a
+     * REMOTE peer when its video track arrives / is dropped, so the tile's
+     * video surface (gated on `camOn`) actually renders — the Kotlin twin
+     * of the web adapter's `setParticipantCamera`. Distinct from [setCamera],
+     * which only ever touches the local participant. No-op if [id] is unknown.
+     */
+    public fun setParticipantCamera(id: String, on: Boolean) {
+        patch(id) { it.copy(camOn = on) }
+    }
+
     /** The id of the only remote participant, when exactly one
      *  exists (the 1×1 case); `null` when alone or in an N-way
      *  call. `CallScreen` gates remote-video rendering on
@@ -708,6 +748,8 @@ public class CallUiState(
         bindJob = null
         _localVideoTrack.value = null
         _remoteVideoTrack.value = null
+        // N-way SFU per-peer video map — wipe so the next call starts empty.
+        _remoteVideoTracks.value = emptyMap()
         // ADR-0032 piece B2a — no camera-on in flight for a fresh call.
         _videoPublishState.value = VideoPublishState.Off
     }

@@ -310,16 +310,18 @@ private struct ParticipantTile: View {
         if participant.camOn {
             // G3-1-video-ui-screen — render the live LOCAL
             // track for the local participant.
-            // G3-1-remote-video — render the live REMOTE track
-            // for the sole remote participant (the 1×1 case;
-            // `soleRemoteParticipantId` is nil in an N-way call
-            // so we never paint the single handle onto the wrong
-            // tile — per-participant track mapping is the
-            // deferred N-way follow-up, gated on the SFU's
-            // MSID → leaf stream-id mapping the client consumes).
-            // Both paths fall through to the gradient
-            // placeholder when no live track is bound (audio-
-            // only, mock design path, or pre-arming).
+            // Remote video — render the live REMOTE track. In an
+            // N-way SFU call each remote tile has its own track in
+            // `remoteVideoTracks`, keyed on the tile's id
+            // (`"peer-<streamId>"`, the SFU pinning the MSID
+            // stream-id to the source peer id). The 1×1 P2P
+            // `CallSession` path has no MSID, so it falls back to
+            // the single `remoteVideoTrack` handle — but only for
+            // the sole remote participant, so that one handle is
+            // never painted onto the wrong tile in a group call.
+            // Both paths fall through to the gradient placeholder
+            // when no live track is bound (audio-only, mock design
+            // path, or pre-arming).
             if participant.isLocal, let track = state.localVideoTrack {
                 LocalVideoPreviewView(
                     track: track,
@@ -327,15 +329,23 @@ private struct ParticipantTile: View {
                     contentMode: .scaleAspectFill
                 )
             } else if !participant.isLocal,
-                participant.id == state.soleRemoteParticipantId,
-                let track = state.remoteVideoTrack {
+                let track = state.remoteVideoTracks[participant.id]
+                    ?? (participant.id == state.soleRemoteParticipantId
+                        ? state.remoteVideoTrack
+                        : nil) {
                 // Remote video is never mirrored — the viewer
                 // wants the other party's true orientation.
+                // `.id(participant.id)` ties the renderer's
+                // identity to the participant so a gallery reorder
+                // never reuses one peer's `RTCMTLVideoView` for
+                // another peer's stream (a track swap for the SAME
+                // peer is handled by `updateUIView`).
                 LocalVideoPreviewView(
                     track: track,
                     mirrored: false,
                     contentMode: .scaleAspectFill
                 )
+                .id(participant.id)
             } else {
                 LinearGradient(
                     gradient: Gradient(colors: [

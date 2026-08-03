@@ -14,8 +14,9 @@ import WebRTC
 ///   * lifecycle `State` -> `CallPhase` (+ the E2EE pill flips active on
 ///     `connected`, since the SFrame seed is armed at connect),
 ///   * `welcome` / `peer-joined` / `peer-left` -> the roster,
-///   * a remote video track -> the sole-remote tile (per-tile N-way
-///     video is a follow-up; audio plays out automatically).
+///   * a remote video track -> its own per-participant tile, keyed on
+///     the MSID stream-id (== the source peer id, so the roster id is
+///     `"peer-<streamId>"`); audio plays out automatically.
 ///
 /// The caller owns deriving the inputs (the JWT via `CallJwtClient`, the
 /// seed via `Group.exportSecret("lakko/call/v1", callId, 32)`, the leaf
@@ -109,13 +110,35 @@ final class SfuCallUi {
                 )
             },
             onPeerLeft: { peerId in
-                ui.participantLeft(Self.participantId(forPeer: peerId))
+                let id = Self.participantId(forPeer: peerId)
+                // Drop the departed peer's video track first so its tile
+                // stops rendering a stale last frame before the roster
+                // removes the tile.
+                ui.setRemoteVideoTrack(nil, forParticipant: id)
+                ui.participantLeft(id)
             },
-            onRemoteVideoTrack: { track, _ in
-                // Sole-remote video (the 2-party case). Per-tile N-way
-                // video on iOS needs a per-participant track map — a
-                // follow-up, like the web side.
-                ui.setRemoteVideoTrack(track)
+            onRemoteVideoTrack: { track, streamId in
+                // N-way SFU remote video — the SFU pins the downstream
+                // MSID stream-id to the source peer id, and the roster
+                // participant id is `"peer-<peerId>"`, so route the track
+                // to that participant's tile.
+                //
+                // A nil stream-id (a camera-off `didRemove rtpReceiver`
+                // fires `onRemoteVideoTrack(nil, nil)` with no MSID) can't
+                // target one map entry — a known follow-up that needs a
+                // receiver->streamId map in `SfuCallSession`. We drop it
+                // here rather than mis-clear a tile; the frozen last frame
+                // clears when that peer leaves (peer-left cleanup above).
+                guard let streamId else { return }
+                let id = "peer-\(streamId)"
+                ui.setRemoteVideoTrack(track, forParticipant: id)
+                // Flip the tile's `camOn` so its video surface (gated on
+                // `participant.camOn` in `CallScreen`) actually paints on
+                // track arrival — and stops on a nil track. A remote
+                // participant is created `camOn: false`, so without this
+                // the per-peer track map populates but the tile never
+                // renders. Mirrors the web `setParticipantCamera`.
+                ui.setParticipantCamera(id, track != nil)
             },
             onLocalVideoTrack: { track in
                 // Local camera (video call or a mid-call publishVideo) ->

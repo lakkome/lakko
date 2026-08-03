@@ -118,12 +118,27 @@ class SfuCallUi(
                 )
             },
             onPeerLeft = { peerId ->
-                ui.participantLeft(participantId(peerId))
+                val id = participantId(peerId)
+                // Drop the peer's video track first so its tile stops
+                // rendering a frozen last frame, then remove the roster entry.
+                ui.setRemoteVideoTrack(null, id)
+                ui.participantLeft(id)
             },
-            onRemoteVideoTrack = { track, _ ->
-                // Sole-remote video (the 2-party case). Per-tile N-way
-                // video needs a per-participant track map — a follow-up.
-                ui.setRemoteVideoTrack(track)
+            onRemoteVideoTrack = { track, streamId ->
+                // N-way remote video — key the track on the source peer's
+                // roster id (`peer-<streamId>`; the MSID stream id == the
+                // source peer id per the SFU contract) so each tile renders
+                // its own peer. Also flip that participant's camera flag so
+                // the tile's video surface (gated on `camOn`) actually
+                // renders — the same shape as the web `setParticipantCamera`.
+                // `track` is always non-null on this path (the pod surfaces
+                // only video tracks), so the camera flips on. A camera-off-
+                // while-staying signal has no pod callback yet (follow-up).
+                streamId?.let { id ->
+                    val participantId = participantId(id)
+                    ui.setRemoteVideoTrack(track, participantId)
+                    ui.setParticipantCamera(participantId, track != null)
+                }
             },
             onLocalVideoTrack = { track ->
                 // Local camera (video call, or a mid-call publishVideo) ->
