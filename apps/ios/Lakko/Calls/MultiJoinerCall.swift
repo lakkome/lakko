@@ -145,6 +145,15 @@ final class MultiJoinerCall {
     /// Canonical safety number of the CURRENT epoch.
     private var safetyNumber: String?
     private var firedLive = false
+    /// Sticky last-known remote camera state, keyed by the roster tile id
+    /// (`"peer-<peerId>"`), so a video-track ARRIVAL for a peer we already
+    /// know is camera-muted is never wrongly flipped back on (the join-time
+    /// track-vs-media-state reorder race — a newcomer subscribing to an
+    /// already-muted peer gets the still-present disabled track, whose add
+    /// can land after the muted re-announce). Media-state is authoritative;
+    /// a track arrival only defers to it. `@MainActor`-confined like the
+    /// rest of this class — no new concurrency.
+    private var lastKnownCameraOn: [String: Bool] = [:]
 
     // MARK: - Init
 
@@ -203,14 +212,25 @@ final class MultiJoinerCall {
                 // `onRemoteVideoTrack(nil, nil)` with no MSID) can't target one
                 // map entry, so drop it here rather than mis-clear a tile; the
                 // frozen last frame clears on peer-left. Mirrors `SfuCallUi`.
-                guard let streamId else { return }
+                guard let self, let streamId else { return }
                 let id = "peer-\(streamId)"
-                self?.ui.setRemoteVideoTrack(track, forParticipant: id)
+                self.ui.setRemoteVideoTrack(track, forParticipant: id)
                 // Flip the tile's `camOn` so its video surface (gated on
                 // `participant.camOn` in `CallScreen`) actually paints on track
                 // arrival — and stops on a nil track. Mirrors web
                 // `setParticipantCamera`.
-                self?.ui.setParticipantCamera(id, track != nil)
+                //
+                // Join-race guard: a track ARRIVAL for a peer we already know
+                // is camera-muted (via a prior `onRemoteMediaState`) must NOT
+                // flip them back on — the disabled track is still present on
+                // the SFU and its add can land after the muted re-announce.
+                // Defer to the sticky last-known state; an unknown peer defaults
+                // on (they published video); a nil track is always off.
+                let on = MultiJoinerCall.joinRaceCameraOn(
+                    trackPresent: track != nil,
+                    lastKnown: self.lastKnownCameraOn[id]
+                )
+                self.ui.setParticipantCamera(id, on)
             },
             onLocalVideoTrack: { [weak self] track in self?.ui.setLocalVideoTrack(track) },
             onServerError: { _, _ in },
@@ -224,7 +244,12 @@ final class MultiJoinerCall {
                 // The session intercepts media-state upstream, so it never
                 // reaches `onRelay`'s (now-dead) `.mediaState` branch. UI-only;
                 // SFrame/seed/MLS untouched.
-                self?.ui.setParticipantCamera("peer-\(from)", cameraOn)
+                guard let self else { return }
+                let id = "peer-\(from)"
+                // Media-state is authoritative — record it so a later (racy)
+                // track arrival for a muted peer defers to it (join-race guard).
+                self.lastKnownCameraOn[id] = cameraOn
+                self.ui.setParticipantCamera(id, cameraOn)
             }
         )
         self.session = SfuCallSession(config: config, callbacks: callbacks)
@@ -419,7 +444,11 @@ final class MultiJoinerCall {
 
     private func onSfuPeerLeft(peerId: String) {
         presence.removePeer(peerId: peerId)
-        ui.participantLeft("\(peerPrefix)\(peerId)")
+        let id = "\(peerPrefix)\(peerId)"
+        // Forget the departed peer's sticky camera state so a later rejoin
+        // under the same id starts from a clean slate (join-race guard).
+        lastKnownCameraOn.removeValue(forKey: id)
+        ui.participantLeft(id)
         // The committer may have left → the next inbound KP is evaluated against
         // the fresh election (this client might now be it). No action here.
     }
@@ -676,6 +705,15 @@ final class MultiJoinerCall {
     /// Safety number is display-only — a derivation failure must never abort.
     private static func safeSafetyNumber(_ seed: Data) -> String? {
         try? callSafetyNumber(seed: seed)
+    }
+
+    /// Join-race camera resolution (see `lastKnownCameraOn`): media-state is
+    /// authoritative, so a video-track ARRIVAL defers to the last-known state —
+    /// a known-muted peer stays off, an unknown peer defaults on (they
+    /// published video), and a nil track (removal) is always off. Pure so it is
+    /// unit-testable without a live `SfuCallSession`.
+    static func joinRaceCameraOn(trackPresent: Bool, lastKnown: Bool?) -> Bool {
+        trackPresent ? (lastKnown ?? true) : false
     }
 }
 

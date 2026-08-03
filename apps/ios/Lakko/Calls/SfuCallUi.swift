@@ -34,6 +34,24 @@ private final class VideoPublishStateRelay {
     var handler: ((SfuCallSession.VideoPublishState) -> Void)?
 }
 
+/// Sticky last-known remote camera state, keyed by the roster tile id
+/// (`"peer-<peerId>"`), so a video-track ARRIVAL for a peer we already
+/// know is camera-muted is never wrongly flipped back on. This closes the
+/// join-time race: a newcomer subscribing to an already-muted peer A gets
+/// A's still-present (disabled) video track — `onRemoteVideoTrack` fires —
+/// AND A's `onRemoteMediaState(off)` re-announce, in a non-deterministic
+/// order; without the sticky map a late track-add would wrongly show A as
+/// camera-on (a frozen/black tile). Media-state is authoritative; a track
+/// arrival only defers to it.
+///
+/// A reference type (not `self`) so the init-time callbacks can capture it
+/// before `session` is assigned, mirroring `VideoPublishStateRelay`. All
+/// access stays on the `@MainActor` the existing `setParticipantCamera`
+/// calls already run on — no new concurrency.
+private final class CameraStateTracker {
+    var lastKnownCameraOn: [String: Bool] = [:]
+}
+
 @MainActor
 final class SfuCallUi {
     /// The underlying session (for direct control if needed).
@@ -61,6 +79,9 @@ final class SfuCallUi {
         self.ui = ui
         let relay = VideoPublishStateRelay()
         self.videoStateRelay = relay
+        // Sticky last-known remote camera state (join-race guard, below).
+        // Captured by the media-state / track / peer-left closures, not `self`.
+        let cameraTracker = CameraStateTracker()
         let audio = config.audio
         let video = config.video
         // Canonical call safety number derived from the shared seed — the
@@ -111,6 +132,9 @@ final class SfuCallUi {
             },
             onPeerLeft: { peerId in
                 let id = Self.participantId(forPeer: peerId)
+                // Forget the departed peer's sticky camera state so a later
+                // rejoin under the same id starts from a clean slate.
+                cameraTracker.lastKnownCameraOn.removeValue(forKey: id)
                 // Drop the departed peer's video track first so its tile
                 // stops rendering a stale last frame before the roster
                 // removes the tile.
@@ -138,7 +162,19 @@ final class SfuCallUi {
                 // participant is created `camOn: false`, so without this
                 // the per-peer track map populates but the tile never
                 // renders. Mirrors the web `setParticipantCamera`.
-                ui.setParticipantCamera(id, track != nil)
+                //
+                // Join-race guard: a track ARRIVAL for a peer we already
+                // know is camera-muted (via a prior `onRemoteMediaState`)
+                // must NOT flip them back on — the disabled track is still
+                // present on the SFU and its add can land after the muted
+                // re-announce. Defer to the sticky last-known state; an
+                // unknown peer defaults on (they published video); a nil
+                // track is always off.
+                let on = Self.joinRaceCameraOn(
+                    trackPresent: track != nil,
+                    lastKnown: cameraTracker.lastKnownCameraOn[id]
+                )
+                ui.setParticipantCamera(id, on)
             },
             onLocalVideoTrack: { track in
                 // Local camera (video call or a mid-call publishVideo) ->
@@ -162,7 +198,11 @@ final class SfuCallUi {
                 // This is the ONLY signal that clears a remote camera-OFF mute
                 // (which fires no track event) — and re-shows the tile on
                 // camera-back-on. UI-only; SFrame/seed/MLS untouched.
-                ui.setParticipantCamera(Self.participantId(forPeer: from), cameraOn)
+                let id = Self.participantId(forPeer: from)
+                // Media-state is authoritative — record it so a later (racy)
+                // track arrival for a muted peer defers to it (join-race guard).
+                cameraTracker.lastKnownCameraOn[id] = cameraOn
+                ui.setParticipantCamera(id, cameraOn)
             }
         )
         self.session = SfuCallSession(config: config, callbacks: callbacks)
@@ -233,6 +273,15 @@ final class SfuCallUi {
     /// Stable roster id for a remote peer.
     private static func participantId(forPeer peerId: String) -> String {
         "peer-\(peerId)"
+    }
+
+    /// Join-race camera resolution (see `CameraStateTracker`): media-state is
+    /// authoritative, so a video-track ARRIVAL defers to the last-known state —
+    /// a known-muted peer stays off, an unknown peer defaults on (they
+    /// published video), and a nil track (removal) is always off. Pure so it is
+    /// unit-testable without a live `SfuCallSession`.
+    static func joinRaceCameraOn(trackPresent: Bool, lastKnown: Bool?) -> Bool {
+        trackPresent ? (lastKnown ?? true) : false
     }
 
     private static func localParticipant(

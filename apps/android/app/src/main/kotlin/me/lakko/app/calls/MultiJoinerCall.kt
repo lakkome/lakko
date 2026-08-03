@@ -164,6 +164,17 @@ class MultiJoinerCall private constructor(
     private var safetyNumber: String? = null
     private var firedLive = false
 
+    /** Sticky last-known camera state per remote roster tile (keyed on
+     *  "peer-<peerId>"). Closes the join-time reorder race: a newcomer
+     *  subscribing to an already camera-muted peer still receives that peer's
+     *  present-but-disabled video track, which fires [onRemoteVideoTrack] and
+     *  would flip `camOn` back on. [onRemoteMediaState] is authoritative and
+     *  records the true state here; the track-arrival path defers to it so a
+     *  known-muted peer is never wrongly shown as camera-on. Adapter-local (one
+     *  adapter per call); both callbacks are delivered on the same session
+     *  scope, so no extra synchronisation is needed. */
+    private val lastKnownCameraOn = mutableMapOf<String, Boolean>()
+
     init {
         localLeaf = initialLeaf
         session = SfuCallSession(
@@ -194,8 +205,12 @@ class MultiJoinerCall private constructor(
                     // event — stops its tile freezing on the last frame (and
                     // re-renders on unmute). Same target as the
                     // onRemoteVideoTrack camera flag, driven by an explicit
-                    // signal. Mirrors SfuCallUi.
-                    ui.setParticipantCamera("$PEER_PREFIX$peerId", cameraOn)
+                    // signal. Mirrors SfuCallUi. Record the authoritative state
+                    // so a later track ARRIVAL for this peer defers to it (the
+                    // join-race guard in onRemoteVideoTrack).
+                    val id = "$PEER_PREFIX$peerId"
+                    lastKnownCameraOn[id] = cameraOn
+                    ui.setParticipantCamera(id, cameraOn)
                 },
                 onLocalVideoTrack = { track -> ui.setLocalVideoTrack(track) },
                 onSignalRelay = { from, payload -> onRelay(from, payload) },
@@ -323,6 +338,7 @@ class MultiJoinerCall private constructor(
     /** Tear down the call. Idempotent. */
     fun hangUp() {
         clearAdmissionTimer()
+        lastKnownCameraOn.clear()
         session.hangUp()
     }
 
@@ -411,6 +427,7 @@ class MultiJoinerCall private constructor(
     private fun onSfuPeerLeft(peerId: String) {
         presence.removePeer(peerId)
         ui.participantLeft("$PEER_PREFIX$peerId")
+        lastKnownCameraOn.remove("$PEER_PREFIX$peerId")
         // The committer may have left -> the next inbound KP is evaluated
         // against the fresh election (this client might now be it).
     }
@@ -418,17 +435,22 @@ class MultiJoinerCall private constructor(
     private fun onRemoteVideoTrack(track: VideoTrack?, streamId: String?) {
         // N-way remote video — key the track on the source peer's roster id
         // ("peer-<streamId>"; the MSID stream id == the source peer id per the
-        // SFU contract) so each tile renders its own peer. Also flip that
+        // SFU contract) so each tile renders its own peer, then set that
         // participant's camera flag so its video surface (gated on camOn)
-        // renders — the same shape as SfuCallUi. `track` is non-null on this
-        // path (the pod surfaces only video tracks), so camera flips on; the
-        // mute case (camera-off while staying, which fires no track event) is
-        // handled by the media-state signal via [onRemoteMediaState]. Guard a
-        // null streamId.
+        // renders — the same shape as SfuCallUi.
+        //
+        // Join-race guard: a newcomer subscribing to an already camera-muted
+        // peer still receives that peer's present-but-disabled video track, so
+        // this path fires even for a muted peer and would wrongly flip camOn
+        // back on. [onRemoteMediaState] is authoritative and records the true
+        // state in [lastKnownCameraOn]; here we DEFER to it — a track arrival
+        // for a peer we already know is muted keeps it off, an unknown peer
+        // defaults on, a null track is off. Guard a null streamId.
         streamId?.let { id ->
             val participantId = "$PEER_PREFIX$id"
             ui.setRemoteVideoTrack(track, participantId)
-            ui.setParticipantCamera(participantId, track != null)
+            val on = if (track != null) lastKnownCameraOn[participantId] ?: true else false
+            ui.setParticipantCamera(participantId, on)
         }
     }
 

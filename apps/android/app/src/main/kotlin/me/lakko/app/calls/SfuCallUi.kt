@@ -73,6 +73,18 @@ class SfuCallUi(
                 }
             }
 
+        // Sticky last-known camera state per remote roster tile (keyed on
+        // "peer-<peerId>"). Closes the join-time reorder race: a newcomer
+        // subscribing to an already camera-muted peer still receives that
+        // peer's present-but-disabled video track, so onRemoteVideoTrack fires
+        // and would flip camOn back on. onRemoteMediaState is authoritative and
+        // records the true state here; the track-arrival path defers to it so a
+        // known-muted peer is never wrongly shown as camera-on. Captured by the
+        // callbacks directly (like `ui` — not `this`); one adapter per call, and
+        // both callbacks are delivered on the same session scope, so no extra
+        // synchronisation is needed and per-call lifetime handles teardown.
+        val lastKnownCameraOn = mutableMapOf<String, Boolean>()
+
         val callbacks = SfuCallSession.Callbacks(
             onStateChange = { state ->
                 when (state) {
@@ -123,23 +135,31 @@ class SfuCallUi(
                 // rendering a frozen last frame, then remove the roster entry.
                 ui.setRemoteVideoTrack(null, id)
                 ui.participantLeft(id)
+                lastKnownCameraOn.remove(id)
             },
             onRemoteVideoTrack = { track, streamId ->
                 // N-way remote video — key the track on the source peer's
                 // roster id (`peer-<streamId>`; the MSID stream id == the
                 // source peer id per the SFU contract) so each tile renders
-                // its own peer. Also flip that participant's camera flag so
-                // the tile's video surface (gated on `camOn`) actually
-                // renders — the same shape as the web `setParticipantCamera`.
-                // `track` is always non-null on this path (the pod surfaces
-                // only video tracks), so the camera flips on. A camera-off-
-                // while-staying (mute) fires no track event; that case is now
-                // handled by the explicit media-state signal (camera-off-
-                // cleanup) via [SfuCallSession.Callbacks.onRemoteMediaState].
+                // its own peer, then set that participant's camera flag so the
+                // tile's video surface (gated on `camOn`) renders — the same
+                // shape as the web `setParticipantCamera`.
+                //
+                // Join-race guard: a newcomer subscribing to an already
+                // camera-muted peer still receives that peer's present-but-
+                // disabled video track, so this path fires even for a muted
+                // peer and would wrongly flip `camOn` back on. onRemoteMediaState
+                // is authoritative and records the true state in
+                // [lastKnownCameraOn]; here we DEFER to it — a track arrival for
+                // a peer we already know is muted keeps it off, an unknown peer
+                // defaults on, a null track is off. Steady-state mute/unmute is
+                // unaffected (it drives onRemoteMediaState directly).
                 streamId?.let { id ->
                     val participantId = participantId(id)
                     ui.setRemoteVideoTrack(track, participantId)
-                    ui.setParticipantCamera(participantId, track != null)
+                    val on =
+                        if (track != null) lastKnownCameraOn[participantId] ?: true else false
+                    ui.setParticipantCamera(participantId, on)
                 }
             },
             onLocalVideoTrack = { track ->
@@ -176,7 +196,11 @@ class SfuCallUi(
                 // `peerId` == the relay sender's SFU peer id == the roster
                 // tile key ("peer-<peerId>"); setParticipantCamera no-ops on
                 // an unknown id (the media-state raced ahead of peer-joined).
-                ui.setParticipantCamera(participantId(peerId), cameraOn)
+                // Record the authoritative state so a later track ARRIVAL for
+                // this peer defers to it (the join-race guard above).
+                val id = participantId(peerId)
+                lastKnownCameraOn[id] = cameraOn
+                ui.setParticipantCamera(id, cameraOn)
             },
             onServerError = { _, _ -> },
         )
