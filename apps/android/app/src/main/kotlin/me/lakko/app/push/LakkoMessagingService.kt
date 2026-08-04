@@ -18,7 +18,10 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 import me.lakko.app.MainActivity
+import me.lakko.app.ds.DsClient
 
 /**
  * `FirebaseMessagingService` subclass — the FCM-side counterpart
@@ -36,12 +39,20 @@ import me.lakko.app.MainActivity
  *     defined by
  *     `services/push-gw/src/providers/fcm.rs::WakeBody`:
  *     `{ v: "1", d: <device_hex>, g: <group_hex>?, p: <pointer>? }`
- *     The service deliberately does NOT attempt MLS decrypt
- *     (no canonical Identity / cached group state available
- *     in the FMS process before the foreground UI is bound);
- *     we surface a generic "New message" alert with the wake
- *     hint as `Intent` extras so the user's tap lands them in
- *     the right thread.
+ *     When the app is NOT foregrounded and the wake is a
+ *     GroupMessage (`g` + `p` present), the service does a
+ *     READ-ONLY THROWAWAY MLS decrypt
+ *     ([me.lakko.app.push.decryptPushPreview]) to show the REAL
+ *     newest-message text as the notification body — mirror of
+ *     the web `sw-push-decrypt.js`. When the app IS foregrounded
+ *     the live poll loop handles it, so we defer to a generic
+ *     alert. ANY failure (no local account / seed / snapshot,
+ *     non-member group, DS / decrypt failure, a Wakeup /
+ *     MailboxMessage kind) falls back to the generic "New
+ *     message" — invariant #4: a frame that will not authenticate
+ *     is dropped, never shown as a guess. Either way the wake hint
+ *     rides `Intent` extras so the user's tap lands in the right
+ *     thread.
  *
  * Registered in `AndroidManifest.xml`:
  *
@@ -85,14 +96,59 @@ public class LakkoMessagingService : FirebaseMessagingService() {
 
     override fun onMessageReceived(message: RemoteMessage) {
         val wake = parseWakeBody(message.data)
-        showWakeNotification(wake)
+        // Silent-push background decrypt (mirror of web sw.js):
+        //   * Foreground → defer. The live poll loop does the durable
+        //     processing + its own preview; a background decrypt here
+        //     would be redundant (and could double-notify).
+        //   * Backgrounded + a GroupMessage wake → READ-ONLY THROWAWAY
+        //     decrypt for the real newest-message text.
+        // `isAppForegrounded` fails toward `false` (background), so a
+        // probe error never suppresses the real preview.
+        val preview: PushPreview? =
+            if (wake?.groupHex != null &&
+                wake.pointer != null &&
+                !isAppForegrounded(applicationContext)
+            ) {
+                backgroundPreviewBlocking(wake)
+            } else {
+                null
+            }
+        showWakeNotification(wake, preview)
+    }
+
+    /**
+     * Run the READ-ONLY throwaway decrypt synchronously within the FMS
+     * budget. [onMessageReceived] is dispatched on a Firebase-owned
+     * background thread (never the main thread), so `runBlocking` here
+     * keeps the process + wakelock alive until we post the
+     * notification without risking an ANR. A [withTimeoutOrNull] guard
+     * keeps us well inside the FMS window; a timeout or ANY failure
+     * degrades to the generic notification (returns `null`).
+     */
+    private fun backgroundPreviewBlocking(wake: WakeBody): PushPreview? {
+        return try {
+            runBlocking {
+                withTimeoutOrNull(BACKGROUND_DECRYPT_BUDGET_MS) {
+                    DsClient().use { ds ->
+                        val deps = buildBackgroundDecryptDeps(applicationContext, ds)
+                        decryptPushPreview(
+                            PushWake(groupHex = wake.groupHex, pointer = wake.pointer),
+                            deps,
+                        )
+                    }
+                }
+            }
+        } catch (cause: Throwable) {
+            Log.w(TAG, "background decrypt failed; showing generic notification", cause)
+            null
+        }
     }
 
     // -----------------------------------------------------------------
     // Notification rendering
     // -----------------------------------------------------------------
 
-    private fun showWakeNotification(wake: WakeBody?) {
+    private fun showWakeNotification(wake: WakeBody?, preview: PushPreview?) {
         ensureNotificationChannel(applicationContext)
 
         // Click intent: launch MainActivity with the wake hint
@@ -128,8 +184,10 @@ public class LakkoMessagingService : FirebaseMessagingService() {
             // from 1.15c. When the app ships a real icon pack
             // (post-MVP), swap this to `R.mipmap.ic_launcher`.
             .setSmallIcon(android.R.drawable.sym_def_app_icon)
-            .setContentTitle("Lakko")
-            .setContentText("New message")
+            // Real decrypted preview when the background decrypt
+            // yielded one; the generic fallback otherwise.
+            .setContentTitle(preview?.title ?: "Lakko")
+            .setContentText(preview?.body ?: "New message")
             .setAutoCancel(true)
             // Tag-replace by group so a burst within the same
             // chat collapses into one OS notification — matches
@@ -193,6 +251,12 @@ public class LakkoMessagingService : FirebaseMessagingService() {
     public companion object {
         /** Logcat tag for FCM-side logging. */
         public const val TAG: String = "lakko-fcm"
+
+        /** Wall-clock budget for the synchronous background decrypt.
+         *  `onMessageReceived` must return well within the FCM window
+         *  (~10 s), so we cap the DS-fetch + MLS-decrypt work and fall
+         *  back to the generic notification on a timeout. */
+        private const val BACKGROUND_DECRYPT_BUDGET_MS: Long = 8_000
 
         /** Notification channel id. Lives across process
          *  restarts; created on first wake via

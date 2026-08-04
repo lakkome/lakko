@@ -75,9 +75,39 @@ public class KnownGroupsStore(context: Context) {
         prefs.edit().remove(keyFor(accountIdB64)).apply()
     }
 
-    private fun keyFor(accountIdB64: String): String = "known_groups.$accountIdB64"
+    /**
+     * Reverse lookup: which locally-stored account (if any) knows
+     * [groupIdHex]? Enumerates every `known_groups.<accountIdB64>`
+     * row and returns the first `accountIdB64` whose set contains the
+     * hex, or `null` when no account on this device knows the group.
+     *
+     * Used by the FCM silent-push background decrypt
+     * ([me.lakko.app.push.decryptPushPreview]) — the FMS has no live
+     * [ChatRepository] to consult, so it resolves the wake's group
+     * pseudonym to an account straight from this store. The comparison
+     * is case-insensitive so a wake's `g` in either hex case matches
+     * (stored ids are lowercase, produced by
+     * [me.lakko.app.ds.DsClient.pseudonymHex]).
+     */
+    public fun findAccountForGroup(groupIdHex: String): String? {
+        val needle = groupIdHex.lowercase()
+        for ((key, _) in prefs.all) {
+            if (!key.startsWith(KEY_PREFIX)) continue
+            val set = prefs.getStringSet(key, null) ?: continue
+            if (set.any { it.lowercase() == needle }) {
+                return key.removePrefix(KEY_PREFIX)
+            }
+        }
+        return null
+    }
+
+    private fun keyFor(accountIdB64: String): String = KEY_PREFIX + accountIdB64
 
     public companion object {
         public const val PREFS_NAME: String = "me.lakko.known-groups.v1"
+
+        /** Per-account key prefix — the suffix is the standard-base64
+         *  `accountIdB64` shared by every per-account store. */
+        private const val KEY_PREFIX: String = "known_groups."
     }
 }
