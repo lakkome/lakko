@@ -26,13 +26,30 @@
  * `bundle-report.mjs`'s policy from 1.16f1).
  */
 import { createHash } from "node:crypto";
-import { readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const DIST = join(HERE, "..", "dist");
 const SW_OUT = join(DIST, "sw.js");
+
+/** wasm-pack output (`npm run build:wasm`) — the SW loads a copy of
+ *  this for the 1.21 silent background decrypt. */
+const WASM_SRC_DIR = join(HERE, "..", "wasm");
+/** Stable, non-hashed dist path the module SW dynamic-`import()`s.
+ *  Deliberately OUTSIDE the precache (excluded below) so a cold
+ *  install never downloads the ~11 MB wasm — it is fetched on demand
+ *  only when a push actually needs a background decrypt. */
+const SW_WASM_DIR = join(DIST, "sw-wasm");
+const SW_WASM_FILES = ["lakko_ffi_wasm.js", "lakko_ffi_wasm_bg.wasm"];
 
 /** Top-level paths we must precache so an offline cold-start
  *  works. The HTML shell is the entry point; everything else is
@@ -53,6 +70,25 @@ function walk(dir) {
   return out;
 }
 
+/** Copy the wasm-pack output into `dist/sw-wasm/` for the SW's
+ *  on-demand background decrypt. Fatal if the wasm build is missing —
+ *  the SW's `import()` would 404 at runtime and every push would fall
+ *  back to generic, so fail loudly at build time instead. */
+function copySwWasm() {
+  mkdirSync(SW_WASM_DIR, { recursive: true });
+  for (const file of SW_WASM_FILES) {
+    const src = join(WASM_SRC_DIR, file);
+    if (!existsSync(src)) {
+      console.error(
+        `build-sw: ${src} missing — run \`npm run build:wasm\` before the SW build`,
+      );
+      process.exit(1);
+    }
+    copyFileSync(src, join(SW_WASM_DIR, file));
+  }
+  console.log(`build-sw: copied ${SW_WASM_FILES.length} wasm file(s) → dist/sw-wasm/`);
+}
+
 function main() {
   let allFiles;
   try {
@@ -65,6 +101,12 @@ function main() {
     process.exit(1);
   }
 
+  // Copy the wasm-pack output into `dist/sw-wasm/` so the module SW
+  // can dynamic-`import()` it for the silent background decrypt. Done
+  // BEFORE the precache walk so the exclusion below can keep it out of
+  // the install manifest (it is fetched on demand, never precached).
+  copySwWasm();
+
   // Compute the precache list. We turn absolute file paths into
   // root-relative URLs (`/assets/foo.js`) — that's the shape `fetch`
   // sees when the page asks for an asset.
@@ -72,6 +114,13 @@ function main() {
   for (const path of allFiles) {
     const rel = relative(DIST, path);
     if (EXCLUDE_RE.test(rel) || EXCLUDE_RE.test(rel.split("/").pop())) continue;
+    // The SW's on-demand wasm copy must NOT be precached — an 11 MB
+    // blob on every cold install (even for users who never get a
+    // push) would be a footgun, and it is loaded lazily via a
+    // separate dynamic import anyway.
+    if (rel === "sw-wasm" || rel.startsWith("sw-wasm/") || rel.startsWith("sw-wasm\\")) {
+      continue;
+    }
     if (rel === "index.html") continue; // already covered by ROOT_ASSETS
     precache.add("/" + rel);
   }

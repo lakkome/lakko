@@ -63,9 +63,30 @@ export async function registerServiceWorker(): Promise<boolean> {
   }
 
   try {
-    const registration = await navigator.serviceWorker.register(SW_URL, {
-      scope: SW_SCOPE,
-    });
+    // Register as a MODULE service worker: the `push` handler
+    // dynamic-`import()`s the pure decrypt core + the wasm glue for the
+    // 1.21 silent background decrypt, and `import()` is only permitted
+    // in a module worker. Browsers that don't support module SWs
+    // (older Safari/Firefox) reject `type: "module"`; we fall back to a
+    // classic registration so offline caching + generic push still
+    // work — on those the background `import()` throws and the push
+    // path degrades to the generic notification (no regression).
+    let registration: ServiceWorkerRegistration;
+    try {
+      registration = await navigator.serviceWorker.register(SW_URL, {
+        scope: SW_SCOPE,
+        type: "module",
+      });
+    } catch (moduleErr) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        "lakko: module service worker registration failed; falling back to classic (silent push decrypt disabled)",
+        moduleErr,
+      );
+      registration = await navigator.serviceWorker.register(SW_URL, {
+        scope: SW_SCOPE,
+      });
+    }
     registered = true;
 
     // Edge case: a previous load already left a worker in the

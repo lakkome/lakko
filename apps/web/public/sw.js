@@ -39,14 +39,27 @@
  *     iteration can swap to "wait for user click" once we ship a
  *     "new version available" banner UI.
  *
- * ## Push events (placeholder)
+ * ## Push events (1.21 — silent background decrypt)
  *
- *   * 1.18 (encrypted-push receive path) wires the `push` event
- *     handler — payload is `(group_pseudonym, envelope_pointer)`,
- *     SW fetches the ciphertext, hands it off to the WASM core via
- *     a clients-postMessage round, and renders a local
- *     notification. We expose the empty handler now so the SW
- *     subscription surface is in place.
+ *   * The `push` payload is `{ v, d, g, p }` (schema version, device
+ *     pseudonym, group_id hex, DS envelope pointer — see
+ *     `services/push-gw/src/providers/webpush.rs::WakeBody`).
+ *   * When a Lakko tab is open + visible, the SW just postMessages the
+ *     wake and shows a notification — the visible app drives the real
+ *     preview + refresh itself.
+ *   * When NO tab is open, the SW does a READ-ONLY THROWAWAY MLS
+ *     decrypt: it reads the device key + last-persisted MLS snapshot +
+ *     identity seed from IndexedDB (all same-origin), restores a
+ *     TEMPORARY in-memory `Group`, GETs the DS journal, and shows the
+ *     REAL newest-message text as the notification body. It NEVER
+ *     persists the advanced state / advances the app's cursor (that
+ *     would desync the app's ratchet — G-34 class); the append-only
+ *     cursor-based journal makes the app's own re-processing on
+ *     foreground idempotent. See `public/sw-push-decrypt.js`.
+ *   * ANY failure in that path (unsupported module SW, wasm/IDB/DS/
+ *     decrypt failure, an unhandled Wakeup / MailboxMessage kind)
+ *     degrades to the generic "New message" notification. The push
+ *     handler never throws (a thrown handler drops the notification).
  */
 
 // Replaced by `scripts/build-sw.mjs` after `vite build`.
@@ -216,73 +229,343 @@ function parseWakeBody(data) {
 }
 
 self.addEventListener("push", (event) => {
-  // Decode + dispatch. The SW deliberately does NOT attempt to
-  // decrypt the MLS message itself: doing so would require the
-  // non-extractable device key (which the SW *can* access, since
-  // the IDB-stored CryptoKey is keyed by origin), the cached MLS
-  // group state, and ~megabytes of WASM glue — all running inside
-  // a ≤30-second budget the OS hands the SW before killing it.
-  //
-  // Instead we:
-  //
-  //   1. Decode the wake payload (no crypto, just JSON).
-  //   2. Render a generic notification ("New message"). The user
-  //      sees the wake; the preview body is intentionally
-  //      content-free because the SW context can't safely render
-  //      decrypted plaintext without holding the full MLS state.
-  //   3. Forward the wake hint to any open tabs via postMessage
-  //      so they can refresh the visible thread without waiting
-  //      for the next poll tick.
-  //
-  // Click-through: `notificationclick` (below) opens the right
-  // route — the SPA itself drives the actual decrypt.
+  // Decode the wake payload (no crypto — just JSON), then run the
+  // dispatch. `parseWakeBody` never throws; `handlePush` wraps its
+  // whole body so a thrown push handler can never drop the wake
+  // notification entirely.
   const wake = parseWakeBody(event.data);
-  event.waitUntil(
-    (async () => {
-      // (a) Tell every open Lakko tab about the wake — they
-      //     handle the foreground refresh path natively + can
-      //     surface a real (decrypted) preview if the page is
-      //     visible.
-      try {
-        const clients = await self.clients.matchAll({
-          type: "window",
-          includeUncontrolled: false,
-        });
-        for (const c of clients) {
-          c.postMessage({ type: "LAKKO_PUSH_WAKE", wake });
-        }
-      } catch {
-        // Best effort — a closed tab is the common case.
-      }
-
-      // (b) Build a local notification. Generic body so we don't
-      //     leak any decrypted content from the SW context (which
-      //     would need to hydrate the full MLS state).
-      const title = "Lakko";
-      const body = "New message";
-      // Click-action carries the wake hint so the route layer can
-      // jump to the right chat without re-polling.
-      const data = wake !== null ? { wake } : {};
-      try {
-        await self.registration.showNotification(title, {
-          body,
-          tag: wake?.groupHex ?? "lakko-default",
-          // Replacing-tag behavior: a quick burst of messages in
-          // the same group collapses into one OS notification —
-          // matches the platform-native chat-app pattern.
-          renotify: false,
-          data,
-          icon: "/icon-192.png",
-          badge: "/icon-96.png",
-        });
-      } catch {
-        // Some browsers + private modes don't allow showing
-        // notifications from a push event under certain
-        // conditions — best-effort, don't throw past `waitUntil`.
-      }
-    })(),
-  );
+  event.waitUntil(handlePush(wake));
 });
+
+/**
+ * The push dispatch:
+ *
+ *   1. Tell every open Lakko tab about the wake so a *visible* app
+ *      handles the foreground refresh + its own preview natively.
+ *   2. When NO visible tab is open, try a READ-ONLY THROWAWAY MLS
+ *      decrypt (1.21) so the notification body carries the REAL
+ *      newest-message text instead of a generic "New message". Any
+ *      failure degrades to generic — the SW never throws out of the
+ *      push handler (a thrown handler drops the notification).
+ *   3. Show the notification (real preview if we got one, else
+ *      generic).
+ *
+ * Click-through: `notificationclick` (below) opens the right route.
+ */
+async function handlePush(wake) {
+  // (a) Notify open tabs + detect whether one is visible.
+  let hasVisibleTab = false;
+  try {
+    const clients = await self.clients.matchAll({
+      type: "window",
+      includeUncontrolled: false,
+    });
+    for (const c of clients) {
+      c.postMessage({ type: "LAKKO_PUSH_WAKE", wake });
+      if (c.visibilityState === "visible") hasVisibleTab = true;
+    }
+  } catch {
+    // Best effort — a closed tab is the common case (and the exact
+    // case the background decrypt below exists for).
+  }
+
+  // (b) Background decrypt — only when there is no visible tab (a
+  //     visible app drives the real preview itself). Never throws:
+  //     `backgroundPreview` returns null on ANY failure.
+  let preview = null;
+  if (!hasVisibleTab) {
+    try {
+      preview = await backgroundPreview(wake);
+    } catch {
+      preview = null; // Belt-and-suspenders — degrade to generic.
+    }
+  }
+
+  // (c) Show the notification. Real preview when we have one; the
+  //     generic "New message" fallback otherwise (unchanged behavior).
+  const title = preview?.title ?? "Lakko";
+  const body = preview?.body ?? "New message";
+  const tag = preview?.tag ?? wake?.groupHex ?? "lakko-default";
+  const data = wake !== null ? { wake } : {};
+  try {
+    await self.registration.showNotification(title, {
+      body,
+      // Replacing-tag behavior: a quick burst of messages in the
+      // same group collapses into one OS notification.
+      tag,
+      renotify: false,
+      data,
+      icon: "/icon-192.png",
+      badge: "/icon-96.png",
+    });
+  } catch {
+    // Some browsers + private modes don't allow showing notifications
+    // from a push event under certain conditions — best-effort, don't
+    // throw past `waitUntil`.
+  }
+}
+
+// ----- background decrypt (1.21) -------------------------------
+//
+// READ-ONLY THROWAWAY MLS decrypt for the no-open-tab case. See the
+// heavily-commented pure core in `public/sw-push-decrypt.js` for the
+// load-bearing correctness discipline: this path reads the device
+// key + last-persisted MLS snapshot + identity seed, restores a
+// TEMPORARY in-memory `Group`, GETs the DS journal, extracts the
+// newest message's plaintext preview, and DISCARDS everything. It
+// NEVER persists the advanced snapshot, NEVER advances the app's DS
+// cursor, NEVER writes MLS state — doing so would desync the
+// foreground app's ratchet (the G-34 nonce-reuse-on-crash class). The
+// DS journal is append-only + cursor-based, so the app re-processing
+// from its OWN cursor on next foreground is idempotent.
+//
+// Stable dist URLs (build-sw.mjs copies the wasm-pack output into
+// `dist/sw-wasm/` and Vite copies `sw-push-decrypt.js` verbatim). Both
+// are dynamic-imported, so this only works in a MODULE service worker
+// (see `src/sw/register.ts`); a classic registration makes `import()`
+// throw, which the try/catch above turns into the generic fallback.
+const SW_DECRYPT_MODULE_URL = "/sw-push-decrypt.js";
+const SW_WASM_GLUE_URL = "/sw-wasm/lakko_ffi_wasm.js";
+const SW_WASM_BINARY_URL = "/sw-wasm/lakko_ffi_wasm_bg.wasm";
+
+/** Cache the loaded wasm namespace across pushes in this SW lifetime. */
+let swWasmPromise = null;
+
+/** Cache the loaded pure-core module promise. */
+let swDecryptModulePromise = null;
+
+/**
+ * Attempt the background decrypt. Returns `{ title, body, tag }` on
+ * success, or `null` for ANY reason (unsupported module SW, wasm
+ * unavailable, no local account/key/snapshot, DS failure, nothing
+ * decryptable) so the caller shows the generic notification.
+ */
+async function backgroundPreview(wake) {
+  // Only GroupMessage wakes carry a group + pointer; the pure core
+  // also re-checks. Wakeup / MailboxMessage stay generic (follow-up).
+  if (
+    wake === null ||
+    typeof wake.groupHex !== "string" ||
+    typeof wake.pointer !== "number"
+  ) {
+    return null;
+  }
+
+  const [core, wasm] = await Promise.all([loadDecryptModule(), loadSwWasm()]);
+  const deps = buildDecryptDeps(wasm);
+  return core.decryptPushPreview(wake, deps);
+}
+
+/** Dynamic-import the pure decrypt core (module SW only). */
+function loadDecryptModule() {
+  if (swDecryptModulePromise === null) {
+    swDecryptModulePromise = import(SW_DECRYPT_MODULE_URL).catch((err) => {
+      // Reset so a transient failure can be retried on the next push.
+      swDecryptModulePromise = null;
+      throw err;
+    });
+  }
+  return swDecryptModulePromise;
+}
+
+/** Dynamic-import + init the wasm core with an explicit `.wasm` URL. */
+function loadSwWasm() {
+  if (swWasmPromise === null) {
+    swWasmPromise = (async () => {
+      const mod = await import(SW_WASM_GLUE_URL);
+      // `mod.default` is wasm-pack's `__wbg_init`; the explicit URL
+      // avoids relying on `import.meta.url` resolution.
+      await mod.default(SW_WASM_BINARY_URL);
+      return mod;
+    })().catch((err) => {
+      swWasmPromise = null;
+      throw err;
+    });
+  }
+  return swWasmPromise;
+}
+
+/**
+ * Build the READ-ONLY dependency object the pure core consumes. Every
+ * capability here is a read or a pure compute — there is deliberately
+ * NO write path (no `saveSnapshot` / `saveMessageLog` / cursor advance).
+ */
+function buildDecryptDeps(wasm) {
+  return {
+    // Which locally-stored account owns this group? `knownGroupIds` is
+    // stored UNENCRYPTED (public group_id routing addresses), so this
+    // needs no device key. Also validates the wake's group is known.
+    resolveAccount: async (groupHex) => {
+      const rows = await idbGetAll("lakko-mls", "snapshots");
+      for (const row of rows) {
+        const known = Array.isArray(row?.knownGroupIds) ? row.knownGroupIds : [];
+        for (const kg of known) {
+          let bytes;
+          try {
+            bytes = base64Decode(kg);
+          } catch {
+            continue;
+          }
+          if (bytesToHex(bytes) === groupHex) {
+            return { accountId: row.accountId, groupIdBytes: bytes };
+          }
+        }
+      }
+      return null;
+    },
+    // Non-extractable AES-GCM device root key (usable for decrypt).
+    getDeviceKey: async (accountId) => {
+      const row = await idbGet("lakko-auth", "device_keys", accountId);
+      return row?.key ?? null;
+    },
+    // 64-byte AccountIdentity seed, unwrapped under the device key.
+    getIdentitySeed: async (accountId, deviceKey) => {
+      const row = await idbGet(
+        "lakko-account-identity-seed",
+        "seeds",
+        accountId,
+      );
+      if (row === undefined || row.ciphertext === undefined) return null;
+      try {
+        const seed = await aesGcmUnwrap(deviceKey, row.ciphertext);
+        return seed.length === 64 ? seed : null;
+      } catch {
+        return null;
+      }
+    },
+    // Last-persisted MLS provider snapshot, unwrapped under the device key.
+    loadSnapshot: async (accountId, deviceKey) => {
+      const row = await idbGet("lakko-mls", "snapshots", accountId);
+      if (row === undefined || row.ciphertext === undefined) return null;
+      try {
+        const snapshotBytes = await aesGcmUnwrap(deviceKey, row.ciphertext);
+        const knownGroupIds = Array.isArray(row.knownGroupIds)
+          ? row.knownGroupIds
+          : [];
+        return { snapshotBytes, knownGroupIds };
+      } catch {
+        return null;
+      }
+    },
+    wasm,
+    // READ-ONLY DS group-journal fetch of rows strictly after `afterId`.
+    dsFetchGroup: async (groupIdBytes, afterId) => {
+      const hex = bytesToHex(groupIdBytes);
+      const url = `/api/ds/group/${hex}/messages?after=${afterId}&wait=0`;
+      const resp = await fetch(url, { method: "GET" });
+      if (!resp.ok) throw new Error(`ds fetch ${resp.status}`);
+      const json = await resp.json();
+      const messages = (json?.messages ?? []).map((m) => ({
+        id: m.id,
+        payload: base64Decode(m.payload_b64),
+        createdAt: m.created_at,
+      }));
+      return { messages };
+    },
+    // The app's last-persisted per-group cursor (READ-ONLY). Used as
+    // the fetch start so intervening commits replay + the epoch stays
+    // correct. Best-effort — null (→ core uses pointer-1) on any miss.
+    startCursor: async (accountId, groupHex) => {
+      const deviceKey = await idbGet(
+        "lakko-auth",
+        "device_keys",
+        accountId,
+      ).then((r) => r?.key ?? null);
+      if (deviceKey === null) return null;
+      const row = await idbGet("lakko-message-log", "logs", accountId);
+      if (row === undefined || row.ciphertext === undefined) return null;
+      try {
+        const plain = await aesGcmUnwrap(deviceKey, row.ciphertext);
+        const payload = JSON.parse(new TextDecoder().decode(plain));
+        const cursorStr = payload?.groups?.[groupHex]?.cursor;
+        if (typeof cursorStr !== "string") return null;
+        const n = Number(cursorStr);
+        return Number.isFinite(n) ? n : null;
+      } catch {
+        return null;
+      }
+    },
+  };
+}
+
+// ----- minimal IDB + crypto helpers (SW context) ---------------
+//
+// The SW is same-origin, so it can open the very databases the app
+// wrote. It CANNOT import the `src/*` store modules (not in the SW's
+// module graph), so these are hand-rolled read-only mirrors of the
+// `keyPath: "accountId"` stores. All READS.
+
+function idbOpen(name) {
+  return new Promise((resolve, reject) => {
+    // Open WITHOUT a version so the SW never triggers an
+    // `onupgradeneeded` schema change: it reads the app's DB at
+    // whatever version the app created, never racing the app's own
+    // migration. (A never-created DB opens empty; the `contains(store)`
+    // guard below then returns undefined.) This also removes the
+    // version-drift hazard of hardcoding each store's version here.
+    const req = indexedDB.open(name);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error ?? new Error("idb open failed"));
+    req.onblocked = () => reject(new Error("idb open blocked"));
+  });
+}
+
+async function idbGet(name, store, key) {
+  const db = await idbOpen(name);
+  try {
+    if (!db.objectStoreNames.contains(store)) return undefined;
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction(store, "readonly");
+      const req = tx.objectStore(store).get(key);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error ?? new Error("idb get failed"));
+    });
+  } finally {
+    db.close();
+  }
+}
+
+async function idbGetAll(name, store) {
+  const db = await idbOpen(name);
+  try {
+    if (!db.objectStoreNames.contains(store)) return [];
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction(store, "readonly");
+      const req = tx.objectStore(store).getAll();
+      req.onsuccess = () => resolve(req.result ?? []);
+      req.onerror = () => reject(req.error ?? new Error("idb getAll failed"));
+    });
+  } finally {
+    db.close();
+  }
+}
+
+/** Unwrap `[12-byte IV | AES-GCM ciphertext+tag]` under `deviceKey`. */
+async function aesGcmUnwrap(deviceKey, blob) {
+  if (blob.length < 12 + 16) throw new Error("ciphertext too short");
+  const iv = blob.slice(0, 12);
+  const ct = blob.slice(12);
+  return new Uint8Array(
+    await crypto.subtle.decrypt({ name: "AES-GCM", iv }, deviceKey, ct),
+  );
+}
+
+/** Lowercase-hex encode (matches `ds/client.ts` `pseudonymHex`). */
+function bytesToHex(bytes) {
+  let out = "";
+  for (let i = 0; i < bytes.length; i++) {
+    out += (bytes[i] ?? 0).toString(16).padStart(2, "0");
+  }
+  return out;
+}
+
+/** Standard-alphabet base64 → bytes (matches `auth/account-id`). */
+function base64Decode(b64) {
+  const binary = atob(b64);
+  const out = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+  return out;
+}
 
 // ----- notificationclick (1.20b) -------------------------------
 
