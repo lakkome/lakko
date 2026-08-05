@@ -60,10 +60,16 @@ public final class MessageLogStore {
     /// isolation comes from the file path, not the wrap key.
     private static let wrapKeyAccount: String = "wrap-key"
 
-    private let envelopeDir: URL?
+    /// Container subdirectory holding the per-account envelopes.
+    private static let subdir: String = "lakko-message-logs"
+
+    /// Old app-private location (`Application Support/lakko-message-logs`).
+    /// Retained as the read-fallback + migration source per ADR-0041 —
+    /// never deleted by the migration.
+    private let oldEnvelopeDir: URL?
 
     public init() {
-        self.envelopeDir = Self.envelopeDir()
+        self.oldEnvelopeDir = Self.oldEnvelopeDir()
     }
 
     // MARK: - Public API
@@ -73,8 +79,12 @@ public final class MessageLogStore {
     /// Keychain / FS failures surface as logged-and-swallowed
     /// no-ops at the caller (`ChatRepository` calls this on
     /// every mutation, so the next successful call recovers).
+    ///
+    /// ADR-0041 — the authoritative copy is written into the App Group
+    /// container (NSE-readable), falling back to the old location when
+    /// the App Group is unavailable.
     public func putLog(accountIdB64: String, payload: MessageLogPayload) {
-        guard let envelopeDir = envelopeDir else { return }
+        guard let target = writeTarget(accountIdB64: accountIdB64) else { return }
         let plaintext: Data
         do {
             let encoder = JSONEncoder()
@@ -83,33 +93,22 @@ public final class MessageLogStore {
         } catch {
             return
         }
-        let wrapKey: SymmetricKey
-        do {
-            wrapKey = try loadOrCreateWrapKey()
-        } catch {
-            return
-        }
-        let sealed: AES.GCM.SealedBox
-        do {
-            sealed = try AES.GCM.seal(plaintext, using: wrapKey)
-        } catch {
-            return
-        }
-        guard let combined = sealed.combined else { return }
+        let wrapKey = SymmetricKey(data: KeychainWrapKey.loadOrCreate(
+            service: Self.wrapKeyService, account: Self.wrapKeyAccount))
+        guard let combined = try? AES.GCM.seal(plaintext, using: wrapKey).combined else { return }
 
         do {
             try FileManager.default.createDirectory(
-                at: envelopeDir,
+                at: target.dir,
                 withIntermediateDirectories: true
             )
-            try Self.excludeFromBackup(envelopeDir)
+            SharedStorage.excludeFromBackup(target.dir)
         } catch {
             // best-effort
         }
-        let url = envelopeURL(accountIdB64: accountIdB64)
         do {
-            try combined.write(to: url, options: .atomic)
-            try Self.excludeFromBackup(url)
+            try combined.write(to: target.url, options: .atomic)
+            SharedStorage.excludeFromBackup(target.url)
         } catch {
             // best-effort
         }
@@ -123,23 +122,17 @@ public final class MessageLogStore {
     ///   * JSON parse failure (corrupt blob — caller starts
     ///     with an empty timeline + re-bootstraps from the DS
     ///     journal cursor).
+    ///
+    /// ADR-0041 — prefers the App Group container copy, falls back to the
+    /// old location so an un-migrated log still reads.
     public func getLog(accountIdB64: String) -> MessageLogPayload? {
-        let url = envelopeURL(accountIdB64: accountIdB64)
-        guard FileManager.default.fileExists(atPath: url.path) else {
+        guard let url = readableURL(accountIdB64: accountIdB64) else { return nil }
+        guard let combined = try? Data(contentsOf: url) else { return nil }
+        guard let keyBytes = KeychainWrapKey.read(
+            service: Self.wrapKeyService, account: Self.wrapKeyAccount) else {
             return nil
         }
-        let combined: Data
-        do {
-            combined = try Data(contentsOf: url)
-        } catch {
-            return nil
-        }
-        let wrapKey: SymmetricKey
-        do {
-            wrapKey = try loadOrCreateWrapKey()
-        } catch {
-            return nil
-        }
+        let wrapKey = SymmetricKey(data: keyBytes)
         let plaintext: Data
         do {
             let sealed = try AES.GCM.SealedBox(combined: combined)
@@ -147,83 +140,71 @@ public final class MessageLogStore {
         } catch {
             return nil
         }
-        do {
-            return try JSONDecoder().decode(MessageLogPayload.self, from: plaintext)
-        } catch {
-            return nil
-        }
+        return try? JSONDecoder().decode(MessageLogPayload.self, from: plaintext)
     }
 
-    /// Erase the log for `accountIdB64`. No-op when absent.
-    /// Called from `forgetDevice`.
+    /// Erase the log for `accountIdB64` from **both** the App Group
+    /// container and the old location. No-op when absent. Called from
+    /// `forgetDevice`.
     public func deleteLog(accountIdB64: String) {
-        let url = envelopeURL(accountIdB64: accountIdB64)
-        try? FileManager.default.removeItem(at: url)
-    }
-
-    // MARK: - Keychain-resident wrap key
-
-    private func loadOrCreateWrapKey() throws -> SymmetricKey {
-        if let existing = try readWrapKey() {
-            return SymmetricKey(data: existing)
+        if let n = newURL(accountIdB64: accountIdB64) {
+            try? FileManager.default.removeItem(at: n)
         }
-        let fresh = SymmetricKey(size: .bits256)
-        try storeWrapKey(fresh.withUnsafeBytes { Data($0) })
-        return fresh
-    }
-
-    private func readWrapKey() throws -> Data? {
-        let query: [CFString: Any] = [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: Self.wrapKeyService,
-            kSecAttrAccount: Self.wrapKeyAccount,
-            kSecReturnData: true,
-            kSecMatchLimit: kSecMatchLimitOne
-        ]
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-        switch status {
-        case errSecSuccess:
-            return item as? Data
-        case errSecItemNotFound:
-            return nil
-        default:
-            throw MessageLogStoreError.keychain(
-                status: status,
-                operation: "SecItemCopyMatching"
-            )
+        if let o = oldURL(accountIdB64: accountIdB64) {
+            try? FileManager.default.removeItem(at: o)
         }
     }
 
-    private func storeWrapKey(_ keyBytes: Data) throws {
-        let baseQuery: [CFString: Any] = [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: Self.wrapKeyService,
-            kSecAttrAccount: Self.wrapKeyAccount
-        ]
-        _ = SecItemDelete(baseQuery as CFDictionary)
-
-        var addQuery = baseQuery
-        addQuery[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        addQuery[kSecValueData] = keyBytes
-        let status = SecItemAdd(addQuery as CFDictionary, nil)
-        if status != errSecSuccess {
-            throw MessageLogStoreError.keychain(
-                status: status,
-                operation: "SecItemAdd"
-            )
+    /// ADR-0041 Phase 1 — one-time, idempotent, **copy-not-move**
+    /// migration of the log into the shared storage the NSE can read: the
+    /// AES wrap key into the shared Keychain access group, and the
+    /// envelope file into the App Group container. Never deletes the old
+    /// copies.
+    public func migrateToSharedStorage(accountIdB64: String) {
+        KeychainWrapKey.migrate(service: Self.wrapKeyService, account: Self.wrapKeyAccount)
+        guard let old = oldURL(accountIdB64: accountIdB64),
+              let shared = newURL(accountIdB64: accountIdB64) else { return }
+        if SharedStorage.migrateFileIfNeeded(old: old, shared: shared) == shared {
+            SharedStorage.excludeFromBackup(shared)
         }
     }
 
-    // MARK: - File layout
+    // MARK: - File layout (dual-location, ADR-0041)
 
-    private func envelopeURL(accountIdB64: String) -> URL {
-        let safe = accountIdB64.replacingOccurrences(of: "/", with: "_")
-        return (envelopeDir ?? FileManager.default.temporaryDirectory)
-            .appendingPathComponent("\(safe).bin")
+    private func fileName(_ accountIdB64: String) -> String {
+        "\(accountIdB64.replacingOccurrences(of: "/", with: "_")).bin"
     }
 
-    private static func envelopeDir() -> URL? {
+    private func newEnvelopeDir() -> URL? {
+        SharedStorage.containerURL()?.appendingPathComponent(Self.subdir)
+    }
+
+    private func newURL(accountIdB64: String) -> URL? {
+        newEnvelopeDir()?.appendingPathComponent(fileName(accountIdB64))
+    }
+
+    private func oldURL(accountIdB64: String) -> URL? {
+        oldEnvelopeDir?.appendingPathComponent(fileName(accountIdB64))
+    }
+
+    private func readableURL(accountIdB64: String) -> URL? {
+        let fm = FileManager.default
+        if let n = newURL(accountIdB64: accountIdB64), fm.fileExists(atPath: n.path) { return n }
+        if let o = oldURL(accountIdB64: accountIdB64), fm.fileExists(atPath: o.path) { return o }
+        return nil
+    }
+
+    private func writeTarget(accountIdB64: String) -> (dir: URL, url: URL)? {
+        if let dir = newEnvelopeDir() {
+            return (dir, dir.appendingPathComponent(fileName(accountIdB64)))
+        }
+        if let dir = oldEnvelopeDir {
+            return (dir, dir.appendingPathComponent(fileName(accountIdB64)))
+        }
+        return nil
+    }
+
+    private static func oldEnvelopeDir() -> URL? {
         guard let appSupport = try? FileManager.default.url(
             for: .applicationSupportDirectory,
             in: .userDomainMask,
@@ -232,14 +213,7 @@ public final class MessageLogStore {
         ) else {
             return nil
         }
-        return appSupport.appendingPathComponent("lakko-message-logs")
-    }
-
-    private static func excludeFromBackup(_ url: URL) throws {
-        var url = url
-        var values = URLResourceValues()
-        values.isExcludedFromBackup = true
-        try url.setResourceValues(values)
+        return appSupport.appendingPathComponent(subdir)
     }
 }
 

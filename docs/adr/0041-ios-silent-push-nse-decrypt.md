@@ -5,7 +5,7 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0041: iOS silent-push background decrypt in the notification-service extension
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-05
 - **Context:** iOS push notifications — background message-preview decrypt. The
   hard-platform slice of the silent-push arc already shipped on **web** (commit

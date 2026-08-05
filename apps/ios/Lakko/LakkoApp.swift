@@ -119,6 +119,19 @@ struct LakkoApp: App {
                 .task {
                     AntiCensorshipManager.shared.armFromSettings()
                 }
+                // ADR-0041 Phase 1 — one-time, idempotent App Group
+                // storage migration for the rehydrated session account, so
+                // the notification-service extension can read the five
+                // decrypt inputs. Copy-not-move + never-delete-old +
+                // read-new-with-fallback-to-old, so an un-provisioned build
+                // or an interrupted migration degrades to today's behaviour
+                // rather than stranding the foreground app. No-op when
+                // there is no session. Idempotent — safe every launch.
+                .task {
+                    if case let .session(account) = authRepository.state {
+                        SharedStorageMigration.runIfNeeded(accountIdB64: account.accountIdB64)
+                    }
+                }
                 // G-29 — queue a background contact-inbox refresh as we leave
                 // the foreground, so a request that arrives while backgrounded
                 // is picked up by the next opportunistic `BGAppRefreshTask`

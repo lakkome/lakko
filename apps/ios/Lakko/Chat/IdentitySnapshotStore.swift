@@ -72,10 +72,16 @@ public final class IdentitySnapshotStore {
     /// account's snapshot wraps under the same key.
     private static let wrapKeyAccount: String = "wrap-key"
 
-    private let envelopeDir: URL?
+    /// Container subdirectory holding the per-account envelopes.
+    private static let subdir: String = "lakko-mls-snapshots"
+
+    /// Old app-private location (`Application Support/lakko-mls-snapshots`).
+    /// Retained as the read-fallback + migration source per ADR-0041 —
+    /// never deleted by the migration.
+    private let oldEnvelopeDir: URL?
 
     public init() {
-        self.envelopeDir = Self.envelopeDir()
+        self.oldEnvelopeDir = Self.oldEnvelopeDir()
     }
 
     // MARK: - Public API
@@ -84,40 +90,32 @@ public final class IdentitySnapshotStore {
     /// envelope. Best-effort — Keychain or filesystem failures
     /// surface as a logged-and-swallowed no-op at the
     /// ``ChatRepository`` call site.
+    ///
+    /// ADR-0041 — the authoritative copy is written into the App Group
+    /// container (NSE-readable). When the App Group is unavailable the
+    /// write falls back to the old `Application Support` location, so
+    /// steady-state behaviour is unchanged on an unprovisioned build.
     public func putSnapshot(accountIdB64: String, blob: Data) {
-        guard let envelopeDir = envelopeDir else { return }
-        let wrapKey: SymmetricKey
-        do {
-            wrapKey = try loadOrCreateWrapKey()
-        } catch {
-            return // best-effort
-        }
-        let sealed: AES.GCM.SealedBox
-        do {
-            sealed = try AES.GCM.seal(blob, using: wrapKey)
-        } catch {
-            return
-        }
+        guard let target = writeTarget(accountIdB64: accountIdB64) else { return }
+        let wrapKey = SymmetricKey(data: KeychainWrapKey.loadOrCreate(
+            service: Self.wrapKeyService, account: Self.wrapKeyAccount))
         // `combined` lays out `nonce || ciphertext || tag` per
         // RFC 5116 §3.1 — same on-disk envelope shape the Android
         // side produces (12-byte IV + ciphertext + 16-byte tag).
-        guard let combined = sealed.combined else { return }
+        guard let combined = try? AES.GCM.seal(blob, using: wrapKey).combined else { return }
 
-        // Make sure the parent directory exists + is flagged as
-        // excluded from iCloud backup.
         do {
             try FileManager.default.createDirectory(
-                at: envelopeDir,
+                at: target.dir,
                 withIntermediateDirectories: true
             )
-            try Self.excludeFromBackup(envelopeDir)
+            SharedStorage.excludeFromBackup(target.dir)
         } catch {
             // best-effort
         }
-        let url = envelopeURL(accountIdB64: accountIdB64)
         do {
-            try combined.write(to: url, options: .atomic)
-            try Self.excludeFromBackup(url)
+            try combined.write(to: target.url, options: .atomic)
+            SharedStorage.excludeFromBackup(target.url)
         } catch {
             // best-effort
         }
@@ -138,14 +136,15 @@ public final class IdentitySnapshotStore {
     /// The load-bearing step is the `.atomic` file write: it stages a
     /// temp file and renames it into place, so a reader never observes a
     /// torn envelope. `excludeFromBackup` failures are non-critical for
-    /// durability and stay best-effort (`try?`).
+    /// durability and stay best-effort.
     public func putSnapshotDurable(accountIdB64: String, blob: Data) throws {
-        guard let envelopeDir = envelopeDir else {
+        guard let target = writeTarget(accountIdB64: accountIdB64) else {
             throw IdentitySnapshotStoreError.unavailable(
-                "no application-support directory to persist the MLS snapshot"
+                "no directory available to persist the MLS snapshot"
             )
         }
-        let wrapKey = try loadOrCreateWrapKey()
+        let wrapKey = SymmetricKey(data: KeychainWrapKey.loadOrCreate(
+            service: Self.wrapKeyService, account: Self.wrapKeyAccount))
         let sealed = try AES.GCM.seal(blob, using: wrapKey)
         // `combined` lays out `nonce || ciphertext || tag` per RFC 5116
         // §3.1 — same envelope shape ``putSnapshot`` produces.
@@ -153,116 +152,108 @@ public final class IdentitySnapshotStore {
             throw IdentitySnapshotStoreError.sealFailed
         }
         try FileManager.default.createDirectory(
-            at: envelopeDir,
+            at: target.dir,
             withIntermediateDirectories: true
         )
-        try? Self.excludeFromBackup(envelopeDir)
-        let url = envelopeURL(accountIdB64: accountIdB64)
-        try combined.write(to: url, options: .atomic)
-        try? Self.excludeFromBackup(url)
+        SharedStorage.excludeFromBackup(target.dir)
+        try combined.write(to: target.url, options: .atomic)
+        SharedStorage.excludeFromBackup(target.url)
     }
 
     /// Read + unwrap the snapshot for `accountIdB64`. Returns
     /// `nil` on missing file, Keychain failure, or AES-GCM auth
     /// failure (e.g. wrap-key rotated since the envelope was
     /// written).
+    ///
+    /// ADR-0041 — prefers the App Group container copy, falls back to the
+    /// old `Application Support` copy so an un-migrated snapshot still
+    /// reads. The wrap key is read (not minted) — a cold read with no key
+    /// simply returns `nil`.
     public func getSnapshot(accountIdB64: String) -> Data? {
-        let url = envelopeURL(accountIdB64: accountIdB64)
-        guard FileManager.default.fileExists(atPath: url.path) else {
+        guard let url = readableURL(accountIdB64: accountIdB64) else { return nil }
+        guard let combined = try? Data(contentsOf: url) else { return nil }
+        guard let keyBytes = KeychainWrapKey.read(
+            service: Self.wrapKeyService, account: Self.wrapKeyAccount) else {
             return nil
         }
-        let combined: Data
-        do {
-            combined = try Data(contentsOf: url)
-        } catch {
+        let wrapKey = SymmetricKey(data: keyBytes)
+        guard let sealed = try? AES.GCM.SealedBox(combined: combined),
+              let plaintext = try? AES.GCM.open(sealed, using: wrapKey) else {
             return nil
         }
-        let wrapKey: SymmetricKey
-        do {
-            wrapKey = try loadOrCreateWrapKey()
-        } catch {
-            return nil
-        }
-        do {
-            let sealed = try AES.GCM.SealedBox(combined: combined)
-            return try AES.GCM.open(sealed, using: wrapKey)
-        } catch {
-            return nil
-        }
+        return plaintext
     }
 
-    /// Erase the snapshot for `accountIdB64`. No-op if absent.
+    /// Erase the snapshot for `accountIdB64` from **both** the App Group
+    /// container and the old location. No-op if absent.
     public func deleteSnapshot(accountIdB64: String) {
-        let url = envelopeURL(accountIdB64: accountIdB64)
-        try? FileManager.default.removeItem(at: url)
-    }
-
-    // MARK: - Keychain-resident wrap key
-
-    private func loadOrCreateWrapKey() throws -> SymmetricKey {
-        if let existing = try readWrapKey() {
-            return SymmetricKey(data: existing)
+        if let n = newURL(accountIdB64: accountIdB64) {
+            try? FileManager.default.removeItem(at: n)
         }
-        let fresh = SymmetricKey(size: .bits256)
-        try storeWrapKey(fresh.withUnsafeBytes { Data($0) })
-        return fresh
-    }
-
-    private func readWrapKey() throws -> Data? {
-        let query: [CFString: Any] = [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: Self.wrapKeyService,
-            kSecAttrAccount: Self.wrapKeyAccount,
-            kSecReturnData: true,
-            kSecMatchLimit: kSecMatchLimitOne
-        ]
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-        switch status {
-        case errSecSuccess:
-            return item as? Data
-        case errSecItemNotFound:
-            return nil
-        default:
-            throw IdentitySnapshotStoreError.keychain(
-                status: status,
-                operation: "SecItemCopyMatching"
-            )
+        if let o = oldURL(accountIdB64: accountIdB64) {
+            try? FileManager.default.removeItem(at: o)
         }
     }
 
-    private func storeWrapKey(_ keyBytes: Data) throws {
-        // Same delete-then-add upsert pattern as DeviceKeyStore.
-        let baseQuery: [CFString: Any] = [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: Self.wrapKeyService,
-            kSecAttrAccount: Self.wrapKeyAccount
-        ]
-        _ = SecItemDelete(baseQuery as CFDictionary)
-
-        var addQuery = baseQuery
-        addQuery[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        addQuery[kSecValueData] = keyBytes
-        let status = SecItemAdd(addQuery as CFDictionary, nil)
-        if status != errSecSuccess {
-            throw IdentitySnapshotStoreError.keychain(
-                status: status,
-                operation: "SecItemAdd"
-            )
+    /// ADR-0041 Phase 1 — one-time, idempotent, **copy-not-move**
+    /// migration of the snapshot into the shared storage the NSE can
+    /// read: the AES wrap key into the shared Keychain access group, and
+    /// the envelope file into the App Group container. Never deletes the
+    /// old copies.
+    public func migrateToSharedStorage(accountIdB64: String) {
+        // Wrap key first so the copied envelope is decryptable from the
+        // shared access group.
+        KeychainWrapKey.migrate(service: Self.wrapKeyService, account: Self.wrapKeyAccount)
+        guard let old = oldURL(accountIdB64: accountIdB64),
+              let shared = newURL(accountIdB64: accountIdB64) else { return }
+        if SharedStorage.migrateFileIfNeeded(old: old, shared: shared) == shared {
+            SharedStorage.excludeFromBackup(shared)
         }
     }
 
-    // MARK: - File layout
+    // MARK: - File layout (dual-location, ADR-0041)
 
-    private func envelopeURL(accountIdB64: String) -> URL {
+    private func fileName(_ accountIdB64: String) -> String {
         // Replace any `/` in the base64 account id with `_` so the
         // segment is filesystem-safe — same posture as Android.
-        let safe = accountIdB64.replacingOccurrences(of: "/", with: "_")
-        return (envelopeDir ?? FileManager.default.temporaryDirectory)
-            .appendingPathComponent("\(safe).bin")
+        "\(accountIdB64.replacingOccurrences(of: "/", with: "_")).bin"
     }
 
-    private static func envelopeDir() -> URL? {
+    /// New authoritative location: the App Group container. `nil` when the
+    /// App Group is not provisioned for this process.
+    private func newEnvelopeDir() -> URL? {
+        SharedStorage.containerURL()?.appendingPathComponent(Self.subdir)
+    }
+
+    private func newURL(accountIdB64: String) -> URL? {
+        newEnvelopeDir()?.appendingPathComponent(fileName(accountIdB64))
+    }
+
+    private func oldURL(accountIdB64: String) -> URL? {
+        oldEnvelopeDir?.appendingPathComponent(fileName(accountIdB64))
+    }
+
+    /// Prefer the App Group container copy, fall back to the old copy.
+    private func readableURL(accountIdB64: String) -> URL? {
+        let fm = FileManager.default
+        if let n = newURL(accountIdB64: accountIdB64), fm.fileExists(atPath: n.path) { return n }
+        if let o = oldURL(accountIdB64: accountIdB64), fm.fileExists(atPath: o.path) { return o }
+        return nil
+    }
+
+    /// Prefer the App Group container as the write target (single
+    /// authoritative NSE-readable copy), fall back to the old location.
+    private func writeTarget(accountIdB64: String) -> (dir: URL, url: URL)? {
+        if let dir = newEnvelopeDir() {
+            return (dir, dir.appendingPathComponent(fileName(accountIdB64)))
+        }
+        if let dir = oldEnvelopeDir {
+            return (dir, dir.appendingPathComponent(fileName(accountIdB64)))
+        }
+        return nil
+    }
+
+    private static func oldEnvelopeDir() -> URL? {
         guard let appSupport = try? FileManager.default.url(
             for: .applicationSupportDirectory,
             in: .userDomainMask,
@@ -271,14 +262,7 @@ public final class IdentitySnapshotStore {
         ) else {
             return nil
         }
-        return appSupport.appendingPathComponent("lakko-mls-snapshots")
-    }
-
-    private static func excludeFromBackup(_ url: URL) throws {
-        var url = url
-        var values = URLResourceValues()
-        values.isExcludedFromBackup = true
-        try url.setResourceValues(values)
+        return appSupport.appendingPathComponent(subdir)
     }
 }
 

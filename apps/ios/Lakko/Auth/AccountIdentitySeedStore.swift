@@ -79,8 +79,17 @@ public enum AccountIdentitySeedStore {
     /// (if any) is overwritten — same delete-then-add pattern
     /// ``ExportKeyStore/putExportKey(accountIdB64:exportKey:)`` uses.
     ///
+    /// ADR-0041 Phase 1 — the seed is written into the **shared Keychain
+    /// access group** (``SharedStorage/keychainAccessGroup``) so the NSE
+    /// process can read it. If the shared access group is unavailable for
+    /// this process (an unprovisioned simulator build, an entitlement
+    /// that has not resolved), the write **falls back to the app-private
+    /// item** so the crown-jewel seed is *never* left unpersisted. A
+    /// pre-existing app-private seed is **left in place** (copy-not-move);
+    /// a future cleanup phase removes it.
+    ///
     /// - Throws: ``AccountIdentitySeedStoreError`` on a wrong-length
-    ///   input or a non-success `OSStatus` from `SecItem…`.
+    ///   input or a non-success `OSStatus` from the fallback `SecItemAdd`.
     public static func putAccountIdentitySeed(
         accountIdB64: String,
         seed: Data
@@ -91,16 +100,19 @@ public enum AccountIdentitySeedStore {
             )
         }
 
-        deleteIgnoringMissing(accountIdB64: accountIdB64)
+        // Prefer the shared access group (NSE-readable). Overwrites any
+        // existing shared item, leaves the app-private item untouched.
+        if addSeed(accountIdB64: accountIdB64, seed: seed,
+                   accessGroup: SharedStorage.keychainAccessGroup) == errSecSuccess {
+            return
+        }
 
-        let addQuery: [CFString: Any] = [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: serviceTag,
-            kSecAttrAccount: accountIdB64,
-            kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
-            kSecValueData: seed
-        ]
-        let status = SecItemAdd(addQuery as CFDictionary, nil)
+        // Fallback: the app-private item (today's behaviour). This path
+        // is reached only when the shared access group is unavailable
+        // (e.g. an unprovisioned build) — in which case no shared item
+        // exists to strand. Must succeed or throw: the seed is never left
+        // unpersisted.
+        let status = addSeed(accountIdB64: accountIdB64, seed: seed, accessGroup: nil)
         if status != errSecSuccess {
             throw AccountIdentitySeedStoreError.keychain(
                 status: status,
@@ -114,6 +126,9 @@ public enum AccountIdentitySeedStore {
     /// / account never seen here / a device that logged in with only
     /// a password before this seed was cached).
     ///
+    /// ADR-0041 Phase 1 — prefers the shared access group, falls back to
+    /// the old app-private item, so an un-migrated seed still reads.
+    ///
     /// The caller MUST NOT silently fall back to deriving the
     /// identity from the export key or minting a fresh identity on a
     /// `nil` — per ADR-0017 the fresh-device fail-safe surfaces a
@@ -121,13 +136,73 @@ public enum AccountIdentitySeedStore {
     public static func getAccountIdentitySeed(
         accountIdB64: String
     ) throws -> Data? {
-        let query: [CFString: Any] = [
+        // Prefer the shared item; a shared read swallows every error to
+        // `nil` so the fallback runs. The app-private read surfaces a
+        // genuine Keychain fault (unchanged contract from before ADR-0041).
+        if let shared = readSeedSafe(
+            accountIdB64: accountIdB64,
+            accessGroup: SharedStorage.keychainAccessGroup
+        ) {
+            return shared
+        }
+        return try readSeed(accountIdB64: accountIdB64, accessGroup: nil)
+    }
+
+    /// ADR-0041 Phase 1 — one-time, idempotent, **copy-not-move** copy of
+    /// the seed into the shared Keychain access group so the NSE can read
+    /// it. No-op when the shared item already exists (idempotent), the old
+    /// item is absent (nothing to copy), or the shared group is
+    /// unavailable (the copy fails → the old item stays authoritative).
+    /// The old app-private item is **never deleted** here.
+    public static func migrateToSharedAccessGroup(accountIdB64: String) {
+        let sharedPresent = readSeedSafe(
+            accountIdB64: accountIdB64,
+            accessGroup: SharedStorage.keychainAccessGroup
+        ) != nil
+        let old = readSeedSafe(accountIdB64: accountIdB64, accessGroup: nil)
+        guard SharedStorage.shouldCopy(sharedPresent: sharedPresent, oldPresent: old != nil),
+              let seed = old else {
+            return
+        }
+        _ = addSeed(accountIdB64: accountIdB64, seed: seed,
+                    accessGroup: SharedStorage.keychainAccessGroup)
+    }
+
+    /// Erase the cached AccountIdentity seed for `accountIdB64` from
+    /// **both** the shared access group and the old app-private item.
+    /// No-op when absent. Called from ``AuthRepository/forgetDevice`` — a
+    /// deliberate full wipe (distinct from the never-delete-old migration
+    /// posture), so the crown-jewel seed is not left behind.
+    public static func deleteAccountIdentitySeed(accountIdB64: String) {
+        deleteSeed(accountIdB64: accountIdB64, accessGroup: SharedStorage.keychainAccessGroup)
+        deleteSeed(accountIdB64: accountIdB64, accessGroup: nil)
+    }
+
+    // MARK: - Access-group-scoped Keychain primitives
+
+    /// ``readSeed`` collapsed to a plain `Data?` — a genuine Keychain
+    /// fault is swallowed to `nil`. Used for the shared-group read
+    /// (which must degrade to the app-private fallback, never throw) and
+    /// for the migration presence checks.
+    private static func readSeedSafe(accountIdB64: String, accessGroup: String?) -> Data? {
+        (try? readSeed(accountIdB64: accountIdB64, accessGroup: accessGroup)) ?? nil
+    }
+
+    /// Read the seed from a specific access group (shared or app-private
+    /// when `nil`). Returns `nil` on not-found / missing-entitlement, and
+    /// validates the length. Throws only a genuine Keychain fault.
+    private static func readSeed(
+        accountIdB64: String,
+        accessGroup: String?
+    ) throws -> Data? {
+        var query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: serviceTag,
             kSecAttrAccount: accountIdB64,
             kSecReturnData: true,
             kSecMatchLimit: kSecMatchLimitOne
         ]
+        if let accessGroup { query[kSecAttrAccessGroup] = accessGroup }
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
         switch status {
@@ -147,7 +222,9 @@ public enum AccountIdentitySeedStore {
                 )
             }
             return data
-        case errSecItemNotFound:
+        case errSecItemNotFound, errSecMissingEntitlement:
+            // Absent here, or the access group is not provisioned for this
+            // process — the caller falls back to the other location.
             return nil
         default:
             throw AccountIdentitySeedStoreError.keychain(
@@ -157,18 +234,33 @@ public enum AccountIdentitySeedStore {
         }
     }
 
-    /// Erase the cached AccountIdentity seed for `accountIdB64`.
-    /// No-op when absent. Called from ``AuthRepository/forgetDevice``.
-    public static func deleteAccountIdentitySeed(accountIdB64: String) {
-        deleteIgnoringMissing(accountIdB64: accountIdB64)
+    /// Overwrite-add the seed into a specific access group (delete-then-add,
+    /// scoped to that group so it never touches the other group's item).
+    @discardableResult
+    private static func addSeed(
+        accountIdB64: String,
+        seed: Data,
+        accessGroup: String?
+    ) -> OSStatus {
+        deleteSeed(accountIdB64: accountIdB64, accessGroup: accessGroup)
+        var query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: serviceTag,
+            kSecAttrAccount: accountIdB64,
+            kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+            kSecValueData: seed
+        ]
+        if let accessGroup { query[kSecAttrAccessGroup] = accessGroup }
+        return SecItemAdd(query as CFDictionary, nil)
     }
 
-    private static func deleteIgnoringMissing(accountIdB64: String) {
-        let query: [CFString: Any] = [
+    private static func deleteSeed(accountIdB64: String, accessGroup: String?) {
+        var query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: serviceTag,
             kSecAttrAccount: accountIdB64
         ]
+        if let accessGroup { query[kSecAttrAccessGroup] = accessGroup }
         _ = SecItemDelete(query as CFDictionary)
     }
 }

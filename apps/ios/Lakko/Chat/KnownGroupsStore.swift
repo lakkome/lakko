@@ -29,26 +29,56 @@ import Foundation
 ///
 /// Per-account namespacing via the `"known_groups.<accountIdB64>"`
 /// key shape — multiple accounts on the same device don't collide.
+///
+/// ADR-0041 Phase 1 — the list is a non-secret decrypt input the NSE
+/// needs, so it moves from `UserDefaults.standard` to the shared
+/// `UserDefaults(suiteName:)` suite. Reads prefer the suite and fall
+/// back to `.standard`; the one-time migration copies the `.standard`
+/// list into the suite when the suite has none (copy-not-move — the
+/// `.standard` entry is never deleted by the migration).
 public final class KnownGroupsStore {
 
-    private let defaults: UserDefaults
+    /// The shared suite (NSE-readable). `nil` when the App Group is not
+    /// provisioned for this process → the store transparently uses
+    /// `standardDefaults` exactly as before ADR-0041.
+    private let sharedDefaults: UserDefaults?
+    /// The old app-private location (`UserDefaults.standard`).
+    private let standardDefaults: UserDefaults
 
-    public init(defaults: UserDefaults = .standard) {
-        self.defaults = defaults
+    public init(
+        sharedDefaults: UserDefaults? = SharedStorage.sharedDefaults(),
+        standardDefaults: UserDefaults = .standard
+    ) {
+        self.sharedDefaults = sharedDefaults
+        self.standardDefaults = standardDefaults
+    }
+
+    /// Backward-compatible single-store convenience — routes both the
+    /// shared and the fallback location to one `UserDefaults` instance.
+    /// Used by tests that inject a transient suite for isolation.
+    public convenience init(defaults: UserDefaults) {
+        self.init(sharedDefaults: defaults, standardDefaults: defaults)
     }
 
     /// Read the set of known group-id hex strings for
     /// `accountIdB64`. Empty set when the account has none yet
     /// (fresh signup or a cleanly-forgotten device).
+    ///
+    /// ADR-0041 — prefers the shared suite, falls back to `.standard`.
     public func load(accountIdB64: String) -> Set<String> {
-        guard let array = defaults.stringArray(forKey: Self.keyFor(accountIdB64)) else {
-            return []
+        let key = Self.keyFor(accountIdB64)
+        if let shared = sharedDefaults, let array = shared.stringArray(forKey: key) {
+            return Set(array)
         }
-        return Set(array)
+        if let array = standardDefaults.stringArray(forKey: key) {
+            return Set(array)
+        }
+        return []
     }
 
     /// Atomically add `groupIdHex` to the set for `accountIdB64`.
-    /// No-op when already present.
+    /// No-op when already present. ADR-0041 — writes go to the shared
+    /// suite when available, else `.standard`.
     public func add(accountIdB64: String, groupIdHex: String) {
         var current = load(accountIdB64: accountIdB64)
         let (inserted, _) = current.insert(groupIdHex)
@@ -58,19 +88,41 @@ public final class KnownGroupsStore {
         // serialise as a sorted `[String]` for deterministic
         // ordering on disk (helps reproducible-build verifier
         // when the prefs plist is part of a per-device backup).
-        defaults.set(
-            Array(current).sorted(),
-            forKey: Self.keyFor(accountIdB64)
-        )
+        let sorted = Array(current).sorted()
+        let key = Self.keyFor(accountIdB64)
+        if let shared = sharedDefaults {
+            shared.set(sorted, forKey: key)
+        } else {
+            standardDefaults.set(sorted, forKey: key)
+        }
     }
 
-    /// Wipe the entire set for `accountIdB64`. Called from
+    /// Wipe the entire set for `accountIdB64` from **both** the shared
+    /// suite and `.standard`. Called from
     /// ``ChatRepository/forgetDevice()`` — same posture as the
     /// ``IdentitySnapshotStore/deleteSnapshot(accountIdB64:)``
     /// wipe (per-account, best-effort, no error surfaced if the
     /// row is already absent).
     public func clear(accountIdB64: String) {
-        defaults.removeObject(forKey: Self.keyFor(accountIdB64))
+        let key = Self.keyFor(accountIdB64)
+        sharedDefaults?.removeObject(forKey: key)
+        standardDefaults.removeObject(forKey: key)
+    }
+
+    /// ADR-0041 Phase 1 — one-time, idempotent, **copy-not-move**
+    /// migration of the known-groups list into the shared suite. No-op
+    /// when the suite already has the list (idempotent), `.standard` has
+    /// none (nothing to copy), or the suite is unavailable.
+    public func migrateToSharedSuite(accountIdB64: String) {
+        guard let shared = sharedDefaults else { return }
+        let key = Self.keyFor(accountIdB64)
+        let suitePresent = shared.stringArray(forKey: key) != nil
+        let standardArray = standardDefaults.stringArray(forKey: key)
+        guard SharedStorage.shouldCopy(sharedPresent: suitePresent, oldPresent: standardArray != nil),
+              let array = standardArray else {
+            return
+        }
+        shared.set(array, forKey: key)
     }
 
     private static func keyFor(_ accountIdB64: String) -> String {

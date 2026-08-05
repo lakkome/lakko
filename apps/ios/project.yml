@@ -225,6 +225,27 @@ targets:
         # set up once.
         com.apple.security.application-groups:
           - group.me.lakko.dev.shared
+        # ADR-0041 Phase 1 — shared Keychain access group so the NSE can
+        # read the three migrated Keychain items (the AccountIdentity
+        # seed + the snapshot/cursor AES wrap keys). Team-scoped via the
+        # `$(AppIdentifierPrefix)` prefix (the build system substitutes
+        # the team id at sign time) — first-party only; a third-party app
+        # cannot join a team's access group.
+        #
+        # ORDERING IS LOAD-BEARING: the FIRST entry is the app's DEFAULT
+        # access group for any Keychain write that does not set
+        # `kSecAttrAccessGroup`. Listing the app-identifier group
+        # (`me.lakko.dev`) first keeps the default UNCHANGED, so every
+        # store NOT migrated by ADR-0041 keeps writing to the app-private
+        # group exactly as before. Only the three migrated items set the
+        # shared group explicitly. (The runtime code binds those items to
+        # the App GROUP as the access group — see `SharedStorage
+        # .keychainAccessGroup` — which needs no team-id resolution; this
+        # team-scoped entry documents the sharing contract + provisions
+        # the alternative mechanism.)
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)me.lakko.dev
+          - $(AppIdentifierPrefix)me.lakko.dev.shared
     dependencies:
       # Local Swift Package reference. The `package: LakkoCore`
       # name matches the SPM Package.swift's `name:` field; the
@@ -364,6 +385,15 @@ targets:
         # carry it for the shared-container plumbing to work.
         com.apple.security.application-groups:
           - group.me.lakko.dev.shared
+        # ADR-0041 Phase 1 — the matching shared Keychain access group on
+        # the NSE, so the extension can READ the app's migrated Keychain
+        # items (Phase 3 wires the actual decrypt; Phase 1 only provisions
+        # the read path). The NSE's own app-identifier group is listed
+        # first to keep its default access group unchanged (the NSE writes
+        # nothing to these stores — it is read-only).
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)me.lakko.dev.LakkoNotificationService
+          - $(AppIdentifierPrefix)me.lakko.dev.shared
     settings:
       base:
         SWIFT_VERSION: "5.10"
