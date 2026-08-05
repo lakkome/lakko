@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! APNs provider — HTTP/2 silent-push to Apple's `api.push.apple.com`.
+//! APNs provider — HTTP/2 mutable-alert push to Apple's `api.push.apple.com`.
 //!
 //! ## Wire protocol (Apple HTTP/2 token-based, 2016+)
 //!
@@ -10,21 +10,30 @@
 //! Host: api.push.apple.com           # or sandbox.push.apple.com
 //! Authorization: bearer <ES256 JWT>
 //! apns-topic: me.lakko.dev           # bundle id
-//! apns-push-type: background         # silent push for Lakko
+//! apns-push-type: alert              # mutable-alert push that fires the NSE
 //! apns-priority: 5                    # power-aware
 //! apns-expiration: 0                  # immediate, no store-and-forward
 //! content-type: application/json
 //!
-//! {"aps":{"content-available":1}}
+//! {"aps":{"alert":{"title":"Lakko","body":"New message"},
+//!         "mutable-content":1,"thread-id":"<g>"},
+//!  "d":"<device pseudonym>","g":"<group pseudonym>","p":<cursor>}
 //! ```
 //!
-//! The body is a fixed silent-push aps dictionary — Apple never sees
-//! plaintext. The recipient client wakes up, fetches ciphertext from
-//! `services/ds`, decrypts locally, and builds the user-visible
-//! `UNNotificationContent` on-device via a `UNNotificationServiceExtension`.
-//! Wake payload metadata (`group_pseudonym`, `envelope_pointer`) rides
-//! as custom keys alongside `aps` so the extension can decide which
-//! cursor to fetch without parsing the whole DS journal.
+//! Lakko uses the **mutable-alert** model, NOT a silent `content-available`
+//! background push: the body carries a generic placeholder alert plus
+//! `mutable-content: 1`, which fires the recipient's
+//! `UNNotificationServiceExtension` BEFORE display. The NSE fetches ciphertext
+//! from `services/ds`, decrypts locally, and rewrites the visible
+//! `UNNotificationContent` on-device — Apple never sees plaintext. If the NSE
+//! is unavailable / times out, the user still sees the generic placeholder
+//! alert ("New message" — the same fallback the foreground app uses).
+//! `apns-push-type` MUST be `alert` for this: a `background` push must omit
+//! the alert and carry `content-available: 1`, which would not fire the NSE
+//! (and Apple may reject the alert+`background` combination outright). Wake
+//! payload metadata (`group_pseudonym`, `envelope_pointer`) rides as custom
+//! keys (`d`/`g`/`p`) alongside `aps` so the extension can decide which cursor
+//! to fetch without parsing the whole DS journal.
 //!
 //! ## ES256 JWT cache
 //!
@@ -239,7 +248,7 @@ impl Provider for ApnsProvider {
             .post(&url)
             .header(header::AUTHORIZATION, format!("bearer {jwt}"))
             .header("apns-topic", &self.config.topic)
-            .header("apns-push-type", "background")
+            .header("apns-push-type", "alert")
             .header("apns-priority", "5")
             .header("apns-expiration", "0")
             .header(header::CONTENT_TYPE, "application/json")
