@@ -169,19 +169,30 @@ public final class IdentitySnapshotStore {
     /// old `Application Support` copy so an un-migrated snapshot still
     /// reads. The wrap key is read (not minted) — a cold read with no key
     /// simply returns `nil`.
+    ///
+    /// ADR-0041 LOW-1 (defence in depth) — the fallback is on **open**
+    /// failure, not just presence: if the preferred (shared) copy exists
+    /// but fails to AES-GCM-open (e.g. a truncated file left by an
+    /// interrupted pre-atomic-migration copy) the intact old copy is
+    /// opened rather than shadowed by a `nil` return. `nil` still results
+    /// only when every copy is absent or unopenable (fail-closed — the
+    /// irreplaceable MLS snapshot is never guessed).
     public func getSnapshot(accountIdB64: String) -> Data? {
-        guard let url = readableURL(accountIdB64: accountIdB64) else { return nil }
-        guard let combined = try? Data(contentsOf: url) else { return nil }
+        let candidates = readCandidates(accountIdB64: accountIdB64)
+        guard !candidates.isEmpty else { return nil }
         guard let keyBytes = KeychainWrapKey.read(
             service: Self.wrapKeyService, account: Self.wrapKeyAccount) else {
             return nil
         }
         let wrapKey = SymmetricKey(data: keyBytes)
-        guard let sealed = try? AES.GCM.SealedBox(combined: combined),
-              let plaintext = try? AES.GCM.open(sealed, using: wrapKey) else {
-            return nil
+        return SharedStorage.firstReadable(candidates) { url -> Data? in
+            guard let combined = try? Data(contentsOf: url) else { return nil }
+            guard let sealed = try? AES.GCM.SealedBox(combined: combined),
+                  let plaintext = try? AES.GCM.open(sealed, using: wrapKey) else {
+                return nil
+            }
+            return plaintext
         }
-        return plaintext
     }
 
     /// Erase the snapshot for `accountIdB64` from **both** the App Group
@@ -233,12 +244,21 @@ public final class IdentitySnapshotStore {
         oldEnvelopeDir?.appendingPathComponent(fileName(accountIdB64))
     }
 
-    /// Prefer the App Group container copy, fall back to the old copy.
-    private func readableURL(accountIdB64: String) -> URL? {
+    /// Ordered read candidates (preferred first): the App Group container
+    /// copy, then the old copy — each included only when it exists on
+    /// disk. Feeds ``SharedStorage/firstReadable(_:open:)`` so an
+    /// unopenable preferred copy falls through to the old copy (ADR-0041
+    /// LOW-1) rather than shadowing it.
+    private func readCandidates(accountIdB64: String) -> [URL] {
         let fm = FileManager.default
-        if let n = newURL(accountIdB64: accountIdB64), fm.fileExists(atPath: n.path) { return n }
-        if let o = oldURL(accountIdB64: accountIdB64), fm.fileExists(atPath: o.path) { return o }
-        return nil
+        var urls: [URL] = []
+        if let n = newURL(accountIdB64: accountIdB64), fm.fileExists(atPath: n.path) {
+            urls.append(n)
+        }
+        if let o = oldURL(accountIdB64: accountIdB64), fm.fileExists(atPath: o.path) {
+            urls.append(o)
+        }
+        return urls
     }
 
     /// Prefer the App Group container as the write target (single

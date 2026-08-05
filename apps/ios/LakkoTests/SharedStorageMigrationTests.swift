@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+import CryptoKit
+import Foundation
 import XCTest
 @testable import Lakko
 
@@ -202,7 +204,155 @@ final class SharedStorageMigrationTests: XCTestCase {
         XCTAssertNil(suite.stringArray(forKey: "me.lakko.known-groups.v1.\(acct)"))
     }
 
+    // MARK: - ADR-0041 LOW-1: atomic migration (no truncated shared file)
+
+    /// A large source migrates byte-identically AND the staged temp file is
+    /// gone afterwards — the shared directory holds ONLY the finished shared
+    /// file, no `.migrate-*.tmp` residue. The atomic rename means the shared
+    /// path only ever appears fully-formed; a partial file is never left.
+    func testMigrateFile_largeSource_atomicNoTempResidue() throws {
+        let (old, shared, cleanup) = try makeFilePair()
+        defer { cleanup() }
+        // 2 MiB so the copy is not a single-syscall trivial op.
+        var payload = Data(count: 2 * 1024 * 1024)
+        payload.withUnsafeMutableBytes { raw in
+            for i in stride(from: 0, to: raw.count, by: 7) { raw[i] = UInt8(i & 0xFF) }
+        }
+        try payload.write(to: old)
+
+        let readURL = SharedStorage.migrateFileIfNeeded(old: old, shared: shared)
+
+        XCTAssertEqual(readURL, shared)
+        XCTAssertEqual(try Data(contentsOf: shared), payload,
+                       "shared copy must be byte-identical to the (large) original")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: old.path),
+                      "copy-not-move: the old copy must NOT be deleted")
+        XCTAssertEqual(try tempResidue(in: shared.deletingLastPathComponent()), [],
+                       "no staged temp file may survive a completed migration")
+    }
+
+    /// Retrying the migration (idempotent) leaves the shared file
+    /// byte-identical and still leaves no temp residue behind.
+    func testMigrateFile_retried_noTempResidueAndByteIdentical() throws {
+        let (old, shared, cleanup) = try makeFilePair()
+        defer { cleanup() }
+        let payload = Data("mls-snapshot-bytes-retry".utf8)
+        try payload.write(to: old)
+
+        _ = SharedStorage.migrateFileIfNeeded(old: old, shared: shared)
+        _ = SharedStorage.migrateFileIfNeeded(old: old, shared: shared) // retry (no-op)
+
+        XCTAssertEqual(try Data(contentsOf: shared), payload)
+        XCTAssertEqual(try tempResidue(in: shared.deletingLastPathComponent()), [],
+                       "a retried migration must not accumulate temp residue")
+    }
+
+    // MARK: - ADR-0041 LOW-1: read fallback on OPEN failure (defence in depth)
+
+    /// Models `IdentitySnapshotStore.getSnapshot` / `MessageLogStore.getLog`:
+    /// a TRUNCATED shared (preferred) envelope + an INTACT old envelope →
+    /// the reader falls THROUGH the failed shared open to the old copy and
+    /// recovers the plaintext, instead of shadowing it with `nil`.
+    func testReadFallback_truncatedShared_opensOld() throws {
+        let (old, shared, cleanup) = try makeFilePair()
+        defer { cleanup() }
+        let key = SymmetricKey(size: .bits256)
+        let plaintext = Data("irreplaceable-mls-snapshot".utf8)
+        try writeSealed(plaintext, key: key, to: old)
+        // A truncated envelope at the PREFERRED (shared) path: fails to open.
+        try ensureParentDir(shared)
+        try Data("not-a-valid-gcm-envelope".utf8).write(to: shared)
+
+        let recovered = SharedStorage.firstReadable([shared, old]) {
+            openEnvelope(at: $0, key: key)
+        }
+
+        XCTAssertEqual(recovered, plaintext,
+                       "a truncated preferred copy must fall through to the intact old copy")
+    }
+
+    /// prefer-shared ordering is preserved: when BOTH copies open, the
+    /// shared (preferred) plaintext wins — the fallback must not regress the
+    /// normal steady-state read.
+    func testReadFallback_bothOpen_prefersShared() throws {
+        let (old, shared, cleanup) = try makeFilePair()
+        defer { cleanup() }
+        let key = SymmetricKey(size: .bits256)
+        try writeSealed(Data("old-plaintext".utf8), key: key, to: old)
+        try ensureParentDir(shared)
+        try writeSealed(Data("shared-plaintext".utf8), key: key, to: shared)
+
+        let recovered = SharedStorage.firstReadable([shared, old]) {
+            openEnvelope(at: $0, key: key)
+        }
+
+        XCTAssertEqual(recovered, Data("shared-plaintext".utf8),
+                       "when both open, the preferred shared copy wins")
+    }
+
+    /// Fail-closed: BOTH copies unopenable → `nil` (never a plaintext guess).
+    func testReadFallback_bothCorrupt_nil() throws {
+        let (old, shared, cleanup) = try makeFilePair()
+        defer { cleanup() }
+        let key = SymmetricKey(size: .bits256)
+        try Data("garbage-old".utf8).write(to: old)
+        try ensureParentDir(shared)
+        try Data("garbage-shared".utf8).write(to: shared)
+
+        let recovered = SharedStorage.firstReadable([shared, old]) {
+            openEnvelope(at: $0, key: key)
+        }
+
+        XCTAssertNil(recovered, "both-corrupt must fail closed (nil)")
+    }
+
+    /// Fail-closed: no candidates at all → `nil`.
+    func testReadFallback_noCandidates_nil() {
+        let recovered = SharedStorage.firstReadable([URL]()) {
+            openEnvelope(at: $0, key: SymmetricKey(size: .bits256))
+        }
+        XCTAssertNil(recovered, "no candidates must fail closed (nil)")
+    }
+
     // MARK: - Helpers
+
+    /// Names of any lingering staged temp files (`.migrate-*.tmp`) in `dir`.
+    /// The temp name starts with a dot, so hidden files must NOT be skipped.
+    private func tempResidue(in dir: URL) throws -> [String] {
+        let entries = try FileManager.default.contentsOfDirectory(
+            at: dir, includingPropertiesForKeys: nil, options: []
+        )
+        return entries
+            .map { $0.lastPathComponent }
+            .filter { $0.contains(".migrate-") || $0.hasSuffix(".tmp") }
+            .sorted()
+    }
+
+    /// Seal `plaintext` under `key` and write the RFC-5116 `combined`
+    /// envelope to `url`, creating the parent directory.
+    private func writeSealed(_ plaintext: Data, key: SymmetricKey, to url: URL) throws {
+        try ensureParentDir(url)
+        let combined = try XCTUnwrap(try AES.GCM.seal(plaintext, using: key).combined)
+        try combined.write(to: url)
+    }
+
+    /// Ensure the parent directory of `url` exists (the `makeFilePair`
+    /// shared dir is created lazily by the migration in production).
+    private func ensureParentDir(_ url: URL) throws {
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+    }
+
+    /// The exact open path `getSnapshot` uses: read → SealedBox → GCM-open,
+    /// `nil` on any absent / truncated / auth failure.
+    private func openEnvelope(at url: URL, key: SymmetricKey) -> Data? {
+        guard let combined = try? Data(contentsOf: url) else { return nil }
+        guard let sealed = try? AES.GCM.SealedBox(combined: combined),
+              let plaintext = try? AES.GCM.open(sealed, using: key) else {
+            return nil
+        }
+        return plaintext
+    }
 
     private func makeFilePair() throws -> (old: URL, shared: URL, cleanup: () -> Void) {
         let base = FileManager.default.temporaryDirectory

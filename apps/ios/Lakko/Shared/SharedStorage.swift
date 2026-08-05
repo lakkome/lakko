@@ -102,6 +102,30 @@ public enum SharedStorage {
         shared ?? old
     }
 
+    /// Open-with-fallback read (ADR-0041 LOW-1 defence in depth): given
+    /// ordered read `candidates` (preferred first — the shared copy, then
+    /// the old copy) and an `open` that returns the decrypted value or
+    /// `nil` on an absent / truncated / auth / parse failure, return the
+    /// first candidate that opens.
+    ///
+    /// Unlike ``effectiveValue(shared:old:)`` (which picks a location by
+    /// *presence* alone), this picks by *openability*: a preferred file
+    /// that exists but fails to AES-GCM-open — e.g. a truncated envelope
+    /// left by an interrupted pre-atomic-migration copy — no longer
+    /// shadows an intact fallback; the reader falls through to it.
+    ///
+    /// Returns `nil` only when **every** candidate is absent or unopenable
+    /// (fail-closed — never a plaintext guess).
+    public static func firstReadable<Candidate, Value>(
+        _ candidates: [Candidate],
+        open: (Candidate) -> Value?
+    ) -> Value? {
+        for candidate in candidates {
+            if let value = open(candidate) { return value }
+        }
+        return nil
+    }
+
     // MARK: - File migration (copy-not-move, idempotent)
 
     /// One-time, idempotent, **copy-not-move** file migration.
@@ -111,6 +135,19 @@ public enum SharedStorage {
     /// creating the shared parent directory as needed. The old file is
     /// **never deleted** — reads keep falling back to it until a future
     /// cleanup phase removes it.
+    ///
+    /// ## Atomicity (ADR-0041 LOW-1)
+    ///
+    /// The copy is **staged into a sibling temp file on the same volume**
+    /// as `shared`, then atomically renamed into place. A same-volume
+    /// `moveItem` is a `rename(2)`, so the shared path only ever
+    /// transitions absent → complete — a crash / kill / power-loss
+    /// mid-copy can never leave a **truncated** file at `shared` (which a
+    /// preferring reader would try, fail to AES-GCM-open, and — before this
+    /// fix — return `nil`, shadowing the intact old copy). On any failure
+    /// the temp file is removed and the authoritative old file is kept
+    /// (copy-not-move, never-delete-old preserved). Because `shouldCopy`
+    /// requires `shared` to be absent, the rename always lands cleanly.
     ///
     /// Returns the URL a reader should now use: the shared file if it
     /// exists (after any copy), else the old file if it exists, else
@@ -124,16 +161,29 @@ public enum SharedStorage {
         let oldPresent = fm.fileExists(atPath: old.path)
 
         if shouldCopy(sharedPresent: sharedPresent, oldPresent: oldPresent) {
+            let sharedDir = shared.deletingLastPathComponent()
+            // A sibling temp in the SAME directory (hence the same volume),
+            // uniquely suffixed so a retry / concurrent launch never
+            // collides on it.
+            let temp = sharedDir.appendingPathComponent(
+                ".\(shared.lastPathComponent).migrate-\(UUID().uuidString).tmp"
+            )
             do {
                 try fm.createDirectory(
-                    at: shared.deletingLastPathComponent(),
+                    at: sharedDir,
                     withIntermediateDirectories: true
                 )
-                // copy-not-move: the authoritative old file stays put.
-                try fm.copyItem(at: old, to: shared)
+                // Stage the full copy into the temp file, then atomically
+                // rename it into place. copy-not-move: the authoritative
+                // old file stays put; a partial file never exists at
+                // `shared`.
+                try fm.copyItem(at: old, to: temp)
+                try fm.moveItem(at: temp, to: shared)
             } catch {
-                // Copy failed — the old file remains authoritative; the
-                // reader falls back to it. Never fatal.
+                // Migration failed — remove any partial temp file and keep
+                // the old file authoritative; the reader falls back to it.
+                // Never fatal.
+                try? fm.removeItem(at: temp)
                 return oldPresent ? old : nil
             }
         }

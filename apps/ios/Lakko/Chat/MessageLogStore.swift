@@ -125,22 +125,32 @@ public final class MessageLogStore {
     ///
     /// ADR-0041 — prefers the App Group container copy, falls back to the
     /// old location so an un-migrated log still reads.
+    ///
+    /// ADR-0041 LOW-1 (defence in depth) — the fallback is on **open**
+    /// failure, not just presence: if the preferred (shared) copy exists
+    /// but fails to AES-GCM-open (e.g. a truncated file left by an
+    /// interrupted pre-atomic-migration copy) the intact old copy is
+    /// opened rather than shadowed by a `nil` return. `nil` still results
+    /// only when every copy is absent or unopenable (fail-closed).
     public func getLog(accountIdB64: String) -> MessageLogPayload? {
-        guard let url = readableURL(accountIdB64: accountIdB64) else { return nil }
-        guard let combined = try? Data(contentsOf: url) else { return nil }
+        let candidates = readCandidates(accountIdB64: accountIdB64)
+        guard !candidates.isEmpty else { return nil }
         guard let keyBytes = KeychainWrapKey.read(
             service: Self.wrapKeyService, account: Self.wrapKeyAccount) else {
             return nil
         }
         let wrapKey = SymmetricKey(data: keyBytes)
-        let plaintext: Data
-        do {
-            let sealed = try AES.GCM.SealedBox(combined: combined)
-            plaintext = try AES.GCM.open(sealed, using: wrapKey)
-        } catch {
-            return nil
+        return SharedStorage.firstReadable(candidates) { url -> MessageLogPayload? in
+            guard let combined = try? Data(contentsOf: url) else { return nil }
+            let plaintext: Data
+            do {
+                let sealed = try AES.GCM.SealedBox(combined: combined)
+                plaintext = try AES.GCM.open(sealed, using: wrapKey)
+            } catch {
+                return nil
+            }
+            return try? JSONDecoder().decode(MessageLogPayload.self, from: plaintext)
         }
-        return try? JSONDecoder().decode(MessageLogPayload.self, from: plaintext)
     }
 
     /// Erase the log for `accountIdB64` from **both** the App Group
@@ -187,11 +197,21 @@ public final class MessageLogStore {
         oldEnvelopeDir?.appendingPathComponent(fileName(accountIdB64))
     }
 
-    private func readableURL(accountIdB64: String) -> URL? {
+    /// Ordered read candidates (preferred first): the App Group container
+    /// copy, then the old copy — each included only when it exists on
+    /// disk. Feeds ``SharedStorage/firstReadable(_:open:)`` so an
+    /// unopenable preferred copy falls through to the old copy (ADR-0041
+    /// LOW-1) rather than shadowing it.
+    private func readCandidates(accountIdB64: String) -> [URL] {
         let fm = FileManager.default
-        if let n = newURL(accountIdB64: accountIdB64), fm.fileExists(atPath: n.path) { return n }
-        if let o = oldURL(accountIdB64: accountIdB64), fm.fileExists(atPath: o.path) { return o }
-        return nil
+        var urls: [URL] = []
+        if let n = newURL(accountIdB64: accountIdB64), fm.fileExists(atPath: n.path) {
+            urls.append(n)
+        }
+        if let o = oldURL(accountIdB64: accountIdB64), fm.fileExists(atPath: o.path) {
+            urls.append(o)
+        }
+        return urls
     }
 
     private func writeTarget(accountIdB64: String) -> (dir: URL, url: URL)? {
