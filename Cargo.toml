@@ -31,6 +31,7 @@ members = [
     "crates/lakko-discovery-client",
     "crates/lakko-tuf",
     "crates/lakko-ffi-uniffi",
+    "crates/lakko-ffi-extension",
     "crates/lakko-ffi-wasm",
     "crates/lakko-sframe-native",
     "services/auth",

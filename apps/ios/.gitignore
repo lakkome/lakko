@@ -38,5 +38,12 @@ Lakko.xcodeproj/
 # is gitignored on the Android side.
 Sources/LakkoCore/lakko_ffi_uniffi.swift
 
+# ADR-0041 Phase 2 — the SLIM decrypt-only UniFFI-emitted Swift
+# source, fan'd in by `just build-ios-extension` from
+# `target/bindings-extension/swift/`. Same build-artefact posture
+# as the full surface above; source of truth is the
+# `#[uniffi::export]` annotations on `crates/lakko-ffi-extension/`.
+Sources/LakkoCoreExtension/lakko_ffi_extension.swift
+
 # macOS Finder cruft.
 .DS_Store

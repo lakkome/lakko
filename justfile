@@ -609,6 +609,62 @@ build-ios:
     @mkdir -p apps/ios/Sources/LakkoCore
     @cp target/bindings/swift/lakko_ffi_uniffi.swift apps/ios/Sources/LakkoCore/
 
+# ADR-0041 Phase 2 — cross-compile the SLIM decrypt-only
+# `lakko-ffi-extension` crate into a `LakkoCoreExtension.xcframework`
+# the iOS NotificationServiceExtension links INSTEAD of the 333 MB
+# `LakkoCore.xcframework`. Same shape as `build-ios` but for the slim
+# crate (only `lakko-mls` + `lakko-attachments`, no transport / calls /
+# SFU / channels), so the NSE stays under its ~30 MB RAM budget.
+#
+# The generated Swift binding lives in its OWN UniFFI module
+# (`lakko_ffi_extensionFFI`), distinct from the full surface's
+# `lakko_ffi_uniffiFFI`, so a device can carry both frameworks side by
+# side (the app links LakkoCore, the NSE links LakkoCoreExtension)
+# without a symbol / type clash.
+[macos]
+build-ios-extension:
+    @command -v xcodebuild >/dev/null 2>&1 || (echo "ERROR: xcodebuild not found — install Xcode Command Line Tools via 'xcode-select --install'" && exit 1)
+    @rustup target list --installed | grep -qx "aarch64-apple-ios" || rustup target add aarch64-apple-ios
+    @rustup target list --installed | grep -qx "aarch64-apple-ios-sim" || rustup target add aarch64-apple-ios-sim
+    @rustup target list --installed | grep -qx "x86_64-apple-ios" || rustup target add x86_64-apple-ios
+    # Generate the slim Swift binding (host build first so the bindgen
+    # can introspect the freshly-built cdylib).
+    cargo build -p lakko-ffi-extension --release
+    cargo run -p lakko-ffi-extension --bin uniffi-bindgen --release -- \
+        generate \
+        --library target/release/liblakko_ffi_extension.{{lib_ext}} \
+        --language swift \
+        --out-dir target/bindings-extension/swift
+    # Cross-compile the staticlib for every iOS slice the NSE links.
+    cargo build --release --target aarch64-apple-ios -p lakko-ffi-extension
+    cargo build --release --target aarch64-apple-ios-sim -p lakko-ffi-extension
+    cargo build --release --target x86_64-apple-ios -p lakko-ffi-extension
+    # Fuse the two simulator slices (arm64 + x86_64) into one fat archive.
+    mkdir -p target/ios-extension
+    lipo -create \
+        target/aarch64-apple-ios-sim/release/liblakko_ffi_extension.a \
+        target/x86_64-apple-ios/release/liblakko_ffi_extension.a \
+        -output target/ios-extension/liblakko_ffi_extension-simulator.a
+    # Lay out the headers + modulemap the `-headers` argument expects.
+    # The `lakko_ffi_extensionFFI` module name must match the
+    # `import lakko_ffi_extensionFFI` the generated Swift binding emits.
+    mkdir -p target/ios-extension/headers
+    @cp target/bindings-extension/swift/lakko_ffi_extensionFFI.h target/ios-extension/headers/
+    @printf 'module lakko_ffi_extensionFFI {\n    header "lakko_ffi_extensionFFI.h"\n    export *\n}\n' \
+        > target/ios-extension/headers/module.modulemap
+    rm -rf target/ios-extension/LakkoCoreExtension.xcframework
+    xcodebuild -create-xcframework \
+        -library target/aarch64-apple-ios/release/liblakko_ffi_extension.a \
+        -headers target/ios-extension/headers \
+        -library target/ios-extension/liblakko_ffi_extension-simulator.a \
+        -headers target/ios-extension/headers \
+        -output target/ios-extension/LakkoCoreExtension.xcframework
+    # Fan the slim Swift binding into its own SPM target source dir
+    # (gitignored build artefact, same posture as the full surface).
+    @mkdir -p apps/ios/Sources/LakkoCoreExtension
+    @cp target/bindings-extension/swift/lakko_ffi_extension.swift apps/ios/Sources/LakkoCoreExtension/
+    @echo "OK: target/ios-extension/LakkoCoreExtension.xcframework"
+
 # Phase 1.14c — regenerate `apps/ios/Lakko.xcodeproj/` from the
 # xcodegen spec at `apps/ios/project.yml`.
 #

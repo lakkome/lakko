@@ -1,0 +1,52 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-ffi-extension"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Slim decrypt-only UniFFI surface for the iOS NotificationServiceExtension (ADR-0041 Phase 2)"
+
+[lib]
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[lints]
+workspace = true
+
+# ADR-0041 Phase 2 — the SLIM decrypt-only FFI. The dependency set is the
+# load-bearing point of this crate: it pulls ONLY the two crates the iOS NSE
+# background-decrypt path needs — `lakko-mls` (restore-throwaway-group /
+# process-incoming-verifying-roles / Identity::from_seed) and
+# `lakko-attachments` (parse-body-envelope) — plus their transitive
+# `lakko-crypto` / `lakko-proto` / openmls. It deliberately does NOT depend on
+# `lakko-transport` (tokio + REALITY/MASQUE/Shadowsocks), `lakko-calls`,
+# `lakko-channels`, `lakko-sfu-proto`, or `lakko-call-jwt` — none of which the
+# decrypt path touches, and all of which bloat the ~30 MB NSE budget. Keep this
+# list minimal; adding a dep here re-inflates the framework the NSE links.
+[dependencies]
+thiserror.workspace = true
+lakko-mls.workspace = true
+lakko-attachments.workspace = true
+
+# `build` powers the `uniffi::setup_scaffolding!()` proc-macro; `cli` enables
+# `uniffi::uniffi_bindgen_main()` in `src/bin/uniffi-bindgen.rs` so
+# `just build-ios-extension` runs a workspace-pinned bindgen. Same 0.31 release
+# the main `lakko-ffi-uniffi` crate uses — no ABI drift between the two
+# xcframeworks a device might load side by side (the NSE links the slim one,
+# the app the full one).
+uniffi = { version = "0.31", features = ["build", "cli"] }
+
+[build-dependencies]
+uniffi = { version = "0.31", features = ["build"] }
+
+# The crate ships two artefacts: the `cdylib` from `[lib]` above (real Swift
+# runtime the NSE links) plus the `uniffi-bindgen` host tool below — codegen
+# only, runs during binding generation, never ships in a production build.
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
