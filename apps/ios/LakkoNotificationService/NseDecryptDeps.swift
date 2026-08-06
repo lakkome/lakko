@@ -98,6 +98,17 @@ struct NseRealDecryptDeps: NsePushDecryptDeps {
         messageLog.getLog(accountIdB64: accountIdB64)?.groups[groupHex]?.cursor
     }
 
+    /// ADR-0041 Finding-1 — read the armed flag the app mirrors into the
+    /// shared App Group suite. Read-only: the NSE never writes it. When
+    /// armed, ``decryptPushPreview`` short-circuits before any DS fetch, so
+    /// the NSE makes no direct connection. Absent / an unprovisioned suite →
+    /// `false` (the common disarmed case keeps the rich preview; a truly
+    /// unprovisioned App Group makes the decrypt fail closed on the missing
+    /// shared stores anyway).
+    func isAntiCensorshipArmed() -> Bool {
+        SharedStorage.isAntiCensorshipArmed()
+    }
+
     /// Decode a lowercase-hex string into bytes. `nil` on any malformed input
     /// (odd length, non-hex char).
     static func hexToData(_ hex: String) -> Data? {

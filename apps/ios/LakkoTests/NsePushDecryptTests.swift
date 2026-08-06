@@ -69,6 +69,7 @@ final class NsePushDecryptTests: XCTestCase {
         let cursor: Int64?
         let dsThrows: Bool
         let openThrows: Bool
+        let armed: Bool
 
         var resolveCount = 0
         var openCount = 0
@@ -83,7 +84,8 @@ final class NsePushDecryptTests: XCTestCase {
             rows: [NseFetchedRow] = [],
             cursor: Int64? = nil,
             dsThrows: Bool = false,
-            openThrows: Bool = false
+            openThrows: Bool = false,
+            armed: Bool = false
         ) {
             self.account = account
             self.seed = seed
@@ -93,6 +95,7 @@ final class NsePushDecryptTests: XCTestCase {
             self.cursor = cursor
             self.dsThrows = dsThrows
             self.openThrows = openThrows
+            self.armed = armed
         }
 
         func resolveAccount(groupHex: String) -> NseResolvedAccount? {
@@ -122,6 +125,8 @@ final class NsePushDecryptTests: XCTestCase {
         }
 
         func startCursor(accountIdB64: String, groupHex: String) -> Int64? { cursor }
+
+        func isAntiCensorshipArmed() -> Bool { armed }
     }
 
     private enum FakeError: Error { case open, ds }
@@ -326,11 +331,26 @@ final class NsePushDecryptTests: XCTestCase {
         XCTAssertEqual(deps.lastAfterId, 5, "intervening commits replay from the app cursor")
     }
 
-    func testPersistedCursorAtOrAbovePointerIsIgnored() async {
+    func testPersistedCursorFloorsTheFetchEvenAbovePointer() async {
+        // ADR-0041 Finding-2 — the persisted cursor is the fetch FLOOR: even
+        // when it is at/above the wake pointer (a stale/ahead wake), we start
+        // at the cursor (the app has durably seen everything up to it), never
+        // below it. A hostile push-gw pointer can no longer force a fetch
+        // below the cursor (the full-journal-replay amplification vector).
         let group = FakeThrowawayGroup(decode: { _ in nil })
         let deps = FakeDeps(account: okAccount(), group: group, cursor: 25)
         _ = await decryptPushPreview(NsePushWake(groupHex: groupHex, pointer: 20), deps)
-        XCTAssertEqual(deps.lastAfterId, 19, "stale/ahead cursor ignored → pointer-1")
+        XCTAssertEqual(deps.lastAfterId, 25, "cursor floors the fetch, never below it")
+    }
+
+    func testHostilePointerCannotForceFullJournalReplayWhenCursorPresent() async {
+        // A malicious push-gw sets p=1 to force `after = 0` (whole-journal
+        // replay). With a real app cursor present, the cursor floor holds and
+        // we fetch only what the app has not seen.
+        let group = FakeThrowawayGroup(decode: { _ in nil })
+        let deps = FakeDeps(account: okAccount(), group: group, cursor: 500)
+        _ = await decryptPushPreview(NsePushWake(groupHex: groupHex, pointer: 1), deps)
+        XCTAssertEqual(deps.lastAfterId, 500, "cursor floor caps a hostile p=1 wake")
     }
 
     func testAfterIsClampedToZero() async {
@@ -338,6 +358,44 @@ final class NsePushDecryptTests: XCTestCase {
         let deps = FakeDeps(account: okAccount(), group: group, cursor: nil)
         _ = await decryptPushPreview(NsePushWake(groupHex: groupHex, pointer: 0), deps)
         XCTAssertEqual(deps.lastAfterId, 0)
+    }
+
+    // MARK: - Anti-censorship gate (ADR-0041 Finding-1) → nil, NO fetch
+
+    func testArmedAntiCensorshipReturnsNilWithoutFetching() async {
+        // When anti-censorship is armed, the NSE must make NO direct DS
+        // connection — it short-circuits to the generic banner. Assert the
+        // fetch spy is never called (and nothing else, either — the gate is
+        // the very first step).
+        let group = FakeThrowawayGroup(decode: { _ in self.chat("secret") })
+        let deps = FakeDeps(
+            account: okAccount(),
+            group: group,
+            rows: [row(10, 1)],
+            armed: true
+        )
+        let preview = await decryptPushPreview(NsePushWake(groupHex: groupHex, pointer: 12), deps)
+
+        XCTAssertNil(preview, "armed → no direct connection, generic banner")
+        XCTAssertEqual(deps.dsFetchCount, 0, "armed must make NO DS fetch")
+        XCTAssertEqual(deps.resolveCount, 0, "armed short-circuits before any store read")
+        XCTAssertEqual(deps.openCount, 0, "armed opens no throwaway group")
+    }
+
+    func testDisarmedAntiCensorshipStillPreviews() async {
+        // The default (disarmed) path is unaffected — the happy preview still
+        // fetches + decrypts.
+        let group = FakeThrowawayGroup(decode: { _ in self.chat("hello") })
+        let deps = FakeDeps(
+            account: okAccount(),
+            group: group,
+            rows: [row(10, 1)],
+            armed: false
+        )
+        let preview = await decryptPushPreview(NsePushWake(groupHex: groupHex, pointer: 12), deps)
+
+        XCTAssertEqual(preview?.body, "hello")
+        XCTAssertEqual(deps.dsFetchCount, 1, "disarmed still fetches")
     }
 
     // MARK: - NEVER-PERSISTS guard (read-only-throwaway discipline)

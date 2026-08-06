@@ -56,6 +56,15 @@ final class AntiCensorshipManager: ObservableObject {
     /// otherwise reset the ambient config to disarmed. Safe to call repeatedly;
     /// `LakkoApp` calls it once at boot.
     func armFromSettings() {
+        // ADR-0041 Finding-1 — mirror the preference into the shared App
+        // Group suite so the `LakkoNotificationService` (a separate process
+        // that cannot read the app's private `UserDefaults.standard`) can
+        // refuse a direct DS connection on a push wake when anti-censorship
+        // is armed. Written here on every toggle (via `setEnabled`) AND once
+        // at boot (`LakkoApp` calls this), so the mirror always tracks the
+        // source-of-truth preference regardless of the arming outcome below.
+        SharedStorage.setAntiCensorshipArmed(isEnabled)
+
         guard isEnabled else {
             AntiCensorshipConfig.current = .disarmed
             state = .disabled

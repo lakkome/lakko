@@ -2916,6 +2916,116 @@ verification against an unpinned (JWKS-served) attest key.
 (`backup_head_mint_limits`, migration `0016`), shipped
 DEFAULT-OFF (`LAKKO_BACKUP_HEAD_MINT_RATE_LIMIT` default `0`).
 
+### C-59: The iOS silent-push NSE decrypts read-only and can never write MLS state back
+
+[ADR-0041](../adr/0041-ios-silent-push-nse-decrypt.md) brings iOS to
+parity with the already-approved web (`148753b`) + Android
+(`ae9a087`) silent-push slices: the
+`UNNotificationServiceExtension` (NSE) renders the **real**
+decrypted text of the newest message on a mutable-alert push wake
+instead of a content-free "New message" banner. The NSE is a
+**separate process** from the foreground app, so — like a call-side
+invariant — this entry pins the properties that keep the
+server + the foreground ratchet safe while a second process decrypts.
+
+The `C-` class is the audit pack's catch-all for server-visible +
+opacity-preserving properties (C-56..C-58 are KT-log + backup, not
+literally calls); C-59 continues that convention.
+
+Five sub-invariants:
+
+1. **The seed-sharing boundary is the minimum, and it is bounded.**
+   On-device MLS decrypt is impossible without the AccountIdentity
+   seed (`Identity.fromSeed`, ADR-0017), so it moves into a
+   **team-scoped shared Keychain access group**
+   (`group.me.lakko.dev.shared`), staying
+   `AfterFirstUnlockThisDeviceOnly`, no-iCloud-sync, and protected by
+   the hardware-derived class key. Only the derived **64-byte phrase
+   seed** is shared — never the recovery phrase — and the seed `Data`
+   is zeroed after use (`resetBytes`, `NsePushDecrypt.swift`). The
+   read scope widens app -> {app, first-party co-signed NSE}, not
+   app -> any app (a third-party app cannot join a team's access
+   group). Invariant #7's non-extractable / hardware-backed letter is
+   preserved; only the process scope that may read the seed widens —
+   the one invariant under tension, which is why the arc was reviewed
+   before Phase 1 landed.
+
+2. **A three-layer structural no-write guarantee makes the throwaway
+   airtight.** (1) The slim `lakko-ffi-extension` FFI (Phase 2,
+   `crates/lakko-ffi-extension/src/lib.rs`) exposes **no persist
+   method** — only `from_seed` / `restore_storage` / `load_group` /
+   `process_incoming_verifying_roles` / `parse_body_envelope`, with
+   no `snapshot_storage` / compose / send / call / channel / transport
+   surface. (2) The `NsePushDecryptDeps` / `NseThrowawayGroup`
+   protocols (`NsePushDecrypt.swift`) expose **no write path** —
+   every method is a read or a pure compute. (3)
+   `NseThrowawayGroup.close()` is a documented no-op
+   (`NseDecryptDeps.swift` — ARC / UniFFI `deinit` frees the handles;
+   never `snapshotStorage` / `putSnapshot`). The app's DS cursor is
+   never advanced (the fetch start is read-only).
+
+3. **The G-34-class ratchet desync is avoided by construction.** The
+   NSE restores a *temporary* group from the last-persisted snapshot,
+   processes DS rows only to extract the newest preview, and DISCARDS
+   it. Because it never writes the advanced snapshot / cursor back,
+   the foreground app later restores from the **same** snapshot and
+   reprocesses from its **own** append-only cursor (idempotent) — the
+   publish/persist ratchet-desync hazard (ADR-0040 / the G-34
+   nonce-reuse-on-crash audit) cannot arise. This is the same
+   read-only-throwaway property `lakko-security` approved on web.
+
+4. **Fail-closed (invariant #4).** A frame that will not decrypt /
+   authenticate is dropped — never rendered as a plaintext guess
+   (`NseThrowawayGroup.process` returns `nil`). Any missing input
+   (no account match, no seed, no snapshot, a non-member group, a DS
+   or decrypt failure, a control frame with no preview, or the ~22 s
+   budget / `serviceExtensionTimeWillExpire`) degrades to the generic
+   "New message" banner. Delivery is exactly-once (`NSLock`) and the
+   NSE never crashes.
+
+5. **Server opacity holds (invariant #2).** The NSE performs only a
+   **read-only** DS group-journal fetch (the same opaque frames the
+   app already fetches — a plain `URLSession` GET, no cursor
+   mutation) and decrypts locally; the server learns nothing it did
+   not already know when it routed the wake to the group pseudonym.
+   No key material leaves the device.
+
+The slim decrypt-only framework is Phase 2's crate split: measured
+against the ~30 MB NSE ceiling, the dead-stripped linked decrypt
+footprint is **~1.6 MB** (`~1.34 MB` mapped code), versus the 333 MB
+full `LakkoCore.xcframework` that transitively pulls
+transport / calls / SFU / channels — an order of magnitude of
+headroom, so `LakkoCoreExtension.xcframework` is what the NSE links.
+
+Invariants: #2 (opaque read-only DS fetch + local decrypt), #3 (no
+`lakko-mls` change — the slim crate re-exports the audited
+`process_incoming_verifying_roles` / `parse_body_envelope` path, it
+does not fork it), #4 (fail-closed to the generic banner), #7 (seed
+read-scope widening, letter preserved). Two Phase-3 findings are
+**RESOLVED**, leaving no open residual gap: **Finding 1** — an
+anti-censorship-**armed** user's NSE never makes a direct
+un-tunneled DS connection (the NSE deliberately cannot carry the
+transport / anti-censorship stack into its memory-starved process,
+so when the user is armed it short-circuits straight to the generic
+banner rather than leaking a direct connection); **Finding 2** — the
+read-only fetch start is floored at the app's persisted per-group
+cursor.
+
+**`lakko-security` verdicts (APPROVE-WITH-NOTES).** Phase 1 (the App
+Group / seed-sharing migration; the LOW-1 finding — a torn-copy
+window in the one-time file migration — fixed via
+atomic-copy-with-read-fallback, `7b18cec`); Phase 3 (the NSE
+read-only-throwaway decrypt); and the earlier web sibling
+(in-memory provider, zero write transactions, no `snapshot_storage`
+call). Coverage: `cargo test -p lakko-ffi-extension` (incl. the full
+`fromSeed -> restoreStorage -> loadGroup ->
+processIncomingVerifyingRoles -> parseBodyEnvelope` round-trip
+recovering plaintext) + `NsePushDecryptTests` (happy path, every
+fail-closed branch, cursor math, never-persists guard) +
+`SharedStorageMigration` tests. Residual: the live
+APNs -> NSE -> decrypted-notification round-trip on a provisioned
+device is deploy-gated.
+
 ## Exporter labels (call-side)
 
 | Label | Length | Context | Source | Used for |

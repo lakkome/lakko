@@ -196,6 +196,14 @@ public protocol NsePushDecryptDeps {
     /// as the fetch start so intervening commits replay and the epoch stays
     /// correct.
     func startCursor(accountIdB64: String, groupHex: String) -> Int64?
+
+    /// `true` when the user has ARMED anti-censorship (ADR-0026), mirrored
+    /// from the app's preference into the shared App Group suite (the NSE is
+    /// a separate process and cannot read the app's private
+    /// `UserDefaults.standard`). When armed, the NSE must make NO direct,
+    /// fingerprintable connection to Lakko infra on a push wake — the decrypt
+    /// short-circuits to the generic banner instead (ADR-0041 Finding-1).
+    func isAntiCensorshipArmed() -> Bool
 }
 
 /// Produce a real decrypted notification preview for a GroupMessage wake, or
@@ -209,6 +217,17 @@ public func decryptPushPreview(
     _ wake: NsePushWake?,
     _ deps: NsePushDecryptDeps
 ) async -> NsePushPreview? {
+    // 0. Anti-censorship gate (ADR-0041 Finding-1). If the user has ARMED
+    //    anti-censorship (to avoid direct connections to Lakko infra in a
+    //    hostile network), the NSE must NOT make a direct, fingerprintable DS
+    //    connection on a push wake. Short-circuit BEFORE any store read or
+    //    network fetch and return nil, so the handler shows the generic
+    //    "New message" banner — the armed user trades the rich preview for
+    //    no-direct-connection, the correct anti-censorship posture. The flag
+    //    is mirrored from the app's preference into the shared App Group
+    //    suite (the NSE cannot read the app's private UserDefaults.standard).
+    if deps.isAntiCensorshipArmed() { return nil }
+
     // 1. Only GroupMessage wakes carry a 64-hex group + a pointer. A Wakeup /
     //    MailboxMessage wake is not handled in this slice.
     guard let rawGroupHex = wake?.groupHex, let pointer = wake?.pointer else {
@@ -258,15 +277,20 @@ public func decryptPushPreview(
     }
 
     // 6. Fetch DS rows after a READ-ONLY start cursor. Prefer the app's
-    //    persisted per-group cursor (so intervening commits since the
-    //    snapshot are replayed and the epoch stays correct); otherwise just
-    //    the message that triggered the wake (`pointer - 1`).
-    var after = pointer - 1
-    if let persisted = deps.startCursor(accountIdB64: account.accountIdB64, groupHex: groupHex),
-       persisted < pointer {
-        after = persisted
+    //    persisted per-group cursor as the fetch FLOOR: the app has durably
+    //    processed everything up to it, so we replay exactly what it has not
+    //    seen — and no more. Flooring at the cursor (instead of overriding it
+    //    only when `persisted < pointer`) also caps a hostile push-gw
+    //    `pointer` (e.g. p=1) from forcing a full-journal replay through the
+    //    throwaway group (CPU/battery/bandwidth amplification — ADR-0041
+    //    Finding-2). Without a persisted cursor, fall back to just the
+    //    message that triggered the wake (`pointer - 1`, clamped at 0).
+    let after: Int64
+    if let persisted = deps.startCursor(accountIdB64: account.accountIdB64, groupHex: groupHex) {
+        after = max(persisted, 0)
+    } else {
+        after = pointer > 0 ? pointer - 1 : 0
     }
-    if after < 0 { after = 0 }
 
     let rows: [NseFetchedRow]
     do {

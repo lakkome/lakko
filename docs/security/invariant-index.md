@@ -13,10 +13,10 @@ section that describes it.
 | Class | Count | Range | Source file |
 |---|---|---|---|
 | **I-** | 8   | I-1..I-8   | [`mls-state-machine.md`](./mls-state-machine.md) |
-| **C-** | 58  | C-1..C-58  | [`calls.md`](./calls.md) |
+| **C-** | 59  | C-1..C-59  | [`calls.md`](./calls.md) |
 | **T-** | 15  | T-1..T-15  | [`transport.md`](./transport.md) |
 | **G-** | 27  | G-1..G-27 (G-28 closed via the G3-sframe-native arc N-1..N-6) | [`known-gaps.md`](./known-gaps.md) — open / deferred |
-| Total invariants  | 81  | (I + C + T) | live properties |
+| Total invariants  | 82  | (I + C + T) | live properties |
 | Total open gaps   | 27  | (G)         | tracked + scoped |
 
 ## MLS state machine invariants (I-1..I-8)
@@ -37,17 +37,23 @@ in `crates/lakko-mls/`.
 | I-7 | Opening a `SealedBundle` with an unknown `algorithm` discriminator is rejected before AEAD-open is attempted | Forward-compat ratchet |
 | I-8 | `create_devicegroup_message` round-trips through `parse_devicegroup_payload` losslessly for every typed body variant | Wire-format byte-stability |
 
-## Call-side invariants (C-1..C-58)
+## Call-side invariants (C-1..C-59)
 
-Source: [`calls.md`](./calls.md). Five sub-sections —
+Source: [`calls.md`](./calls.md). The `C-` class is the
+catch-all for "everything the SFU / channels / storage /
+auth server might see, and every client-side property that
+keeps it opaque". Five sub-sections —
 media-key pipeline (C-1..C-14), call-admission JWT
 (C-15..C-23), link-based invite + composer + dispatcher
 (C-24..C-36), SFrame + RFC 9605 + SFU signaling
 (C-37..C-39), channel-broadcast backend opacity
-(C-40..C-44), then per-arc additions C-45..C-55
+(C-40..C-44), then per-arc additions C-45..C-59
 (SFrame native shim, TURN, PublisherGroup persistence,
-host-side bridge validation, rotation policy, and the
-SFU multi-party client SFrame coverage).
+host-side bridge validation, rotation policy, the
+SFU multi-party client SFrame coverage, the KT-log
+client-authorised leaf + witness quorum, the backup-head
+rollback commitment, and the iOS NSE silent-push
+read-only-throwaway decrypt boundary).
 
 ### C-1..C-14 — media-key pipeline (SFrame + overlap window)
 
@@ -176,6 +182,12 @@ SFU multi-party client SFrame coverage).
 | ID   | Title |
 |---|---|
 | C-58 | A storage-tier backup **rollback** (serving a restoring client an older, cleanly-opening envelope) is detected by an auth-signed **backup head** committed atomically inside the one opaque storage blob. `BackupHead` (`crates/lakko-attest/src/backup_head.rs`) is a 129-byte fixed-layout Ed25519 blob binding `(account_id, backup_version, envelope_hash, signed_at)`, domain `lakko/backup-head/v1` (distinct from `device-attest/v1` + `genesis-attest/v1`; a three-way domain-crossing test proves the kinds are non-interchangeable even under the shared attest signing key). A signature proves the head **authentic**, not **current** — two mechanisms turn authenticity into a rollback defence: (a) an **auth-assigned, per-account, strictly-monotone `backup_version`** minted at `POST /auth/backup/head` (bearer-authed + STATEFUL — the `backup_head_versions` counter table, migration `0015`, read-bumped in one transaction via the MariaDB `LAST_INSERT_ID` idiom; never client-supplied, so a regression is structurally impossible) that a **returning client** refuses to go below via a device-key-encrypted `last_known_version` floor (HARD, no window); and (b) a signed **`signed_at`** mint timestamp (Unix millis) a **zero-anchor fresh install** bounds with a client-side staleness window (default 30 days). The head rides as a `0xB1` container-tag prefix of the single storage blob (`crates/lakko-backup/src/head_frame.rs` `frame_backup_blob` / `parse_backup_blob`), so head + envelope swap together in one atomic `PUT` — no torn-state window, no `services/storage` change (invariant #2: the tag + head are more opaque bytes below the storage tier). The three-client restore gate (`verify_backup_head` full / `verify_backup_head_binding`, FFI-exposed with a discriminable `BackupHeadStale` vs `Backup` / `invalid:` error) applies a three-case policy: **absent** (byte 0 ≠ `0xB1` — legacy / stripped) → **fail-open** (rollback-detection availability only — the envelope stays phrase-AEAD sealed regardless, so invariant #4's no-silent-downgrade-to-non-E2EE never depends on the head); **invalid** (bad signature / account / envelope-hash, or a framed-but-truncated blob) → **hard fail-closed**; **stale** (below the floor, or over the window) → **fail-closed with an explicit user-acknowledged override**. Invariants: #1 (the head carries only `account_id`, a `BLAKE3` of ciphertext, a monotone integer, a timestamp; the counter table stores only `(account_id, version)` — no PII), #2 (storage + auth both opaque to key material — auth persists only a counter), #4 (fail-closed, scoped to the rollback-detection layer). Residual: a within-window replay of a genuine old head is uncaught for a **true zero-anchor fresh install only** (any client that ever persisted a floor is hard-protected); the tightening path (auth serving a trusted current-version marker on restore) is declined for single-fetch simplicity; the dormant v2 chain (`lakko-backup::chain`) stays out of scope. **`lakko-security` APPROVE-WITH-NOTES** (no CRITICAL/HIGH, no invariant-#4 break on the live path); the F1-F5b hardenings from it: **F4** — the **absent**-head case now floor-checks a returning client (`BLAKE3(envelope) == floor.envelope_hash` → proceed, else stale-override), so the fail-open is scoped to a **true zero-anchor fresh install** and the shipped code matches the residual above (a returning client is hard-protected against a head-stripping downgrade); **F5a** — a present-but-corrupt floor → stale-override (never a silent demote to the fresh path); **F2** — the restore gate is mandatory (the ungated no-verification path removed); **F1** — a loud unpinned-attest-key warning; **F3** (Android) — a `Throwable` `parseBackupBlob` catch; **F5b** (auth) — a default-off per-account **fail-open** mint rate-limit (`backup_head_mint_limits`, migration `0016`, `LAKKO_BACKUP_HEAD_MINT_RATE_LIMIT` default `0`). Closes G-11 in practice. Fuzz: `backup_head_open` (`lakko-attest`) + `backup_blob_parse` (`lakko-backup`) |
+
+### C-59 — iOS NSE silent-push read-only-throwaway decrypt boundary (ADR-0041 Phase 3)
+
+| ID   | Title |
+|---|---|
+| C-59 | The iOS `UNNotificationServiceExtension` (NSE) renders a **real** decrypted push preview via a **read-only throwaway** MLS decrypt ([ADR-0041](../adr/0041-ios-silent-push-nse-decrypt.md) Phase 3), mirroring the already-approved web (`148753b`) + Android (`ae9a087`) slices, without ever advancing the foreground app's ratchet. **Seed-sharing boundary.** On-device decrypt requires the AccountIdentity seed (`Identity.fromSeed`, ADR-0017) to be NSE-readable, so it moves into a **team-scoped shared Keychain access group** (`group.me.lakko.dev.shared`), staying `AfterFirstUnlockThisDeviceOnly` + no-iCloud-sync + hardware-class-key-protected; only the derived **64-byte phrase seed** is shared (never the recovery phrase), and the seed `Data` is zeroed after use (`resetBytes`). The read scope widens app -> {app, first-party co-signed NSE}, not app -> any app: invariant #7's non-extractable / hardware-backed letter is preserved, only the process scope widens (the one invariant under tension, reviewed). **Three-layer structural no-write guarantee** (what makes the throwaway airtight): (1) the slim `lakko-ffi-extension` FFI exposes **no persist method** — only `from_seed` / `restore_storage` / `load_group` / `process_incoming_verifying_roles` / `parse_body_envelope`, with no `snapshot_storage` / compose / send / call / channel / transport surface; (2) the `NsePushDecryptDeps` / `NseThrowawayGroup` protocols expose **no write path** — every method is a read or a pure compute; (3) `NseThrowawayGroup.close()` is a documented no-op (ARC / UniFFI `deinit` frees the handles; never `snapshotStorage` / `putSnapshot`); and the app's DS cursor is **never advanced** (the fetch start is read-only). The foreground app later restores from the SAME snapshot and reprocesses from its OWN append-only cursor (idempotent), so the G-34-class publish/persist ratchet-desync is avoided by construction. **Fail-closed (invariant #4):** a frame that will not authenticate is dropped (never a plaintext guess); any missing input / non-member group / DS or decrypt failure / control frame / budget expiry degrades to the generic "New message" banner. Two Phase-3 findings **RESOLVED**: **Finding 1** — an anti-censorship-**armed** user's NSE never makes a direct un-tunneled DS connection (the NSE deliberately cannot carry the transport stack, so when armed it short-circuits straight to the generic banner rather than leaking a direct connection); no open residual gap. **Finding 2** — the read-only fetch start is floored at the app's persisted per-group cursor. Invariants #2 (the NSE does only an opaque read-only DS fetch + local decrypt; the server learns nothing new — it already routed the wake to the group pseudonym), #3 (no `lakko-mls` change — the slim crate re-exports the audited `process_incoming_verifying_roles` / `parse_body_envelope` path, it does not fork it), #4 (fail-closed to the generic banner), #7 (seed read-scope widening, letter preserved). `lakko-security` APPROVE-WITH-NOTES on Phase 1 (App Group / seed-sharing migration; the LOW-1 atomic-copy-with-read-fallback fixed, `7b18cec`) + Phase 3 (NSE decrypt) + the web sibling. |
 
 ## Transport-layer invariants (T-1..T-11)
 

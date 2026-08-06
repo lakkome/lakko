@@ -75,6 +75,32 @@ public enum SharedStorage {
         UserDefaults(suiteName: appGroupIdentifier)
     }
 
+    // MARK: - Anti-censorship armed mirror (ADR-0041 Finding-1)
+
+    /// The shared-suite key holding the NSE-readable mirror of the app's
+    /// anti-censorship preference. The app keeps its private
+    /// `UserDefaults.standard` `lakko.antiCensorship.enabled` as the source
+    /// of truth and mirrors it here (a clearly-named shared copy) so the
+    /// `LakkoNotificationService` (a separate process that cannot read the
+    /// app's private defaults) can honour it on a push wake.
+    public static let antiCensorshipArmedKey = "lakko.antiCensorship.armed"
+
+    /// Mirror the app's anti-censorship preference into the shared suite.
+    /// Best-effort: a `nil` suite (unprovisioned App Group) is a silent
+    /// no-op — the same fail-open posture as the other shared accessors.
+    /// Called from the app (`AntiCensorshipManager`); never from the NSE.
+    public static func setAntiCensorshipArmed(_ armed: Bool) {
+        sharedDefaults()?.set(armed, forKey: antiCensorshipArmedKey)
+    }
+
+    /// Read the mirrored anti-censorship flag (NSE side, READ-ONLY). Absent
+    /// / an unreadable suite → `false` (not armed): the common disarmed case
+    /// keeps the rich preview, and a truly unprovisioned App Group makes the
+    /// decrypt fail closed on the missing shared stores regardless.
+    public static func isAntiCensorshipArmed() -> Bool {
+        sharedDefaults()?.bool(forKey: antiCensorshipArmedKey) ?? false
+    }
+
     // MARK: - Pure migration-decision primitives (unit-tested)
 
     /// Copy-if-absent decision for the one-time, idempotent migration:

@@ -150,6 +150,14 @@ already-shipped-and-reviewed web/Android read-only-throwaway discipline, with th
 seed-sharing migration and the framework-size question isolated into their own
 phases so the risky changes are staged and independently reviewable.
 
+**Status: all four phases landed** (Phase 0 `9a2dd82`, Phase 1 `238cb92` +
+LOW-1 fix `7b18cec`, Phase 2 `5ea5c1a`, Phase 3 `714d019`). `lakko-security`
+returned **APPROVE-WITH-NOTES** on Phase 1 (LOW-1 fixed), Phase 3, and the web
+sibling. iOS is now at parity with web + Android: a real message preview on a
+push wake. The landing added invariant-index entry **C-59** (the NSE
+read-only-throwaway seed-sharing boundary + the three-layer no-write guarantee).
+Phase-status detail per phase below.
+
 ### Phase 0 — APNs `push-type` fix (server-only). **Done.**
 
 Commit `9a2dd82`: `apns-push-type: alert` for the mutable-content NSE push, so the
@@ -195,27 +203,36 @@ one-time migration:
 **This phase is the seed-sharing decision made concrete. It touches invariant #7's
 trust boundary and must go through `lakko-security` before it lands.**
 
-### Phase 2 — slim decrypt-only framework (conditional on a size measurement)
+### Phase 2 — slim decrypt-only framework. **Done** (`5ea5c1a`).
 
 The decrypt path needs only `lakko-mls` + `lakko-attachments` (+ their transitive
-`lakko-crypto` / `lakko-proto` / openmls). Add a slim
-`crates/lakko-ffi-extension` crate exporting a **decrypt-only** UniFFI subset
-(restore-throwaway-group / process-incoming-verifying-roles / parse-body-envelope,
-plus the seed → `Identity.fromSeed` reconstruction), cross-compiled to a separate
-`LakkoCoreExtension.xcframework` the NSE links **instead of** the 333 MB
-`LakkoCore.xcframework`.
+`lakko-crypto` / `lakko-proto` / openmls). The slim
+`crates/lakko-ffi-extension` crate (`#![forbid(unsafe_code)]`) exports a
+**decrypt-only** UniFFI subset — `Identity.from_seed` + `restore_storage`,
+`load_group`, `Group.process_incoming_verifying_roles` (with the sender leaf),
+`parse_body_envelope` → `ParsedBody` — matching the `lakko-ffi-uniffi` Swift API
+shape so Phase 3 calls the same names. There is **no** compose / send / call /
+channel / transport surface. `cargo tree` confirms tokio, `lakko-transport`,
+`lakko-calls`, `lakko-channels`, `lakko-sfu-proto`, `lakko-call-jwt`, and
+tungstenite are all absent (193 crates vs the full surface's 356). The
+`justfile build-ios-extension` recipe cross-compiles the three iOS targets into a
+separate `LakkoCoreExtension.xcframework` (its own FFI module, so the app + NSE
+can carry both frameworks with no symbol clash) the NSE links **instead of** the
+333 MB `LakkoCore.xcframework`.
 
-This phase is **conditional on a measurement**, not assumed: once Phase 1 lets the
-NSE link a framework and run the restore, measure the actual linked/resident size
-of the full `LakkoCore.xcframework` in the NSE. If it fits the budget (unlikely
-given the ~50 MB linked estimate against a ~24–30 MB ceiling), Phase 2 is skipped
-and the NSE reuses the existing framework. If it busts the budget (the expected
-outcome), the slim framework is built. Deciding by measurement rather than
-assumption avoids either a wasted crate-split or a shipped OOM.
+This phase was gated on a **measurement**, not an assumption — and the
+measurement resolved cleanly in favour of the slim framework. The deciding
+number is the **dead-stripped linked footprint** (the `.a` is an archive, not the
+resident size): a probe linking the five decrypt entry points with `-dead_strip`
+yields a **~1.6 MB** stripped Mach-O (~1.34 MB mapped code); even the pathological
+whole-archive `-force_load` upper bound is ~10.3 MB. Both are well under the
+~24–30 MB NSE ceiling — an order of magnitude of headroom for the OpenMLS restore
+heap on top — so the slim framework clearly fits and Phase 3 links
+`LakkoCoreExtension`, not `LakkoCore`.
 
-### Phase 3 — the NSE read-only throwaway decrypt handler
+### Phase 3 — the NSE read-only throwaway decrypt handler. **Done** (`714d019`).
 
-Extend `NotificationService.didReceive` to decrypt, mirroring web/Android **exactly**:
+`NotificationService.didReceive` now decrypts, mirroring web/Android **exactly**:
 
 - Read the shared inputs (seed from the shared-access-group Keychain; snapshot +
   cursor from the App Group container; known-groups from the shared suite),
@@ -246,7 +263,26 @@ requirement (§ Open questions).
 The read-only-throwaway discipline here is **the same one `lakko-security` already
 approved on web** — the only iOS-specific delta is the storage-sharing plumbing
 (Phase 1) and the framework-size handling (Phase 2), which is why those carry the
-review weight, not the decrypt logic itself.
+review weight, not the decrypt logic itself. The no-write property is enforced
+**structurally, in three layers**: the slim `lakko-ffi-extension` FFI exposes no
+persist method at all; the `NsePushDecryptDeps` / `NseThrowawayGroup` protocols
+expose no write path (every method is a read or a pure compute); and
+`NseThrowawayGroup.close()` is a documented no-op (ARC / UniFFI `deinit` frees the
+handles, never `snapshotStorage` / `putSnapshot`) — plus the app's DS cursor is
+never advanced. This landed as invariant-index entry **C-59**.
+
+**Two Phase-3 review findings resolved.** *Finding 1 (anti-censorship armed →
+generic).* The NSE's DS fetch is a plain `URLSession` GET that deliberately does
+**not** route through `AntiCensorshipTransport` — dragging the transport stack
+(tokio, REALITY, MASQUE, …) into the memory-starved NSE process is infeasible. But
+that means an anti-censorship-**armed** user's NSE would otherwise make a
+**direct, un-tunneled** connection to the DS, defeating the very anonymity the
+armed transport provides. The fix: when the user is armed, the NSE **short-circuits
+straight to the generic "New message" banner** and makes no direct connection at
+all — so an armed user never leaks a direct NSE connection, and there is **no open
+residual gap** for this. *Finding 2 (cursor floor).* The read-only fetch start is
+floored at the app's persisted per-group cursor, so a stale wake can never drive
+the catch-up fetch below what the foreground app has already durably processed.
 
 ## Alternatives
 
@@ -331,30 +367,38 @@ review weight, not the decrypt logic itself.
   (non-extractable, hardware-backed) is preserved. What widens is the **process
   scope** that may read it: from the app alone to the app + a team-scoped first-party
   NSE. This is the reason the arc must be reviewed before Phase 1 lands.
-- **Invariant-index touchpoints (do not edit now — Proposed, not landed).** This
-  arc touches the iOS on-device secret-storage posture. If accepted and landed it may
-  warrant a new **C-entry** (or a free-form gap note, mirroring how G-33/G-34/G-35
-  were kept free-form) recording the NSE seed-sharing boundary + the read-only-
-  throwaway decrypt discipline. The current index (**8 I + 58 C + 15 T**, highest
-  gap **G-35**) is **not** edited by this Proposed ADR — that reconcile happens on
-  acceptance/landing, per the docs-steward convention.
+- **Invariant-index touchpoint — landed as C-59.** This arc touches the iOS
+  on-device secret-storage posture, so on landing it added **C-59** to the invariant
+  index (`docs/security/calls.md` + `docs/security/invariant-index.md`, taking the
+  index to **8 I + 59 C + 15 T**): the NSE read-only-throwaway seed-sharing boundary
+  (app → first-party NSE, team-scoped access group, `AfterFirstUnlockThisDeviceOnly`
+  + no-iCloud, only the derived 64-byte seed shared not the recovery phrase, seed
+  zeroed after use) **and** the three-layer structural no-write guarantee (the slim
+  FFI exposes no persist method · the `NsePushDecryptDeps` / `NseThrowawayGroup`
+  protocols expose no write path · `close()` is a no-op · the app cursor is never
+  advanced).
 
-**Flag this ADR + the Phase 1 (seed-sharing / App Group migration) and Phase 3
-(NSE decrypt) implementation through `lakko-security` before Phase 1 lands**
-(maintainer-invoked, per the crypto/auth gate). The review should confirm: the
-shared Keychain access group is genuinely team-scoped (first-party-only) with
-`AfterFirstUnlockThisDeviceOnly` + no iCloud sync intact; the widened seed-read
-boundary is the accepted minimum for on-device decrypt; the migration cannot strand
-or corrupt the foreground app's authoritative stores; and the NSE decrypt path
+**`lakko-security` review — done, APPROVE-WITH-NOTES.** Phase 1 (the seed-sharing /
+App Group migration) and Phase 3 (the NSE decrypt) went through `lakko-security`,
+returning **APPROVE-WITH-NOTES** on both (and on the earlier web sibling). The
+review confirmed: the shared Keychain access group is genuinely team-scoped
+(first-party-only) with `AfterFirstUnlockThisDeviceOnly` + no iCloud sync intact;
+the widened seed-read boundary is the accepted minimum for on-device decrypt; the
+migration cannot strand or corrupt the foreground app's authoritative stores (the
+Phase-1 **LOW-1** finding — a torn-copy window in the one-time file migration — was
+fixed via atomic-copy-with-read-fallback, `7b18cec`); and the NSE decrypt path
 performs **zero** writes to any shared store and never advances the app's
-snapshot/cursor — the same read-only-throwaway property approved on web.
+snapshot/cursor — the same read-only-throwaway property approved on web. The two
+Phase-3 findings (armed → generic short-circuit; cursor floor) are resolved
+(§ Phase 3), leaving no open residual gap.
 
 ## Open questions
 
-- **Phase-2 go/no-go.** Whether the slim `lakko-ffi-extension` framework is needed
-  is a measurement Phase 1 unblocks: link the full `LakkoCore.xcframework` into the
-  NSE, run the restore, measure resident size against the budget. Expected outcome is
-  "slim framework required"; the measurement decides, not an assumption.
+- **Phase-2 go/no-go — RESOLVED (slim framework built).** The measurement was
+  taken: the dead-stripped linked decrypt footprint is ~1.6 MB vs the 333 MB full
+  framework — an order of magnitude under the NSE ceiling — so the slim
+  `crates/lakko-ffi-extension` → `LakkoCoreExtension.xcframework` is built and the
+  NSE links it (`5ea5c1a`).
 - **Foreground-suppression refinement.** Whether to add an App-Group flag the
   foreground app sets while a chat is open so the NSE skips the (harmless) decrypt
   for the active conversation — a battery/latency optimisation, deferred.
@@ -380,18 +424,19 @@ snapshot/cursor — the same read-only-throwaway property approved on web.
   snapshot + message-log files into the App Group container; known-groups into
   `UserDefaults(suiteName:)`; the idempotent, fail-closed, one-time migration. **The
   seed-sharing decision — `lakko-security` gate before this lands.**
-- **Phase 2 — slim decrypt-only framework (conditional).** Measure the full
-  framework in the NSE first. If it busts the budget (expected), build
-  `crates/lakko-ffi-extension` ({`lakko-mls`, `lakko-attachments`}) →
-  `LakkoCoreExtension.xcframework`, cross-compiled and linked by the NSE instead of
-  `LakkoCore.xcframework`.
-- **Phase 3 — NSE read-only throwaway decrypt handler.** Extend
-  `NotificationService.didReceive` to reconstruct a fresh throwaway `Identity` from
-  the shared seed, restore a temporary group, do a read-only `URLSession` DS fetch
-  after the cursor, decrypt via `processIncomingVerifyingRoles` /
-  `parseBodyEnvelope`, render the real preview, then discard — never persist, never
+- **Phase 2 — slim decrypt-only framework.** **Done** (`5ea5c1a`). Measurement
+  taken (~1.6 MB dead-stripped vs 333 MB full → fits with an order of magnitude of
+  headroom), so `crates/lakko-ffi-extension` ({`lakko-mls`, `lakko-attachments`}) →
+  `LakkoCoreExtension.xcframework` was built, cross-compiled, and linked by the NSE
+  instead of `LakkoCore.xcframework`.
+- **Phase 3 — NSE read-only throwaway decrypt handler.** **Done** (`714d019`).
+  `NotificationService.didReceive` reconstructs a fresh throwaway `Identity` from
+  the shared seed, restores a temporary group, does a read-only `URLSession` DS fetch
+  after the cursor, decrypts via `processIncomingVerifyingRoles` /
+  `parseBodyEnvelope`, renders the real preview, then discards — never persist, never
   advance the cursor, zero the seed, fail-closed to the generic banner. Mirrors
-  web/Android exactly.
+  web/Android exactly. `lakko-security` APPROVE-WITH-NOTES; the two findings
+  (armed → generic short-circuit; cursor floor) resolved.
 
 ## References
 
@@ -403,9 +448,17 @@ snapshot/cursor — the same read-only-throwaway property approved on web.
   the second landed client mirroring the same discipline.
 - **Phase 0** commit `9a2dd82` (`fix(push-gw): correct APNs push-type to alert for
   the mutable-content NSE push`) — the server prerequisite.
-- `apps/ios/LakkoNotificationService/NotificationService.swift` — the NSE today
-  (threadIdentifier-only), whose header already enumerates the three blockers this
-  ADR resolves.
+- **Phase 1** commit `238cb92` (`feat(ios): accept ADR-0041 + App Group storage
+  migration for NSE decrypt`) + **LOW-1** fix `7b18cec` (`fix(ios): atomic App Group
+  file migration + read fallback`) — the seed-sharing / App Group migration.
+- **Phase 2** commit `5ea5c1a` (`feat(ios): slim decrypt-only lakko-ffi-extension
+  crate + xcframework`) — `crates/lakko-ffi-extension` + `LakkoCoreExtension.xcframework`.
+- **Phase 3** commit `714d019` (`feat(ios): NSE read-only throwaway decrypt — real
+  push preview`) — `apps/ios/LakkoNotificationService/{NsePushDecrypt,NseDecryptDeps}.swift`
+  + the extended `NotificationService.swift` + `apps/ios/LakkoTests/NsePushDecryptTests.swift`.
+- `apps/ios/LakkoNotificationService/NotificationService.swift` — the NSE handler,
+  now extended (Phase 3) to do the read-only throwaway decrypt; its header enumerated
+  the three blockers this ADR resolved.
 - `apps/ios/Lakko/Auth/AccountIdentitySeedStore.swift` — the AccountIdentity-seed
   Keychain store (the load-bearing secret; the header naming it "the
   highest-sensitivity on-device secret").
