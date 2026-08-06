@@ -44,9 +44,11 @@
  *   * The `push` payload is `{ v, d, g, p }` (schema version, device
  *     pseudonym, group routing hex, DS envelope pointer — see
  *     `services/push-gw/src/providers/webpush.rs::WakeBody`). Post-
- *     ADR-0042 `g` is the OPAQUE `push_gid`; the decrypt path reverse-
- *     maps it to the real group_id via the `lakko-push-routing`/`routes`
- *     IDB index (legacy raw-group_id wakes still resolve directly).
+ *     ADR-0042 `g` is the OPAQUE `push_gid`; BOTH the decrypt path and
+ *     the notification-TAP deep-link reverse-map it to the real group_id
+ *     via the `lakko-push-routing`/`routes` IDB index (legacy raw-
+ *     group_id wakes still resolve directly, and any miss keeps the raw
+ *     `g` so behavior is unchanged for them).
  *   * When a Lakko tab is open + visible, the SW just postMessages the
  *     wake and shows a notification — the visible app drives the real
  *     preview + refresh itself.
@@ -284,12 +286,28 @@ async function handlePush(wake) {
     }
   }
 
-  // (c) Show the notification. Real preview when we have one; the
+  // (c) Reverse-map the opaque `push_gid` to the REAL group_id for the
+  //     TAP deep-link (ADR-0042). Resolved HERE rather than inside
+  //     `notificationclick` on purpose: the click handler must reach
+  //     `clients.openWindow` with as few awaits as possible so the
+  //     notification's user activation survives. A miss leaves the
+  //     payload untouched, so the legacy path stays byte-for-byte.
+  //     Note this deliberately does NOT touch `tag` below — `push_gid`
+  //     is stable per group, so the existing grouping is already right.
+  const tapGroupHex =
+    wake?.groupHex != null ? await resolveTapGroupHex(wake.groupHex) : null;
+
+  // (d) Show the notification. Real preview when we have one; the
   //     generic "New message" fallback otherwise (unchanged behavior).
   const title = preview?.title ?? "Lakko";
   const body = preview?.body ?? "New message";
   const tag = preview?.tag ?? wake?.groupHex ?? "lakko-default";
-  const data = wake !== null ? { wake } : {};
+  const data =
+    wake !== null
+      ? tapGroupHex !== null
+        ? { wake, tapGroupHex }
+        : { wake }
+      : {};
   try {
     await self.registration.showNotification(title, {
       body,
@@ -305,6 +323,33 @@ async function handlePush(wake) {
     // Some browsers + private modes don't allow showing notifications
     // from a push event under certain conditions — best-effort, don't
     // throw past `waitUntil`.
+  }
+}
+
+/**
+ * ADR-0042 — reverse-map a wake's opaque `push_gid` (`g`) to the REAL
+ * DS `group_id`, lowercase-hex, for the notification-TAP deep-link.
+ *
+ * Reads the SAME plaintext `lakko-push-routing`/`routes` reverse index
+ * the background decrypt consults (see `buildDecryptDeps.lookupRoute`
+ * and `src/push/group-routing-store.ts`): `push_gid` is a one-way
+ * derivation and `group_id` is a public DS routing address, so the row
+ * needs no device key — which is exactly why the SW can read it here.
+ * READ-ONLY, like every other SW touch of app storage.
+ *
+ * Returns `null` on ANY miss — a legacy pre-ADR-0042 raw-group_id wake,
+ * a group whose route was never provisioned, a malformed row, or an IDB
+ * failure. The caller then leaves the tap payload on the raw `g`, i.e.
+ * exactly today's behavior. NEVER throws: a rejection here would
+ * propagate out of the `push` handler and drop the notification.
+ */
+async function resolveTapGroupHex(pushGidHex) {
+  try {
+    const row = await idbGet("lakko-push-routing", "routes", pushGidHex);
+    if (row === undefined || typeof row.groupIdB64 !== "string") return null;
+    return bytesToHex(base64Decode(row.groupIdB64));
+  } catch {
+    return null;
   }
 }
 
@@ -598,14 +643,21 @@ self.addEventListener("notificationclick", (event) => {
   event.notification.close();
 
   const wake = event.notification.data?.wake;
+  // ADR-0042 — `wake.groupHex` is the OPAQUE `push_gid`, which no SPA
+  // surface can match against a group. `handlePush` already resolved it
+  // to the real `group_id` hex via the `routes` reverse index and stashed
+  // it as `tapGroupHex`; prefer that. On a miss (legacy wake / route not
+  // provisioned) the field is absent and we fall back to the raw `g` —
+  // today's behavior, which the SPA treats as an unknown group.
+  const tapGroupHex = event.notification.data?.tapGroupHex ?? wake?.groupHex;
   // Default landing: the app shell. When we know the group, route
   // to the per-chat page so the user lands on the unread thread.
   // The `paths.chat(...)` slug is base64url-no-pad(groupId) — the
   // SW doesn't have the helper, so we just open the root and let
   // the SPA route via its own deep-link reader (set in 1.18g).
   let url = "/";
-  if (wake?.groupHex) {
-    url = `/?wake=${encodeURIComponent(wake.groupHex)}`;
+  if (tapGroupHex) {
+    url = `/?wake=${encodeURIComponent(tapGroupHex)}`;
   }
 
   event.waitUntil(

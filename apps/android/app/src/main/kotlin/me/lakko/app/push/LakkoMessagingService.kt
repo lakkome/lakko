@@ -52,7 +52,9 @@ import me.lakko.app.ds.DsClient
  *     message" — invariant #4: a frame that will not authenticate
  *     is dropped, never shown as a guess. Either way the wake hint
  *     rides `Intent` extras so the user's tap lands in the right
- *     thread.
+ *     thread — post-ADR-0042 the `g` in those extras is the
+ *     reverse-resolved real `group_id` (see [resolveTapGroupHex]),
+ *     not the opaque `push_gid` the wire carries.
  *
  * Registered in `AndroidManifest.xml`:
  *
@@ -159,10 +161,28 @@ public class LakkoMessagingService : FirebaseMessagingService() {
         // routes the user to the matching chat thread (falling
         // back to the chat list when the group is unknown
         // locally — a stale wake).
+        // ADR-0042 — the wake's `g` is the OPAQUE `push_gid`, which the
+        // router cannot match against a local thread. Reverse-resolve it
+        // to the real `group_id` hex for the TAP extra only; a miss keeps
+        // the raw `g` (today's behavior). The notification GROUP key, the
+        // notification id, and the PendingIntent request code below all
+        // deliberately stay on the raw `push_gid` — it is stable per group,
+        // so the existing grouping/replace semantics are already correct.
+        val tapGroupHex = wake?.groupHex?.let { pushGidHex ->
+            resolveTapGroupHex(pushGidHex) { hex ->
+                try {
+                    PushRouteStore(applicationContext).lookup(hex)?.groupIdHex
+                } catch (cause: Throwable) {
+                    Log.w(TAG, "push route lookup failed; tap keeps the raw push_gid", cause)
+                    null
+                }
+            }
+        }
+
         val clickIntent = Intent(applicationContext, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
-            if (wake?.groupHex != null) {
-                putExtra(EXTRA_WAKE_GROUP, wake.groupHex)
+            if (tapGroupHex != null) {
+                putExtra(EXTRA_WAKE_GROUP, tapGroupHex)
             }
             if (wake?.pointer != null) {
                 putExtra(EXTRA_WAKE_POINTER, wake.pointer)
@@ -270,4 +290,44 @@ public class LakkoMessagingService : FirebaseMessagingService() {
         public const val EXTRA_WAKE_GROUP: String = "me.lakko.push.wake_group"
         public const val EXTRA_WAKE_POINTER: String = "me.lakko.push.wake_pointer"
     }
+}
+
+/**
+ * ADR-0042 — reverse-map a wake's opaque `push_gid` to the REAL DS
+ * `group_id` (lowercase hex) for the notification-TAP deep link.
+ *
+ * Post-ADR-0042 the wake's `g` is the opaque `push_gid`, but the tap
+ * consumer chain — [me.lakko.app.MainActivity.handleWakeIntent] ->
+ * [PushIntake] -> the Compose router — matches the extra against
+ * `ChatRepository.threads`' real `group_id` hex. Handing it the raw `g`
+ * therefore never matches, so every tap fell back to the chat list. This
+ * resolves it through the SAME plaintext reverse index the silent-push
+ * decrypt path uses ([PushRouteStore.lookup]) — a read, never a write.
+ *
+ * Pure + injectable so it is unit-testable on the plain JVM without a
+ * [android.content.Context]: [lookupGroupIdHex] is the only
+ * side-effecting dependency, and this function deliberately does NOT
+ * touch [android.util.Log] (a throwing stub off-device — it would defeat
+ * the never-throws contract below in exactly the tests meant to prove
+ * it). Diagnostics are the caller's job, inside the lambda it supplies.
+ *
+ * Fallback contract — on a MISS (a legacy pre-ADR-0042 raw-group_id
+ * wake, a group whose route was never provisioned, a malformed stored
+ * row, or a lookup THROW) this returns [wakeGroupHex] unchanged, i.e.
+ * exactly today's behavior, which the router degrades to its existing
+ * unknown-group chat-list fallback. It never throws: this runs on the
+ * FCM callback thread on the way to posting a notification.
+ */
+public fun resolveTapGroupHex(
+    wakeGroupHex: String,
+    lookupGroupIdHex: (String) -> String?,
+): String {
+    val resolved = try {
+        lookupGroupIdHex(wakeGroupHex)
+    } catch (cause: Throwable) {
+        // Defence in depth — the caller already logs + swallows. Anything
+        // reaching here still degrades to the raw wake hex, never escapes.
+        null
+    }
+    return resolved?.trim()?.takeIf { it.isNotEmpty() } ?: wakeGroupHex
 }
