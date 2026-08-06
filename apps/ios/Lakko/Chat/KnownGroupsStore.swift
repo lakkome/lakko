@@ -109,6 +109,33 @@ public final class KnownGroupsStore {
         standardDefaults.removeObject(forKey: key)
     }
 
+    /// ADR-0041 Phase 3 — which locally-stored account knows `groupIdHex`?
+    /// Enumerates every `me.lakko.known-groups.v1.<accountIdB64>` row (the
+    /// shared suite first, then `.standard`) and returns the first
+    /// `accountIdB64` whose set contains the hex, or `nil` when no account
+    /// on this device knows the group.
+    ///
+    /// Used by the silent-push NSE background decrypt
+    /// (``NsePushDecrypt``): the extension has no live ``ChatRepository``
+    /// to consult, so it resolves the wake's group pseudonym to an account
+    /// straight from this store — the direct mirror of Android's
+    /// `KnownGroupsStore.findAccountForGroup`. The comparison is
+    /// case-insensitive so a wake's `g` in either hex case matches (stored
+    /// ids are lowercase, produced by ``DsClient/pseudonymHex(_:)``).
+    public func findAccountForGroup(groupIdHex: String) -> String? {
+        let needle = groupIdHex.lowercased()
+        let prefix = Self.keyPrefix
+        for defaults in [sharedDefaults, standardDefaults].compactMap({ $0 }) {
+            for (key, _) in defaults.dictionaryRepresentation() where key.hasPrefix(prefix) {
+                guard let array = defaults.stringArray(forKey: key) else { continue }
+                if array.contains(where: { $0.lowercased() == needle }) {
+                    return String(key.dropFirst(prefix.count))
+                }
+            }
+        }
+        return nil
+    }
+
     /// ADR-0041 Phase 1 — one-time, idempotent, **copy-not-move**
     /// migration of the known-groups list into the shared suite. No-op
     /// when the suite already has the list (idempotent), `.standard` has
@@ -125,7 +152,12 @@ public final class KnownGroupsStore {
         shared.set(array, forKey: key)
     }
 
+    /// Per-account key prefix — the suffix is the standard-base64
+    /// `accountIdB64` shared by every per-account store. Enumerated by
+    /// ``findAccountForGroup(groupIdHex:)`` to reverse a group → account.
+    private static let keyPrefix: String = "me.lakko.known-groups.v1."
+
     private static func keyFor(_ accountIdB64: String) -> String {
-        "me.lakko.known-groups.v1.\(accountIdB64)"
+        keyPrefix + accountIdB64
     }
 }

@@ -62,6 +62,23 @@ let package = Package(
             name: "LakkoCore",
             targets: ["LakkoCore"]
         ),
+        // ADR-0041 Phase 3 — the SLIM decrypt-only surface the
+        // `LakkoNotificationService` (NSE) links INSTEAD of the full
+        // `LakkoCore`. Wraps `target/ios-extension/LakkoCoreExtension.xcframework`
+        // (built by `just build-ios-extension` from the
+        // `lakko-ffi-extension` crate — only `lakko-mls` +
+        // `lakko-attachments`, no transport / calls / SFU / channels), so
+        // the NSE stays under its ~30 MB RAM budget. Consumers import
+        // `LakkoCoreExtension`; the full-surface `Identity` / `Group` /
+        // `ProcessedMessage` types it exposes are a DISTINCT UniFFI module
+        // (`lakko_ffi_extensionFFI`) from the full surface's
+        // (`lakko_ffi_uniffiFFI`), so a device can carry both frameworks
+        // side by side (the app links `LakkoCore`, the NSE
+        // `LakkoCoreExtension`) with no symbol / type clash.
+        .library(
+            name: "LakkoCoreExtension",
+            targets: ["LakkoCoreExtension"]
+        ),
     ],
     targets: [
         // Binary target pointing at the XCFramework `just
@@ -94,6 +111,23 @@ let package = Package(
         .target(
             name: "LakkoCore",
             dependencies: ["lakko_ffi_uniffiFFI"]
+        ),
+        // ADR-0041 Phase 3 — the slim decrypt-only binary + Swift wrapper
+        // for the NSE. Same two-target (binary + Swift-source) shape as
+        // `LakkoCore` above, pointed at the slim xcframework + the slim
+        // UniFFI binding `just build-ios-extension` fans into
+        // `Sources/LakkoCoreExtension/` (gitignored build artefact). The
+        // binary-target name must match the C module name in the slim
+        // xcframework's `module.modulemap` (`lakko_ffi_extensionFFI`) —
+        // the value the generated `lakko_ffi_extension.swift` hard-codes
+        // in its `import lakko_ffi_extensionFFI`.
+        .binaryTarget(
+            name: "lakko_ffi_extensionFFI",
+            path: "../../target/ios-extension/LakkoCoreExtension.xcframework"
+        ),
+        .target(
+            name: "LakkoCoreExtension",
+            dependencies: ["lakko_ffi_extensionFFI"]
         ),
     ]
 )

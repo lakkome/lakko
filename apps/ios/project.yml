@@ -358,10 +358,42 @@ targets:
     platform: iOS
     sources:
       - path: LakkoNotificationService
+      # ADR-0041 Phase 3 — the FFI-CLEAN shared stores the read-only NSE
+      # decrypt reads, compiled into the NSE target as sibling sources (no
+      # shared framework). Each imports only Foundation / CryptoKit /
+      # Security (NOT the full `LakkoCore`), so they compile into the
+      # slim-framework NSE process. Phase 1 already made them read from the
+      # App Group container / shared Keychain access group. `MessageLogStore`
+      # was split — its `LakkoCore`-dependent `ChatMessage` bridge lives in
+      # `MessageLogStore+ChatMessage.swift` (app target only), leaving the
+      # store FFI-clean so the NSE can read the per-group cursor.
+      - path: Lakko/Shared/SharedStorage.swift
+        type: file
+        buildPhase: sources
+      - path: Lakko/Shared/KeychainWrapKey.swift
+        type: file
+        buildPhase: sources
+      - path: Lakko/Auth/AccountIdentitySeedStore.swift
+        type: file
+        buildPhase: sources
+      - path: Lakko/Chat/IdentitySnapshotStore.swift
+        type: file
+        buildPhase: sources
+      - path: Lakko/Chat/KnownGroupsStore.swift
+        type: file
+        buildPhase: sources
+      - path: Lakko/Chat/MessageLogStore.swift
+        type: file
+        buildPhase: sources
     info:
       path: LakkoNotificationService/Info.plist
       properties:
         CFBundleDisplayName: Lakko Notifications
+        # ADR-0041 Phase 3 — DS base URL the NSE's slim `URLSession` fetch
+        # uses. EMPTY → `NseConfig.dsBaseURL` falls back to the app's
+        # `DsClient` default (`http://localhost:8082`); a deployment sets it
+        # per build configuration to point the NSE at the real DS.
+        LakkoDsUrl: ""
         # `NSExtension` block now lives in `properties` so
         # xcodegen owns the entire Info.plist (previous
         # comment about manual editing was stale — Xcode
@@ -394,6 +426,15 @@ targets:
         keychain-access-groups:
           - $(AppIdentifierPrefix)me.lakko.dev.LakkoNotificationService
           - $(AppIdentifierPrefix)me.lakko.dev.shared
+    dependencies:
+      # ADR-0041 Phase 3 — the NSE links the SLIM decrypt-only
+      # `LakkoCoreExtension` (only `lakko-mls` + `lakko-attachments`), NOT
+      # the full 333 MB `LakkoCore`, so it stays under its ~30 MB RAM
+      # budget. The two frameworks live in distinct UniFFI modules
+      # (`lakko_ffi_extensionFFI` vs `lakko_ffi_uniffiFFI`) so a device can
+      # carry both side by side without a symbol / type clash.
+      - package: LakkoCore
+        product: LakkoCoreExtension
     settings:
       base:
         SWIFT_VERSION: "5.10"
@@ -404,13 +445,6 @@ targets:
         # (Phase 1.14b pinned iOS 17). Lower would prevent
         # bundling.
         IPHONEOS_DEPLOYMENT_TARGET: "17.0"
-        # The extension target does NOT depend on LakkoCore
-        # (or any UniFFI surface). 1.20c2 only reads the APNs
-        # `userInfo` dictionary; 1.20c2b's decrypt path will
-        # introduce a separate slim `LakkoCoreExtension`
-        # framework with just `parseEnvelope` +
-        # `Group.processIncoming` carved out for the
-        # 30 MB-memory extension process.
 
   # G3-4-mobile — iOS XCTest target hosted by the Lakko app.
   # Wired into the existing `Lakko` scheme below so
@@ -424,6 +458,15 @@ targets:
     platform: iOS
     sources:
       - path: LakkoTests
+      # ADR-0041 Phase 3 — the pure, FFI-free NSE decrypt core, compiled
+      # into the test target so `NsePushDecryptTests` can drive it with
+      # hand-rolled fakes (no `LakkoCoreExtension.xcframework` linked). Same
+      # source file the NSE target compiles — one source of truth, two
+      # target memberships. The FFI + Keychain wiring (`NseDecryptDeps.swift`,
+      # `NotificationService.swift`) is NOT compiled here.
+      - path: LakkoNotificationService/NsePushDecrypt.swift
+        type: file
+        buildPhase: sources
     settings:
       base:
         SWIFT_VERSION: "5.10"

@@ -648,10 +648,25 @@ build-ios-extension:
     # Lay out the headers + modulemap the `-headers` argument expects.
     # The `lakko_ffi_extensionFFI` module name must match the
     # `import lakko_ffi_extensionFFI` the generated Swift binding emits.
-    mkdir -p target/ios-extension/headers
-    @cp target/bindings-extension/swift/lakko_ffi_extensionFFI.h target/ios-extension/headers/
+    #
+    # ADR-0041 Phase 3 — the header + modulemap live in a MODULE-NAMED
+    # SUBDIRECTORY (`headers/lakko_ffi_extensionFFI/`) rather than flat in
+    # `headers/`. When the NSE (slim) framework and the app (full
+    # `LakkoCore`) framework are both consumed in ONE app build, Xcode's
+    # `ProcessXCFramework` flattens each static-lib xcframework's `Headers/`
+    # into the shared `$(BUILT_PRODUCTS_DIR)/include/`. Two bare top-level
+    # `module.modulemap` files then collide ("Multiple commands produce
+    # include/module.modulemap"). Nesting the slim modulemap under its
+    # module name makes it land at `include/lakko_ffi_extensionFFI/
+    # module.modulemap`, distinct from the full framework's
+    # `include/module.modulemap` — no collision. The clean re-create avoids
+    # a stale flat `module.modulemap` from a pre-Phase-3 build lingering
+    # alongside the subdir and re-introducing the collision.
+    rm -rf target/ios-extension/headers
+    mkdir -p target/ios-extension/headers/lakko_ffi_extensionFFI
+    @cp target/bindings-extension/swift/lakko_ffi_extensionFFI.h target/ios-extension/headers/lakko_ffi_extensionFFI/
     @printf 'module lakko_ffi_extensionFFI {\n    header "lakko_ffi_extensionFFI.h"\n    export *\n}\n' \
-        > target/ios-extension/headers/module.modulemap
+        > target/ios-extension/headers/lakko_ffi_extensionFFI/module.modulemap
     rm -rf target/ios-extension/LakkoCoreExtension.xcframework
     xcodebuild -create-xcframework \
         -library target/aarch64-apple-ios/release/liblakko_ffi_extension.a \
