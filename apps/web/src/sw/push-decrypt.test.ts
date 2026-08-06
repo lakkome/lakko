@@ -14,6 +14,9 @@
  *   * the newest decryptable message wins,
  *   * edit surfaces new text; delete/reaction/typing/read-receipt do not,
  *   * the app's persisted cursor is used as the READ-ONLY fetch start,
+ *   * an ADR-0042 `push_gid` wake reverse-maps via the injected
+ *     `lookupRoute` to the REAL group (miss → legacy raw-group_id path;
+ *     lookup error / malformed row → legacy path, never a throw),
  *   * and NO persist / cursor-advance hook is EVER called.
  *
  * The module under test is a `public/*.js` ESM (the one shape reachable
@@ -28,6 +31,10 @@ import { decryptPushPreview } from "../../public/sw-push-decrypt.js";
 const GROUP_HEX = "aa".repeat(32);
 const GROUP_BYTES = new Uint8Array(32).fill(0xaa);
 const ACCOUNT_ID = "acct-b64";
+// The ADR-0042 opaque push_gid a post-Sprint-3 wake carries as `g` —
+// same 64-lowercase-hex shape as a group id, but NOT a group we know.
+const PUSH_GID_HEX = "cc".repeat(32);
+const GROUP_B64 = btoa(String.fromCharCode(...GROUP_BYTES));
 
 /** Build a DS message whose payload the mock wasm interprets. */
 function msg(id: number, parsed: unknown, opts: { throwOnProcess?: boolean } = {}) {
@@ -266,6 +273,100 @@ describe("decryptPushPreview — fail-closed / null fallbacks", () => {
       })),
     });
     await decryptPushPreview(wake(), deps);
+    expect(saveSnapshot).not.toHaveBeenCalled();
+    expect(saveMessageLog).not.toHaveBeenCalled();
+    expect(advanceCursor).not.toHaveBeenCalled();
+  });
+});
+
+describe("decryptPushPreview — ADR-0042 push_gid reverse-map (Sprint 4)", () => {
+  it("resolves an opaque push_gid wake via lookupRoute to the REAL group and decrypts", async () => {
+    const lookupRoute = vi.fn(async (_gid: string) => ({
+      accountId: ACCOUNT_ID,
+      groupIdB64: GROUP_B64,
+    }));
+    const { deps, dsFetchGroup, saveSnapshot, saveMessageLog, advanceCursor } =
+      baseDeps({ lookupRoute });
+    const out = await decryptPushPreview(wake({ groupHex: PUSH_GID_HEX }), deps);
+    // Downstream everything (DS fetch, cursor, tag) uses the REAL group.
+    expect(out).toEqual({ title: "Lakko", body: "hello world", tag: GROUP_HEX });
+    expect(lookupRoute).toHaveBeenCalledWith(PUSH_GID_HEX);
+    expect(dsFetchGroup).toHaveBeenCalledWith(GROUP_BYTES, 41);
+    expect(deps.startCursor).toHaveBeenCalledWith(ACCOUNT_ID, GROUP_HEX);
+    // The legacy path never ran.
+    expect(deps.resolveAccount).not.toHaveBeenCalled();
+    // The route lookup is a READ — still nothing persisted, ever.
+    expect(saveSnapshot).not.toHaveBeenCalled();
+    expect(saveMessageLog).not.toHaveBeenCalled();
+    expect(advanceCursor).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the legacy raw-group_id path on a route miss", async () => {
+    const lookupRoute = vi.fn(async (_gid: string) => null);
+    const { deps } = baseDeps({ lookupRoute });
+    // The wake's `g` IS a real group id this device knows (legacy wake /
+    // not-yet-provisioned group) — unchanged pre-Sprint-4 behavior.
+    const out = await decryptPushPreview(wake(), deps);
+    expect(out).toEqual({ title: "Lakko", body: "hello world", tag: GROUP_HEX });
+    expect(lookupRoute).toHaveBeenCalledWith(GROUP_HEX);
+    expect(deps.resolveAccount).toHaveBeenCalledWith(GROUP_HEX);
+  });
+
+  it("treats a lookupRoute error as a miss (legacy path still works)", async () => {
+    const lookupRoute = vi.fn(async () => {
+      throw new Error("idb open blocked");
+    });
+    const { deps } = baseDeps({ lookupRoute });
+    const out = await decryptPushPreview(wake(), deps);
+    expect(out?.body).toBe("hello world");
+    expect(deps.resolveAccount).toHaveBeenCalledWith(GROUP_HEX);
+  });
+
+  it("degrades to null (generic) when the lookup errors AND the legacy path misses", async () => {
+    const lookupRoute = vi.fn(async () => {
+      throw new Error("idb open blocked");
+    });
+    const { deps, dsFetchGroup } = baseDeps({
+      lookupRoute,
+      resolveAccount: vi.fn(async () => null),
+    });
+    // An unknown push_gid + no legacy match → null, never a throw.
+    expect(
+      await decryptPushPreview(wake({ groupHex: PUSH_GID_HEX }), deps),
+    ).toBeNull();
+    expect(dsFetchGroup).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the legacy path on a malformed route row", async () => {
+    for (const badRoute of [
+      { accountId: ACCOUNT_ID, groupIdB64: "!!!not-base64!!!" }, // undecodable
+      { accountId: ACCOUNT_ID, groupIdB64: btoa("short") }, // not 32 bytes
+      { accountId: ACCOUNT_ID }, // missing groupIdB64
+      { groupIdB64: GROUP_B64 }, // missing accountId
+    ]) {
+      const { deps } = baseDeps({
+        lookupRoute: vi.fn(async () => badRoute),
+      });
+      const out = await decryptPushPreview(wake(), deps);
+      // The legacy path (g = a known group id) still produced the preview.
+      expect(out?.body).toBe("hello world");
+      expect(deps.resolveAccount).toHaveBeenCalledWith(GROUP_HEX);
+    }
+  });
+
+  it("never persists on the route-resolved path even when decrypt fails", async () => {
+    const { deps, saveSnapshot, saveMessageLog, advanceCursor } = baseDeps({
+      lookupRoute: vi.fn(async () => ({
+        accountId: ACCOUNT_ID,
+        groupIdB64: GROUP_B64,
+      })),
+      dsFetchGroup: vi.fn(async () => ({
+        messages: [msg(42, {}, { throwOnProcess: true })],
+      })),
+    });
+    expect(
+      await decryptPushPreview(wake({ groupHex: PUSH_GID_HEX }), deps),
+    ).toBeNull();
     expect(saveSnapshot).not.toHaveBeenCalled();
     expect(saveMessageLog).not.toHaveBeenCalled();
     expect(advanceCursor).not.toHaveBeenCalled();

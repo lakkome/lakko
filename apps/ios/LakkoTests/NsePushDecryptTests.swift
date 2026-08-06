@@ -20,6 +20,10 @@ final class NsePushDecryptTests: XCTestCase {
     private let groupHex = String(repeating: "a", count: 64)
     private let groupIdBytes = Data(repeating: 0xAA, count: 32)
     private let accountId = "acct-b64=="
+    /// ADR-0042 — an opaque `push_gid` hex (the post-Sprint-3 wake `g`);
+    /// deliberately DIFFERENT from `groupHex` so a test can prove the real
+    /// group_id (not the wake's `g`) drives the fetch/open on a route hit.
+    private let pushGidHex = String(repeating: "b", count: 64)
 
     // MARK: - Fakes
 
@@ -67,6 +71,9 @@ final class NsePushDecryptTests: XCTestCase {
         let group: FakeThrowawayGroup?
         let rows: [NseFetchedRow]
         let cursor: Int64?
+        /// ADR-0042 Sprint 4 — the canned reverse-index row (`nil` = miss,
+        /// the pre-ADR-0042 legacy shape every older test exercises).
+        let route: (accountIdB64: String, groupIdHex: String)?
         let dsThrows: Bool
         let openThrows: Bool
         let armed: Bool
@@ -75,6 +82,10 @@ final class NsePushDecryptTests: XCTestCase {
         var openCount = 0
         var dsFetchCount = 0
         var lastAfterId: Int64?
+        var lookupCount = 0
+        var lastLookupPushGid: String?
+        var lastFetchGroupIdBytes: Data?
+        var lastCursorGroupHex: String?
 
         init(
             account: NseResolvedAccount?,
@@ -83,6 +94,7 @@ final class NsePushDecryptTests: XCTestCase {
             group: FakeThrowawayGroup? = nil,
             rows: [NseFetchedRow] = [],
             cursor: Int64? = nil,
+            route: (accountIdB64: String, groupIdHex: String)? = nil,
             dsThrows: Bool = false,
             openThrows: Bool = false,
             armed: Bool = false
@@ -93,9 +105,16 @@ final class NsePushDecryptTests: XCTestCase {
             self.group = group
             self.rows = rows
             self.cursor = cursor
+            self.route = route
             self.dsThrows = dsThrows
             self.openThrows = openThrows
             self.armed = armed
+        }
+
+        func lookupRoute(pushGidHex: String) -> (accountIdB64: String, groupIdHex: String)? {
+            lookupCount += 1
+            lastLookupPushGid = pushGidHex
+            return route
         }
 
         func resolveAccount(groupHex: String) -> NseResolvedAccount? {
@@ -120,11 +139,15 @@ final class NsePushDecryptTests: XCTestCase {
         func dsFetch(groupIdBytes: Data, afterId: Int64) async throws -> [NseFetchedRow] {
             dsFetchCount += 1
             lastAfterId = afterId
+            lastFetchGroupIdBytes = groupIdBytes
             if dsThrows { throw FakeError.ds }
             return rows
         }
 
-        func startCursor(accountIdB64: String, groupHex: String) -> Int64? { cursor }
+        func startCursor(accountIdB64: String, groupHex: String) -> Int64? {
+            lastCursorGroupHex = groupHex
+            return cursor
+        }
 
         func isAntiCensorshipArmed() -> Bool { armed }
     }
@@ -396,6 +419,120 @@ final class NsePushDecryptTests: XCTestCase {
 
         XCTAssertEqual(preview?.body, "hello")
         XCTAssertEqual(deps.dsFetchCount, 1, "disarmed still fetches")
+    }
+
+    // MARK: - ADR-0042 Sprint 4 — push_gid reverse-map (route-first, legacy fallback)
+
+    func testPushGidWakeResolvesViaReverseIndexAndDecrypts() async {
+        // The wake's `g` is an opaque push_gid; the reverse index maps it to
+        // the REAL (account, group_id). The legacy resolve must never be
+        // consulted on a hit — `account: nil` proves it is not needed.
+        let group = FakeThrowawayGroup(decode: { _ in self.chat("routed hello") })
+        let deps = FakeDeps(
+            account: nil,
+            group: group,
+            rows: [row(10, 1)],
+            route: (accountIdB64: accountId, groupIdHex: groupHex)
+        )
+        let preview = await decryptPushPreview(NsePushWake(groupHex: pushGidHex, pointer: 11), deps)
+
+        XCTAssertEqual(preview?.body, "routed hello")
+        XCTAssertEqual(preview?.tag, groupHex, "tag is the REAL group hex, not the push_gid")
+        XCTAssertEqual(deps.lookupCount, 1, "reverse index consulted first")
+        XCTAssertEqual(deps.lastLookupPushGid, pushGidHex)
+        XCTAssertEqual(deps.resolveCount, 0, "route hit never consults the legacy resolve")
+        XCTAssertEqual(deps.lastFetchGroupIdBytes, groupIdBytes, "DS fetch uses the REAL group_id")
+        XCTAssertEqual(deps.lastCursorGroupHex, groupHex, "cursor read keyed on the REAL group hex")
+        XCTAssertTrue(group.closed, "throwaway group closed on the routed path too")
+        XCTAssertFalse(group.persistAttempted, "no persist entry point on the routed path")
+    }
+
+    func testRouteMissFallsBackToLegacyRawGroupIdPath() async {
+        // A legacy wake: `g` IS the raw group_id and the reverse index has
+        // no row for it — the pre-ADR-0042 path runs byte-for-byte.
+        let group = FakeThrowawayGroup(decode: { _ in self.chat("legacy") })
+        let deps = FakeDeps(account: okAccount(), group: group, rows: [row(10, 1)], route: nil)
+        let preview = await decryptPushPreview(NsePushWake(groupHex: groupHex, pointer: 11), deps)
+
+        XCTAssertEqual(preview?.body, "legacy")
+        XCTAssertEqual(preview?.tag, groupHex)
+        XCTAssertEqual(deps.lookupCount, 1, "reverse index consulted first even for a legacy wake")
+        XCTAssertEqual(deps.resolveCount, 1, "miss falls back to the raw-group_id resolve")
+        XCTAssertEqual(deps.lastCursorGroupHex, groupHex)
+    }
+
+    func testMalformedRouteRowFallsBackToLegacy() async {
+        // A corrupt plaintext row (wrong-length / non-hex group id, empty
+        // account) must DEGRADE to the legacy path, never crash / mis-route.
+        let badRoutes: [(accountIdB64: String, groupIdHex: String)] = [
+            (accountIdB64: accountId, groupIdHex: "abc"),
+            (accountIdB64: accountId, groupIdHex: String(repeating: "z", count: 64)),
+            (accountIdB64: accountId, groupIdHex: ""),
+            (accountIdB64: "", groupIdHex: groupHex),
+        ]
+        for badRoute in badRoutes {
+            let group = FakeThrowawayGroup(decode: { _ in self.chat("survivor") })
+            let deps = FakeDeps(
+                account: okAccount(), group: group, rows: [row(10, 1)], route: badRoute
+            )
+            let preview = await decryptPushPreview(
+                NsePushWake(groupHex: groupHex, pointer: 11), deps
+            )
+            XCTAssertEqual(
+                preview?.body, "survivor",
+                "bad route row \(badRoute) must degrade to the legacy path"
+            )
+            XCTAssertEqual(deps.resolveCount, 1, "legacy resolve ran for \(badRoute)")
+        }
+    }
+
+    func testRouteMissAndUnknownLegacyGroupYieldGeneric() async {
+        // Neither the reverse index nor the legacy known-groups match →
+        // nil → the generic banner (fail-closed), with no group opened.
+        let deps = FakeDeps(account: nil, route: nil)
+        let preview = await decryptPushPreview(NsePushWake(groupHex: pushGidHex, pointer: 5), deps)
+
+        XCTAssertNil(preview)
+        XCTAssertEqual(deps.lookupCount, 1)
+        XCTAssertEqual(deps.resolveCount, 1)
+        XCTAssertEqual(deps.openCount, 0, "no throwaway group on a double miss")
+        XCTAssertEqual(deps.dsFetchCount, 0, "no DS fetch on a double miss")
+    }
+
+    func testArmedShortCircuitsBeforeReverseIndexLookup() async {
+        // The ADR-0041 Finding-1 armed gate stays the very FIRST step — it
+        // must precede even the reverse-index read.
+        let group = FakeThrowawayGroup(decode: { _ in self.chat("secret") })
+        let deps = FakeDeps(
+            account: okAccount(),
+            group: group,
+            rows: [row(10, 1)],
+            route: (accountIdB64: accountId, groupIdHex: groupHex),
+            armed: true
+        )
+        let preview = await decryptPushPreview(NsePushWake(groupHex: pushGidHex, pointer: 12), deps)
+
+        XCTAssertNil(preview)
+        XCTAssertEqual(deps.lookupCount, 0, "armed gate precedes the reverse-index read")
+        XCTAssertEqual(deps.resolveCount, 0)
+        XCTAssertEqual(deps.dsFetchCount, 0)
+    }
+
+    func testUppercaseRouteGroupHexIsNormalizedAndDecrypts() async {
+        // A row whose group hex was stored uppercase still routes — the core
+        // lowercases before validating (defensive; the store writes lowercase).
+        let group = FakeThrowawayGroup(decode: { _ in self.chat("normalized") })
+        let deps = FakeDeps(
+            account: nil,
+            group: group,
+            rows: [row(10, 1)],
+            route: (accountIdB64: accountId, groupIdHex: groupHex.uppercased())
+        )
+        let preview = await decryptPushPreview(NsePushWake(groupHex: pushGidHex, pointer: 11), deps)
+
+        XCTAssertEqual(preview?.body, "normalized")
+        XCTAssertEqual(preview?.tag, groupHex, "tag normalized to lowercase")
+        XCTAssertEqual(deps.lastFetchGroupIdBytes, groupIdBytes)
     }
 
     // MARK: - NEVER-PERSISTS guard (read-only-throwaway discipline)

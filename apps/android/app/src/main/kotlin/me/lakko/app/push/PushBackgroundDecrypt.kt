@@ -77,7 +77,18 @@ internal fun buildBackgroundDecryptDeps(
 ): PushDecryptDeps {
     val appContext = context.applicationContext
     val knownGroups = KnownGroupsStore(appContext)
+    val pushRoutes = PushRouteStore(appContext)
     return object : PushDecryptDeps {
+        override fun lookupRoute(pushGidHex: String): Pair<String, String>? =
+            try {
+                // ADR-0042 (Sprint 4): the plaintext reverse index
+                // Sprint 3 populates — a READ, deliberately without
+                // the device key (the FMS runs in the background).
+                pushRoutes.lookup(pushGidHex)?.let { it.accountIdB64 to it.groupIdHex }
+            } catch (_: Throwable) {
+                null
+            }
+
         override fun resolveAccount(groupHex: String): ResolvedPushAccount? {
             val accountIdB64 = knownGroups.findAccountForGroup(groupHex) ?: return null
             val groupIdBytes = hexToBytes(groupHex) ?: return null

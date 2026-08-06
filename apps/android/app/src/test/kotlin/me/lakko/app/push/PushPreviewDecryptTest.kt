@@ -73,12 +73,27 @@ class PushPreviewDecryptTest {
         val cursor: Long? = null,
         val dsThrows: Boolean = false,
         val openThrows: Boolean = false,
+        /** ADR-0042: the reverse-index row `lookupRoute` returns
+         *  (`null` = miss → legacy raw-group_id path). */
+        val route: Pair<String, String>? = null,
+        val routeThrows: Boolean = false,
     ) : PushDecryptDeps {
+        var lookupCount = 0
+        var lastLookupGid: String? = null
         var resolveCount = 0
         var openCount = 0
         var dsFetchCount = 0
         var lastAfterId: Long? = null
+        var lastFetchGroupBytes: ByteArray? = null
+        var lastCursorGroupHex: String? = null
         var lastSeedZeroed = false
+
+        override fun lookupRoute(pushGidHex: String): Pair<String, String>? {
+            lookupCount++
+            lastLookupGid = pushGidHex
+            if (routeThrows) throw RuntimeException("route lookup failure")
+            return route
+        }
 
         override fun resolveAccount(groupHex: String): ResolvedPushAccount? {
             resolveCount++
@@ -102,11 +117,15 @@ class PushPreviewDecryptTest {
         override suspend fun dsFetch(groupIdBytes: ByteArray, afterId: Long): List<FetchedRow> {
             dsFetchCount++
             lastAfterId = afterId
+            lastFetchGroupBytes = groupIdBytes
             if (dsThrows) throw RuntimeException("ds failure")
             return rows
         }
 
-        override fun startCursor(accountIdB64: String, groupHex: String): Long? = cursor
+        override fun startCursor(accountIdB64: String, groupHex: String): Long? {
+            lastCursorGroupHex = groupHex
+            return cursor
+        }
     }
 
     private fun okAccount() =
@@ -344,6 +363,111 @@ class PushPreviewDecryptTest {
         val deps = FakeDeps(okAccount(), group = group, cursor = null)
         decryptPushPreview(PushWake(groupHex, pointer = 0), deps)
         assertEquals(0L, deps.lastAfterId)
+    }
+
+    // -----------------------------------------------------------------
+    // ADR-0042 (Sprint 4): opaque push_gid reverse-resolution
+    // -----------------------------------------------------------------
+
+    /** An opaque push_gid — same 64-hex shape, deliberately NOT a
+     *  known group id (legacy resolveAccount would miss it). */
+    private val pushGidHex = "b".repeat(64)
+
+    @Test
+    fun `a push_gid wake resolves via the route index and decrypts`() = runTest {
+        val group = FakeThrowawayGroup(decode = { chat("routed hello") })
+        val deps = FakeDeps(
+            // Legacy resolution would FAIL for the push_gid — the route
+            // index is the only way home.
+            account = null,
+            group = group,
+            rows = listOf(row(10, 1)),
+            cursor = 4L,
+            route = accountId to groupHex,
+        )
+        val preview = decryptPushPreview(PushWake(pushGidHex, pointer = 11), deps)
+
+        assertEquals("routed hello", preview?.body)
+        // The route hit skipped the legacy path entirely...
+        assertEquals(1, deps.lookupCount)
+        assertEquals(pushGidHex, deps.lastLookupGid)
+        assertEquals("legacy resolveAccount must not run on a hit", 0, deps.resolveCount)
+        // ...and everything downstream used the REAL group_id.
+        assertTrue(
+            "DS fetch must use the real group_id bytes",
+            groupIdBytes.contentEquals(deps.lastFetchGroupBytes),
+        )
+        assertEquals("cursor read keyed by the real group hex", groupHex, deps.lastCursorGroupHex)
+        assertEquals("app cursor below the pointer preferred", 4L, deps.lastAfterId)
+        assertEquals("notification tag is the real group hex", groupHex, preview?.tag)
+        // Read-only-throwaway discipline unchanged on the routed path.
+        assertTrue("throwaway group must be closed", group.closed)
+        assertFalse("no persist entry point may be reached", group.persistAttempted)
+    }
+
+    @Test
+    fun `a route miss falls back to the legacy raw-group_id path`() = runTest {
+        val group = FakeThrowawayGroup(decode = { chat("legacy") })
+        val deps = FakeDeps(
+            account = okAccount(),
+            group = group,
+            rows = listOf(row(5, 1)),
+            route = null, // miss
+        )
+        val preview = decryptPushPreview(PushWake(groupHex, 6), deps)
+
+        assertEquals("legacy", preview?.body)
+        assertEquals(1, deps.lookupCount)
+        assertEquals("legacy path consulted on a miss", 1, deps.resolveCount)
+        assertEquals(groupHex, preview?.tag)
+    }
+
+    @Test
+    fun `a route lookup error degrades to the legacy path`() = runTest {
+        val group = FakeThrowawayGroup(decode = { chat("survived the store error") })
+        val deps = FakeDeps(
+            account = okAccount(),
+            group = group,
+            rows = listOf(row(5, 1)),
+            routeThrows = true,
+        )
+        assertEquals(
+            "survived the store error",
+            decryptPushPreview(PushWake(groupHex, 6), deps)?.body,
+        )
+        assertEquals(1, deps.resolveCount)
+    }
+
+    @Test
+    fun `a route lookup error with no legacy match yields generic`() = runTest {
+        val deps = FakeDeps(account = null, routeThrows = true)
+        assertNull(decryptPushPreview(PushWake(pushGidHex, 6), deps))
+        assertEquals("no group open on a dead end", 0, deps.openCount)
+    }
+
+    @Test
+    fun `a malformed route row falls back to the legacy path`() = runTest {
+        for (badGroupIdHex in listOf("zz", "Z".repeat(64), "a".repeat(63))) {
+            val deps = FakeDeps(
+                account = okAccount(),
+                group = FakeThrowawayGroup(decode = { chat("legacy after bad row") }),
+                rows = listOf(row(5, 1)),
+                route = accountId to badGroupIdHex,
+            )
+            assertEquals(
+                "malformed stored row '$badGroupIdHex' must fall back",
+                "legacy after bad row",
+                decryptPushPreview(PushWake(groupHex, 6), deps)?.body,
+            )
+            assertEquals(1, deps.resolveCount)
+        }
+    }
+
+    @Test
+    fun `a malformed wake never reaches the route lookup`() = runTest {
+        val deps = FakeDeps(okAccount(), route = accountId to groupHex)
+        assertNull(decryptPushPreview(PushWake("abc", 5), deps))
+        assertEquals(0, deps.lookupCount)
     }
 
     // -----------------------------------------------------------------

@@ -69,7 +69,10 @@ const PREVIEW_MAX_CHARS = 140;
 /**
  * @typedef {object} PushWake
  * @property {string | null} deviceHex   Device pseudonym (unused here — routing only).
- * @property {string | null} groupHex    64 lowercase-hex chars = the 32-byte group_id.
+ * @property {string | null} groupHex    64 lowercase-hex chars. Post-ADR-0042
+ *   (Sprint 3) this is the OPAQUE 32-byte `push_gid`; a legacy wake carries
+ *   the raw 32-byte group_id. Either way the shape is identical — the
+ *   `lookupRoute` reverse-map (Sprint 4) disambiguates.
  * @property {number | null} pointer     DS message id of the message that triggered the wake.
  */
 
@@ -101,8 +104,15 @@ const PREVIEW_MAX_CHARS = 140;
  * the test wires spies and asserts zero calls.
  *
  * @typedef {object} DecryptPushDeps
+ * @property {(pushGidHex: string) => Promise<{ accountId: string, groupIdB64: string } | null>} [lookupRoute]
+ *   ADR-0042 Sprint 4 — READ-ONLY reverse-map of an opaque `push_gid`
+ *   (lowercase hex) to the owning `(accountId, base64 group_id)` via the
+ *   plaintext `lakko-push-routing`/`routes` IDB index. `null` on a miss
+ *   (legacy wake / not-yet-provisioned group). Optional so older deps
+ *   objects keep working; any throw is treated as a miss (fail-closed).
  * @property {(groupHex: string) => Promise<ResolvedAccount | null>} resolveAccount
  *   Match `groupHex` to a locally-stored account+group (returns null if none).
+ *   The LEGACY fallback path — runs only when `lookupRoute` misses.
  * @property {(accountId: string) => Promise<any | null>} getDeviceKey
  *   The non-extractable AES-GCM device root CryptoKey, or null.
  * @property {(accountId: string, deviceKey: any) => Promise<Uint8Array | null>} getIdentitySeed
@@ -156,14 +166,54 @@ export async function decryptPushPreview(wake, deps) {
   ) {
     return null;
   }
-  const groupHex = wake.groupHex;
+  const wakeHex = wake.groupHex;
   const pointer = wake.pointer;
 
-  // 2. Which locally-stored account owns this group? (Also validates
-  //    `groupHex` is a group we actually know — a stray wake → null.)
-  const account = await deps.resolveAccount(groupHex);
-  if (account === null || account === undefined) return null;
-  const { accountId, groupIdBytes } = account;
+  // 2. Resolve the wake's `g` to the owning account + REAL group_id.
+  //    Post-ADR-0042 (Sprint 3) notify routes under the OPAQUE
+  //    `push_gid`, so FIRST reverse-map it through the plaintext
+  //    routes index (Sprint 4). Everything downstream (snapshot load,
+  //    Group.load, DS fetch, cursor, tag) then uses the REAL group_id.
+  //    A miss — a legacy raw-group_id wake or a group whose route this
+  //    device has not stored yet — falls back to the original
+  //    treat-`g`-as-group_id path, and ANY lookup error degrades the
+  //    same way (fail-closed: worst case is the generic notification).
+  //    The lookup is a READ; this path never writes push-routing state.
+  let accountId = null;
+  let groupIdBytes = null;
+  let groupHex = wakeHex; // becomes the REAL group hex on a route hit
+  if (typeof deps.lookupRoute === "function") {
+    let route = null;
+    try {
+      route = await deps.lookupRoute(wakeHex);
+    } catch {
+      route = null; // lookup error → legacy path → generic at worst
+    }
+    if (
+      route !== null &&
+      route !== undefined &&
+      typeof route.accountId === "string" &&
+      typeof route.groupIdB64 === "string"
+    ) {
+      const bytes = base64DecodeQuietly(route.groupIdB64);
+      if (bytes !== null && bytes.length === 32) {
+        accountId = route.accountId;
+        groupIdBytes = bytes;
+        groupHex = bytesToHex(bytes);
+      }
+      // A malformed route row falls through to the legacy path below.
+    }
+  }
+
+  //    Legacy fallback: treat `g` as the raw group_id hex. (Also
+  //    validates it is a group we actually know — a stray wake → null.)
+  if (accountId === null) {
+    const account = await deps.resolveAccount(wakeHex);
+    if (account === null || account === undefined) return null;
+    accountId = account.accountId;
+    groupIdBytes = account.groupIdBytes;
+    groupHex = wakeHex;
+  }
 
   // 3. The device root key (a non-extractable CryptoKey handle usable
   //    for AES-GCM decrypt without extraction). No key → can't unwrap
@@ -322,6 +372,34 @@ function isHex(s) {
     if (!isDigit && !isLower) return false;
   }
   return true;
+}
+
+/** Lowercase-hex encode (matches `sw.js` / `ds/client.ts`). */
+function bytesToHex(bytes) {
+  let out = "";
+  for (let i = 0; i < bytes.length; i++) {
+    out += (bytes[i] ?? 0).toString(16).padStart(2, "0");
+  }
+  return out;
+}
+
+/**
+ * Standard-alphabet base64 → bytes, or `null` on any decode failure
+ * (a malformed route row must degrade to the legacy path, never throw).
+ * `atob` exists in both the SW global scope and Node (tests).
+ *
+ * @param {string} b64
+ * @returns {Uint8Array | null}
+ */
+function base64DecodeQuietly(b64) {
+  try {
+    const binary = atob(b64);
+    const out = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+    return out;
+  } catch {
+    return null;
+  }
 }
 
 /** Free a wasm handle if it exposes `.free()`; ignore anything else. */

@@ -385,6 +385,15 @@ targets:
       - path: Lakko/Chat/MessageLogStore.swift
         type: file
         buildPhase: sources
+      # ADR-0042 Sprint 4 — the push-routing store whose `lookupRoute`
+      # reverse-maps the wake's opaque `push_gid` hex back to the real
+      # `(account, group_id)` via the plaintext App Group reverse index
+      # Sprint 3 populates. FFI-clean (Foundation + CryptoKit only); the
+      # NSE only ever calls the read-only `lookupRoute` — the
+      # Keychain-touching secret paths are app-side only.
+      - path: Lakko/Push/PushRoutingStore.swift
+        type: file
+        buildPhase: sources
     info:
       path: LakkoNotificationService/Info.plist
       properties:

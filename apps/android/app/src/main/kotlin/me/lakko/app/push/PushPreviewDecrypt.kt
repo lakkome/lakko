@@ -75,11 +75,14 @@ private const val GROUP_HEX_LEN = 64
 
 /**
  * The GroupMessage wake hint, already decoded from the FCM `data`
- * payload (`{ v, d, g, p }`). Only `g` (group hex) + `p` (DS pointer)
- * are load-bearing for the preview.
+ * payload (`{ v, d, g, p }`). Only `g` + `p` (DS pointer) are
+ * load-bearing for the preview.
  */
 public data class PushWake(
-    /** 64 lowercase-hex chars = the 32-byte group_id, or `null`. */
+    /** 64 lowercase-hex chars — post-ADR-0042 the opaque 32-byte
+     *  `push_gid` (reverse-resolved via [PushDecryptDeps.lookupRoute]);
+     *  a pre-ADR-0042 legacy wake carries the raw 32-byte group_id.
+     *  `null` for a non-group wake. */
     val groupHex: String?,
     /** DS message id of the message that triggered the wake, or `null`. */
     val pointer: Long?,
@@ -167,6 +170,13 @@ public interface ThrowawayGroup : AutoCloseable {
  * structural enforcement of the read-only-throwaway discipline.
  */
 public interface PushDecryptDeps {
+    /** ADR-0042 (Sprint 4): reverse-map an opaque wake `g` (the
+     *  lowercase-hex `push_gid`) to its owning
+     *  `(accountIdB64, groupIdHex)` via the plaintext reverse index
+     *  Sprint 3 populates ([PushRouteStore.lookup]), or `null` when
+     *  unknown. A READ — never a write. */
+    public fun lookupRoute(pushGidHex: String): Pair<String, String>?
+
     /** Match `groupHex` to a locally-stored account+group. `null` when
      *  no account on this device knows the group (a stray wake). */
     public fun resolveAccount(groupHex: String): ResolvedPushAccount?
@@ -218,9 +228,45 @@ public suspend fun decryptPushPreview(
     val groupHex = rawGroupHex.lowercase()
     if (groupHex.length != GROUP_HEX_LEN || !isLowerHex(groupHex)) return null
 
-    // 2. Which locally-stored account owns this group? (Also validates
-    //    the wake's group is one we actually know — a stray wake → null.)
-    val account = deps.resolveAccount(groupHex) ?: return null
+    // 2. Resolve the wake's `g` to a locally-stored account + the REAL
+    //    DS group_id. ADR-0042 (Sprint 4): post-Sprint-3, notify sends
+    //    `g = hex(push_gid)` — an opaque routing id, NOT the group_id —
+    //    so FIRST reverse-resolve it via the plaintext route index; a
+    //    hit yields the owning account + the real group_id used for
+    //    everything downstream (snapshot, loadGroup, DS fetch, cursor).
+    //    A miss, a lookup error, or a malformed stored row FALLS BACK
+    //    to the legacy raw-group_id path (pre-ADR-0042 wakes), which
+    //    itself fails closed to `null` (→ generic) on a stray wake.
+    var account: ResolvedPushAccount? = null
+    var realGroupHex = groupHex
+    val route = try {
+        deps.lookupRoute(groupHex)
+    } catch (_: Throwable) {
+        null
+    }
+    if (route != null) {
+        val routedHex = route.second.lowercase()
+        val routedBytes =
+            if (routedHex.length == GROUP_HEX_LEN && isLowerHex(routedHex)) {
+                hexToBytes(routedHex)
+            } else {
+                null
+            }
+        if (routedBytes != null) {
+            account = ResolvedPushAccount(
+                accountIdB64 = route.first,
+                groupIdBytes = routedBytes,
+            )
+            realGroupHex = routedHex
+        }
+    }
+    if (account == null) {
+        // Legacy path: treat `g` as the raw group_id (also validates
+        // the wake's group is one we actually know — a stray wake →
+        // null).
+        account = deps.resolveAccount(groupHex) ?: return null
+        realGroupHex = groupHex
+    }
 
     // 3. The AccountIdentity seed → the throwaway Identity.
     val seed = deps.loadIdentitySeed(account.accountIdB64) ?: return null
@@ -249,7 +295,7 @@ public suspend fun decryptPushPreview(
         //    wake (`pointer - 1`).
         var after = pointer - 1
         val persisted = try {
-            deps.startCursor(account.accountIdB64, groupHex)
+            deps.startCursor(account.accountIdB64, realGroupHex)
         } catch (_: Throwable) {
             null
         }
@@ -278,7 +324,7 @@ public suspend fun decryptPushPreview(
                 continue
             }
             val body = previewBodyOf(processed) ?: continue
-            latest = PushPreview(title = "Lakko", body = body, tag = groupHex)
+            latest = PushPreview(title = "Lakko", body = body, tag = realGroupHex)
         }
         return latest
     } finally {
@@ -331,6 +377,22 @@ private fun truncate(text: String): String =
     } else {
         text.take(PREVIEW_MAX_CHARS - 1) + "…"
     }
+
+/** Decode a lowercase even-length hex string into bytes. Returns
+ *  `null` on any malformed input (defensive — callers pre-validate
+ *  via [isLowerHex]). Kotlin-stdlib-only so the pure core stays
+ *  JVM-unit-testable. */
+private fun hexToBytes(hex: String): ByteArray? {
+    if (hex.length % 2 != 0) return null
+    val out = ByteArray(hex.length / 2)
+    for (i in out.indices) {
+        val hi = Character.digit(hex[i * 2], 16)
+        val lo = Character.digit(hex[i * 2 + 1], 16)
+        if (hi < 0 || lo < 0) return null
+        out[i] = ((hi shl 4) or lo).toByte()
+    }
+    return out
+}
 
 /** `true` when every char of `s` is a lowercase hex digit. */
 private fun isLowerHex(s: String): Boolean {

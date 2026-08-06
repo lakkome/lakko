@@ -76,7 +76,11 @@ private let groupHexLen = 64
 /// payload (`{ aps, d, g, p }`). Only `g` (group hex) + `p` (DS pointer) are
 /// load-bearing for the preview.
 public struct NsePushWake: Equatable {
-    /// 64 lowercase-hex chars = the 32-byte group_id, or `nil`.
+    /// 64 lowercase-hex chars = the 32-byte opaque `push_gid` (post-ADR-0042
+    /// Sprint 3 the notify path sends `g = hex(push_gid)`) or a legacy raw
+    /// group_id (a pre-ADR-0042 subscription), or `nil`. The decrypt core
+    /// reverse-maps a `push_gid` to the real group_id first and falls back
+    /// to the raw-group_id interpretation on a miss.
     public let groupHex: String?
     /// DS message id of the message that triggered the wake, or `nil`.
     public let pointer: Int64?
@@ -169,6 +173,16 @@ public protocol NseThrowawayGroup: AnyObject {
 /// advance). The protocol simply cannot persist, which is the structural
 /// enforcement of the read-only-throwaway discipline.
 public protocol NsePushDecryptDeps {
+    /// ADR-0042 Sprint 4 — reverse-map an opaque `push_gid` (lowercase hex,
+    /// the post-Sprint-3 wake `g`) to its owning `(account, real group_id)`
+    /// via the PLAINTEXT App-Group reverse index Sprint 3 populates
+    /// (`PushRoutingStore.lookupRoute`, key
+    /// `me.lakko.push-route.v1.<pushGidHex>`). `nil` on a miss (an unknown
+    /// push_gid / an unprovisioned suite) — the caller falls back to the
+    /// legacy raw-group_id interpretation of `g`. READ-ONLY: a plain
+    /// shared-suite `UserDefaults` read, never a write.
+    func lookupRoute(pushGidHex: String) -> (accountIdB64: String, groupIdHex: String)?
+
     /// Match `groupHex` to a locally-stored account+group. `nil` when no
     /// account on this device knows the group (a stray wake).
     func resolveAccount(groupHex: String) -> NseResolvedAccount?
@@ -236,9 +250,26 @@ public func decryptPushPreview(
     let groupHex = rawGroupHex.lowercased()
     guard groupHex.count == groupHexLen, isLowerHex(groupHex) else { return nil }
 
-    // 2. Which locally-stored account owns this group? (Also validates the
-    //    wake's group is one we actually know — a stray wake → nil.)
-    guard let account = deps.resolveAccount(groupHex: groupHex) else { return nil }
+    // 2. Resolve the wake's `g` to a real (account, group_id). ADR-0042
+    //    Sprint 4: post-Sprint-3 the notify path sends `g = hex(push_gid)` —
+    //    an opaque routing id, NOT the DS group_id — so FIRST reverse-map it
+    //    through the App-Group reverse index Sprint 3 populates; on a hit
+    //    the row's REAL group_id drives everything downstream (snapshot,
+    //    group open, DS fetch, cursor). On a miss — an unknown push_gid, an
+    //    unprovisioned suite, or a malformed row — FALL BACK to treating `g`
+    //    as a raw group_id (a legacy pre-ADR-0042 wake), byte-for-byte the
+    //    old path. Both failing → nil → the generic banner (fail-closed).
+    let account: NseResolvedAccount
+    let realGroupHex: String
+    if let routed = routedAccount(deps.lookupRoute(pushGidHex: groupHex)) {
+        account = routed.account
+        realGroupHex = routed.groupHex
+    } else if let legacy = deps.resolveAccount(groupHex: groupHex) {
+        account = legacy
+        realGroupHex = groupHex
+    } else {
+        return nil
+    }
 
     // 3. The AccountIdentity seed → the throwaway Identity.
     guard var seed = deps.loadIdentitySeed(accountIdB64: account.accountIdB64) else {
@@ -286,7 +317,7 @@ public func decryptPushPreview(
     //    Finding-2). Without a persisted cursor, fall back to just the
     //    message that triggered the wake (`pointer - 1`, clamped at 0).
     let after: Int64
-    if let persisted = deps.startCursor(accountIdB64: account.accountIdB64, groupHex: groupHex) {
+    if let persisted = deps.startCursor(accountIdB64: account.accountIdB64, groupHex: realGroupHex) {
         after = max(persisted, 0)
     } else {
         after = pointer > 0 ? pointer - 1 : 0
@@ -308,7 +339,7 @@ public func decryptPushPreview(
     for row in rows {
         guard let processed = group.process(row.payload) else { continue }
         guard let body = previewBody(of: processed) else { continue }
-        latest = NsePushPreview(title: "Lakko", body: body, tag: groupHex)
+        latest = NsePushPreview(title: "Lakko", body: body, tag: realGroupHex)
     }
     return latest
 }
@@ -332,6 +363,46 @@ private func previewBody(of row: NseProcessedRow) -> String? {
     case .delete, .reaction, .typing, .readReceipt:
         return nil
     }
+}
+
+/// Validate + decode a reverse-index row into a resolved account (ADR-0042
+/// Sprint 4). `nil` on a missing row or ANY malformed field — an empty
+/// account, a wrong-length / non-hex group id — so the caller degrades to the
+/// legacy raw-group_id interpretation of the wake's `g` (the row is a
+/// plaintext `UserDefaults` value; a corrupt row must never crash or
+/// mis-route the decrypt).
+private func routedAccount(
+    _ route: (accountIdB64: String, groupIdHex: String)?
+) -> (account: NseResolvedAccount, groupHex: String)? {
+    guard let route, !route.accountIdB64.isEmpty else { return nil }
+    let groupHex = route.groupIdHex.lowercased()
+    guard groupHex.count == groupHexLen, isLowerHex(groupHex),
+          let groupIdBytes = hexToData(groupHex) else {
+        return nil
+    }
+    return (
+        account: NseResolvedAccount(
+            accountIdB64: route.accountIdB64,
+            groupIdBytes: groupIdBytes
+        ),
+        groupHex: groupHex
+    )
+}
+
+/// Decode a lowercase-hex string into bytes. `nil` on any malformed input
+/// (odd length, non-hex char). Kept local so the pure core stays FFI-free /
+/// deps-file-free (the test target compiles only this file).
+private func hexToData(_ hex: String) -> Data? {
+    guard hex.count % 2 == 0 else { return nil }
+    var out = Data(capacity: hex.count / 2)
+    var index = hex.startIndex
+    while index < hex.endIndex {
+        let next = hex.index(index, offsetBy: 2)
+        guard let byte = UInt8(hex[index..<next], radix: 16) else { return nil }
+        out.append(byte)
+        index = next
+    }
+    return out
 }
 
 /// Truncate a preview body to a sane notification length.

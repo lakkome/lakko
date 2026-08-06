@@ -42,8 +42,11 @@
  * ## Push events (1.21 — silent background decrypt)
  *
  *   * The `push` payload is `{ v, d, g, p }` (schema version, device
- *     pseudonym, group_id hex, DS envelope pointer — see
- *     `services/push-gw/src/providers/webpush.rs::WakeBody`).
+ *     pseudonym, group routing hex, DS envelope pointer — see
+ *     `services/push-gw/src/providers/webpush.rs::WakeBody`). Post-
+ *     ADR-0042 `g` is the OPAQUE `push_gid`; the decrypt path reverse-
+ *     maps it to the real group_id via the `lakko-push-routing`/`routes`
+ *     IDB index (legacy raw-group_id wakes still resolve directly).
  *   * When a Lakko tab is open + visible, the SW just postMessages the
  *     wake and shows a notification — the visible app drives the real
  *     preview + refresh itself.
@@ -206,7 +209,7 @@ async function networkFirstWithCacheFallback(req) {
  * behalf, we receive the plaintext JSON). The body shape is
  * defined by `WakeBody` in `services/push-gw/src/providers/webpush.rs`:
  *
- *     { v: 1, d: <device_hex>, g: <group_hex>?, p: <pointer>? }
+ *     { v: 1, d: <device_hex>, g: <push_gid_or_legacy_group_hex>?, p: <pointer>? }
  *
  * Unknown versions / malformed JSON / missing fields collapse into
  * a generic notification — the user still gets a wake, just without
@@ -392,9 +395,29 @@ function loadSwWasm() {
  */
 function buildDecryptDeps(wasm) {
   return {
+    // ADR-0042 Sprint 4 — reverse-map an opaque `push_gid` wake `g`
+    // back to the owning `(accountId, base64 group_id)`. The `routes`
+    // store is PLAINTEXT by design (push_gid is a one-way derivation;
+    // group_id is a public DS routing address — see
+    // `src/push/group-routing-store.ts`) precisely so this read needs
+    // no device key. READ-ONLY: the SW never writes push-routing state.
+    // `null` on a miss → the core falls back to the legacy raw-group_id
+    // path; a throw is treated as a miss by the core (fail-closed).
+    lookupRoute: async (pushGidHex) => {
+      const row = await idbGet("lakko-push-routing", "routes", pushGidHex);
+      if (
+        row === undefined ||
+        typeof row.accountId !== "string" ||
+        typeof row.groupIdB64 !== "string"
+      ) {
+        return null;
+      }
+      return { accountId: row.accountId, groupIdB64: row.groupIdB64 };
+    },
     // Which locally-stored account owns this group? `knownGroupIds` is
     // stored UNENCRYPTED (public group_id routing addresses), so this
     // needs no device key. Also validates the wake's group is known.
+    // LEGACY fallback — runs only when the route lookup misses.
     resolveAccount: async (groupHex) => {
       const rows = await idbGetAll("lakko-mls", "snapshots");
       for (const row of rows) {

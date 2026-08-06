@@ -41,12 +41,26 @@ struct NseRealDecryptDeps: NsePushDecryptDeps {
     private let knownGroups = KnownGroupsStore()
     private let snapshotStore = IdentitySnapshotStore()
     private let messageLog = MessageLogStore()
+    private let pushRoutes = PushRoutingStore()
     private let dsBaseURL: String
     private let session: URLSession
 
     init(dsBaseURL: String = NseConfig.dsBaseURL, session: URLSession = .shared) {
         self.dsBaseURL = dsBaseURL
         self.session = session
+    }
+
+    /// ADR-0042 Sprint 4 — the App-Group reverse-index read that turns the
+    /// wake's opaque `push_gid` hex back into the real `(account, group_id)`.
+    /// Reuses ``PushRoutingStore`` (compiled into the NSE target as a sibling
+    /// source, like the other shared stores): it is FFI-clean — Foundation +
+    /// CryptoKit only, no `LakkoCore` — and `lookupRoute` is a plain
+    /// shared-suite `UserDefaults` read (the Keychain-touching secret paths
+    /// exist on the store but are never called from the NSE), so the one
+    /// `me.lakko.push-route.v1.` key-shape definition is shared with the app
+    /// instead of duplicated here. READ-ONLY.
+    func lookupRoute(pushGidHex: String) -> (accountIdB64: String, groupIdHex: String)? {
+        pushRoutes.lookupRoute(pushGidHex: pushGidHex)
     }
 
     func resolveAccount(groupHex: String) -> NseResolvedAccount? {
