@@ -62,6 +62,11 @@ use lakko_contacts::invite::{
 use lakko_contacts::media_state::{
     compose_media_state as rust_compose_media_state, decode_media_state as rust_decode_media_state,
 };
+use lakko_contacts::push_routing::{
+    compose_push_routing_secret as rust_compose_push_routing_secret,
+    decode_push_routing_secret as rust_decode_push_routing_secret,
+    derive_push_gid as rust_derive_push_gid, PUSH_ROUTING_SECRET_LEN,
+};
 use lakko_contacts::{
     compose as rust_compose, decode_and_verify as rust_decode, open_envelope as rust_open,
     ContactError, ContactRequest as RustContactRequest, Direction as RustDirection,
@@ -1306,6 +1311,11 @@ pub enum FfiIncomingEnvelopeKind {
     /// The decoded flag rides the `camera_on` field of
     /// [`FfiIncomingEnvelope`]; `payload` is empty.
     MediaState,
+    /// In-group push-routing-secret distribution envelope
+    /// (ADR-0042). The decoded 32-byte secret rides the
+    /// `payload` field of [`FfiIncomingEnvelope`]; `camera_on`
+    /// is `None`.
+    PushRoutingSecret,
 }
 
 /// FFI-portable result of [`dispatch_incoming_envelope`].
@@ -1320,7 +1330,8 @@ pub struct FfiIncomingEnvelope {
     /// `CallKeyPackage` this is the bytes **after** the
     /// 22- / 25-byte domain separator; for `IntroMessage`
     /// it is the original plaintext verbatim; for
-    /// `MediaState` it is empty.
+    /// `PushRoutingSecret` it is the decoded 32-byte secret;
+    /// for `MediaState` it is empty.
     pub payload: Vec<u8>,
     /// Set only for `MediaState`: whether the sender's camera
     /// is on. `None` for every other kind.
@@ -1356,6 +1367,11 @@ pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvel
             FfiIncomingEnvelopeKind::MediaState,
             Vec::new(),
             Some(camera_on),
+        ),
+        IncomingEnvelope::PushRoutingSecret { secret } => (
+            FfiIncomingEnvelopeKind::PushRoutingSecret,
+            secret.to_vec(),
+            None,
         ),
         IncomingEnvelope::IntroMessage(p) => {
             (FfiIncomingEnvelopeKind::IntroMessage, p.to_vec(), None)
@@ -1412,6 +1428,86 @@ pub fn compose_media_state(camera_on: bool) -> Vec<u8> {
 pub fn decode_media_state(plaintext: Vec<u8>) -> Result<bool, FfiError> {
     rust_decode_media_state(&plaintext)
         .map(|state| state.camera_on)
+        .map_err(|err| FfiError::Contacts(err.to_string()))
+}
+
+// ===========================================================================
+// Push-routing-secret + opaque push_gid — ADR-0042
+// (invariant #5 — close the push social-graph leak)
+// ===========================================================================
+
+/// Coerce a caller-supplied byte vector into the fixed 32-byte
+/// `push_routing_secret` array, fail-closed on a wrong length.
+fn push_routing_secret_array(secret: &[u8]) -> Result<[u8; PUSH_ROUTING_SECRET_LEN], FfiError> {
+    <[u8; PUSH_ROUTING_SECRET_LEN]>::try_from(secret).map_err(|_| {
+        FfiError::Contacts(format!(
+            "push_routing_secret must be {PUSH_ROUTING_SECRET_LEN} bytes, got {}",
+            secret.len(),
+        ))
+    })
+}
+
+/// Derive the stable opaque `push_gid` from a group's 32-byte
+/// `push_routing_secret` (ADR-0042). Returns the 32-byte routing
+/// id the client subscribes / notifies under (and reverse-indexes
+/// to `(account, group_id)`), instead of the leaky DS journal
+/// key.
+///
+/// See [`lakko_contacts::push_routing::derive_push_gid`] for the
+/// derivation (keyed-BLAKE3, domain
+/// `lakko/push/group-routing-id/v1`) and the invariant-#5
+/// rationale.
+///
+/// # Errors
+///
+/// * [`FfiError::Contacts`] when `secret` is not exactly 32
+///   bytes.
+#[uniffi::export]
+pub fn derive_push_gid(secret: Vec<u8>) -> Result<Vec<u8>, FfiError> {
+    let arr = push_routing_secret_array(&secret)?;
+    Ok(rust_derive_push_gid(&arr).to_vec())
+}
+
+/// Compose the in-group push-routing-secret distribution envelope
+/// (ADR-0042) for a group's 32-byte `push_routing_secret`. The
+/// founder / adder broadcasts the returned bytes as an MLS
+/// application message on the group journal so members + joiners
+/// learn the secret; receivers classify them (via
+/// [`dispatch_incoming_envelope`] or [`decode_push_routing_secret`])
+/// and persist the secret — never render it as a chat bubble.
+///
+/// See [`lakko_contacts::push_routing`] for the wire format
+/// (`domain || version || secret(32)`) and threat model (the DS
+/// sees ciphertext — invariant #2).
+///
+/// # Errors
+///
+/// * [`FfiError::Contacts`] when `secret` is not exactly 32
+///   bytes.
+#[uniffi::export]
+pub fn compose_push_routing_secret(secret: Vec<u8>) -> Result<Vec<u8>, FfiError> {
+    let arr = push_routing_secret_array(&secret)?;
+    Ok(rust_compose_push_routing_secret(&arr))
+}
+
+/// Strictly decode a push-routing-secret distribution envelope
+/// (ADR-0042), returning the 32-byte secret. Fail-closed: rejects
+/// a plaintext that does not carry the push-routing-secret domain
+/// separator or whose payload is malformed.
+///
+/// Use [`dispatch_incoming_envelope`] instead when the plaintext
+/// might be any relay-payload / in-group envelope kind (it falls
+/// through to the other kinds rather than erroring).
+///
+/// # Errors
+///
+/// * [`FfiError::Contacts`] when `plaintext` is not a valid
+///   push-routing-secret envelope (wrong domain / bad length /
+///   unknown version).
+#[uniffi::export]
+pub fn decode_push_routing_secret(plaintext: Vec<u8>) -> Result<Vec<u8>, FfiError> {
+    rust_decode_push_routing_secret(&plaintext)
+        .map(|secret| secret.to_vec())
         .map_err(|err| FfiError::Contacts(err.to_string()))
 }
 
@@ -2216,6 +2312,54 @@ mod tests {
         let welcome = wrap_call_welcome(vec![0xABu8; 256]);
         let result = dispatch_incoming_envelope(welcome).expect("dispatch should succeed");
         assert_eq!(result.kind, FfiIncomingEnvelopeKind::CallWelcome);
+        assert_eq!(result.camera_on, None);
+    }
+
+    // -------------------------------------------------------------------
+    // Push-routing-secret + push_gid (ADR-0042)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn push_routing_compose_then_decode_round_trips() {
+        let secret = vec![0x42u8; 32];
+        let wrapped = compose_push_routing_secret(secret.clone()).expect("compose should succeed");
+        let decoded = decode_push_routing_secret(wrapped).expect("decode should succeed");
+        assert_eq!(decoded, secret);
+    }
+
+    #[test]
+    fn push_routing_compose_rejects_wrong_length_secret() {
+        match compose_push_routing_secret(vec![0u8; 31]) {
+            Err(FfiError::Contacts(_)) => {},
+            other => panic!("expected Contacts error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn derive_push_gid_is_32_bytes_and_rejects_wrong_length() {
+        let gid = derive_push_gid(vec![0x42u8; 32]).expect("derive should succeed");
+        assert_eq!(gid.len(), 32);
+        match derive_push_gid(vec![0u8; 16]) {
+            Err(FfiError::Contacts(_)) => {},
+            other => panic!("expected Contacts error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_push_routing_secret_rejects_non_matching_plaintext() {
+        match decode_push_routing_secret(b"hello alice".to_vec()) {
+            Err(FfiError::Contacts(_)) => {},
+            other => panic!("expected Contacts error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatch_routes_push_routing_secret_envelope() {
+        let secret = vec![0x42u8; 32];
+        let wrapped = compose_push_routing_secret(secret.clone()).expect("compose should succeed");
+        let result = dispatch_incoming_envelope(wrapped).expect("dispatch should succeed");
+        assert_eq!(result.kind, FfiIncomingEnvelopeKind::PushRoutingSecret);
+        assert_eq!(result.payload, secret);
         assert_eq!(result.camera_on, None);
     }
 }

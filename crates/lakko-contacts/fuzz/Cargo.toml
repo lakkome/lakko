@@ -47,6 +47,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "push_routing_secret_decode"
+path = "fuzz_targets/push_routing_secret_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "contact_request_decode_and_verify"
 path = "fuzz_targets/contact_request_decode_and_verify.rs"
 test = false

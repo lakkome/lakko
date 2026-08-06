@@ -39,6 +39,11 @@ use lakko_contacts::invite::{
 use lakko_contacts::media_state::{
     compose_media_state as rust_compose_media_state, decode_media_state as rust_decode_media_state,
 };
+use lakko_contacts::push_routing::{
+    compose_push_routing_secret as rust_compose_push_routing_secret,
+    decode_push_routing_secret as rust_decode_push_routing_secret,
+    derive_push_gid as rust_derive_push_gid, PUSH_ROUTING_SECRET_LEN,
+};
 use lakko_contacts::ACCOUNT_ID_LEN;
 use lakko_contacts::{
     compose as rust_compose, decode_and_verify as rust_decode, open_envelope as rust_open,
@@ -1140,6 +1145,12 @@ pub enum WasmIncomingEnvelopeKind {
     /// The decoded flag rides the `cameraOn` getter of
     /// [`WasmIncomingEnvelope`]; `payload` is empty.
     MediaState = 3,
+    /// In-group push-routing-secret distribution envelope
+    /// (ADR-0042). The decoded 32-byte secret rides the
+    /// `payload` getter of [`WasmIncomingEnvelope`]; `cameraOn`
+    /// is `undefined`. Appended as `4` so the pre-existing tags
+    /// stay fixed.
+    PushRoutingSecret = 4,
 }
 
 /// FFI-portable result of [`dispatchIncomingEnvelope`]. The
@@ -1165,7 +1176,8 @@ impl WasmIncomingEnvelope {
     /// `CallKeyPackage` this is the bytes **after** the
     /// 22- / 25-byte domain separator; for `IntroMessage`
     /// it is the original plaintext verbatim; for
-    /// `MediaState` it is empty.
+    /// `PushRoutingSecret` it is the decoded 32-byte secret;
+    /// for `MediaState` it is empty.
     #[wasm_bindgen(getter)]
     pub fn payload(&self) -> Vec<u8> {
         self.payload.clone()
@@ -1213,6 +1225,11 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<WasmIncomingEnvelo
             payload: Vec::new(),
             camera_on: Some(camera_on),
         },
+        IncomingEnvelope::PushRoutingSecret { secret } => WasmIncomingEnvelope {
+            kind: WasmIncomingEnvelopeKind::PushRoutingSecret,
+            payload: secret.to_vec(),
+            camera_on: None,
+        },
         IncomingEnvelope::IntroMessage(p) => WasmIncomingEnvelope {
             kind: WasmIncomingEnvelopeKind::IntroMessage,
             payload: p.to_vec(),
@@ -1253,6 +1270,80 @@ pub fn compose_media_state(camera_on: bool) -> Vec<u8> {
 pub fn decode_media_state(plaintext: &[u8]) -> Result<bool, JsError> {
     rust_decode_media_state(plaintext)
         .map(|state| state.camera_on)
+        .map_err(|err| JsError::new(&err.to_string()))
+}
+
+// ============================================================================
+// Push-routing-secret + opaque push_gid — ADR-0042
+// (invariant #5 — close the push social-graph leak)
+// ============================================================================
+
+/// Coerce a caller-supplied slice into the fixed 32-byte
+/// `push_routing_secret` array, fail-closed on a wrong length.
+fn push_routing_secret_array(secret: &[u8]) -> Result<[u8; PUSH_ROUTING_SECRET_LEN], JsError> {
+    <[u8; PUSH_ROUTING_SECRET_LEN]>::try_from(secret).map_err(|_| {
+        JsError::new(&format!(
+            "push_routing_secret must be {PUSH_ROUTING_SECRET_LEN} bytes, got {}",
+            secret.len(),
+        ))
+    })
+}
+
+/// Derive the stable opaque `push_gid` from a group's 32-byte
+/// `push_routing_secret` (ADR-0042). Returns the 32-byte routing
+/// id the client subscribes / notifies under (and reverse-indexes
+/// to `(account, group_id)`), instead of the leaky DS journal
+/// key.
+///
+/// See [`lakko_contacts::push_routing::derive_push_gid`] for the
+/// derivation (keyed-BLAKE3, domain
+/// `lakko/push/group-routing-id/v1`) and the invariant-#5
+/// rationale.
+///
+/// # Errors
+///
+/// `JsError` when `secret` is not exactly 32 bytes.
+#[wasm_bindgen(js_name = derivePushGid)]
+pub fn derive_push_gid(secret: &[u8]) -> Result<Vec<u8>, JsError> {
+    let arr = push_routing_secret_array(secret)?;
+    Ok(rust_derive_push_gid(&arr).to_vec())
+}
+
+/// Compose the in-group push-routing-secret distribution envelope
+/// (ADR-0042) for a group's 32-byte `push_routing_secret`. The
+/// founder / adder broadcasts the returned bytes as an MLS
+/// application message on the group journal so members + joiners
+/// learn the secret; receivers classify them (via
+/// `dispatchIncomingEnvelope` or `decodePushRoutingSecret`) and
+/// persist the secret — never render it as a chat bubble.
+///
+/// See [`lakko_contacts::push_routing`] for the wire format and
+/// threat model (the DS sees ciphertext — invariant #2).
+///
+/// # Errors
+///
+/// `JsError` when `secret` is not exactly 32 bytes.
+#[wasm_bindgen(js_name = composePushRoutingSecret)]
+pub fn compose_push_routing_secret(secret: &[u8]) -> Result<Vec<u8>, JsError> {
+    let arr = push_routing_secret_array(secret)?;
+    Ok(rust_compose_push_routing_secret(&arr))
+}
+
+/// Strictly decode a push-routing-secret distribution envelope
+/// (ADR-0042), returning the 32-byte secret. Fail-closed: rejects
+/// a plaintext that does not carry the push-routing-secret domain
+/// separator or whose payload is malformed. Use
+/// `dispatchIncomingEnvelope` instead when the plaintext might be
+/// any relay-payload / in-group envelope kind.
+///
+/// # Errors
+///
+/// `JsError` when `plaintext` is not a valid push-routing-secret
+/// envelope (wrong domain / bad length / unknown version).
+#[wasm_bindgen(js_name = decodePushRoutingSecret)]
+pub fn decode_push_routing_secret(plaintext: &[u8]) -> Result<Vec<u8>, JsError> {
+    rust_decode_push_routing_secret(plaintext)
+        .map(|secret| secret.to_vec())
         .map_err(|err| JsError::new(&err.to_string()))
 }
 

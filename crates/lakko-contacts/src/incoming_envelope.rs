@@ -26,7 +26,12 @@
 //! 3. [`crate::media_state::try_unwrap_media_state`] — the
 //!    camera on/off signal (camera-off-cleanup). Caller
 //!    resets the sender's tile `camOn` state.
-//! 4. **Intro-message fallthrough** — plain free-text
+//! 4. [`crate::push_routing::try_unwrap_push_routing_secret`]
+//!    — the in-group push-routing-secret distribution
+//!    envelope (ADR-0042). Caller persists the 32-byte
+//!    secret + builds the `push_gid → group_id` reverse
+//!    index.
+//! 5. **Intro-message fallthrough** — plain free-text
 //!    `ContactRequest` (ADR-0005 scenario A; "add me as a
 //!    contact"). Caller renders the bytes as a UTF-8 intro
 //!    message.
@@ -61,6 +66,7 @@ use thiserror::Error;
 use crate::call_kp_forward::try_unwrap_call_kp_forward;
 use crate::call_welcome::{try_unwrap_call_welcome, CallWelcomeError};
 use crate::media_state::{try_unwrap_media_state, MediaStateError};
+use crate::push_routing::{try_unwrap_push_routing_secret, PushRoutingSecretError};
 
 /// Discriminated dispatch result. Borrow-flavoured slice so
 /// the dispatcher itself is zero-copy; the caller decides
@@ -87,6 +93,17 @@ pub enum IncomingEnvelope<'a> {
         /// Whether the sender's camera is currently on.
         camera_on: bool,
     },
+    /// In-group push-routing-secret distribution envelope
+    /// (ADR-0042). Rides an MLS application message on the group
+    /// journal; carries the 32-byte per-group `push_routing_secret`
+    /// a member/joiner persists to derive the opaque `push_gid`.
+    /// Caller stores the secret + builds the `push_gid →
+    /// (account, group_id)` reverse index — never rendered as a
+    /// chat bubble.
+    PushRoutingSecret {
+        /// The decoded 32-byte per-group routing secret.
+        secret: [u8; crate::push_routing::PUSH_ROUTING_SECRET_LEN],
+    },
     /// Plain free-text intro message (ADR-0005 scenario A).
     /// Caller renders as a UTF-8 ContactRequest.
     IntroMessage(&'a [u8]),
@@ -110,6 +127,11 @@ pub enum DispatchError {
     /// version / out-of-range flag byte).
     #[error(transparent)]
     MediaState(#[from] MediaStateError),
+    /// A push-routing-secret envelope (ADR-0042) matched its
+    /// domain separator but its payload was malformed (wrong
+    /// length / unknown version).
+    #[error(transparent)]
+    PushRoutingSecret(#[from] PushRoutingSecretError),
 }
 
 /// Single-call dispatcher. Runs the two unwrap helpers in
@@ -145,7 +167,11 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<IncomingEnvelope<'
             camera_on: state.camera_on,
         });
     }
-    // 4. Plain intro message — ADR-0005 scenario A.
+    // 4. Push-routing-secret — in-group secret distribution (ADR-0042).
+    if let Some(secret) = try_unwrap_push_routing_secret(plaintext)? {
+        return Ok(IncomingEnvelope::PushRoutingSecret { secret });
+    }
+    // 5. Plain intro message — ADR-0005 scenario A.
     Ok(IncomingEnvelope::IntroMessage(plaintext))
 }
 
@@ -244,6 +270,29 @@ mod tests {
         assert_eq!(
             err,
             DispatchError::MediaState(MediaStateError::BadFlag(0x02))
+        );
+    }
+
+    #[test]
+    fn dispatches_push_routing_secret_envelope() {
+        let secret = [0x42u8; crate::push_routing::PUSH_ROUTING_SECRET_LEN];
+        let wrapped = crate::push_routing::compose_push_routing_secret(&secret);
+        let result = dispatch_incoming_envelope(&wrapped).unwrap();
+        assert_eq!(result, IncomingEnvelope::PushRoutingSecret { secret });
+    }
+
+    #[test]
+    fn malformed_push_routing_secret_surfaces_as_error() {
+        // Domain separator matches but the version byte is unknown
+        // — fail-closed, not an intro-message fallthrough.
+        let mut wrapped = Vec::new();
+        wrapped.extend_from_slice(crate::push_routing::PUSH_ROUTING_SECRET_ENVELOPE_DOMAIN_V1);
+        wrapped.push(0x02);
+        wrapped.extend_from_slice(&[0u8; crate::push_routing::PUSH_ROUTING_SECRET_LEN]);
+        let err = dispatch_incoming_envelope(&wrapped).unwrap_err();
+        assert_eq!(
+            err,
+            DispatchError::PushRoutingSecret(PushRoutingSecretError::UnknownVersion(0x02)),
         );
     }
 

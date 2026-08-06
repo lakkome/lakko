@@ -63,6 +63,7 @@ pub mod incoming_envelope;
 pub mod invite;
 pub mod media_state;
 pub mod pseudonym;
+pub mod push_routing;
 pub mod request;
 pub mod safety;
 
@@ -104,6 +105,12 @@ pub use media_state::{
     MEDIA_STATE_ENVELOPE_DOMAIN_V1, MEDIA_STATE_PAYLOAD_LEN, MEDIA_STATE_VERSION_V1,
 };
 pub use pseudonym::{Direction, IdentityPseudonym, PerRelationship, StrangerInbox, PSEUDONYM_LEN};
+pub use push_routing::{
+    compose_push_routing_secret, decode_push_routing_secret, derive_push_gid,
+    try_unwrap_push_routing_secret, PushRoutingSecretError, PUSH_GID_DERIVE_DOMAIN_V1,
+    PUSH_GID_LEN, PUSH_ROUTING_SECRET_ENVELOPE_DOMAIN_V1, PUSH_ROUTING_SECRET_LEN,
+    PUSH_ROUTING_SECRET_PAYLOAD_LEN, PUSH_ROUTING_SECRET_VERSION_V1,
+};
 pub use request::{compose, decode_and_verify, open_envelope, ContactRequest, ACCOUNT_ID_LEN};
 pub use safety::{
     safety_number, safety_number_bytes, SAFETY_NUMBER_DIGITS, SAFETY_NUMBER_DIGITS_PER_GROUP,
