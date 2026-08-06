@@ -77,6 +77,7 @@ import {
   parseBodyEnvelope,
   type AttachmentRefBytes,
 } from "./attachments";
+import { tryDecodeSecretEnvelope } from "../push/group-routing";
 
 /** Result of `sendMessage`. */
 export interface SendMessageResult {
@@ -202,6 +203,19 @@ export type IncomingChatEvent =
        *  its own mount. */
       payloadBytes: Uint8Array;
       createdAt: string;
+    }
+  | {
+      /** ADR-0042 — an in-group push-routing-secret distribution
+       *  envelope (the group OWNER broadcast the group's
+       *  `push_routing_secret`). Never a timeline bubble: the receive
+       *  loop persists the secret + subscribes under the derived opaque
+       *  `push_gid` (invariant #5). Classified by its domain-separated
+       *  envelope prefix via the wasm fail-closed codec. */
+      kind: "pushRoutingSecret";
+      messageId: number;
+      /** The decoded 32-byte `push_routing_secret`. */
+      secret: Uint8Array;
+      createdAt: string;
     };
 
 /** Result of `pollMessages`. */
@@ -237,6 +251,16 @@ export interface ChatClientOptions {
    *  provider snapshot to disk. Best-effort — exceptions are
    *  logged and swallowed; the in-memory state stays good. */
   onPersist?: () => Promise<void>;
+  /** ADR-0042 — resolve the opaque `push_gid` for a group's DS
+   *  `group_id`, so the notify wake routes under the routing id instead
+   *  of the leaky DS journal key. Returns `null` when this device does
+   *  not (yet) hold the group's `push_routing_secret` — in which case the
+   *  wake is SKIPPED (never notified under `group_id`, invariant #5). When
+   *  UNSET (tests / standalone callers with no push-routing store) the
+   *  notify falls back to the raw `group_id`, mirroring the
+   *  `identityProvider` fallback convention — production paths
+   *  (`<ChatProvider>`) MUST wire this. */
+  pushGidResolver?: (groupId: Uint8Array) => Promise<Uint8Array | null>;
 }
 
 export class ChatClient {
@@ -248,6 +272,9 @@ export class ChatClient {
   private readonly ownPublishedIds = new Set<number>();
   private readonly identityProvider: (() => WasmIdentity | null) | undefined;
   private readonly onPersist: (() => Promise<void>) | undefined;
+  private readonly pushGidResolver:
+    | ((groupId: Uint8Array) => Promise<Uint8Array | null>)
+    | undefined;
 
   constructor(
     private readonly ds: DsClient = new DsClient(),
@@ -260,6 +287,7 @@ export class ChatClient {
   ) {
     this.identityProvider = options.identityProvider;
     this.onPersist = options.onPersist;
+    this.pushGidResolver = options.pushGidResolver;
   }
 
   /**
@@ -423,10 +451,18 @@ export class ChatClient {
   }
 
   /**
-   * 1.20e — fire `pushClient.notifyGroup(groupId, messageId)`
+   * 1.20e — fire `pushClient.notifyGroup(pushGid, messageId)`
    * on the side. Best-effort: if push-gw is down, the message
    * has still been published to DS + recipients will pick it
    * up on their next poll. We don't gate `sendMessage` on this.
+   *
+   * ADR-0042 — the notify routes under the opaque `push_gid`, NOT the DS
+   * `group_id`. When a `pushGidResolver` is wired (production) and it
+   * yields `null` (this device holds no secret for the group yet), the
+   * wake is SKIPPED rather than leaking the `group_id` to push-gw
+   * (invariant #5). A publisher is a member, so it normally holds the
+   * secret. When no resolver is wired (tests) the raw `group_id` is used,
+   * matching the `identityProvider`/`resolveIdentity` fallback convention.
    */
   private notifyPushGroupBestEffort(
     groupId: Uint8Array,
@@ -436,12 +472,23 @@ export class ChatClient {
     // 100-500 ms; running it inline in sendMessage would
     // double the user-visible send latency. Off the critical
     // path:
-    void this.pushClient
-      .notifyGroup(groupId, messageId)
-      .catch((err) => {
-        // eslint-disable-next-line no-console
-        console.warn("push notify-group failed", err);
-      });
+    void (async (): Promise<void> => {
+      let target = groupId;
+      if (this.pushGidResolver !== undefined) {
+        const pushGid = await this.pushGidResolver(groupId);
+        if (pushGid === null) {
+          // ADR-0042 — no secret held yet: do NOT wake under the DS key.
+          // Recipients still receive the message on their next foreground
+          // poll; the wake resumes once the secret propagates.
+          return;
+        }
+        target = pushGid;
+      }
+      await this.pushClient.notifyGroup(target, messageId);
+    })().catch((err) => {
+      // eslint-disable-next-line no-console
+      console.warn("push notify-group failed", err);
+    });
   }
 
   /**
@@ -466,6 +513,66 @@ export class ChatClient {
    */
   markOwnPublishedCommit(messageId: number): void {
     this.ownPublishedIds.add(messageId);
+  }
+
+  /**
+   * ADR-0042 — broadcast a CONTROL application message to the group
+   * journal (currently: the push-routing-secret distribution envelope).
+   *
+   * Mirrors `sendMessage`'s persist-before-publish fail-closed discipline
+   * — `createApplicationMessage` advances the sender ratchet, so the
+   * post-advance state MUST be durably persisted before the ciphertext
+   * reaches the DS (the AEAD nonce-reuse-on-crash class). Unlike
+   * `sendMessage` it fires NO user-facing push wake: a routing-secret
+   * handshake should not wake devices (a member without the secret cannot
+   * be woken under `push_gid` yet anyway — they catch up on the next
+   * foreground poll).
+   *
+   * Records the DS id in `ownPublishedIds` so the broadcaster's own next
+   * poll drops the echo (the owner already holds the secret it minted).
+   */
+  async broadcastControl(
+    identity: IdentitySecrets | null,
+    group: WasmGroup,
+    controlBytes: Uint8Array,
+  ): Promise<{ messageId: number }> {
+    if (controlBytes.length === 0) {
+      throw new ChatClientArgError("controlBytes must be non-empty");
+    }
+    const myIdentity = await this.resolveIdentity(identity);
+
+    let wireBytes: Uint8Array;
+    try {
+      wireBytes = group.createApplicationMessage(myIdentity, controlBytes);
+    } catch (err) {
+      throw new ChatError("createApplicationMessage failed", err);
+    }
+
+    let groupId: Uint8Array;
+    try {
+      groupId = group.groupId;
+    } catch (err) {
+      throw new ChatError("group.groupId unavailable", err);
+    }
+
+    // PERSIST BEFORE PUBLISH, FAIL-CLOSED — same rationale as sendMessage.
+    try {
+      await this.persistDurableOrThrow();
+    } catch (err) {
+      throw new ChatError(
+        "MLS snapshot persist failed — control broadcast aborted to prevent nonce reuse",
+        err,
+      );
+    }
+
+    let publish;
+    try {
+      publish = await this.ds.publishGroup(groupId, wireBytes);
+    } catch (err) {
+      throw new ChatError("DS publish failed", err);
+    }
+    this.ownPublishedIds.add(publish.id);
+    return { messageId: publish.id };
   }
 
   /**
@@ -569,6 +676,19 @@ async function toEvent(
         kind: "callSignaling",
         messageId,
         payloadBytes: bytes,
+        createdAt,
+      };
+    }
+    // ADR-0042 — sniff for a push-routing-secret distribution envelope
+    // before the chat parser. The wasm codec is fail-closed (domain +
+    // version + exact-length gate), so a non-envelope plaintext returns
+    // null and falls through to the normal chat parse.
+    const routingSecret = await tryDecodeSecretEnvelope(bytes);
+    if (routingSecret !== null) {
+      return {
+        kind: "pushRoutingSecret",
+        messageId,
+        secret: routingSecret,
         createdAt,
       };
     }

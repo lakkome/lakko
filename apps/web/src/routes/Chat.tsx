@@ -102,6 +102,12 @@ import {
 } from "../chat/attachments";
 import { useChats, type ActiveGroup } from "../chat/ChatContext";
 import {
+  ensureGroupPushRouting,
+  pushGidForGroup,
+  receivePushRoutingSecret,
+  redistributeSecretToGroup,
+} from "../push/group-routing";
+import {
   applyOp,
   editDeleteAuthorized,
   OWN_REACTION_SENTINEL,
@@ -309,6 +315,14 @@ function ChatView(props: {
       const s = auth.state();
       if (s.kind !== "session") return;
       await chats.persistSnapshot(s.account.accountId);
+    },
+    // ADR-0042 — route the notify wake under the opaque `push_gid` instead
+    // of the leaky DS `group_id`. Returns null when no secret is held yet
+    // (→ the wake is skipped; recipients catch up on foreground poll).
+    pushGidResolver: async (groupId) => {
+      const s = auth.state();
+      if (s.kind !== "session") return null;
+      return pushGidForGroup(s.account.accountId, base64Encode(groupId));
     },
   });
   // 1.18g — ContactsClient is the home of the addMemberToGroup
@@ -1553,6 +1567,24 @@ function ChatView(props: {
         // membersVersion bump after this loop refreshes that memo, so just
         // skip it here (don't materialise a chat bubble for it).
         if (e.kind === "externalJoinRequest") continue;
+        // ADR-0042 — a push-routing-secret distribution envelope: persist the
+        // secret (idempotent) + subscribe under the derived opaque `push_gid`.
+        // Never a timeline bubble. Fire-and-forget (best-effort).
+        if (e.kind === "pushRoutingSecret") {
+          const s = auth.state();
+          if (s.kind === "session") {
+            const groupIdB64 = base64Encode(props.entry.group.groupId);
+            void receivePushRoutingSecret(
+              s.account.accountId,
+              groupIdB64,
+              e.secret,
+            ).catch((err) => {
+              // eslint-disable-next-line no-console
+              console.warn("push-routing secret receive failed", err);
+            });
+          }
+          continue;
+        }
         if (incomingIds.has(e.messageId)) continue;
         fresh.push({ kind: "incoming", event: e });
       }
@@ -2097,6 +2129,24 @@ function ChatView(props: {
       // doesn't try to processIncoming on its own commit at
       // an epoch we've already advanced past.
       chat.markOwnPublishedCommit(result.commitMessageId);
+      // ADR-0042 — re-broadcast the CURRENT push-routing secret so the
+      // newly-added member learns it on their next poll (no-op if this
+      // device holds no secret; idempotent for existing members). Runs
+      // AFTER the add commit so the new member is already in the group.
+      // Fire-and-forget; failures retry on the next add / launch sweep.
+      {
+        const s = auth.state();
+        if (s.kind === "session") {
+          void redistributeSecretToGroup(
+            s.account.accountId,
+            props.entry.group,
+            broadcastToGroup,
+          ).catch((err) => {
+            // eslint-disable-next-line no-console
+            console.warn("push-routing secret redistribute failed", err);
+          });
+        }
+      }
       // Mirror the post-add member count into the reactive
       // signal so the header re-renders.
       setMemberCount(props.entry.group.memberCount);
@@ -2285,6 +2335,37 @@ function ChatView(props: {
   // catches up any rows that arrived while the tab was
   // closed (the persisted `cursor` lets the next refresh
   // start from the right slot).
+  // ADR-0042 — post the given control bytes (a push-routing-secret
+  // distribution envelope) to the group journal as an E2EE MLS
+  // application message via the fail-closed persist-before-publish path.
+  async function broadcastToGroup(bytes: Uint8Array): Promise<void> {
+    await chat.broadcastControl(
+      props.requireIdentity(),
+      props.entry.group,
+      bytes,
+    );
+  }
+
+  // ADR-0042 — the owner-mint + subscribe funnel for THIS group. Reads the
+  // session lazily so it always sees the current account.
+  async function provisionPushRouting(): Promise<void> {
+    const s = auth.state();
+    if (s.kind !== "session") return;
+    const id = chats.identity();
+    if (id === null) return;
+    try {
+      await ensureGroupPushRouting(
+        s.account.accountId,
+        props.entry.group,
+        id,
+        broadcastToGroup,
+      );
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("push-routing provisioning failed", err);
+    }
+  }
+
   onMount(() => {
     void (async (): Promise<void> => {
       await hydrateFromLog();
@@ -2302,6 +2383,13 @@ function ChatView(props: {
         console.warn("commit-outbox sweep failed", err);
       }
       await refresh();
+      // ADR-0042 — ensure this group's opaque push routing is provisioned.
+      // Owner + no secret yet → mint + persist + broadcast the distribution
+      // envelope (E2EE journal); then subscribe under `push_gid` (or defer
+      // if this device holds no secret). Idempotent + race-safe (a shared
+      // per-group in-flight lock coalesces this with the rehydrate sweep).
+      // Best-effort — never blocks the chat.
+      void provisionPushRouting();
     })();
   });
 
@@ -3565,6 +3653,11 @@ function TimelineBubble(props: {
       // bubble (the receive loop skips it before `rows()`). Defensive.
       return null;
     }
+    if (ev.kind === "pushRoutingSecret") {
+      // ADR-0042 — the receive loop consumes it (persist + subscribe) and
+      // never pushes it into `rows()`. Defensive.
+      return null;
+    }
     // Incoming application message — never our own → Edit/Delete
     // are not offered (the author-only gate would reject our op
     // anyway); React is.
@@ -4306,6 +4399,11 @@ function timelineRowToPersisted(row: TimelineRow): PersistedMessage | null {
   if (row.event.kind === "externalJoinRequest") {
     // ADR-0027 (G-3) — external-join requests never enter `rows()` (the
     // receive loop skips them), so this branch is unreachable. Never persist.
+    return null;
+  }
+  if (row.event.kind === "pushRoutingSecret") {
+    // ADR-0042 — consumed by the receive loop (persist + subscribe), never
+    // materialised as a timeline row, so this branch is unreachable.
     return null;
   }
   // system

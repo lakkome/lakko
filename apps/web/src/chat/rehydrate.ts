@@ -55,7 +55,9 @@
  */
 import { base64Decode } from "../auth/account-id";
 import { getDeviceKey } from "../auth/key-store";
+import { ensureGroupPushRouting } from "../push/group-routing";
 import { loadWasm } from "../wasm";
+import { ChatClient } from "./client";
 import { type ChatApi } from "./ChatContext";
 import { loadMlsSnapshot } from "./mls-store";
 
@@ -146,6 +148,17 @@ export async function rehydrateMlsState(
     return;
   }
 
+  // ADR-0042 — a ChatClient dedicated to the legacy-sweep broadcast: it
+  // posts a push-routing-secret distribution envelope as an E2EE MLS
+  // application message (persist-before-publish). Wired to the canonical
+  // Identity + the snapshot persist, same as the chat view's client.
+  const sweepClient = new ChatClient(undefined, {
+    identityProvider: () => chats.identity(),
+    onPersist: async () => {
+      await chats.persistSnapshot(accountIdB64);
+    },
+  });
+
   // Re-create a WasmGroup for every persisted id. Group.load
   // is a static factory that walks the just-restored provider's
   // storage and rebuilds the in-memory `MlsGroup` struct
@@ -202,6 +215,23 @@ export async function rehydrateMlsState(
       label: synthesisedGroupLabel(groupIdB64),
       group,
     });
+
+    // ADR-0042 legacy-sweep — provision opaque push routing for every
+    // restored group. Owner + no secret yet → mint + persist + distribute
+    // the envelope + subscribe; a member holding a secret → subscribe under
+    // `push_gid`; anyone else → defer (no push under `group_id`). Idempotent
+    // + race-safe (shared in-flight lock with the chat view's onMount).
+    // Best-effort — a failure never blocks the session restore.
+    try {
+      await ensureGroupPushRouting(accountIdB64, group, canonical, (bytes) =>
+        sweepClient
+          .broadcastControl(null, group, bytes)
+          .then(() => undefined),
+      );
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("push-routing legacy-sweep failed for", groupIdB64, err);
+    }
   }
 }
 

@@ -106,6 +106,7 @@ import {
 import { clearAll as clearContactsStore } from "../contacts/local-store";
 import { useChats } from "../chat/ChatContext";
 import { deleteMlsSnapshot } from "../chat/mls-store";
+import { clearAllGroupRouting } from "../push/group-routing-store";
 import { deleteOutboxForAccount } from "../chat/commit-outbox";
 import { deleteMessageLog } from "../chat/message-log-store";
 import { rehydrateMlsState } from "../chat/rehydrate";
@@ -2650,6 +2651,15 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // confuse a future returning-client restore on the same accountId.
         try {
           await deleteFloor(cached.accountIdB64);
+        } catch {
+          // best-effort
+        }
+        // ADR-0042: wipe the push-routing secrets + the push_gid reverse
+        // index. The secret is wrapped under the device-root key just
+        // wiped, but a stale reverse-index row (plaintext push_gid →
+        // group_id) would leave push-routing residue behind — full reset.
+        try {
+          await clearAllGroupRouting();
         } catch {
           // best-effort
         }
