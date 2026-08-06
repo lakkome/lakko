@@ -183,6 +183,74 @@ public final class ChatClient {
         registerOwnPublishedId(messageId)
     }
 
+    /// ADR-0042 — broadcast a CONTROL application message to the group
+    /// journal (currently: the push-routing-secret distribution envelope).
+    ///
+    /// Mirrors ``sendMessage(identity:group:plaintext:)``'s
+    /// persist-before-publish fail-closed discipline —
+    /// `createApplicationMessage` advances the sender ratchet, so the
+    /// post-advance state MUST be durably persisted (via the wired
+    /// ``ratchetPersister``) before the ciphertext reaches the DS (the AEAD
+    /// nonce-reuse-on-crash class). Unlike ``sendMessage`` it fires NO
+    /// user-facing push wake: a routing-secret handshake should not wake
+    /// devices (a member without the secret cannot be woken under
+    /// `push_gid` yet anyway — they catch up on the next foreground poll).
+    ///
+    /// Records the DS id in the own-published registry so the broadcaster's
+    /// own next poll drops the echo (the owner already holds the secret it
+    /// minted). Returns the DS message id.
+    @discardableResult
+    public func broadcastControl(
+        identity: Identity,
+        group: Group,
+        controlBytes: Data
+    ) async throws -> Int64 {
+        guard !controlBytes.isEmpty else {
+            throw ChatError.argument("controlBytes must be non-empty")
+        }
+
+        let wireBytes: Data
+        do {
+            wireBytes = try group.createApplicationMessage(
+                identity: identity,
+                plaintext: controlBytes
+            )
+        } catch {
+            throw ChatError.wrapped("createApplicationMessage failed", underlying: error)
+        }
+
+        let groupId: Data
+        do {
+            groupId = try group.groupId()
+        } catch {
+            throw ChatError.wrapped("group.groupId unavailable", underlying: error)
+        }
+
+        // PERSIST BEFORE PUBLISH, FAIL-CLOSED — same rationale as
+        // `sendMessage`. A failed persist ABORTS the broadcast so the
+        // gen-N ciphertext never reaches the DS without its N+1 ratchet
+        // state durably on disk.
+        if let ratchetPersister {
+            do {
+                try await ratchetPersister()
+            } catch {
+                throw ChatError.wrapped(
+                    "MLS snapshot persist failed — control broadcast aborted to prevent nonce reuse",
+                    underlying: error
+                )
+            }
+        }
+
+        let publish: PublishResult
+        do {
+            publish = try await ds.publishGroup(groupId: groupId, payload: wireBytes)
+        } catch {
+            throw ChatError.wrapped("DS publishGroup (control) failed", underlying: error)
+        }
+        registerOwnPublishedId(publish.id)
+        return publish.id
+    }
+
     /// Pull all rows newer than `after` for the group's journal,
     /// decrypt application messages, return a list of discriminated
     /// ``IncomingChatEvent``s + a fresh cursor.
@@ -301,6 +369,19 @@ public final class ChatClient {
                 return .callSignaling(
                     messageId: messageId,
                     payloadBytes: data,
+                    createdAt: createdAt
+                )
+            }
+            // ADR-0042 — sniff for a push-routing-secret distribution
+            // envelope before the chat parser. The FFI codec is fail-closed
+            // (domain + version + exact-length gate), so a non-envelope
+            // plaintext returns `nil` and falls through to the normal chat
+            // parse. Never a timeline bubble — the receive loop persists the
+            // secret + subscribes under the derived opaque `push_gid`.
+            if let secret = PushGroupRouting.tryDecodeSecretEnvelope(data) {
+                return .pushRoutingSecret(
+                    messageId: messageId,
+                    secret: secret,
                     createdAt: createdAt
                 )
             }
@@ -502,6 +583,12 @@ public enum IncomingChatEvent: Equatable {
     /// `group.pendingExternalJoins()`, is the source of truth; this event is
     /// the nudge that a new request landed).
     case externalJoinRequest(messageId: Int64, joinerSignatureKey: Data, createdAt: String)
+    /// ADR-0042 — an in-group push-routing-secret distribution envelope
+    /// (the group OWNER broadcast the group's `push_routing_secret`). Never
+    /// a timeline bubble: the receive loop persists the secret + subscribes
+    /// under the derived opaque `push_gid` (invariant #5). Classified by
+    /// its domain-separated envelope prefix via the FFI fail-closed codec.
+    case pushRoutingSecret(messageId: Int64, secret: Data, createdAt: String)
 }
 
 /// ADR-0024 — an inbound ephemeral chat-status signal lifted out of

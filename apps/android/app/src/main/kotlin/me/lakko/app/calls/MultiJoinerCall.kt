@@ -476,6 +476,11 @@ class MultiJoinerCall private constructor(
             // camOn) instead of onSignalRelay, so it never reaches here.
             // Explicit no-op for exhaustiveness + intent.
             FfiIncomingEnvelopeKind.MEDIA_STATE -> Unit
+            // ADR-0042 — a push-routing-secret distribution envelope rides the
+            // GROUP JOURNAL as an E2EE MLS application message (handled by the
+            // chat receive loop), never the SFU signal-relay. A peer that
+            // relays one here is off-contract — fail-closed drop.
+            FfiIncomingEnvelopeKind.PUSH_ROUTING_SECRET -> Unit
         }
     }
 

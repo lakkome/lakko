@@ -88,6 +88,11 @@ public struct ChatScreen: View {
             // ADR-0024 — mark the thread visible: arms read-receipt
             // publishing for the loaded timeline.
             viewModel.screenVisible = true
+            // ADR-0042 — provision opaque push routing for this thread
+            // (owner mints + broadcasts the `push_routing_secret`; everyone
+            // subscribes under the derived `push_gid`, or defers). Mirror of
+            // the web `Chat.tsx` onMount `provisionPushRouting`.
+            viewModel.ensurePushRouting()
         }
         .onDisappear {
             // ADR-0024 — leaving the thread stops advertising typing.

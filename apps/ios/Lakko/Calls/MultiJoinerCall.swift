@@ -479,6 +479,13 @@ final class MultiJoinerCall {
             // switch exhaustive. The per-tile `camOn` wiring now lives on the
             // `onRemoteMediaState` callback in the `Callbacks(...)` block above.
             break
+        case .pushRoutingSecret:
+            // ADR-0042 — the push-routing-secret distribution envelope rides
+            // the GROUP JOURNAL (handled in `ChatClient.pollMessages`), never
+            // the SFU signal-relay. A relay payload that classifies as one is
+            // out of place here — drop it. Case present to keep the switch
+            // exhaustive after the Sprint-1 FFI added the variant.
+            break
         }
     }
 

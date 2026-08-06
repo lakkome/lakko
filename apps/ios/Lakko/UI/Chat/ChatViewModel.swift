@@ -242,6 +242,18 @@ public final class ChatViewModel: ObservableObject {
         typingSendThrottle?.cancel()
     }
 
+    /// ADR-0042 — provision this thread's opaque push routing on appear
+    /// (the equivalent of the web `Chat.tsx` onMount `provisionPushRouting`).
+    /// Owner + no secret yet → mint the `push_routing_secret` + broadcast it
+    /// over the E2EE journal + subscribe under the derived `push_gid`; a
+    /// member holding a secret → subscribe under `push_gid`; anyone else →
+    /// defer (never subscribes under the leaky DS `group_id`, invariant #5).
+    /// Idempotent + race-safe (a shared in-flight guard coalesces this with
+    /// the launch-time legacy-sweep). Fire-and-forget.
+    public func ensurePushRouting() {
+        repository.ensurePushRouting(groupIdHex: groupIdHex)
+    }
+
     // MARK: - Phase 3a9 — call surface helpers
 
     /// Tap-to-call from the chat header. Mints a fresh

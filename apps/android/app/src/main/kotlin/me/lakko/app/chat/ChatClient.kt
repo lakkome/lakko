@@ -9,12 +9,14 @@ import me.lakko.app.ds.DsClient
 import me.lakko.app.ds.DsClientArgError
 import me.lakko.app.ds.DsHttpError
 import me.lakko.app.ds.DsNetworkError
+import me.lakko.app.push.GroupPushRouting
 import uniffi.lakko_ffi_uniffi.AttachmentRef
 import uniffi.lakko_ffi_uniffi.FfiException
 import uniffi.lakko_ffi_uniffi.Group
 import uniffi.lakko_ffi_uniffi.Identity
 import uniffi.lakko_ffi_uniffi.MessageBodyKind
 import uniffi.lakko_ffi_uniffi.ProcessedMessage
+import uniffi.lakko_ffi_uniffi.decodePushRoutingSecret
 import uniffi.lakko_ffi_uniffi.parseBodyEnvelope
 
 /**
@@ -314,6 +316,22 @@ private fun toEvent(
 ): IncomingChatEvent =
     when (processed) {
         is ProcessedMessage.Application -> {
+            // ADR-0042 — sniff for a push-routing-secret distribution
+            // envelope (a cheap length + first-byte pre-filter, then the
+            // authoritative fail-closed FFI decode). A non-envelope
+            // plaintext returns `null` and falls through to the normal
+            // chat parse. First byte `'l'` (0x6c) is disjoint from both
+            // the chat `{` (0x7B) and the call-signaling tags below.
+            val routingSecret: ByteArray? =
+                if (GroupPushRouting.looksLikeSecretEnvelope(processed.data)) {
+                    try {
+                        decodePushRoutingSecret(processed.data)
+                    } catch (_: Throwable) {
+                        null
+                    }
+                } else {
+                    null
+                }
             // Phase 3a10 — sniff for call-signaling proto
             // bytes before running the chat-envelope
             // parser. Cheap unambiguous discriminator:
@@ -325,6 +343,15 @@ private fun toEvent(
                 IncomingChatEvent.CallSignaling(
                     messageId = messageId,
                     payloadBytes = processed.data,
+                    createdAt = createdAt,
+                )
+            } else if (routingSecret != null) {
+                // ADR-0042 — never a timeline bubble: the repository
+                // persists the secret + subscribes under the derived
+                // opaque `push_gid`.
+                IncomingChatEvent.PushRoutingSecret(
+                    messageId = messageId,
+                    secret = routingSecret,
                     createdAt = createdAt,
                 )
             } else {
@@ -592,6 +619,34 @@ public sealed interface IncomingChatEvent {
         override fun hashCode(): Int {
             var result = messageId.hashCode()
             result = 31 * result + joinerSignatureKey.contentHashCode()
+            result = 31 * result + createdAt.hashCode()
+            return result
+        }
+    }
+
+    /** ADR-0042 — a push-routing-secret distribution envelope: an
+     *  in-group MLS application message carrying the 32-byte
+     *  `push_routing_secret` the group OWNER minted. Never a timeline
+     *  bubble — the repository persists it + subscribes under the
+     *  derived opaque `push_gid` (closing the invariant-#5 push
+     *  social-graph leak). Consumes a DS [messageId] like any other
+     *  application row so the poll cursor advances past it. */
+    public data class PushRoutingSecret(
+        val messageId: Long,
+        val secret: ByteArray,
+        val createdAt: String,
+    ) : IncomingChatEvent {
+        override fun equals(other: Any?): Boolean {
+            if (this === other) return true
+            if (other !is PushRoutingSecret) return false
+            return messageId == other.messageId &&
+                secret.contentEquals(other.secret) &&
+                createdAt == other.createdAt
+        }
+
+        override fun hashCode(): Int {
+            var result = messageId.hashCode()
+            result = 31 * result + secret.contentHashCode()
             result = 31 * result + createdAt.hashCode()
             return result
         }

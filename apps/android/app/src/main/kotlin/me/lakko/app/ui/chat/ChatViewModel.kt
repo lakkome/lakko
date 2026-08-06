@@ -87,6 +87,12 @@ public class ChatViewModel(
     public val activeCall: StateFlow<CallSession?> = mutableActiveCall.asStateFlow()
 
     init {
+        // ADR-0042 — chat-open push-routing provisioning (mirror of the web
+        // Chat.tsx onMount `provisionPushRouting`): owner + no secret ->
+        // mint + persist + distribute + subscribe under the opaque
+        // `push_gid`; member with a secret -> subscribe; else defer.
+        // Idempotent + race-safe; fire-and-forget inside the repository.
+        repo.ensurePushRouting(groupIdHex)
         // Manually combine two StateFlows — kotlinx-coroutines
         // has no synchronous `combine` for two StateFlows;
         // two parallel collectors keep the derived flow hot

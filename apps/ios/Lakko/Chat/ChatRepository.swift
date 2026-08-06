@@ -77,6 +77,12 @@ public final class ChatRepository: ObservableObject {
     /// ``sweepPendingCommits(record:)``.
     private let commitOutbox: CommitOutboxStore
 
+    /// ADR-0042 — the opaque per-group push routing orchestrator. Owns the
+    /// mint (owner-only) / receive / derive / subscribe-under-`push_gid`
+    /// logic + the device-key-encrypted secret store + the App Group
+    /// plaintext `push_gid → (account, group_id)` reverse index.
+    private let pushRouting: PushGroupRouting
+
     /// The canonical ``Identity`` for the current session. `nil`
     /// until ``bootstrap(secrets:)`` populates it.
     private var canonicalIdentity: Identity?
@@ -104,7 +110,8 @@ public final class ChatRepository: ObservableObject {
         snapshotStore: IdentitySnapshotStore = IdentitySnapshotStore(),
         knownGroupsStore: KnownGroupsStore = KnownGroupsStore(),
         messageLogStore: MessageLogStore = MessageLogStore(),
-        commitOutbox: CommitOutboxStore = CommitOutboxStore()
+        commitOutbox: CommitOutboxStore = CommitOutboxStore(),
+        pushRouting: PushGroupRouting = PushGroupRouting()
     ) {
         self.chatClient = chatClient
         self.dsClient = dsClient
@@ -113,6 +120,7 @@ public final class ChatRepository: ObservableObject {
         self.knownGroupsStore = knownGroupsStore
         self.messageLogStore = messageLogStore
         self.commitOutbox = commitOutbox
+        self.pushRouting = pushRouting
         // SECURITY (nonce-reuse-on-crash) — wire the fail-closed MLS
         // ratchet persister into the ChatClient so EVERY application send
         // (chat / edit / delete / reaction / typing / read-receipt /
@@ -196,13 +204,14 @@ public final class ChatRepository: ObservableObject {
                         continue
                     }
                     groups[groupIdHex] = GroupRecord(group: group, groupId: groupId)
-                    // 1.20e — subscribe to push wakes for each
-                    // rehydrated group. Idempotent server-side
-                    // so re-subscribing on every cold start is
-                    // free.
-                    Task { [groupId] in
-                        await Self.subscribeGroupPushBestEffort(groupId: groupId)
-                    }
+                    // ADR-0042 legacy-sweep — provision opaque push routing
+                    // for every restored group. Owner + no secret yet → mint
+                    // + persist + distribute the envelope + subscribe; a
+                    // member holding a secret → subscribe under `push_gid`;
+                    // anyone else → defer (no push under `group_id`).
+                    // Idempotent + race-safe (shared in-flight guard with the
+                    // chat view's onAppear). Best-effort.
+                    ensurePushRouting(groupIdHex: groupIdHex)
                 } catch {
                     // best-effort
                     continue
@@ -251,6 +260,9 @@ public final class ChatRepository: ObservableObject {
             // account alongside the snapshot they were paired with, so a wiped
             // device leaves no stale commit to be swept later.
             commitOutbox.deleteOutboxForAccount(accountIdB64: accountIdB64)
+            // ADR-0042 — wipe the push-routing secrets + the `push_gid`
+            // reverse index so a forgotten device leaves no routing residue.
+            pushRouting.clear(accountIdB64: accountIdB64)
             // Phase 2a3f1 — drop the plaintext message log too.
             // The Keychain wrap key is shared across accounts
             // (per-installation, not per-account) so we leave
@@ -352,10 +364,11 @@ public final class ChatRepository: ObservableObject {
         persistKnownGroupBestEffort(groupIdHex: groupIdHex)
         persistSnapshotBestEffort()
         state = state.with(threads: buildThreadList())
-        // 1.20e — subscribe to push wakes for this new group.
-        Task { [groupId] in
-            await Self.subscribeGroupPushBestEffort(groupId: groupId)
-        }
+        // ADR-0042 — subscribe under `push_gid` (defers until this device
+        // holds the group's `push_routing_secret`; never subscribes under
+        // the DS `group_id`). The owner mints the secret on chat-open
+        // (`ensurePushRouting`); until then this is a no-op deferral.
+        subscribeGroupUnderPushGid(groupIdHex: groupIdHex)
         return groupIdHex
     }
 
@@ -386,12 +399,10 @@ public final class ChatRepository: ObservableObject {
         persistKnownGroupBestEffort(groupIdHex: groupIdHex)
         persistSnapshotBestEffort()
         state = state.with(threads: buildThreadList())
-        // 1.20e — subscribe to push wakes for the just-joined
-        // group. Same fire-and-forget pattern as the create
-        // path above; idempotent server-side.
-        Task { [groupId] in
-            await Self.subscribeGroupPushBestEffort(groupId: groupId)
-        }
+        // ADR-0042 — subscribe under `push_gid` (defers until the joiner
+        // receives the group's `push_routing_secret` over the distribution
+        // envelope on its next poll; never subscribes under `group_id`).
+        subscribeGroupUnderPushGid(groupIdHex: groupIdHex)
         return groupIdHex
     }
 
@@ -815,6 +826,12 @@ public final class ChatRepository: ObservableObject {
             secondMessageId: welcomePublish.id
         )
         state = state.with(threads: buildThreadList())
+        // ADR-0042 — re-broadcast the CURRENT push-routing secret so the
+        // newly-added member learns it on their next poll (no-op if this
+        // device holds no secret; idempotent for existing members). Runs
+        // AFTER the add commit so the new member is already in the group.
+        // Fire-and-forget; failures retry on the next add / launch sweep.
+        redistributePushRoutingSecret(groupIdHex: groupIdHex)
         return commitPublish.id
     }
 
@@ -1216,9 +1233,9 @@ public final class ChatRepository: ObservableObject {
         // even if push-gw is down. Off the user-visible send
         // critical path so the PoW solve doesn't double send
         // latency.
-        Task { [groupId = record.groupId, messageId = result.messageId] in
-            await Self.notifyPushGroupBestEffort(
-                groupId: groupId,
+        Task { @MainActor [weak self, groupIdHex, messageId = result.messageId] in
+            await self?.notifyPushGroupBestEffort(
+                groupIdHex: groupIdHex,
                 messageId: messageId
             )
         }
@@ -1395,15 +1412,25 @@ public final class ChatRepository: ObservableObject {
         )
     }
 
-    /// 1.20e — push-gw wake fan-out. Best-effort, off the
-    /// critical path. Errors logged via NSLog, never re-thrown.
-    private static func notifyPushGroupBestEffort(
-        groupId: Data,
+    /// ADR-0042 — push-gw wake fan-out routed under the opaque `push_gid`,
+    /// NOT the DS `group_id`. When this device holds no secret for the
+    /// group yet, the wake is SKIPPED rather than leaking the `group_id` to
+    /// push-gw (invariant #5) — recipients still receive the message on
+    /// their next foreground poll. A publisher is a member, so it normally
+    /// holds the secret. Best-effort, off the critical path.
+    private func notifyPushGroupBestEffort(
+        groupIdHex: String,
         messageId: Int64
     ) async {
+        guard let accountIdB64 = currentAccountIdB64,
+              let pushGid = pushRouting.pushGid(
+                accountIdB64: accountIdB64, groupIdHex: groupIdHex) else {
+            // No secret held yet → do NOT wake under the DS key.
+            return
+        }
         do {
             _ = try await PushClient().notifyGroup(
-                groupPseudonym: groupId,
+                groupPseudonym: pushGid,
                 envelopePointer: messageId
             )
         } catch {
@@ -1411,20 +1438,95 @@ public final class ChatRepository: ObservableObject {
         }
     }
 
-    /// 1.20e — subscribe this device to push wakes for the
-    /// given group. Fired after every successful group join /
-    /// create / rehydrate; server-side idempotent so re-runs
-    /// are cheap no-ops.
-    private static func subscribeGroupPushBestEffort(groupId: Data) async {
-        do {
-            let pseudonym = try DevicePushId.getOrCreate()
-            _ = try await PushClient().subscribeGroup(
-                devicePseudonym: pseudonym,
-                groupPseudonym: groupId
-            )
-        } catch {
-            NSLog("push group subscribe failed: \(error)")
+    // MARK: - ADR-0042 opaque push routing
+
+    /// ADR-0042 — ensure this group's opaque push routing is provisioned
+    /// for this device. Owner + no secret yet → mint + persist + broadcast
+    /// the distribution envelope (E2EE journal) + subscribe under
+    /// `push_gid`; a member holding a secret → subscribe under `push_gid`;
+    /// anyone else → defer (no push under `group_id`). Idempotent +
+    /// race-safe (a shared per-group in-flight guard in ``PushGroupRouting``
+    /// coalesces the chat view's onAppear with the legacy-sweep).
+    /// Fire-and-forget — never blocks the chat.
+    public func ensurePushRouting(groupIdHex: String) {
+        guard currentAccountIdB64 != nil, groups[groupIdHex] != nil else { return }
+        Task { @MainActor [weak self] in
+            await self?.performEnsurePushRouting(groupIdHex: groupIdHex)
         }
+    }
+
+    /// @MainActor body of ``ensurePushRouting(groupIdHex:)`` — reads the
+    /// live `Group` handle + canonical identity on the actor and hands them
+    /// to the ``PushGroupRouting`` funnel (same actor, so the non-`Sendable`
+    /// `Group` never crosses an actor boundary).
+    private func performEnsurePushRouting(groupIdHex: String) async {
+        guard let identity = canonicalIdentity,
+              let accountIdB64 = currentAccountIdB64,
+              let record = groups[groupIdHex] else { return }
+        await pushRouting.ensureProvisioned(
+            accountIdB64: accountIdB64,
+            groupIdHex: groupIdHex,
+            group: record.group,
+            identity: identity,
+            broadcast: { [weak self] bytes in
+                try await self?.broadcastPushRoutingControl(groupIdHex: groupIdHex, bytes: bytes)
+            }
+        )
+    }
+
+    /// ADR-0042 — subscribe under `push_gid` (defers when no secret is
+    /// held; never subscribes under the DS `group_id`). Fire-and-forget.
+    public func subscribeGroupUnderPushGid(groupIdHex: String) {
+        guard let accountIdB64 = currentAccountIdB64 else { return }
+        Task { @MainActor [weak self] in
+            await self?.pushRouting.subscribeUnderPushGidBestEffort(
+                accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        }
+    }
+
+    /// ADR-0042 — a push-routing-secret distribution envelope arrived on
+    /// the group journal: persist the secret (idempotent) + subscribe under
+    /// the derived `push_gid`. Fire-and-forget (best-effort).
+    public func receivePushRoutingSecret(groupIdHex: String, secret: Data) {
+        guard let accountIdB64 = currentAccountIdB64 else { return }
+        Task { @MainActor [weak self] in
+            await self?.pushRouting.receiveSecret(
+                accountIdB64: accountIdB64, groupIdHex: groupIdHex, secret: secret)
+        }
+    }
+
+    /// ADR-0042 — re-broadcast the current secret to a group (after an
+    /// add-member commit). No-op when this device holds no secret.
+    /// Fire-and-forget.
+    private func redistributePushRoutingSecret(groupIdHex: String) {
+        guard let accountIdB64 = currentAccountIdB64 else { return }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.pushRouting.redistribute(
+                accountIdB64: accountIdB64,
+                groupIdHex: groupIdHex,
+                broadcast: { [weak self] bytes in
+                    try await self?.broadcastPushRoutingControl(groupIdHex: groupIdHex, bytes: bytes)
+                }
+            )
+        }
+    }
+
+    /// ADR-0042 — post a control envelope (a push-routing-secret
+    /// distribution envelope) to the group journal as an E2EE MLS
+    /// application message via the fail-closed persist-before-publish path.
+    private func broadcastPushRoutingControl(groupIdHex: String, bytes: Data) async throws {
+        guard let identity = canonicalIdentity else {
+            throw ChatError.argument("ChatRepository not bootstrapped")
+        }
+        guard let record = groups[groupIdHex] else {
+            throw ChatError.argument("no live Group handle for \(groupIdHex)")
+        }
+        _ = try await chatClient.broadcastControl(
+            identity: identity,
+            group: record.group,
+            controlBytes: bytes
+        )
     }
 
     /// Pull new messages from one group's journal + apply them to
@@ -1461,6 +1563,10 @@ public final class ChatRepository: ObservableObject {
             },
             chatStatusSink: { [weak self] status in
                 self?.chatStatusSink?(groupIdHex, status)
+            },
+            pushRoutingSecretSink: { [weak self] secret in
+                // ADR-0042 — persist the secret + subscribe under `push_gid`.
+                self?.receivePushRoutingSecret(groupIdHex: groupIdHex, secret: secret)
             }
         )
         if !result.events.isEmpty {
@@ -2109,7 +2215,8 @@ private final class GroupRecord {
     func applyPollResult(
         _ result: PollMessagesResult,
         callSignalingSink: ((Data) -> Void)? = nil,
-        chatStatusSink: ((ChatStatusEvent) -> Void)? = nil
+        chatStatusSink: ((ChatStatusEvent) -> Void)? = nil,
+        pushRoutingSecretSink: ((Data) -> Void)? = nil
     ) {
         for event in result.events {
             switch event {
@@ -2180,6 +2287,12 @@ private final class GroupRecord {
                 // below nudges the view model to re-query when its sheet is
                 // open.
                 break
+            case .pushRoutingSecret(_, let secret, _):
+                // ADR-0042 — the group OWNER broadcast the `push_routing_secret`.
+                // Not a timeline row: persist the secret (idempotent) +
+                // subscribe under the derived opaque `push_gid` (invariant #5).
+                // Routed out to the repository, which owns the push-routing store.
+                pushRoutingSecretSink?(secret)
             }
         }
         cursor = result.cursor
