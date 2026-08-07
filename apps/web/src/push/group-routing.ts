@@ -18,7 +18,21 @@
  *     the group over an E2EE MLS application message (the DS sees
  *     ciphertext — invariant #2).
  *   - Everyone else ONLY receives + persists the secret from that envelope
- *     ({@link receivePushRoutingSecret}) — they never mint.
+ *     ({@link receivePushRoutingSecretGated}) — they never mint.
+ *
+ * ## The gate is on BOTH sides
+ *
+ * `ensureGroupPushRouting` enforces "owner mints" on the SEND side, but that
+ * alone is not a security boundary: nothing stops a non-owner from composing
+ * and broadcasting an envelope by hand. So the RECEIVE side enforces it too —
+ * {@link receivePushRoutingSecretGated} applies a CHANGED secret only when
+ * its MLS sender leaf resolves to the ADR-0022 role-table owner (a
+ * byte-identical re-broadcast is always accepted, keeping the owner's
+ * post-add-member redistribute idempotent). Without the receive gate a single
+ * member could unilaterally rotate the group's routing id: every other member
+ * would overwrite its secret and re-subscribe, and since per-group unsubscribe
+ * is never called, each churn strands an orphan push-gw subscription that
+ * keeps receiving wakes.
  *
  * ## Never subscribe under the leaky `group_id`
  *
@@ -193,10 +207,14 @@ export function subscribeGroupUnderPushGidBestEffort(
 }
 
 /**
- * RECEIVE side — a non-owner (or any member) got the distribution
- * envelope: persist the secret (idempotent) + subscribe under the derived
- * `push_gid`. Best-effort; a persist that yields no `push_gid` (no device
- * key) skips the subscribe.
+ * RECEIVE side, UNCHECKED — persist the secret (idempotent) + subscribe
+ * under the derived `push_gid`. Best-effort; a persist that yields no
+ * `push_gid` (no device key) skips the subscribe.
+ *
+ * This applies whatever it is handed. Production receive paths MUST go
+ * through {@link receivePushRoutingSecretGated}, which authorises the
+ * envelope against the ADR-0022 role-table owner first; this remains
+ * exported only as that wrapper's apply step.
  */
 export async function receivePushRoutingSecret(
   accountId: string,
@@ -210,6 +228,176 @@ export async function receivePushRoutingSecret(
   );
   if (pushGid === null) return;
   subscribeGroupUnderPushGidBestEffort(accountId, groupIdB64);
+}
+
+/** Byte-wise equality. Not constant-time on purpose: both operands are
+ *  values the sender already knows (it just transmitted one of them), so
+ *  there is no secret to leak through timing here. */
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+/**
+ * Outcome of the receive-side owner gate ({@link receivePushRoutingSecretGated}).
+ * The three `accept-*` verdicts persist + re-subscribe; the two `reject-*`
+ * verdicts drop the envelope entirely (no persist, no subscribe).
+ */
+export type RoutingSecretVerdict =
+  /** Byte-identical to the secret already held — idempotent no-op re-persist.
+   *  Keeps the owner's post-add-member `redistribute` working when relayed
+   *  or re-observed, whoever forwarded it. */
+  | "accept-identical"
+  /** A CHANGED secret authored by the ADR-0022 role-table owner. */
+  | "accept-owner"
+  /** A CHANGED secret in a group with NO role table (legacy / open group).
+   *  There is no owner to check against, so this keeps the pre-gate
+   *  behaviour rather than silently breaking those groups. */
+  | "accept-no-owner"
+  /** A CHANGED secret from a member that is not the owner — dropped. */
+  | "reject-not-owner"
+  /** A CHANGED secret whose authorship could not be established (the
+   *  member lookup / owner read threw, or the frame carried no sender
+   *  leaf) — dropped, fail-closed. */
+  | "reject-unverifiable";
+
+/** True when the verdict lets the envelope through. */
+export function verdictAccepts(v: RoutingSecretVerdict): boolean {
+  return v.startsWith("accept");
+}
+
+/**
+ * Pure decision core of the receive-side owner gate — no IO, so the whole
+ * accept/reject matrix is directly testable.
+ *
+ * Accept when EITHER the envelope is byte-identical to what we already
+ * hold (idempotent), OR its author is the group's role-table owner.
+ * A group with no role table has no owner to check against and keeps the
+ * pre-gate accept. Everything else is refused.
+ */
+export function routingSecretVerdict(args: {
+  /** `group.roleTableOwner()` — `undefined` = legacy / open group. */
+  ownerKey: Uint8Array | undefined;
+  /** The sender leaf's signature public key, `undefined` when it could
+   *  not be resolved from the member snapshot. */
+  senderKey: Uint8Array | undefined;
+  /** The secret this device already holds, `null` when it holds none. */
+  storedSecret: Uint8Array | null;
+  /** The secret carried by the incoming envelope. */
+  incomingSecret: Uint8Array;
+  /** Set when reading the owner / member snapshot threw — authorship
+   *  cannot be established, so a CHANGED secret must be refused. */
+  verifyFailed: boolean;
+}): RoutingSecretVerdict {
+  // (b) Idempotent case first — a re-observed identical secret changes
+  // nothing, so it needs no authority at all.
+  if (
+    args.storedSecret !== null &&
+    bytesEqual(args.storedSecret, args.incomingSecret)
+  ) {
+    return "accept-identical";
+  }
+  // From here the envelope would CHANGE this device's routing id.
+  if (args.verifyFailed) return "reject-unverifiable";
+  // Legacy / open group: no role table, hence no owner to authorise
+  // against. Keep today's behaviour rather than breaking those groups.
+  if (args.ownerKey === undefined) return "accept-no-owner";
+  // (a) Owner-authored rotation.
+  if (
+    args.senderKey !== undefined &&
+    bytesEqual(args.senderKey, args.ownerKey)
+  ) {
+    return "accept-owner";
+  }
+  return args.senderKey === undefined ? "reject-unverifiable" : "reject-not-owner";
+}
+
+/**
+ * RECEIVE side, GATED — the production entry point for an incoming
+ * push-routing distribution envelope.
+ *
+ * The owner gate previously existed only on the SEND side
+ * ({@link ensureGroupPushRouting} checks `ownRole === Owner`), so any single
+ * non-owner member could broadcast a fresh secret and unilaterally rotate
+ * the whole group's routing id: every other member would overwrite their
+ * secret and re-subscribe, and because per-group unsubscribe is never
+ * called, each churn stranded an orphan push-gw subscription that keeps
+ * receiving wakes. This closes that by refusing a CHANGED secret from a
+ * non-owner.
+ *
+ * Never throws — the poll loop calls this per message.
+ *
+ * @returns the verdict, so the caller can log / assert on it.
+ */
+export async function receivePushRoutingSecretGated(
+  accountId: string,
+  group: WasmGroup,
+  groupIdB64: string,
+  senderLeaf: number | undefined,
+  secret: Uint8Array,
+): Promise<RoutingSecretVerdict> {
+  let storedSecret: Uint8Array | null = null;
+  try {
+    const deviceKey = await getDeviceKey(accountId);
+    storedSecret =
+      deviceKey === null
+        ? null
+        : await getGroupRoutingSecret(accountId, groupIdB64, deviceKey);
+  } catch {
+    // Unreadable local secret — cannot prove "identical"; the owner check
+    // below still decides.
+    storedSecret = null;
+  }
+
+  let ownerKey: Uint8Array | undefined;
+  let senderKey: Uint8Array | undefined;
+  let verifyFailed = false;
+  try {
+    ownerKey = group.roleTableOwner() ?? undefined;
+    if (senderLeaf !== undefined) {
+      const members = group.members() as Array<{
+        leafIndex: number;
+        signaturePublicKey: Uint8Array;
+      }>;
+      senderKey = members.find((m) => m.leafIndex === senderLeaf)
+        ?.signaturePublicKey;
+    }
+  } catch {
+    // A torn group / unreadable role table — authorship is unverifiable.
+    verifyFailed = true;
+  }
+
+  const verdict = routingSecretVerdict({
+    ownerKey,
+    senderKey,
+    storedSecret,
+    incomingSecret: secret,
+    verifyFailed,
+  });
+
+  if (!verdictAccepts(verdict)) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      "push-routing secret REFUSED (ADR-0042 owner gate)",
+      verdict,
+      "senderLeaf",
+      senderLeaf,
+    );
+    return verdict;
+  }
+
+  try {
+    await receivePushRoutingSecret(accountId, groupIdB64, secret);
+  } catch (err) {
+    // Best-effort, exactly as before the gate — never throw out of the
+    // poll loop.
+    // eslint-disable-next-line no-console
+    console.warn("push-routing secret receive failed", err);
+  }
+  return verdict;
 }
 
 /** Per-group in-flight provisioning promise, so a concurrent legacy-sweep

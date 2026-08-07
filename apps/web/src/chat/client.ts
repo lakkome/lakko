@@ -215,6 +215,15 @@ export type IncomingChatEvent =
       messageId: number;
       /** The decoded 32-byte `push_routing_secret`. */
       secret: Uint8Array;
+      /** The MLS leaf that authored this envelope (ADR-0023 precedent).
+       *  The receive-side gate resolves it to the sender's signature
+       *  public key via `group.members()` and refuses a CHANGED secret
+       *  from anyone but the ADR-0022 role-table OWNER — otherwise any
+       *  single member could unilaterally rotate the group's routing id
+       *  and strand an orphan push-gw subscription per churn.
+       *  `undefined` for a control frame / external sender, which the
+       *  gate treats as unverifiable (fail-closed). */
+      senderLeaf: number | undefined;
       createdAt: string;
     };
 
@@ -689,6 +698,9 @@ async function toEvent(
         kind: "pushRoutingSecret",
         messageId,
         secret: routingSecret,
+        // ADR-0042 — carried so the receive-side owner gate can resolve
+        // the author's signature key against the role-table owner.
+        senderLeaf,
         createdAt,
       };
     }

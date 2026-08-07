@@ -378,10 +378,14 @@ public final class ChatClient {
             // plaintext returns `nil` and falls through to the normal chat
             // parse. Never a timeline bubble — the receive loop persists the
             // secret + subscribes under the derived opaque `push_gid`.
+            // The MLS-authenticated `senderLeaf` rides along so the receive
+            // side can enforce the owner gate (`lakko-security` MEDIUM-1) —
+            // the same attribution the ADR-0023 author-only gate uses.
             if let secret = PushGroupRouting.tryDecodeSecretEnvelope(data) {
                 return .pushRoutingSecret(
                     messageId: messageId,
                     secret: secret,
+                    senderLeaf: senderLeaf,
                     createdAt: createdAt
                 )
             }
@@ -588,7 +592,19 @@ public enum IncomingChatEvent: Equatable {
     /// a timeline bubble: the receive loop persists the secret + subscribes
     /// under the derived opaque `push_gid` (invariant #5). Classified by
     /// its domain-separated envelope prefix via the FFI fail-closed codec.
-    case pushRoutingSecret(messageId: Int64, secret: Data, createdAt: String)
+    ///
+    /// `senderLeaf` is the MLS leaf index that authored the envelope (the
+    /// MLS-authenticated attribution from `ProcessedMessage`). The receive
+    /// side resolves it against the live group roster + the ADR-0022 role
+    /// table so only the OWNER can *change* the group's routing secret
+    /// (`lakko-security` MEDIUM-1). `nil` ⇒ unattributable ⇒ only a
+    /// byte-identical re-send is accepted.
+    case pushRoutingSecret(
+        messageId: Int64,
+        secret: Data,
+        senderLeaf: UInt32?,
+        createdAt: String
+    )
 }
 
 /// ADR-0024 — an inbound ephemeral chat-status signal lifted out of

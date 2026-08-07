@@ -1711,25 +1711,98 @@ public class ChatRepository(
     }
 
     /**
+     * ADR-0042 — read [group]'s ADR-0022 role-table owner key. Distinguishes
+     * "no role table" (a legacy / open group — the gate stays open) from "could
+     * not read" (fail closed), which
+     * [GroupPushRouting.decideAcceptReceivedSecret] treats differently. Must be
+     * called on the [groupsLock] critical path (the `Group` handle is not safe
+     * to touch off it).
+     */
+    private fun roleTableOwner(group: Group): GroupPushRouting.OwnerLookup =
+        try {
+            val roles = group.groupRoles()
+            if (roles == null) {
+                GroupPushRouting.OwnerLookup.NoRoleTable
+            } else {
+                GroupPushRouting.OwnerLookup.Known(roles.owner)
+            }
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "push routing: role-table read failed", cause)
+            GroupPushRouting.OwnerLookup.Unavailable
+        }
+
+    /**
+     * ADR-0042 — resolve an MLS [leafIndex] to that member's 32-byte Ed25519
+     * signature public key via the LIVE roster, or `null` when it cannot be
+     * resolved (an external sender with no leaf, a leaf absent from the current
+     * epoch's roster, or an FFI throw). `null` never matches an owner key, so
+     * an unresolved sender is refused by the gate. Must be called on the
+     * [groupsLock] critical path.
+     */
+    private fun signatureKeyForLeaf(group: Group, leafIndex: UInt?): ByteArray? {
+        if (leafIndex == null) return null
+        return try {
+            group.members().firstOrNull { it.leafIndex == leafIndex }?.signaturePublicKey
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "push routing: roster read failed", cause)
+            null
+        }
+    }
+
+    /**
      * ADR-0042 — persist a received distribution-envelope secret + subscribe
      * under the derived `push_gid`. Fire-and-forget on the push scope
      * (best-effort). Never mints.
+     *
+     * GATED (lakko-security MEDIUM-1): the owner check used to live only on the
+     * SEND side ([ensurePushRoutingBestEffort] gates the mint on
+     * `ownRole == OWNER`), so on RECEIVE any member could unilaterally rotate
+     * the group's `push_gid` — every member would overwrite its secret and
+     * re-subscribe, and since per-group unsubscribe is never called, each churn
+     * stranded an orphan push-gw subscription that keeps receiving wakes. The
+     * MLS-authenticated [senderLeaf] is now resolved against the live roster
+     * and compared to the ADR-0022 owner key: a CHANGED secret from a non-owner
+     * is DROPPED (no persist, no subscribe). A byte-identical secret is always
+     * accepted, which keeps the owner's post-add-member `redistribute`
+     * idempotent for existing members.
+     *
+     * The two `Group` reads happen SYNCHRONOUSLY here — this runs inside the
+     * poll loop's [groupsLock] critical section (via `applyPollResult`), the
+     * same discipline as the `group.groupId()` read below and as
+     * [ensurePushRoutingBestEffort]'s `ownRole` read. Only the store read and
+     * the network subscribe are deferred to [pushScope].
      */
     private fun receivePushRoutingSecretBestEffort(
         group: Group,
         identity: Identity,
         secret: ByteArray,
+        senderLeaf: UInt?,
     ) {
         val groupIdHex = try {
             DsClient.pseudonymHex(group.groupId())
         } catch (_: Throwable) {
             return
         }
+        val owner = roleTableOwner(group)
+        val senderKey = signatureKeyForLeaf(group, senderLeaf)
         pushScope.launch {
             try {
-                GroupPushRouting.receive(groupIdHex, secret, pushRoutingPorts(group, identity))
+                val verdict = GroupPushRouting.receiveGated(
+                    groupIdHex = groupIdHex,
+                    secret = secret,
+                    senderSignatureKey = senderKey,
+                    owner = owner,
+                    ports = pushRoutingPorts(group, identity),
+                )
+                if (verdict == GroupPushRouting.ReceiveVerdict.REJECT) {
+                    android.util.Log.w(
+                        "ChatRepository",
+                        "push routing: refused a changed secret from a non-owner " +
+                            "sender (group=$groupIdHex, leaf=$senderLeaf)",
+                    )
+                }
             } catch (_: Throwable) {
-                // best-effort
+                // best-effort — push is a UX nicety; never escapes the poll loop.
             }
         }
     }
@@ -1795,12 +1868,18 @@ public class ChatRepository(
                 callSignalingSink = { payload ->
                     callSignalingSink?.invoke(groupIdHex, payload)
                 },
-                pushRoutingSecretSink = { secret ->
-                    // ADR-0042 — persist the received secret + subscribe under
-                    // the derived opaque `push_gid`. Fire-and-forget on the
-                    // push scope so the poll loop is never blocked on the
-                    // network subscribe; best-effort.
-                    receivePushRoutingSecretBestEffort(record.group, identity, secret)
+                pushRoutingSecretSink = { secret, senderLeaf ->
+                    // ADR-0042 — gate on the MLS-authenticated sender leaf
+                    // (only the ADR-0022 owner may CHANGE the secret), then
+                    // persist + subscribe under the derived opaque `push_gid`.
+                    // Fire-and-forget on the push scope so the poll loop is
+                    // never blocked on the network subscribe; best-effort.
+                    receivePushRoutingSecretBestEffort(
+                        record.group,
+                        identity,
+                        secret,
+                        senderLeaf,
+                    )
                 },
             )
             if (result.events.isNotEmpty()) {
@@ -2430,7 +2509,7 @@ private class GroupRecord(
     fun applyPollResult(
         result: PollMessagesResult,
         callSignalingSink: ((ByteArray) -> Unit)? = null,
-        pushRoutingSecretSink: ((ByteArray) -> Unit)? = null,
+        pushRoutingSecretSink: ((ByteArray, UInt?) -> Unit)? = null,
     ) {
         for (event in result.events) {
             when (event) {
@@ -2483,10 +2562,13 @@ private class GroupRecord(
                 }
                 is IncomingChatEvent.PushRoutingSecret -> {
                     // ADR-0042 — a push-routing-secret distribution envelope.
-                    // Not a timeline row; the repository persists the secret +
-                    // subscribes under the derived opaque `push_gid`. Handed to
-                    // the sink (which fires the async receive on the push scope).
-                    pushRoutingSecretSink?.invoke(event.secret)
+                    // Not a timeline row; the repository gates on the sender
+                    // leaf (only the ADR-0022 owner may CHANGE the secret) then
+                    // persists + subscribes under the derived opaque `push_gid`.
+                    // Handed to the sink (which fires the async receive on the
+                    // push scope) together with the MLS-authenticated sender
+                    // leaf the gate needs.
+                    pushRoutingSecretSink?.invoke(event.secret, event.senderLeaf)
                 }
             }
         }

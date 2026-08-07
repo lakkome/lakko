@@ -349,9 +349,23 @@ private fun toEvent(
                 // ADR-0042 — never a timeline bubble: the repository
                 // persists the secret + subscribes under the derived
                 // opaque `push_gid`.
+                //
+                // `senderLeaf` is the MLS-authenticated author leaf of
+                // this Application message (`null` for an external
+                // sender). It is the ONLY trustworthy sender identity
+                // available here — the envelope BODY is attacker-chosen,
+                // the leaf is not — so the repository's receive gate
+                // resolves it to the sender's signature key and refuses
+                // a CHANGED secret from a non-owner. Without it any one
+                // member could unilaterally rotate the group's push_gid,
+                // forcing every member to re-subscribe and stranding an
+                // orphan push-gw subscription per churn. Same threading
+                // precedent as the ADR-0023 author-only edit/delete gate
+                // below.
                 IncomingChatEvent.PushRoutingSecret(
                     messageId = messageId,
                     secret = routingSecret,
+                    senderLeaf = processed.senderLeaf,
                     createdAt = createdAt,
                 )
             } else {
@@ -630,10 +644,19 @@ public sealed interface IncomingChatEvent {
      *  bubble — the repository persists it + subscribes under the
      *  derived opaque `push_gid` (closing the invariant-#5 push
      *  social-graph leak). Consumes a DS [messageId] like any other
-     *  application row so the poll cursor advances past it. */
+     *  application row so the poll cursor advances past it.
+     *
+     *  [senderLeaf] is the MLS-authenticated author leaf (`null` for an
+     *  external sender). The repository resolves it against the live
+     *  roster + the ADR-0022 role table and REFUSES a changed secret
+     *  from a non-owner — only the owner may rotate a group's
+     *  `push_gid`. It is carried on the event because the classifier is
+     *  the only place the `ProcessedMessage.Application.senderLeaf`
+     *  binding is still in hand. */
     public data class PushRoutingSecret(
         val messageId: Long,
         val secret: ByteArray,
+        val senderLeaf: UInt?,
         val createdAt: String,
     ) : IncomingChatEvent {
         override fun equals(other: Any?): Boolean {
@@ -641,12 +664,14 @@ public sealed interface IncomingChatEvent {
             if (other !is PushRoutingSecret) return false
             return messageId == other.messageId &&
                 secret.contentEquals(other.secret) &&
+                senderLeaf == other.senderLeaf &&
                 createdAt == other.createdAt
         }
 
         override fun hashCode(): Int {
             var result = messageId.hashCode()
             result = 31 * result + secret.contentHashCode()
+            result = 31 * result + (senderLeaf?.hashCode() ?: 0)
             result = 31 * result + createdAt.hashCode()
             return result
         }

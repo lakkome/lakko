@@ -1485,14 +1485,47 @@ public final class ChatRepository: ObservableObject {
     }
 
     /// ADR-0042 — a push-routing-secret distribution envelope arrived on
-    /// the group journal: persist the secret (idempotent) + subscribe under
-    /// the derived `push_gid`. Fire-and-forget (best-effort).
-    public func receivePushRoutingSecret(groupIdHex: String, secret: Data) {
-        guard let accountIdB64 = currentAccountIdB64 else { return }
+    /// the group journal: run the owner gate, then (on accept) persist the
+    /// secret (idempotent) + subscribe under the derived `push_gid`.
+    /// Fire-and-forget (best-effort).
+    ///
+    /// `senderLeaf` is the MLS-authenticated author of the envelope. It is
+    /// resolved against the LIVE `Group` (roster + ADR-0022 role table) in
+    /// ``performReceivePushRoutingSecret(groupIdHex:secret:senderLeaf:)`` —
+    /// a *changed* secret from a non-owner is refused (`lakko-security`
+    /// MEDIUM-1).
+    public func receivePushRoutingSecret(
+        groupIdHex: String,
+        secret: Data,
+        senderLeaf: UInt32?
+    ) {
+        guard currentAccountIdB64 != nil, groups[groupIdHex] != nil else { return }
         Task { @MainActor [weak self] in
-            await self?.pushRouting.receiveSecret(
-                accountIdB64: accountIdB64, groupIdHex: groupIdHex, secret: secret)
+            await self?.performReceivePushRoutingSecret(
+                groupIdHex: groupIdHex, secret: secret, senderLeaf: senderLeaf)
         }
+    }
+
+    /// @MainActor body of
+    /// ``receivePushRoutingSecret(groupIdHex:secret:senderLeaf:)`` — reads
+    /// the live `Group` handle on the actor and hands it to the gate (same
+    /// actor, so the non-`Sendable` `Group` never crosses an actor
+    /// boundary). The group is the ONLY authority for the owner key + the
+    /// leaf → signature-key mapping.
+    private func performReceivePushRoutingSecret(
+        groupIdHex: String,
+        secret: Data,
+        senderLeaf: UInt32?
+    ) async {
+        guard let accountIdB64 = currentAccountIdB64,
+              let record = groups[groupIdHex] else { return }
+        await pushRouting.receiveSecret(
+            accountIdB64: accountIdB64,
+            groupIdHex: groupIdHex,
+            secret: secret,
+            group: record.group,
+            senderLeaf: senderLeaf
+        )
     }
 
     /// ADR-0042 — re-broadcast the current secret to a group (after an
@@ -1564,9 +1597,11 @@ public final class ChatRepository: ObservableObject {
             chatStatusSink: { [weak self] status in
                 self?.chatStatusSink?(groupIdHex, status)
             },
-            pushRoutingSecretSink: { [weak self] secret in
-                // ADR-0042 — persist the secret + subscribe under `push_gid`.
-                self?.receivePushRoutingSecret(groupIdHex: groupIdHex, secret: secret)
+            pushRoutingSecretSink: { [weak self] secret, senderLeaf in
+                // ADR-0042 — owner-gate, then persist the secret + subscribe
+                // under `push_gid`.
+                self?.receivePushRoutingSecret(
+                    groupIdHex: groupIdHex, secret: secret, senderLeaf: senderLeaf)
             }
         )
         if !result.events.isEmpty {
@@ -2216,7 +2251,7 @@ private final class GroupRecord {
         _ result: PollMessagesResult,
         callSignalingSink: ((Data) -> Void)? = nil,
         chatStatusSink: ((ChatStatusEvent) -> Void)? = nil,
-        pushRoutingSecretSink: ((Data) -> Void)? = nil
+        pushRoutingSecretSink: ((Data, UInt32?) -> Void)? = nil
     ) {
         for event in result.events {
             switch event {
@@ -2287,12 +2322,16 @@ private final class GroupRecord {
                 // below nudges the view model to re-query when its sheet is
                 // open.
                 break
-            case .pushRoutingSecret(_, let secret, _):
-                // ADR-0042 — the group OWNER broadcast the `push_routing_secret`.
-                // Not a timeline row: persist the secret (idempotent) +
-                // subscribe under the derived opaque `push_gid` (invariant #5).
-                // Routed out to the repository, which owns the push-routing store.
-                pushRoutingSecretSink?(secret)
+            case .pushRoutingSecret(_, let secret, let senderLeaf, _):
+                // ADR-0042 — a `push_routing_secret` distribution envelope.
+                // Not a timeline row: routed out to the repository, which owns
+                // the push-routing store AND the live `Group` handle the owner
+                // gate needs. The MLS-authenticated `senderLeaf` rides along so
+                // only the ADR-0022 owner can CHANGE the secret
+                // (`lakko-security` MEDIUM-1); on accept the repository persists
+                // it (idempotent) + subscribes under the derived opaque
+                // `push_gid` (invariant #5).
+                pushRoutingSecretSink?(secret, senderLeaf)
             }
         }
         cursor = result.cursor

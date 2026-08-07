@@ -104,7 +104,7 @@ import { useChats, type ActiveGroup } from "../chat/ChatContext";
 import {
   ensureGroupPushRouting,
   pushGidForGroup,
-  receivePushRoutingSecret,
+  receivePushRoutingSecretGated,
   redistributeSecretToGroup,
 } from "../push/group-routing";
 import {
@@ -1570,13 +1570,22 @@ function ChatView(props: {
         // ADR-0042 — a push-routing-secret distribution envelope: persist the
         // secret (idempotent) + subscribe under the derived opaque `push_gid`.
         // Never a timeline bubble. Fire-and-forget (best-effort).
+        //
+        // GATED on the ADR-0022 role table: a CHANGED secret is applied only
+        // when its MLS sender leaf resolves to the group's OWNER (an
+        // identical re-broadcast is always idempotent-accepted, so the
+        // owner's post-add-member redistribute keeps working). Without this,
+        // any single member could unilaterally rotate the group's routing id
+        // and strand an orphan push-gw subscription on every churn.
         if (e.kind === "pushRoutingSecret") {
           const s = auth.state();
           if (s.kind === "session") {
             const groupIdB64 = base64Encode(props.entry.group.groupId);
-            void receivePushRoutingSecret(
+            void receivePushRoutingSecretGated(
               s.account.accountId,
+              props.entry.group,
               groupIdB64,
+              e.senderLeaf,
               e.secret,
             ).catch((err) => {
               // eslint-disable-next-line no-console
