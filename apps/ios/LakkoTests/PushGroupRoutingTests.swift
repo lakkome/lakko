@@ -24,10 +24,12 @@ import LakkoCore
 ///   * the reverse index (`push_gid -> account/group`) is populated from the
 ///     derived `push_gid` — the map the Sprint-4 decrypt reverse-resolves;
 ///   * `tryDecodeSecretEnvelope` is fail-closed on a non-envelope plaintext;
-///   * **the receive-side owner gate** (`lakko-security` MEDIUM-1): a
-///     *changed* secret is accepted only from the ADR-0022 owner; a
-///     byte-identical re-send is accepted from anyone (idempotent
-///     `redistribute`); an unreadable role table refuses a change.
+///   * **the receive-side authority gate** (`lakko-security` MEDIUM-1):
+///     owner outranks admin outranks member — the OWNER may always set the
+///     secret, an ADMIN may only SEED a hole (first-ever) and never
+///     overwrite, a plain member may only re-send the byte-identical value
+///     (which keeps `redistribute` idempotent); an unreadable role table
+///     refuses a change.
 ///
 /// The push-gw subscribe seam is injected (spy); the store is a transient
 /// `UserDefaults` suite; the FFI + owner `Group` are REAL.
@@ -110,6 +112,53 @@ final class PushGroupRoutingTests: XCTestCase {
             roster.first { $0.signaturePublicKey != ownerKey }?.leafIndex)
         XCTAssertNotEqual(ownerLeaf, memberLeaf)
         return (group, groupIdHex, ownerLeaf, memberLeaf)
+    }
+
+    /// A real 3-member MLS group: `owner` founds it, adds `admin` and
+    /// `member`, then promotes `admin` into the ADR-0022 role table's admin
+    /// set via a REAL owner-only `setGroupRoles` GroupContextExtensions
+    /// commit — so `group.groupRoles()!.admins` really contains the admin's
+    /// signature key and the gate is exercised against genuine role state,
+    /// not a hand-built table.
+    private func makeGroupWithAdmin(
+        owner: Identity,
+        admin: Identity,
+        member: Identity
+    ) throws -> (
+        group: Group, groupIdHex: String,
+        ownerLeaf: UInt32, adminLeaf: UInt32, memberLeaf: UInt32
+    ) {
+        let (group, groupIdHex) = try makeOwnerGroup(owner)
+        _ = try group.addMemberFromWire(
+            identity: owner, keyPackage: try admin.createKeyPackage())
+        _ = try group.addMemberFromWire(
+            identity: owner, keyPackage: try member.createKeyPackage())
+
+        let ownerKey = try XCTUnwrap(try group.groupRoles()).owner
+        let roster = try group.members()
+        let ownerLeaf = try XCTUnwrap(
+            roster.first { $0.signaturePublicKey == ownerKey }?.leafIndex)
+        // Leaf order is an MLS-tree detail; pin the admin/member split on
+        // the identity's own signature key, resolved through the roster.
+        let others = roster.filter { $0.signaturePublicKey != ownerKey }
+        XCTAssertEqual(others.count, 2)
+        let adminEntry = try XCTUnwrap(others.first)
+        let memberEntry = try XCTUnwrap(others.last)
+
+        // The owner-only role-table commit promoting exactly one of them.
+        _ = try group.setGroupRoles(
+            identity: owner,
+            owner: ownerKey,
+            admins: [adminEntry.signaturePublicKey]
+        )
+        let table = try XCTUnwrap(try group.groupRoles())
+        XCTAssertEqual(table.owner, ownerKey)
+        XCTAssertEqual(table.admins, [adminEntry.signaturePublicKey],
+                       "the promotion commit must be reflected in the live role table")
+        XCTAssertFalse(table.admins.contains(memberEntry.signaturePublicKey),
+                       "the plain member must NOT be an admin")
+
+        return (group, groupIdHex, ownerLeaf, adminEntry.leafIndex, memberEntry.leafIndex)
     }
 
     // MARK: - primitives
@@ -319,60 +368,131 @@ final class PushGroupRoutingTests: XCTestCase {
         let a = Data(repeating: 0xA1, count: 32)
         let b = Data(repeating: 0xB2, count: 32)
         let ownerKey = Data(repeating: 0x01, count: 32)
-        let otherKey = Data(repeating: 0x02, count: 32)
+        let adminKey = Data(repeating: 0x02, count: 32)
+        let memberKey = Data(repeating: 0x03, count: 32)
+        let roles = PushGroupRouting.SecretAuthority.roleTable(
+            owner: ownerKey, admins: [adminKey])
 
-        // --- CHANGED secret ------------------------------------------------
-        // owner authored the change -> accept
+        // --- CHANGED secret (something already stored) ---------------------
+        // OWNER authored the change -> accept (the owner may always rotate)
         XCTAssertEqual(
             PushGroupRouting.classifyIncomingSecret(
-                incoming: b, stored: a, senderKey: ownerKey, owner: .owner(ownerKey)),
+                incoming: b, stored: a, senderKey: ownerKey, authority: roles),
             .accept)
-        // a NON-owner member authored the change -> REJECT
+        // ADMIN authored the change -> REJECT (an admin may not OVERWRITE)
         XCTAssertEqual(
             PushGroupRouting.classifyIncomingSecret(
-                incoming: b, stored: a, senderKey: otherKey, owner: .owner(ownerKey)),
+                incoming: b, stored: a, senderKey: adminKey, authority: roles),
+            .reject)
+        // a PLAIN MEMBER authored the change -> REJECT
+        XCTAssertEqual(
+            PushGroupRouting.classifyIncomingSecret(
+                incoming: b, stored: a, senderKey: memberKey, authority: roles),
             .reject)
         // unattributable sender (no leaf / leaf not in roster) -> REJECT
         XCTAssertEqual(
             PushGroupRouting.classifyIncomingSecret(
-                incoming: b, stored: a, senderKey: nil, owner: .owner(ownerKey)),
+                incoming: b, stored: a, senderKey: nil, authority: roles),
             .reject)
         // legacy / open group with no role table -> accept (pre-gate behaviour)
         XCTAssertEqual(
             PushGroupRouting.classifyIncomingSecret(
-                incoming: b, stored: a, senderKey: otherKey, owner: .noRoleTable),
+                incoming: b, stored: a, senderKey: memberKey, authority: .noRoleTable),
             .accept)
         // roster / role read threw -> REJECT (fail-closed, invariant #4)
         XCTAssertEqual(
             PushGroupRouting.classifyIncomingSecret(
-                incoming: b, stored: a, senderKey: otherKey, owner: .unreadable),
+                incoming: b, stored: a, senderKey: memberKey, authority: .unreadable),
             .reject)
 
         // --- IDENTICAL secret: accepted from ANYONE (idempotent redistribute)
         for authority: PushGroupRouting.SecretAuthority in
-            [.owner(ownerKey), .noRoleTable, .unreadable] {
-            XCTAssertEqual(
-                PushGroupRouting.classifyIncomingSecret(
-                    incoming: a, stored: a, senderKey: otherKey, owner: authority),
-                .accept)
-            XCTAssertEqual(
-                PushGroupRouting.classifyIncomingSecret(
-                    incoming: a, stored: a, senderKey: nil, owner: authority),
-                .accept)
+            [roles, .noRoleTable, .unreadable] {
+            for sender: Data? in [ownerKey, adminKey, memberKey, nil] {
+                XCTAssertEqual(
+                    PushGroupRouting.classifyIncomingSecret(
+                        incoming: a, stored: a, senderKey: sender, authority: authority),
+                    .accept)
+            }
         }
 
-        // --- FIRST-EVER secret (nothing stored) is a "change" ---------------
+        // --- FIRST-EVER secret (nothing stored) ----------------------------
+        // OWNER seeds -> accept
         XCTAssertEqual(
             PushGroupRouting.classifyIncomingSecret(
-                incoming: a, stored: nil, senderKey: ownerKey, owner: .owner(ownerKey)),
+                incoming: a, stored: nil, senderKey: ownerKey, authority: roles),
             .accept)
+        // ADMIN seeds a HOLE -> accept (closes the admin-add delivery gap)
         XCTAssertEqual(
             PushGroupRouting.classifyIncomingSecret(
-                incoming: a, stored: nil, senderKey: otherKey, owner: .owner(ownerKey)),
+                incoming: a, stored: nil, senderKey: adminKey, authority: roles),
+            .accept)
+        // a PLAIN MEMBER seeds -> REJECT (even with nothing stored)
+        XCTAssertEqual(
+            PushGroupRouting.classifyIncomingSecret(
+                incoming: a, stored: nil, senderKey: memberKey, authority: roles),
+            .reject)
+        // unattributable / unreadable seeds -> REJECT
+        XCTAssertEqual(
+            PushGroupRouting.classifyIncomingSecret(
+                incoming: a, stored: nil, senderKey: nil, authority: roles),
             .reject)
         XCTAssertEqual(
             PushGroupRouting.classifyIncomingSecret(
-                incoming: a, stored: nil, senderKey: nil, owner: .unreadable),
+                incoming: a, stored: nil, senderKey: nil, authority: .unreadable),
+            .reject)
+
+        // --- OWNER PRIORITY: the owner overwrites an ADMIN-SEEDED secret ----
+        // Arrival order must not matter — whatever an admin seeded, the
+        // owner's value wins.
+        XCTAssertEqual(
+            PushGroupRouting.classifyIncomingSecret(
+                incoming: b, stored: a, senderKey: ownerKey, authority: roles),
+            .accept)
+
+        // --- DEGENERATE keys are never a match -----------------------------
+        // An empty resolved sender key must not match an empty owner/admin
+        // entry (no authority level is inferred from a degenerate table).
+        XCTAssertEqual(
+            PushGroupRouting.classifyIncomingSecret(
+                incoming: a, stored: nil, senderKey: Data(),
+                authority: .roleTable(owner: Data(), admins: [Data()])),
+            .reject)
+
+        // --- ADMIN HOLE MUST BE PROVABLE -----------------------------------
+        // `stored == nil` also happens when the store could not be READ (no
+        // device wrap key / AEAD open failed). An admin must not be able to
+        // exploit that to overwrite a secret this device really holds.
+        XCTAssertEqual(
+            PushGroupRouting.classifyIncomingSecret(
+                incoming: a, stored: nil, storedUnreadable: true,
+                senderKey: adminKey, authority: roles),
+            .reject)
+        // ... but the OWNER may still write over an unreadable store — that
+        // is the repair path.
+        XCTAssertEqual(
+            PushGroupRouting.classifyIncomingSecret(
+                incoming: a, stored: nil, storedUnreadable: true,
+                senderKey: ownerKey, authority: roles),
+            .accept)
+        // A provable hole (the default) still lets the admin seed.
+        XCTAssertEqual(
+            PushGroupRouting.classifyIncomingSecret(
+                incoming: a, stored: nil, storedUnreadable: false,
+                senderKey: adminKey, authority: roles),
+            .accept)
+
+        // --- MULTI-ADMIN: every listed admin may seed ----------------------
+        let admin2 = Data(repeating: 0x04, count: 32)
+        let multi = PushGroupRouting.SecretAuthority.roleTable(
+            owner: ownerKey, admins: [adminKey, admin2])
+        XCTAssertEqual(
+            PushGroupRouting.classifyIncomingSecret(
+                incoming: a, stored: nil, senderKey: admin2, authority: multi),
+            .accept)
+        XCTAssertEqual(
+            PushGroupRouting.classifyIncomingSecret(
+                incoming: b, stored: a, senderKey: admin2, authority: multi),
             .reject)
     }
 
@@ -384,16 +504,17 @@ final class PushGroupRoutingTests: XCTestCase {
             owner: try makeIdentity(0xE1), member: try makeIdentity(0xE2))
         let ownerKey = try XCTUnwrap(try group.groupRoles()).owner
 
-        // The owner's leaf resolves to the role-table owner key.
+        // The owner's leaf resolves to the role-table owner key. A freshly
+        // founded group has an owner and an EMPTY admin set.
         let fromOwner = PushGroupRouting.resolveSenderAuthority(
             group: group, senderLeaf: ownerLeaf)
-        XCTAssertEqual(fromOwner.owner, .owner(ownerKey))
+        XCTAssertEqual(fromOwner.authority, .roleTable(owner: ownerKey, admins: []))
         XCTAssertEqual(fromOwner.senderKey, ownerKey)
 
         // The non-owner member's leaf resolves to a DIFFERENT key.
         let fromMember = PushGroupRouting.resolveSenderAuthority(
             group: group, senderLeaf: memberLeaf)
-        XCTAssertEqual(fromMember.owner, .owner(ownerKey))
+        XCTAssertEqual(fromMember.authority, .roleTable(owner: ownerKey, admins: []))
         XCTAssertNotNil(fromMember.senderKey)
         XCTAssertNotEqual(fromMember.senderKey, ownerKey)
 
@@ -466,6 +587,152 @@ final class PushGroupRoutingTests: XCTestCase {
         // The rogue push_gid never entered the reverse index either.
         let rogueGid = try XCTUnwrap(PushGroupRouting.derivePushGid(secret: rogue))
         XCTAssertNil(store.lookupRoute(pushGidHex: PushGroupRouting.hex(rogueGid)))
+    }
+
+    // MARK: - ADMIN rows of the gate, against a REAL promoted admin
+
+    /// The resolver carries the ADR-0022 admin set alongside the owner, off
+    /// a REAL `setGroupRoles` promotion commit.
+    func testResolveSenderAuthorityCarriesTheAdminSet() throws {
+        let (group, _, ownerLeaf, adminLeaf, memberLeaf) = try makeGroupWithAdmin(
+            owner: try makeIdentity(0x61),
+            admin: try makeIdentity(0x62),
+            member: try makeIdentity(0x63))
+        let table = try XCTUnwrap(try group.groupRoles())
+
+        let fromOwner = PushGroupRouting.resolveSenderAuthority(
+            group: group, senderLeaf: ownerLeaf)
+        XCTAssertEqual(
+            fromOwner.authority, .roleTable(owner: table.owner, admins: table.admins))
+        XCTAssertEqual(fromOwner.senderKey, table.owner)
+
+        // The promoted admin's leaf resolves to a key IN the admin set.
+        let fromAdmin = PushGroupRouting.resolveSenderAuthority(
+            group: group, senderLeaf: adminLeaf)
+        let adminKey = try XCTUnwrap(fromAdmin.senderKey)
+        XCTAssertTrue(table.admins.contains(adminKey))
+        XCTAssertNotEqual(adminKey, table.owner)
+
+        // The plain member's leaf is neither the owner nor an admin.
+        let memberKey = try XCTUnwrap(
+            PushGroupRouting.resolveSenderAuthority(
+                group: group, senderLeaf: memberLeaf).senderKey)
+        XCTAssertNotEqual(memberKey, table.owner)
+        XCTAssertFalse(table.admins.contains(memberKey))
+    }
+
+    /// **The delivery regression this refinement closes.** ADR-0022 lets an
+    /// ADMIN add a member, and `redistribute` fires after that add — so the
+    /// new member's first-ever secret arrives from the admin, not the owner.
+    /// It must be accepted, else that member never gets push routing.
+    func testReceiveAdminSeedsFirstEverSecret() async throws {
+        let store = makeStore()
+        let spy = SubscribeSpy()
+        let routing = makeRouting(store: store, spy: spy)
+        let (group, groupIdHex, _, adminLeaf, _) = try makeGroupWithAdmin(
+            owner: try makeIdentity(0x71),
+            admin: try makeIdentity(0x72),
+            member: try makeIdentity(0x73))
+
+        // Nothing stored — this device was just added by the admin.
+        XCTAssertNil(store.getSecret(accountIdB64: "acctNew", groupIdHex: groupIdHex))
+
+        let secret = try XCTUnwrap(PushGroupRouting.mintSecret())
+        await routing.receiveSecret(
+            accountIdB64: "acctNew", groupIdHex: groupIdHex, secret: secret,
+            group: group, senderLeaf: adminLeaf)
+
+        let pushGid = try XCTUnwrap(PushGroupRouting.derivePushGid(secret: secret))
+        XCTAssertEqual(
+            store.getSecret(accountIdB64: "acctNew", groupIdHex: groupIdHex), secret,
+            "an admin must be able to SEED the first-ever secret")
+        XCTAssertEqual(spy.targets, [pushGid], "and the seeded member subscribes under push_gid")
+    }
+
+    /// An admin may seed a hole but must NOT be able to rotate a secret the
+    /// device already holds — that power stays owner-only.
+    func testReceiveAdminChangedSecretIsRejected() async throws {
+        let store = makeStore()
+        let spy = SubscribeSpy()
+        let routing = makeRouting(store: store, spy: spy)
+        let (group, groupIdHex, ownerLeaf, adminLeaf, _) = try makeGroupWithAdmin(
+            owner: try makeIdentity(0x81),
+            admin: try makeIdentity(0x82),
+            member: try makeIdentity(0x83))
+
+        let ownerSecret = try XCTUnwrap(PushGroupRouting.mintSecret())
+        await routing.receiveSecret(
+            accountIdB64: "acct", groupIdHex: groupIdHex, secret: ownerSecret,
+            group: group, senderLeaf: ownerLeaf)
+        let ownerPushGid = try XCTUnwrap(PushGroupRouting.derivePushGid(secret: ownerSecret))
+        XCTAssertEqual(spy.targets, [ownerPushGid])
+
+        let rogue = try XCTUnwrap(PushGroupRouting.mintSecret())
+        XCTAssertNotEqual(rogue, ownerSecret)
+        await routing.receiveSecret(
+            accountIdB64: "acct", groupIdHex: groupIdHex, secret: rogue,
+            group: group, senderLeaf: adminLeaf)
+
+        XCTAssertEqual(
+            store.getSecret(accountIdB64: "acct", groupIdHex: groupIdHex), ownerSecret,
+            "an admin must not be able to OVERWRITE the group's routing secret")
+        XCTAssertEqual(spy.targets, [ownerPushGid], "no re-subscribe on a refused secret")
+        let rogueGid = try XCTUnwrap(PushGroupRouting.derivePushGid(secret: rogue))
+        XCTAssertNil(store.lookupRoute(pushGidHex: PushGroupRouting.hex(rogueGid)))
+    }
+
+    /// Owner priority: whatever an admin seeded, a later owner broadcast
+    /// overwrites it (the "owner takes priority" half of the rule).
+    func testReceiveOwnerOverwritesAnAdminSeededSecret() async throws {
+        let store = makeStore()
+        let spy = SubscribeSpy()
+        let routing = makeRouting(store: store, spy: spy)
+        let (group, groupIdHex, ownerLeaf, adminLeaf, _) = try makeGroupWithAdmin(
+            owner: try makeIdentity(0x91),
+            admin: try makeIdentity(0x92),
+            member: try makeIdentity(0x93))
+
+        let adminSeeded = try XCTUnwrap(PushGroupRouting.mintSecret())
+        await routing.receiveSecret(
+            accountIdB64: "acct", groupIdHex: groupIdHex, secret: adminSeeded,
+            group: group, senderLeaf: adminLeaf)
+        XCTAssertEqual(store.getSecret(accountIdB64: "acct", groupIdHex: groupIdHex), adminSeeded)
+
+        let ownerSecret = try XCTUnwrap(PushGroupRouting.mintSecret())
+        XCTAssertNotEqual(ownerSecret, adminSeeded)
+        await routing.receiveSecret(
+            accountIdB64: "acct", groupIdHex: groupIdHex, secret: ownerSecret,
+            group: group, senderLeaf: ownerLeaf)
+
+        XCTAssertEqual(
+            store.getSecret(accountIdB64: "acct", groupIdHex: groupIdHex), ownerSecret,
+            "the owner outranks the admin regardless of arrival order")
+        XCTAssertEqual(spy.targets, [
+            try XCTUnwrap(PushGroupRouting.derivePushGid(secret: adminSeeded)),
+            try XCTUnwrap(PushGroupRouting.derivePushGid(secret: ownerSecret)),
+        ])
+    }
+
+    /// A PLAIN member may not even seed — widening the gate to admins must
+    /// not have widened it to everyone.
+    func testReceivePlainMemberSeedIsRejected() async throws {
+        let store = makeStore()
+        let spy = SubscribeSpy()
+        let routing = makeRouting(store: store, spy: spy)
+        let (group, groupIdHex, _, _, memberLeaf) = try makeGroupWithAdmin(
+            owner: try makeIdentity(0xA1),
+            admin: try makeIdentity(0xA2),
+            member: try makeIdentity(0xA3))
+
+        let secret = try XCTUnwrap(PushGroupRouting.mintSecret())
+        await routing.receiveSecret(
+            accountIdB64: "acct", groupIdHex: groupIdHex, secret: secret,
+            group: group, senderLeaf: memberLeaf)
+
+        XCTAssertNil(
+            store.getSecret(accountIdB64: "acct", groupIdHex: groupIdHex),
+            "a plain member must not be able to seed the routing secret")
+        XCTAssertTrue(spy.targets.isEmpty)
     }
 
     /// A non-owner relaying the SAME bytes we already hold is a no-op

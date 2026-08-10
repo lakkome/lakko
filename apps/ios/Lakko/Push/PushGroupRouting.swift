@@ -29,10 +29,28 @@ import Security
 ///
 /// The receive side enforces the same rule rather than trusting it: a
 /// *changed* secret is accepted only when the MLS-authenticated sender leaf
-/// resolves to the role-table owner's signature key (`lakko-security`
-/// MEDIUM-1). Otherwise any single member could unilaterally rotate the
-/// group's routing id and strand an orphan push-gw subscription per churn.
-/// See ``classifyIncomingSecret(incoming:stored:senderKey:owner:)``.
+/// resolves to a signature key the ADR-0022 role table authorises
+/// (`lakko-security` MEDIUM-1). Otherwise any single member could
+/// unilaterally rotate the group's routing id and strand an orphan push-gw
+/// subscription per churn.
+///
+/// The authorised set is **owner + admins, with the owner taking
+/// priority** — expressed as *who may overwrite what*, so no authority
+/// level is ever persisted:
+///
+///   * the OWNER may always set the secret (rotate it, whatever is
+///     stored and in whatever arrival order);
+///   * an ADMIN may only **seed a hole** — set the FIRST-ever secret this
+///     device holds — never overwrite an existing one;
+///   * a plain member may only re-send the byte-identical value.
+///
+/// Admitting admins as seeders is what keeps delivery working: ADR-0022
+/// lets owner OR admin add a member, and `redistribute` fires after any
+/// add-member commit, so a member added by a non-owner admin learns the
+/// secret from that admin's re-broadcast (the owner only broadcasts at
+/// mint time). Denying admins the *overwrite* is what keeps the rotation
+/// power owner-only.
+/// See ``classifyIncomingSecret(incoming:stored:senderKey:authority:)``.
 ///
 /// ## Never subscribe under the leaky `group_id`
 ///
@@ -208,25 +226,27 @@ public final class PushGroupRouting {
     }
 
     /// RECEIVE side — a member got the distribution envelope: run the
-    /// owner gate, then persist the secret (idempotent) + subscribe under
-    /// the derived `push_gid`. Best-effort — never throws into the poll
-    /// loop.
+    /// authority gate, then persist the secret (idempotent) + subscribe
+    /// under the derived `push_gid`. Best-effort — never throws into the
+    /// poll loop.
     ///
-    /// **The owner gate (`lakko-security` MEDIUM-1).** The send side only
-    /// ever lets the ADR-0022 OWNER mint
+    /// **The authority gate (`lakko-security` MEDIUM-1).** The send side
+    /// only ever lets the ADR-0022 OWNER mint
     /// (``ensureProvisioned(accountIdB64:groupIdHex:group:identity:broadcast:)``),
     /// but without a matching receive-side check ANY member could broadcast
     /// a fresh 32-byte envelope and unilaterally rotate the whole group's
     /// routing id — every member would overwrite their secret and
     /// re-subscribe, and because there is no per-group unsubscribe each
     /// churn strands an orphan push-gw subscription that keeps receiving
-    /// wakes. So a *changed* secret is accepted only from the owner; see
-    /// ``classifyIncomingSecret(incoming:stored:senderKey:owner:)`` for the
-    /// full matrix.
+    /// wakes. So a *changed* secret is accepted only from the owner, and a
+    /// FIRST-ever secret additionally from an admin (which is how a member
+    /// added by a non-owner admin ever learns it); see
+    /// ``classifyIncomingSecret(incoming:stored:senderKey:authority:)`` for
+    /// the full matrix.
     ///
     /// - Parameters:
     ///   - group: the live MLS `Group` — the ONLY authority for both the
-    ///     role-table owner key and the sender leaf → signature-key
+    ///     role table (owner + admins) and the sender leaf → signature-key
     ///     mapping. Never trust a value carried in the envelope.
     ///   - senderLeaf: the MLS leaf index that authored the application
     ///     message (surfaced by `ProcessedMessage`, the same
@@ -241,18 +261,31 @@ public final class PushGroupRouting {
         senderLeaf: UInt32?
     ) async {
         let stored = store.getSecret(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
-        let authority = Self.resolveSenderAuthority(group: group, senderLeaf: senderLeaf)
+        // `getSecret` returns nil for THREE different reasons: nothing
+        // stored, no device wrap key, or the AEAD open failed. Only the
+        // first is a provable hole. `hasSecret` is the key-free presence
+        // check that separates them, so an admin cannot exploit a transient
+        // Keychain / decrypt failure to overwrite a secret we really hold.
+        let storedUnreadable = stored == nil
+            && store.hasSecret(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        let resolved = Self.resolveSenderAuthority(group: group, senderLeaf: senderLeaf)
         let verdict = Self.classifyIncomingSecret(
             incoming: secret,
             stored: stored,
-            senderKey: authority.senderKey,
-            owner: authority.owner
+            storedUnreadable: storedUnreadable,
+            senderKey: resolved.senderKey,
+            authority: resolved.authority
         )
         guard verdict == .accept else {
+            // Low-cardinality diagnostics only — never the secret or any
+            // signature key. `held` distinguishes the two refusal shapes:
+            // an overwrite attempt (held: true) vs a seed from an
+            // unauthorised sender (held: false).
             NSLog(
-                "push-routing secret REFUSED: changed secret from a non-owner "
+                "push-routing secret REFUSED: sender is not authorised to set it "
                     + "(leaf \(senderLeaf.map(String.init) ?? "none"), "
-                    + "owner \(authority.owner.diagnosticTag))"
+                    + "authority \(resolved.authority.diagnosticTag), "
+                    + "held \(stored != nil), unreadable \(storedUnreadable))"
             )
             return
         }
@@ -263,7 +296,7 @@ public final class PushGroupRouting {
         await subscribeUnderPushGidBestEffort(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
     }
 
-    // MARK: - Receive-side owner gate (lakko-security MEDIUM-1)
+    // MARK: - Receive-side authority gate (lakko-security MEDIUM-1)
 
     /// Verdict for an inbound push-routing-secret distribution envelope.
     public enum SecretVerdict: Equatable {
@@ -273,12 +306,20 @@ public final class PushGroupRouting {
         case reject
     }
 
-    /// What the live MLS group says about who is allowed to rotate the
+    /// What the live MLS group says about who is allowed to set the
     /// group's `push_routing_secret`.
+    ///
+    /// The three states are deliberately kept distinct: a group with NO
+    /// role table is not the same as a group whose role table could not be
+    /// read (the first is a legacy / open group, the second is a failure
+    /// that must fail closed).
     public enum SecretAuthority: Equatable {
-        /// The group carries an ADR-0022 role table; the payload is the
-        /// owner's 32-byte Ed25519 signature public key.
-        case owner(Data)
+        /// The group carries an ADR-0022 role table: the owner's 32-byte
+        /// Ed25519 signature public key plus the admin set (each also a
+        /// raw 32-byte signature key, as `RoleTable.admins` reports them).
+        /// Owner outranks admin outranks member — see
+        /// ``classifyIncomingSecret(incoming:stored:senderKey:authority:)``.
+        case roleTable(owner: Data, admins: [Data])
         /// The group carries NO role table (a legacy / open group). There
         /// is no owner to gate on, so the pre-gate behaviour is preserved
         /// (accept) rather than bricking push for such groups — matching
@@ -292,7 +333,7 @@ public final class PushGroupRouting {
         /// Low-cardinality tag for the refusal log — never the key bytes.
         var diagnosticTag: String {
             switch self {
-            case .owner: return "owner-key"
+            case .roleTable: return "role-table"
             case .noRoleTable: return "no-role-table"
             case .unreadable: return "unreadable"
             }
@@ -301,77 +342,125 @@ public final class PushGroupRouting {
 
     /// The pure, side-effect-free receive-side authorization decision.
     ///
-    /// | stored vs incoming | authority | verdict |
+    /// **Owner outranks admin outranks member**, expressed purely as *who
+    /// may overwrite what* — so no authority level is ever persisted
+    /// alongside the secret, and the outcome does not depend on the order
+    /// the envelopes arrive in (an owner broadcast always wins, whether it
+    /// lands before or after an admin's).
+    ///
+    /// | stored vs incoming | authority + sender | verdict |
     /// |---|---|---|
-    /// | identical | any | **accept** (idempotent re-broadcast) |
-    /// | changed / first | `.owner(k)`, sender == `k` | **accept** |
-    /// | changed / first | `.owner(k)`, sender != `k` (or no sender) | **reject** |
+    /// | identical | any sender, incl. a plain member | **accept** (idempotent re-broadcast) |
+    /// | changed / first | `.roleTable`, sender == owner | **accept** (the owner may always rotate) |
+    /// | **first, PROVABLY absent** | `.roleTable`, sender ∈ admins | **accept** (an admin may SEED a hole) |
+    /// | **changed**, or absence unprovable | `.roleTable`, sender ∈ admins | **reject** (an admin may not OVERWRITE) |
+    /// | changed / first | `.roleTable`, plain member (or no sender) | **reject** |
     /// | changed / first | `.noRoleTable` | **accept** (legacy / open group) |
     /// | changed / first | `.unreadable` | **reject** (fail-closed) |
     ///
+    /// The admin-seeds row is what keeps delivery working: ADR-0022 lets
+    /// owner OR admin add a member, and
+    /// ``redistribute(accountIdB64:groupIdHex:broadcast:)`` fires after any
+    /// add-member commit, so a member added by a non-owner admin holds no
+    /// secret and would otherwise never get push routing (the owner only
+    /// broadcasts at mint time). Withholding the OVERWRITE from admins is
+    /// what keeps the group-wide rotation power owner-only — an admin can
+    /// fill a hole but can never strand the group on a rotated
+    /// `push_gid`.
+    ///
     /// The byte-identical escape hatch is what keeps the owner's
-    /// post-add-member ``redistribute(accountIdB64:groupIdHex:broadcast:)``
-    /// idempotent even when it is relayed by a path whose sender attribution
-    /// does not resolve — re-persisting the value already held changes
-    /// nothing, so it can never be an attack.
+    /// post-add-member `redistribute` idempotent even when it is relayed by
+    /// a path whose sender attribution does not resolve — re-persisting the
+    /// value already held changes nothing, so it can never be an attack.
+    /// - Parameters:
+    ///   - stored: the secret this device already holds, `nil` when it
+    ///     holds none **or** could not read it.
+    ///   - storedUnreadable: set when the local secret could NOT be read
+    ///     (no device wrap key, or the AEAD open failed). `stored == nil`
+    ///     then means "unknown", NOT "provably absent" — so the admin
+    ///     hole-fill branch must refuse, else a transient Keychain / decrypt
+    ///     failure would let an admin overwrite a secret this device really
+    ///     holds. The owner branch is unaffected (an owner write is the
+    ///     repair path for exactly that state).
     public static func classifyIncomingSecret(
         incoming: Data,
         stored: Data?,
+        storedUnreadable: Bool = false,
         senderKey: Data?,
-        owner: SecretAuthority
+        authority: SecretAuthority
     ) -> SecretVerdict {
         // Byte-identical to what we already hold → a no-op re-persist.
-        // Safe from anyone, and required for `redistribute` idempotence.
+        // Safe from anyone (a plain member included), and required for
+        // `redistribute` idempotence.
         if let stored, stored == incoming { return .accept }
 
-        switch owner {
+        switch authority {
         case .noRoleTable:
-            // No ADR-0022 role table ⇒ no owner to check against. Preserve
+            // No ADR-0022 role table ⇒ nobody to check against. Preserve
             // the pre-gate behaviour for legacy / open groups.
             return .accept
         case .unreadable:
             // Could not read the roles / roster ⇒ cannot authorise a
             // CHANGE. Fail-closed (invariant #4).
             return .reject
-        case .owner(let ownerKey):
-            guard let senderKey, !ownerKey.isEmpty, senderKey == ownerKey else {
-                return .reject
+        case .roleTable(let ownerKey, let admins):
+            // An unattributable sender (no leaf, or a leaf that is not in
+            // the current roster) can never authorise a set. An EMPTY key
+            // is not a valid Ed25519 signature key — refuse it outright so
+            // a degenerate role-table entry can never be matched by an
+            // equally degenerate resolved sender.
+            guard let senderKey, !senderKey.isEmpty else { return .reject }
+
+            // OWNER — the priority. May always set the secret, whatever is
+            // stored and in whatever order the envelopes arrive.
+            if senderKey == ownerKey { return .accept }
+
+            // ADMIN — may SEED a hole (nothing stored yet) so a member the
+            // admin added gets routing, but may never OVERWRITE a secret
+            // this device already holds. The hole must be PROVABLE: an
+            // unreadable store is treated as possibly-occupied
+            // (fail-closed, invariant #4).
+            if stored == nil, !storedUnreadable, admins.contains(senderKey) {
+                return .accept
             }
-            return .accept
+
+            // A plain member, or an admin attempting a rotation.
+            return .reject
         }
     }
 
-    /// Read the ADR-0022 role-table owner key + resolve `senderLeaf` to its
-    /// signature public key off the live MLS `Group`.
+    /// Read the ADR-0022 role table (owner + admins) + resolve `senderLeaf`
+    /// to its signature public key off the live MLS `Group`.
     ///
     /// The leaf → key mapping comes from `Group.members()` (each
     /// `GroupMember` carries `leafIndex` + `signaturePublicKey`), and the
-    /// owner key from `Group.groupRoles()?.owner` — both read from the
-    /// group's own authenticated state, never from the envelope. Any FFI
-    /// throw folds into ``SecretAuthority/unreadable`` so the classifier
-    /// fails closed. A `senderLeaf` that is not in the current roster
-    /// resolves to `nil` (⇒ rejected on a change), not to `.unreadable`.
+    /// authorised keys from `Group.groupRoles()` (`RoleTable.owner` +
+    /// `RoleTable.admins`) — both read from the group's own authenticated
+    /// state, never from the envelope. Any FFI throw folds into
+    /// ``SecretAuthority/unreadable`` so the classifier fails closed. A
+    /// `senderLeaf` that is not in the current roster resolves to `nil`
+    /// (⇒ rejected on a change), not to `.unreadable`.
     public static func resolveSenderAuthority(
         group: Group,
         senderLeaf: UInt32?
-    ) -> (owner: SecretAuthority, senderKey: Data?) {
-        let owner: SecretAuthority
+    ) -> (authority: SecretAuthority, senderKey: Data?) {
+        let authority: SecretAuthority
         do {
             if let table = try group.groupRoles() {
-                owner = .owner(table.owner)
+                authority = .roleTable(owner: table.owner, admins: table.admins)
             } else {
-                owner = .noRoleTable
+                authority = .noRoleTable
             }
         } catch {
             return (.unreadable, nil)
         }
 
-        guard let senderLeaf else { return (owner, nil) }
+        guard let senderLeaf else { return (authority, nil) }
         do {
             let key = try group.members()
                 .first { $0.leafIndex == senderLeaf }?
                 .signaturePublicKey
-            return (owner, key)
+            return (authority, key)
         } catch {
             return (.unreadable, nil)
         }

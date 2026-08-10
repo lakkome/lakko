@@ -1571,12 +1571,15 @@ function ChatView(props: {
         // secret (idempotent) + subscribe under the derived opaque `push_gid`.
         // Never a timeline bubble. Fire-and-forget (best-effort).
         //
-        // GATED on the ADR-0022 role table: a CHANGED secret is applied only
-        // when its MLS sender leaf resolves to the group's OWNER (an
-        // identical re-broadcast is always idempotent-accepted, so the
-        // owner's post-add-member redistribute keeps working). Without this,
-        // any single member could unilaterally rotate the group's routing id
-        // and strand an orphan push-gw subscription on every churn.
+        // GATED on the ADR-0022 role table, ranked owner > admin > member:
+        // the OWNER may rotate whatever is stored; an ADMIN may only seed a
+        // device that holds none (so an admin-performed add-member still
+        // delivers routing to the new member); a plain member may never
+        // change it. An identical re-broadcast is always idempotent-accepted
+        // from anyone, so the post-add-member redistribute keeps working.
+        // Without this, any single member could unilaterally rotate the
+        // group's routing id and strand an orphan push-gw subscription on
+        // every churn.
         if (e.kind === "pushRoutingSecret") {
           const s = auth.state();
           if (s.kind === "session") {

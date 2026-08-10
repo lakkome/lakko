@@ -32,6 +32,12 @@ import uniffi.lakko_ffi_uniffi.derivePushGid as ffiDerivePushGid
  *   - Everyone else ONLY receives + persists the secret from that
  *     envelope ([receive]) — they never mint.
  *
+ * On the RECEIVE side that mint authority is mirrored by a rank gate
+ * ([decideAcceptReceivedSecret]): the owner may always rotate, an
+ * ADR-0022 admin may only SEED a device that holds nothing (so a member
+ * added by a non-owner admin still gets routing), and a plain member may
+ * only relay a byte-identical secret.
+ *
  * ## Never subscribe under the leaky `group_id`
  *
  * The whole point of the ADR is that push-gw + APNs/FCM must not see
@@ -73,24 +79,38 @@ public object GroupPushRouting {
     /** Result of a subscribe attempt. */
     public enum class SubscribeOutcome { SUBSCRIBED, DEFERRED }
 
-    /** Verdict of the receive-side owner gate ([decideAcceptReceivedSecret]).
+    /** Verdict of the receive-side authority gate ([decideAcceptReceivedSecret]).
      *  [REJECT] means DROP — no persist, no subscribe, no re-broadcast. */
     public enum class ReceiveVerdict { ACCEPT, REJECT }
 
     /**
-     * Outcome of reading a group's ADR-0022 role-table owner. Three
-     * DISTINCT states — conflating them is the bug this models away:
-     * "no role table" is a legitimate legacy/open group (accept), while
-     * "could not read" is an error that must fail closed.
+     * Outcome of reading a group's ADR-0022 role table. Three DISTINCT
+     * states — conflating them is the bug this models away: "no role
+     * table" is a legitimate legacy/open group (accept), while "could
+     * not read" is an error that must fail closed.
      */
     public sealed interface OwnerLookup {
-        /** The group carries a role table; [key] is the owner's raw
-         *  32-byte Ed25519 signature public key. */
-        public data class Known(val key: ByteArray) : OwnerLookup {
+        /** The group carries a role table. [owner] is the owner's raw
+         *  32-byte Ed25519 signature public key; [admins] is the
+         *  ADR-0022 admin set (each entry likewise a raw 32-byte
+         *  signature public key). Both are the SAME key shape the live
+         *  roster (`Group.members()[].signaturePublicKey`) reports, so
+         *  the gate compares like with like. */
+        public data class Known(
+            val owner: ByteArray,
+            val admins: List<ByteArray> = emptyList(),
+        ) : OwnerLookup {
             override fun equals(other: Any?): Boolean =
-                this === other || (other is Known && key.contentEquals(other.key))
+                this === other ||
+                    (
+                        other is Known &&
+                            owner.contentEquals(other.owner) &&
+                            admins.size == other.admins.size &&
+                            admins.indices.all { admins[it].contentEquals(other.admins[it]) }
+                        )
 
-            override fun hashCode(): Int = key.contentHashCode()
+            override fun hashCode(): Int =
+                admins.fold(owner.contentHashCode()) { acc, a -> 31 * acc + a.contentHashCode() }
         }
 
         /** The group carries NO role table — a legacy / open group
@@ -104,41 +124,65 @@ public object GroupPushRouting {
     }
 
     /**
-     * The receive-side owner gate — PURE, so the accept/reject matrix is
-     * host-JVM unit-testable without the Android framework or the native
-     * `.so` (the [me.lakko.app.push.resolveTapGroupHex] /
+     * The receive-side authority gate — PURE, so the accept/reject matrix
+     * is host-JVM unit-testable without the Android framework or the
+     * native `.so` (the [me.lakko.app.push.resolveTapGroupHex] /
      * `CommitOutbox.reconcileVerdict` precedent).
      *
      * ## Why a gate at all
      *
-     * The owner check used to exist ONLY on the SEND side
+     * The authority check used to exist ONLY on the SEND side
      * (`ChatRepository.ensurePushRoutingBestEffort` gates the mint on
      * `ownRole == OWNER`). On RECEIVE every member persisted whatever
-     * secret arrived and re-subscribed — so a single non-owner member
+     * secret arrived and re-subscribed — so a single plain member
      * could unilaterally rotate the group's `push_gid`: every member
      * overwrites its secret and re-subscribes, and since per-group
      * unsubscribe is never called, each churn strands an orphan push-gw
      * subscription that keeps receiving wakes.
      *
-     * ## The rule — accept if OWNER **or** IDENTICAL
+     * ## The rule — OWNER outranks ADMIN outranks MEMBER
      *
-     *   - [ReceiveVerdict.ACCEPT] when the incoming secret is
-     *     byte-identical to the stored one. This is what keeps the
-     *     owner's post-add-member [redistribute] idempotent for every
-     *     existing member, and it is safe by construction: an identical
-     *     secret changes no routing state, so it does not matter who
-     *     relayed it.
-     *   - Otherwise (the secret CHANGES) [ReceiveVerdict.ACCEPT] only
-     *     when [senderSignatureKey] is the role table's owner key.
+     * Authority is expressed as *who may overwrite what*, deliberately
+     * WITHOUT persisting an authority level alongside the secret (the
+     * stored state stays exactly the 32 secret bytes):
+     *
+     * | stored | sender | verdict |
+     * |---|---|---|
+     * | identical to incoming | anyone (member too) | ACCEPT |
+     * | any (or none) | OWNER | ACCEPT |
+     * | **none** (first-ever) | ADMIN | ACCEPT |
+     * | present + changed | ADMIN | REJECT |
+     * | any changed | plain member | REJECT |
+     * | changed, no role table | any | ACCEPT |
+     * | changed, roles unreadable / sender unresolved | any | REJECT |
+     *
+     *   - **Identical → always ACCEPT**, regardless of sender: it needs
+     *     no authority because it rotates nothing. This is what keeps the
+     *     post-add-member [redistribute] idempotent for every existing
+     *     member.
+     *   - **The OWNER may always rotate** — the "owner takes priority"
+     *     half. Because owner-acceptance does not depend on what is
+     *     stored, the owner wins regardless of ARRIVAL ORDER: an
+     *     owner-minted secret overwrites an admin-seeded one whether it
+     *     lands before or after it.
+     *   - **An ADMIN may SEED but never OVERWRITE.** ADR-0022 permits
+     *     owner *or* admin to add members, and [redistribute] fires after
+     *     any add-member commit — so a member added by a non-owner admin
+     *     would otherwise hold no secret forever (the owner only
+     *     broadcasts at mint time) and never get push routing. Letting an
+     *     admin FILL A HOLE closes that delivery gap; refusing an admin
+     *     overwrite keeps the rotation-churn attack surface at the owner
+     *     alone.
      *   - [OwnerLookup.NoRoleTable] → accept (legacy / open group —
-     *     unchanged pre-gate behaviour; such a group has no owner to
+     *     unchanged pre-gate behaviour; such a group has no roles to
      *     check against).
      *   - [OwnerLookup.Unavailable] → REJECT a changed secret (fail
      *     closed, invariant #4): an unreadable roster / role table must
      *     never widen who may rotate.
      *   - A `null` [senderSignatureKey] (an external sender, a leaf
-     *     absent from the roster, or a lookup throw) can never match an
-     *     owner key, so a changed secret from one is refused.
+     *     absent from the roster, or a lookup throw) matches neither the
+     *     owner key nor any admin key, so a changed secret from one is
+     *     refused.
      *
      * Note the sender identity is the MLS-authenticated
      * `ProcessedMessage.Application.senderLeaf` resolved against the
@@ -147,7 +191,7 @@ public object GroupPushRouting {
      *
      * @param senderSignatureKey the sender's 32-byte Ed25519 signature
      *   public key, or `null` when it could not be resolved.
-     * @param owner the group's role-table owner lookup outcome.
+     * @param owner the group's role-table lookup outcome (owner + admins).
      * @param incomingSecret the secret carried by the received envelope.
      * @param storedSecret the secret this device already holds, or
      *   `null` when it holds none.
@@ -160,20 +204,26 @@ public object GroupPushRouting {
     ): ReceiveVerdict {
         // Unchanged secret -> always idempotent-accept, regardless of
         // sender: it rotates nothing, so a relay by any member is inert
-        // (and this is exactly the owner's `redistribute` re-broadcast).
+        // (and this is exactly the post-add-member `redistribute`).
         if (storedSecret != null && incomingSecret.contentEquals(storedSecret)) {
             return ReceiveVerdict.ACCEPT
         }
-        // The secret CHANGES from here on — only the owner may do that.
+        // The secret CHANGES (or is the first-ever) from here on.
         return when (owner) {
             is OwnerLookup.Unavailable -> ReceiveVerdict.REJECT
             is OwnerLookup.NoRoleTable -> ReceiveVerdict.ACCEPT
-            is OwnerLookup.Known ->
-                if (senderSignatureKey != null && senderSignatureKey.contentEquals(owner.key)) {
-                    ReceiveVerdict.ACCEPT
-                } else {
-                    ReceiveVerdict.REJECT
-                }
+            is OwnerLookup.Known -> when {
+                senderSignatureKey == null -> ReceiveVerdict.REJECT
+                // The owner outranks everyone: may seed AND may rotate,
+                // whatever is stored and whatever arrived first.
+                senderSignatureKey.contentEquals(owner.owner) -> ReceiveVerdict.ACCEPT
+                // An admin may FILL A HOLE (no secret held) but never
+                // overwrite one that is already there.
+                owner.admins.any { it.contentEquals(senderSignatureKey) } ->
+                    if (storedSecret == null) ReceiveVerdict.ACCEPT else ReceiveVerdict.REJECT
+                // A plain member (or a non-member key) may never change it.
+                else -> ReceiveVerdict.REJECT
+            }
         }
     }
 
@@ -219,7 +269,7 @@ public object GroupPushRouting {
      * under the derived `push_gid`. Never mints.
      *
      * UNGATED — callers on the wire path MUST use [receiveGated], which
-     * runs the [decideAcceptReceivedSecret] owner check first.
+     * runs the [decideAcceptReceivedSecret] authority check first.
      */
     public suspend fun receive(
         groupIdHex: String,
@@ -232,18 +282,24 @@ public object GroupPushRouting {
     }
 
     /**
-     * RECEIVE side WITH the owner gate — the entry point the chat
+     * RECEIVE side WITH the authority gate — the entry point the chat
      * receive loop uses. Reads the currently-held secret, runs
      * [decideAcceptReceivedSecret], and only on
      * [ReceiveVerdict.ACCEPT] does it fall through to [receive]. A
      * [ReceiveVerdict.REJECT] is a pure DROP: no persist, no
-     * reverse-index write, no subscribe — so a non-owner cannot rotate
-     * the group's `push_gid` (and cannot strand an orphan push-gw
+     * reverse-index write, no subscribe — so nobody below owner rank can
+     * rotate the group's `push_gid` (and cannot strand an orphan push-gw
      * subscription).
      *
-     * A throwing `getSecret` degrades to "no stored secret", which can
-     * only make the gate STRICTER (the byte-identical fast path is what
-     * is lost), never more permissive.
+     * A throwing `getSecret` degrades to "no stored secret", which must
+     * stay STRICTER, never more permissive. Losing the stored value
+     * loses the byte-identical fast path (stricter by itself), but for
+     * an ADMIN sender "no secret held" is precisely the hole-fill the
+     * matrix ACCEPTS — so on a throw the admin set is dropped from the
+     * authority before deciding, leaving only the owner (who may rotate
+     * whatever is stored) able to accept. An unreadable store therefore
+     * cannot widen who may write, exactly as an unreadable role table
+     * cannot ([OwnerLookup.Unavailable]).
      *
      * @return the verdict, so the caller can log a refusal.
      */
@@ -254,14 +310,20 @@ public object GroupPushRouting {
         owner: OwnerLookup,
         ports: PushRoutingPorts,
     ): ReceiveVerdict {
-        val stored = try {
-            ports.getSecret(groupIdHex)
-        } catch (_: Throwable) {
-            null
+        val read: Result<ByteArray?> = runCatching { ports.getSecret(groupIdHex) }
+        val stored = read.getOrNull()
+        // On an unreadable store the stored state is UNKNOWN, so strip the
+        // admin set: a `storedSecret = null` must not be mistaken for a
+        // real hole an admin may fill. The owner is unaffected (it may
+        // rotate whatever is stored), so this can only narrow the gate.
+        val authority = if (read.isSuccess || owner !is OwnerLookup.Known) {
+            owner
+        } else {
+            OwnerLookup.Known(owner.owner)
         }
         val verdict = decideAcceptReceivedSecret(
             senderSignatureKey = senderSignatureKey,
-            owner = owner,
+            owner = authority,
             incomingSecret = secret,
             storedSecret = stored,
         )

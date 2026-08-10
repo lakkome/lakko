@@ -1711,9 +1711,11 @@ public class ChatRepository(
     }
 
     /**
-     * ADR-0042 — read [group]'s ADR-0022 role-table owner key. Distinguishes
-     * "no role table" (a legacy / open group — the gate stays open) from "could
-     * not read" (fail closed), which
+     * ADR-0042 — read [group]'s ADR-0022 role table: the owner key AND the
+     * admin set, both raw 32-byte Ed25519 signature public keys (the same key
+     * shape `group.members()[].signaturePublicKey` reports, so the gate
+     * compares like with like). Distinguishes "no role table" (a legacy / open
+     * group — the gate stays open) from "could not read" (fail closed), which
      * [GroupPushRouting.decideAcceptReceivedSecret] treats differently. Must be
      * called on the [groupsLock] critical path (the `Group` handle is not safe
      * to touch off it).
@@ -1724,7 +1726,7 @@ public class ChatRepository(
             if (roles == null) {
                 GroupPushRouting.OwnerLookup.NoRoleTable
             } else {
-                GroupPushRouting.OwnerLookup.Known(roles.owner)
+                GroupPushRouting.OwnerLookup.Known(roles.owner, roles.admins)
             }
         } catch (cause: Throwable) {
             android.util.Log.w("ChatRepository", "push routing: role-table read failed", cause)
@@ -1754,17 +1756,20 @@ public class ChatRepository(
      * under the derived `push_gid`. Fire-and-forget on the push scope
      * (best-effort). Never mints.
      *
-     * GATED (lakko-security MEDIUM-1): the owner check used to live only on the
-     * SEND side ([ensurePushRoutingBestEffort] gates the mint on
+     * GATED (lakko-security MEDIUM-1): the authority check used to live only on
+     * the SEND side ([ensurePushRoutingBestEffort] gates the mint on
      * `ownRole == OWNER`), so on RECEIVE any member could unilaterally rotate
      * the group's `push_gid` — every member would overwrite its secret and
      * re-subscribe, and since per-group unsubscribe is never called, each churn
      * stranded an orphan push-gw subscription that keeps receiving wakes. The
      * MLS-authenticated [senderLeaf] is now resolved against the live roster
-     * and compared to the ADR-0022 owner key: a CHANGED secret from a non-owner
-     * is DROPPED (no persist, no subscribe). A byte-identical secret is always
-     * accepted, which keeps the owner's post-add-member `redistribute`
-     * idempotent for existing members.
+     * and ranked against the ADR-0022 role table: the OWNER may always rotate,
+     * an ADMIN may only SEED a device holding nothing (ADR-0022 lets an admin
+     * add members, and `redistribute` fires after any add-member commit — so
+     * without this a member added by a non-owner admin would never get push
+     * routing), and a plain member's CHANGED secret is DROPPED (no persist, no
+     * subscribe). A byte-identical secret is always accepted, which keeps the
+     * post-add-member `redistribute` idempotent for existing members.
      *
      * The two `Group` reads happen SYNCHRONOUSLY here — this runs inside the
      * poll loop's [groupsLock] critical section (via `applyPollResult`), the
@@ -1797,8 +1802,9 @@ public class ChatRepository(
                 if (verdict == GroupPushRouting.ReceiveVerdict.REJECT) {
                     android.util.Log.w(
                         "ChatRepository",
-                        "push routing: refused a changed secret from a non-owner " +
-                            "sender (group=$groupIdHex, leaf=$senderLeaf)",
+                        "push routing: refused a changed secret from an unauthorised " +
+                            "sender (only the owner may rotate; an admin may only seed) " +
+                            "(group=$groupIdHex, leaf=$senderLeaf)",
                     )
                 }
             } catch (_: Throwable) {

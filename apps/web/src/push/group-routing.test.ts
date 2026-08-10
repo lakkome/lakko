@@ -107,7 +107,7 @@ import {
   tryDecodeSecretEnvelope,
   verdictAccepts,
 } from "./group-routing";
-import { putGroupRouting } from "./group-routing-store";
+import { getGroupRoutingSecret, putGroupRouting } from "./group-routing-store";
 import { base64Encode } from "../auth/account-id";
 
 // ---- helpers -------------------------------------------------------------
@@ -133,25 +133,33 @@ const DUMMY_IDENTITY = {} as unknown as WasmIdentity;
 /** Signature public keys for the receive-gate matrix. */
 const OWNER_PK = new Uint8Array(32).fill(0xa1);
 const MEMBER_PK = new Uint8Array(32).fill(0xb2);
+const ADMIN_PK = new Uint8Array(32).fill(0xc3);
 
 /** Leaf indices the mock member snapshot exposes. */
 const OWNER_LEAF = 0;
 const MEMBER_LEAF = 1;
+const ADMIN_LEAF = 2;
 
 /**
  * A mock group carrying an ADR-0022 role table + a `(leafIndex ->
- * signaturePublicKey)` member snapshot, i.e. exactly the two reads the
- * receive-side owner gate performs.
+ * signaturePublicKey)` member snapshot, i.e. exactly the three reads the
+ * receive-side role gate performs (`roleTableOwner` / `roleTableAdmins` /
+ * `members`).
  *
  * @param ownerKey `undefined` models a legacy / open group with NO role
- *                 table (`roleTableOwner()` returns undefined).
- * @param throws   makes BOTH reads throw, modelling a torn group.
+ *                 table (`roleTableOwner()` returns undefined and
+ *                 `roleTableAdmins()` returns an empty buffer).
+ * @param opts.admins the admin set, flattened into the 32-byte-stride buffer
+ *                 the real `roleTableAdmins()` returns. Defaults to
+ *                 `[ADMIN_PK]`.
+ * @param opts.throws makes ALL reads throw, modelling a torn group.
  */
 function mockRoleGroup(
   groupId: Uint8Array,
   ownerKey: Uint8Array | undefined,
-  opts: { throws?: boolean } = {},
+  opts: { throws?: boolean; admins?: Uint8Array[] } = {},
 ): WasmGroup {
+  const admins = opts.admins ?? [ADMIN_PK];
   return {
     get groupId(): Uint8Array {
       return groupId;
@@ -161,11 +169,20 @@ function mockRoleGroup(
       if (opts.throws === true) throw new Error("torn group");
       return ownerKey;
     },
+    roleTableAdmins: (): Uint8Array => {
+      if (opts.throws === true) throw new Error("torn group");
+      // An open group (no role table) has no admin set either.
+      if (ownerKey === undefined) return new Uint8Array(0);
+      const flat = new Uint8Array(admins.length * 32);
+      admins.forEach((a, i) => flat.set(a, i * 32));
+      return flat;
+    },
     members: (): unknown[] => {
       if (opts.throws === true) throw new Error("torn group");
       return [
         { leafIndex: OWNER_LEAF, signaturePublicKey: OWNER_PK },
         { leafIndex: MEMBER_LEAF, signaturePublicKey: MEMBER_PK },
+        { leafIndex: ADMIN_LEAF, signaturePublicKey: ADMIN_PK },
       ];
     },
   } as unknown as WasmGroup;
@@ -304,7 +321,7 @@ describe("group-routing orchestration (ADR-0042)", () => {
   });
 });
 
-describe("receive-side owner gate (ADR-0042, lakko-security MEDIUM-1)", () => {
+describe("receive-side role gate (ADR-0042, lakko-security MEDIUM-1)", () => {
   const ACCT = "acctGate";
   const GRP = "grpGateB64";
   const GROUP_ID = new Uint8Array([7, 7, 7, 7]);
@@ -334,7 +351,7 @@ describe("receive-side owner gate (ADR-0042, lakko-security MEDIUM-1)", () => {
     await vi.waitFor(() => expect(subscribeGroup).toHaveBeenCalled());
   });
 
-  it("REJECTS a changed secret from a NON-owner (store unchanged, no subscribe)", async () => {
+  it("REJECTS a changed secret from a PLAIN MEMBER (store unchanged, no subscribe)", async () => {
     seedStoredSecret(ACCT, GRP, HELD);
     const group = mockRoleGroup(GROUP_ID, OWNER_PK);
 
@@ -346,7 +363,7 @@ describe("receive-side owner gate (ADR-0042, lakko-security MEDIUM-1)", () => {
       ROTATED,
     );
 
-    expect(verdict).toBe("reject-not-owner");
+    expect(verdict).toBe("reject-not-authorized");
     // Nothing persisted, nothing subscribed — the unilateral rotation +
     // the orphan push-gw subscription it would strand are both prevented.
     expect(vi.mocked(putGroupRouting)).not.toHaveBeenCalled();
@@ -356,7 +373,7 @@ describe("receive-side owner gate (ADR-0042, lakko-security MEDIUM-1)", () => {
     );
   });
 
-  it("ACCEPTS an IDENTICAL secret from a non-owner (idempotent redistribute relay)", async () => {
+  it("ACCEPTS an IDENTICAL secret from a plain member (idempotent redistribute relay)", async () => {
     seedStoredSecret(ACCT, GRP, HELD);
     const group = mockRoleGroup(GROUP_ID, OWNER_PK);
 
@@ -410,7 +427,7 @@ describe("receive-side owner gate (ADR-0042, lakko-security MEDIUM-1)", () => {
     expect(vi.mocked(putGroupRouting)).toHaveBeenCalledTimes(1);
   });
 
-  it("REJECTS a first-ever secret from a NON-owner (no stored secret to match)", async () => {
+  it("REJECTS a first-ever secret from a PLAIN MEMBER (no stored secret to match)", async () => {
     const group = mockRoleGroup(GROUP_ID, OWNER_PK);
 
     const verdict = await receivePushRoutingSecretGated(
@@ -421,9 +438,113 @@ describe("receive-side owner gate (ADR-0042, lakko-security MEDIUM-1)", () => {
       ROTATED,
     );
 
-    expect(verdict).toBe("reject-not-owner");
+    expect(verdict).toBe("reject-not-authorized");
     expect(vi.mocked(putGroupRouting)).not.toHaveBeenCalled();
     expect(subscribeGroup).not.toHaveBeenCalled();
+  });
+
+  // ---- admin tier (the delivery regression the owner-only gate introduced) --
+
+  it("ACCEPTS a first-ever secret from an ADMIN when the device holds none", async () => {
+    // The regression this closes: ADR-0022 lets an ADMIN commit an
+    // add-member, and `redistributeSecretToGroup` fires after ANY add — so
+    // for a member added by a non-owner admin, that admin's redistribute is
+    // the ONLY source of the secret (the owner broadcasts only at mint).
+    const group = mockRoleGroup(GROUP_ID, OWNER_PK);
+
+    const verdict = await receivePushRoutingSecretGated(
+      ACCT,
+      group,
+      GRP,
+      ADMIN_LEAF,
+      ROTATED,
+    );
+
+    expect(verdict).toBe("accept-admin-seed");
+    expect(vi.mocked(putGroupRouting)).toHaveBeenCalledTimes(1);
+    expect(Array.from(h.secrets.get(`${ACCT}\0${GRP}`) as Uint8Array)).toEqual(
+      Array.from(ROTATED),
+    );
+    await vi.waitFor(() => expect(subscribeGroup).toHaveBeenCalled());
+  });
+
+  it("REJECTS a changed secret from an ADMIN when the device already holds one", async () => {
+    seedStoredSecret(ACCT, GRP, HELD);
+    const group = mockRoleGroup(GROUP_ID, OWNER_PK);
+
+    const verdict = await receivePushRoutingSecretGated(
+      ACCT,
+      group,
+      GRP,
+      ADMIN_LEAF,
+      ROTATED,
+    );
+
+    // An admin may seed a hole, never rotate — only the owner rotates.
+    expect(verdict).toBe("reject-admin-overwrite");
+    expect(vi.mocked(putGroupRouting)).not.toHaveBeenCalled();
+    expect(subscribeGroup).not.toHaveBeenCalled();
+    expect(Array.from(h.secrets.get(`${ACCT}\0${GRP}`) as Uint8Array)).toEqual(
+      Array.from(HELD),
+    );
+  });
+
+  it("ACCEPTS an OWNER rotation over an ADMIN-seeded secret (owner takes priority)", async () => {
+    const group = mockRoleGroup(GROUP_ID, OWNER_PK);
+
+    // 1. Admin seeds the hole.
+    expect(
+      await receivePushRoutingSecretGated(ACCT, group, GRP, ADMIN_LEAF, HELD),
+    ).toBe("accept-admin-seed");
+    expect(Array.from(h.secrets.get(`${ACCT}\0${GRP}`) as Uint8Array)).toEqual(
+      Array.from(HELD),
+    );
+
+    // 2. The owner's envelope arrives AFTER and still wins — no authority
+    // level was persisted alongside the admin-seeded secret, so the owner
+    // branch is decided without consulting who wrote it.
+    expect(
+      await receivePushRoutingSecretGated(ACCT, group, GRP, OWNER_LEAF, ROTATED),
+    ).toBe("accept-owner");
+    expect(Array.from(h.secrets.get(`${ACCT}\0${GRP}`) as Uint8Array)).toEqual(
+      Array.from(ROTATED),
+    );
+  });
+
+  it("REJECTS an ADMIN seed when the local store is UNREADABLE (hole unprovable)", async () => {
+    const group = mockRoleGroup(GROUP_ID, OWNER_PK);
+    vi.mocked(getGroupRoutingSecret).mockRejectedValueOnce(
+      new Error("store unreadable"),
+    );
+
+    const verdict = await receivePushRoutingSecretGated(
+      ACCT,
+      group,
+      GRP,
+      ADMIN_LEAF,
+      ROTATED,
+    );
+
+    // `storedSecret === null` here means "unknown", not "provably absent" —
+    // fail-closed rather than let an admin overwrite what we may hold.
+    expect(verdict).toBe("reject-admin-overwrite");
+    expect(vi.mocked(putGroupRouting)).not.toHaveBeenCalled();
+  });
+
+  it("an ADMIN key not in the role table's admin set is a plain member", async () => {
+    // Same sender leaf, but the role table lists NO admins.
+    const group = mockRoleGroup(GROUP_ID, OWNER_PK, { admins: [] });
+
+    const verdict = await receivePushRoutingSecretGated(
+      ACCT,
+      group,
+      GRP,
+      ADMIN_LEAF,
+      ROTATED,
+    );
+
+    expect(verdict).toBe("reject-not-authorized");
+    expect(vi.mocked(putGroupRouting)).not.toHaveBeenCalled();
   });
 
   it("fails CLOSED on a torn group: changed secret dropped, identical accepted", async () => {
@@ -487,7 +608,11 @@ describe("receive-side owner gate (ADR-0042, lakko-security MEDIUM-1)", () => {
 describe("routingSecretVerdict (pure decision core)", () => {
   const A = new Uint8Array([1, 2, 3]);
   const B = new Uint8Array([9, 9, 9]);
-  const base = { verifyFailed: false };
+  const base = {
+    verifyFailed: false,
+    storedUnreadable: false,
+    adminKeys: [ADMIN_PK],
+  };
 
   it("identical short-circuits regardless of authorship", () => {
     expect(
@@ -504,6 +629,7 @@ describe("routingSecretVerdict (pure decision core)", () => {
   it("identical wins even when verification failed", () => {
     expect(
       routingSecretVerdict({
+        ...base,
         verifyFailed: true,
         ownerKey: undefined,
         senderKey: undefined,
@@ -525,7 +651,59 @@ describe("routingSecretVerdict (pure decision core)", () => {
     ).toBe("accept-owner");
   });
 
-  it("non-owner change rejected", () => {
+  it("owner outranks the admin set even when also listed as an admin", () => {
+    expect(
+      routingSecretVerdict({
+        ...base,
+        ownerKey: OWNER_PK,
+        adminKeys: [ADMIN_PK, OWNER_PK],
+        senderKey: new Uint8Array(OWNER_PK),
+        // Stored + changed: the admin branch would REJECT this, the owner
+        // branch accepts. Owner is checked first, so it wins.
+        storedSecret: A,
+        incomingSecret: B,
+      }),
+    ).toBe("accept-owner");
+  });
+
+  it("admin seeds an empty store", () => {
+    expect(
+      routingSecretVerdict({
+        ...base,
+        ownerKey: OWNER_PK,
+        senderKey: new Uint8Array(ADMIN_PK),
+        storedSecret: null,
+        incomingSecret: B,
+      }),
+    ).toBe("accept-admin-seed");
+  });
+
+  it("admin cannot overwrite a held secret", () => {
+    expect(
+      routingSecretVerdict({
+        ...base,
+        ownerKey: OWNER_PK,
+        senderKey: new Uint8Array(ADMIN_PK),
+        storedSecret: A,
+        incomingSecret: B,
+      }),
+    ).toBe("reject-admin-overwrite");
+  });
+
+  it("admin cannot seed when the store is unreadable (hole unprovable)", () => {
+    expect(
+      routingSecretVerdict({
+        ...base,
+        storedUnreadable: true,
+        ownerKey: OWNER_PK,
+        senderKey: new Uint8Array(ADMIN_PK),
+        storedSecret: null,
+        incomingSecret: B,
+      }),
+    ).toBe("reject-admin-overwrite");
+  });
+
+  it("plain-member change rejected (held or not)", () => {
     expect(
       routingSecretVerdict({
         ...base,
@@ -534,7 +712,30 @@ describe("routingSecretVerdict (pure decision core)", () => {
         storedSecret: A,
         incomingSecret: B,
       }),
-    ).toBe("reject-not-owner");
+    ).toBe("reject-not-authorized");
+    // A plain member gets NO hole-fill privilege — that is the admin tier.
+    expect(
+      routingSecretVerdict({
+        ...base,
+        ownerKey: OWNER_PK,
+        senderKey: MEMBER_PK,
+        storedSecret: null,
+        incomingSecret: B,
+      }),
+    ).toBe("reject-not-authorized");
+  });
+
+  it("an empty admin set leaves everyone but the owner unauthorized", () => {
+    expect(
+      routingSecretVerdict({
+        ...base,
+        adminKeys: [],
+        ownerKey: OWNER_PK,
+        senderKey: new Uint8Array(ADMIN_PK),
+        storedSecret: null,
+        incomingSecret: B,
+      }),
+    ).toBe("reject-not-authorized");
   });
 
   it("no role table accepts the change", () => {
@@ -549,6 +750,18 @@ describe("routingSecretVerdict (pure decision core)", () => {
     ).toBe("accept-no-owner");
   });
 
+  it("an unresolved sender is unverifiable, admin set notwithstanding", () => {
+    expect(
+      routingSecretVerdict({
+        ...base,
+        ownerKey: OWNER_PK,
+        senderKey: undefined,
+        storedSecret: null,
+        incomingSecret: B,
+      }),
+    ).toBe("reject-unverifiable");
+  });
+
   it("a length-mismatched stored secret is NOT identical", () => {
     expect(
       routingSecretVerdict({
@@ -558,14 +771,16 @@ describe("routingSecretVerdict (pure decision core)", () => {
         storedSecret: new Uint8Array([1, 2, 3, 4]),
         incomingSecret: new Uint8Array([1, 2, 3]),
       }),
-    ).toBe("reject-not-owner");
+    ).toBe("reject-not-authorized");
   });
 
   it("verdictAccepts partitions the verdict space", () => {
     expect(verdictAccepts("accept-identical")).toBe(true);
     expect(verdictAccepts("accept-owner")).toBe(true);
+    expect(verdictAccepts("accept-admin-seed")).toBe(true);
     expect(verdictAccepts("accept-no-owner")).toBe(true);
-    expect(verdictAccepts("reject-not-owner")).toBe(false);
+    expect(verdictAccepts("reject-admin-overwrite")).toBe(false);
+    expect(verdictAccepts("reject-not-authorized")).toBe(false);
     expect(verdictAccepts("reject-unverifiable")).toBe(false);
   });
 });

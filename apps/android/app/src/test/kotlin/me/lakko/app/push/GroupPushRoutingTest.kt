@@ -7,6 +7,7 @@ import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -36,7 +37,12 @@ import org.junit.Test
  *   - a member WITHOUT the secret DEFERS (no subscription at all);
  *   - the reverse index (`push_gid -> account/group`) is populated on
  *     every secret persist;
- *   - the receive-side envelope pre-filter is fail-closed.
+ *   - the receive-side envelope pre-filter is fail-closed;
+ *   - the receive-side RANK gate — owner outranks admin outranks member:
+ *     the owner may always rotate, an admin may only SEED a device that
+ *     holds nothing, a plain member may only relay a byte-identical
+ *     secret, a legacy group with no role table stays open, and an
+ *     unreadable role table (or an unreadable store) fails closed.
  */
 private fun hex(bytes: ByteArray): String =
     bytes.joinToString("") { "%02x".format(it.toInt() and 0xFF) }
@@ -233,22 +239,41 @@ class GroupPushRoutingTest {
     }
 
     // -----------------------------------------------------------------
-    // Receive-side OWNER GATE (lakko-security MEDIUM-1)
+    // Receive-side AUTHORITY GATE (lakko-security MEDIUM-1)
     //
     // Before the gate, `receive` persisted + re-subscribed unconditionally,
-    // so ONE non-owner member could unilaterally rotate the group's
+    // so ONE plain member could unilaterally rotate the group's
     // `push_gid`: every member overwrote its secret and re-subscribed, and
     // since per-group unsubscribe is never called, each churn stranded an
     // orphan push-gw subscription that keeps receiving wakes.
     //
-    // Rule: ACCEPT if the sender is the ADR-0022 owner OR the secret is
-    // byte-identical to the stored one; otherwise DROP.
+    // Rule — OWNER outranks ADMIN outranks MEMBER, expressed as who may
+    // overwrite what (no authority level is persisted alongside the secret):
+    //
+    //   identical to stored          | anyone        | ACCEPT
+    //   any (or none) stored         | OWNER         | ACCEPT
+    //   NONE stored (first-ever)     | ADMIN         | ACCEPT (fill a hole)
+    //   present + changed            | ADMIN         | REJECT (no overwrite)
+    //   any changed                  | plain member  | REJECT
+    //   changed, no role table       | anyone        | ACCEPT (legacy/open)
+    //   changed, roles unreadable    | anyone        | REJECT (fail closed)
+    //
+    // The admin row is not a nicety: ADR-0022 permits owner OR admin to add
+    // members and `redistribute` fires after ANY add-member commit, so
+    // without it a member added by a non-owner admin would hold no secret
+    // forever (the owner only broadcasts at mint time) and never get push.
     // -----------------------------------------------------------------
 
     private val ownerKey = ByteArray(32) { 0x11 }
     private val memberKey = ByteArray(32) { 0x22 }
+    private val adminKey = ByteArray(32) { 0x33 }
+    private val otherAdminKey = ByteArray(32) { 0x44 }
     private val secretA = ByteArray(32) { 0xA1.toByte() }
     private val secretB = ByteArray(32) { 0xB2.toByte() }
+
+    /** A role table with an owner and a two-entry admin set. */
+    private fun knownRoles() =
+        GroupPushRouting.OwnerLookup.Known(ownerKey, listOf(adminKey, otherAdminKey))
 
     /** Asserts the REJECT contract: nothing persisted, nothing subscribed,
      *  no reverse-index row — and any pre-existing secret left untouched. */
@@ -272,7 +297,7 @@ class GroupPushRoutingTest {
             groupIdHex = g,
             secret = secretB,
             senderSignatureKey = ownerKey,
-            owner = GroupPushRouting.OwnerLookup.Known(ownerKey),
+            owner = knownRoles(),
             ports = ports,
         )
 
@@ -283,7 +308,7 @@ class GroupPushRoutingTest {
     }
 
     @Test
-    fun `NON-owner changing the secret is REJECTED - no persist, no subscribe`() = runTest {
+    fun `plain MEMBER changing the secret is REJECTED - no persist, no subscribe`() = runTest {
         val ports = FakePorts(account)
         val g = "02".repeat(32)
         ports.secrets[g] = secretA
@@ -292,7 +317,7 @@ class GroupPushRoutingTest {
             groupIdHex = g,
             secret = secretB,
             senderSignatureKey = memberKey,
-            owner = GroupPushRouting.OwnerLookup.Known(ownerKey),
+            owner = knownRoles(),
             ports = ports,
         )
 
@@ -301,7 +326,7 @@ class GroupPushRoutingTest {
     }
 
     @Test
-    fun `NON-owner seeding a FIRST secret is REJECTED (holder had none)`() = runTest {
+    fun `plain MEMBER seeding a FIRST secret is REJECTED (holder had none)`() = runTest {
         val ports = FakePorts(account)
         val g = "03".repeat(32)
 
@@ -309,7 +334,7 @@ class GroupPushRoutingTest {
             groupIdHex = g,
             secret = secretB,
             senderSignatureKey = memberKey,
-            owner = GroupPushRouting.OwnerLookup.Known(ownerKey),
+            owner = knownRoles(),
             ports = ports,
         )
 
@@ -318,7 +343,7 @@ class GroupPushRoutingTest {
     }
 
     @Test
-    fun `NON-owner relaying the IDENTICAL secret is accepted (redistribute stays idempotent)`() =
+    fun `plain MEMBER relaying the IDENTICAL secret is accepted (redistribute stays idempotent)`() =
         runTest {
             val ports = FakePorts(account)
             val g = "04".repeat(32)
@@ -328,7 +353,7 @@ class GroupPushRoutingTest {
                 groupIdHex = g,
                 secret = secretA.copyOf(),
                 senderSignatureKey = memberKey,
-                owner = GroupPushRouting.OwnerLookup.Known(ownerKey),
+                owner = knownRoles(),
                 ports = ports,
             )
 
@@ -336,6 +361,116 @@ class GroupPushRoutingTest {
             assertEquals(GroupPushRouting.ReceiveVerdict.ACCEPT, verdict)
             assertArrayEquals(secretA, ports.secrets[g])
             assertEquals(1, ports.subscribeCount)
+        }
+
+    // ---- ADMIN rank: may SEED a hole, may never OVERWRITE ----
+
+    @Test
+    fun `ADMIN seeding a FIRST secret is ACCEPTED (closes the admin-add delivery gap)`() = runTest {
+        val ports = FakePorts(account)
+        val g = "0a".repeat(32)
+        // Holder has NOTHING — exactly the state of a member an admin just
+        // added: the owner already broadcast at mint time, so the ONLY
+        // envelope this device will ever see is the admin's `redistribute`.
+
+        val verdict = GroupPushRouting.receiveGated(
+            groupIdHex = g,
+            secret = secretB,
+            senderSignatureKey = adminKey,
+            owner = knownRoles(),
+            ports = ports,
+        )
+
+        assertEquals(GroupPushRouting.ReceiveVerdict.ACCEPT, verdict)
+        assertArrayEquals("admin filled the hole", secretB, ports.secrets[g])
+        assertEquals("subscribed under the derived push_gid", 1, ports.subscribeCount)
+        assertArrayEquals(ports.derivePushGid(secretB), ports.lastSubscribeTarget)
+    }
+
+    @Test
+    fun `ADMIN changing an EXISTING secret is REJECTED (seed only, never overwrite)`() = runTest {
+        val ports = FakePorts(account)
+        val g = "0b".repeat(32)
+        ports.secrets[g] = secretA
+
+        val verdict = GroupPushRouting.receiveGated(
+            groupIdHex = g,
+            secret = secretB,
+            senderSignatureKey = adminKey,
+            owner = knownRoles(),
+            ports = ports,
+        )
+
+        assertEquals(GroupPushRouting.ReceiveVerdict.REJECT, verdict)
+        assertDropped(ports, g, before = secretA)
+    }
+
+    @Test
+    fun `OWNER outranks an ADMIN-seeded secret (owner wins whatever the arrival order)`() =
+        runTest {
+            val ports = FakePorts(account)
+            val g = "0c".repeat(32)
+
+            // 1. An admin seeds the hole first.
+            val seeded = GroupPushRouting.receiveGated(
+                groupIdHex = g,
+                secret = secretA,
+                senderSignatureKey = adminKey,
+                owner = knownRoles(),
+                ports = ports,
+            )
+            assertEquals(GroupPushRouting.ReceiveVerdict.ACCEPT, seeded)
+            assertArrayEquals(secretA, ports.secrets[g])
+
+            // 2. The owner's own secret lands AFTER it and still wins — owner
+            //    acceptance never depends on what is already stored.
+            val rotated = GroupPushRouting.receiveGated(
+                groupIdHex = g,
+                secret = secretB,
+                senderSignatureKey = ownerKey,
+                owner = knownRoles(),
+                ports = ports,
+            )
+            assertEquals(GroupPushRouting.ReceiveVerdict.ACCEPT, rotated)
+            assertArrayEquals("owner overwrote the admin-seeded secret", secretB, ports.secrets[g])
+            assertArrayEquals(ports.derivePushGid(secretB), ports.lastSubscribeTarget)
+        }
+
+    @Test
+    fun `a SECOND admin in the set is recognised (whole set is matched, not just the first)`() =
+        runTest {
+            val ports = FakePorts(account)
+            val g = "0d".repeat(32)
+
+            val verdict = GroupPushRouting.receiveGated(
+                groupIdHex = g,
+                secret = secretB,
+                senderSignatureKey = otherAdminKey,
+                owner = knownRoles(),
+                ports = ports,
+            )
+
+            assertEquals(GroupPushRouting.ReceiveVerdict.ACCEPT, verdict)
+            assertArrayEquals(secretB, ports.secrets[g])
+        }
+
+    @Test
+    fun `an ADMIN relaying the IDENTICAL secret is accepted (idempotent, no rank needed)`() =
+        runTest {
+            val ports = FakePorts(account)
+            val g = "0e".repeat(32)
+            ports.secrets[g] = secretA
+
+            val verdict = GroupPushRouting.receiveGated(
+                groupIdHex = g,
+                secret = secretA.copyOf(),
+                senderSignatureKey = adminKey,
+                owner = knownRoles(),
+                ports = ports,
+            )
+
+            assertEquals(GroupPushRouting.ReceiveVerdict.ACCEPT, verdict)
+            assertArrayEquals(secretA, ports.secrets[g])
         }
 
     @Test
@@ -406,7 +541,7 @@ class GroupPushRoutingTest {
             secret = secretB,
             // `null` = external sender / leaf absent from the roster / FFI throw.
             senderSignatureKey = null,
-            owner = GroupPushRouting.OwnerLookup.Known(ownerKey),
+            owner = knownRoles(),
             ports = ports,
         )
 
@@ -414,29 +549,83 @@ class GroupPushRoutingTest {
         assertDropped(ports, g, before = secretA)
     }
 
+    /**
+     * [PushRoutingPorts] whose store read throws on the first [failures]
+     * calls, then delegates normally. `failures = 1` fails exactly the
+     * GATE read (so the strip logic is exercised) while letting an ACCEPT
+     * still run through [GroupPushRouting.receive]; a huge value makes it
+     * throw forever, which is only usable on a REJECT path.
+     */
+    private class FlakyStore(
+        private val failures: Int,
+        private val inner: FakePorts,
+    ) : PushRoutingPorts by inner {
+        private var reads = 0
+
+        override fun getSecret(groupIdHex: String): ByteArray? {
+            reads++
+            if (reads <= failures) throw IllegalStateException("keystore unavailable")
+            return inner.getSecret(groupIdHex)
+        }
+    }
+
     @Test
     fun `a throwing getSecret degrades to strict, never permissive`() = runTest {
-        val g = "09".repeat(32)
-        val ports = object : PushRoutingPorts by FakePorts(account) {
-            override fun getSecret(groupIdHex: String): ByteArray? =
-                throw IllegalStateException("keystore unavailable")
-        }
-
+        val inner = FakePorts(account)
         val verdict = GroupPushRouting.receiveGated(
-            groupIdHex = g,
+            groupIdHex = "09".repeat(32),
             secret = secretB,
             senderSignatureKey = memberKey,
-            owner = GroupPushRouting.OwnerLookup.Known(ownerKey),
-            ports = ports,
+            owner = knownRoles(),
+            ports = FlakyStore(Int.MAX_VALUE, inner),
         )
 
         // Losing the byte-identical fast path can only make the gate stricter.
         assertEquals(GroupPushRouting.ReceiveVerdict.REJECT, verdict)
+        assertTrue("nothing persisted", inner.secrets.isEmpty())
+    }
+
+    @Test
+    fun `a throwing getSecret does NOT let an ADMIN seed (unknown stored state is not a hole)`() =
+        runTest {
+            val inner = FakePorts(account)
+            val verdict = GroupPushRouting.receiveGated(
+                groupIdHex = "0f".repeat(32),
+                secret = secretB,
+                senderSignatureKey = adminKey,
+                owner = knownRoles(),
+                ports = FlakyStore(Int.MAX_VALUE, inner),
+            )
+
+            // An unreadable store yields `storedSecret = null`, which for an
+            // admin would otherwise READ AS a hole to fill — the one place the
+            // degrade could have been permissive. `receiveGated` strips the
+            // admin set on a read failure, so it stays fail-closed.
+            assertEquals(GroupPushRouting.ReceiveVerdict.REJECT, verdict)
+            assertTrue("nothing persisted", inner.secrets.isEmpty())
+        }
+
+    @Test
+    fun `a throwing getSecret still lets the OWNER through (it may rotate anything)`() = runTest {
+        val inner = FakePorts(account)
+        val g = "10".repeat(32)
+        // Only the GATE read fails; the strip narrows the authority to the
+        // owner alone, which is exactly who is sending.
+        val verdict = GroupPushRouting.receiveGated(
+            groupIdHex = g,
+            secret = secretB,
+            senderSignatureKey = ownerKey,
+            owner = knownRoles(),
+            ports = FlakyStore(1, inner),
+        )
+
+        assertEquals(GroupPushRouting.ReceiveVerdict.ACCEPT, verdict)
+        assertArrayEquals("owner's secret persisted", secretB, inner.secrets[g])
     }
 
     @Test
     fun `the pure decision function covers the whole matrix`() {
-        val known = GroupPushRouting.OwnerLookup.Known(ownerKey)
+        val known = knownRoles()
         fun decide(
             sender: ByteArray?,
             owner: GroupPushRouting.OwnerLookup,
@@ -447,21 +636,68 @@ class GroupPushRoutingTest {
         val accept = GroupPushRouting.ReceiveVerdict.ACCEPT
         val reject = GroupPushRouting.ReceiveVerdict.REJECT
 
-        // owner + changed -> accept; non-owner + changed -> reject
+        // --- OWNER: may seed AND may rotate, whatever is stored ---
         assertEquals(accept, decide(ownerKey, known, secretB, secretA))
-        assertEquals(reject, decide(memberKey, known, secretB, secretA))
-        // identical always accepted, whoever relayed it
-        assertEquals(accept, decide(memberKey, known, secretA, secretA.copyOf()))
-        assertEquals(accept, decide(null, known, secretA, secretA.copyOf()))
-        // first-ever secret: only from the owner
         assertEquals(accept, decide(ownerKey, known, secretA, null))
+
+        // --- ADMIN: may SEED a hole, may NEVER overwrite ---
+        assertEquals(accept, decide(adminKey, known, secretA, null))
+        assertEquals(accept, decide(otherAdminKey, known, secretA, null))
+        assertEquals(reject, decide(adminKey, known, secretB, secretA))
+        assertEquals(reject, decide(otherAdminKey, known, secretB, secretA))
+
+        // --- plain MEMBER: may never change it, seed or overwrite ---
+        assertEquals(reject, decide(memberKey, known, secretB, secretA))
         assertEquals(reject, decide(memberKey, known, secretA, null))
-        // no role table -> open; unreadable -> fail closed
-        assertEquals(accept, decide(memberKey, GroupPushRouting.OwnerLookup.NoRoleTable, secretB, secretA))
-        assertEquals(reject, decide(ownerKey, GroupPushRouting.OwnerLookup.Unavailable, secretB, secretA))
-        // a near-miss key (one byte off) is not the owner
-        val nearMiss = ownerKey.copyOf().also { it[31] = 0x12 }
-        assertEquals(reject, decide(nearMiss, known, secretB, secretA))
+
+        // --- identical always accepted, whoever relayed it (needs no rank) ---
+        assertEquals(accept, decide(memberKey, known, secretA, secretA.copyOf()))
+        assertEquals(accept, decide(adminKey, known, secretA, secretA.copyOf()))
+        assertEquals(accept, decide(null, known, secretA, secretA.copyOf()))
+
+        // --- no role table -> open; unreadable -> fail closed for EVERY rank ---
+        val open = GroupPushRouting.OwnerLookup.NoRoleTable
+        val unreadable = GroupPushRouting.OwnerLookup.Unavailable
+        assertEquals(accept, decide(memberKey, open, secretB, secretA))
+        assertEquals(accept, decide(memberKey, open, secretA, null))
+        assertEquals(reject, decide(ownerKey, unreadable, secretB, secretA))
+        assertEquals(reject, decide(adminKey, unreadable, secretA, null))
+
+        // --- an unresolved sender matches neither owner nor any admin ---
+        assertEquals(reject, decide(null, known, secretB, secretA))
+        assertEquals(reject, decide(null, known, secretA, null))
+
+        // --- near-miss keys (one byte off) match neither rank ---
+        val nearOwner = ownerKey.copyOf().also { it[31] = 0x12 }
+        val nearAdmin = adminKey.copyOf().also { it[31] = 0x34 }
+        assertEquals(reject, decide(nearOwner, known, secretB, secretA))
+        assertEquals(reject, decide(nearAdmin, known, secretA, null))
+
+        // --- an EMPTY admin set degenerates to the owner-only gate ---
+        val ownerOnly = GroupPushRouting.OwnerLookup.Known(ownerKey)
+        assertEquals(accept, decide(ownerKey, ownerOnly, secretB, secretA))
+        assertEquals(reject, decide(adminKey, ownerOnly, secretA, null))
+    }
+
+    @Test
+    fun `OwnerLookup Known compares by CONTENT, not array identity`() {
+        // The gate's inputs are freshly-decoded FFI arrays every poll, so
+        // reference equality would silently break any equals-based assertion.
+        assertEquals(knownRoles(), knownRoles())
+        assertEquals(knownRoles().hashCode(), knownRoles().hashCode())
+        assertEquals(
+            GroupPushRouting.OwnerLookup.Known(ownerKey.copyOf(), listOf(adminKey.copyOf())),
+            GroupPushRouting.OwnerLookup.Known(ownerKey, listOf(adminKey)),
+        )
+        // A different admin set is a different authority.
+        assertNotEquals(
+            GroupPushRouting.OwnerLookup.Known(ownerKey, listOf(adminKey)),
+            GroupPushRouting.OwnerLookup.Known(ownerKey, listOf(memberKey)),
+        )
+        assertNotEquals(
+            GroupPushRouting.OwnerLookup.Known(ownerKey),
+            GroupPushRouting.OwnerLookup.Known(ownerKey, listOf(adminKey)),
+        )
     }
 
     // -----------------------------------------------------------------
