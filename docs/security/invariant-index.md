@@ -13,10 +13,10 @@ section that describes it.
 | Class | Count | Range | Source file |
 |---|---|---|---|
 | **I-** | 8   | I-1..I-8   | [`mls-state-machine.md`](./mls-state-machine.md) |
-| **C-** | 59  | C-1..C-59  | [`calls.md`](./calls.md) |
+| **C-** | 60  | C-1..C-60  | [`calls.md`](./calls.md) |
 | **T-** | 15  | T-1..T-15  | [`transport.md`](./transport.md) |
 | **G-** | 27  | G-1..G-27 (G-28 closed via the G3-sframe-native arc N-1..N-6) | [`known-gaps.md`](./known-gaps.md) — open / deferred |
-| Total invariants  | 82  | (I + C + T) | live properties |
+| Total invariants  | 83  | (I + C + T) | live properties |
 | Total open gaps   | 27  | (G)         | tracked + scoped |
 
 ## MLS state machine invariants (I-1..I-8)
@@ -37,7 +37,7 @@ in `crates/lakko-mls/`.
 | I-7 | Opening a `SealedBundle` with an unknown `algorithm` discriminator is rejected before AEAD-open is attempted | Forward-compat ratchet |
 | I-8 | `create_devicegroup_message` round-trips through `parse_devicegroup_payload` losslessly for every typed body variant | Wire-format byte-stability |
 
-## Call-side invariants (C-1..C-59)
+## Call-side invariants (C-1..C-60)
 
 Source: [`calls.md`](./calls.md). The `C-` class is the
 catch-all for "everything the SFU / channels / storage /
@@ -47,13 +47,14 @@ media-key pipeline (C-1..C-14), call-admission JWT
 (C-15..C-23), link-based invite + composer + dispatcher
 (C-24..C-36), SFrame + RFC 9605 + SFU signaling
 (C-37..C-39), channel-broadcast backend opacity
-(C-40..C-44), then per-arc additions C-45..C-59
+(C-40..C-44), then per-arc additions C-45..C-60
 (SFrame native shim, TURN, PublisherGroup persistence,
 host-side bridge validation, rotation policy, the
 SFU multi-party client SFrame coverage, the KT-log
 client-authorised leaf + witness quorum, the backup-head
-rollback commitment, and the iOS NSE silent-push
-read-only-throwaway decrypt boundary).
+rollback commitment, the iOS NSE silent-push
+read-only-throwaway decrypt boundary, and the opaque
+per-group push routing id).
 
 ### C-1..C-14 — media-key pipeline (SFrame + overlap window)
 
@@ -188,6 +189,12 @@ read-only-throwaway decrypt boundary).
 | ID   | Title |
 |---|---|
 | C-59 | The iOS `UNNotificationServiceExtension` (NSE) renders a **real** decrypted push preview via a **read-only throwaway** MLS decrypt ([ADR-0041](../adr/0041-ios-silent-push-nse-decrypt.md) Phase 3), mirroring the already-approved web (`148753b`) + Android (`ae9a087`) slices, without ever advancing the foreground app's ratchet. **Seed-sharing boundary.** On-device decrypt requires the AccountIdentity seed (`Identity.fromSeed`, ADR-0017) to be NSE-readable, so it moves into a **team-scoped shared Keychain access group** (`group.me.lakko.dev.shared`), staying `AfterFirstUnlockThisDeviceOnly` + no-iCloud-sync + hardware-class-key-protected; only the derived **64-byte phrase seed** is shared (never the recovery phrase), and the seed `Data` is zeroed after use (`resetBytes`). The read scope widens app -> {app, first-party co-signed NSE}, not app -> any app: invariant #7's non-extractable / hardware-backed letter is preserved, only the process scope widens (the one invariant under tension, reviewed). **Three-layer structural no-write guarantee** (what makes the throwaway airtight): (1) the slim `lakko-ffi-extension` FFI exposes **no persist method** — only `from_seed` / `restore_storage` / `load_group` / `process_incoming_verifying_roles` / `parse_body_envelope`, with no `snapshot_storage` / compose / send / call / channel / transport surface; (2) the `NsePushDecryptDeps` / `NseThrowawayGroup` protocols expose **no write path** — every method is a read or a pure compute; (3) `NseThrowawayGroup.close()` is a documented no-op (ARC / UniFFI `deinit` frees the handles; never `snapshotStorage` / `putSnapshot`); and the app's DS cursor is **never advanced** (the fetch start is read-only). The foreground app later restores from the SAME snapshot and reprocesses from its OWN append-only cursor (idempotent), so the G-34-class publish/persist ratchet-desync is avoided by construction. **Fail-closed (invariant #4):** a frame that will not authenticate is dropped (never a plaintext guess); any missing input / non-member group / DS or decrypt failure / control frame / budget expiry degrades to the generic "New message" banner. Two Phase-3 findings **RESOLVED**: **Finding 1** — an anti-censorship-**armed** user's NSE never makes a direct un-tunneled DS connection (the NSE deliberately cannot carry the transport stack, so when armed it short-circuits straight to the generic banner rather than leaking a direct connection); no open residual gap. **Finding 2** — the read-only fetch start is floored at the app's persisted per-group cursor. Invariants #2 (the NSE does only an opaque read-only DS fetch + local decrypt; the server learns nothing new — it already routed the wake to the group pseudonym), #3 (no `lakko-mls` change — the slim crate re-exports the audited `process_incoming_verifying_roles` / `parse_body_envelope` path, it does not fork it), #4 (fail-closed to the generic banner), #7 (seed read-scope widening, letter preserved). `lakko-security` APPROVE-WITH-NOTES on Phase 1 (App Group / seed-sharing migration; the LOW-1 atomic-copy-with-read-fallback fixed, `7b18cec`) + Phase 3 (NSE decrypt) + the web sibling. |
+
+### C-60 — Opaque per-group push routing id, unlinkable to the DS `group_id` (ADR-0042)
+
+| ID   | Title |
+|---|---|
+| C-60 | Push subscribe / notify / the delivered payload route under an **opaque, member-secret-derived `push_gid`** that is **unlinkable to the DS `group_id`** ([ADR-0042](../adr/0042-push-opaque-group-routing-id.md)). **The claim is narrow and exact — this is NOT "the social graph is no longer materialised on the server"**: push-gw still stores device-to-routing-id rows and APNs/FCM still receive a **stable per-group pseudonym in cleartext**; what is removed is the ability to join that pseudonym to the group's DS identity (residual clustering tracked as **G-36**). **(1) Algebraic independence.** `push_gid = keyed-BLAKE3(push_routing_secret, "lakko/push/group-routing-id/v1")` (`crates/lakko-contacts/src/push_routing.rs` `derive_push_gid`, golden-pinned) over **32 CSPRNG bytes** never derived from the `group_id`, so `push_gid` carries no algebraic relation to it and a push-gw-vs-DS cross-correlation is **impossible without the secret**, which no server holds; the 32-byte width drops into push-gw's existing `BINARY(32)` / hex key-space unchanged. **(2) In-group-only distribution.** The secret rides an **MLS application message** as a fixed 62-byte domain-separated envelope (`domain || version || secret(32)`), so the DS and push-gw see only ciphertext (invariant #2); the codec is bounded + fail-closed (exact-length + domain-match + version gate), byte-distinct from every sibling envelope kind, and fuzzed (`push_routing_secret_decode`). **(3) No raw-`group_id` path (invariant #4).** A member without the secret **defers** — it does not subscribe at all rather than falling back to the leaky DS key; there is no downgrade path. Accepted cost: a legacy / no-role-table group has no owner, so nobody mints and every member defers, meaning such groups get **no push at all** (G-36). **(4) Authority-gated receive path.** A pure, host-testable decision function on each of the three clients takes the MLS **sender leaf** (the ADR-0023 author-only-gate pattern), resolves it via the live group's `members()`, and ranks it against the ADR-0022 role table **owner > admin > member**: an *identical* secret is accepted from anyone (rotates nothing, keeps the post-add redistribute idempotent); the **owner** may always rotate, its branch evaluated **before** anything is read about what is stored (so owner priority is independent of envelope arrival order); an **admin** may **seed** a *provably*-absent secret but never overwrite a stored one; a plain member, an **unreadable role table**, and an **unresolvable sender** are all refused fail-closed. "No role table" and "read failed" are kept **distinct** rather than one nullable, and a store-read failure is never allowed to read as a fillable hole on the admin branch. Without this gate any single non-owner could unilaterally rotate the group's routing id (`lakko-security` MEDIUM-1, fixed `21554f2`, refined `62f23ad`). **(5) Server untouched.** `services/push-gw` is **byte-identical** across the arc (`git diff 51fe05d..HEAD -- services/` is empty) — it never interpreted the value's meaning, only its width; the ADR-0041 / C-59 background decrypt gained a `push_gid -> (account, group_id)` reverse-map through a plaintext **local** index while the DS fetch keeps the real `group_id`, leaving the read-only-throwaway discipline unchanged. Invariants #2 (server opaque), #4 (defer, never downgrade; receive gate fail-closed), #5 (**improved but not fully satisfied** — no DS-linkable social graph, but a stable opaque co-membership cluster remains, G-36). `lakko-security` **APPROVE-WITH-NOTES**, no CRITICAL/HIGH. |
 
 ## Transport-layer invariants (T-1..T-11)
 

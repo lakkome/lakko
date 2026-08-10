@@ -2938,3 +2938,96 @@ crash-injection / power-loss e2e on a deployed multi-device environment (a runti
 gate, like G-26) — the reorder + torn-write + sweep are proven by the per-platform
 unit suites. Option B (defer the eager merge in the MLS core until publish is
 confirmed) stays deferred as a future refinement.
+
+### G-36: Push routing under an opaque `push_gid` — the co-membership cluster, the stable provider pseudonym, and three delivery-side residuals ([ADR-0042](../adr/0042-push-opaque-group-routing-id.md), 2026-08)
+
+[ADR-0042](../adr/0042-push-opaque-group-routing-id.md) landed end-to-end (core +
+FFI + web + iOS + Android; `lakko-security` **APPROVE-WITH-NOTES**, no
+CRITICAL/HIGH) and is recorded as **C-60**. This entry is the honest inventory of
+what it did **not** close. Like G-33 / G-34 / G-35 this is a **free-form audit
+record** — it adds **no** indexed C / I / T invariant of its own (C-60 is ADR-0042's
+positive property; the counts move to **8 I + 60 C + 15 T** because of C-60, not
+because of this gap).
+
+**What ADR-0042 actually bought, stated precisely.** Push subscribe / notify / the
+delivered payload now route under `push_gid = keyed-BLAKE3(push_routing_secret,
+"lakko/push/group-routing-id/v1")` over 32 CSPRNG bytes that never leave the E2EE
+group, so the routing id is **algebraically independent of the DS `group_id`** and a
+push-gw↔DS cross-correlation is impossible without the secret. That removes the
+**linkage to the DS group identity**. It does **not** remove the **clustering**.
+
+#### Residual 1 — the co-membership cluster is still materialised (the main one)
+
+`services/push-gw` still stores device↔routing-id rows
+(`push_group_subscriptions`), and APNs / FCM still receive a **stable per-group
+pseudonym in cleartext** (the wake payload `g` plus the APNs `thread-id`, both
+`hex::encode` of the routing id — `providers/apns.rs:368`/`:371`,
+`providers/fcm.rs:369`). Because `push_gid` **never rotates**, a provider (or
+push-gw itself) can still observe "these N device tokens share one opaque group
+handle" and track that cluster **and its churn** for the group's entire lifetime —
+it simply can no longer join that handle to the DS journal key. The set-membership
+and its evolution over time remain visible; only the group's *name* is now opaque.
+WebPush is unaffected either way (the whole `WakeBody` is RFC-8291
+`aes128gcm`-encrypted before it leaves push-gw, `providers/webpush.rs:252-256`).
+Closing this needs a rotating or per-device-blinded routing id (the ADR's rejected
+Option A direction) plus payload minimisation, not a renaming.
+
+#### Residual 2 — no rotation on membership change, compounded by dead unsubscribe
+
+V1 deliberately does not re-mint the secret when a member is removed, so **a removed
+member keeps a valid `push_gid`** and can keep deriving the group's current routing
+id. This is compounded by a second, independent finding: **per-group unsubscribe is
+never called anywhere.** `unsubscribeGroup` exists on all three clients
+(`apps/web/src/push/client.ts:204`, `apps/ios/Lakko/Push/PushClient.swift:165`,
+`apps/android/.../push/PushClient.kt:197`) and the `POST /push/group/unsubscribe`
+endpoint is live (`services/push-gw/src/main.rs:250`), but **no call site exists** —
+it is dead code on every client. So an ex-member's push-gw subscription is never
+torn down and **keeps receiving wakes** for a group it has left. The two compound:
+rotation alone would not help while the stale subscription persists, and unsubscribe
+alone would not help while the ex-member still derives the id.
+
+#### Residual 3 — admin-seed denial of service
+
+The `62f23ad` refinement widened the receive gate from owner-only to **owner +
+admins** to fix a real delivery regression (ADR-0022 lets an admin add members, and
+a member added by a non-owner admin would otherwise never receive the secret). An
+admin may **seed** a secret into a hole but never **overwrite** a stored one. The
+residual: **a malicious admin can seed a bogus secret to a member who holds none**,
+denying that member's push wakes until the owner next rotates. Bounded — foreground
+polling still delivers messages, so this is a wake-latency denial rather than a
+message-loss one, and an admin can already remove the member outright, so it grants
+no capability an admin lacks. Accepted, not closed.
+
+#### Residual 4 — legacy / no-role-table groups get no push at all
+
+The send side mints only when the local member is the ADR-0022 **owner**. A legacy
+or open group has **no role table**, hence no owner, so **nobody mints** (the
+in-code rationale is explicit: "nobody mints (avoids divergence)",
+`apps/web/src/push/group-routing.ts`). Every member therefore **defers** — a member
+without the secret does not subscribe at all rather than falling back to the leaky
+raw `group_id`. The privacy posture is the preferred one (invariant #4 — no silent
+downgrade), but the functional consequence is real and silent: **pre-ADR-0022 groups
+receive no push wakes whatsoever**, with no user-visible signal. A provisioning path
+for legacy groups (or an explicit UI state) is unbuilt.
+
+#### Two loose ends found during the arc
+
+- **Nothing reads the web `?wake=` deep-link parameter.** The service worker builds
+  `/?wake=<hex>` on notification tap (`apps/web/public/sw.js:660`) and its comment
+  says the SPA routes "via its own deep-link reader (set in 1.18g)" — but **no
+  reader exists**: `wake=` appears nowhere in `apps/web/src` outside a test fixture.
+  A web notification tap has therefore **never** opened the target chat; it lands on
+  the app shell. The SW comment is stale. (ADR-0042 correctly threads the reverse-
+  resolved real `group_id` hex into `tapGroupHex`, so the fix is a missing SPA
+  reader, not a routing-id problem. The Android tap deep-link **does** work —
+  `7da84ee` wired its reverse-resolve.)
+- **`unsubscribeGroup` is dead code on all three clients** — see Residual 2.
+
+**Status: OPEN (accepted residuals).** Residual 1 is the substantive privacy limit
+and is inherent to a stable routing id; residuals 2-4 and both loose ends are
+delivery-side / functional and independently fixable. Invariants: #2 holds (push-gw
+handles the same opaque `BINARY(32)` it always did; the secret rides an E2EE MLS
+application message), #4 holds (defer rather than downgrade; the receive gate
+rejects on an unreadable role table or an unresolvable sender), #5 is **improved but
+not fully satisfied** — the server no longer materialises a *DS-linkable* social
+graph, but it does still materialise an opaque co-membership cluster.

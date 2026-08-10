@@ -3026,6 +3026,105 @@ fail-closed branch, cursor math, never-persists guard) +
 APNs -> NSE -> decrypted-notification round-trip on a provisioned
 device is deploy-gated.
 
+### C-60: Push routes under an opaque, member-secret-derived id that is unlinkable to the DS `group_id`
+
+[ADR-0042](../adr/0042-push-opaque-group-routing-id.md) changes **what 32-byte
+value** the push subsystem routes on. Before it, the push subscription key, the
+notify JOIN key, and the delivered payload `g` were all **identical to the
+Delivery Service journal key** (`group_id`), so push-gw materialised
+"device X belongs to group G" internally and Apple / Google received that same
+DS-linkable identifier **in cleartext**. This entry pins the property that
+replaced it.
+
+The `C-` class is the audit pack's catch-all for server-visible +
+opacity-preserving properties (C-56..C-58 are KT-log + backup, C-59 is the iOS
+NSE decrypt boundary); C-60 continues that convention.
+
+**Scope — read this first.** The claim is **narrow and exact**: push now routes
+under an **opaque, member-secret-derived id that is unlinkable to the DS
+`group_id`**. The claim is **NOT** "the social graph is no longer materialised on
+the server". push-gw still stores device-to-routing-id rows and the providers
+still receive a **stable per-group pseudonym** in cleartext; what is gone is the
+ability to join that pseudonym to the group's DS identity. The residual clustering
+is tracked as **G-36**.
+
+Five sub-invariants:
+
+1. **The routing id is algebraically independent of the `group_id`.**
+   `push_gid = keyed-BLAKE3(push_routing_secret,
+   "lakko/push/group-routing-id/v1")` (`crates/lakko-contacts/src/push_routing.rs`
+   `derive_push_gid`), where `push_routing_secret` is **32 CSPRNG bytes** minted
+   once per group and never derived from the `group_id`. The derivation is
+   one-way, domain-separated, and golden-pinned (`derive_push_gid_golden`), so
+   every platform computes the same id. Because the secret is independent random
+   input, `push_gid` carries **no algebraic relation** to `group_id`: a
+   push-gw-vs-DS cross-correlation is **impossible without the secret**, which
+   neither server holds. The output is 32 bytes, so it drops into push-gw's
+   existing `BINARY(32)` / hex key-space unchanged.
+
+2. **The secret is distributed only inside the E2EE group.** It rides an **MLS
+   application message** on the group journal as a fixed 62-byte
+   domain-separated envelope
+   (`PUSH_ROUTING_SECRET_ENVELOPE_DOMAIN_V1 || version || secret(32)`), so the DS
+   and push-gw see only **ciphertext** (invariant #2) and the separator's trailing
+   `0x00` keeps it byte-distinct from every sibling envelope kind
+   (`separator_distinct_from_sibling_domains`, plus a no-cross-dispatch test).
+   The codec is bounded and fail-closed — exact-length + domain-match + version
+   gate, `WrongDomain` / `BadLength` / `UnknownVersion` — and is fuzzed
+   (`push_routing_secret_decode`, the same threat class as `media_state_decode`,
+   since the receive-loop dispatch reaches it on attacker-touchable journal bytes
+   before any state is consulted).
+
+3. **No client ever subscribes or notifies under the raw `group_id` (invariant
+   #4).** A member that does not hold the secret **defers**: it does not subscribe
+   at all, rather than falling back to the leaky DS key
+   (`subscribeGroupUnderPushGid` returns `"deferred"`). There is no downgrade
+   path. The functional cost is explicit and accepted — a legacy / no-role-table
+   group has no owner, so nobody mints and every member defers, meaning such
+   groups receive **no push at all** (G-36).
+
+4. **The receive path is authority-gated fail-closed.** The gate is a **pure,
+   host-testable decision function** on each of the three clients, fed by the MLS
+   **sender leaf** (surfaced the same way the ADR-0023 author-only gate does) and
+   resolved to a signature public key via the live group's `members()`, then
+   compared against the ADR-0022 role table. Ranking is **owner > admin >
+   member**, expressed as who may overwrite what: an **identical** secret is
+   accepted from anyone (it rotates nothing, keeping the post-add redistribute
+   idempotent); the **owner** may always rotate, and its branch is evaluated
+   **before** anything is read about what is stored, which is what makes owner
+   priority independent of envelope arrival order; an **admin** may **seed** a
+   provably-absent secret (closing the real regression where a member added by a
+   non-owner admin would never receive one) but may **never overwrite** a stored
+   one; a **plain member** is refused; an **unreadable role table** or an
+   **unresolvable sender** is refused. "No role table" and "read failed" are kept
+   as **distinct** states rather than one nullable — collapsing them is exactly
+   the bug class this gate exists to prevent — and a store-read failure is never
+   allowed to read as a fillable hole on the admin branch (web + iOS require the
+   absence to be *provable*; Android strips the admin set when the store cannot be
+   read). Without this gate any single non-owner could unilaterally rotate the
+   group's routing id (the `lakko-security` MEDIUM-1 finding, fixed in `21554f2`
+   and refined in `62f23ad`).
+
+5. **The server is untouched and stays opaque (invariant #2).** `services/push-gw`
+   is **byte-identical** across the whole arc (`git diff 51fe05d..HEAD --
+   services/` is empty): it never parsed or interpreted the value's meaning, only
+   its 32-byte width, so only the value's *meaning* shifted from "DS journal key"
+   to "opaque routing id". The ADR-0041 background decrypt (C-59) gained a
+   `push_gid -> (account, group_id)` reverse-map through a **plaintext local**
+   index the background process reads; the DS fetch keeps using the **real**
+   `group_id`, and the read-only-throwaway discipline of C-59 is unchanged.
+
+**Residual (G-36).** Because `push_gid` never rotates, push-gw and the push
+providers can still observe a **stable co-membership cluster** — "these N device
+tokens share one opaque group handle" — and track its churn for the group's
+lifetime; only the linkage to the DS group identity is removed. A removed member
+also keeps a valid `push_gid` (no rotation on membership change), compounded by
+per-group unsubscribe being dead code on all three clients, so an ex-member's
+subscription keeps receiving wakes. A malicious admin can seed a bogus secret to a
+member holding none, denying that member's wakes until the owner next rotates
+(bounded — foreground polling still delivers). `lakko-security`
+**APPROVE-WITH-NOTES**, no CRITICAL/HIGH.
+
 ## Exporter labels (call-side)
 
 | Label | Length | Context | Source | Used for |

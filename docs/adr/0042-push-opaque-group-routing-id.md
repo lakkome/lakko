@@ -5,8 +5,10 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0042: Opaque per-group push routing id — close the push social-graph leak
 
-- **Status:** Proposed
-- **Date:** 2026-08-06
+- **Status:** Accepted
+- **Date:** 2026-08-06 (proposed) / 2026-08-10 (accepted — implemented end-to-end
+  on the core + FFI + web + iOS + Android; `lakko-security`
+  **APPROVE-WITH-NOTES**, no CRITICAL/HIGH)
 - **Context:** Phase 3 — the push subsystem (push-gw fan-out + the ADR-0041
   silent-push decrypt). Closes the invariant-#5 push social-graph leak: the push
   subsystem routes by a group identifier that **is** the DS journal key, which
@@ -246,30 +248,36 @@ enhancement** (§ Open questions).
 
 ## Consequences
 
-- **Positive.** Closes the invariant-#5 push social-graph leak on **both** fronts
-  — the push-gw-internal subscription/notify materialisation **and** the external
+- **Positive (delivered).** Push now routes under an opaque, member-secret-derived
+  id that is **unlinkable to the DS `group_id`** — on both fronts, the
+  push-gw-internal subscription/notify materialisation **and** the external
   APNs/FCM cleartext `g`/`thread-id` correlation — with **zero push-gw code or
-  schema change** (the server stays opaque, invariant #2). The routing id is
-  stable, so the reverse-map is a fixed per-group entry, subscribers survive
-  membership commits without re-subscribing, and iOS lock-screen grouping stays
-  intact. The distribution envelope reuses the audited, fuzzed `media_state`
-  fail-closed-codec pattern.
+  schema change** (verified: `git diff 51fe05d..HEAD -- services/` is empty; the
+  server stays opaque, invariant #2). The routing id is stable, so the reverse-map
+  is a fixed per-group entry, subscribers survive membership commits without
+  re-subscribing, and iOS lock-screen grouping stays intact. The distribution
+  envelope reuses the audited, fuzzed `media_state` fail-closed-codec pattern.
+  **Scope, stated precisely:** this removes the *linkage to the DS group identity*,
+  **not** the clustering — push-gw still stores device↔routing-id rows and the
+  providers still receive a stable per-group pseudonym in cleartext (see G-36).
 
-- **Negative / new risks.** A **wire-format change** (a new in-group envelope
-  kind + a flip of the payload `g`'s semantics). A **new piece of E2EE key
-  material per group** (`push_routing_secret`) that must be minted, persisted,
-  distributed to joiners, and reverse-indexed on three platforms — new client
-  state and a new failure mode (a member who never received the envelope subscribes
-  under the wrong/absent id and misses wakes until it catches up). **Legacy groups**
-  created before this change have no secret and must be provisioned or fall back to
-  the leaky `g` until then (§ Open questions). The V1 no-rotation-on-removal choice
-  means a removed member keeps a valid `push_gid` (bounded by the accepted DS-side
-  baseline, but a real residual — see G-36).
+- **Negative / new risks (realised).** A **wire-format change** (a new in-group
+  envelope kind + a flip of the payload `g`'s semantics). A **new piece of E2EE key
+  material per group** (`push_routing_secret`) minted, persisted, distributed to
+  joiners, and reverse-indexed on three platforms — new client state and a new
+  failure mode (a member who has not yet received the envelope **defers**: it does
+  not subscribe at all until it holds the secret, rather than falling back to the
+  leaky `g`). **Legacy / no-role-table groups** get **no push at all** — nobody
+  mints (the send-side gate requires the ADR-0022 owner, and an open group has no
+  owner) and every member therefore defers: the privacy-preferring outcome, but a
+  silent functional regression for pre-ADR-0022 groups (G-36). The V1
+  no-rotation-on-removal choice means a removed member keeps a valid `push_gid`,
+  compounded by per-group unsubscribe never being called (G-36).
 
-- **Neutral.** Client-only; push-gw is verified-unchanged (its tests should be
-  byte-identical). The ADR-0041 decrypt path gains a reverse-map step but its
-  read-only-throwaway discipline is untouched. The DS-side "device fetches group G"
-  correlation (`0002_...sql:20-24`) remains the accepted out-of-scope baseline.
+- **Neutral (confirmed).** Client-only; push-gw is verified-unchanged. The ADR-0041
+  decrypt path gained a reverse-map step but its read-only-throwaway discipline
+  (C-59) is untouched. The DS-side "device fetches group G" correlation
+  (`0002_...sql:20-24`) remains the accepted out-of-scope baseline.
 
 ### Invariants touched
 
@@ -291,36 +299,112 @@ enhancement** (§ Open questions).
   fail-closed (a malformed envelope is ignored, never mis-parsed); a client without
   the secret does not fall back to leaking the DS key as `g` — it simply does not
   subscribe under a valid id until it receives the secret (a delivery-availability
-  cost, not a confidentiality downgrade).
-- **Invariant-index touchpoint — a new C-entry on landing** (next after C-59, i.e.
-  **C-60**): the opaque per-group push routing id + the in-band secret distribution
-  + the fail-closed codec + the reverse-map. **Not added now** (Proposed); it lands
-  with implementation. **Mints gap G-36** (the residual: the DS-side device↔group
-  correlation baseline + the V1 no-rotation-on-removal window) — recorded here,
-  **not** added to `docs/security/known-gaps.md` yet.
+  cost, not a confidentiality downgrade). The **receive path** is authority-gated
+  fail-closed as well (see § Outcome): an unreadable role table or an unresolvable
+  sender rejects rather than accepts.
+- **Invariant-index touchpoint — LANDED as C-60**
+  (`docs/security/invariant-index.md` + the source section in
+  `docs/security/calls.md`): push routing under an opaque, member-secret-derived id
+  unlinkable to the DS `group_id` + the in-band secret distribution + the
+  fail-closed codec + the authority-gated receive path + the reverse-map. **Minted
+  gap G-36** in `docs/security/known-gaps.md` (the four residuals: the still-
+  materialised co-membership cluster + stable provider pseudonym, no rotation on
+  membership change, the admin-seed DoS, and the legacy/no-role-table no-push
+  regression).
 
-**`lakko-security` gate.** This is a privacy-invariant change (invariant #5) that
-introduces new E2EE key material and a new wire envelope, so it **must go through
-`lakko-security` before merge** (Sprint 6).
+**`lakko-security` gate — DONE.** Reviewed as a privacy-invariant change
+(invariant #5) introducing new E2EE key material and a new wire envelope.
+Verdict: **APPROVE-WITH-NOTES**, no CRITICAL/HIGH. Two MEDIUM findings were fixed
+(§ Outcome); four residuals are recorded as **G-36**.
 
-## Open questions
+## Open questions — resolved
 
-- **Legacy-group provisioning + concurrent-mint avoidance.** How groups created
-  before this change acquire a secret without two members concurrently minting
-  divergent secrets. Candidate: only the ADR-0022 **owner** mints for a legacy
-  group (single authoritative minter), or legacy groups keep the leaky `g` until a
-  natural re-creation. Needs a decision in Sprint 1/3.
-- **Rotation-on-removal (forward unlinkability).** V1 deliberately does not rotate
-  the secret when a member is removed. A future enhancement would re-mint +
-  re-distribute on removal so a removed member's cached `push_gid` goes stale — the
-  forward-unlinkability bonus Option A gets for free. Deferred; tracked under G-36.
-- **Exact crate placement of the envelope + derivation.** Recommended beside
-  `media_state.rs` in `lakko-contacts` (pattern + dispatch reuse); a dedicated tiny
-  crate is the alternative. Minor.
-- **Reverse-map staleness for in-flight wakes.** With a stable id this is a
-  non-issue in steady state, but the legacy-transition window (a group mid-
-  provisioning) needs the NSE/SW to fall back gracefully (no valid reverse-map
-  entry → generic banner, per the ADR-0041 fail-closed posture).
+- **Legacy-group provisioning + concurrent-mint avoidance — RESOLVED.** Only the
+  ADR-0022 **owner** mints (the single authoritative minter), and a per-group
+  in-flight lock coalesces concurrent attempts so the random secret is minted
+  exactly once. A **legacy / open group has no role table, hence no owner, so
+  nobody mints** and every member defers — such groups get **no push at all**
+  rather than keeping the leaky `g`. That is the privacy-preferring resolution, and
+  it is a real functional regression for pre-ADR-0022 groups; recorded in G-36.
+- **Rotation-on-removal (forward unlinkability) — DEFERRED, unchanged.** V1 does
+  not rotate on removal, so a removed member keeps a valid `push_gid`. Compounded
+  in practice because per-group unsubscribe is never called on any client, so an
+  ex-member's push-gw subscription keeps receiving wakes. Tracked under G-36.
+- **Exact crate placement — RESOLVED.** `crates/lakko-contacts/src/push_routing.rs`,
+  beside `media_state.rs`, reusing the `incoming_envelope` dispatch seam
+  (`IncomingEnvelope::PushRoutingSecret { secret }`). No `crates/lakko-mls` edit —
+  invariant #3 untouched.
+- **Reverse-map staleness for in-flight wakes — RESOLVED as designed.** With a
+  stable id this is a non-issue in steady state; a wake with no reverse-map entry
+  degrades to the generic banner, per the ADR-0041 fail-closed posture.
+
+## Outcome — what landed
+
+Implemented across seven sprints; every claim below is grounded in the commits
+named.
+
+| Sprint | Outcome | Commit |
+|---|---|---|
+| 1 | **Core + FFI.** `crates/lakko-contacts/src/push_routing.rs` — `derive_push_gid` (keyed-BLAKE3, golden-pinned), the fixed **62-byte** envelope (`compose_push_routing_secret` / `try_unwrap_push_routing_secret` / `decode_push_routing_secret`, exact-length + domain + version gates), the `IncomingEnvelope::PushRoutingSecret` dispatch variant, the `push_routing_secret_decode` fuzz target, and the uniffi + wasm surface (`derivePushGid` / `composePushRoutingSecret` / `decodePushRoutingSecret`) | `0d349f6` |
+| 2 | **FFI** — landed together with Sprint 1 | `0d349f6` |
+| 3 | **Clients.** Mint (owner) + persist + redistribute + subscribe/notify under `push_gid` + the reverse index — web reference, then the iOS + Android mirrors | `024b3c9` (web), `ea2c513` (iOS + Android) |
+| 4 | **ADR-0041 decrypt reverse-map.** `resolveAccount` on all three clients reverse-maps `push_gid → (account, group_id)`; the DS fetch keeps the real `group_id`. The Android notification **tap** deep-link reverse-resolves too | `981bc91`, `7da84ee` |
+| 5 | **push-gw — no change, verified.** `git diff 51fe05d..HEAD -- services/` is **empty**: the code, schema, and tests are byte-identical. push-gw keeps treating the value as an opaque `BINARY(32)` | (verified, no commit) |
+| 6 | **`lakko-security` review** — **APPROVE-WITH-NOTES**, no CRITICAL/HIGH. Two MEDIUM findings fixed (below); four residuals recorded as G-36 | `21554f2`, `62f23ad` |
+| 7 | **Docs reconcile** — this status flip + **G-36** + **C-60** + the `CLAUDE.md` ADR table / module map / fuzz list | (this change) |
+
+### Security findings fixed
+
+- **MEDIUM-1 — the receive path was unauthenticated.** The owner gate existed only
+  on the **send** side, so the receive path accepted a `push_routing_secret` from
+  **any** group member: a single non-owner could unilaterally rotate the group's
+  routing id, every member would overwrite and re-subscribe, and (because per-group
+  unsubscribe is never called) each churn stranded an orphan push-gw subscription
+  that keeps receiving wakes. It also defeated the "mint once, no divergence"
+  property this ADR relies on. **Fixed** (`21554f2`) by threading the MLS sender
+  leaf onto the event (the ADR-0023 author-only-gate pattern), resolving it to a
+  signature public key via the live group's `members()`, and comparing against the
+  ADR-0022 role table — as a pure, host-testable decision function on each platform.
+- **MEDIUM-3 — literal NUL bytes in four source files.** The composite storage-key
+  separator was written as a raw `0x00`, so git classified those files as binary
+  (no diff, no blame) and `grep -r` skipped them silently — which broke two review
+  passes. **Fixed** (`21554f2`) by replacing each raw byte with a source-level
+  escape (`\0` in Swift / Kotlin, `\u0000` in TypeScript): byte-identical at
+  runtime, so existing stored rows stay readable, and the files are text again.
+  Android pins it with a test asserting the escape is exactly one `0x00` byte.
+
+### The admin-may-seed refinement
+
+The owner-only receive gate introduced a **delivery regression**: ADR-0022 permits
+owner **or admin** to add members, and redistribute fires after any add-member
+commit — so a member added by a non-owner admin held no secret, the admin's
+redistribute was rejected, and that member never got push routing (the owner only
+broadcasts at mint time). **Fixed** (`62f23ad`) by widening the accepted senders to
+the role table's **owner + admins**, with owner precedence expressed as *who may
+overwrite what* (no authority level is persisted):
+
+| Stored vs incoming | Sender | Verdict |
+|---|---|---|
+| identical to stored | anyone | **accept** (rotates nothing; needs no authority) |
+| any/no stored | **owner** | **accept** (may always rotate) |
+| no stored (**provably**) | **admin** | **accept** (may fill a hole — closes the regression) |
+| stored **and** changed | admin | **reject** (may seed, never overwrite) |
+| changed | plain member | **reject** |
+| changed | anyone, **no role table** | **accept** (legacy / open group — unchanged) |
+| changed | anyone, **roles unreadable** | **reject** (fail-closed) |
+
+The owner branch is evaluated **before** the admin branch and never consults what is
+stored, which is what makes owner priority independent of envelope arrival order.
+All three clients independently hit the same second-order trap the widening creates
+— a store-read failure yields "no stored secret", which for an admin would read as a
+fillable hole, turning a *degraded* read into a *permissive* one and inverting the
+degrade-to-strict rule. Each fixes it fail-closed: web + iOS require the absence to
+be **provable** (a distinct `storedUnreadable` flag; iOS derives it from the key-free
+`hasSecret()` because its `getSecret` returns nil for three different reasons), and
+Android strips the admin set when the store cannot be read. The owner path is
+deliberately exempt on all three — an owner write is the repair path for that state.
+The residual this leaves (a malicious admin seeding a bogus secret to a member who
+holds none) is recorded in **G-36**.
 
 ## Sprint decomposition
 
