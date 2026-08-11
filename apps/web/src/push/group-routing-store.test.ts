@@ -4,13 +4,17 @@
 /**
  * ADR-0042 — `push/group-routing-store` round-trip.
  *
- * Pins the two things the store owns:
+ * Pins the three things the store owns:
  *   1. the device-key-encrypted `push_routing_secret` round-trips
  *      (put → get returns the exact 32 bytes), and `hasGroupRoutingSecret`
  *      reflects presence without the device key;
  *   2. the plaintext `push_gid → (account, group_id)` REVERSE INDEX
  *      resolves via `lookupPushRoute` — the map the Sprint-4 silent-push
- *      decrypt reverse-resolves — and `clearAllGroupRouting` wipes both.
+ *      decrypt reverse-resolves — and `clearAllGroupRouting` wipes both;
+ *   3. the durable `distributed` flag: `getGroupRoutingState` separates
+ *      `absent` / `pending` / `distributed`, `markGroupRoutingDistributed`
+ *      flips a pending row, and a LEGACY row carrying no flag reads as
+ *      `distributed` (so an upgrade does not re-broadcast for every group).
  *
  * A small in-memory IndexedDB shim (multi-store + `getKey`) + the real
  * `crypto.subtle` (Node WebCrypto) exercise the actual store code path.
@@ -157,8 +161,10 @@ afterEach(() => {
 import {
   clearAllGroupRouting,
   getGroupRoutingSecret,
+  getGroupRoutingState,
   hasGroupRoutingSecret,
   lookupPushRoute,
+  markGroupRoutingDistributed,
   putGroupRouting,
 } from "./group-routing-store";
 
@@ -180,7 +186,13 @@ describe("group-routing-store — round-trip", () => {
     const secret = crypto.getRandomValues(new Uint8Array(32));
 
     await putGroupRouting(
-      { accountId: ACCT, groupIdB64: GROUP, secret, pushGidHex: PUSH_GID_HEX },
+      {
+        accountId: ACCT,
+        groupIdB64: GROUP,
+        secret,
+        pushGidHex: PUSH_GID_HEX,
+        distributed: true,
+      },
       deviceKey,
     );
 
@@ -203,6 +215,7 @@ describe("group-routing-store — round-trip", () => {
         groupIdB64: GROUP,
         secret: new Uint8Array(32).fill(9),
         pushGidHex: PUSH_GID_HEX,
+        distributed: true,
       },
       deviceKey,
     );
@@ -217,6 +230,7 @@ describe("group-routing-store — round-trip", () => {
         groupIdB64: GROUP,
         secret: new Uint8Array(32).fill(1),
         pushGidHex: PUSH_GID_HEX,
+        distributed: true,
       },
       deviceKey,
     );
@@ -239,6 +253,7 @@ describe("group-routing-store — round-trip", () => {
         groupIdB64: GROUP,
         secret: new Uint8Array(32).fill(2),
         pushGidHex: PUSH_GID_HEX,
+        distributed: true,
       },
       deviceKey,
     );
@@ -247,5 +262,81 @@ describe("group-routing-store — round-trip", () => {
 
     expect(await hasGroupRoutingSecret(ACCT, GROUP)).toBe(false);
     expect(await lookupPushRoute(PUSH_GID_HEX)).toBeNull();
+  });
+});
+
+describe("group-routing-store — the durable `distributed` flag", () => {
+  async function put(distributed: boolean): Promise<void> {
+    await putGroupRouting(
+      {
+        accountId: ACCT,
+        groupIdB64: GROUP,
+        secret: new Uint8Array(32).fill(3),
+        pushGidHex: PUSH_GID_HEX,
+        distributed,
+      },
+      await makeDeviceKey(),
+    );
+  }
+
+  /** Strip the field from the stored row — the on-disk shape a build that
+   *  predates the flag left behind. */
+  function stripDistributedField(): void {
+    const rows = DBS.get("lakko-push-routing")?.stores.get("secrets");
+    expect(rows).toBeDefined();
+    for (const row of (rows as Map<string, Row>).values()) {
+      delete row.distributed;
+    }
+  }
+
+  it("reports `absent` for a group with no secret", async () => {
+    expect(await getGroupRoutingState(ACCT, GROUP)).toBe("absent");
+  });
+
+  it("reports `pending` for a secret persisted before its broadcast landed", async () => {
+    await put(false);
+    expect(await getGroupRoutingState(ACCT, GROUP)).toBe("pending");
+    // Presence alone cannot see the difference — that is the whole defect.
+    expect(await hasGroupRoutingSecret(ACCT, GROUP)).toBe(true);
+  });
+
+  it("markGroupRoutingDistributed flips pending -> distributed, keeping the secret intact", async () => {
+    const deviceKey = await makeDeviceKey();
+    const secret = crypto.getRandomValues(new Uint8Array(32));
+    await putGroupRouting(
+      {
+        accountId: ACCT,
+        groupIdB64: GROUP,
+        secret,
+        pushGidHex: PUSH_GID_HEX,
+        distributed: false,
+      },
+      deviceKey,
+    );
+
+    await markGroupRoutingDistributed(ACCT, GROUP);
+
+    expect(await getGroupRoutingState(ACCT, GROUP)).toBe("distributed");
+    // The read-modify-write must not disturb the ciphertext.
+    const got = await getGroupRoutingSecret(ACCT, GROUP, deviceKey);
+    expect(Array.from(got as Uint8Array)).toEqual(Array.from(secret));
+    // Idempotent.
+    await markGroupRoutingDistributed(ACCT, GROUP);
+    expect(await getGroupRoutingState(ACCT, GROUP)).toBe("distributed");
+  });
+
+  it("markGroupRoutingDistributed on an absent row is a no-op (never resurrects a wiped secret)", async () => {
+    await markGroupRoutingDistributed(ACCT, GROUP);
+    expect(await getGroupRoutingState(ACCT, GROUP)).toBe("absent");
+    expect(await hasGroupRoutingSecret(ACCT, GROUP)).toBe(false);
+  });
+
+  it("a LEGACY row with no `distributed` field reads as distributed", async () => {
+    await put(true);
+    stripDistributedField();
+    // Those groups were provisioned by the old code and work today; reading
+    // the missing field as `pending` would re-broadcast for every one of
+    // them on the first launch after an upgrade.
+    expect(await getGroupRoutingState(ACCT, GROUP)).toBe("distributed");
   });
 });

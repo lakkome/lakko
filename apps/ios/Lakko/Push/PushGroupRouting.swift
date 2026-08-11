@@ -52,6 +52,21 @@ import Security
 /// power owner-only.
 /// See ``classifyIncomingSecret(incoming:stored:senderKey:authority:)``.
 ///
+/// ## A mint is not done until the group has been told
+///
+/// The owner persists before it broadcasts (minting twice would diverge the
+/// group's routing id — far worse than sending one envelope twice), so a
+/// broadcast that fails leaves a durably stored secret nobody else knows.
+/// The store therefore carries a durable **`distributed`** flag beside each
+/// secret, and the owner branch of
+/// ``ensureProvisioned(accountIdB64:groupIdHex:group:identity:broadcast:)``
+/// re-broadcasts whenever it is still `false`. Unlike the ADR-0040
+/// commit-outbox this needs no stored bytes: the distribution envelope is
+/// recomputable from the secret at any time
+/// (``composeSecretEnvelope(secret:)``), so recording *whether* it landed is
+/// the entire durable state. Re-broadcasting is idempotent for every member
+/// because the receive gate accepts a byte-identical secret from anyone.
+///
 /// ## Never subscribe under the leaky `group_id`
 ///
 /// The whole point of the ADR is that push-gw + APNs/FCM must not see the
@@ -164,22 +179,30 @@ public final class PushGroupRouting {
 
     // MARK: - Persist + resolve
 
-    /// Persist a group's secret (device-key-encrypted) AND its
-    /// `push_gid → (account, group_id)` reverse-index entry. Idempotent.
-    /// Returns the derived `push_gid` bytes, or `nil` when the derivation
-    /// fails (should not happen for a 32-byte secret).
+    /// Persist a group's secret + its `distributed` flag
+    /// (device-key-encrypted) AND its `push_gid → (account, group_id)`
+    /// reverse-index entry. Idempotent. Returns the derived `push_gid`
+    /// bytes, or `nil` when the derivation fails (should not happen for a
+    /// 32-byte secret).
+    ///
+    /// - Parameter distributed: whether the group has already been told this
+    ///   secret. The owner-mint path persists `false` FIRST and flips it
+    ///   only once the broadcast lands; the receive path persists `true`
+    ///   (the envelope's arrival IS the proof it travelled).
     @discardableResult
     public func persistSecret(
         accountIdB64: String,
         groupIdHex: String,
-        secret: Data
+        secret: Data,
+        distributed: Bool
     ) -> Data? {
         guard let pushGid = Self.derivePushGid(secret: secret) else { return nil }
         store.putRouting(
             accountIdB64: accountIdB64,
             groupIdHex: groupIdHex,
             secret: secret,
-            pushGidHex: Self.hex(pushGid)
+            pushGidHex: Self.hex(pushGid),
+            distributed: distributed
         )
         return pushGid
     }
@@ -289,8 +312,13 @@ public final class PushGroupRouting {
             )
             return
         }
+        // `distributed: true` — this secret ARRIVED over the group journal,
+        // so its distribution envelope is provably on the wire. A receiver
+        // never re-broadcasts (only the owner does), and marking it settled
+        // keeps a member from ever entering the owner's re-broadcast branch.
         guard persistSecret(
-            accountIdB64: accountIdB64, groupIdHex: groupIdHex, secret: secret) != nil else {
+            accountIdB64: accountIdB64, groupIdHex: groupIdHex, secret: secret,
+            distributed: true) != nil else {
             return
         }
         await subscribeUnderPushGidBestEffort(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
@@ -480,10 +508,42 @@ public final class PushGroupRouting {
             accountIdB64: accountIdB64, groupIdHex: groupIdHex) else {
             return
         }
+        // A successful redistribute is a successful distribution — it settles
+        // the flag exactly like the mint-time broadcast, so an owner whose
+        // original broadcast failed stops re-broadcasting once ANY of them
+        // lands. On failure the flag is left alone: still-pending stays
+        // pending (``ensureProvisioned`` retries), already-settled stays
+        // settled.
+        await broadcastAndSettle(
+            secret: secret, accountIdB64: accountIdB64, groupIdHex: groupIdHex,
+            what: "redistribute", broadcast: broadcast)
+    }
+
+    /// Compose + broadcast a secret's distribution envelope and, ONLY on
+    /// success, durably record that the group has been told
+    /// (``PushRoutingStore/markDistributed(accountIdB64:groupIdHex:matching:)``).
+    ///
+    /// This is the whole recovery mechanism: the envelope is never stored
+    /// because it is recomputable from the secret, so a failed broadcast
+    /// needs to leave behind exactly one bit — "not yet on the wire" — and
+    /// ``ensureProvisioned(accountIdB64:groupIdHex:group:identity:broadcast:)``
+    /// picks it up on the next launch / chat-open.
+    private func broadcastAndSettle(
+        secret: Data,
+        accountIdB64: String,
+        groupIdHex: String,
+        what: String,
+        broadcast: (Data) async throws -> Void
+    ) async {
         do {
             try await broadcast(try Self.composeSecretEnvelope(secret: secret))
+            store.markDistributed(
+                accountIdB64: accountIdB64, groupIdHex: groupIdHex, matching: secret)
         } catch {
-            NSLog("push-routing secret redistribute failed: \(error)")
+            NSLog(
+                "push-routing secret \(what) failed (secret stays marked "
+                    + "undistributed; the owner re-broadcasts on the next "
+                    + "provision): \(error)")
         }
     }
 
@@ -491,19 +551,37 @@ public final class PushGroupRouting {
 
     /// Ensure a group's push routing is provisioned for this device.
     ///
-    ///   * If the local client is the OWNER (ADR-0022) and no secret is
-    ///     held yet: mint + persist + broadcast the distribution envelope
-    ///     (via `broadcast`, which posts an E2EE MLS application message to
-    ///     the group journal).
+    ///   * OWNER (ADR-0022), no secret held → **mint**: persist marked
+    ///     undistributed, broadcast the distribution envelope (via
+    ///     `broadcast`, which posts an E2EE MLS application message to the
+    ///     group journal), and mark distributed once it lands.
+    ///   * OWNER, secret held but **not** distributed → **re-broadcast**:
+    ///     recompose the envelope from the stored secret and try again,
+    ///     marking distributed on success.
     ///   * Then subscribe under `push_gid` if the secret is held (owner
     ///     just minted it; a member may already hold one from a prior
     ///     receive), else defer.
     ///
+    /// ## Why the re-broadcast branch exists
+    ///
+    /// A mint whose broadcast fails (offline, DS error) leaves the secret
+    /// durably stored, so a guard shaped `isOwner && !hasSecret` would
+    /// short-circuit on every later launch and never retry — the group's
+    /// other members never learn the secret and defer push **forever**
+    /// (only an unrelated add-member's
+    /// ``redistribute(accountIdB64:groupIdHex:broadcast:)`` would
+    /// accidentally repair it). The durable `distributed` flag is what makes
+    /// that failure recoverable: the envelope itself is never stored because
+    /// it is recomputable from the secret, so one bit is the entire state
+    /// needed. A re-broadcast is safe by construction — the ADR-0042 receive
+    /// gate accepts a byte-identical secret from any sender, so it is an
+    /// idempotent no-op re-persist for every member that already has it.
+    ///
     /// This single funnel serves BOTH the chat-open path (owner opens the
     /// freshly founded group) AND the legacy-sweep (owner opens /
-    /// rehydrates an un-provisioned group). Non-owners never mint here —
-    /// they only subscribe if they already hold a secret; otherwise they
-    /// wait for the receive path.
+    /// rehydrates an un-provisioned group). Non-owners never mint or
+    /// broadcast here — they only subscribe if they already hold a secret;
+    /// otherwise they wait for the receive path.
     ///
     /// A per-group in-flight guard coalesces a concurrent legacy-sweep +
     /// onAppear. The mint → persist is synchronous (no `await` before
@@ -513,7 +591,10 @@ public final class PushGroupRouting {
     ///
     /// - Parameter broadcast: posts the distribution-envelope bytes to the
     ///   group journal as an E2EE MLS application message
-    ///   (persist-before-publish). Only invoked on the owner-mint branch.
+    ///   (persist-before-publish). Only invoked on the two owner branches
+    ///   (mint + re-broadcast). It MUST throw when the bytes did not reach
+    ///   the journal — a silent no-op return would durably mark an
+    ///   undelivered secret as distributed.
     public func ensureProvisioned(
         accountIdB64: String,
         groupIdHex: String,
@@ -532,21 +613,39 @@ public final class PushGroupRouting {
         // push until a natural re-creation.
         let isOwner = (try? group.ownRole(identity: identity)) == .owner
 
-        if isOwner, !store.hasSecret(accountIdB64: accountIdB64, groupIdHex: groupIdHex) {
-            guard let secret = Self.mintSecret() else { return }
-            // Mint → persist synchronously (flips `hasSecret` true) before
-            // any await, then distribute to founding members over the E2EE
-            // journal. Best-effort beyond the persist — a broadcast failure
-            // retries on the next launch / add-member; the local secret +
-            // reverse index are already durable.
-            if persistSecret(
-                accountIdB64: accountIdB64, groupIdHex: groupIdHex, secret: secret) != nil {
-                do {
-                    try await broadcast(try Self.composeSecretEnvelope(secret: secret))
-                } catch {
-                    NSLog("push-routing secret broadcast failed: \(error)")
+        if isOwner {
+            if !store.hasSecret(accountIdB64: accountIdB64, groupIdHex: groupIdHex) {
+                // MINT. Persist synchronously (flips `hasSecret` true) before
+                // any await, marked NOT distributed, then tell the group over
+                // the E2EE journal. Persist-before-broadcast stays: minting
+                // twice would diverge the group's routing id, which is far
+                // worse than re-broadcasting one envelope.
+                guard let secret = Self.mintSecret() else { return }
+                if persistSecret(
+                    accountIdB64: accountIdB64, groupIdHex: groupIdHex, secret: secret,
+                    distributed: false) != nil {
+                    await broadcastAndSettle(
+                        secret: secret, accountIdB64: accountIdB64, groupIdHex: groupIdHex,
+                        what: "broadcast", broadcast: broadcast)
                 }
+            } else if let pending = store.getRecord(
+                accountIdB64: accountIdB64, groupIdHex: groupIdHex), !pending.distributed {
+                // RE-BROADCAST — the repair branch. A previous mint persisted
+                // the secret but its broadcast failed (offline / DS error), so
+                // no other member ever learned it and the whole group is
+                // deferring push forever. The envelope is recomputed from the
+                // stored secret; a re-broadcast is safe by construction
+                // because the receive gate accepts a BYTE-IDENTICAL secret
+                // from any sender, so it is a no-op re-persist for every
+                // member that already has it.
+                await broadcastAndSettle(
+                    secret: pending.secret, accountIdB64: accountIdB64, groupIdHex: groupIdHex,
+                    what: "re-broadcast", broadcast: broadcast)
             }
+            // An owner holding a secret it cannot READ (`getRecord` nil while
+            // `hasSecret` is true — wrap key rotated / corrupt row) falls
+            // through deliberately: it must not re-mint (that would diverge
+            // the group's routing id) and cannot recompose the envelope.
         }
 
         // Subscribe (or defer) under push_gid. Owner just minted →

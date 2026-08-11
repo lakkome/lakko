@@ -1468,8 +1468,15 @@ public final class ChatRepository: ObservableObject {
             groupIdHex: groupIdHex,
             group: record.group,
             identity: identity,
+            // A vanished `self` must THROW, not optional-chain into a silent
+            // success: ADR-0042 marks the secret distributed only when this
+            // closure returns without throwing, and a no-op "success" would
+            // durably record an envelope that never reached the journal.
             broadcast: { [weak self] bytes in
-                try await self?.broadcastPushRoutingControl(groupIdHex: groupIdHex, bytes: bytes)
+                guard let self else {
+                    throw ChatError.argument("ChatRepository deallocated mid-broadcast")
+                }
+                try await self.broadcastPushRoutingControl(groupIdHex: groupIdHex, bytes: bytes)
             }
         )
     }
@@ -1538,8 +1545,14 @@ public final class ChatRepository: ObservableObject {
             await self.pushRouting.redistribute(
                 accountIdB64: accountIdB64,
                 groupIdHex: groupIdHex,
+                // Throws rather than optional-chaining into a silent success —
+                // see the note in `performEnsurePushRouting`.
                 broadcast: { [weak self] bytes in
-                    try await self?.broadcastPushRoutingControl(groupIdHex: groupIdHex, bytes: bytes)
+                    guard let self else {
+                        throw ChatError.argument("ChatRepository deallocated mid-broadcast")
+                    }
+                    try await self.broadcastPushRoutingControl(
+                        groupIdHex: groupIdHex, bytes: bytes)
                 }
             )
         }

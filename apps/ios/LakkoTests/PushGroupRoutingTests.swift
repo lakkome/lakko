@@ -50,6 +50,21 @@ final class PushGroupRoutingTests: XCTestCase {
         func record(_ bytes: Data) { envelopes.append(bytes) }
     }
 
+    /// A broadcast seam that can be made to FAIL — the offline / DS-error
+    /// case that leaves a minted secret durably stored but undelivered.
+    private final class FlakyBroadcastRecorder {
+        struct Failure: Error {}
+        private(set) var envelopes: [Data] = []
+        var shouldFail: Bool
+        init(shouldFail: Bool) { self.shouldFail = shouldFail }
+        /// Records the attempt FIRST, then throws when armed — so a test can
+        /// tell "never attempted" from "attempted and failed".
+        func send(_ bytes: Data) throws {
+            envelopes.append(bytes)
+            if shouldFail { throw Failure() }
+        }
+    }
+
     private var suiteName: String = ""
     private var defaults: UserDefaults!
 
@@ -211,7 +226,8 @@ final class PushGroupRoutingTests: XCTestCase {
 
         XCTAssertFalse(store.hasSecret(accountIdB64: "acct", groupIdHex: "grp"))
         store.putRouting(
-            accountIdB64: "acct", groupIdHex: "grp", secret: secret, pushGidHex: pushGidHex)
+            accountIdB64: "acct", groupIdHex: "grp", secret: secret, pushGidHex: pushGidHex,
+            distributed: true)
 
         // Presence check (no device key needed).
         XCTAssertTrue(store.hasSecret(accountIdB64: "acct", groupIdHex: "grp"))
@@ -292,6 +308,230 @@ final class PushGroupRoutingTests: XCTestCase {
         // Minted + broadcast exactly once across two provisions.
         XCTAssertEqual(recorder.envelopes.count, 1)
         XCTAssertTrue(store.hasSecret(accountIdB64: "acctO", groupIdHex: groupIdHex))
+    }
+
+    // MARK: - durable `distributed` flag: the undelivered-mint repair
+
+    /// **The regression this flag closes.** A mint whose broadcast fails
+    /// leaves the secret durably stored, so the old `isOwner && !hasSecret`
+    /// guard short-circuited on every later launch and NEVER retried — no
+    /// other member ever learned the secret and the whole group deferred
+    /// push permanently. The owner must re-broadcast until it lands.
+    func testFailedBroadcastReBroadcastsOnTheNextProvision() async throws {
+        let store = makeStore()
+        let spy = SubscribeSpy()
+        let routing = makeRouting(store: store, spy: spy)
+        let broadcaster = FlakyBroadcastRecorder(shouldFail: true)
+
+        let identity = try makeIdentity(0x30)
+        let (group, groupIdHex) = try makeOwnerGroup(identity)
+
+        // 1st provision — the mint succeeds, the journal write FAILS.
+        await routing.ensureProvisioned(
+            accountIdB64: "acctOwner", groupIdHex: groupIdHex, group: group,
+            identity: identity, broadcast: { try broadcaster.send($0) })
+
+        XCTAssertEqual(broadcaster.envelopes.count, 1, "the mint attempted a broadcast")
+        // The secret is durably stored (persist-before-broadcast is kept) ...
+        let minted = try XCTUnwrap(
+            store.getRecord(accountIdB64: "acctOwner", groupIdHex: groupIdHex))
+        // ... but marked NOT distributed: nobody in the group learned it.
+        XCTAssertFalse(
+            minted.distributed,
+            "a failed broadcast must leave the secret marked undistributed")
+
+        // 2nd provision (a relaunch / chat re-open) — the repair branch.
+        broadcaster.shouldFail = false
+        await routing.ensureProvisioned(
+            accountIdB64: "acctOwner", groupIdHex: groupIdHex, group: group,
+            identity: identity, broadcast: { try broadcaster.send($0) })
+
+        XCTAssertEqual(
+            broadcaster.envelopes.count, 2,
+            "an undistributed secret must be RE-BROADCAST on the next provision")
+        // The retry carries the SAME secret, recomposed from the store — a
+        // second MINT would diverge the group's routing id. The envelope is
+        // deterministic in the secret, so byte-equality proves no re-mint.
+        XCTAssertEqual(broadcaster.envelopes[0], broadcaster.envelopes[1])
+        XCTAssertEqual(
+            PushGroupRouting.tryDecodeSecretEnvelope(broadcaster.envelopes[1]), minted.secret)
+
+        // The successful re-broadcast settles the flag ...
+        XCTAssertEqual(
+            store.getRecord(accountIdB64: "acctOwner", groupIdHex: groupIdHex)?.distributed,
+            true)
+
+        // ... so a 3rd provision is silent again.
+        await routing.ensureProvisioned(
+            accountIdB64: "acctOwner", groupIdHex: groupIdHex, group: group,
+            identity: identity, broadcast: { try broadcaster.send($0) })
+        XCTAssertEqual(
+            broadcaster.envelopes.count, 2, "a settled secret is never re-broadcast")
+    }
+
+    /// The other half: a mint whose broadcast SUCCEEDS is settled
+    /// immediately, so the repair branch never fires for a healthy group.
+    func testSuccessfulMintIsMarkedDistributedAndNotReBroadcast() async throws {
+        let store = makeStore()
+        let spy = SubscribeSpy()
+        let routing = makeRouting(store: store, spy: spy)
+        let broadcaster = FlakyBroadcastRecorder(shouldFail: false)
+
+        let identity = try makeIdentity(0x32)
+        let (group, groupIdHex) = try makeOwnerGroup(identity)
+
+        await routing.ensureProvisioned(
+            accountIdB64: "acctOwner", groupIdHex: groupIdHex, group: group,
+            identity: identity, broadcast: { try broadcaster.send($0) })
+
+        XCTAssertEqual(broadcaster.envelopes.count, 1)
+        XCTAssertEqual(
+            store.getRecord(accountIdB64: "acctOwner", groupIdHex: groupIdHex)?.distributed,
+            true, "a landed broadcast settles the flag")
+
+        await routing.ensureProvisioned(
+            accountIdB64: "acctOwner", groupIdHex: groupIdHex, group: group,
+            identity: identity, broadcast: { try broadcaster.send($0) })
+        XCTAssertEqual(
+            broadcaster.envelopes.count, 1,
+            "a distributed secret must not be re-broadcast on a later provision")
+    }
+
+    /// Upgrade rule: a row written before the flag existed (a BARE 32-byte
+    /// sealed secret, no flag byte) reads as ALREADY distributed. Those
+    /// groups are provisioned and working today — re-broadcasting for every
+    /// one of them on upgrade would be a pointless journal write.
+    func testLegacyRowWithoutTheFlagIsTreatedAsDistributed() async throws {
+        let store = makeStore()
+        let spy = SubscribeSpy()
+        let routing = makeRouting(store: store, spy: spy)
+        let broadcaster = FlakyBroadcastRecorder(shouldFail: false)
+
+        let identity = try makeIdentity(0x34)
+        let (group, groupIdHex) = try makeOwnerGroup(identity)
+
+        // The pre-flag on-disk shape: the sealed plaintext IS the secret.
+        let legacy = try XCTUnwrap(PushGroupRouting.mintSecret())
+        store.putRawRecordForTesting(
+            accountIdB64: "acctLegacy", groupIdHex: groupIdHex, plaintext: legacy)
+
+        // It reads back intact, and as already distributed.
+        let record = try XCTUnwrap(
+            store.getRecord(accountIdB64: "acctLegacy", groupIdHex: groupIdHex))
+        XCTAssertEqual(record.secret, legacy, "a legacy row must stay readable")
+        XCTAssertTrue(record.distributed, "a legacy row is treated as distributed")
+
+        await routing.ensureProvisioned(
+            accountIdB64: "acctLegacy", groupIdHex: groupIdHex, group: group,
+            identity: identity, broadcast: { try broadcaster.send($0) })
+
+        XCTAssertTrue(
+            broadcaster.envelopes.isEmpty,
+            "upgrading must not re-broadcast for every already-working group")
+        XCTAssertEqual(
+            store.getSecret(accountIdB64: "acctLegacy", groupIdHex: groupIdHex), legacy,
+            "and must not re-mint either")
+        // The owner still subscribes under the legacy secret's push_gid.
+        XCTAssertEqual(
+            spy.targets, [try XCTUnwrap(PushGroupRouting.derivePushGid(secret: legacy))])
+    }
+
+    /// A secret that ARRIVED over the journal is trivially already on the
+    /// wire, so a receiver stores it settled and never enters the owner's
+    /// re-broadcast branch.
+    func testReceivedSecretIsStoredDistributed() async throws {
+        let store = makeStore()
+        let spy = SubscribeSpy()
+        let routing = makeRouting(store: store, spy: spy)
+        let (group, groupIdHex, ownerLeaf, _) = try makeTwoMemberGroup(
+            owner: try makeIdentity(0x36), member: try makeIdentity(0x37))
+
+        let secret = try XCTUnwrap(PushGroupRouting.mintSecret())
+        await routing.receiveSecret(
+            accountIdB64: "acctPeer", groupIdHex: groupIdHex, secret: secret,
+            group: group, senderLeaf: ownerLeaf)
+
+        let record = try XCTUnwrap(
+            store.getRecord(accountIdB64: "acctPeer", groupIdHex: groupIdHex))
+        XCTAssertEqual(record.secret, secret)
+        XCTAssertTrue(
+            record.distributed,
+            "an arrived envelope is proof the secret is on the wire")
+    }
+
+    /// The `storedUnreadable` three-way distinction must survive the new
+    /// record framing: an uninterpretable row is UNREADABLE (`getRecord`
+    /// nil while `hasSecret` stays true), never a provable absence — that is
+    /// what the receive gate's fail-closed admin-seed rule keys off. And an
+    /// owner holding one must not re-mint.
+    func testUnreadableRecordIsNotAbsentAndOwnerDoesNotReMint() async throws {
+        let store = makeStore()
+        let spy = SubscribeSpy()
+        let routing = makeRouting(store: store, spy: spy)
+        let broadcaster = FlakyBroadcastRecorder(shouldFail: false)
+
+        let identity = try makeIdentity(0x38)
+        let (group, groupIdHex) = try makeOwnerGroup(identity)
+
+        // Neither a legacy bare secret nor a valid flagged record.
+        store.putRawRecordForTesting(
+            accountIdB64: "acctOwner", groupIdHex: groupIdHex,
+            plaintext: Data(repeating: 0x09, count: 7))
+
+        XCTAssertTrue(
+            store.hasSecret(accountIdB64: "acctOwner", groupIdHex: groupIdHex),
+            "the key-free presence check still sees the row")
+        XCTAssertNil(store.getRecord(accountIdB64: "acctOwner", groupIdHex: groupIdHex))
+        XCTAssertNil(store.getSecret(accountIdB64: "acctOwner", groupIdHex: groupIdHex))
+
+        // An unknown flag byte is unreadable too (never a guessed flag).
+        var unknownFlag = Data([0x02])
+        unknownFlag.append(Data(repeating: 0xAB, count: 32))
+        store.putRawRecordForTesting(
+            accountIdB64: "acctOwner", groupIdHex: "otherGrp", plaintext: unknownFlag)
+        XCTAssertTrue(store.hasSecret(accountIdB64: "acctOwner", groupIdHex: "otherGrp"))
+        XCTAssertNil(store.getRecord(accountIdB64: "acctOwner", groupIdHex: "otherGrp"))
+
+        // The owner falls through: no re-mint (that would diverge the
+        // group's routing id) and no broadcast (the envelope is not
+        // recomposable without the secret).
+        await routing.ensureProvisioned(
+            accountIdB64: "acctOwner", groupIdHex: groupIdHex, group: group,
+            identity: identity, broadcast: { try broadcaster.send($0) })
+        XCTAssertTrue(broadcaster.envelopes.isEmpty)
+        XCTAssertNil(store.getSecret(accountIdB64: "acctOwner", groupIdHex: groupIdHex))
+        XCTAssertTrue(spy.targets.isEmpty, "an unreadable secret defers the subscription")
+    }
+
+    /// The flag can only ever describe the secret that actually travelled:
+    /// `markDistributed` is a no-op when the stored secret has since
+    /// changed (an owner rotation racing an in-flight broadcast).
+    func testMarkDistributedOnlyMatchesTheBroadcastSecret() throws {
+        let store = makeStore()
+        let stored = try XCTUnwrap(PushGroupRouting.mintSecret())
+        let other = try XCTUnwrap(PushGroupRouting.mintSecret())
+        XCTAssertNotEqual(stored, other)
+        let gidHex = PushGroupRouting.hex(
+            try XCTUnwrap(PushGroupRouting.derivePushGid(secret: stored)))
+
+        store.putRouting(
+            accountIdB64: "acct", groupIdHex: "grp", secret: stored, pushGidHex: gidHex,
+            distributed: false)
+
+        // A different secret's broadcast must not settle this row.
+        XCTAssertFalse(store.markDistributed(
+            accountIdB64: "acct", groupIdHex: "grp", matching: other))
+        XCTAssertEqual(
+            store.getRecord(accountIdB64: "acct", groupIdHex: "grp")?.distributed, false)
+
+        // The matching one does, and stays idempotent.
+        XCTAssertTrue(store.markDistributed(
+            accountIdB64: "acct", groupIdHex: "grp", matching: stored))
+        XCTAssertTrue(store.markDistributed(
+            accountIdB64: "acct", groupIdHex: "grp", matching: stored))
+        let record = try XCTUnwrap(store.getRecord(accountIdB64: "acct", groupIdHex: "grp"))
+        XCTAssertTrue(record.distributed)
+        XCTAssertEqual(record.secret, stored, "settling must not disturb the secret")
     }
 
     func testNonOwnerNeverMints() async throws {

@@ -16,7 +16,9 @@
  *      and stored **device-key-encrypted at rest** (AES-256-GCM under
  *      the non-extractable device root key), the same posture as the MLS
  *      snapshot / account-identity seed / session token. Foreground-only
- *      — the SW never needs the raw secret.
+ *      — the SW never needs the raw secret. The row also carries a
+ *      plaintext `distributed` flag recording whether the in-group
+ *      distribution envelope was ever confirmed on the wire (see below).
  *   2. **`routes`** — the **`push_gid → (account, group_id)` reverse
  *      index**, keyed by the lowercase-hex `push_gid`. This is the map
  *      the ADR-0041 silent-push decrypt path reverse-resolves in Sprint 4
@@ -28,6 +30,29 @@
  *      snapshot store. Plaintext is REQUIRED so the SW can read it
  *      without the device key.
  *
+ * ## The `distributed` flag — why a boolean, and not an outbox
+ *
+ * The owner persists its freshly minted secret BEFORE broadcasting the
+ * distribution envelope (minting twice is worse than broadcasting twice).
+ * If that broadcast then fails — offline, DS error — the secret is already
+ * durable, so a presence-only guard (`is a secret held?`) short-circuits on
+ * every later launch and the envelope is NEVER re-sent: the other members
+ * defer forever and the whole group silently loses push.
+ *
+ * The fix records whether the envelope was **confirmed on the wire**. Unlike
+ * the ADR-0040 commit outbox — which must store the commit BYTES, because
+ * they are unrecoverable once the in-memory MLS state moves on — the
+ * distribution envelope is **recomputable from the stored secret at any
+ * time** (`composePushRoutingSecret(secret)`). So one durable boolean is the
+ * whole mechanism; there is nothing to spool.
+ *
+ * A row written by a build that predates the flag carries no `distributed`
+ * field. Such rows are read as **`true`**: those groups were provisioned by
+ * the old code and are working today, so treating `undefined` as "not yet
+ * distributed" would re-broadcast for every group on the first launch after
+ * an upgrade. Only an explicit `false` — written by the mint path in this
+ * build — means "pending".
+ *
  * ```text
  *   db   "lakko-push-routing"  v1
  *   ├── store "secrets"  keyPath: "key"  (string = accountId "\0" groupIdB64)
@@ -35,7 +60,8 @@
  *   │       key:        <accountId "\0" groupIdB64>,
  *   │       accountId:  <b64-uuidv7>,
  *   │       groupIdB64: <b64 group_id>,
- *   │       ciphertext: Uint8Array   // [12-byte IV | AES-GCM(secret)+tag]
+ *   │       ciphertext: Uint8Array,  // [12-byte IV | AES-GCM(secret)+tag]
+ *   │       distributed?: boolean    // absent (legacy) === true
  *   │     }
  *   └── store "routes"  keyPath: "pushGidHex"  (string, 64 lowercase hex)
  *         row {
@@ -78,7 +104,24 @@ interface SecretRow {
   accountId: string;
   groupIdB64: string;
   ciphertext: Uint8Array;
+  /** Was the in-group distribution envelope confirmed on the wire?
+   *  **Optional on purpose** — a row written before this field existed has
+   *  none, and {@link getGroupRoutingState} reads that as `true` (see the
+   *  module doc). Only an explicit `false` means "pending". */
+  distributed?: boolean;
 }
+
+/**
+ * What this device holds for a `(account, group)` pair:
+ *
+ *   - `absent` — no secret at all (a member awaiting the envelope, or an
+ *     owner that has never minted);
+ *   - `pending` — a secret is held but its distribution envelope was never
+ *     confirmed on the wire, so the owner must re-broadcast it;
+ *   - `distributed` — a secret is held and the envelope landed (or the row
+ *     predates the flag).
+ */
+export type GroupRoutingState = "absent" | "pending" | "distributed";
 
 /** On-disk `routes` row — the plaintext reverse-index entry. */
 export interface RouteRow {
@@ -164,6 +207,11 @@ async function decrypt(
  * transaction. Idempotent: re-persisting the same `(account, group)` /
  * secret overwrites both rows in place (a no-op in effect).
  *
+ * @param args.distributed whether the in-group distribution envelope for
+ *                   this secret is already confirmed on the wire. `false`
+ *                   on the owner's mint (the broadcast has not happened
+ *                   yet); `true` on a RECEIVE (a secret that arrived over
+ *                   the journal is trivially already on the wire).
  * @param deviceKey  the non-extractable AES-GCM device root key. When
  *                   `null` (half-reset — `forgetDevice` in flight) the
  *                   caller must not reach here; this throws rather than
@@ -175,6 +223,7 @@ export async function putGroupRouting(
     groupIdB64: string;
     secret: Uint8Array;
     pushGidHex: string;
+    distributed: boolean;
   },
   deviceKey: CryptoKey,
 ): Promise<void> {
@@ -184,6 +233,7 @@ export async function putGroupRouting(
     accountId: args.accountId,
     groupIdB64: args.groupIdB64,
     ciphertext,
+    distributed: args.distributed,
   };
   const routeRow: RouteRow = {
     pushGidHex: args.pushGidHex,
@@ -212,14 +262,23 @@ export async function getGroupRoutingSecret(
   groupIdB64: string,
   deviceKey: CryptoKey,
 ): Promise<Uint8Array | null> {
+  const row = await readSecretRow(accountId, groupIdB64);
+  if (row === undefined) return null;
+  return decrypt(deviceKey, row.ciphertext);
+}
+
+/** Read the raw `secrets` row (still encrypted), or `undefined`. */
+async function readSecretRow(
+  accountId: string,
+  groupIdB64: string,
+): Promise<SecretRow | undefined> {
   const db = await openPushRoutingDb();
-  let row: SecretRow | undefined;
   try {
     const tx = db.transaction(SECRETS_STORE, "readonly");
-    const req = tx.objectStore(SECRETS_STORE).get(
-      secretRowKey(accountId, groupIdB64),
-    );
-    row = await new Promise<SecretRow | undefined>((resolve, reject) => {
+    const req = tx
+      .objectStore(SECRETS_STORE)
+      .get(secretRowKey(accountId, groupIdB64));
+    return await new Promise<SecretRow | undefined>((resolve, reject) => {
       req.onsuccess = (): void => resolve(req.result as SecretRow | undefined);
       req.onerror = (): void =>
         reject(req.error ?? new Error("idb get failed"));
@@ -227,31 +286,68 @@ export async function getGroupRoutingSecret(
   } finally {
     db.close();
   }
-  if (row === undefined) return null;
-  return decrypt(deviceKey, row.ciphertext);
+}
+
+/**
+ * What this device holds for the `(account, group)` pair — the guard the
+ * owner's provisioning funnel branches on. No device key needed (the flag
+ * and the row's presence are both plaintext), so it works during a
+ * half-reset.
+ *
+ * A row with no `distributed` field predates the flag and reads as
+ * `"distributed"` — see the module doc for why that direction is the safe
+ * one.
+ */
+export async function getGroupRoutingState(
+  accountId: string,
+  groupIdB64: string,
+): Promise<GroupRoutingState> {
+  const row = await readSecretRow(accountId, groupIdB64);
+  if (row === undefined) return "absent";
+  return row.distributed === false ? "pending" : "distributed";
 }
 
 /**
  * Cheap existence check — does this device already hold a
  * `push_routing_secret` for the `(account, group)` pair? No device key
- * needed (only checks the key's presence), so it is the guard the owner
- * uses to avoid re-minting a secret it already provisioned.
+ * needed. Prefer {@link getGroupRoutingState} when the answer drives the
+ * owner's mint / re-broadcast decision: presence alone cannot tell a
+ * distributed secret from one whose envelope never reached the wire.
  */
 export async function hasGroupRoutingSecret(
   accountId: string,
   groupIdB64: string,
 ): Promise<boolean> {
+  return (await getGroupRoutingState(accountId, groupIdB64)) !== "absent";
+}
+
+/**
+ * Flip a held secret's `distributed` flag to `true` — called only after the
+ * distribution envelope is CONFIRMED on the wire (the broadcast resolved).
+ *
+ * Read-modify-write inside ONE transaction, chained through the `get`'s
+ * `onsuccess` rather than across an `await`: an IndexedDB transaction
+ * auto-commits once it has no in-flight request, so awaiting between the
+ * read and the write would commit the tx and write into a dead one.
+ *
+ * A no-op when the row is absent (wiped by a concurrent `forgetDevice`) —
+ * it must never resurrect a deleted secret.
+ */
+export async function markGroupRoutingDistributed(
+  accountId: string,
+  groupIdB64: string,
+): Promise<void> {
   const db = await openPushRoutingDb();
   try {
-    const tx = db.transaction(SECRETS_STORE, "readonly");
-    const req = tx.objectStore(SECRETS_STORE).getKey(
-      secretRowKey(accountId, groupIdB64),
-    );
-    return await new Promise<boolean>((resolve, reject) => {
-      req.onsuccess = (): void => resolve(req.result !== undefined);
-      req.onerror = (): void =>
-        reject(req.error ?? new Error("idb getKey failed"));
-    });
+    const tx = db.transaction(SECRETS_STORE, "readwrite");
+    const store = tx.objectStore(SECRETS_STORE);
+    const req = store.get(secretRowKey(accountId, groupIdB64));
+    req.onsuccess = (): void => {
+      const row = req.result as SecretRow | undefined;
+      if (row === undefined || row.distributed === true) return;
+      store.put({ ...row, distributed: true });
+    };
+    await awaitTx(tx);
   } finally {
     db.close();
   }

@@ -32,6 +32,14 @@ import uniffi.lakko_ffi_uniffi.derivePushGid as ffiDerivePushGid
  *   - Everyone else ONLY receives + persists the secret from that
  *     envelope ([receive]) — they never mint.
  *
+ * Because that broadcast is the ONLY way the rest of the group ever
+ * learns the secret, its delivery is tracked durably: a row is stored
+ * flagged NOT distributed until a broadcast is confirmed, and [ensure]
+ * re-sends a still-pending one on every later call. Without that, one
+ * failed broadcast (offline, DS error) left the owner's mint guard
+ * permanently satisfied and cost the whole group push for good — see
+ * [decideEnsureAction].
+ *
  * On the RECEIVE side that mint authority is mirrored by a rank gate
  * ([decideAcceptReceivedSecret]): the owner may always rotate, an
  * ADR-0022 admin may only SEED a device that holds nothing (so a member
@@ -82,6 +90,73 @@ public object GroupPushRouting {
     /** Verdict of the receive-side authority gate ([decideAcceptReceivedSecret]).
      *  [REJECT] means DROP — no persist, no subscribe, no re-broadcast. */
     public enum class ReceiveVerdict { ACCEPT, REJECT }
+
+    /** What [ensure]'s provisioning step must do this call
+     *  ([decideEnsureAction]). Subscription is decided separately and
+     *  always runs — see [subscribeOrDefer]. */
+    public enum class EnsureAction {
+        /** Nothing to provision: a non-owner, or an owner whose secret is
+         *  both held and confirmed distributed. */
+        NONE,
+
+        /** Owner, no secret held: mint + persist (flagged NOT distributed)
+         *  + broadcast. */
+        MINT_AND_BROADCAST,
+
+        /** Owner, secret held but its distribution was never confirmed:
+         *  recompose the envelope from the STORED secret and broadcast it
+         *  again. Never re-mints — a second random mint would diverge the
+         *  group's `push_gid`. */
+        REBROADCAST,
+    }
+
+    /**
+     * The provisioning half of [ensure] as a PURE function, so the
+     * recovery branch is host-JVM unit-testable (the
+     * [decideAcceptReceivedSecret] precedent).
+     *
+     * ## The bug this models away
+     *
+     * The guard used to be exactly `isOwner && !hasSecret`, with the
+     * secret persisted BEFORE the broadcast and the broadcast's failure
+     * swallowed. So an owner that minted while offline (or hit a DS
+     * error) ended up with the secret durably stored and the guard
+     * permanently satisfied: on every later launch / chat-open `ensure`
+     * short-circuited and the distribution envelope was NEVER re-sent.
+     * Every other member deferred forever ([subscribeOrDefer] never falls
+     * back to `group_id`), so **the whole group silently lost push, for
+     * good** — the only accidental repair being a [redistribute] after an
+     * unrelated add-member commit.
+     *
+     * Persist-before-broadcast is still right (minting twice DIVERGES the
+     * group's `push_gid`; broadcasting twice is inert). What was missing
+     * is a durable record of whether the broadcast landed —
+     * [distributed]. With it, the failure is recoverable on the next
+     * `ensure` instead of terminal.
+     *
+     * A re-broadcast is safe by construction: it re-sends the SAME bytes,
+     * and [decideAcceptReceivedSecret] accepts a byte-identical secret
+     * from any sender, so it is idempotent for every member regardless of
+     * rank or of what they already hold.
+     *
+     * @param isOwner is this device the ADR-0022 group owner? Only the
+     *   owner ever mints or broadcasts here.
+     * @param hasSecret does this device hold a `push_routing_secret` for
+     *   the group?
+     * @param distributed has the held secret's distribution envelope been
+     *   confirmed on the wire? Meaningless (and ignored) when
+     *   [hasSecret] is `false`.
+     */
+    public fun decideEnsureAction(
+        isOwner: Boolean,
+        hasSecret: Boolean,
+        distributed: Boolean,
+    ): EnsureAction = when {
+        !isOwner -> EnsureAction.NONE
+        !hasSecret -> EnsureAction.MINT_AND_BROADCAST
+        !distributed -> EnsureAction.REBROADCAST
+        else -> EnsureAction.NONE
+    }
 
     /**
      * Outcome of reading a group's ADR-0022 role table. Three DISTINCT
@@ -277,7 +352,10 @@ public object GroupPushRouting {
         ports: PushRoutingPorts,
     ) {
         val pushGid = ports.derivePushGid(secret)
-        ports.persist(groupIdHex, secret, pushGid)
+        // Persisted as ALREADY distributed: this secret arrived off the
+        // group journal, so it is by definition on the wire. A receiver
+        // never re-broadcasts — only the owner does ([ensure]).
+        ports.persist(groupIdHex, secret, pushGid, distributed = true)
         subscribeOrDefer(groupIdHex, ports)
     }
 
@@ -336,16 +414,22 @@ public object GroupPushRouting {
     /**
      * Ensure a group's push routing is provisioned for this device.
      *
-     *   - If the local client is the ADR-0022 OWNER and holds no
-     *     secret yet: mint (32 CSPRNG bytes) + persist + broadcast
-     *     the distribution envelope (best-effort beyond the persist).
+     *   - ADR-0022 OWNER holding no secret yet: mint (32 CSPRNG bytes)
+     *     + persist (flagged NOT distributed) + broadcast the
+     *     distribution envelope, flagging it distributed ON SUCCESS.
+     *   - OWNER holding a secret whose broadcast was never confirmed:
+     *     **re-broadcast** it — the envelope is recomposed from the
+     *     STORED secret, so nothing is re-minted. This is the recovery
+     *     path for a mint whose broadcast failed (offline / DS error);
+     *     without it that group never learns its secret and loses push
+     *     permanently. See [decideEnsureAction].
      *   - Then subscribe under `push_gid` if the secret is held
      *     (owner just minted it; a member may already hold one from a
      *     prior receive), else defer.
      *
      * The single funnel for BOTH the create / join path AND the
-     * bootstrap legacy-sweep. Non-owners never mint here. A
-     * per-`(account, group)` in-flight lock coalesces concurrent
+     * bootstrap legacy-sweep. Non-owners never mint NOR broadcast here.
+     * A per-`(account, group)` in-flight lock coalesces concurrent
      * callers so the random secret is minted exactly once.
      */
     public suspend fun ensure(
@@ -356,24 +440,72 @@ public object GroupPushRouting {
     ) {
         val mutex = inflight.getOrPut(lockKey(accountIdB64, groupIdHex)) { Mutex() }
         mutex.withLock {
-            if (isOwner && !ports.hasSecret(groupIdHex)) {
-                val secret = ports.mintSecret()
-                val pushGid = ports.derivePushGid(secret)
-                ports.persist(groupIdHex, secret, pushGid)
-                // Distribute to founding members over the E2EE journal.
-                // Best-effort beyond the persist — a broadcast failure
-                // retries on the next launch / add-member; the local
-                // secret + reverse index are already durable.
-                try {
-                    ports.broadcast(ports.composeEnvelope(secret))
-                } catch (_: Throwable) {
-                    // best-effort
-                }
+            // A non-owner neither mints nor broadcasts, so its store is
+            // not even read here.
+            val action = if (!isOwner) {
+                EnsureAction.NONE
+            } else {
+                val hasSecret = ports.hasSecret(groupIdHex)
+                // An unreadable flag is treated as NOT distributed: a
+                // needless re-broadcast is inert (byte-identical, so
+                // every member idempotently accepts it), whereas
+                // guessing "distributed" would resurrect the
+                // permanent-no-push bug.
+                val distributed = !hasSecret ||
+                    runCatching { ports.isDistributed(groupIdHex) }.getOrDefault(false)
+                decideEnsureAction(isOwner = true, hasSecret = hasSecret, distributed = distributed)
             }
+
+            when (action) {
+                EnsureAction.MINT_AND_BROADCAST -> {
+                    val secret = ports.mintSecret()
+                    val pushGid = ports.derivePushGid(secret)
+                    // Persist BEFORE broadcasting, flagged NOT distributed.
+                    // The order is deliberate: minting twice would diverge
+                    // the group's push_gid, so a crash between the two must
+                    // leave the secret durable — and the flag is what makes
+                    // the un-broadcast state recoverable rather than
+                    // terminal (the next `ensure` takes the REBROADCAST
+                    // branch below).
+                    ports.persist(groupIdHex, secret, pushGid, distributed = false)
+                    broadcastAndMark(groupIdHex, secret, ports)
+                }
+
+                EnsureAction.REBROADCAST -> {
+                    // Recomposed from the stored secret — never re-minted.
+                    val secret = ports.getSecret(groupIdHex)
+                    if (secret != null) broadcastAndMark(groupIdHex, secret, ports)
+                }
+
+                EnsureAction.NONE -> Unit
+            }
+
             // Subscribe (or defer) under push_gid. Owner just minted ->
             // subscribes; a member with no secret -> deferred (never
             // under group_id).
             subscribeOrDefer(groupIdHex, ports)
+        }
+    }
+
+    /**
+     * Broadcast the distribution envelope for [secret] and, ONLY on
+     * success, durably flag the group's row distributed.
+     *
+     * Best-effort by design: a failure is swallowed and the row stays
+     * flagged NOT distributed, so the next [ensure] re-broadcasts. A
+     * throwing `markDistributed` lands in the same place — the row
+     * stays pending and the (idempotent) broadcast simply repeats.
+     */
+    private suspend fun broadcastAndMark(
+        groupIdHex: String,
+        secret: ByteArray,
+        ports: PushRoutingPorts,
+    ) {
+        try {
+            ports.broadcast(ports.composeEnvelope(secret))
+            ports.markDistributed(groupIdHex)
+        } catch (_: Throwable) {
+            // Left pending on purpose — the next `ensure` retries.
         }
     }
 
@@ -383,6 +515,11 @@ public object GroupPushRouting {
      * poll). No-op when this device holds no secret. Idempotent for
      * existing members (a re-received secret is the same value → an
      * idempotent re-persist). Best-effort.
+     *
+     * Marks the row distributed on success (it is a confirmed send of
+     * exactly the envelope [ensure] would re-send), so a mint whose own
+     * broadcast failed is also healed by this path. A throw propagates
+     * to the caller and leaves the row pending.
      */
     public suspend fun redistribute(
         groupIdHex: String,
@@ -390,6 +527,7 @@ public object GroupPushRouting {
     ) {
         val secret = ports.getSecret(groupIdHex) ?: return
         ports.broadcast(ports.composeEnvelope(secret))
+        ports.markDistributed(groupIdHex)
     }
 
     private fun lockKey(accountIdB64: String, groupIdHex: String): String =
@@ -422,9 +560,28 @@ public interface PushRoutingPorts {
     /** Read the persisted secret for `groupIdHex`, or `null`. */
     public fun getSecret(groupIdHex: String): ByteArray?
 
+    /** Has the held secret's distribution envelope been confirmed on
+     *  the wire? `true` when nothing is held (there is nothing pending
+     *  to re-send) and for a LEGACY row written before the flag
+     *  existed. Drives [GroupPushRouting.EnsureAction.REBROADCAST]. */
+    public fun isDistributed(groupIdHex: String): Boolean
+
     /** Persist the secret (encrypted at rest) AND the
-     *  `push_gid -> (account, group)` reverse-index entry. */
-    public fun persist(groupIdHex: String, secret: ByteArray, pushGid: ByteArray)
+     *  `push_gid -> (account, group)` reverse-index entry, together
+     *  with whether its distribution envelope is already on the wire
+     *  ([distributed]). The owner mint passes `false`; a received
+     *  secret passes `true`. */
+    public fun persist(
+        groupIdHex: String,
+        secret: ByteArray,
+        pushGid: ByteArray,
+        distributed: Boolean,
+    )
+
+    /** Durably flag `groupIdHex`'s row distributed — called ONLY after
+     *  a broadcast actually succeeded. No-op when no row is held or it
+     *  is already flagged. */
+    public fun markDistributed(groupIdHex: String)
 
     /** Subscribe this device to push-gw under `pushGid`. */
     public suspend fun subscribeUnderPushGid(pushGid: ByteArray)
@@ -463,9 +620,21 @@ public class NativePushRoutingPorts(
     override fun getSecret(groupIdHex: String): ByteArray? =
         PushRoutingSecretStore.get(context, accountIdB64, groupIdHex)
 
-    override fun persist(groupIdHex: String, secret: ByteArray, pushGid: ByteArray) {
-        PushRoutingSecretStore.put(context, accountIdB64, groupIdHex, secret)
+    override fun isDistributed(groupIdHex: String): Boolean =
+        PushRoutingSecretStore.isDistributed(context, accountIdB64, groupIdHex)
+
+    override fun persist(
+        groupIdHex: String,
+        secret: ByteArray,
+        pushGid: ByteArray,
+        distributed: Boolean,
+    ) {
+        PushRoutingSecretStore.put(context, accountIdB64, groupIdHex, secret, distributed)
         routeStore.put(PushClient.pseudonymHex(pushGid), accountIdB64, groupIdHex)
+    }
+
+    override fun markDistributed(groupIdHex: String) {
+        PushRoutingSecretStore.markDistributed(context, accountIdB64, groupIdHex)
     }
 
     override suspend fun subscribeUnderPushGid(pushGid: ByteArray) {

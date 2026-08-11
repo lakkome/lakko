@@ -66,6 +66,21 @@
  * always holds the secret (it is a member), so notify always has a
  * `push_gid`.
  *
+ * ## The broadcast must be durable, not just attempted
+ *
+ * The owner persists the minted secret BEFORE broadcasting (two divergent
+ * random secrets would be worse than two identical envelopes). That makes a
+ * failed broadcast dangerous on its own: a guard shaped "do I hold a
+ * secret?" short-circuits forever after, the envelope is never re-sent, and
+ * every other member defers permanently — the whole group silently loses
+ * push. So the store records whether the envelope was CONFIRMED on the wire
+ * (`distributed`), and {@link ensureGroupPushRouting} re-broadcasts while it
+ * is false. The envelope is recomputable from the stored secret, so this
+ * needs one durable boolean, not an outbox of wire bytes (contrast the
+ * ADR-0040 commit outbox, whose commit bytes are unrecoverable once the
+ * in-memory MLS state moves on). Re-sending is safe because the value is
+ * byte-identical: every member reads it as `accept-identical`.
+ *
  * ## Concurrency
  *
  * Provisioning can be triggered from two places in the same session — the
@@ -86,7 +101,8 @@ import { PushClient } from "./client";
 import { getOrCreateDevicePushId } from "./device-id";
 import {
   getGroupRoutingSecret,
-  hasGroupRoutingSecret,
+  getGroupRoutingState,
+  markGroupRoutingDistributed,
   putGroupRouting,
 } from "./group-routing-store";
 
@@ -167,17 +183,22 @@ function toHex(bytes: Uint8Array): string {
  * `push_gid → (account, group_id)` reverse-index entry. Idempotent.
  * Returns the derived `push_gid` bytes, or `null` when there is no device
  * key (half-reset — the caller bails out of subscribing).
+ *
+ * @param distributed whether the in-group distribution envelope for this
+ *                    secret is already on the wire. `false` on the owner's
+ *                    mint (the broadcast follows); `true` on a receive.
  */
 export async function persistGroupRoutingSecret(
   accountId: string,
   groupIdB64: string,
   secret: Uint8Array,
+  distributed: boolean,
 ): Promise<Uint8Array | null> {
   const deviceKey = await getDeviceKey(accountId);
   if (deviceKey === null) return null;
   const pushGid = await derivePushGid(secret);
   await putGroupRouting(
-    { accountId, groupIdB64, secret, pushGidHex: toHex(pushGid) },
+    { accountId, groupIdB64, secret, pushGidHex: toHex(pushGid), distributed },
     deviceKey,
   );
   return pushGid;
@@ -237,6 +258,11 @@ export function subscribeGroupUnderPushGidBestEffort(
  * through {@link receivePushRoutingSecretGated}, which authorises the
  * envelope against the ADR-0022 role table (owner + admins) first; this
  * remains exported only as that wrapper's apply step.
+ *
+ * Persisted as `distributed: true`: a secret that ARRIVED over the journal
+ * is by definition already on the wire. Only the owner ever (re-)broadcasts,
+ * so a receiver must never be left with a pending flag that no branch here
+ * would act on.
  */
 export async function receivePushRoutingSecret(
   accountId: string,
@@ -247,6 +273,7 @@ export async function receivePushRoutingSecret(
     accountId,
     groupIdB64,
     secret,
+    true,
   );
   if (pushGid === null) return;
   subscribeGroupUnderPushGidBestEffort(accountId, groupIdB64);
@@ -487,24 +514,60 @@ export async function receivePushRoutingSecretGated(
 const provisioning = new Map<string, Promise<void>>();
 
 /**
+ * Send the distribution envelope for a secret and, ONLY once the broadcast
+ * resolves, record it as distributed. Never throws — a failure leaves the
+ * flag `false`, which is precisely what makes the next provisioning pass
+ * retry it.
+ *
+ * The envelope is recomposed from the secret on every attempt, so nothing
+ * about the wire bytes needs to be spooled between attempts.
+ */
+async function broadcastAndMarkDistributed(
+  accountId: string,
+  groupIdB64: string,
+  secret: Uint8Array,
+  broadcast: (envelopeBytes: Uint8Array) => Promise<void>,
+): Promise<void> {
+  try {
+    await broadcast(await composeSecretEnvelope(secret));
+    await markGroupRoutingDistributed(accountId, groupIdB64);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn("push-routing secret broadcast failed", err);
+  }
+}
+
+/**
  * Ensure a group's push routing is provisioned for this device.
  *
  *   - If the local client is the OWNER (ADR-0022) and no secret is held
  *     yet: mint + persist + broadcast the distribution envelope (via
  *     `broadcast`, which posts an E2EE MLS application message to the
- *     group journal).
+ *     group journal) + record the broadcast as confirmed.
+ *   - If the local client is the OWNER and holds a secret whose envelope
+ *     was never confirmed on the wire: RE-BROADCAST it (recomposed from the
+ *     stored secret) and record the confirmation. Without this branch a
+ *     single failed broadcast is permanent — the secret is durable, so the
+ *     mint branch never fires again, and every other member defers forever,
+ *     i.e. the whole group silently loses push.
  *   - Then subscribe under `push_gid` if the secret is held (owner just
  *     minted it; a member may already hold one from a prior receive),
  *     else defer.
  *
+ * The re-broadcast is safe by construction: it carries the byte-identical
+ * secret, which {@link routingSecretVerdict} accepts from ANY sender as
+ * `accept-identical`, so every member (and any concurrent redistribute)
+ * treats it as an idempotent no-op.
+ *
  * This single funnel serves BOTH the create path (owner opens the freshly
  * founded group) AND the legacy-sweep (owner opens / rehydrates an
- * un-provisioned group). Non-owners never mint here — they only subscribe
- * if they already hold a secret; otherwise they wait for the receive path.
+ * un-provisioned group). Non-owners never mint or broadcast here — they only
+ * subscribe if they already hold a secret; otherwise they wait for the
+ * receive path.
  *
  * @param broadcast posts the distribution-envelope bytes to the group
  *                  journal as an E2EE MLS application message (persist-
- *                  before-publish). Only invoked on the owner-mint branch.
+ *                  before-publish). Only invoked on the owner branches.
  */
 export function ensureGroupPushRouting(
   accountId: string,
@@ -530,23 +593,57 @@ export function ensureGroupPushRouting(
       isOwner = false;
     }
 
-    if (isOwner && !(await hasGroupRoutingSecret(accountId, groupIdB64))) {
-      const secret = mintPushRoutingSecret();
-      const pushGid = await persistGroupRoutingSecret(
-        accountId,
-        groupIdB64,
-        secret,
-      );
-      if (pushGid !== null) {
-        // Distribute to founding members over the E2EE journal. Best-effort
-        // beyond the persist — a broadcast failure retries on the next
-        // launch / add-member; the local secret + reverse index are already
-        // durable.
+    if (isOwner) {
+      const state = await getGroupRoutingState(accountId, groupIdB64);
+      if (state === "absent") {
+        const secret = mintPushRoutingSecret();
+        // Persist BEFORE broadcasting — minting twice (two divergent random
+        // secrets) is worse than broadcasting twice (byte-identical, hence
+        // idempotent). The `distributed: false` flag is what makes the
+        // ordering recoverable: a broadcast failure below is retried by the
+        // `pending` branch on the NEXT provisioning pass (chat-open or the
+        // launch legacy-sweep), so the group is never stranded.
+        const pushGid = await persistGroupRoutingSecret(
+          accountId,
+          groupIdB64,
+          secret,
+          false,
+        );
+        if (pushGid !== null) {
+          // Distribute to founding members over the E2EE journal.
+          await broadcastAndMarkDistributed(
+            accountId,
+            groupIdB64,
+            secret,
+            broadcast,
+          );
+        }
+      } else if (state === "pending") {
+        // A previous pass minted + persisted but its broadcast never landed.
+        // The envelope is recomputable from the stored secret, so re-send it
+        // — no outbox of wire bytes is needed, only this flag.
+        let secret: Uint8Array | null = null;
         try {
-          await broadcast(await composeSecretEnvelope(secret));
+          const deviceKey = await getDeviceKey(accountId);
+          secret =
+            deviceKey === null
+              ? null
+              : await getGroupRoutingSecret(accountId, groupIdB64, deviceKey);
         } catch (err) {
+          // Half-reset or an undecryptable row — nothing to re-broadcast.
           // eslint-disable-next-line no-console
-          console.warn("push-routing secret broadcast failed", err);
+          console.warn(
+            "push-routing secret unreadable, re-broadcast skipped",
+            err,
+          );
+        }
+        if (secret !== null) {
+          await broadcastAndMarkDistributed(
+            accountId,
+            groupIdB64,
+            secret,
+            broadcast,
+          );
         }
       }
     }
@@ -573,6 +670,11 @@ export function ensureGroupPushRouting(
  * too; the receive gate accepts it because the new member holds no secret
  * (`accept-admin-seed`) while every existing member sees the byte-identical
  * value (`accept-identical`).
+ *
+ * A successful send is the same confirmation the owner's own broadcast
+ * gives, so it clears a pending `distributed` flag too — an add-member that
+ * happens to follow a failed mint-broadcast repairs it here rather than
+ * waiting for the next provisioning pass.
  */
 export async function redistributeSecretToGroup(
   accountId: string,
@@ -585,4 +687,5 @@ export async function redistributeSecretToGroup(
   const secret = await getGroupRoutingSecret(accountId, groupIdB64, deviceKey);
   if (secret === null) return;
   await broadcast(await composeSecretEnvelope(secret));
+  await markGroupRoutingDistributed(accountId, groupIdB64);
 }

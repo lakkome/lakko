@@ -37,8 +37,12 @@ import type {
 
 // In-memory backing shared by the store mock (hoisted so the vi.mock factory
 // can close over it). The vi.fn's read/write these maps.
+// `distributed` mirrors the real store's row field: a key ABSENT from the
+// map models a legacy row written before the flag existed, which the store
+// reads as `distributed` (never `pending`).
 const h = vi.hoisted(() => ({
   secrets: new Map<string, Uint8Array>(),
+  distributed: new Map<string, boolean>(),
   routes: new Map<string, { accountId: string; groupIdB64: string }>(),
 }));
 
@@ -50,10 +54,15 @@ vi.mock("./group-routing-store", () => ({
         groupIdB64: string;
         secret: Uint8Array;
         pushGidHex: string;
+        distributed: boolean;
       },
       _deviceKey: unknown,
     ) => {
       h.secrets.set(`${args.accountId}\0${args.groupIdB64}`, args.secret);
+      h.distributed.set(
+        `${args.accountId}\0${args.groupIdB64}`,
+        args.distributed,
+      );
       h.routes.set(args.pushGidHex, {
         accountId: args.accountId,
         groupIdB64: args.groupIdB64,
@@ -64,8 +73,20 @@ vi.mock("./group-routing-store", () => ({
     async (accountId: string, groupIdB64: string, _dk: unknown) =>
       h.secrets.get(`${accountId}\0${groupIdB64}`) ?? null,
   ),
-  hasGroupRoutingSecret: vi.fn(async (accountId: string, groupIdB64: string) =>
-    h.secrets.has(`${accountId}\0${groupIdB64}`),
+  getGroupRoutingState: vi.fn(
+    async (accountId: string, groupIdB64: string) => {
+      const k = `${accountId}\0${groupIdB64}`;
+      if (!h.secrets.has(k)) return "absent";
+      // Legacy row (no flag recorded) reads as distributed, exactly like the
+      // real store's `row.distributed === false ? "pending" : "distributed"`.
+      return h.distributed.get(k) === false ? "pending" : "distributed";
+    },
+  ),
+  markGroupRoutingDistributed: vi.fn(
+    async (accountId: string, groupIdB64: string) => {
+      const k = `${accountId}\0${groupIdB64}`;
+      if (h.secrets.has(k)) h.distributed.set(k, true);
+    },
   ),
 }));
 
@@ -206,6 +227,7 @@ beforeAll(async () => {
 
 beforeEach(() => {
   h.secrets.clear();
+  h.distributed.clear();
   h.routes.clear();
   subscribeGroup.mockClear();
   vi.mocked(putGroupRouting).mockClear();
@@ -318,6 +340,145 @@ describe("group-routing orchestration (ADR-0042)", () => {
     expect(await tryDecodeSecretEnvelope(chat)).toBeNull();
     // Right length, wrong first byte.
     expect(await tryDecodeSecretEnvelope(new Uint8Array(62).fill(0x7b))).toBeNull();
+  });
+});
+
+describe("distribution durability — a failed broadcast must not strand the group", () => {
+  const ACCT = "acctDur";
+  const GROUP_ID = new Uint8Array([3, 1, 4, 1, 5, 9]);
+  const GRP_B64 = base64Encode(GROUP_ID);
+
+  /** A broadcast sink that records every attempt and can be armed to fail. */
+  function recordingBroadcast(): {
+    sent: Uint8Array[];
+    failNext: (n: number) => void;
+    fn: (b: Uint8Array) => Promise<void>;
+  } {
+    const sent: Uint8Array[] = [];
+    let failures = 0;
+    return {
+      sent,
+      failNext: (n: number): void => {
+        failures = n;
+      },
+      fn: async (b: Uint8Array): Promise<void> => {
+        sent.push(b);
+        if (failures > 0) {
+          failures -= 1;
+          throw new Error("DS unreachable");
+        }
+      },
+    };
+  }
+
+  it("a failed broadcast leaves the secret PENDING and the NEXT provision re-broadcasts it", async () => {
+    const group = mockGroup(GROUP_ID, wasm.Role.Owner);
+    const b = recordingBroadcast();
+    b.failNext(1);
+
+    // Pass 1 — mint + persist succeed, the broadcast throws. The failure is
+    // swallowed (push is best-effort) but must NOT be forgotten.
+    await ensureGroupPushRouting(ACCT, group, DUMMY_IDENTITY, b.fn);
+
+    expect(vi.mocked(putGroupRouting)).toHaveBeenCalledTimes(1);
+    const minted = vi.mocked(putGroupRouting).mock.calls[0]![0].secret;
+    // Persisted as NOT distributed — this is what makes it recoverable.
+    expect(vi.mocked(putGroupRouting).mock.calls[0]![0].distributed).toBe(false);
+    expect(h.distributed.get(`${ACCT}\0${GRP_B64}`)).toBe(false);
+    expect(b.sent.length).toBe(1);
+
+    // Pass 2 (a later launch / chat-open) — re-broadcasts the SAME secret,
+    // recomputed from the store. No second mint: a fresh random secret would
+    // diverge from the one already persisted + subscribed under.
+    await ensureGroupPushRouting(ACCT, group, DUMMY_IDENTITY, b.fn);
+
+    expect(vi.mocked(putGroupRouting)).toHaveBeenCalledTimes(1);
+    expect(b.sent.length).toBe(2);
+    expect(Array.from(wasm.decodePushRoutingSecret(b.sent[1]!))).toEqual(
+      Array.from(minted),
+    );
+    // Confirmed on the wire this time -> flagged distributed.
+    expect(h.distributed.get(`${ACCT}\0${GRP_B64}`)).toBe(true);
+
+    // Pass 3 — now that it is distributed, nothing more is sent.
+    await ensureGroupPushRouting(ACCT, group, DUMMY_IDENTITY, b.fn);
+    expect(b.sent.length).toBe(2);
+  });
+
+  it("keeps retrying while the broadcast keeps failing (not a one-shot repair)", async () => {
+    const group = mockGroup(GROUP_ID, wasm.Role.Owner);
+    const b = recordingBroadcast();
+    b.failNext(3);
+
+    await ensureGroupPushRouting(ACCT, group, DUMMY_IDENTITY, b.fn);
+    await ensureGroupPushRouting(ACCT, group, DUMMY_IDENTITY, b.fn);
+    await ensureGroupPushRouting(ACCT, group, DUMMY_IDENTITY, b.fn);
+
+    expect(b.sent.length).toBe(3);
+    expect(h.distributed.get(`${ACCT}\0${GRP_B64}`)).toBe(false);
+    // Still exactly one secret ever minted.
+    expect(vi.mocked(putGroupRouting)).toHaveBeenCalledTimes(1);
+  });
+
+  it("a SUCCESSFUL mint-broadcast is not re-broadcast on the next provision", async () => {
+    const group = mockGroup(GROUP_ID, wasm.Role.Owner);
+    const b = recordingBroadcast();
+
+    await ensureGroupPushRouting(ACCT, group, DUMMY_IDENTITY, b.fn);
+    expect(h.distributed.get(`${ACCT}\0${GRP_B64}`)).toBe(true);
+
+    await ensureGroupPushRouting(ACCT, group, DUMMY_IDENTITY, b.fn);
+    expect(b.sent.length).toBe(1);
+    expect(vi.mocked(putGroupRouting)).toHaveBeenCalledTimes(1);
+  });
+
+  it("a LEGACY row carrying no flag is treated as distributed (no upgrade-day re-broadcast)", async () => {
+    // Seed the secret WITHOUT a `distributed` entry — exactly the on-disk
+    // shape a build predating the flag left behind. Those groups are working
+    // today, so an upgrade must not re-broadcast for every one of them.
+    seedStoredSecret(ACCT, GRP_B64, new Uint8Array(32).fill(0x5a));
+    expect(h.distributed.has(`${ACCT}\0${GRP_B64}`)).toBe(false);
+
+    const group = mockGroup(GROUP_ID, wasm.Role.Owner);
+    const b = recordingBroadcast();
+    await ensureGroupPushRouting(ACCT, group, DUMMY_IDENTITY, b.fn);
+
+    expect(b.sent.length).toBe(0);
+    expect(vi.mocked(putGroupRouting)).not.toHaveBeenCalled();
+  });
+
+  it("a RECEIVED secret is stored distributed (a receiver never re-broadcasts)", async () => {
+    const secret = mintPushRoutingSecret();
+    await receivePushRoutingSecret(ACCT, GRP_B64, secret);
+
+    expect(vi.mocked(putGroupRouting).mock.calls[0]![0].distributed).toBe(true);
+    expect(h.distributed.get(`${ACCT}\0${GRP_B64}`)).toBe(true);
+
+    // Even if this device is (or becomes) the owner, the received secret is
+    // already on the wire — no re-broadcast, no re-mint.
+    const b = recordingBroadcast();
+    await ensureGroupPushRouting(
+      ACCT,
+      mockGroup(GROUP_ID, wasm.Role.Owner),
+      DUMMY_IDENTITY,
+      b.fn,
+    );
+    expect(b.sent.length).toBe(0);
+    expect(vi.mocked(putGroupRouting)).toHaveBeenCalledTimes(1);
+  });
+
+  it("a NON-owner holding a pending-looking hole never broadcasts", async () => {
+    // Only the owner mints or re-broadcasts; a member with no secret defers.
+    const b = recordingBroadcast();
+    await ensureGroupPushRouting(
+      ACCT,
+      mockGroup(GROUP_ID, wasm.Role.Member),
+      DUMMY_IDENTITY,
+      b.fn,
+    );
+    expect(b.sent.length).toBe(0);
+    expect(vi.mocked(putGroupRouting)).not.toHaveBeenCalled();
+    expect(subscribeGroup).not.toHaveBeenCalled();
   });
 });
 

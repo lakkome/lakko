@@ -737,7 +737,13 @@ public class ChatRepository(
         // newly-added member learns it on their next poll (no-op if this
         // device holds no secret; idempotent for existing members). Runs
         // AFTER the add commit so the new member is already in the group.
-        // Fire-and-forget; failures retry on the next add / launch sweep.
+        // Fire-and-forget. A SUCCESS also clears the secret's `distributed`
+        // flag, so this path heals a mint whose own broadcast failed. A
+        // FAILURE here is only retried by the launch / chat-open sweep when
+        // the row is still flagged pending; if the secret was already
+        // distributed, the newly-added member holds nothing until the next
+        // add-member commit fires this again (they defer — never a fallback
+        // to the leaky group_id).
         redistributePushRoutingBestEffort(groupIdHex)
         return addedCommitId
     }
@@ -1816,9 +1822,16 @@ public class ChatRepository(
     /**
      * ADR-0042 — the chat-open provisioning hook (mirror of the web
      * `Chat.tsx` onMount `provisionPushRouting`): re-run the owner-mint +
-     * subscribe funnel for [groupIdHex] each time the thread is opened, so a
-     * broadcast / subscribe that failed earlier in the session retries
-     * without waiting for the next launch sweep. Idempotent + race-safe
+     * subscribe funnel for [groupIdHex] each time the thread is opened.
+     *
+     * The retry it drives is real only because the secret's row carries a
+     * durable `distributed` flag: an owner whose distribution broadcast
+     * failed keeps the row flagged pending, and this call (like the launch
+     * sweep) re-broadcasts the SAME envelope, recomposed from the stored
+     * secret. Before that flag existed the mint guard was permanently
+     * satisfied by the persisted secret, so nothing but an unrelated
+     * add-member `redistribute` could ever repair a failed broadcast — the
+     * group stayed without push indefinitely. Idempotent + race-safe
      * (shared per-group in-flight lock with the bootstrap sweep).
      * Fire-and-forget; best-effort. No-op for an unknown group.
      */

@@ -29,7 +29,13 @@ import org.junit.Test
  *   - the OWNER mints the secret exactly once, persists it, broadcasts the
  *     distribution envelope, and subscribes under the derived `push_gid`
  *     — a second provision is a no-op (no re-mint / re-broadcast);
- *   - a NON-owner never mints;
+ *   - a FAILED broadcast is RECOVERABLE, not terminal: the secret stays
+ *     stored flagged NOT distributed and the next `ensure` re-broadcasts
+ *     it (recomposed from the store, never re-minted) until one lands —
+ *     while a legacy row carrying no flag is read as already distributed,
+ *     so an upgrade does not re-broadcast every working group;
+ *   - a NON-owner never mints, and never broadcasts even holding a
+ *     pending row;
  *   - a member that receives the envelope persists + subscribes under the
  *     SAME `push_gid` a golden derivation would give (structural golden-
  *     equality: publisher + subscriber both route through `derivePushGid`);
@@ -64,13 +70,23 @@ class GroupPushRoutingTest {
      * FakePorts sharing this transform derive the SAME push_gid from the
      * SAME secret, which is the structural golden-equality property.
      */
-    private class FakePorts(private val accountIdB64: String) : PushRoutingPorts {
+    private open class FakePorts(private val accountIdB64: String) : PushRoutingPorts {
         var mintCount = 0
         var broadcastCount = 0
         val secrets = mutableMapOf<String, ByteArray>()
+
+        /** The durable `distributed` flag, per group — mirrors the
+         *  `PushRoutingSecretStore` row column. A group present in
+         *  [secrets] but absent here is a row written by an older build
+         *  (no flag suffix), which the real store reads as `true`. */
+        val distributed = mutableMapOf<String, Boolean>()
         val routes = mutableMapOf<String, Route>()
         var lastSubscribeTarget: ByteArray? = null
         var subscribeCount = 0
+        val broadcastEnvelopes = mutableListOf<ByteArray>()
+
+        /** When true, [broadcast] throws — the offline / DS-error case. */
+        var broadcastFails = false
 
         /** A distinct, fixed secret so mint output is assertable. */
         override fun mintSecret(): ByteArray {
@@ -88,9 +104,23 @@ class GroupPushRoutingTest {
 
         override fun getSecret(groupIdHex: String): ByteArray? = secrets[groupIdHex]
 
-        override fun persist(groupIdHex: String, secret: ByteArray, pushGid: ByteArray) {
+        // Absent flag == a legacy row == already distributed, exactly as
+        // `PushRoutingSecretStore.parseValue` reads a suffix-less value.
+        override fun isDistributed(groupIdHex: String): Boolean = distributed[groupIdHex] ?: true
+
+        override fun persist(
+            groupIdHex: String,
+            secret: ByteArray,
+            pushGid: ByteArray,
+            distributed: Boolean,
+        ) {
             secrets[groupIdHex] = secret
+            this.distributed[groupIdHex] = distributed
             routes[hex(pushGid)] = Route(accountIdB64, groupIdHex)
+        }
+
+        override fun markDistributed(groupIdHex: String) {
+            if (secrets.containsKey(groupIdHex)) distributed[groupIdHex] = true
         }
 
         override suspend fun subscribeUnderPushGid(pushGid: ByteArray) {
@@ -99,7 +129,9 @@ class GroupPushRoutingTest {
         }
 
         override suspend fun broadcast(envelope: ByteArray) {
+            if (broadcastFails) throw IllegalStateException("DS unreachable")
             broadcastCount++
+            broadcastEnvelopes.add(envelope)
         }
     }
 
@@ -153,6 +185,232 @@ class GroupPushRoutingTest {
         assertEquals("no mint for a non-owner", 0, ports.mintCount)
         assertEquals("no broadcast for a non-owner", 0, ports.broadcastCount)
         assertEquals("deferred — no subscribe under group_id", 0, ports.subscribeCount)
+    }
+
+    // -----------------------------------------------------------------
+    // Durable `distributed` flag — the failed-broadcast recovery path
+    //
+    // The guard used to be exactly `isOwner && !hasSecret`, with the
+    // secret persisted BEFORE the broadcast and the broadcast's failure
+    // swallowed. So an owner that minted while offline stored the secret,
+    // permanently satisfied its own mint guard, and NEVER re-sent the
+    // distribution envelope — every other member deferred forever and the
+    // whole group silently lost push for good (only an unrelated
+    // add-member `redistribute` could accidentally repair it).
+    //
+    // Persist-before-broadcast stays (a second random mint would DIVERGE
+    // the group's push_gid; a second broadcast is inert); the durable flag
+    // is what turns the failure from terminal into recoverable.
+    // -----------------------------------------------------------------
+
+    @Test
+    fun `a FAILED broadcast stores the secret but leaves it NOT distributed`() = runTest {
+        val ports = FakePorts(account)
+        val g = "20".repeat(32)
+        ports.broadcastFails = true
+
+        GroupPushRouting.ensure(account, g, isOwner = true, ports = ports)
+
+        assertEquals("minted once", 1, ports.mintCount)
+        assertTrue("secret persisted despite the failed broadcast", ports.secrets[g] != null)
+        assertEquals("nothing reached the wire", 0, ports.broadcastCount)
+        assertFalse("row is flagged pending", ports.isDistributed(g))
+        // The local half still works — this device subscribes under its
+        // own push_gid; it is the OTHER members that are missing the secret.
+        assertEquals(1, ports.subscribeCount)
+    }
+
+    @Test
+    fun `the NEXT ensure RE-BROADCASTS a pending secret without re-minting`() = runTest {
+        val ports = FakePorts(account)
+        val g = "21".repeat(32)
+
+        // 1. Mint while the broadcast fails.
+        ports.broadcastFails = true
+        GroupPushRouting.ensure(account, g, isOwner = true, ports = ports)
+        val minted = ports.secrets[g]!!
+        assertEquals(0, ports.broadcastCount)
+
+        // 2. Next launch / chat-open, connectivity restored.
+        ports.broadcastFails = false
+        GroupPushRouting.ensure(account, g, isOwner = true, ports = ports)
+
+        assertEquals("NEVER re-minted (a second mint would diverge push_gid)", 1, ports.mintCount)
+        assertEquals("the pending envelope was re-sent", 1, ports.broadcastCount)
+        assertArrayEquals("same secret, recomposed from the store", minted, ports.secrets[g])
+        assertArrayEquals(
+            "the envelope is the one composed from the STORED secret",
+            ports.composeEnvelope(minted),
+            ports.broadcastEnvelopes.single(),
+        )
+        assertTrue("flagged distributed on success", ports.isDistributed(g))
+    }
+
+    @Test
+    fun `a re-broadcast keeps retrying until one actually lands`() = runTest {
+        val ports = FakePorts(account)
+        val g = "22".repeat(32)
+        ports.broadcastFails = true
+
+        repeat(4) { GroupPushRouting.ensure(account, g, isOwner = true, ports = ports) }
+        assertEquals("still minted exactly once", 1, ports.mintCount)
+        assertEquals(0, ports.broadcastCount)
+        assertFalse(ports.isDistributed(g))
+
+        ports.broadcastFails = false
+        GroupPushRouting.ensure(account, g, isOwner = true, ports = ports)
+        assertEquals(1, ports.broadcastCount)
+        assertTrue(ports.isDistributed(g))
+    }
+
+    @Test
+    fun `a SUCCESSFUL mint does not re-broadcast on the next ensure`() = runTest {
+        val ports = FakePorts(account)
+        val g = "23".repeat(32)
+
+        GroupPushRouting.ensure(account, g, isOwner = true, ports = ports)
+        assertEquals(1, ports.broadcastCount)
+        assertTrue("flagged distributed by the successful broadcast", ports.isDistributed(g))
+
+        // Re-provisioning (bootstrap sweep + every chat-open) must stay a
+        // no-op — the flag is what stops this becoming a broadcast storm.
+        repeat(3) { GroupPushRouting.ensure(account, g, isOwner = true, ports = ports) }
+        assertEquals("broadcast exactly once in total", 1, ports.broadcastCount)
+        assertEquals(1, ports.mintCount)
+    }
+
+    @Test
+    fun `a LEGACY row with no flag is treated as distributed (no upgrade broadcast storm)`() =
+        runTest {
+            val ports = FakePorts(account)
+            val g = "24".repeat(32)
+            // A row written by an older build: a secret with NO flag entry,
+            // exactly what `PushRoutingSecretStore.parseValue` sees for a
+            // value carrying no ':' suffix.
+            ports.secrets[g] = secretA
+
+            GroupPushRouting.ensure(account, g, isOwner = true, ports = ports)
+
+            assertEquals("no re-mint", 0, ports.mintCount)
+            assertEquals(
+                "a working legacy group must NOT be re-broadcast on upgrade",
+                0,
+                ports.broadcastCount,
+            )
+            assertEquals("still subscribes under its push_gid", 1, ports.subscribeCount)
+        }
+
+    @Test
+    fun `a RECEIVED secret is stored distributed (a receiver never re-broadcasts)`() = runTest {
+        val ports = FakePorts(account)
+        val g = "25".repeat(32)
+
+        GroupPushRouting.receive(g, secretA, ports)
+        assertTrue("arrived off the journal, so it is by definition on the wire", ports.isDistributed(g))
+
+        // Even if this device were the owner, there is nothing pending.
+        GroupPushRouting.ensure(account, g, isOwner = true, ports = ports)
+        assertEquals(0, ports.broadcastCount)
+        assertEquals(0, ports.mintCount)
+    }
+
+    @Test
+    fun `a NON-owner holding a pending row still never broadcasts`() = runTest {
+        val ports = FakePorts(account)
+        val g = "26".repeat(32)
+        ports.secrets[g] = secretA
+        ports.distributed[g] = false
+
+        GroupPushRouting.ensure(account, g, isOwner = false, ports = ports)
+
+        // Only the owner distributes — the re-broadcast branch must not
+        // become a back door around that.
+        assertEquals(0, ports.broadcastCount)
+        assertEquals(0, ports.mintCount)
+        assertEquals("still subscribes under its held secret", 1, ports.subscribeCount)
+    }
+
+    @Test
+    fun `redistribute marks the row distributed (heals a mint whose broadcast failed)`() = runTest {
+        val ports = FakePorts(account)
+        val g = "27".repeat(32)
+        ports.broadcastFails = true
+        GroupPushRouting.ensure(account, g, isOwner = true, ports = ports)
+        assertFalse(ports.isDistributed(g))
+
+        // An add-member commit fires `redistribute`; that send IS the
+        // envelope `ensure` would have re-sent, so it clears the flag too.
+        ports.broadcastFails = false
+        GroupPushRouting.redistribute(g, ports)
+        assertTrue(ports.isDistributed(g))
+
+        GroupPushRouting.ensure(account, g, isOwner = true, ports = ports)
+        assertEquals("no duplicate re-broadcast after the heal", 1, ports.broadcastCount)
+    }
+
+    @Test
+    fun `a failing redistribute leaves the row pending for ensure to retry`() = runTest {
+        val ports = FakePorts(account)
+        val g = "28".repeat(32)
+        ports.broadcastFails = true
+        GroupPushRouting.ensure(account, g, isOwner = true, ports = ports)
+
+        // `redistribute` propagates (its caller is best-effort) and must
+        // NOT mark a send that never happened.
+        runCatching { GroupPushRouting.redistribute(g, ports) }
+        assertFalse(ports.isDistributed(g))
+
+        ports.broadcastFails = false
+        GroupPushRouting.ensure(account, g, isOwner = true, ports = ports)
+        assertEquals(1, ports.broadcastCount)
+        assertTrue(ports.isDistributed(g))
+    }
+
+    /** [PushRoutingPorts] whose flag read always throws (an unreadable
+     *  keystore), delegating everything else. */
+    private class FlakyFlag(inner: FakePorts) : PushRoutingPorts by inner {
+        override fun isDistributed(groupIdHex: String): Boolean =
+            throw IllegalStateException("keystore unavailable")
+    }
+
+    @Test
+    fun `an UNREADABLE distributed flag re-broadcasts rather than assuming distributed`() =
+        runTest {
+            val inner = FakePorts(account)
+            val g = "29".repeat(32)
+            inner.secrets[g] = secretA
+            inner.distributed[g] = true
+
+            GroupPushRouting.ensure(account, g, isOwner = true, ports = FlakyFlag(inner))
+
+            // A needless re-broadcast is inert (byte-identical bytes are
+            // idempotently accepted by every member); guessing "distributed"
+            // would resurrect the permanent-no-push bug.
+            assertEquals(1, inner.broadcastCount)
+            assertEquals("still never re-mints", 0, inner.mintCount)
+        }
+
+    @Test
+    fun `the pure decideEnsureAction covers the whole matrix`() {
+        fun decide(isOwner: Boolean, hasSecret: Boolean, distributed: Boolean) =
+            GroupPushRouting.decideEnsureAction(isOwner, hasSecret, distributed)
+
+        val none = GroupPushRouting.EnsureAction.NONE
+        val mint = GroupPushRouting.EnsureAction.MINT_AND_BROADCAST
+        val rebroadcast = GroupPushRouting.EnsureAction.REBROADCAST
+
+        // Owner: mint when nothing is held, re-broadcast when the held
+        // secret never made it to the wire, otherwise idle.
+        assertEquals(mint, decide(isOwner = true, hasSecret = false, distributed = false))
+        assertEquals(mint, decide(isOwner = true, hasSecret = false, distributed = true))
+        assertEquals(rebroadcast, decide(isOwner = true, hasSecret = true, distributed = false))
+        assertEquals(none, decide(isOwner = true, hasSecret = true, distributed = true))
+
+        // A non-owner never mints and never broadcasts, whatever it holds.
+        assertEquals(none, decide(isOwner = false, hasSecret = false, distributed = false))
+        assertEquals(none, decide(isOwner = false, hasSecret = false, distributed = true))
+        assertEquals(none, decide(isOwner = false, hasSecret = true, distributed = false))
+        assertEquals(none, decide(isOwner = false, hasSecret = true, distributed = true))
     }
 
     // -----------------------------------------------------------------
