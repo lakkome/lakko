@@ -602,11 +602,23 @@ final class PushGroupRoutingTests: XCTestCase {
             "a settled row must not be re-broadcast after a successful redistribute")
     }
 
-    /// ADR-0022 lets an ADMIN add a member too, so a NON-owner reaches
-    /// `redistribute` and can therefore mark its own row pending. That must
-    /// stay inert: only the owner's branch of `ensureProvisioned`
-    /// re-broadcasts, so a non-owner never starts broadcasting off the flag.
-    func testNonOwnerPendingRowNeverReBroadcasts() async throws {
+    /// **The other half of the retry hole.** ADR-0022 lets an ADMIN add a
+    /// member too, so a NON-owner reaches `redistribute` and marks its OWN row
+    /// pending when that broadcast fails. Gating the re-broadcast branch on
+    /// `ownRole == .owner` made that flag inert — and nothing else would ever
+    /// repair it, because the owner's row is still settled and the owner never
+    /// learns the admin's broadcast failed. The newly-added member would get no
+    /// push, permanently.
+    ///
+    /// So the retry branch is open to any secret HOLDER. That grants no new
+    /// authority: it re-sends the exact stored bytes, and the ADR-0042 receive
+    /// gate accepts a byte-identical secret from ANY sender *before* consulting
+    /// authority — a member could always have replayed an identical envelope.
+    /// Only the MINT stays owner-only (see
+    /// ``testNonOwnerMemberWithoutSecretNeitherMintsNorBroadcasts``), because
+    /// that is where the random value is CHOSEN and two mints would diverge the
+    /// group's `push_gid`.
+    func testNonOwnerPendingRowIsReBroadcast() async throws {
         let store = makeStore()
         let spy = SubscribeSpy()
         let routing = makeRouting(store: store, spy: spy)
@@ -616,6 +628,11 @@ final class PushGroupRoutingTests: XCTestCase {
         let memberIdentity = try makeIdentity(0x3F)
         let (group, groupIdHex, ownerLeaf, _) = try makeTwoMemberGroup(
             owner: ownerIdentity, member: memberIdentity)
+        // Sanity: this device really is NOT the ADR-0022 owner, so the branch
+        // under test is genuinely the non-owner one.
+        XCTAssertFalse(
+            try group.ownRole(identity: memberIdentity) == Role.owner,
+            "this device must not be the ADR-0022 owner for this test to mean anything")
 
         // This device is the non-owner MEMBER; it received the secret over the
         // journal, so its row is stored settled.
@@ -636,19 +653,84 @@ final class PushGroupRoutingTests: XCTestCase {
             store.getRecord(accountIdB64: "acctMember", groupIdHex: groupIdHex)?.distributed,
             false, "the failed redistribute un-settled this device's row")
 
-        // The next provision on a NON-owner must not broadcast anything: the
-        // re-broadcast branch is gated on `ownRole == .owner`.
+        // The next provision (relaunch / chat re-open) RETRIES on this
+        // non-owner device — the whole point: nobody else is watching this row.
+        broadcaster.shouldFail = false
         await routing.ensureProvisioned(
             accountIdB64: "acctMember", groupIdHex: groupIdHex, group: group,
             identity: memberIdentity, broadcast: { try broadcaster.send($0) })
         XCTAssertEqual(
-            broadcaster.envelopes.count, 1,
-            "a non-owner must never broadcast, pending row or not")
-        // It still subscribes under the secret it holds.
+            broadcaster.envelopes.count, 2,
+            "a pending row must be re-broadcast by ANY holder, owner or not — "
+                + "an owner-only retry strands the member the admin just added")
+        // `first`/`last` rather than subscripts: a regression that skips the
+        // retry leaves ONE envelope, and an out-of-range subscript would kill
+        // the whole test process instead of reporting the count assertion above.
         XCTAssertEqual(
-            spy.targets,
-            [try XCTUnwrap(PushGroupRouting.derivePushGid(secret: secret)),
-             try XCTUnwrap(PushGroupRouting.derivePushGid(secret: secret))])
+            broadcaster.envelopes.first, broadcaster.envelopes.last,
+            "the retry carries the SAME secret — re-sending identical bytes is "
+                + "what makes it authority-free (the receive gate accepts it "
+                + "from anyone); a fresh mint would diverge the routing id")
+        XCTAssertEqual(
+            store.getRecord(accountIdB64: "acctMember", groupIdHex: groupIdHex)?.distributed,
+            true, "the landed retry settles the row")
+        XCTAssertEqual(
+            store.getSecret(accountIdB64: "acctMember", groupIdHex: groupIdHex), secret,
+            "the retry must not disturb the secret")
+
+        // ... and a further provision is silent (the retry loop terminates).
+        await routing.ensureProvisioned(
+            accountIdB64: "acctMember", groupIdHex: groupIdHex, group: group,
+            identity: memberIdentity, broadcast: { try broadcaster.send($0) })
+        XCTAssertEqual(broadcaster.envelopes.count, 2)
+
+        // It subscribed under the secret it holds on each provision.
+        let pushGid = try XCTUnwrap(PushGroupRouting.derivePushGid(secret: secret))
+        XCTAssertEqual(spy.targets, [pushGid, pushGid, pushGid])
+    }
+
+    /// The half of the split guard that did NOT move: a non-owner MEMBER of a
+    /// real group that holds NO secret still never mints and never broadcasts.
+    /// The mint is where the 32 RANDOM bytes are chosen, so a second minter
+    /// would diverge the group's `push_gid` and break routing for everyone —
+    /// that branch stays owner-only. Such a member simply defers push until the
+    /// distribution envelope arrives.
+    ///
+    /// (``testNonOwnerNeverMints`` pins the same for an identity that is not in
+    /// the roster at all; this one pins it for a genuine member, which is the
+    /// case the split guard actually has to keep straight.)
+    func testNonOwnerMemberWithoutSecretNeitherMintsNorBroadcasts() async throws {
+        let store = makeStore()
+        let spy = SubscribeSpy()
+        let routing = makeRouting(store: store, spy: spy)
+        let recorder = BroadcastRecorder()
+
+        let ownerIdentity = try makeIdentity(0x4A)
+        let memberIdentity = try makeIdentity(0x4B)
+        let (group, groupIdHex, _, _) = try makeTwoMemberGroup(
+            owner: ownerIdentity, member: memberIdentity)
+        XCTAssertFalse(
+            try group.ownRole(identity: memberIdentity) == Role.owner,
+            "this device must not be the ADR-0022 owner for this test to mean anything")
+
+        await routing.ensureProvisioned(
+            accountIdB64: "acctMember", groupIdHex: groupIdHex, group: group,
+            identity: memberIdentity, broadcast: { bytes in recorder.record(bytes) })
+
+        XCTAssertTrue(
+            recorder.envelopes.isEmpty,
+            "a non-owner member holding no secret must never mint or broadcast")
+        XCTAssertFalse(
+            store.hasSecret(accountIdB64: "acctMember", groupIdHex: groupIdHex),
+            "nothing may be persisted — a second mint would diverge the push_gid")
+        XCTAssertTrue(spy.targets.isEmpty, "no secret held -> push deferred, never group_id")
+
+        // Repeat provisions stay silent (no drift into minting on a later open).
+        await routing.ensureProvisioned(
+            accountIdB64: "acctMember", groupIdHex: groupIdHex, group: group,
+            identity: memberIdentity, broadcast: { bytes in recorder.record(bytes) })
+        XCTAssertTrue(recorder.envelopes.isEmpty)
+        XCTAssertFalse(store.hasSecret(accountIdB64: "acctMember", groupIdHex: groupIdHex))
     }
 
     /// `markPending` mirrors `markDistributed`: a no-op on an absent record,

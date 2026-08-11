@@ -239,10 +239,14 @@ public final class PushRoutingStore {
     /// member) that fails on a row the mint broadcast already settled would
     /// otherwise leave the flag `true` — no sweep would ever re-send, and
     /// that new member would defer push forever. Flipping the row back to
-    /// pending puts it in the owner's
+    /// pending puts it in **this device's**
     /// ``PushGroupRouting/ensureProvisioned(accountIdB64:groupIdHex:group:identity:broadcast:)``
     /// re-broadcast branch, which retries on every launch / chat-open until
-    /// it lands. The retry is byte-identical, so the ADR-0042 receive gate
+    /// it lands. That branch is open to any secret HOLDER rather than the
+    /// owner alone, because ADR-0022 lets an ADMIN add a member: the admin
+    /// runs the failing redistribute, so the pending row is the ADMIN's while
+    /// the owner's stays settled, and an owner-only retry would never fire.
+    /// The retry is byte-identical, so the ADR-0042 receive gate
     /// reads it as an idempotent no-op re-persist for every member that
     /// already holds it, and as the seed the new member needs.
     ///

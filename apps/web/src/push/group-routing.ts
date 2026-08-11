@@ -90,6 +90,30 @@
  * bug, scoped to one member. So a failed send flips the row back to pending
  * and the re-broadcast branch below repairs it.
  *
+ * ## MINT is owner-only; RE-BROADCAST needs no authority at all
+ *
+ * The retry has to be reachable from whichever device's send failed, and
+ * ADR-0022 lets an ADMIN commit an add-member — so an admin's redistribute
+ * can be the new member's only source of the secret. Gating the retry on
+ * ownership would leave exactly that case unrepaired: the admin's row goes
+ * pending, the admin never re-sends, the owner's row still reads
+ * `distributed` so the owner never learns, and the newly-added member never
+ * gets push.
+ *
+ * So the two branches of {@link ensureGroupPushRouting} carry DIFFERENT
+ * authority requirements:
+ *
+ *   - **mint** (state `absent`) stays OWNER-ONLY. The secret is 32 random
+ *     bytes; two independent mints diverge the group's `push_gid` and break
+ *     the notify JOIN. That is the whole reason the owner-mints rule exists.
+ *   - **re-broadcast** (state `pending`, i.e. this device already HOLDS a
+ *     secret) is open to ANY holder — owner, admin, or plain member. It
+ *     re-sends the exact stored bytes, which {@link routingSecretVerdict}
+ *     resolves as `accept-identical` for ANY sender, before authority is even
+ *     consulted. No new secret is ever generated on that path, so it cannot
+ *     introduce divergence, and it grants nobody a new capability: a member
+ *     could already replay a byte-identical envelope and have it accepted.
+ *
  * ## Concurrency
  *
  * Provisioning can be triggered from two places in the same session — the
@@ -270,9 +294,9 @@ export function subscribeGroupUnderPushGidBestEffort(
  * remains exported only as that wrapper's apply step.
  *
  * Persisted as `distributed: true`: a secret that ARRIVED over the journal
- * is by definition already on the wire. Only the owner ever (re-)broadcasts,
- * so a receiver must never be left with a pending flag that no branch here
- * would act on.
+ * is by definition already on the wire, so a receiver has nothing to confirm.
+ * Storing it pending would make every receiver re-broadcast a value the whole
+ * group already has, on the very next provisioning pass.
  */
 export async function receivePushRoutingSecret(
   accountId: string,
@@ -550,34 +574,42 @@ async function broadcastAndMarkDistributed(
 /**
  * Ensure a group's push routing is provisioned for this device.
  *
- *   - If the local client is the OWNER (ADR-0022) and no secret is held
- *     yet: mint + persist + broadcast the distribution envelope (via
- *     `broadcast`, which posts an E2EE MLS application message to the
- *     group journal) + record the broadcast as confirmed.
- *   - If the local client is the OWNER and holds a secret whose envelope
- *     was never confirmed on the wire: RE-BROADCAST it (recomposed from the
- *     stored secret) and record the confirmation. Without this branch a
- *     single failed broadcast is permanent — the secret is durable, so the
- *     mint branch never fires again, and every other member defers forever,
- *     i.e. the whole group silently loses push.
+ *   - **Mint (OWNER ONLY).** If the local client is the ADR-0022 OWNER and
+ *     no secret is held yet: mint + persist + broadcast the distribution
+ *     envelope (via `broadcast`, which posts an E2EE MLS application message
+ *     to the group journal) + record the broadcast as confirmed. Owner-only
+ *     because the secret is 32 RANDOM bytes — a second minter would diverge
+ *     the group's `push_gid`. A non-owner holding no secret never mints; it
+ *     waits for the receive path.
+ *   - **Re-broadcast (ANY HOLDER).** If this device holds a secret whose
+ *     envelope was never confirmed on the wire: RE-BROADCAST it (recomposed
+ *     from the stored secret) and record the confirmation. Without this
+ *     branch a single failed send is permanent — the secret is durable, so
+ *     the mint branch never fires again, and every other member defers
+ *     forever, i.e. the group silently loses push.
  *   - Then subscribe under `push_gid` if the secret is held (owner just
  *     minted it; a member may already hold one from a prior receive),
  *     else defer.
  *
- * The re-broadcast is safe by construction: it carries the byte-identical
- * secret, which {@link routingSecretVerdict} accepts from ANY sender as
- * `accept-identical`, so every member (and any concurrent redistribute)
- * treats it as an idempotent no-op.
+ * The re-broadcast deliberately carries NO role check, and that is not a
+ * relaxation of the ADR-0042 gate: it sends the byte-identical secret this
+ * device already holds, which {@link routingSecretVerdict} resolves as
+ * `accept-identical` for ANY sender BEFORE any authority is consulted. It
+ * generates no new secret, so it cannot introduce divergence, and it confers
+ * no new capability — a member could already replay an identical envelope and
+ * have it accepted. Restricting it to the owner instead LOSES the
+ * admin-performed add (ADR-0022 lets an admin commit an add-member, so that
+ * admin's failed redistribute is the new member's only lost source of the
+ * secret, and only that admin's own row records the failure).
  *
  * This single funnel serves BOTH the create path (owner opens the freshly
- * founded group) AND the legacy-sweep (owner opens / rehydrates an
- * un-provisioned group). Non-owners never mint or broadcast here — they only
- * subscribe if they already hold a secret; otherwise they wait for the
- * receive path.
+ * founded group) AND the legacy-sweep (any member opens / rehydrates a group
+ * whose last send is unconfirmed).
  *
  * @param broadcast posts the distribution-envelope bytes to the group
  *                  journal as an E2EE MLS application message (persist-
- *                  before-publish). Only invoked on the owner branches.
+ *                  before-publish). Invoked on the owner's mint branch and on
+ *                  ANY holder's re-broadcast branch.
  */
 export function ensureGroupPushRouting(
   accountId: string,
@@ -603,9 +635,13 @@ export function ensureGroupPushRouting(
       isOwner = false;
     }
 
-    if (isOwner) {
-      const state = await getGroupRoutingState(accountId, groupIdB64);
-      if (state === "absent") {
+    const state = await getGroupRoutingState(accountId, groupIdB64);
+
+    if (state === "absent") {
+      // MINT — OWNER ONLY. The secret is 32 random bytes, so a second minter
+      // would diverge the group's `push_gid` and break the notify JOIN. This
+      // is the branch the owner-only rule actually protects.
+      if (isOwner) {
         const secret = mintPushRoutingSecret();
         // Persist BEFORE broadcasting — minting twice (two divergent random
         // secrets) is worse than broadcasting twice (byte-identical, hence
@@ -628,33 +664,44 @@ export function ensureGroupPushRouting(
             broadcast,
           );
         }
-      } else if (state === "pending") {
-        // A previous pass minted + persisted but its broadcast never landed.
-        // The envelope is recomputable from the stored secret, so re-send it
-        // — no outbox of wire bytes is needed, only this flag.
-        let secret: Uint8Array | null = null;
-        try {
-          const deviceKey = await getDeviceKey(accountId);
-          secret =
-            deviceKey === null
-              ? null
-              : await getGroupRoutingSecret(accountId, groupIdB64, deviceKey);
-        } catch (err) {
-          // Half-reset or an undecryptable row — nothing to re-broadcast.
-          // eslint-disable-next-line no-console
-          console.warn(
-            "push-routing secret unreadable, re-broadcast skipped",
-            err,
-          );
-        }
-        if (secret !== null) {
-          await broadcastAndMarkDistributed(
-            accountId,
-            groupIdB64,
-            secret,
-            broadcast,
-          );
-        }
+      }
+    } else if (state === "pending") {
+      // RE-BROADCAST — ANY HOLDER, no role check. A previous send from THIS
+      // device (the owner's mint broadcast, or an admin's / any member's
+      // redistribute) never landed. The envelope is recomputable from the
+      // stored secret, so re-send it — no outbox of wire bytes is needed,
+      // only this flag.
+      //
+      // No authority is required because nothing changes: the bytes are
+      // byte-identical to what is already held, which `routingSecretVerdict`
+      // resolves as `accept-identical` for ANY sender BEFORE it consults the
+      // role table. Gating this on ownership would strand the admin-add case
+      // — ADR-0022 lets an admin commit the add, so that admin's redistribute
+      // is the new member's only source of the secret; if only the owner
+      // could retry, the admin's pending flag would be inert and the owner's
+      // row (still `distributed`) would never signal a retry.
+      let secret: Uint8Array | null = null;
+      try {
+        const deviceKey = await getDeviceKey(accountId);
+        secret =
+          deviceKey === null
+            ? null
+            : await getGroupRoutingSecret(accountId, groupIdB64, deviceKey);
+      } catch (err) {
+        // Half-reset or an undecryptable row — nothing to re-broadcast.
+        // eslint-disable-next-line no-console
+        console.warn(
+          "push-routing secret unreadable, re-broadcast skipped",
+          err,
+        );
+      }
+      if (secret !== null) {
+        await broadcastAndMarkDistributed(
+          accountId,
+          groupIdB64,
+          secret,
+          broadcast,
+        );
       }
     }
 
@@ -697,10 +744,13 @@ export function ensureGroupPushRouting(
  * (idempotent) while the new member finally gets it; the cost is at most one
  * extra control message per failed redistribute.
  *
- * Only the OWNER's branch in {@link ensureGroupPushRouting} re-broadcasts. An
- * admin (ADR-0022 lets admins commit an add too) marking its own row pending
- * is therefore inert — nothing else reads the state — but harmless, and it is
- * the correct record of "this device's last send did not land".
+ * The retry lands on THIS device, whatever its role: the re-broadcast branch
+ * in {@link ensureGroupPushRouting} is open to any secret HOLDER, because
+ * re-sending a byte-identical secret needs no authority. That is what makes
+ * the mark meaningful for an admin (ADR-0022 lets admins commit an add too) —
+ * the admin's own row is the only place the failure is recorded, since the
+ * owner's row still reads `distributed` and the owner has no way to learn
+ * that someone else's redistribute failed.
  *
  * Rejects with the broadcast's error after marking, so the caller still logs
  * the failure exactly as before.

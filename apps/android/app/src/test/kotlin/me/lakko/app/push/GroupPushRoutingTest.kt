@@ -38,9 +38,17 @@ import org.junit.Test
  *     REWINDS it to pending — otherwise a group whose mint landed stays
  *     flagged distributed and the newly-added member (the only one
  *     missing the secret) defers push forever; a successful one leaves it
- *     distributed, and the rewind never makes a non-owner broadcast;
- *   - a NON-owner never mints, and never broadcasts even holding a
- *     pending row;
+ *     distributed;
+ *   - the re-send is NOT owner-gated, and that is the other half of the
+ *     same hole: ADR-0022 lets an ADMIN add members, so the device whose
+ *     `redistribute` failed is often not the owner, and an owner-only
+ *     retry would leave its rewound flag inert while the owner (row still
+ *     distributed) had no reason to act. So ANY holder re-sends a pending
+ *     row — safe because it re-sends byte-identical bytes, which the
+ *     receive gate accepts from any sender before rank is consulted;
+ *   - but a NON-owner holding NOTHING still never mints and never
+ *     broadcasts — rank still gates the MINT, since two independent mints
+ *     of 32 random bytes would diverge the group's `push_gid`;
  *   - a member that receives the envelope persists + subscribes under the
  *     SAME `push_gid` a golden derivation would give (structural golden-
  *     equality: publisher + subscriber both route through `derivePushGid`);
@@ -330,20 +338,33 @@ class GroupPushRoutingTest {
     }
 
     @Test
-    fun `a NON-owner holding a pending row still never broadcasts`() = runTest {
-        val ports = FakePorts(account)
-        val g = "26".repeat(32)
-        ports.secrets[g] = secretA
-        ports.distributed[g] = false
+    fun `a NON-owner holding a PENDING row DOES re-broadcast it (identical bytes need no rank)`() =
+        runTest {
+            val ports = FakePorts(account)
+            val g = "26".repeat(32)
+            ports.secrets[g] = secretA
+            ports.distributed[g] = false
 
-        GroupPushRouting.ensure(account, g, isOwner = false, ports = ports)
+            GroupPushRouting.ensure(account, g, isOwner = false, ports = ports)
 
-        // Only the owner distributes — the re-broadcast branch must not
-        // become a back door around that.
-        assertEquals(0, ports.broadcastCount)
-        assertEquals(0, ports.mintCount)
-        assertEquals("still subscribes under its held secret", 1, ports.subscribeCount)
-    }
+            // The re-send is the whole point of the pending flag, and it is
+            // NOT owner-gated: the device that failed to send is often an
+            // admin (ADR-0022 lets an admin add members), and it is the only
+            // one whose row records the failure.
+            assertEquals("the pending envelope was re-sent", 1, ports.broadcastCount)
+            assertArrayEquals(
+                "recomposed from the STORED secret, never re-minted",
+                ports.composeEnvelope(secretA),
+                ports.broadcastEnvelopes.single(),
+            )
+            assertEquals("a non-owner still NEVER mints", 0, ports.mintCount)
+            assertTrue("flagged distributed once it landed", ports.isDistributed(g))
+            assertEquals("still subscribes under its held secret", 1, ports.subscribeCount)
+
+            // ... and settles — no broadcast storm on later sweeps.
+            repeat(3) { GroupPushRouting.ensure(account, g, isOwner = false, ports = ports) }
+            assertEquals("exactly one re-send in total", 1, ports.broadcastCount)
+        }
 
     @Test
     fun `redistribute marks the row distributed (heals a mint whose broadcast failed)`() = runTest {
@@ -473,11 +494,11 @@ class GroupPushRoutingTest {
     }
 
     @Test
-    fun `a failed redistribute never turns a NON-owner into a broadcaster`() = runTest {
+    fun `a failed redistribute on a NON-owner (admin) is retried BY THAT DEVICE`() = runTest {
         val ports = FakePorts(account)
         val g = "2d".repeat(32)
         // ADR-0022 lets an ADMIN add members, so a NON-owner reaches
-        // `redistribute` too. Its failure rewinds its OWN row...
+        // `redistribute` too — and its failure rewinds its OWN row.
         ports.secrets[g] = secretA
         ports.distributed[g] = true
 
@@ -485,13 +506,40 @@ class GroupPushRoutingTest {
         runCatching { GroupPushRouting.redistribute(g, ports) }
         assertFalse("its own row is flagged pending", ports.isDistributed(g))
 
-        // ... but a pending flag is INERT on a non-owner: `decideEnsureAction`
-        // returns NONE whatever the flag says, so the rewind can never make a
-        // non-owner start broadcasting.
+        // The other half of the hole: with an owner-only retry that pending
+        // flag was INERT. The owner's row is still flagged distributed and it
+        // never learns the send failed, so nothing anywhere re-sends and the
+        // member the admin just added defers push forever. The rewind has to
+        // be actionable on the device that observed the failure.
         ports.broadcastFails = false
+        GroupPushRouting.ensure(account, g, isOwner = false, ports = ports)
+        assertEquals("the admin re-sent its own pending row", 1, ports.broadcastCount)
+        assertArrayEquals(
+            "byte-identical bytes — accepted by every peer regardless of rank",
+            ports.composeEnvelope(secretA),
+            ports.broadcastEnvelopes.single(),
+        )
+        assertTrue("settled", ports.isDistributed(g))
+        assertEquals("re-sending is not minting — a non-owner still never mints", 0, ports.mintCount)
+
+        // And it settles: the retry runs until one send lands, then stops.
         repeat(3) { GroupPushRouting.ensure(account, g, isOwner = false, ports = ports) }
-        assertEquals("a non-owner still never broadcasts", 0, ports.broadcastCount)
-        assertEquals(0, ports.mintCount)
+        assertEquals("exactly one retry in total", 1, ports.broadcastCount)
+    }
+
+    @Test
+    fun `a NON-owner holding NOTHING still never mints nor broadcasts`() = runTest {
+        val ports = FakePorts(account)
+        val g = "2f".repeat(32)
+        // Rank still gates the MINT: two independent mints of 32 RANDOM
+        // bytes would diverge the group's push_gid and break routing for
+        // everyone. Opening the retry to any holder must not leak into this.
+        repeat(3) { GroupPushRouting.ensure(account, g, isOwner = false, ports = ports) }
+
+        assertEquals("never mints", 0, ports.mintCount)
+        assertEquals("never broadcasts — there is nothing to re-send", 0, ports.broadcastCount)
+        assertTrue("nothing persisted", ports.secrets.isEmpty())
+        assertEquals("deferred — no subscribe under group_id", 0, ports.subscribeCount)
     }
 
     /** [PushRoutingPorts] whose `markPending` throws (an unwritable
@@ -557,11 +605,26 @@ class GroupPushRoutingTest {
         assertEquals(rebroadcast, decide(isOwner = true, hasSecret = true, distributed = false))
         assertEquals(none, decide(isOwner = true, hasSecret = true, distributed = true))
 
-        // A non-owner never mints and never broadcasts, whatever it holds.
+        // A non-owner NEVER mints — rank gates the mint, because two
+        // independent mints of 32 random bytes diverge the group's push_gid.
         assertEquals(none, decide(isOwner = false, hasSecret = false, distributed = false))
         assertEquals(none, decide(isOwner = false, hasSecret = false, distributed = true))
-        assertEquals(none, decide(isOwner = false, hasSecret = true, distributed = false))
+        // ... but a non-owner HOLDER re-sends a pending row. Re-sending
+        // byte-identical bytes needs no authority (the receive gate accepts
+        // them from any sender before rank is consulted), and without this
+        // an admin's failed `redistribute` is never retried by anyone.
+        assertEquals(rebroadcast, decide(isOwner = false, hasSecret = true, distributed = false))
         assertEquals(none, decide(isOwner = false, hasSecret = true, distributed = true))
+
+        // The rank input matters ONLY when nothing is held: once a secret is
+        // in hand, owner and non-owner behave identically.
+        for (distributed in listOf(false, true)) {
+            assertEquals(
+                "holding a secret, rank is irrelevant (distributed=$distributed)",
+                decide(isOwner = true, hasSecret = true, distributed = distributed),
+                decide(isOwner = false, hasSecret = true, distributed = distributed),
+            )
+        }
     }
 
     // -----------------------------------------------------------------

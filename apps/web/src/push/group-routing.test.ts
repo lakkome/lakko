@@ -477,7 +477,8 @@ describe("distribution durability — a failed broadcast must not strand the gro
   });
 
   it("a NON-owner holding a pending-looking hole never broadcasts", async () => {
-    // Only the owner mints or re-broadcasts; a member with no secret defers.
+    // Only the owner MINTS; a member with no secret has nothing to re-send,
+    // so it defers (it never falls back to subscribing under group_id).
     const b = recordingBroadcast();
     await ensureGroupPushRouting(
       ACCT,
@@ -550,24 +551,107 @@ describe("distribution durability — a failed broadcast must not strand the gro
     expect(vi.mocked(putGroupRouting)).toHaveBeenCalledTimes(1);
   });
 
-  it("a NON-owner whose redistribute failed still never broadcasts (the mark is inert there)", async () => {
-    // ADR-0022 lets an ADMIN commit an add, so an admin reaches redistribute.
-    // Marking its own row pending must not turn it into a broadcaster — only
-    // the owner branch re-sends.
-    seedStoredSecret(ACCT, GRP_B64, new Uint8Array(32).fill(0x33));
+  // -- the retry is reachable from ANY holder, not just the owner ----------
+  //
+  // MINT is owner-only (32 random bytes; a second minter diverges the group's
+  // push_gid). RE-BROADCAST needs no authority at all: it re-sends the exact
+  // bytes this device already holds, which `routingSecretVerdict` resolves as
+  // `accept-identical` for ANY sender BEFORE the role table is consulted.
+  // Gating the retry on ownership strands the admin-add case below.
+
+  it("a NON-owner (ADMIN) whose redistribute failed DOES re-broadcast on the next provision", async () => {
+    // ADR-0022 lets an ADMIN commit an add, so an admin reaches redistribute —
+    // and for a member added by that admin, the admin's redistribute is the
+    // new member's ONLY source of the secret. If only the owner could retry:
+    // the admin's row goes pending but the admin never re-sends, the owner's
+    // row still reads `distributed` so the owner never learns, and the newly
+    // added member gets no push, permanently.
+    const held = new Uint8Array(32).fill(0x33);
+    seedStoredSecret(ACCT, GRP_B64, held);
     h.distributed.set(`${ACCT}\0${GRP_B64}`, true);
-    const nonOwner = mockGroup(GROUP_ID, wasm.Role.Admin);
+    const admin = mockGroup(GROUP_ID, wasm.Role.Admin);
     const b = recordingBroadcast();
 
     b.failNext(1);
-    await expect(
-      redistributeSecretToGroup(ACCT, nonOwner, b.fn),
-    ).rejects.toThrow("DS unreachable");
+    await expect(redistributeSecretToGroup(ACCT, admin, b.fn)).rejects.toThrow(
+      "DS unreachable",
+    );
     expect(h.distributed.get(`${ACCT}\0${GRP_B64}`)).toBe(false);
 
-    await ensureGroupPushRouting(ACCT, nonOwner, DUMMY_IDENTITY, b.fn);
-    // Only the one failed redistribute attempt — no owner-style re-broadcast.
+    // Next launch / chat-open: the admin repairs ITS OWN failed send.
+    await ensureGroupPushRouting(ACCT, admin, DUMMY_IDENTITY, b.fn);
+    expect(b.sent.length).toBe(2);
+    expect(Array.from(wasm.decodePushRoutingSecret(b.sent[1]!))).toEqual(
+      Array.from(held),
+    );
+    expect(h.distributed.get(`${ACCT}\0${GRP_B64}`)).toBe(true);
+    // Never a mint: the retry re-sends the HELD bytes and generates nothing,
+    // so a non-owner retry cannot diverge the group's push_gid.
+    expect(vi.mocked(putGroupRouting)).not.toHaveBeenCalled();
+
+    // Settled again — no further traffic.
+    await ensureGroupPushRouting(ACCT, admin, DUMMY_IDENTITY, b.fn);
+    expect(b.sent.length).toBe(2);
+  });
+
+  it("a PLAIN MEMBER holding a pending row re-broadcasts too (identical bytes need no authority)", async () => {
+    const held = new Uint8Array(32).fill(0x44);
+    seedStoredSecret(ACCT, GRP_B64, held);
+    h.distributed.set(`${ACCT}\0${GRP_B64}`, false);
+    const member = mockGroup(GROUP_ID, wasm.Role.Member);
+    const b = recordingBroadcast();
+
+    await ensureGroupPushRouting(ACCT, member, DUMMY_IDENTITY, b.fn);
+
     expect(b.sent.length).toBe(1);
+    expect(Array.from(wasm.decodePushRoutingSecret(b.sent[0]!))).toEqual(
+      Array.from(held),
+    );
+    expect(h.distributed.get(`${ACCT}\0${GRP_B64}`)).toBe(true);
+    expect(vi.mocked(putGroupRouting)).not.toHaveBeenCalled();
+  });
+
+  it("a NON-owner with NO secret still never mints and never broadcasts (mint gate untouched)", async () => {
+    // The half that stays owner-only. Neither an admin nor a plain member may
+    // create a secret — that is what would diverge the group's push_gid.
+    const b = recordingBroadcast();
+
+    await ensureGroupPushRouting(
+      ACCT,
+      mockGroup(GROUP_ID, wasm.Role.Admin),
+      DUMMY_IDENTITY,
+      b.fn,
+    );
+    await ensureGroupPushRouting(
+      ACCT,
+      mockGroup(GROUP_ID, wasm.Role.Member),
+      DUMMY_IDENTITY,
+      b.fn,
+    );
+
+    expect(b.sent.length).toBe(0);
+    expect(vi.mocked(putGroupRouting)).not.toHaveBeenCalled();
+    expect(h.secrets.has(`${ACCT}\0${GRP_B64}`)).toBe(false);
+    expect(subscribeGroup).not.toHaveBeenCalled();
+  });
+
+  it("a non-owner keeps retrying while the re-broadcast keeps failing", async () => {
+    const held = new Uint8Array(32).fill(0x55);
+    seedStoredSecret(ACCT, GRP_B64, held);
+    h.distributed.set(`${ACCT}\0${GRP_B64}`, false);
+    const member = mockGroup(GROUP_ID, wasm.Role.Member);
+    const b = recordingBroadcast();
+    b.failNext(2);
+
+    await ensureGroupPushRouting(ACCT, member, DUMMY_IDENTITY, b.fn);
+    await ensureGroupPushRouting(ACCT, member, DUMMY_IDENTITY, b.fn);
+    expect(b.sent.length).toBe(2);
+    expect(h.distributed.get(`${ACCT}\0${GRP_B64}`)).toBe(false);
+
+    // Third attempt lands.
+    await ensureGroupPushRouting(ACCT, member, DUMMY_IDENTITY, b.fn);
+    expect(b.sent.length).toBe(3);
+    expect(h.distributed.get(`${ACCT}\0${GRP_B64}`)).toBe(true);
     expect(vi.mocked(putGroupRouting)).not.toHaveBeenCalled();
   });
 });

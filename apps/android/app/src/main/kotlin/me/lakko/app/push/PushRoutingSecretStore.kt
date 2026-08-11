@@ -112,8 +112,10 @@ public object PushRoutingSecretStore {
      * its in-group distribution envelope has been confirmed on the
      * wire.
      *
-     * @property distributed `false` means the owner minted + persisted
-     *   this secret but the broadcast has NOT yet succeeded, so
+     * @property distributed `false` means a send of this secret's
+     *   distribution envelope has NOT been confirmed on the wire — the
+     *   owner minted + persisted it and the broadcast failed, or a
+     *   post-add-member re-send failed on ANY holder's device — so
      *   [me.lakko.app.push.GroupPushRouting.ensure] must re-broadcast
      *   it (recomposing the envelope from [secret]). A legacy row
      *   written before the flag existed reads as `true`.
@@ -215,9 +217,17 @@ public object PushRoutingSecretStore {
 
     /**
      * Flip the held row's flag back to `distributed = false` — called
-     * when a distribution broadcast FAILED, so the owner's next
+     * when a distribution broadcast FAILED, so THIS device's next
      * [me.lakko.app.push.GroupPushRouting.ensure] re-sends the envelope.
      * The exact inverse of [markDistributed].
+     *
+     * "This device" is deliberate, and is why the rewind is worth
+     * anything: ADR-0022 lets an ADMIN add members, so the device that
+     * observed the failure is often not the owner, and
+     * [me.lakko.app.push.GroupPushRouting.decideEnsureAction] therefore
+     * arms the re-send for ANY holder. Re-sending a secret already held
+     * needs no rank (the receive gate accepts byte-identical bytes from
+     * any sender); only minting does.
      *
      * The caller is [me.lakko.app.push.GroupPushRouting.redistribute]:
      * the mint's own failure already leaves the row pending, but a failed

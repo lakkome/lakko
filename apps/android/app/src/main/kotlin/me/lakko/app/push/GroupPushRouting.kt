@@ -43,6 +43,16 @@ import uniffi.lakko_ffi_uniffi.derivePushGid as ffiDerivePushGid
  * mint DID land stays flagged distributed and the newly-added member
  * — the only one missing the secret — defers push permanently.
  *
+ * Note the RETRY is not owner-gated, only the MINT is. ADR-0022 lets an
+ * ADMIN add members, so the device whose [redistribute] failed — and
+ * whose row therefore holds the only record of it — is frequently not
+ * the owner; an owner-only retry would leave that flag inert and the
+ * new member unreachable. Re-sending a secret the device ALREADY HOLDS
+ * requires no authority, because the receive gate accepts byte-identical
+ * bytes from any sender before rank is consulted. Only the mint needs
+ * rank, since two independent mints of 32 random bytes would diverge the
+ * group's `push_gid`.
+ *
  * On the RECEIVE side that mint authority is mirrored by a rank gate
  * ([decideAcceptReceivedSecret]): the owner may always rotate, an
  * ADR-0022 admin may only SEED a device that holds nothing (so a member
@@ -98,18 +108,19 @@ public object GroupPushRouting {
      *  ([decideEnsureAction]). Subscription is decided separately and
      *  always runs — see [subscribeOrDefer]. */
     public enum class EnsureAction {
-        /** Nothing to provision: a non-owner, or an owner whose secret is
-         *  both held and confirmed distributed. */
+        /** Nothing to provision: a holder whose secret is confirmed
+         *  distributed, or a NON-owner holding nothing at all (it must
+         *  wait for the envelope — it may never mint). */
         NONE,
 
         /** Owner, no secret held: mint + persist (flagged NOT distributed)
-         *  + broadcast. */
+         *  + broadcast. The one branch that still requires owner rank. */
         MINT_AND_BROADCAST,
 
-        /** Owner, secret held but its distribution was never confirmed:
-         *  recompose the envelope from the STORED secret and broadcast it
-         *  again. Never re-mints — a second random mint would diverge the
-         *  group's `push_gid`. */
+        /** ANY holder — owner or not — whose secret's distribution was
+         *  never confirmed: recompose the envelope from the STORED secret
+         *  and broadcast it again. Never re-mints — a second random mint
+         *  would diverge the group's `push_gid`. */
         REBROADCAST,
     }
 
@@ -142,8 +153,38 @@ public object GroupPushRouting {
      * from any sender, so it is idempotent for every member regardless of
      * rank or of what they already hold.
      *
-     * @param isOwner is this device the ADR-0022 group owner? Only the
-     *   owner ever mints or broadcasts here.
+     * ## Why the retry branch is NOT owner-gated
+     *
+     * The retry used to be, and that left the second half of the same hole
+     * open. ADR-0022 lets an ADMIN add members, and [redistribute] fires
+     * after ANY add-member commit — so: an admin adds a member, the
+     * admin's re-send fails, the admin's row rewinds to pending, and with
+     * an owner-only retry that pending flag is INERT. The owner's own row
+     * is still flagged distributed and it never learns anything went
+     * wrong, so nothing ever re-sends and the newly-added member defers
+     * push forever. The rewind would fix nothing on the one device that
+     * actually observed the failure.
+     *
+     * Re-broadcasting needs no authority, and that is not a concession —
+     * it falls straight out of the receive gate. [decideAcceptReceivedSecret]
+     * accepts a byte-identical secret from ANY sender, checked BEFORE any
+     * authority is consulted, precisely because identical bytes rotate
+     * nothing. So [REBROADCAST] — which re-sends the exact stored bytes,
+     * never re-composed from anything new — is accepted by every peer
+     * whatever the sender's rank, and grants no capability a member did
+     * not already have (it could always replay an identical envelope off
+     * the journal and be accepted).
+     *
+     * Owner rank is required for the MINT alone, and for a hard reason:
+     * the secret is 32 RANDOM bytes, so two independent mints DIVERGE the
+     * group's `push_gid` and break routing for everyone. Re-sending a
+     * secret the device already holds cannot diverge anything. Hence the
+     * split below: [MINT_AND_BROADCAST] keeps its owner gate, [REBROADCAST]
+     * is open to any holder, and a non-owner holding NOTHING still does
+     * nothing at all (it may never mint — it waits for the envelope).
+     *
+     * @param isOwner is this device the ADR-0022 group owner? Gates the
+     *   MINT only — a non-owner may still re-send a secret it holds.
      * @param hasSecret does this device hold a `push_routing_secret` for
      *   the group?
      * @param distributed has the held secret's distribution envelope been
@@ -155,8 +196,11 @@ public object GroupPushRouting {
         hasSecret: Boolean,
         distributed: Boolean,
     ): EnsureAction = when {
-        !isOwner -> EnsureAction.NONE
-        !hasSecret -> EnsureAction.MINT_AND_BROADCAST
+        // Holding nothing: only the owner may mint. Everyone else waits
+        // for the distribution envelope — never mints, never broadcasts.
+        !hasSecret -> if (isOwner) EnsureAction.MINT_AND_BROADCAST else EnsureAction.NONE
+        // Holding a secret whose send was never confirmed: re-send it,
+        // whatever this device's rank. Identical bytes need no authority.
         !distributed -> EnsureAction.REBROADCAST
         else -> EnsureAction.NONE
     }
@@ -420,20 +464,27 @@ public object GroupPushRouting {
      *   - ADR-0022 OWNER holding no secret yet: mint (32 CSPRNG bytes)
      *     + persist (flagged NOT distributed) + broadcast the
      *     distribution envelope, flagging it distributed ON SUCCESS.
-     *   - OWNER holding a secret whose broadcast was never confirmed:
-     *     **re-broadcast** it — the envelope is recomposed from the
-     *     STORED secret, so nothing is re-minted. This is the recovery
-     *     path for a mint whose broadcast failed (offline / DS error);
-     *     without it that group never learns its secret and loses push
-     *     permanently. See [decideEnsureAction].
+     *     Minting is the ONLY owner-gated branch.
+     *   - ANY holder — owner or not — whose secret's broadcast was never
+     *     confirmed: **re-broadcast** it — the envelope is recomposed
+     *     from the STORED secret, so nothing is re-minted. This is the
+     *     recovery path both for a mint whose broadcast failed and for a
+     *     failed post-add-member [redistribute] on an ADMIN's device
+     *     (ADR-0022 lets an admin add members); without it the group —
+     *     or, in the admin case, just the newly-added member — never
+     *     learns the secret and loses push permanently. Re-sending
+     *     identical bytes needs no authority, so it is safe on any
+     *     device. See [decideEnsureAction].
+     *   - A NON-owner holding NOTHING does nothing: it never mints, and
+     *     simply waits for the distribution envelope.
      *   - Then subscribe under `push_gid` if the secret is held
      *     (owner just minted it; a member may already hold one from a
      *     prior receive), else defer.
      *
      * The single funnel for BOTH the create / join path AND the
-     * bootstrap legacy-sweep. Non-owners never mint NOR broadcast here.
-     * A per-`(account, group)` in-flight lock coalesces concurrent
-     * callers so the random secret is minted exactly once.
+     * bootstrap legacy-sweep. A per-`(account, group)` in-flight lock
+     * coalesces concurrent callers so the random secret is minted
+     * exactly once.
      */
     public suspend fun ensure(
         accountIdB64: String,
@@ -443,21 +494,28 @@ public object GroupPushRouting {
     ) {
         val mutex = inflight.getOrPut(lockKey(accountIdB64, groupIdHex)) { Mutex() }
         mutex.withLock {
-            // A non-owner neither mints nor broadcasts, so its store is
-            // not even read here.
-            val action = if (!isOwner) {
-                EnsureAction.NONE
-            } else {
-                val hasSecret = ports.hasSecret(groupIdHex)
-                // An unreadable flag is treated as NOT distributed: a
-                // needless re-broadcast is inert (byte-identical, so
-                // every member idempotently accepts it), whereas
-                // guessing "distributed" would resurrect the
-                // permanent-no-push bug.
-                val distributed = !hasSecret ||
-                    runCatching { ports.isDistributed(groupIdHex) }.getOrDefault(false)
-                decideEnsureAction(isOwner = true, hasSecret = hasSecret, distributed = distributed)
-            }
+            // The rank check no longer short-circuits ahead of the store:
+            // a NON-owner can hold a pending row (its own post-add-member
+            // `redistribute` failed and rewound it), and that row is only
+            // ever re-sent if it is actually looked at. `isOwner` is now
+            // just one input to the decision.
+            val hasSecret = ports.hasSecret(groupIdHex)
+            // The flag read is still skipped when nothing is held — which
+            // is exactly the common non-owner NONE case (a member awaiting
+            // the envelope), so the cheap membership check remains the
+            // only store touch on that path.
+            //
+            // An unreadable flag is treated as NOT distributed: a needless
+            // re-broadcast is inert (byte-identical, so every member
+            // idempotently accepts it), whereas guessing "distributed"
+            // would resurrect the permanent-no-push bug.
+            val distributed = !hasSecret ||
+                runCatching { ports.isDistributed(groupIdHex) }.getOrDefault(false)
+            val action = decideEnsureAction(
+                isOwner = isOwner,
+                hasSecret = hasSecret,
+                distributed = distributed,
+            )
 
             when (action) {
                 EnsureAction.MINT_AND_BROADCAST -> {
@@ -549,11 +607,16 @@ public object GroupPushRouting {
      * failure is what the caller must see, and re-flagging is a
      * best-effort repair, not a correctness gate.
      *
-     * Note only the OWNER acts on a pending flag: [decideEnsureAction]
-     * returns [EnsureAction.NONE] for a non-owner regardless of the flag.
-     * An ADMIN may also reach this path (ADR-0022 lets an admin add
-     * members), and its pending mark is simply inert on its own device —
-     * marking pending can never turn a non-owner into a broadcaster.
+     * The rewind lands on the device that actually observed the failure,
+     * and that device is often NOT the owner: ADR-0022 lets an ADMIN add
+     * members, so an admin reaches this path too. That is exactly why
+     * [decideEnsureAction] arms [EnsureAction.REBROADCAST] for ANY holder
+     * rather than the owner alone — an owner-gated retry would leave the
+     * admin's pending flag inert while the owner's row (still flagged
+     * distributed) gave it no reason to act, and the newly-added member
+     * would never learn the secret. Re-sending the identical stored bytes
+     * needs no authority (the receive gate accepts them from any sender
+     * before rank is consulted), so the retry is safe wherever it fires.
      *
      * A throw propagates to the caller (which is best-effort).
      */
@@ -625,9 +688,10 @@ public interface PushRoutingPorts {
     public fun markDistributed(groupIdHex: String)
 
     /** Durably flag `groupIdHex`'s row NOT distributed — the inverse of
-     *  [markDistributed], called when a broadcast FAILED so the owner's
-     *  next [GroupPushRouting.ensure] re-sends it. No-op when no row is
-     *  held or it is already pending. */
+     *  [markDistributed], called when a broadcast FAILED so THIS device's
+     *  next [GroupPushRouting.ensure] re-sends it (the retry is not
+     *  owner-gated — see [GroupPushRouting.decideEnsureAction]). No-op
+     *  when no row is held or it is already pending. */
     public fun markPending(groupIdHex: String)
 
     /** Subscribe this device to push-gw under `pushGid`. */
@@ -635,7 +699,10 @@ public interface PushRoutingPorts {
 
     /** Post the distribution-envelope bytes to the group journal as
      *  an E2EE MLS application message (persist-before-publish,
-     *  fail-closed). Only invoked on the owner-mint branch. */
+     *  fail-closed). Invoked on the owner-mint branch and on the
+     *  re-send branches ([GroupPushRouting.EnsureAction.REBROADCAST] /
+     *  [GroupPushRouting.redistribute]), which any HOLDER may run — the
+     *  bytes are identical, so they need no rank. */
     public suspend fun broadcast(envelope: ByteArray)
 }
 
