@@ -3012,15 +3012,21 @@ for legacy groups (or an explicit UI state) is unbuilt.
 
 #### Two loose ends found during the arc
 
-- **Nothing reads the web `?wake=` deep-link parameter.** The service worker builds
-  `/?wake=<hex>` on notification tap (`apps/web/public/sw.js:660`) and its comment
-  says the SPA routes "via its own deep-link reader (set in 1.18g)" — but **no
-  reader exists**: `wake=` appears nowhere in `apps/web/src` outside a test fixture.
-  A web notification tap has therefore **never** opened the target chat; it lands on
-  the app shell. The SW comment is stale. (ADR-0042 correctly threads the reverse-
-  resolved real `group_id` hex into `tapGroupHex`, so the fix is a missing SPA
-  reader, not a routing-id problem. The Android tap deep-link **does** work —
-  `7da84ee` wired its reverse-resolve.)
+- **~~Nothing reads the web `?wake=` deep-link parameter.~~ CLOSED.** The service
+  worker built `/?wake=<hex>` on notification tap and its comment claimed the SPA
+  routed "via its own deep-link reader (set in 1.18g)" — but **no reader existed**,
+  so a web notification tap had **never** opened the target chat; it landed on the
+  app shell. (The routing id itself was fine: ADR-0042 threads the reverse-resolved
+  real `group_id` hex into `tapGroupHex`.) Now closed by
+  `apps/web/src/push/{wake-target.ts,WakeNavigator.tsx}`: the cold-open `?wake=`
+  param and a new `LAKKO_NOTIFICATION_TAP` message (the already-open case had no
+  usable click-time signal at all — the SW only called `focus()`) feed one reader
+  that navigates once the session **and** identity secrets are restored, holding
+  the target across the login bounce. It only ever navigates to a group already in
+  the in-memory registry — an attacker-supplied `?wake=` can never make it fetch,
+  subscribe, or create anything — and a malformed / unknown / still-opaque
+  `push_gid` value is dropped silently. The stale SW comment is corrected. The
+  Android tap deep-link already worked (`7da84ee`).
 - **`unsubscribeGroup` is dead code on all three clients** — see Residual 2.
 
 **Status: OPEN (accepted residuals).** Residual 1 is the substantive privacy limit

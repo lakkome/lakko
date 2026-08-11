@@ -28,12 +28,29 @@
  * its own module so swapping a route is a single import change.
  */
 import type { Component } from "solid-js";
-import { Router } from "@solidjs/router";
+import { Router, type RouteSectionProps } from "@solidjs/router";
 import { AuthProvider } from "./auth/AuthContext";
 import { ChatProvider } from "./chat/ChatContext";
 import { DeviceGroupSyncProvider } from "./devices/sync/DeviceGroupSyncContext";
+import { WakeNavigator } from "./push/WakeNavigator";
 import { routes } from "./routes/routes";
 import { SwUpdateBanner } from "./sw/SwUpdateBanner";
+
+/**
+ * Router-level layout (G-36). Renders the active route unchanged and
+ * mounts the push notification-tap reader alongside it.
+ *
+ * The reader has to live INSIDE `<Router>` (it calls `useNavigate`)
+ * but OUTSIDE any individual route, so that a tap captured on a cold
+ * `/?wake=…` open survives the `/` -> `/login` -> `/` bounce a
+ * password re-entry performs. `<Router root>` is exactly that slot.
+ */
+const RootLayout: Component<RouteSectionProps> = (props) => (
+  <>
+    <WakeNavigator />
+    {props.children}
+  </>
+);
 
 /**
  * Provider order rationale:
@@ -54,7 +71,7 @@ const App: Component = () => (
   <ChatProvider>
     <AuthProvider>
       <DeviceGroupSyncProvider>
-        <Router>{routes}</Router>
+        <Router root={RootLayout}>{routes}</Router>
         {/*
          * 1.18f — "new version available" toast. Mounted at
          * the top level so it overlays every route (auth shell

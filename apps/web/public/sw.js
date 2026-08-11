@@ -653,8 +653,11 @@ self.addEventListener("notificationclick", (event) => {
   // Default landing: the app shell. When we know the group, route
   // to the per-chat page so the user lands on the unread thread.
   // The `paths.chat(...)` slug is base64url-no-pad(groupId) — the
-  // SW doesn't have the helper, so we just open the root and let
-  // the SPA route via its own deep-link reader (set in 1.18g).
+  // SW doesn't have that helper (nor the base64url alphabet swap),
+  // so we open the root with the hex in `?wake=` and let the SPA's
+  // deep-link reader (`src/push/WakeNavigator.tsx`) do the
+  // conversion + the navigation. G-36: that reader did not exist
+  // until now, which is why a tap used to land on the shell.
   let url = "/";
   if (tapGroupHex) {
     url = `/?wake=${encodeURIComponent(tapGroupHex)}`;
@@ -662,14 +665,37 @@ self.addEventListener("notificationclick", (event) => {
 
   event.waitUntil(
     (async () => {
-      // If a Lakko tab is already open, focus it (and let the SPA
-      // pull the wake out of the postMessage we already sent).
+      // If a Lakko tab is already open, tell it which chat was tapped
+      // and raise it.
       const clients = await self.clients.matchAll({
         type: "window",
         includeUncontrolled: true,
       });
       for (const c of clients) {
         if (c.url.startsWith(self.location.origin)) {
+          // G-36 — focusing alone tells the tab nothing about WHICH
+          // chat was tapped. The `push`-time `LAKKO_PUSH_WAKE`
+          // broadcast can't stand in for this: it fires on message
+          // ARRIVAL for every open tab (navigating on it would yank a
+          // reading user around), and post-ADR-0042 its `wake.groupHex`
+          // is the OPAQUE `push_gid`, which matches no group. So post
+          // the already-resolved real `group_id` hex, on the TAP only.
+          // `src/push/WakeNavigator.tsx` opens that chat when this
+          // device knows it and ignores it otherwise.
+          //
+          // Posted BEFORE the focus so a `focus()` rejection (some
+          // browsers refuse it without user activation) cannot swallow
+          // the deep link — the tab still routes, it just isn't raised.
+          if (tapGroupHex) {
+            try {
+              c.postMessage({
+                type: "LAKKO_NOTIFICATION_TAP",
+                groupHex: tapGroupHex,
+              });
+            } catch {
+              // The client went away between `matchAll` and here.
+            }
+          }
           await c.focus();
           return;
         }
