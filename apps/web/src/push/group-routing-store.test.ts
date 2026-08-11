@@ -10,7 +10,10 @@
  *      reflects presence without the device key;
  *   2. the plaintext `push_gid → (account, group_id)` REVERSE INDEX
  *      resolves via `lookupPushRoute` — the map the Sprint-4 silent-push
- *      decrypt reverse-resolves — and `clearAllGroupRouting` wipes both;
+ *      decrypt reverse-resolves — `deleteRoute` retires exactly ONE entry
+ *      (ADR-0043: a rotation overwrites the secret in place but only ADDS a
+ *      route row, so the superseded one must be named and dropped), and
+ *      `clearAllGroupRouting` wipes both;
  *   3. the durable `distributed` flag: `getGroupRoutingState` separates
  *      `absent` / `pending` / `distributed`, `markGroupRoutingDistributed`
  *      flips a pending row, `markGroupRoutingPending` flips it BACK (what
@@ -70,6 +73,15 @@ class FakeStore {
     this.tx.enqueue(() => {
       req.result = this.backing.has(key) ? key : undefined;
       req.onsuccess?.();
+    });
+    return req;
+  }
+  delete(key: string): FakeReq<void> {
+    const req = new FakeReq<void>();
+    this.tx.enqueue(() => {
+      // IndexedDB `delete` succeeds on an unknown key — a no-op, not an
+      // error. The real store relies on that (ADR-0043 `deleteRoute`).
+      this.backing.delete(key);
     });
     return req;
   }
@@ -162,6 +174,7 @@ afterEach(() => {
 
 import {
   clearAllGroupRouting,
+  deleteRoute,
   getGroupRoutingSecret,
   getGroupRoutingState,
   hasGroupRoutingSecret,
@@ -246,6 +259,49 @@ describe("group-routing-store — round-trip", () => {
     expect(route?.pushGidHex).toBe(PUSH_GID_HEX);
 
     expect(await lookupPushRoute("deadbeef")).toBeNull();
+  });
+
+  it("deleteRoute retires ONE reverse-index row and leaves the secret intact", async () => {
+    // ADR-0043 — the store surface a rotation needs. The `secrets` row is
+    // overwritten in place, but `routes` is keyed by push_gid, so the
+    // superseded entry has to be named and deleted explicitly or it lives
+    // forever.
+    const deviceKey = await makeDeviceKey();
+    const OTHER_GID_HEX =
+      "ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100";
+    await putGroupRouting(
+      {
+        accountId: ACCT,
+        groupIdB64: GROUP,
+        secret: new Uint8Array(32).fill(9),
+        pushGidHex: PUSH_GID_HEX,
+        distributed: true,
+      },
+      deviceKey,
+    );
+    await putGroupRouting(
+      {
+        accountId: ACCT,
+        groupIdB64: "b3RoZXItZ3JvdXA=",
+        secret: new Uint8Array(32).fill(8),
+        pushGidHex: OTHER_GID_HEX,
+        distributed: true,
+      },
+      deviceKey,
+    );
+
+    await deleteRoute(PUSH_GID_HEX);
+
+    expect(await lookupPushRoute(PUSH_GID_HEX)).toBeNull();
+    // Scoped to the one key: the other group's route survives ...
+    expect(await lookupPushRoute(OTHER_GID_HEX)).not.toBeNull();
+    // ... and no secret is touched, so a delete can never strand a group by
+    // dropping the material a live push_gid is derived from.
+    expect(await hasGroupRoutingSecret(ACCT, GROUP)).toBe(true);
+  });
+
+  it("deleteRoute on an absent row is a no-op", async () => {
+    await expect(deleteRoute("deadbeef")).resolves.toBeUndefined();
   });
 
   it("clearAllGroupRouting wipes secrets + the reverse index", async () => {

@@ -103,9 +103,12 @@ import {
 import { useChats, type ActiveGroup } from "../chat/ChatContext";
 import {
   ensureGroupPushRouting,
+  memberSignatureKeys,
   pushGidForGroup,
   receivePushRoutingSecretGated,
   redistributeSecretToGroup,
+  rotatePushRoutingSecret,
+  rotatePushRoutingSecretIfMembershipShrank,
 } from "../push/group-routing";
 import {
   applyOp,
@@ -1484,6 +1487,14 @@ function ChatView(props: {
     setError(null);
     setBusy(true);
     try {
+      // ADR-0043 — baseline for the membership diff, captured BEFORE the poll
+      // applies any commit. A Commit carries no membership delta out of the
+      // poll loop, so a removal committed by SOMEONE ELSE is inferred from
+      // this snapshot against the post-poll one. This device's OWN removals
+      // never show up here (they were applied locally before this poll, so
+      // the baseline is already post-removal); those rotate directly in
+      // `onRemoveMember`.
+      const membersBeforePoll = memberSignatureKeys(props.entry.group);
       const result = await chat.pollMessages(
         props.requireIdentity(),
         props.entry.group,
@@ -1623,6 +1634,33 @@ function ChatView(props: {
       // 1.18h — bump membersVersion so the members panel's
       // createMemo re-reads the post-poll leaf set.
       setMembersVersion(membersVersion() + 1);
+      // ADR-0043 — someone else's Remove commit just landed? Then the
+      // evicted member still holds this group's push_routing_secret and
+      // push-gw is still waking it. Re-key so nobody ever notifies the id it
+      // can derive again. Driven off an actual before/after member-set
+      // comparison, NOT off `membersVersion` — that counter is bumped
+      // unconditionally after every poll, so it is a "a poll happened" tick,
+      // not a membership signal.
+      //
+      // Owner-or-admin only, no-op on growth, and a no-op on this device's
+      // own removals (their baseline is already post-removal). Fire-and-
+      // forget: a rotation failure must never break the poll loop.
+      {
+        const s = auth.state();
+        if (s.kind === "session") {
+          void rotatePushRoutingSecretIfMembershipShrank({
+            accountId: s.account.accountId,
+            group: props.entry.group,
+            ownRole: ownRole(),
+            previousMemberKeys: membersBeforePoll,
+            currentMemberKeys: memberSignatureKeys(props.entry.group),
+            broadcast: broadcastToGroup,
+          }).catch((err) => {
+            // eslint-disable-next-line no-console
+            console.warn("push-routing rotation failed", err);
+          });
+        }
+      }
     } catch (err) {
       setError(formatError(err));
     } finally {
@@ -2202,6 +2240,35 @@ function ChatView(props: {
         leafIndex,
       );
       chat.markOwnPublishedCommit(result.commitMessageId);
+      // ADR-0043 — rotate the push routing secret, STRICTLY AFTER the Remove
+      // commit above. The distribution envelope is an MLS application
+      // message: sealed before the commit it would be readable by the member
+      // being evicted (they are still in that epoch) and the rotation would
+      // buy nothing. Sealed here it is at the post-removal epoch, which RFC
+      // 9420 forward secrecy denies the removed leaf.
+      //
+      // Owner-or-admin (ADR-0043 ratified option (b)) — the gate lives inside
+      // `rotatePushRoutingSecret`, which also no-ops when this device holds no
+      // secret, so rotation never becomes a second mint path.
+      //
+      // Fire-and-forget: push is best-effort and a failed rotation must not
+      // unwind the removal. A failed BROADCAST leaves the row pending, and
+      // the existing `ensureGroupPushRouting` re-broadcast branch re-sends it
+      // on the next chat-open / launch.
+      {
+        const s = auth.state();
+        if (s.kind === "session") {
+          void rotatePushRoutingSecret(
+            s.account.accountId,
+            props.entry.group,
+            ownRole(),
+            broadcastToGroup,
+          ).catch((err) => {
+            // eslint-disable-next-line no-console
+            console.warn("push-routing rotation failed", err);
+          });
+        }
+      }
       setMemberCount(props.entry.group.memberCount);
       setMembersVersion(membersVersion() + 1);
       setNotice(`Member at leaf #${leafIndex} removed (commit #${result.commitMessageId}).`);

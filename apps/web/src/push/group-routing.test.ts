@@ -96,6 +96,11 @@ vi.mock("./group-routing-store", () => ({
       if (h.secrets.has(k)) h.distributed.set(k, false);
     },
   ),
+  // ADR-0043 — the per-gid reverse-index delete. A no-op on an absent row,
+  // exactly like the real IndexedDB `delete`.
+  deleteRoute: vi.fn(async (pushGidHex: string) => {
+    h.routes.delete(pushGidHex);
+  }),
 }));
 
 // getDeviceKey returns a non-null placeholder — the store is mocked, so the
@@ -112,10 +117,18 @@ const subscribeGroup = vi.fn(
   (_device: Uint8Array, _group: Uint8Array): Promise<{ inserted: boolean }> =>
     Promise.resolve({ inserted: true }),
 );
+/** ADR-0043 — the first real caller of `unsubscribeGroup` (dead code until
+ *  now). Records the group pseudonym so a test can prove the RETIRED gid is
+ *  the one torn down. */
+const unsubscribeGroup = vi.fn(
+  (_device: Uint8Array, _group: Uint8Array): Promise<{ removed: boolean }> =>
+    Promise.resolve({ removed: true }),
+);
 vi.mock("./client", () => ({
   DEFAULT_BASE_URL: "/api/push",
   PushClient: class {
     subscribeGroup = subscribeGroup;
+    unsubscribeGroup = unsubscribeGroup;
   },
 }));
 
@@ -128,16 +141,24 @@ vi.mock("../wasm", async () => {
 import {
   composeSecretEnvelope,
   ensureGroupPushRouting,
+  membershipRotationDecision,
+  memberSignatureKeys,
   mintPushRoutingSecret,
   receivePushRoutingSecret,
   receivePushRoutingSecretGated,
   redistributeSecretToGroup,
+  rotatePushRoutingSecret,
+  rotatePushRoutingSecretIfMembershipShrank,
   routingSecretVerdict,
   subscribeGroupUnderPushGid,
   tryDecodeSecretEnvelope,
   verdictAccepts,
 } from "./group-routing";
-import { getGroupRoutingSecret, putGroupRouting } from "./group-routing-store";
+import {
+  deleteRoute,
+  getGroupRoutingSecret,
+  putGroupRouting,
+} from "./group-routing-store";
 import { base64Encode } from "../auth/account-id";
 
 // ---- helpers -------------------------------------------------------------
@@ -239,7 +260,9 @@ beforeEach(() => {
   h.distributed.clear();
   h.routes.clear();
   subscribeGroup.mockClear();
+  unsubscribeGroup.mockClear();
   vi.mocked(putGroupRouting).mockClear();
+  vi.mocked(deleteRoute).mockClear();
 });
 
 describe("group-routing orchestration (ADR-0042)", () => {
@@ -803,7 +826,12 @@ describe("receive-side role gate (ADR-0042, lakko-security MEDIUM-1)", () => {
     await vi.waitFor(() => expect(subscribeGroup).toHaveBeenCalled());
   });
 
-  it("REJECTS a changed secret from an ADMIN when the device already holds one", async () => {
+  it("ACCEPTS a changed secret from an ADMIN over a held one (ADR-0043 option (b))", async () => {
+    // The ratified widening. ADR-0022 lets an ADMIN commit the Remove that
+    // makes an ADR-0043 rotation necessary; refusing the overwrite left an
+    // admin able to evict a member but unable to retire that member's
+    // routing id, so the eviction completed with the ex-member's wake stream
+    // intact. Reported as `accept-admin-rotate`, distinct from the seed case.
     seedStoredSecret(ACCT, GRP, HELD);
     const group = mockRoleGroup(GROUP_ID, OWNER_PK);
 
@@ -815,13 +843,12 @@ describe("receive-side role gate (ADR-0042, lakko-security MEDIUM-1)", () => {
       ROTATED,
     );
 
-    // An admin may seed a hole, never rotate — only the owner rotates.
-    expect(verdict).toBe("reject-admin-overwrite");
-    expect(vi.mocked(putGroupRouting)).not.toHaveBeenCalled();
-    expect(subscribeGroup).not.toHaveBeenCalled();
+    expect(verdict).toBe("accept-admin-rotate");
+    expect(vi.mocked(putGroupRouting)).toHaveBeenCalledTimes(1);
     expect(Array.from(h.secrets.get(`${ACCT}\0${GRP}`) as Uint8Array)).toEqual(
-      Array.from(HELD),
+      Array.from(ROTATED),
     );
+    await vi.waitFor(() => expect(subscribeGroup).toHaveBeenCalled());
   });
 
   it("ACCEPTS an OWNER rotation over an ADMIN-seeded secret (owner takes priority)", async () => {
@@ -846,7 +873,7 @@ describe("receive-side role gate (ADR-0042, lakko-security MEDIUM-1)", () => {
     );
   });
 
-  it("REJECTS an ADMIN seed when the local store is UNREADABLE (hole unprovable)", async () => {
+  it("an ADMIN write over an UNREADABLE store is reported as a ROTATE, not a seed", async () => {
     const group = mockRoleGroup(GROUP_ID, OWNER_PK);
     vi.mocked(getGroupRoutingSecret).mockRejectedValueOnce(
       new Error("store unreadable"),
@@ -860,10 +887,12 @@ describe("receive-side role gate (ADR-0042, lakko-security MEDIUM-1)", () => {
       ROTATED,
     );
 
-    // `storedSecret === null` here means "unknown", not "provably absent" —
-    // fail-closed rather than let an admin overwrite what we may hold.
-    expect(verdict).toBe("reject-admin-overwrite");
-    expect(vi.mocked(putGroupRouting)).not.toHaveBeenCalled();
+    // `storedSecret === null` here means "unknown", not "provably absent",
+    // so it is NOT a seed. Under ADR-0043 option (b) the admin is authorised
+    // either way, so the distinction only picks the verdict NAME — which
+    // keeps the log honest about what was actually observed.
+    expect(verdict).toBe("accept-admin-rotate");
+    expect(vi.mocked(putGroupRouting)).toHaveBeenCalledTimes(1);
   });
 
   it("an ADMIN key not in the role table's admin set is a plain member", async () => {
@@ -1013,7 +1042,7 @@ describe("routingSecretVerdict (pure decision core)", () => {
     ).toBe("accept-admin-seed");
   });
 
-  it("admin cannot overwrite a held secret", () => {
+  it("admin MAY overwrite a held secret — reported as a rotate (ADR-0043 (b))", () => {
     expect(
       routingSecretVerdict({
         ...base,
@@ -1022,10 +1051,10 @@ describe("routingSecretVerdict (pure decision core)", () => {
         storedSecret: A,
         incomingSecret: B,
       }),
-    ).toBe("reject-admin-overwrite");
+    ).toBe("accept-admin-rotate");
   });
 
-  it("admin cannot seed when the store is unreadable (hole unprovable)", () => {
+  it("an unreadable store makes an admin write a ROTATE, not a seed", () => {
     expect(
       routingSecretVerdict({
         ...base,
@@ -1035,7 +1064,22 @@ describe("routingSecretVerdict (pure decision core)", () => {
         storedSecret: null,
         incomingSecret: B,
       }),
-    ).toBe("reject-admin-overwrite");
+    ).toBe("accept-admin-rotate");
+  });
+
+  it("a plain member is STILL refused, held or not (the tier boundary held)", () => {
+    // The admin widening must not leak downward: only owner + admin write.
+    for (const storedSecret of [A, null]) {
+      expect(
+        routingSecretVerdict({
+          ...base,
+          ownerKey: OWNER_PK,
+          senderKey: new Uint8Array(MEMBER_PK),
+          storedSecret,
+          incomingSecret: B,
+        }),
+      ).toBe("reject-not-authorized");
+    }
   });
 
   it("plain-member change rejected (held or not)", () => {
@@ -1113,10 +1157,531 @@ describe("routingSecretVerdict (pure decision core)", () => {
     expect(verdictAccepts("accept-identical")).toBe(true);
     expect(verdictAccepts("accept-owner")).toBe(true);
     expect(verdictAccepts("accept-admin-seed")).toBe(true);
+    expect(verdictAccepts("accept-admin-rotate")).toBe(true);
     expect(verdictAccepts("accept-no-owner")).toBe(true);
-    expect(verdictAccepts("reject-admin-overwrite")).toBe(false);
     expect(verdictAccepts("reject-not-authorized")).toBe(false);
     expect(verdictAccepts("reject-unverifiable")).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ADR-0043 — rotation on member removal
+// ---------------------------------------------------------------------------
+
+describe("membershipRotationDecision (pure decision core, ADR-0043)", () => {
+  const A = "aa".repeat(32);
+  const B = "bb".repeat(32);
+  const C = "cc".repeat(32);
+
+  it("a SHRINK rotates for the OWNER", () => {
+    expect(
+      membershipRotationDecision({
+        previousMemberKeys: [A, B, C],
+        currentMemberKeys: [A, B],
+        ownRole: "owner",
+      }),
+    ).toBe("rotate");
+  });
+
+  it("a SHRINK rotates for an ADMIN (ADR-0043 ratified option (b))", () => {
+    // ADR-0022 lets an admin commit the Remove, so an admin must be able to
+    // retire the evicted member's routing id — otherwise an admin-performed
+    // eviction completes with the ex-member's wake stream intact.
+    expect(
+      membershipRotationDecision({
+        previousMemberKeys: [A, B, C],
+        currentMemberKeys: [A, B],
+        ownRole: "admin",
+      }),
+    ).toBe("rotate");
+  });
+
+  it("a SHRINK does NOT rotate for a plain member", () => {
+    expect(
+      membershipRotationDecision({
+        previousMemberKeys: [A, B, C],
+        currentMemberKeys: [A, B],
+        ownRole: "member",
+      }),
+    ).toBe("skip-not-authorized");
+  });
+
+  it("a SHRINK does NOT rotate in a group with no role table", () => {
+    // No role table ⇒ no owner ⇒ nobody ever minted a secret for this group,
+    // so there is nothing to rotate; and letting every member rotate would
+    // have them each mint a divergent secret.
+    expect(
+      membershipRotationDecision({
+        previousMemberKeys: [A, B, C],
+        currentMemberKeys: [A, B],
+        ownRole: null,
+      }),
+    ).toBe("skip-not-authorized");
+  });
+
+  it("GROWTH (an add) never rotates", () => {
+    // Rotating on add would buy nothing (the new member is supposed to
+    // route) and churn the id on the commonest membership event.
+    expect(
+      membershipRotationDecision({
+        previousMemberKeys: [A, B],
+        currentMemberKeys: [A, B, C],
+        ownRole: "owner",
+      }),
+    ).toBe("skip-no-shrink");
+  });
+
+  it("an UNCHANGED roster never rotates (an ordinary commit / a bare poll)", () => {
+    expect(
+      membershipRotationDecision({
+        previousMemberKeys: [A, B],
+        currentMemberKeys: [A, B],
+        ownRole: "owner",
+      }),
+    ).toBe("skip-no-shrink");
+  });
+
+  it("a remove+add in ONE batch still rotates (the count is equal, the SET is not)", () => {
+    // Why the diff is over member keys, not a count: OpenMLS reuses a vacated
+    // leaf for the next Add, so a batch carrying both leaves the size
+    // identical while a member really was evicted.
+    expect(
+      membershipRotationDecision({
+        previousMemberKeys: [A, B],
+        currentMemberKeys: [A, C],
+        ownRole: "owner",
+      }),
+    ).toBe("rotate");
+  });
+
+  it("an UNKNOWN snapshot never rotates (a torn members() read is not 'everyone left')", () => {
+    expect(
+      membershipRotationDecision({
+        previousMemberKeys: null,
+        currentMemberKeys: [A],
+        ownRole: "owner",
+      }),
+    ).toBe("skip-unknown-membership");
+    expect(
+      membershipRotationDecision({
+        previousMemberKeys: [A, B],
+        currentMemberKeys: null,
+        ownRole: "owner",
+      }),
+    ).toBe("skip-unknown-membership");
+  });
+
+  it("a FIRST observation (empty baseline) never rotates", () => {
+    expect(
+      membershipRotationDecision({
+        previousMemberKeys: [],
+        currentMemberKeys: [],
+        ownRole: "owner",
+      }),
+    ).toBe("skip-unknown-membership");
+  });
+
+  it("memberSignatureKeys hexes the roster and returns null on a torn group", () => {
+    const group = mockRoleGroup(new Uint8Array([1]), OWNER_PK);
+    expect(memberSignatureKeys(group)).toEqual([
+      toHex(OWNER_PK),
+      toHex(MEMBER_PK),
+      toHex(ADMIN_PK),
+    ]);
+    const torn = mockRoleGroup(new Uint8Array([1]), OWNER_PK, { throws: true });
+    expect(memberSignatureKeys(torn)).toBeNull();
+  });
+});
+
+describe("rotatePushRoutingSecret (ADR-0043)", () => {
+  const ACCT = "acctRot";
+  const GROUP_ID = new Uint8Array([2, 7, 1, 8, 2, 8]);
+  const GRP_B64 = base64Encode(GROUP_ID);
+  const OLD = new Uint8Array(32).fill(0x77);
+
+  /** A broadcast sink that records every attempt and can be armed to fail. */
+  function recordingBroadcast(): {
+    sent: Uint8Array[];
+    failNext: (n: number) => void;
+    fn: (b: Uint8Array) => Promise<void>;
+  } {
+    const sent: Uint8Array[] = [];
+    let failures = 0;
+    return {
+      sent,
+      failNext: (n: number): void => {
+        failures = n;
+      },
+      fn: async (b: Uint8Array): Promise<void> => {
+        sent.push(b);
+        if (failures > 0) {
+          failures -= 1;
+          throw new Error("DS unreachable");
+        }
+      },
+    };
+  }
+
+  /** Seed a settled (already-distributed) secret for the group. */
+  function seedSettled(secret: Uint8Array): void {
+    seedStoredSecret(ACCT, GRP_B64, secret);
+    h.distributed.set(`${ACCT}\0${GRP_B64}`, true);
+    h.routes.set(toHex(wasm.derivePushGid(secret)), {
+      accountId: ACCT,
+      groupIdB64: GRP_B64,
+    });
+  }
+
+  it("the OWNER re-keys: new secret persisted + broadcast, NEW gid subscribed + indexed, OLD gid unsubscribed + de-indexed", async () => {
+    seedSettled(OLD);
+    const oldGidHex = toHex(wasm.derivePushGid(OLD));
+    const group = mockGroup(GROUP_ID, undefined);
+    const b = recordingBroadcast();
+
+    const outcome = await rotatePushRoutingSecret(ACCT, group, "owner", b.fn);
+    expect(outcome).toBe("rotated");
+
+    // A genuinely NEW secret replaced the old one, in place.
+    const stored = h.secrets.get(`${ACCT}\0${GRP_B64}`) as Uint8Array;
+    expect(stored.length).toBe(32);
+    expect(Array.from(stored)).not.toEqual(Array.from(OLD));
+    const newGidHex = toHex(wasm.derivePushGid(stored));
+    expect(newGidHex).not.toBe(oldGidHex);
+
+    // Redistributed to the group — the envelope carries the NEW secret.
+    expect(b.sent.length).toBe(1);
+    expect(Array.from(wasm.decodePushRoutingSecret(b.sent[0]!))).toEqual(
+      Array.from(stored),
+    );
+    // Confirmed on the wire.
+    expect(h.distributed.get(`${ACCT}\0${GRP_B64}`)).toBe(true);
+
+    // Subscribed under the NEW gid.
+    expect(subscribeGroup).toHaveBeenCalledTimes(1);
+    expect(toHex(subscribeGroup.mock.calls[0]![1])).toBe(newGidHex);
+
+    // Unsubscribed from the OLD gid — the first live call site of
+    // `PushClient.unsubscribeGroup`, dead code before this ADR.
+    expect(unsubscribeGroup).toHaveBeenCalledTimes(1);
+    expect(toHex(unsubscribeGroup.mock.calls[0]![1])).toBe(oldGidHex);
+
+    // The reverse index carries the new entry and NOT the retired one:
+    // without the delete every rotation grows the map by a dead row.
+    expect(h.routes.has(newGidHex)).toBe(true);
+    expect(h.routes.has(oldGidHex)).toBe(false);
+    expect(vi.mocked(deleteRoute)).toHaveBeenCalledWith(oldGidHex);
+  });
+
+  it("an ADMIN may rotate too (ADR-0043 ratified option (b))", async () => {
+    seedSettled(OLD);
+    const b = recordingBroadcast();
+
+    expect(
+      await rotatePushRoutingSecret(
+        ACCT,
+        mockGroup(GROUP_ID, undefined),
+        "admin",
+        b.fn,
+      ),
+    ).toBe("rotated");
+    expect(b.sent.length).toBe(1);
+    expect(unsubscribeGroup).toHaveBeenCalledTimes(1);
+  });
+
+  it("a PLAIN MEMBER never rotates (nothing minted, nothing sent, nothing torn down)", async () => {
+    seedSettled(OLD);
+    const b = recordingBroadcast();
+
+    for (const role of ["member", null] as const) {
+      expect(
+        await rotatePushRoutingSecret(
+          ACCT,
+          mockGroup(GROUP_ID, undefined),
+          role,
+          b.fn,
+        ),
+      ).toBe("skip-not-authorized");
+    }
+    expect(b.sent.length).toBe(0);
+    expect(vi.mocked(putGroupRouting)).not.toHaveBeenCalled();
+    expect(unsubscribeGroup).not.toHaveBeenCalled();
+    expect(Array.from(h.secrets.get(`${ACCT}\0${GRP_B64}`) as Uint8Array)).toEqual(
+      Array.from(OLD),
+    );
+  });
+
+  it("rotation NEVER mints a first secret (minting stays owner-only in `ensure`)", async () => {
+    // No secret held: an admin rotating here would become a SECOND minter and
+    // diverge the group's push_gid, which is exactly what the owner-mints
+    // rule exists to prevent. Option (b) widened OVERWRITE authority, not
+    // MINT authority.
+    const b = recordingBroadcast();
+
+    expect(
+      await rotatePushRoutingSecret(
+        ACCT,
+        mockGroup(GROUP_ID, undefined),
+        "admin",
+        b.fn,
+      ),
+    ).toBe("skip-no-secret");
+    expect(b.sent.length).toBe(0);
+    expect(vi.mocked(putGroupRouting)).not.toHaveBeenCalled();
+  });
+
+  it("the OLD secret is read BEFORE the overwrite — the teardown targets the OLD gid", async () => {
+    // The `secrets` row is keyed (account, group) and clobbered in place. If
+    // the rotation persisted first, the id being retired could no longer be
+    // named: an undeletable orphan that keeps receiving wakes — the exact
+    // defect this ADR fixes. Pinned by asserting the unsubscribe target.
+    seedSettled(OLD);
+    const oldGidHex = toHex(wasm.derivePushGid(OLD));
+    const b = recordingBroadcast();
+
+    await rotatePushRoutingSecret(ACCT, mockGroup(GROUP_ID, undefined), "owner", b.fn);
+
+    const newGidHex = toHex(
+      wasm.derivePushGid(h.secrets.get(`${ACCT}\0${GRP_B64}`) as Uint8Array),
+    );
+    const torndown = toHex(unsubscribeGroup.mock.calls[0]![1]);
+    expect(torndown).toBe(oldGidHex);
+    expect(torndown).not.toBe(newGidHex);
+    // ... and the device is armed under the new id before the old one is
+    // dropped, so it is never unsubscribed from both at once.
+    expect(subscribeGroup.mock.invocationCallOrder[0]!).toBeLessThan(
+      unsubscribeGroup.mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it("a FAILED rotation broadcast leaves the row PENDING and the existing retry re-sends the NEW secret", async () => {
+    // The dangerous window: the rotator has switched locally while every
+    // other member is still on the old id, so nobody notifies either — the
+    // whole group's wakes stop. The `distributed` flag (reused verbatim from
+    // the mint path) is what makes it recoverable.
+    seedSettled(OLD);
+    const group = mockGroup(GROUP_ID, undefined);
+    const b = recordingBroadcast();
+    b.failNext(1);
+
+    expect(await rotatePushRoutingSecret(ACCT, group, "owner", b.fn)).toBe(
+      "rotated",
+    );
+    const rotated = h.secrets.get(`${ACCT}\0${GRP_B64}`) as Uint8Array;
+    expect(b.sent.length).toBe(1);
+    expect(h.distributed.get(`${ACCT}\0${GRP_B64}`)).toBe(false);
+    // The local switch is durable regardless of the failed send.
+    expect(unsubscribeGroup).toHaveBeenCalledTimes(1);
+
+    // Next chat-open / launch: `ensureGroupPushRouting`'s re-broadcast branch
+    // re-sends the STORED (i.e. the newly rotated) secret. Never a re-mint.
+    await ensureGroupPushRouting(ACCT, group, DUMMY_IDENTITY, b.fn);
+    expect(b.sent.length).toBe(2);
+    expect(Array.from(wasm.decodePushRoutingSecret(b.sent[1]!))).toEqual(
+      Array.from(rotated),
+    );
+    expect(h.distributed.get(`${ACCT}\0${GRP_B64}`)).toBe(true);
+    expect(Array.from(h.secrets.get(`${ACCT}\0${GRP_B64}`) as Uint8Array)).toEqual(
+      Array.from(rotated),
+    );
+  });
+
+  it("two concurrent triggers coalesce into ONE rotation (never two mints)", async () => {
+    // This device's own `onRemoveMember` and a poll-loop diff can both fire.
+    // A second mint would strand the first new push_gid as a subscribed but
+    // never-notified id — the orphan this ADR exists to prevent.
+    seedSettled(OLD);
+    const group = mockGroup(GROUP_ID, undefined);
+    const b = recordingBroadcast();
+
+    const [x, y] = await Promise.all([
+      rotatePushRoutingSecret(ACCT, group, "owner", b.fn),
+      rotatePushRoutingSecret(ACCT, group, "owner", b.fn),
+    ]);
+
+    expect([x, y]).toEqual(["rotated", "rotated"]);
+    expect(b.sent.length).toBe(1);
+    expect(vi.mocked(putGroupRouting)).toHaveBeenCalledTimes(1);
+    expect(unsubscribeGroup).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("rotation trigger — the membership-shrink entry point (ADR-0043)", () => {
+  const ACCT = "acctTrig";
+  const GROUP_ID = new Uint8Array([5, 5, 5, 5]);
+  const GRP_B64 = base64Encode(GROUP_ID);
+  const HELD = new Uint8Array(32).fill(0x66);
+  const A = toHex(OWNER_PK);
+  const B = toHex(MEMBER_PK);
+  const C = toHex(ADMIN_PK);
+
+  function seedSettled(): void {
+    seedStoredSecret(ACCT, GRP_B64, HELD);
+    h.distributed.set(`${ACCT}\0${GRP_B64}`, true);
+    h.routes.set(toHex(wasm.derivePushGid(HELD)), {
+      accountId: ACCT,
+      groupIdB64: GRP_B64,
+    });
+  }
+
+  async function trigger(
+    ownRole: "owner" | "admin" | "member" | null,
+    previous: readonly string[] | null,
+    current: readonly string[] | null,
+    sent: Uint8Array[],
+  ): Promise<string> {
+    return rotatePushRoutingSecretIfMembershipShrank({
+      accountId: ACCT,
+      group: mockGroup(GROUP_ID, undefined),
+      ownRole,
+      previousMemberKeys: previous,
+      currentMemberKeys: current,
+      broadcast: async (bytes) => {
+        sent.push(bytes);
+      },
+    });
+  }
+
+  it("an observed SHRINK rotates on the OWNER", async () => {
+    seedSettled();
+    const sent: Uint8Array[] = [];
+    expect(await trigger("owner", [A, B, C], [A, B], sent)).toBe("rotated");
+    expect(sent.length).toBe(1);
+    expect(unsubscribeGroup).toHaveBeenCalledTimes(1);
+    expect(toHex(unsubscribeGroup.mock.calls[0]![1])).toBe(
+      toHex(wasm.derivePushGid(HELD)),
+    );
+  });
+
+  it("an observed SHRINK rotates on an ADMIN", async () => {
+    seedSettled();
+    const sent: Uint8Array[] = [];
+    expect(await trigger("admin", [A, B, C], [A, B], sent)).toBe("rotated");
+    expect(sent.length).toBe(1);
+  });
+
+  it("an observed SHRINK does NOT rotate on a plain member", async () => {
+    seedSettled();
+    const sent: Uint8Array[] = [];
+    expect(await trigger("member", [A, B, C], [A, B], sent)).toBe(
+      "skip-not-authorized",
+    );
+    expect(sent.length).toBe(0);
+    expect(vi.mocked(putGroupRouting)).not.toHaveBeenCalled();
+    expect(unsubscribeGroup).not.toHaveBeenCalled();
+    // The plain member still ends up on the new id — via the gated receive
+    // path, when the rotator's envelope arrives.
+    expect(Array.from(h.secrets.get(`${ACCT}\0${GRP_B64}`) as Uint8Array)).toEqual(
+      Array.from(HELD),
+    );
+  });
+
+  it("an ADD never rotates (the routing id stays stable across ordinary commits)", async () => {
+    seedSettled();
+    const sent: Uint8Array[] = [];
+    expect(await trigger("owner", [A, B], [A, B, C], sent)).toBe(
+      "skip-no-shrink",
+    );
+    expect(sent.length).toBe(0);
+    expect(vi.mocked(putGroupRouting)).not.toHaveBeenCalled();
+    expect(unsubscribeGroup).not.toHaveBeenCalled();
+    expect(Array.from(h.secrets.get(`${ACCT}\0${GRP_B64}`) as Uint8Array)).toEqual(
+      Array.from(HELD),
+    );
+  });
+
+  it("a poll that changed nothing never rotates", async () => {
+    seedSettled();
+    const sent: Uint8Array[] = [];
+    expect(await trigger("owner", [A, B], [A, B], sent)).toBe("skip-no-shrink");
+    expect(sent.length).toBe(0);
+  });
+});
+
+describe("receive-side teardown of a superseded push_gid (ADR-0043)", () => {
+  const ACCT = "acctRecv";
+  const GRP = "grpRecvB64";
+  const GROUP_ID = new Uint8Array([8, 8, 8, 8]);
+  const HELD = new Uint8Array(32).fill(0x11);
+  const ROTATED = new Uint8Array(32).fill(0x22);
+
+  it("a NON-rotator applying a CHANGED secret retires its OWN old gid", async () => {
+    // Every member must tear its own row down: `group_unsubscribe` deletes
+    // exactly the (device, group) row named in the request and a client knows
+    // only its own device pseudonym, so the rotator cannot do it for anyone
+    // else. Skip this and each rotation leaves one dead row PER MEMBER — the
+    // versioned-cluster archive ADR-0043 calls worse than not rotating.
+    seedStoredSecret(ACCT, GRP, HELD);
+    h.routes.set(toHex(wasm.derivePushGid(HELD)), {
+      accountId: ACCT,
+      groupIdB64: GRP,
+    });
+    const group = mockRoleGroup(GROUP_ID, OWNER_PK);
+
+    expect(
+      await receivePushRoutingSecretGated(ACCT, group, GRP, OWNER_LEAF, ROTATED),
+    ).toBe("accept-owner");
+
+    const oldGidHex = toHex(wasm.derivePushGid(HELD));
+    const newGidHex = toHex(wasm.derivePushGid(ROTATED));
+    await vi.waitFor(() => expect(unsubscribeGroup).toHaveBeenCalled());
+    expect(toHex(unsubscribeGroup.mock.calls[0]![1])).toBe(oldGidHex);
+    expect(h.routes.has(oldGidHex)).toBe(false);
+    expect(h.routes.has(newGidHex)).toBe(true);
+  });
+
+  it("an ADMIN-authored rotation is applied and torn down the same way", async () => {
+    seedStoredSecret(ACCT, GRP, HELD);
+    h.routes.set(toHex(wasm.derivePushGid(HELD)), {
+      accountId: ACCT,
+      groupIdB64: GRP,
+    });
+    const group = mockRoleGroup(GROUP_ID, OWNER_PK);
+
+    expect(
+      await receivePushRoutingSecretGated(ACCT, group, GRP, ADMIN_LEAF, ROTATED),
+    ).toBe("accept-admin-rotate");
+    await vi.waitFor(() => expect(unsubscribeGroup).toHaveBeenCalled());
+    expect(toHex(unsubscribeGroup.mock.calls[0]![1])).toBe(
+      toHex(wasm.derivePushGid(HELD)),
+    );
+  });
+
+  it("an IDENTICAL re-broadcast retires nothing (the id did not change)", async () => {
+    seedStoredSecret(ACCT, GRP, HELD);
+    const group = mockRoleGroup(GROUP_ID, OWNER_PK);
+
+    expect(
+      await receivePushRoutingSecretGated(
+        ACCT,
+        group,
+        GRP,
+        MEMBER_LEAF,
+        new Uint8Array(HELD),
+      ),
+    ).toBe("accept-identical");
+    expect(unsubscribeGroup).not.toHaveBeenCalled();
+    expect(vi.mocked(deleteRoute)).not.toHaveBeenCalled();
+  });
+
+  it("a FIRST-EVER secret retires nothing (there is no old id)", async () => {
+    const group = mockRoleGroup(GROUP_ID, OWNER_PK);
+
+    expect(
+      await receivePushRoutingSecretGated(ACCT, group, GRP, ADMIN_LEAF, ROTATED),
+    ).toBe("accept-admin-seed");
+    expect(unsubscribeGroup).not.toHaveBeenCalled();
+    expect(vi.mocked(deleteRoute)).not.toHaveBeenCalled();
+  });
+
+  it("a REFUSED secret retires nothing (the device keeps its id)", async () => {
+    seedStoredSecret(ACCT, GRP, HELD);
+    const group = mockRoleGroup(GROUP_ID, OWNER_PK);
+
+    expect(
+      await receivePushRoutingSecretGated(ACCT, group, GRP, MEMBER_LEAF, ROTATED),
+    ).toBe("reject-not-authorized");
+    expect(unsubscribeGroup).not.toHaveBeenCalled();
+    expect(vi.mocked(deleteRoute)).not.toHaveBeenCalled();
   });
 });
 

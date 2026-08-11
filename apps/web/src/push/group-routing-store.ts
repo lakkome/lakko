@@ -30,6 +30,12 @@
  *      snapshot store. Plaintext is REQUIRED so the SW can read it
  *      without the device key.
  *
+ * The two stores age differently, which ADR-0043 makes load-bearing: a
+ * rotation OVERWRITES the `secrets` row in place (same `(account, group)`
+ * key) but only ADDS to `routes` (keyed by the freshly derived
+ * `pushGidHex`). The superseded route entry is therefore retired explicitly,
+ * via {@link deleteRoute}.
+ *
  * ## The `distributed` flag — why a boolean, and not an outbox
  *
  * The owner persists its freshly minted secret BEFORE broadcasting the
@@ -423,6 +429,34 @@ export async function lookupPushRoute(
       req.onerror = (): void =>
         reject(req.error ?? new Error("idb get failed"));
     });
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * Delete ONE reverse-index entry, by its `push_gid` (lowercase hex).
+ *
+ * ADR-0043. The asymmetry this closes: the `secrets` store is keyed
+ * `(account, group)` and is **overwritten in place** by a rotation, but the
+ * `routes` store is keyed by `pushGidHex`, so a rotation only ever **adds** a
+ * row — the superseded `push_gid → (account, group_id)` entry survives
+ * forever. Left behind, each rotation grows the reverse map by one dead entry
+ * whose `push_gid` nothing will ever notify again.
+ *
+ * A no-op when the row is absent (IndexedDB `delete` on an unknown key
+ * succeeds), so the caller never has to check first — a rotation on a device
+ * that had not yet indexed the old gid is simply a no-op.
+ *
+ * Scoped to the ONE key: never touches the `secrets` store, so it can never
+ * strand a group by deleting the material a live `push_gid` is derived from.
+ */
+export async function deleteRoute(pushGidHex: string): Promise<void> {
+  const db = await openPushRoutingDb();
+  try {
+    const tx = db.transaction(ROUTES_STORE, "readwrite");
+    tx.objectStore(ROUTES_STORE).delete(pushGidHex);
+    await awaitTx(tx);
   } finally {
     db.close();
   }

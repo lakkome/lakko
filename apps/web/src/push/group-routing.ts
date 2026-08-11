@@ -4,7 +4,9 @@
 /**
  * ADR-0042 orchestration — mint / receive / derive / subscribe / notify
  * the opaque per-group push routing id (`push_gid`), closing the
- * invariant-#5 push social-graph leak.
+ * invariant-#5 push social-graph leak — plus the ADR-0043 rotation of that
+ * id when a member is REMOVED (see the rotation section at the bottom of
+ * this file for why removal is the only event that rotates).
  *
  * ## The load-bearing rule: OWNER mints, everyone else RECEIVES
  *
@@ -42,15 +44,25 @@
  *     it is the only sender that may ROTATE an established secret. Because
  *     this branch ignores what is already held, the owner wins regardless of
  *     the order envelopes arrive in; no tie-break state is needed.
- *   - **admin** — may only FILL A HOLE (accepted when this device holds no
- *     secret at all), never overwrite one. This is what makes an
- *     admin-performed add work: ADR-0022 lets owner OR admin commit an
- *     add-member, and `redistributeSecretToGroup` fires after ANY add — so
- *     when a non-owner admin adds a member, that admin's redistribute is the
- *     new member's ONLY source of the secret (the owner broadcasts only at
- *     mint time). Gating on the owner alone silently denied those members
- *     push routing forever.
+ *   - **admin** — may also write whatever is stored (ADR-0043, ratified
+ *     option (b)). Two distinct things depend on it: an admin FILLING A HOLE
+ *     (`accept-admin-seed`) is what makes an admin-performed add work —
+ *     ADR-0022 lets owner OR admin commit an add-member, and
+ *     `redistributeSecretToGroup` fires after ANY add, so that admin's
+ *     redistribute is the new member's ONLY source of the secret; an admin
+ *     ROTATING an established secret (`accept-admin-rotate`) is what makes
+ *     ADR-0043 rotation-on-removal reachable at all, since ADR-0022 lets an
+ *     admin commit the Remove. Refusing the overwrite left an admin able to
+ *     evict a member but unable to retire that member's routing id.
  *   - **plain member** — may never change the secret.
+ *
+ * The cost of the admin tier is recorded honestly in ADR-0043 § fork (b):
+ * it widens G-36 residual 3 from "a malicious admin can seed a secret to a
+ * member who holds none" to "a malicious admin can churn the group's routing
+ * id at will". The capability gain is small (an admin can already evict
+ * members outright) and the churn is a wake outage, never a downgrade —
+ * a member without the current secret still DEFERS, it never falls back to
+ * the leaky `group_id`.
  *
  * A byte-identical re-broadcast is accepted from ANYONE (it changes nothing,
  * so it needs no authority), which keeps every relay of the redistribute
@@ -133,6 +145,7 @@ import { loadWasm } from "../wasm";
 import { PushClient } from "./client";
 import { getOrCreateDevicePushId } from "./device-id";
 import {
+  deleteRoute,
   getGroupRoutingSecret,
   getGroupRoutingState,
   markGroupRoutingDistributed,
@@ -284,6 +297,58 @@ export function subscribeGroupUnderPushGidBestEffort(
 }
 
 /**
+ * ADR-0043 — retire a SUPERSEDED `push_gid`: drop this device's push-gw
+ * subscription under it, then delete its reverse-index row.
+ *
+ * Called on BOTH sides of a rotation with the OLD secret — by the rotator
+ * after it re-arms under the new id, and by every remaining member when the
+ * gated receive path applies a CHANGED secret. Both must, and for the same
+ * reason: `POST /push/group/unsubscribe` deletes exactly the
+ * `(device, group)` row named in the request, and a client knows only its OWN
+ * device pseudonym, so nobody can tear down anyone else's row. If only the
+ * rotator unsubscribed, every OTHER member would leave a live row under the
+ * old id — one dead subscription per member per rotation, which is the
+ * "versioned cluster archive" ADR-0043 § Context calls strictly worse than
+ * not rotating at all.
+ *
+ * The **subscription** teardown is what carries the privacy value; the route
+ * row is local bookkeeping (a reverse-map miss already degrades to the
+ * generic "New message" banner under the ADR-0041 fail-closed posture), so it
+ * is deleted immediately — the simpler invariant — rather than retained for
+ * an overlap window.
+ *
+ * Best-effort and never throws: the caller has ALREADY switched to the new
+ * id, so a failure here must not unwind the rotation. The cost of a failed
+ * unsubscribe is a stale row that nothing notifies again.
+ */
+export async function retireOldPushGid(oldSecret: Uint8Array): Promise<void> {
+  let oldGid: Uint8Array;
+  let oldGidHex: string;
+  try {
+    oldGid = await derivePushGid(oldSecret);
+    oldGidHex = toHex(oldGid);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn("push-routing old push_gid derivation failed", err);
+    return;
+  }
+  try {
+    await new PushClient().unsubscribeGroup(getOrCreateDevicePushId(), oldGid);
+  } catch (err) {
+    // The new id is already armed; a failed unsubscribe leaves a row that
+    // nothing notifies again, not a broken group.
+    // eslint-disable-next-line no-console
+    console.warn("push_gid unsubscribe failed", err);
+  }
+  try {
+    await deleteRoute(oldGidHex);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn("push-routing stale route delete failed", err);
+  }
+}
+
+/**
  * RECEIVE side, UNCHECKED — persist the secret (idempotent) + subscribe
  * under the derived `push_gid`. Best-effort; a persist that yields no
  * `push_gid` (no device key) skips the subscribe.
@@ -326,7 +391,7 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
 
 /**
  * Outcome of the receive-side role gate ({@link receivePushRoutingSecretGated}).
- * The four `accept-*` verdicts persist + re-subscribe; the three `reject-*`
+ * The five `accept-*` verdicts persist + re-subscribe; the two `reject-*`
  * verdicts drop the envelope entirely (no persist, no subscribe).
  */
 export type RoutingSecretVerdict =
@@ -338,16 +403,21 @@ export type RoutingSecretVerdict =
    *  may always write, whatever is stored — this is the rotation authority. */
   | "accept-owner"
   /** A first-ever secret authored by an ADR-0022 ADMIN while this device
-   *  holds NONE. An admin may seed a hole (so an admin-performed add-member
-   *  actually delivers routing to the new member) but never overwrite. */
+   *  PROVABLY holds none — the admin-seed path that makes an
+   *  admin-performed add-member deliver routing to the new member. */
   | "accept-admin-seed"
+  /** A CHANGED secret authored by an ADR-0022 ADMIN over one this device
+   *  already holds (or cannot prove it lacks). ADR-0043 ratified option (b):
+   *  an admin may rotate, because ADR-0022 lets an admin commit the Remove
+   *  that makes a rotation necessary — refusing here left an admin able to
+   *  evict a member but unable to retire that member's routing id. Kept as a
+   *  DISTINCT verdict from `accept-admin-seed` so a rotation is legible in
+   *  the log; both accept. */
+  | "accept-admin-rotate"
   /** A CHANGED secret in a group with NO role table (legacy / open group).
    *  There is no owner or admin set to check against, so this keeps the
    *  pre-gate behaviour rather than silently breaking those groups. */
   | "accept-no-owner"
-  /** An ADMIN tried to overwrite a secret this device already holds — or one
-   *  it cannot prove it lacks (unreadable store). Only the owner rotates. */
-  | "reject-admin-overwrite"
   /** A CHANGED secret from a member that is neither owner nor admin. */
   | "reject-not-authorized"
   /** A CHANGED secret whose authorship could not be established (the
@@ -369,7 +439,7 @@ function containsKey(set: readonly Uint8Array[], key: Uint8Array): boolean {
  * Pure decision core of the receive-side role gate — no IO, so the whole
  * accept/reject matrix is directly testable.
  *
- * The rank is **owner > admin > member**, expressed purely as *who may
+ * The rank is **owner ≥ admin > member**, expressed purely as *who may
  * overwrite what*, so NO authority level is persisted alongside the secret:
  *
  * | stored              | sender          | verdict                  |
@@ -377,7 +447,7 @@ function containsKey(set: readonly Uint8Array[], key: Uint8Array): boolean {
  * | identical           | anyone          | `accept-identical`       |
  * | any (or none)       | owner           | `accept-owner`           |
  * | none (provably)     | admin           | `accept-admin-seed`      |
- * | present / unprovable| admin           | `reject-admin-overwrite` |
+ * | present / unprovable| admin           | `accept-admin-rotate`    |
  * | changed             | plain member    | `reject-not-authorized`  |
  * | changed, no roles   | anyone          | `accept-no-owner`        |
  * | changed, unreadable | anyone          | `reject-unverifiable`    |
@@ -386,6 +456,14 @@ function containsKey(set: readonly Uint8Array[], key: Uint8Array): boolean {
  * stored, an owner rotation lands whatever an admin seeded and in whatever
  * order the two envelopes arrive — that is the whole of "owner takes
  * priority", with no tie-break state.
+ *
+ * **ADR-0043 (ratified option (b)) widened the admin row from a refusal to an
+ * acceptance.** The `storedSecret` / `storedUnreadable` pair no longer gates
+ * an admin's *authority* — it only picks WHICH admin verdict is reported
+ * (`seed` when the hole is provable, `rotate` otherwise), which keeps the
+ * distinction legible in the log and keeps the two cases separately testable.
+ * Owner is still evaluated first, so the ordering property above is
+ * unchanged.
  */
 export function routingSecretVerdict(args: {
   /** `group.roleTableOwner()` — `undefined` = legacy / open group. */
@@ -400,7 +478,10 @@ export function routingSecretVerdict(args: {
   storedSecret: Uint8Array | null;
   /** Set when the local secret could NOT be read (store threw, or there is
    *  no device key). `storedSecret === null` then means "unknown", not
-   *  "provably absent" — so the admin hole-fill branch must refuse. */
+   *  "provably absent" — so an admin write is reported as a ROTATE rather
+   *  than a seed. It no longer changes the accept/reject outcome (ADR-0043
+   *  option (b) lets an admin overwrite either way); it keeps the verdict
+   *  honest about what was actually observed. */
   storedUnreadable: boolean;
   /** The secret carried by the incoming envelope. */
   incomingSecret: Uint8Array;
@@ -425,12 +506,14 @@ export function routingSecretVerdict(args: {
   if (args.senderKey === undefined) return "reject-unverifiable";
   // Owner outranks everything: may rotate whatever is stored, in any order.
   if (bytesEqual(args.senderKey, args.ownerKey)) return "accept-owner";
-  // Admin may SEED a hole but never overwrite. "Hole" must be provable —
-  // an unreadable store is treated as possibly-occupied (fail-closed).
+  // Admin may SEED a hole AND rotate an established secret (ADR-0043
+  // option (b)). The two are reported separately — a provable hole is a
+  // seed, anything else (held, or unreadable hence possibly held) is a
+  // rotate — but both accept.
   if (containsKey(args.adminKeys, args.senderKey)) {
     return args.storedSecret === null && !args.storedUnreadable
       ? "accept-admin-seed"
-      : "reject-admin-overwrite";
+      : "accept-admin-rotate";
   }
   return "reject-not-authorized";
 }
@@ -450,7 +533,14 @@ export function routingSecretVerdict(args: {
  * The authorised senders are the ADR-0022 owner AND admins, ranked by what
  * they may write — see {@link routingSecretVerdict} for the full matrix and
  * for why admins must be included (an admin-performed add-member is the new
- * member's only source of the secret).
+ * member's only source of the secret; an admin-performed REMOVE is what makes
+ * an ADR-0043 rotation necessary).
+ *
+ * ADR-0043 — when an accepted secret CHANGES the one this device held, the
+ * old `push_gid` is retired here too ({@link retireOldPushGid}): every member
+ * tears down its OWN push-gw row, because no client can delete anyone else's.
+ * This is the receiving half of the rotation; the rotator runs the same
+ * teardown in {@link rotatePushRoutingSecret}.
  *
  * Never throws — the poll loop calls this per message.
  *
@@ -534,6 +624,14 @@ export async function receivePushRoutingSecretGated(
 
   try {
     await receivePushRoutingSecret(accountId, groupIdB64, secret);
+    // ADR-0043 — the applied secret SUPERSEDED one this device held, so the
+    // id it was subscribed under is now dead. Retire it: this device is the
+    // only party that can drop its own push-gw row. Read from the snapshot
+    // taken BEFORE the persist above — the `secrets` row is overwritten in
+    // place, so after the write the old bytes are unrecoverable.
+    if (storedSecret !== null && !bytesEqual(storedSecret, secret)) {
+      await retireOldPushGid(storedSecret);
+    }
   } catch (err) {
     // Best-effort, exactly as before the gate — never throw out of the
     // poll loop.
@@ -778,4 +876,304 @@ export async function redistributeSecretToGroup(
     throw err;
   }
   await markGroupRoutingDistributed(accountId, groupIdB64);
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0043 — rotate the routing secret when a member is REMOVED
+// ---------------------------------------------------------------------------
+//
+// ## What rotation buys, stated precisely
+//
+// A removed member keeps the group's `push_routing_secret` on disk, so it can
+// still derive the current `push_gid` — and since nothing tears its
+// subscription down, push-gw keeps waking that device for a group it was
+// evicted from. The leak is not storage hygiene: an ex-member learns "this
+// group was active at time T" on every send, indefinitely.
+//
+// It cannot be closed by unsubscribing, because `POST /push/group/unsubscribe`
+// deletes exactly the `(device, group)` row named in the request and a client
+// knows only its OWN device pseudonym — no remaining member can reach the
+// ex-member's row, and the ex-member's client has no "you were removed"
+// handling to do it itself. Re-keying is the only mechanism the GROUP has:
+// after a rotation nobody ever notifies the old id again, so that row goes
+// **inert without the ex-member's cooperation**.
+//
+// What it does NOT buy: unlinkability of the CLUSTER. The provider sees
+// `{A,B,C,D}` under the old id and `{A,B,C}` under the new one and re-links by
+// token-set intersection — the set difference even names the evicted device.
+// That is a deliberate, recorded trade (ADR-0043 § crux), not an oversight:
+// closing it needs per-device-blinded routing ids (G-36 residual 1).
+//
+// ## Rotate on REMOVAL only, never on add
+//
+// An added member is *supposed* to route — `redistributeSecretToGroup` already
+// hands it the current secret. Rotating on add would also turn that
+// redistribute into a CHANGED secret against every existing member's stored
+// one on every add, for zero privacy gain.
+
+/** The local device's ADR-0022 role in the group, in the shape the chat view
+ *  already computes it. `null` = an open / legacy group with no role table. */
+export type PushRotationRole = "owner" | "admin" | "member" | null;
+
+/** Verdict of the pure {@link membershipRotationDecision} core. */
+export type PushRotationDecision =
+  /** Membership SHRANK and this device may rotate. */
+  | "rotate"
+  /** Membership grew or is unchanged — an add / role change / ordinary
+   *  commit. The routing id stays stable, which is the whole point of
+   *  rotating only at removals. */
+  | "skip-no-shrink"
+  /** No usable before/after snapshot (first observation of the group, or a
+   *  `members()` read that threw). Never rotate on an unknown delta — a
+   *  missing snapshot would otherwise read as "everyone departed". */
+  | "skip-unknown-membership"
+  /** A shrink, but this device is a plain member (or the group has no role
+   *  table). Rotating is owner-or-admin only. */
+  | "skip-not-authorized";
+
+/** Outcome of the rotation orchestration — the decision values plus what the
+ *  IO half resolved to. */
+export type PushRotationOutcome =
+  | Exclude<PushRotationDecision, "rotate">
+  /** Minted, persisted, broadcast, re-subscribed, old id retired. */
+  | "rotated"
+  /** This device holds no secret, so there is nothing to ROTATE. Minting is
+   *  owner-only and lives in {@link ensureGroupPushRouting}; rotation
+   *  deliberately never mints a first secret, so an admin can never become a
+   *  second minter and diverge the group's `push_gid`. */
+  | "skip-no-secret"
+  /** Half-reset (`forgetDevice` in flight) — the store cannot be read or
+   *  written, so nothing is touched. */
+  | "skip-no-device-key";
+
+/**
+ * Stable per-member identities for the membership diff: the lowercase-hex
+ * Ed25519 signature public keys from `group.members()`.
+ *
+ * Keys, NOT leaf indices: OpenMLS reuses a vacated leaf for the next Add, so
+ * a remove-then-add pair can leave the index set identical while the
+ * membership genuinely changed. The signature key is stable for a member's
+ * lifetime in the group.
+ *
+ * Returns `null` when the snapshot cannot be read (a torn group), which the
+ * decision core treats as "unknown", never as "everybody left".
+ */
+export function memberSignatureKeys(group: WasmGroup): string[] | null {
+  try {
+    const members = group.members() as Array<{
+      leafIndex: number;
+      signaturePublicKey: Uint8Array;
+    }>;
+    return members.map((m) => toHex(m.signaturePublicKey));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Pure decision core — did the membership SHRINK, and may this device rotate?
+ * No IO, so the whole matrix is directly testable (and portable verbatim to
+ * iOS / Android, like the ADR-0037 `restoreVerdict` gate).
+ *
+ * "Shrank" = at least one member present in the previous snapshot is absent
+ * from the current one. Deliberately not a count comparison: a poll batch can
+ * carry a Remove AND an Add, which leaves the count equal while a member was
+ * evicted — and that member must still lose its routing id.
+ *
+ * The authority check is owner-OR-admin (ADR-0043 ratified option (b)),
+ * matching who ADR-0022 lets commit the Remove in the first place. A `null`
+ * role (no role table) does NOT rotate: such a group has no owner, so nobody
+ * ever minted a secret for it and there is nothing to rotate — and letting
+ * every member of an un-owned group rotate would have them each mint divergent
+ * secrets.
+ */
+export function membershipRotationDecision(args: {
+  /** Member keys observed BEFORE the commits landed, or `null` if unknown. */
+  previousMemberKeys: readonly string[] | null;
+  /** Member keys observed AFTER, or `null` if unknown. */
+  currentMemberKeys: readonly string[] | null;
+  /** This device's ADR-0022 role. */
+  ownRole: PushRotationRole;
+}): PushRotationDecision {
+  const { previousMemberKeys: before, currentMemberKeys: after } = args;
+  if (before === null || after === null) return "skip-unknown-membership";
+  // A first observation has no baseline to diff against.
+  if (before.length === 0) return "skip-unknown-membership";
+  const present = new Set(after);
+  const departed = before.some((k) => !present.has(k));
+  if (!departed) return "skip-no-shrink";
+  if (args.ownRole !== "owner" && args.ownRole !== "admin") {
+    return "skip-not-authorized";
+  }
+  return "rotate";
+}
+
+/**
+ * Per-group in-flight rotation promise.
+ *
+ * Two triggers can observe the same removal (this device's own
+ * `onRemoveMember` and a concurrent poll-loop diff). Interleaving them is the
+ * damaging case: both would read the SAME old secret, both mint, the second
+ * persist wins — leaving the first new `push_gid` subscribed and indexed but
+ * never notified again, i.e. exactly the orphan this ADR exists to prevent.
+ * Coalescing (the same shape as the `provisioning` mint lock) rules that out.
+ *
+ * The cost is that a SECOND removal observed while a rotation is in flight can
+ * be folded into it, and that rotation's envelope may have been sealed at an
+ * epoch where the second evictee was still a member. That is tolerable
+ * because the poll-path diff is a redundant safety net, not the primary path:
+ * ADR-0022 requires the Remove committer to be owner-or-admin, and that device
+ * runs its own rotation strictly AFTER its own commit — so every removal
+ * already has one correctly-sequenced rotation from the device that made it.
+ */
+const rotating = new Map<string, Promise<PushRotationOutcome>>();
+
+/**
+ * ADR-0043 — re-mint the group's `push_routing_secret`, redistribute it, and
+ * retire the superseded `push_gid`.
+ *
+ * **The caller MUST have already published the Remove commit.** The envelope
+ * is an MLS application message: sealed at epoch N (pre-removal) the evicted
+ * member is still a member of that epoch and can OPEN it, learning the new
+ * secret and defeating the whole change. Sealed at N+1 it is unreadable to the
+ * removed leaf — RFC 9420 forward secrecy is exactly the property doing the
+ * work here. This is a hard sequencing requirement, not an optimisation.
+ *
+ * The steps, in the one order that works:
+ *
+ *   1. read the OLD secret and 2. derive the OLD `push_gid` — **before** the
+ *      store write, because the `secrets` row is keyed `(account, group)` and
+ *      is clobbered in place. Persist first and the id being retired can no
+ *      longer be named: an undeletable orphan that keeps receiving wakes,
+ *      i.e. the exact defect being fixed;
+ *   3. mint the NEW secret and 4. persist it `distributed: false`;
+ *   5. broadcast, marking distributed only once the send lands. That flag is
+ *      the whole durability mechanism, reused verbatim from the mint path: a
+ *      failed rotation broadcast leaves the row PENDING, and
+ *      {@link ensureGroupPushRouting}'s re-broadcast branch — open to ANY
+ *      holder — re-sends the stored (i.e. the new) secret on the next
+ *      chat-open / launch. Without it, a failed rotation broadcast strands the
+ *      whole group: the rotator alone on the new id, everyone else on the old
+ *      one, nobody notifying either;
+ *   6. subscribe under the NEW id, then 7./8. retire the OLD one
+ *      ({@link retireOldPushGid}) — in that order, so the device is never
+ *      unsubscribed from both at once.
+ *
+ * Rotation NEVER mints a first secret: with no secret held this is a no-op
+ * (`skip-no-secret`). Minting stays owner-only in {@link ensureGroupPushRouting},
+ * so widening rotation to admins does not create a second minter.
+ *
+ * Never throws — push is best-effort and a rotation failure must not unwind
+ * the membership change that triggered it.
+ */
+export function rotatePushRoutingSecret(
+  accountId: string,
+  group: WasmGroup,
+  ownRole: PushRotationRole,
+  broadcast: (envelopeBytes: Uint8Array) => Promise<void>,
+): Promise<PushRotationOutcome> {
+  if (ownRole !== "owner" && ownRole !== "admin") {
+    return Promise.resolve("skip-not-authorized");
+  }
+  const groupIdB64 = base64Encode(group.groupId);
+  const lockKey = `${accountId} ${groupIdB64}`;
+  const inflight = rotating.get(lockKey);
+  if (inflight !== undefined) return inflight;
+
+  const run = (async (): Promise<PushRotationOutcome> => {
+    const deviceKey = await getDeviceKey(accountId);
+    if (deviceKey === null) return "skip-no-device-key";
+
+    // (1)+(2) — the OLD secret, read BEFORE anything overwrites it. The gid is
+    // derived from these bytes at teardown time, in `retireOldPushGid`.
+    let oldSecret: Uint8Array | null = null;
+    try {
+      oldSecret = await getGroupRoutingSecret(accountId, groupIdB64, deviceKey);
+    } catch (err) {
+      // An unreadable row cannot be rotated: the old id could never be named,
+      // so a rotation would strand it subscribed forever.
+      // eslint-disable-next-line no-console
+      console.warn("push-routing secret unreadable, rotation skipped", err);
+      return "skip-no-secret";
+    }
+    if (oldSecret === null) return "skip-no-secret";
+
+    // (3)+(4) — mint + persist PENDING. Persist before broadcasting for the
+    // same reason the mint path does: two divergent random secrets are worse
+    // than two identical envelopes.
+    const next = mintPushRoutingSecret();
+    const pushGid = await persistGroupRoutingSecret(
+      accountId,
+      groupIdB64,
+      next,
+      false,
+    );
+    if (pushGid === null) return "skip-no-device-key";
+
+    // (5) — redistribute at the POST-removal epoch. Failure leaves the row
+    // pending for the existing retry branch; it must NOT abort the local
+    // switch, which is already durable.
+    await broadcastAndMarkDistributed(accountId, groupIdB64, next, broadcast);
+
+    // (6) — arm the NEW id first, so a failure between the two never leaves
+    // this device subscribed to nothing.
+    try {
+      await subscribeGroupUnderPushGid(accountId, groupIdB64);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("push_gid subscribe failed", err);
+    }
+
+    // (7)+(8) — retire the OLD id: unsubscribe this device's row, drop the
+    // stale reverse-index entry.
+    await retireOldPushGid(oldSecret);
+    return "rotated";
+  })().finally(() => {
+    rotating.delete(lockKey);
+  });
+
+  rotating.set(lockKey, run);
+  return run;
+}
+
+/**
+ * ADR-0043 — the WIRE-OBSERVED trigger: rotate when this device notices that
+ * the membership shrank, i.e. when SOMEONE ELSE committed the Remove.
+ *
+ * A Commit surfaces from the poll loop with no membership delta attached
+ * (surfacing removed leaves from `lakko-mls` would be exact, but it is an
+ * invariant-#3 change to the MLS state machine and needs its own ADR), so the
+ * removal is INFERRED from a `members()` snapshot taken either side of the
+ * poll batch. The snapshot is already read per poll, so the diff is free.
+ *
+ * The device that performed the removal itself does NOT come through here: it
+ * applied its own commit locally before the poll, so the next poll's baseline
+ * is already post-removal and shows no shrink. It rotates directly instead,
+ * via {@link rotatePushRoutingSecret}, right after its Remove commit is
+ * published.
+ *
+ * Never throws.
+ */
+export async function rotatePushRoutingSecretIfMembershipShrank(args: {
+  accountId: string;
+  group: WasmGroup;
+  ownRole: PushRotationRole;
+  /** `memberSignatureKeys(group)` from BEFORE the poll applied commits. */
+  previousMemberKeys: readonly string[] | null;
+  /** `memberSignatureKeys(group)` from AFTER. */
+  currentMemberKeys: readonly string[] | null;
+  broadcast: (envelopeBytes: Uint8Array) => Promise<void>;
+}): Promise<PushRotationOutcome> {
+  const decision = membershipRotationDecision({
+    previousMemberKeys: args.previousMemberKeys,
+    currentMemberKeys: args.currentMemberKeys,
+    ownRole: args.ownRole,
+  });
+  if (decision !== "rotate") return decision;
+  return rotatePushRoutingSecret(
+    args.accountId,
+    args.group,
+    args.ownRole,
+    args.broadcast,
+  );
 }
