@@ -3,6 +3,10 @@
 
 package me.lakko.app.push
 
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -149,6 +153,28 @@ class GroupPushRoutingTest {
         override suspend fun subscribeUnderPushGid(pushGid: ByteArray) {
             subscribeCount++
             lastSubscribeTarget = pushGid
+        }
+
+        /** ADR-0043 — every gid this device dropped its push-gw row under,
+         *  in call order. The privacy-carrying half of a rotation. */
+        val unsubscribed = mutableListOf<ByteArray>()
+        var unsubscribeCount = 0
+
+        /** When true, [unsubscribeFromPushGid] throws — the offline case.
+         *  The rotation must survive it (the new id is already armed). */
+        var unsubscribeFails = false
+
+        override suspend fun unsubscribeFromPushGid(pushGid: ByteArray) {
+            unsubscribeCount++
+            if (unsubscribeFails) throw IllegalStateException("push-gw unreachable")
+            unsubscribed.add(pushGid)
+        }
+
+        /** Mirrors `PushRouteStore.remove`: deletes exactly the one keyed
+         *  row and never touches [secrets], so it can never strand a group
+         *  by dropping the material a LIVE push_gid derives from. */
+        override fun deleteRoute(pushGid: ByteArray) {
+            routes.remove(hex(pushGid))
         }
 
         override suspend fun broadcast(envelope: ByteArray) {
@@ -725,15 +751,20 @@ class GroupPushRoutingTest {
     //   identical to stored          | anyone        | ACCEPT
     //   any (or none) stored         | OWNER         | ACCEPT
     //   NONE stored (first-ever)     | ADMIN         | ACCEPT (fill a hole)
-    //   present + changed            | ADMIN         | REJECT (no overwrite)
+    //   present + changed            | ADMIN         | ACCEPT (ADR-0043 (b))
     //   any changed                  | plain member  | REJECT
     //   changed, no role table       | anyone        | ACCEPT (legacy/open)
     //   changed, roles unreadable    | anyone        | REJECT (fail closed)
     //
-    // The admin row is not a nicety: ADR-0022 permits owner OR admin to add
-    // members and `redistribute` fires after ANY add-member commit, so
-    // without it a member added by a non-owner admin would hold no secret
-    // forever (the owner only broadcasts at mint time) and never get push.
+    // Neither admin row is a nicety. SEEDING: ADR-0022 permits owner OR
+    // admin to add members and `redistribute` fires after ANY add-member
+    // commit, so without it a member added by a non-owner admin would hold
+    // no secret forever (the owner only broadcasts at mint time) and never
+    // get push. OVERWRITING (ADR-0043 ratified option (b)): ADR-0022 also
+    // lets an admin commit the REMOVE, and refusing the overwrite left that
+    // admin able to evict a member but unable to retire the evicted
+    // member's routing id — the eviction completed with the ex-member's
+    // wake stream intact, which is the whole defect ADR-0043 closes.
     // -----------------------------------------------------------------
 
     private val ownerKey = ByteArray(32) { 0x11 }
@@ -835,7 +866,7 @@ class GroupPushRoutingTest {
             assertEquals(1, ports.subscribeCount)
         }
 
-    // ---- ADMIN rank: may SEED a hole, may never OVERWRITE ----
+    // ---- ADMIN rank: may SEED a hole AND rotate (ADR-0043 option (b)) ----
 
     @Test
     fun `ADMIN seeding a FIRST secret is ACCEPTED (closes the admin-add delivery gap)`() = runTest {
@@ -860,10 +891,17 @@ class GroupPushRoutingTest {
     }
 
     @Test
-    fun `ADMIN changing an EXISTING secret is REJECTED (seed only, never overwrite)`() = runTest {
+    fun `ADMIN changing an EXISTING secret is ACCEPTED (ADR-0043 ratified option (b))`() = runTest {
+        // The rewritten half of the ADR-0042 contract. Under ADR-0042 this
+        // was REJECT ("an admin may seed but never overwrite"), which left an
+        // admin able to commit a Remove (ADR-0022 permits it) but unable to
+        // retire the evicted member's routing id — so the rotation ADR-0043
+        // requires was unreachable from the very device that performed the
+        // eviction.
         val ports = FakePorts(account)
         val g = "0b".repeat(32)
         ports.secrets[g] = secretA
+        ports.routes[hex(ports.derivePushGid(secretA))] = Route(account, g)
 
         val verdict = GroupPushRouting.receiveGated(
             groupIdHex = g,
@@ -873,8 +911,20 @@ class GroupPushRoutingTest {
             ports = ports,
         )
 
-        assertEquals(GroupPushRouting.ReceiveVerdict.REJECT, verdict)
-        assertDropped(ports, g, before = secretA)
+        assertEquals(GroupPushRouting.ReceiveVerdict.ACCEPT, verdict)
+        assertArrayEquals("admin's rotation applied", secretB, ports.secrets[g])
+        assertArrayEquals(
+            "subscribed under the NEW push_gid",
+            ports.derivePushGid(secretB),
+            ports.lastSubscribeTarget,
+        )
+        // ...and the receiving side tore down its OWN old row (ADR-0043).
+        assertEquals(1, ports.unsubscribeCount)
+        assertArrayEquals(ports.derivePushGid(secretA), ports.unsubscribed.single())
+        assertNull(
+            "old reverse-index row deleted",
+            ports.routes[hex(ports.derivePushGid(secretA))],
+        )
     }
 
     @Test
@@ -1058,31 +1108,41 @@ class GroupPushRoutingTest {
     }
 
     @Test
-    fun `a throwing getSecret does NOT let an ADMIN seed (unknown stored state is not a hole)`() =
+    fun `a throwing getSecret still lets an ADMIN through (ADR-0043 (b) - stored state is moot)`() =
         runTest {
             val inner = FakePorts(account)
+            val g = "0f".repeat(32)
             val verdict = GroupPushRouting.receiveGated(
-                groupIdHex = "0f".repeat(32),
+                groupIdHex = g,
                 secret = secretB,
                 senderSignatureKey = adminKey,
                 owner = knownRoles(),
                 ports = FlakyStore(Int.MAX_VALUE, inner),
             )
 
-            // An unreadable store yields `storedSecret = null`, which for an
-            // admin would otherwise READ AS a hole to fill — the one place the
-            // degrade could have been permissive. `receiveGated` strips the
-            // admin set on a read failure, so it stays fail-closed.
-            assertEquals(GroupPushRouting.ReceiveVerdict.REJECT, verdict)
-            assertTrue("nothing persisted", inner.secrets.isEmpty())
+            // Under ADR-0042 the gate STRIPPED the admin set on a read
+            // failure, because `storedSecret = null` would otherwise read as
+            // a hole an admin may fill. ADR-0043 option (b) removed the
+            // premise — an admin may write whatever is stored — so the
+            // narrowing became vestigial, and keeping it would refuse the
+            // very admin rotation option (b) exists to permit, on nothing
+            // more than a transient store error. The check that still guards
+            // WHO may write is the role table, and it still fails closed
+            // (see the Unavailable cases).
+            assertEquals(GroupPushRouting.ReceiveVerdict.ACCEPT, verdict)
+            assertArrayEquals("admin's secret persisted", secretB, inner.secrets[g])
+            // Nothing is retired: an unreadable store yields no OLD bytes, so
+            // no old gid can be NAMED — the teardown is skipped rather than
+            // guessed at.
+            assertEquals("no teardown without a readable old secret", 0, inner.unsubscribeCount)
         }
 
     @Test
     fun `a throwing getSecret still lets the OWNER through (it may rotate anything)`() = runTest {
         val inner = FakePorts(account)
         val g = "10".repeat(32)
-        // Only the GATE read fails; the strip narrows the authority to the
-        // owner alone, which is exactly who is sending.
+        // Only the GATE read fails; the owner may rotate whatever is stored,
+        // so an unknown stored state changes nothing for it.
         val verdict = GroupPushRouting.receiveGated(
             groupIdHex = g,
             secret = secretB,
@@ -1112,11 +1172,11 @@ class GroupPushRoutingTest {
         assertEquals(accept, decide(ownerKey, known, secretB, secretA))
         assertEquals(accept, decide(ownerKey, known, secretA, null))
 
-        // --- ADMIN: may SEED a hole, may NEVER overwrite ---
+        // --- ADMIN: may SEED a hole AND rotate (ADR-0043 option (b)) ---
         assertEquals(accept, decide(adminKey, known, secretA, null))
         assertEquals(accept, decide(otherAdminKey, known, secretA, null))
-        assertEquals(reject, decide(adminKey, known, secretB, secretA))
-        assertEquals(reject, decide(otherAdminKey, known, secretB, secretA))
+        assertEquals(accept, decide(adminKey, known, secretB, secretA))
+        assertEquals(accept, decide(otherAdminKey, known, secretB, secretA))
 
         // --- plain MEMBER: may never change it, seed or overwrite ---
         assertEquals(reject, decide(memberKey, known, secretB, secretA))
@@ -1170,6 +1230,597 @@ class GroupPushRoutingTest {
             GroupPushRouting.OwnerLookup.Known(ownerKey),
             GroupPushRouting.OwnerLookup.Known(ownerKey, listOf(adminKey)),
         )
+    }
+
+    // -----------------------------------------------------------------
+    // ADR-0043 — rotate the routing secret when a member is REMOVED
+    //
+    // The defect: a removed member keeps the group's push_routing_secret
+    // on disk, so it can still derive the current push_gid — and since
+    // per-group unsubscribe was dead code on every client, push-gw kept
+    // waking that device for a group it was evicted from. It learns "this
+    // group was active at time T" on every send, indefinitely. No remaining
+    // member can stop it (unsubscribe deletes only the caller's OWN
+    // (device, group) row) and the ex-member's client has no removal
+    // handling, so RE-KEYING is the only mechanism the group has.
+    //
+    // Rotation and unsubscribe are inseparable: rotating WITHOUT the
+    // per-member teardown leaves one dead row per remaining device per
+    // rotation, turning a live cluster into a versioned archive of
+    // clusters — strictly worse than not rotating at all.
+    // -----------------------------------------------------------------
+
+    /** Distinct member identities for the diff (hex signature keys). */
+    private val mA = "aa".repeat(32)
+    private val mB = "bb".repeat(32)
+    private val mC = "cc".repeat(32)
+    private val mD = "dd".repeat(32)
+
+    private fun decideShrink(
+        before: List<String>?,
+        after: List<String>?,
+        role: GroupPushRouting.RotationRole,
+    ) = GroupPushRouting.membershipRotationDecision(before, after, role)
+
+    @Test
+    fun `a SHRINK rotates for the OWNER and for an ADMIN, never for a plain member`() {
+        val before = listOf(mA, mB, mC)
+        val after = listOf(mA, mB)
+
+        assertEquals(
+            GroupPushRouting.RotationDecision.ROTATE,
+            decideShrink(before, after, GroupPushRouting.RotationRole.OWNER),
+        )
+        // ADR-0043 ratified option (b): ADR-0022 lets an ADMIN commit the
+        // Remove, so an admin that cannot rotate can evict a member without
+        // being able to retire that member's routing id.
+        assertEquals(
+            GroupPushRouting.RotationDecision.ROTATE,
+            decideShrink(before, after, GroupPushRouting.RotationRole.ADMIN),
+        )
+        assertEquals(
+            GroupPushRouting.RotationDecision.SKIP_NOT_AUTHORIZED,
+            decideShrink(before, after, GroupPushRouting.RotationRole.MEMBER),
+        )
+    }
+
+    @Test
+    fun `a SHRINK does NOT rotate in a group with no role table`() {
+        // No role table means no owner, so nobody ever minted a secret for
+        // this group — there is nothing to rotate, and letting every member
+        // rotate would have them each mint DIVERGENT secrets.
+        assertEquals(
+            GroupPushRouting.RotationDecision.SKIP_NOT_AUTHORIZED,
+            decideShrink(listOf(mA, mB), listOf(mA), GroupPushRouting.RotationRole.NONE),
+        )
+    }
+
+    @Test
+    fun `GROWTH never rotates - the routing id stays stable across an add`() {
+        // An added member is SUPPOSED to route; `redistribute` already hands
+        // it the current secret. Rotating on add would turn that into a
+        // CHANGED secret against every existing member for zero gain.
+        assertEquals(
+            GroupPushRouting.RotationDecision.SKIP_NO_SHRINK,
+            decideShrink(listOf(mA, mB), listOf(mA, mB, mC), GroupPushRouting.RotationRole.OWNER),
+        )
+    }
+
+    @Test
+    fun `an UNCHANGED roster never rotates (an ordinary commit or a bare poll)`() {
+        assertEquals(
+            GroupPushRouting.RotationDecision.SKIP_NO_SHRINK,
+            decideShrink(listOf(mA, mB), listOf(mA, mB), GroupPushRouting.RotationRole.OWNER),
+        )
+        // Order is irrelevant — it is a SET comparison.
+        assertEquals(
+            GroupPushRouting.RotationDecision.SKIP_NO_SHRINK,
+            decideShrink(listOf(mA, mB), listOf(mB, mA), GroupPushRouting.RotationRole.OWNER),
+        )
+    }
+
+    @Test
+    fun `a remove plus an add in ONE batch still rotates (the count is equal, the SET is not)`() {
+        // The reason the diff is over signature KEYS and not counts or leaf
+        // indices: OpenMLS reuses a vacated leaf for the next Add, so this
+        // batch leaves BOTH the member count and the leaf-index set
+        // unchanged while a member genuinely was evicted — and that member
+        // must still lose its routing id.
+        assertEquals(
+            GroupPushRouting.RotationDecision.ROTATE,
+            decideShrink(
+                listOf(mA, mB, mC),
+                listOf(mA, mB, mD),
+                GroupPushRouting.RotationRole.OWNER,
+            ),
+        )
+    }
+
+    @Test
+    fun `an UNKNOWN snapshot never rotates (a torn members() read is not 'everyone left')`() {
+        val known = listOf(mA, mB)
+        assertEquals(
+            GroupPushRouting.RotationDecision.SKIP_UNKNOWN_MEMBERSHIP,
+            decideShrink(null, known, GroupPushRouting.RotationRole.OWNER),
+        )
+        assertEquals(
+            GroupPushRouting.RotationDecision.SKIP_UNKNOWN_MEMBERSHIP,
+            decideShrink(known, null, GroupPushRouting.RotationRole.OWNER),
+        )
+        assertEquals(
+            GroupPushRouting.RotationDecision.SKIP_UNKNOWN_MEMBERSHIP,
+            decideShrink(null, null, GroupPushRouting.RotationRole.OWNER),
+        )
+    }
+
+    @Test
+    fun `a FIRST observation (empty baseline) never rotates`() {
+        // An empty baseline against a real roster is a set difference of
+        // zero, but it is also indistinguishable from "we have never looked"
+        // — so it is classified UNKNOWN rather than allowed to fall through.
+        assertEquals(
+            GroupPushRouting.RotationDecision.SKIP_UNKNOWN_MEMBERSHIP,
+            decideShrink(emptyList(), listOf(mA, mB), GroupPushRouting.RotationRole.OWNER),
+        )
+        assertEquals(
+            GroupPushRouting.RotationDecision.SKIP_UNKNOWN_MEMBERSHIP,
+            decideShrink(emptyList(), emptyList(), GroupPushRouting.RotationRole.OWNER),
+        )
+    }
+
+    // ---- the rotation itself ----
+
+    /** Seeds [ports] with a held, already-distributed secret + its
+     *  reverse-index row — the steady state a rotation starts from. */
+    private fun seedRouting(ports: FakePorts, groupHex: String, secret: ByteArray) {
+        ports.secrets[groupHex] = secret
+        ports.distributed[groupHex] = true
+        ports.routes[hex(ports.derivePushGid(secret))] = Route(account, groupHex)
+    }
+
+    @Test
+    fun `the OWNER re-keys - new secret broadcast, NEW gid subscribed, OLD gid unsubscribed`() =
+        runTest {
+            val ports = FakePorts(account)
+            val g = "30".repeat(32)
+            seedRouting(ports, g, secretA)
+            val oldGid = ports.derivePushGid(secretA)
+
+            val outcome = GroupPushRouting.rotate(
+                accountIdB64 = account,
+                groupIdHex = g,
+                ownRole = GroupPushRouting.RotationRole.OWNER,
+                ports = ports,
+            )
+
+            assertEquals(GroupPushRouting.RotationOutcome.ROTATED, outcome)
+            // A NEW secret replaced the old one...
+            assertEquals(1, ports.mintCount)
+            val next = ports.secrets[g]!!
+            assertFalse("the secret actually changed", next.contentEquals(secretA))
+            // ...was redistributed at the POST-removal epoch...
+            assertEquals(1, ports.broadcastCount)
+            assertArrayEquals(ports.composeEnvelope(next), ports.broadcastEnvelopes.single())
+            assertTrue("broadcast confirmed", ports.isDistributed(g))
+            // ...this device re-armed under the NEW id...
+            val newGid = ports.derivePushGid(next)
+            assertArrayEquals(newGid, ports.lastSubscribeTarget)
+            assertEquals(Route(account, g), ports.routes[hex(newGid)])
+            // ...and the OLD id was retired: subscription dropped + row gone.
+            assertEquals(1, ports.unsubscribeCount)
+            assertArrayEquals(oldGid, ports.unsubscribed.single())
+            assertNull("stale reverse-index row deleted", ports.routes[hex(oldGid)])
+            assertEquals("exactly one live route row", 1, ports.routes.size)
+        }
+
+    @Test
+    fun `an ADMIN may rotate too (ADR-0043 ratified option (b))`() = runTest {
+        val ports = FakePorts(account)
+        val g = "31".repeat(32)
+        seedRouting(ports, g, secretA)
+
+        val outcome = GroupPushRouting.rotate(
+            account,
+            g,
+            GroupPushRouting.RotationRole.ADMIN,
+            ports,
+        )
+
+        assertEquals(GroupPushRouting.RotationOutcome.ROTATED, outcome)
+        assertEquals(1, ports.broadcastCount)
+        assertEquals(1, ports.unsubscribeCount)
+    }
+
+    @Test
+    fun `a PLAIN MEMBER never rotates - nothing minted, nothing sent, nothing torn down`() =
+        runTest {
+            for (role in listOf(
+                GroupPushRouting.RotationRole.MEMBER,
+                GroupPushRouting.RotationRole.NONE,
+            )) {
+                val ports = FakePorts(account)
+                val g = "32".repeat(32)
+                seedRouting(ports, g, secretA)
+
+                val outcome = GroupPushRouting.rotate(account, g, role, ports)
+
+                assertEquals(GroupPushRouting.RotationOutcome.SKIP_NOT_AUTHORIZED, outcome)
+                assertEquals("no mint", 0, ports.mintCount)
+                assertEquals("no broadcast", 0, ports.broadcastCount)
+                assertEquals("no teardown", 0, ports.unsubscribeCount)
+                assertArrayEquals("secret untouched", secretA, ports.secrets[g])
+            }
+        }
+
+    @Test
+    fun `rotation NEVER mints a first secret (minting stays owner-only in ensure)`() = runTest {
+        // Holding nothing there is nothing to ROTATE. If rotation minted
+        // here, an ADMIN — which ADR-0043 (b) lets rotate — would become a
+        // SECOND minter, and two independent mints of 32 random bytes
+        // diverge the group's push_gid and break the notify JOIN outright.
+        val ports = FakePorts(account)
+        val g = "33".repeat(32)
+
+        val outcome = GroupPushRouting.rotate(
+            account,
+            g,
+            GroupPushRouting.RotationRole.ADMIN,
+            ports,
+        )
+
+        assertEquals(GroupPushRouting.RotationOutcome.SKIP_NO_SECRET, outcome)
+        assertEquals(0, ports.mintCount)
+        assertEquals(0, ports.broadcastCount)
+        assertTrue("nothing persisted", ports.secrets.isEmpty())
+        assertEquals("no teardown", 0, ports.unsubscribeCount)
+    }
+
+    @Test
+    fun `an UNREADABLE secret row is not rotated (the old id could never be named)`() = runTest {
+        val inner = FakePorts(account)
+        val g = "34".repeat(32)
+        seedRouting(inner, g, secretA)
+
+        val outcome = GroupPushRouting.rotate(
+            account,
+            g,
+            GroupPushRouting.RotationRole.OWNER,
+            FlakyStore(Int.MAX_VALUE, inner),
+        )
+
+        // Rotating a row whose OLD bytes cannot be read would strand the old
+        // gid subscribed forever — the exact defect being fixed.
+        assertEquals(GroupPushRouting.RotationOutcome.SKIP_NO_SECRET, outcome)
+        assertEquals(0, inner.mintCount)
+        assertEquals(0, inner.unsubscribeCount)
+    }
+
+    @Test
+    fun `the OLD secret is read BEFORE the overwrite - the teardown targets the OLD gid`() =
+        runTest {
+            // Ordering (b) of ADR-0043. The secret row is keyed
+            // (account, group) and is CLOBBERED in place, so persisting
+            // first makes the retiring id unnameable: the unsubscribe would
+            // target the id just armed, leaving the superseded one live and
+            // undeletable — an orphan that keeps receiving wakes.
+            val ports = FakePorts(account)
+            val g = "35".repeat(32)
+            seedRouting(ports, g, secretA)
+            val oldGid = ports.derivePushGid(secretA)
+
+            GroupPushRouting.rotate(account, g, GroupPushRouting.RotationRole.OWNER, ports)
+
+            val newGid = ports.derivePushGid(ports.secrets[g]!!)
+            assertArrayEquals("unsubscribed the OLD gid", oldGid, ports.unsubscribed.single())
+            assertFalse(
+                "must NOT unsubscribe the id just armed",
+                newGid.contentEquals(ports.unsubscribed.single()),
+            )
+            // The route row that survives is the NEW one, not the old one.
+            assertNull(ports.routes[hex(oldGid)])
+            assertEquals(Route(account, g), ports.routes[hex(newGid)])
+        }
+
+    @Test
+    fun `a FAILED rotation broadcast leaves the row PENDING and the retry re-sends the NEW secret`() =
+        runTest {
+            // The crash window ADR-0043 calls materially worse than at mint
+            // time: the rotator is alone on the new id, everyone else is on
+            // the old one, and nobody notifies either — the WHOLE group
+            // loses push. The existing `distributed` flag is the whole
+            // durability mechanism, reused verbatim.
+            val ports = FakePorts(account)
+            val g = "36".repeat(32)
+            seedRouting(ports, g, secretA)
+            ports.broadcastFails = true
+
+            val outcome = GroupPushRouting.rotate(
+                account,
+                g,
+                GroupPushRouting.RotationRole.OWNER,
+                ports,
+            )
+
+            // The LOCAL switch is durable and complete regardless...
+            assertEquals(GroupPushRouting.RotationOutcome.ROTATED, outcome)
+            val next = ports.secrets[g]!!
+            assertEquals(1, ports.unsubscribeCount)
+            // ...but the send is recorded as NOT landed.
+            assertFalse("row left pending", ports.isDistributed(g))
+            assertEquals(0, ports.broadcastCount)
+
+            // The existing re-broadcast branch — open to ANY holder — re-sends
+            // the STORED (i.e. the NEW) secret, never a re-mint.
+            ports.broadcastFails = false
+            GroupPushRouting.ensure(account, g, isOwner = false, ports = ports)
+
+            assertEquals("no second mint", 1, ports.mintCount)
+            assertEquals(1, ports.broadcastCount)
+            assertArrayEquals(ports.composeEnvelope(next), ports.broadcastEnvelopes.single())
+            assertTrue("now confirmed", ports.isDistributed(g))
+        }
+
+    @Test
+    fun `a FAILING unsubscribe does not unwind the rotation (the new id is already armed)`() =
+        runTest {
+            val ports = FakePorts(account)
+            val g = "37".repeat(32)
+            seedRouting(ports, g, secretA)
+            ports.unsubscribeFails = true
+
+            val outcome = GroupPushRouting.rotate(
+                account,
+                g,
+                GroupPushRouting.RotationRole.OWNER,
+                ports,
+            )
+
+            assertEquals(GroupPushRouting.RotationOutcome.ROTATED, outcome)
+            assertEquals("it was attempted", 1, ports.unsubscribeCount)
+            // The route row is still dropped — the cost of a failed
+            // unsubscribe is a stale push-gw row nothing notifies again, not
+            // a broken group.
+            assertNull(ports.routes[hex(ports.derivePushGid(secretA))])
+        }
+
+    /** Mints a DISTINCT secret per call, so two rotations are
+     *  distinguishable. */
+    private class DistinctMintPorts(accountIdB64: String) : FakePorts(accountIdB64) {
+        val broadcastGate = CompletableDeferred<Unit>()
+
+        override fun mintSecret(): ByteArray {
+            mintCount++
+            return ByteArray(32) { (0x40 + mintCount).toByte() }
+        }
+
+        override suspend fun broadcast(envelope: ByteArray) {
+            broadcastGate.await()
+            super.broadcast(envelope)
+        }
+    }
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `the per-group lock SERIALISES concurrent rotations (never two mints off one old secret)`() =
+        runTest {
+            // The damaging interleave: both triggers (this device's own
+            // remove + a concurrent poll-loop diff) read the SAME old secret,
+            // both mint, the second persist wins — leaving the first new
+            // push_gid subscribed and indexed but never notified again, i.e.
+            // exactly the orphan this ADR exists to prevent.
+            val ports = DistinctMintPorts(account)
+            val g = "38".repeat(32)
+            seedRouting(ports, g, secretA)
+            val oldGid = ports.derivePushGid(secretA)
+
+            val owner = GroupPushRouting.RotationRole.OWNER
+            launch { GroupPushRouting.rotate(account, g, owner, ports) }
+            launch { GroupPushRouting.rotate(account, g, owner, ports) }
+            runCurrent()
+
+            // The first rotation is parked inside its broadcast. Without the
+            // lock the second would ALREADY have minted off the same old
+            // secret; behind it, it has not started.
+            assertEquals("second rotation is behind the lock", 1, ports.mintCount)
+
+            ports.broadcastGate.complete(Unit)
+            advanceUntilIdle()
+
+            // Serialised, so the second rotation's "old" secret is the FIRST
+            // one's output — every intermediate id is retired, none stranded.
+            assertEquals(2, ports.mintCount)
+            assertEquals(2, ports.unsubscribeCount)
+            val finalGid = ports.derivePushGid(ports.secrets[g]!!)
+            assertEquals("exactly one live route row", 1, ports.routes.size)
+            assertEquals(Route(account, g), ports.routes[hex(finalGid)])
+            assertNull("the original id was retired", ports.routes[hex(oldGid)])
+        }
+
+    // ---- the membership-shrink entry point ----
+
+    @Test
+    fun `an observed SHRINK rotates for an owner and an admin, not for a plain member`() = runTest {
+        for (role in listOf(
+            GroupPushRouting.RotationRole.OWNER,
+            GroupPushRouting.RotationRole.ADMIN,
+        )) {
+            val ports = FakePorts(account)
+            val g = "39".repeat(32)
+            seedRouting(ports, g, secretA)
+
+            val outcome = GroupPushRouting.rotateIfMembershipShrank(
+                accountIdB64 = account,
+                groupIdHex = g,
+                ownRole = role,
+                previousMemberKeys = listOf(mA, mB, mC),
+                currentMemberKeys = listOf(mA, mB),
+                ports = ports,
+            )
+
+            assertEquals(GroupPushRouting.RotationOutcome.ROTATED, outcome)
+            assertEquals(1, ports.mintCount)
+            assertEquals(1, ports.unsubscribeCount)
+        }
+
+        val ports = FakePorts(account)
+        val g = "3a".repeat(32)
+        seedRouting(ports, g, secretA)
+        val outcome = GroupPushRouting.rotateIfMembershipShrank(
+            accountIdB64 = account,
+            groupIdHex = g,
+            ownRole = GroupPushRouting.RotationRole.MEMBER,
+            previousMemberKeys = listOf(mA, mB, mC),
+            currentMemberKeys = listOf(mA, mB),
+            ports = ports,
+        )
+        assertEquals(GroupPushRouting.RotationOutcome.SKIP_NOT_AUTHORIZED, outcome)
+        assertEquals(0, ports.mintCount)
+    }
+
+    @Test
+    fun `an ADD, an unchanged roster, and a torn snapshot never rotate on the wire path`() =
+        runTest {
+            var n = 0
+            suspend fun assertNoRotation(
+                label: String,
+                expected: GroupPushRouting.RotationOutcome,
+                before: List<String>?,
+                after: List<String>?,
+            ) {
+                n += 1
+                val ports = FakePorts(account)
+                val g = "%02x".format(0x40 + n).repeat(32)
+                seedRouting(ports, g, secretA)
+                val outcome = GroupPushRouting.rotateIfMembershipShrank(
+                    accountIdB64 = account,
+                    groupIdHex = g,
+                    ownRole = GroupPushRouting.RotationRole.OWNER,
+                    previousMemberKeys = before,
+                    currentMemberKeys = after,
+                    ports = ports,
+                )
+                assertEquals(label, expected, outcome)
+                assertEquals("$label: no mint", 0, ports.mintCount)
+                assertEquals("$label: no broadcast", 0, ports.broadcastCount)
+                assertEquals("$label: no teardown", 0, ports.unsubscribeCount)
+                assertArrayEquals("$label: secret untouched", secretA, ports.secrets[g])
+            }
+
+            assertNoRotation(
+                "an add",
+                GroupPushRouting.RotationOutcome.SKIP_NO_SHRINK,
+                listOf(mA, mB),
+                listOf(mA, mB, mC),
+            )
+            assertNoRotation(
+                "an unchanged roster",
+                GroupPushRouting.RotationOutcome.SKIP_NO_SHRINK,
+                listOf(mA, mB),
+                listOf(mA, mB),
+            )
+            assertNoRotation(
+                "a torn post-poll read",
+                GroupPushRouting.RotationOutcome.SKIP_UNKNOWN_MEMBERSHIP,
+                listOf(mA, mB),
+                null,
+            )
+            assertNoRotation(
+                "a torn baseline",
+                GroupPushRouting.RotationOutcome.SKIP_UNKNOWN_MEMBERSHIP,
+                null,
+                listOf(mA, mB),
+            )
+        }
+
+    // ---- the RECEIVE-side teardown (every member retires its own row) ----
+
+    @Test
+    fun `a NON-rotator applying a CHANGED secret retires its OWN old gid`() = runTest {
+        // This is what keeps rotation from being a NET LOSS. `group_unsubscribe`
+        // deletes exactly the (device, group) row named in the request and a
+        // device knows only its own pseudonym, so the rotator cannot tear
+        // down anyone else's. Without this every member would leave a live
+        // row under the old id — one dead subscription per member per
+        // rotation, "a live cluster plus an archive of every past cluster".
+        val ports = FakePorts(account)
+        val g = "3c".repeat(32)
+        seedRouting(ports, g, secretA)
+        val oldGid = ports.derivePushGid(secretA)
+
+        val verdict = GroupPushRouting.receiveGated(
+            groupIdHex = g,
+            secret = secretB,
+            senderSignatureKey = ownerKey,
+            owner = knownRoles(),
+            ports = ports,
+        )
+
+        assertEquals(GroupPushRouting.ReceiveVerdict.ACCEPT, verdict)
+        assertArrayEquals(secretB, ports.secrets[g])
+        assertArrayEquals(ports.derivePushGid(secretB), ports.lastSubscribeTarget)
+        assertEquals(1, ports.unsubscribeCount)
+        assertArrayEquals(oldGid, ports.unsubscribed.single())
+        assertNull(ports.routes[hex(oldGid)])
+        assertEquals("exactly one live route row", 1, ports.routes.size)
+        // A receiver NEVER re-broadcasts — it is not the rotator.
+        assertEquals(0, ports.broadcastCount)
+        assertEquals(0, ports.mintCount)
+    }
+
+    @Test
+    fun `an IDENTICAL re-broadcast retires nothing (the id did not change)`() = runTest {
+        val ports = FakePorts(account)
+        val g = "3d".repeat(32)
+        seedRouting(ports, g, secretA)
+
+        val verdict = GroupPushRouting.receiveGated(
+            groupIdHex = g,
+            secret = secretA.copyOf(),
+            senderSignatureKey = memberKey,
+            owner = knownRoles(),
+            ports = ports,
+        )
+
+        assertEquals(GroupPushRouting.ReceiveVerdict.ACCEPT, verdict)
+        assertEquals("nothing to retire", 0, ports.unsubscribeCount)
+        assertEquals(Route(account, g), ports.routes[hex(ports.derivePushGid(secretA))])
+    }
+
+    @Test
+    fun `a FIRST-EVER secret retires nothing (there is no old id)`() = runTest {
+        val ports = FakePorts(account)
+        val g = "3e".repeat(32)
+
+        val verdict = GroupPushRouting.receiveGated(
+            groupIdHex = g,
+            secret = secretB,
+            senderSignatureKey = adminKey,
+            owner = knownRoles(),
+            ports = ports,
+        )
+
+        assertEquals(GroupPushRouting.ReceiveVerdict.ACCEPT, verdict)
+        assertEquals(0, ports.unsubscribeCount)
+    }
+
+    @Test
+    fun `a REFUSED secret retires nothing (the device keeps its id)`() = runTest {
+        val ports = FakePorts(account)
+        val g = "3f".repeat(32)
+        seedRouting(ports, g, secretA)
+
+        val verdict = GroupPushRouting.receiveGated(
+            groupIdHex = g,
+            secret = secretB,
+            senderSignatureKey = memberKey,
+            owner = knownRoles(),
+            ports = ports,
+        )
+
+        assertEquals(GroupPushRouting.ReceiveVerdict.REJECT, verdict)
+        assertEquals("a refusal must not tear down a LIVE subscription", 0, ports.unsubscribeCount)
+        assertArrayEquals(secretA, ports.secrets[g])
+        assertEquals(Route(account, g), ports.routes[hex(ports.derivePushGid(secretA))])
     }
 
     // -----------------------------------------------------------------

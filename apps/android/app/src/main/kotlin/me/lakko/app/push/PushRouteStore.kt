@@ -83,6 +83,30 @@ public class PushRouteStore(context: Context) {
     }
 
     /**
+     * Delete ONE reverse-index row, by its `push_gid` (lowercase hex).
+     *
+     * ADR-0043. The asymmetry this closes: [PushRoutingSecretStore] is
+     * keyed `(account, group)` and is **overwritten in place** by a
+     * rotation, but this store is keyed by the `push_gid` itself — so a
+     * rotation only ever ADDS a row and the superseded
+     * `push_gid -> (account, group_id)` entry survives forever. Left
+     * behind, each rotation grows the reverse map by one dead entry whose
+     * `push_gid` nothing will ever notify again.
+     *
+     * A no-op when the row is absent (`SharedPreferences.remove` on an
+     * unknown key succeeds), so the caller never has to check first — a
+     * rotation on a device that had not yet indexed the old gid is simply
+     * a no-op.
+     *
+     * Scoped to the ONE key: never touches [PushRoutingSecretStore], so it
+     * can never strand a group by deleting the material a LIVE `push_gid`
+     * is derived from.
+     */
+    public fun remove(pushGidHex: String) {
+        prefs.edit().remove(pushGidHex.lowercase()).apply()
+    }
+
+    /**
      * Drop every reverse-index row owned by [accountIdB64]. Called
      * from `ChatRepository.forgetDevice`. Best-effort; a row for
      * another account on the same device is left intact.

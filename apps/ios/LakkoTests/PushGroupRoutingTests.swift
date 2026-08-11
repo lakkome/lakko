@@ -26,13 +26,25 @@ import LakkoCore
 ///   * `tryDecodeSecretEnvelope` is fail-closed on a non-envelope plaintext;
 ///   * **the receive-side authority gate** (`lakko-security` MEDIUM-1):
 ///     owner outranks admin outranks member — the OWNER may always set the
-///     secret, an ADMIN may only SEED a hole (first-ever) and never
-///     overwrite, a plain member may only re-send the byte-identical value
-///     (which keeps `redistribute` idempotent); an unreadable role table
-///     refuses a change.
+///     secret, an ADMIN may SEED a hole (first-ever) **and (ADR-0043 option
+///     (b)) OVERWRITE an established one**, a plain member may only re-send
+///     the byte-identical value (which keeps `redistribute` idempotent); an
+///     unreadable role table refuses a change.
 ///
-/// The push-gw subscribe seam is injected (spy); the store is a transient
-/// `UserDefaults` suite; the FFI + owner `Group` are REAL.
+/// ADR-0043 additionally pins the rotation-on-removal arc:
+///
+///   * the pure membership-SHRINK decision core (a set difference over
+///     member signature keys, so a remove+add in one batch still rotates);
+///   * the rotation flow — old secret read BEFORE the in-place overwrite,
+///     new gid subscribed + indexed, OLD gid unsubscribed + de-indexed, in
+///     that order;
+///   * a failed rotation broadcast leaves the row PENDING for the existing
+///     any-holder retry;
+///   * the receive-side teardown, which is what keeps a rotation from
+///     leaving one dead push-gw row per member.
+///
+/// The push-gw subscribe + unsubscribe seams are injected (spies); the store
+/// is a transient `UserDefaults` suite; the FFI + owner `Group` are REAL.
 @MainActor
 final class PushGroupRoutingTests: XCTestCase {
 
@@ -41,6 +53,20 @@ final class PushGroupRoutingTests: XCTestCase {
     private final class SubscribeSpy {
         private(set) var targets: [Data] = []
         func record(_ pushGid: Data) { targets.append(pushGid) }
+    }
+
+    /// ADR-0043 — records the `push_gid`s the orchestrator UNSUBSCRIBED from,
+    /// plus how many subscribes had already happened at that moment. The
+    /// latter pins the load-bearing ordering: the device arms the NEW id
+    /// before dropping the OLD one, so it is never unsubscribed from both at
+    /// once.
+    private final class UnsubscribeSpy {
+        private(set) var targets: [Data] = []
+        private(set) var subscribesBefore: [Int] = []
+        func record(_ pushGid: Data, subscribesSoFar: Int) {
+            targets.append(pushGid)
+            subscribesBefore.append(subscribesSoFar)
+        }
     }
 
     /// Records the E2EE distribution-envelope bytes the orchestrator asked
@@ -88,11 +114,20 @@ final class PushGroupRoutingTests: XCTestCase {
 
     private func makeRouting(
         store: PushRoutingStore,
-        spy: SubscribeSpy
+        spy: SubscribeSpy,
+        unsubscribeSpy: UnsubscribeSpy? = nil
     ) -> PushGroupRouting {
-        PushGroupRouting(store: store, subscribeUnderPushGid: { pushGid in
-            spy.record(pushGid)
-        })
+        PushGroupRouting(
+            store: store,
+            subscribeUnderPushGid: { pushGid in
+                spy.record(pushGid)
+            },
+            unsubscribeUnderPushGid: { pushGid in
+                // Snapshot the subscribe count AT the unsubscribe, so the
+                // arm-new-before-drop-old ordering is directly assertable.
+                unsubscribeSpy?.record(pushGid, subscribesSoFar: spy.targets.count)
+            }
+        )
     }
 
     private func makeIdentity(_ seedByte: UInt8) throws -> Identity {
@@ -893,11 +928,13 @@ final class PushGroupRoutingTests: XCTestCase {
             PushGroupRouting.classifyIncomingSecret(
                 incoming: b, stored: a, senderKey: ownerKey, authority: roles),
             .accept)
-        // ADMIN authored the change -> REJECT (an admin may not OVERWRITE)
+        // ADMIN authored the change -> ACCEPT (ADR-0043 ratified option (b):
+        // ADR-0022 lets an admin commit the Remove, so an admin must be able
+        // to retire the evicted member's routing id).
         XCTAssertEqual(
             PushGroupRouting.classifyIncomingSecret(
                 incoming: b, stored: a, senderKey: adminKey, authority: roles),
-            .reject)
+            .accept)
         // a PLAIN MEMBER authored the change -> REJECT
         XCTAssertEqual(
             PushGroupRouting.classifyIncomingSecret(
@@ -973,17 +1010,18 @@ final class PushGroupRoutingTests: XCTestCase {
                 authority: .roleTable(owner: Data(), admins: [Data()])),
             .reject)
 
-        // --- ADMIN HOLE MUST BE PROVABLE -----------------------------------
+        // --- ADMIN WRITES OVER AN UNREADABLE STORE -------------------------
         // `stored == nil` also happens when the store could not be READ (no
-        // device wrap key / AEAD open failed). An admin must not be able to
-        // exploit that to overwrite a secret this device really holds.
+        // device wrap key / AEAD open failed), which makes the write a ROTATE
+        // rather than a provable SEED. Under ADR-0043 option (b) the admin is
+        // authorised either way, so this no longer changes the outcome — the
+        // distinction survives only in the diagnostic log.
         XCTAssertEqual(
             PushGroupRouting.classifyIncomingSecret(
                 incoming: a, stored: nil, storedUnreadable: true,
                 senderKey: adminKey, authority: roles),
-            .reject)
-        // ... but the OWNER may still write over an unreadable store — that
-        // is the repair path.
+            .accept)
+        // The OWNER may still write over an unreadable store — the repair path.
         XCTAssertEqual(
             PushGroupRouting.classifyIncomingSecret(
                 incoming: a, stored: nil, storedUnreadable: true,
@@ -995,8 +1033,22 @@ final class PushGroupRoutingTests: XCTestCase {
                 incoming: a, stored: nil, storedUnreadable: false,
                 senderKey: adminKey, authority: roles),
             .accept)
+        // ... and a PLAIN MEMBER stays refused in every one of those states —
+        // the admin widening must not leak downward.
+        for unreadable in [true, false] {
+            XCTAssertEqual(
+                PushGroupRouting.classifyIncomingSecret(
+                    incoming: b, stored: a, storedUnreadable: unreadable,
+                    senderKey: memberKey, authority: roles),
+                .reject)
+            XCTAssertEqual(
+                PushGroupRouting.classifyIncomingSecret(
+                    incoming: a, stored: nil, storedUnreadable: unreadable,
+                    senderKey: memberKey, authority: roles),
+                .reject)
+        }
 
-        // --- MULTI-ADMIN: every listed admin may seed ----------------------
+        // --- MULTI-ADMIN: every listed admin may seed AND rotate -----------
         let admin2 = Data(repeating: 0x04, count: 32)
         let multi = PushGroupRouting.SecretAuthority.roleTable(
             owner: ownerKey, admins: [adminKey, admin2])
@@ -1007,7 +1059,7 @@ final class PushGroupRoutingTests: XCTestCase {
         XCTAssertEqual(
             PushGroupRouting.classifyIncomingSecret(
                 incoming: b, stored: a, senderKey: admin2, authority: multi),
-            .reject)
+            .accept)
     }
 
     /// The leaf -> signature-key mapping the gate depends on, against a REAL
@@ -1163,12 +1215,19 @@ final class PushGroupRoutingTests: XCTestCase {
         XCTAssertEqual(spy.targets, [pushGid], "and the seeded member subscribes under push_gid")
     }
 
-    /// An admin may seed a hole but must NOT be able to rotate a secret the
-    /// device already holds — that power stays owner-only.
-    func testReceiveAdminChangedSecretIsRejected() async throws {
+    /// **ADR-0043 ratified option (b) — the gate widening.** This test used to
+    /// pin the opposite contract ("an admin may seed a hole but must NOT be
+    /// able to rotate"). ADR-0022 lets an ADMIN commit the Remove that makes
+    /// an ADR-0043 rotation necessary, so refusing the overwrite left an
+    /// admin able to evict a member but unable to retire that member's
+    /// routing id — the eviction completed with the ex-member's wake stream
+    /// intact. The admin's changed secret is now APPLIED, and the device
+    /// re-subscribes under the new id + retires the old one.
+    func testReceiveAdminMayRotateAHeldSecret() async throws {
         let store = makeStore()
         let spy = SubscribeSpy()
-        let routing = makeRouting(store: store, spy: spy)
+        let unsub = UnsubscribeSpy()
+        let routing = makeRouting(store: store, spy: spy, unsubscribeSpy: unsub)
         let (group, groupIdHex, ownerLeaf, adminLeaf, _) = try makeGroupWithAdmin(
             owner: try makeIdentity(0x81),
             admin: try makeIdentity(0x82),
@@ -1181,16 +1240,56 @@ final class PushGroupRoutingTests: XCTestCase {
         let ownerPushGid = try XCTUnwrap(PushGroupRouting.derivePushGid(secret: ownerSecret))
         XCTAssertEqual(spy.targets, [ownerPushGid])
 
+        let rotated = try XCTUnwrap(PushGroupRouting.mintSecret())
+        XCTAssertNotEqual(rotated, ownerSecret)
+        await routing.receiveSecret(
+            accountIdB64: "acct", groupIdHex: groupIdHex, secret: rotated,
+            group: group, senderLeaf: adminLeaf)
+
+        let rotatedGid = try XCTUnwrap(PushGroupRouting.derivePushGid(secret: rotated))
+        XCTAssertEqual(
+            store.getSecret(accountIdB64: "acct", groupIdHex: groupIdHex), rotated,
+            "ADR-0043 option (b): an admin MAY overwrite the group's routing secret")
+        XCTAssertEqual(spy.targets, [ownerPushGid, rotatedGid],
+                       "and the device re-subscribes under the rotated id")
+        XCTAssertEqual(unsub.targets, [ownerPushGid],
+                       "and retires its OWN row under the superseded id")
+        XCTAssertNil(
+            store.lookupRoute(pushGidHex: PushGroupRouting.hex(ownerPushGid)),
+            "the superseded reverse-index row is deleted, not accumulated")
+        XCTAssertNotNil(store.lookupRoute(pushGidHex: PushGroupRouting.hex(rotatedGid)))
+    }
+
+    /// The tier boundary the widening did NOT cross: a PLAIN member's changed
+    /// secret is still refused whole — no persist, no re-subscribe, and
+    /// nothing torn down (the device keeps the id it is on).
+    func testReceivePlainMemberChangedSecretIsStillRejected() async throws {
+        let store = makeStore()
+        let spy = SubscribeSpy()
+        let unsub = UnsubscribeSpy()
+        let routing = makeRouting(store: store, spy: spy, unsubscribeSpy: unsub)
+        let (group, groupIdHex, ownerLeaf, _, memberLeaf) = try makeGroupWithAdmin(
+            owner: try makeIdentity(0x84),
+            admin: try makeIdentity(0x85),
+            member: try makeIdentity(0x86))
+
+        let ownerSecret = try XCTUnwrap(PushGroupRouting.mintSecret())
+        await routing.receiveSecret(
+            accountIdB64: "acct", groupIdHex: groupIdHex, secret: ownerSecret,
+            group: group, senderLeaf: ownerLeaf)
+        let ownerPushGid = try XCTUnwrap(PushGroupRouting.derivePushGid(secret: ownerSecret))
+
         let rogue = try XCTUnwrap(PushGroupRouting.mintSecret())
         XCTAssertNotEqual(rogue, ownerSecret)
         await routing.receiveSecret(
             accountIdB64: "acct", groupIdHex: groupIdHex, secret: rogue,
-            group: group, senderLeaf: adminLeaf)
+            group: group, senderLeaf: memberLeaf)
 
         XCTAssertEqual(
             store.getSecret(accountIdB64: "acct", groupIdHex: groupIdHex), ownerSecret,
-            "an admin must not be able to OVERWRITE the group's routing secret")
+            "widening the gate to admins must not have widened it to everyone")
         XCTAssertEqual(spy.targets, [ownerPushGid], "no re-subscribe on a refused secret")
+        XCTAssertTrue(unsub.targets.isEmpty, "a refused secret retires nothing")
         let rogueGid = try XCTUnwrap(PushGroupRouting.derivePushGid(secret: rogue))
         XCTAssertNil(store.lookupRoute(pushGidHex: PushGroupRouting.hex(rogueGid)))
     }
@@ -1317,5 +1416,574 @@ final class PushGroupRoutingTests: XCTestCase {
 
         // Deferred — no subscription under group_id (or anything at all).
         XCTAssertTrue(spy.targets.isEmpty)
+    }
+
+    // MARK: - ADR-0043: the per-gid route delete (new store surface)
+
+    /// The store asymmetry ADR-0043 closes: the secret row is overwritten in
+    /// place by a rotation, but a route row is keyed by `push_gid` so a
+    /// rotation only ADDS one. Without a per-gid delete every rotation grows
+    /// the reverse map by a dead entry nothing will ever notify again.
+    func testRemoveRouteRetiresOneRowAndLeavesTheSecretIntact() throws {
+        let store = makeStore()
+        let secret = try XCTUnwrap(PushGroupRouting.mintSecret())
+        let other = try XCTUnwrap(PushGroupRouting.mintSecret())
+        let gidHex = PushGroupRouting.hex(
+            try XCTUnwrap(PushGroupRouting.derivePushGid(secret: secret)))
+        let otherGidHex = PushGroupRouting.hex(
+            try XCTUnwrap(PushGroupRouting.derivePushGid(secret: other)))
+
+        store.putRouting(
+            accountIdB64: "acct", groupIdHex: "grp", secret: secret, pushGidHex: gidHex,
+            distributed: true)
+        store.putRouting(
+            accountIdB64: "acct", groupIdHex: "grp2", secret: other, pushGidHex: otherGidHex,
+            distributed: true)
+
+        store.removeRoute(pushGidHex: gidHex)
+
+        XCTAssertNil(store.lookupRoute(pushGidHex: gidHex), "the named row is gone")
+        XCTAssertNotNil(
+            store.lookupRoute(pushGidHex: otherGidHex),
+            "and ONLY the named row — a sibling group's route survives")
+        // Scoped to the reverse index: it must never strand a group by
+        // deleting the material a live push_gid is derived from.
+        XCTAssertEqual(store.getSecret(accountIdB64: "acct", groupIdHex: "grp"), secret)
+        XCTAssertTrue(store.hasSecret(accountIdB64: "acct", groupIdHex: "grp"))
+    }
+
+    /// A rotation on a device that had not yet indexed the old gid must not
+    /// have to check first.
+    func testRemoveRouteOnAnAbsentRowIsANoOp() throws {
+        let store = makeStore()
+        store.removeRoute(pushGidHex: String(repeating: "ab", count: 32))
+        XCTAssertNil(store.lookupRoute(pushGidHex: String(repeating: "ab", count: 32)))
+    }
+
+    // MARK: - ADR-0043: the pure membership-shrink decision core
+
+    /// The verbatim port of the web `membershipRotationDecision` matrix.
+    func testMembershipRotationDecisionMatrix() {
+        let a = String(repeating: "aa", count: 32)
+        let b = String(repeating: "bb", count: 32)
+        let c = String(repeating: "cc", count: 32)
+
+        // A SHRINK rotates for the OWNER ...
+        XCTAssertEqual(
+            PushGroupRouting.membershipRotationDecision(
+                previousMemberKeys: [a, b, c], currentMemberKeys: [a, b], ownRole: .owner),
+            .rotate)
+        // ... and for an ADMIN (ADR-0043 ratified option (b)): ADR-0022 lets
+        // an admin commit the Remove, so an admin must be able to retire the
+        // evicted member's routing id, else the eviction completes with the
+        // ex-member's wake stream intact.
+        XCTAssertEqual(
+            PushGroupRouting.membershipRotationDecision(
+                previousMemberKeys: [a, b, c], currentMemberKeys: [a, b], ownRole: .admin),
+            .rotate)
+        // ... but NOT for a plain member.
+        XCTAssertEqual(
+            PushGroupRouting.membershipRotationDecision(
+                previousMemberKeys: [a, b, c], currentMemberKeys: [a, b], ownRole: .member),
+            .skipNotAuthorized)
+        // ... and NOT in a group with no role table: no role table ⇒ no owner
+        // ⇒ nobody ever minted a secret for it, so there is nothing to
+        // rotate; and letting every member rotate would have them each mint a
+        // divergent secret.
+        XCTAssertEqual(
+            PushGroupRouting.membershipRotationDecision(
+                previousMemberKeys: [a, b, c], currentMemberKeys: [a, b], ownRole: nil),
+            .skipNotAuthorized)
+
+        // GROWTH (an add) never rotates — the added member is SUPPOSED to
+        // route, and rotating on the commonest membership event would churn
+        // the id for zero privacy gain.
+        XCTAssertEqual(
+            PushGroupRouting.membershipRotationDecision(
+                previousMemberKeys: [a, b], currentMemberKeys: [a, b, c], ownRole: .owner),
+            .skipNoShrink)
+        // An UNCHANGED roster never rotates (an ordinary commit / a bare poll).
+        XCTAssertEqual(
+            PushGroupRouting.membershipRotationDecision(
+                previousMemberKeys: [a, b], currentMemberKeys: [a, b], ownRole: .owner),
+            .skipNoShrink)
+
+        // A remove+add in ONE poll batch still rotates: the COUNT is equal,
+        // the SET is not. This is why the diff is over member signature keys
+        // and not over counts or leaf indices — OpenMLS reuses a vacated leaf
+        // for the next Add, so both of those look unchanged while a member
+        // really was evicted.
+        XCTAssertEqual(
+            PushGroupRouting.membershipRotationDecision(
+                previousMemberKeys: [a, b], currentMemberKeys: [a, c], ownRole: .owner),
+            .rotate)
+
+        // An UNKNOWN snapshot never rotates — a torn `members()` read is not
+        // "everyone left".
+        XCTAssertEqual(
+            PushGroupRouting.membershipRotationDecision(
+                previousMemberKeys: nil, currentMemberKeys: [a], ownRole: .owner),
+            .skipUnknownMembership)
+        XCTAssertEqual(
+            PushGroupRouting.membershipRotationDecision(
+                previousMemberKeys: [a, b], currentMemberKeys: nil, ownRole: .owner),
+            .skipUnknownMembership)
+        // A FIRST observation (empty baseline) has nothing to diff against.
+        XCTAssertEqual(
+            PushGroupRouting.membershipRotationDecision(
+                previousMemberKeys: [], currentMemberKeys: [], ownRole: .owner),
+            .skipUnknownMembership)
+    }
+
+    /// `memberSignatureKeys` hexes a REAL roster, and the shrink it feeds is
+    /// the real one: removing a leaf from a live 3-member group produces a
+    /// set difference the decision core reads as `rotate`.
+    func testMemberSignatureKeysOnARealGroupAndARealRemoval() throws {
+        let owner = try makeIdentity(0x66)
+        let (group, _) = try makeOwnerGroup(owner)
+        _ = try group.addMemberFromWire(
+            identity: owner, keyPackage: try (try makeIdentity(0x67)).createKeyPackage())
+        _ = try group.addMemberFromWire(
+            identity: owner, keyPackage: try (try makeIdentity(0x68)).createKeyPackage())
+
+        let before = try XCTUnwrap(PushGroupRouting.memberSignatureKeys(group: group))
+        XCTAssertEqual(before.count, 3)
+        XCTAssertEqual(
+            before, try group.members().map { PushGroupRouting.hex($0.signaturePublicKey) })
+
+        // A REAL removal commit, then the post-removal snapshot.
+        let ownerKey = try XCTUnwrap(try group.groupRoles()).owner
+        let victim = try XCTUnwrap(
+            try group.members().first { $0.signaturePublicKey != ownerKey })
+        _ = try group.removeMember(identity: owner, leafIndex: victim.leafIndex)
+        let after = try XCTUnwrap(PushGroupRouting.memberSignatureKeys(group: group))
+
+        XCTAssertEqual(after.count, 2)
+        XCTAssertEqual(
+            PushGroupRouting.membershipRotationDecision(
+                previousMemberKeys: before, currentMemberKeys: after, ownRole: .owner),
+            .rotate,
+            "a real MLS removal must be visible to the diff")
+    }
+
+    // MARK: - ADR-0043: the rotation flow
+
+    /// Seed a settled (already-distributed) secret + its reverse-index row.
+    private func seedSettled(
+        store: PushRoutingStore,
+        accountIdB64: String,
+        groupIdHex: String,
+        secret: Data
+    ) throws {
+        let gidHex = PushGroupRouting.hex(
+            try XCTUnwrap(PushGroupRouting.derivePushGid(secret: secret)))
+        store.putRouting(
+            accountIdB64: accountIdB64, groupIdHex: groupIdHex, secret: secret,
+            pushGidHex: gidHex, distributed: true)
+    }
+
+    /// The whole rotation, end to end: a genuinely NEW secret is persisted +
+    /// broadcast, the NEW gid is subscribed + indexed, and the OLD gid is
+    /// unsubscribed + de-indexed.
+    func testOwnerRotationRekeysAndRetiresTheOldPushGid() async throws {
+        let store = makeStore()
+        let spy = SubscribeSpy()
+        let unsub = UnsubscribeSpy()
+        let routing = makeRouting(store: store, spy: spy, unsubscribeSpy: unsub)
+        let recorder = BroadcastRecorder()
+
+        let old = try XCTUnwrap(PushGroupRouting.mintSecret())
+        try seedSettled(store: store, accountIdB64: "acct", groupIdHex: "grp", secret: old)
+        let oldGid = try XCTUnwrap(PushGroupRouting.derivePushGid(secret: old))
+
+        let outcome = await routing.rotateSecret(
+            accountIdB64: "acct", groupIdHex: "grp", ownRole: .owner,
+            broadcast: { bytes in recorder.record(bytes) })
+        XCTAssertEqual(outcome, .rotated)
+
+        // A genuinely NEW secret replaced the old one, in place.
+        let stored = try XCTUnwrap(store.getSecret(accountIdB64: "acct", groupIdHex: "grp"))
+        XCTAssertEqual(stored.count, 32)
+        XCTAssertNotEqual(stored, old)
+        let newGid = try XCTUnwrap(PushGroupRouting.derivePushGid(secret: stored))
+        XCTAssertNotEqual(newGid, oldGid)
+
+        // Redistributed to the group — the envelope carries the NEW secret ...
+        XCTAssertEqual(recorder.envelopes.count, 1)
+        XCTAssertEqual(
+            PushGroupRouting.tryDecodeSecretEnvelope(try XCTUnwrap(recorder.envelopes.first)),
+            stored)
+        // ... and is confirmed on the wire.
+        XCTAssertEqual(
+            store.getRecord(accountIdB64: "acct", groupIdHex: "grp")?.distributed, true)
+
+        // Subscribed under the NEW gid.
+        XCTAssertEqual(spy.targets, [newGid])
+        // Unsubscribed from the OLD gid — the FIRST live call site of
+        // `PushClient.unsubscribeGroup`, dead code before this ADR.
+        XCTAssertEqual(unsub.targets, [oldGid])
+
+        // The reverse index carries the new entry and NOT the retired one:
+        // without the delete every rotation grows the map by a dead row.
+        XCTAssertNotNil(store.lookupRoute(pushGidHex: PushGroupRouting.hex(newGid)))
+        XCTAssertNil(store.lookupRoute(pushGidHex: PushGroupRouting.hex(oldGid)))
+    }
+
+    /// ADR-0043 ratified option (b): an ADMIN may rotate too.
+    func testAdminMayRotate() async throws {
+        let store = makeStore()
+        let spy = SubscribeSpy()
+        let unsub = UnsubscribeSpy()
+        let routing = makeRouting(store: store, spy: spy, unsubscribeSpy: unsub)
+        let recorder = BroadcastRecorder()
+
+        let old = try XCTUnwrap(PushGroupRouting.mintSecret())
+        try seedSettled(store: store, accountIdB64: "acct", groupIdHex: "grp", secret: old)
+
+        let outcome = await routing.rotateSecret(
+            accountIdB64: "acct", groupIdHex: "grp", ownRole: .admin,
+            broadcast: { bytes in recorder.record(bytes) })
+        XCTAssertEqual(outcome, .rotated)
+        XCTAssertEqual(recorder.envelopes.count, 1)
+        XCTAssertEqual(unsub.targets.count, 1)
+        XCTAssertNotEqual(store.getSecret(accountIdB64: "acct", groupIdHex: "grp"), old)
+    }
+
+    /// A plain member (and a group with no role table) never rotates:
+    /// nothing minted, nothing sent, nothing torn down.
+    func testPlainMemberNeverRotates() async throws {
+        let store = makeStore()
+        let spy = SubscribeSpy()
+        let unsub = UnsubscribeSpy()
+        let routing = makeRouting(store: store, spy: spy, unsubscribeSpy: unsub)
+        let recorder = BroadcastRecorder()
+
+        let old = try XCTUnwrap(PushGroupRouting.mintSecret())
+        try seedSettled(store: store, accountIdB64: "acct", groupIdHex: "grp", secret: old)
+
+        for role: Role? in [.member, nil] {
+            let outcome = await routing.rotateSecret(
+                accountIdB64: "acct", groupIdHex: "grp", ownRole: role,
+                broadcast: { bytes in recorder.record(bytes) })
+            XCTAssertEqual(outcome, .skipNotAuthorized)
+        }
+        XCTAssertTrue(recorder.envelopes.isEmpty)
+        XCTAssertTrue(unsub.targets.isEmpty)
+        XCTAssertTrue(spy.targets.isEmpty)
+        XCTAssertEqual(
+            store.getSecret(accountIdB64: "acct", groupIdHex: "grp"), old,
+            "a plain member still ends up on the new id — via the gated "
+                + "receive path, when the rotator's envelope arrives")
+    }
+
+    /// **Rotation NEVER mints a first secret.** With nothing held, an admin
+    /// rotating here would become a SECOND minter and diverge the group's
+    /// `push_gid` — exactly what the owner-mints rule exists to prevent.
+    /// ADR-0043 option (b) widened OVERWRITE authority, never MINT authority.
+    func testRotationNeverMintsAFirstSecret() async throws {
+        let store = makeStore()
+        let spy = SubscribeSpy()
+        let unsub = UnsubscribeSpy()
+        let routing = makeRouting(store: store, spy: spy, unsubscribeSpy: unsub)
+        let recorder = BroadcastRecorder()
+
+        for role: Role in [.admin, .owner] {
+            let outcome = await routing.rotateSecret(
+                accountIdB64: "acct", groupIdHex: "emptyGrp", ownRole: role,
+                broadcast: { bytes in recorder.record(bytes) })
+            XCTAssertEqual(outcome, .skipNoSecret)
+        }
+        XCTAssertTrue(recorder.envelopes.isEmpty)
+        XCTAssertFalse(store.hasSecret(accountIdB64: "acct", groupIdHex: "emptyGrp"))
+        XCTAssertTrue(spy.targets.isEmpty)
+        XCTAssertTrue(unsub.targets.isEmpty)
+    }
+
+    /// An UNREADABLE row cannot be rotated either: the OLD id could never be
+    /// named from bytes we cannot read, so a rotation would strand it
+    /// subscribed forever.
+    func testRotationSkipsAnUnreadableRow() async throws {
+        let store = makeStore()
+        let spy = SubscribeSpy()
+        let unsub = UnsubscribeSpy()
+        let routing = makeRouting(store: store, spy: spy, unsubscribeSpy: unsub)
+        let recorder = BroadcastRecorder()
+
+        store.putRawRecordForTesting(
+            accountIdB64: "acct", groupIdHex: "grp", plaintext: Data(repeating: 0x09, count: 7))
+        XCTAssertTrue(store.hasSecret(accountIdB64: "acct", groupIdHex: "grp"))
+        XCTAssertNil(store.getSecret(accountIdB64: "acct", groupIdHex: "grp"))
+
+        let outcome = await routing.rotateSecret(
+            accountIdB64: "acct", groupIdHex: "grp", ownRole: .owner,
+            broadcast: { bytes in recorder.record(bytes) })
+        XCTAssertEqual(outcome, .skipNoSecret)
+        XCTAssertTrue(recorder.envelopes.isEmpty)
+        XCTAssertTrue(unsub.targets.isEmpty)
+        XCTAssertNil(store.getSecret(accountIdB64: "acct", groupIdHex: "grp"),
+                     "and the unreadable row is not overwritten by a fresh mint")
+    }
+
+    /// **Ordering (b): the OLD secret is read BEFORE the overwrite.** The
+    /// secret row is keyed `(account, group)` and clobbered in place. If the
+    /// rotation persisted first, the id being retired could no longer be
+    /// named: an undeletable orphan that keeps receiving wakes — the exact
+    /// defect this ADR fixes. Pinned by asserting the unsubscribe TARGET.
+    func testTheTeardownTargetsTheOldGidNotTheNewOne() async throws {
+        let store = makeStore()
+        let spy = SubscribeSpy()
+        let unsub = UnsubscribeSpy()
+        let routing = makeRouting(store: store, spy: spy, unsubscribeSpy: unsub)
+        let recorder = BroadcastRecorder()
+
+        let old = try XCTUnwrap(PushGroupRouting.mintSecret())
+        try seedSettled(store: store, accountIdB64: "acct", groupIdHex: "grp", secret: old)
+        let oldGid = try XCTUnwrap(PushGroupRouting.derivePushGid(secret: old))
+
+        await routing.rotateSecret(
+            accountIdB64: "acct", groupIdHex: "grp", ownRole: .owner,
+            broadcast: { bytes in recorder.record(bytes) })
+
+        let newGid = try XCTUnwrap(PushGroupRouting.derivePushGid(
+            secret: try XCTUnwrap(store.getSecret(accountIdB64: "acct", groupIdHex: "grp"))))
+        XCTAssertEqual(unsub.targets, [oldGid], "the teardown names the OLD id")
+        XCTAssertNotEqual(unsub.targets.first, newGid, "and never the new one")
+        // ... and the device is armed under the new id BEFORE the old one is
+        // dropped, so it is never unsubscribed from both at once.
+        XCTAssertEqual(
+            unsub.subscribesBefore, [1],
+            "the NEW gid must already be subscribed when the OLD one is retired")
+        XCTAssertEqual(spy.targets, [newGid])
+    }
+
+    /// **The dangerous window.** A failed rotation broadcast leaves the
+    /// rotator switched locally while every other member is still on the old
+    /// id, so nobody notifies either and the whole group's wakes stop. The
+    /// `distributed` flag — reused verbatim from the mint path — is what
+    /// makes it recoverable: the row stays PENDING and the existing
+    /// any-holder re-broadcast branch re-sends the NEW secret. Never a
+    /// re-mint.
+    func testFailedRotationBroadcastLeavesTheRowPendingForTheRetry() async throws {
+        let store = makeStore()
+        let spy = SubscribeSpy()
+        let unsub = UnsubscribeSpy()
+        let routing = makeRouting(store: store, spy: spy, unsubscribeSpy: unsub)
+        let broadcaster = FlakyBroadcastRecorder(shouldFail: true)
+
+        let identity = try makeIdentity(0x69)
+        let (group, groupIdHex) = try makeOwnerGroup(identity)
+        let old = try XCTUnwrap(PushGroupRouting.mintSecret())
+        try seedSettled(store: store, accountIdB64: "acct", groupIdHex: groupIdHex, secret: old)
+
+        let outcome = await routing.rotateSecret(
+            accountIdB64: "acct", groupIdHex: groupIdHex, ownRole: .owner,
+            broadcast: { try broadcaster.send($0) })
+        XCTAssertEqual(outcome, .rotated)
+
+        let rotated = try XCTUnwrap(store.getSecret(accountIdB64: "acct", groupIdHex: groupIdHex))
+        XCTAssertNotEqual(rotated, old)
+        XCTAssertEqual(broadcaster.envelopes.count, 1, "the rotation attempted a broadcast")
+        XCTAssertEqual(
+            store.getRecord(accountIdB64: "acct", groupIdHex: groupIdHex)?.distributed, false,
+            "a failed rotation broadcast must leave the row PENDING")
+        // The local switch is durable regardless of the failed send.
+        XCTAssertEqual(unsub.targets.count, 1)
+
+        // Next chat-open / launch: the re-broadcast branch re-sends the
+        // STORED (i.e. the newly rotated) secret.
+        broadcaster.shouldFail = false
+        await routing.ensureProvisioned(
+            accountIdB64: "acct", groupIdHex: groupIdHex, group: group,
+            identity: identity, broadcast: { try broadcaster.send($0) })
+
+        XCTAssertEqual(broadcaster.envelopes.count, 2)
+        XCTAssertEqual(
+            PushGroupRouting.tryDecodeSecretEnvelope(try XCTUnwrap(broadcaster.envelopes.last)),
+            rotated,
+            "the retry re-sends the ROTATED secret — a re-mint would diverge the routing id")
+        XCTAssertEqual(
+            store.getRecord(accountIdB64: "acct", groupIdHex: groupIdHex)?.distributed, true)
+        XCTAssertEqual(
+            store.getSecret(accountIdB64: "acct", groupIdHex: groupIdHex), rotated)
+    }
+
+    /// Two concurrent triggers (this device's own removal + a poll-loop diff)
+    /// coalesce into ONE rotation. Two mints would strand the first new
+    /// `push_gid` as a subscribed-but-never-notified id — the orphan this ADR
+    /// exists to prevent.
+    func testConcurrentTriggersCoalesceIntoOneRotation() async throws {
+        let store = makeStore()
+        let spy = SubscribeSpy()
+        let unsub = UnsubscribeSpy()
+        let routing = makeRouting(store: store, spy: spy, unsubscribeSpy: unsub)
+        let recorder = BroadcastRecorder()
+
+        let old = try XCTUnwrap(PushGroupRouting.mintSecret())
+        try seedSettled(store: store, accountIdB64: "acct", groupIdHex: "grp", secret: old)
+
+        async let first = routing.rotateSecret(
+            accountIdB64: "acct", groupIdHex: "grp", ownRole: .owner,
+            broadcast: { bytes in recorder.record(bytes) })
+        async let second = routing.rotateSecret(
+            accountIdB64: "acct", groupIdHex: "grp", ownRole: .owner,
+            broadcast: { bytes in recorder.record(bytes) })
+        let outcomes = await [first, second]
+
+        XCTAssertEqual(outcomes, [.rotated, .rotated])
+        XCTAssertEqual(recorder.envelopes.count, 1, "exactly ONE mint + broadcast")
+        XCTAssertEqual(spy.targets.count, 1)
+        XCTAssertEqual(unsub.targets.count, 1)
+    }
+
+    // MARK: - ADR-0043: the membership-shrink trigger entry point
+
+    /// An observed SHRINK rotates on the owner and on an admin, and the
+    /// teardown names the id the device was actually on.
+    func testObservedShrinkRotatesForOwnerAndAdmin() async throws {
+        for role: Role in [.owner, .admin] {
+            let store = makeStore()
+            let spy = SubscribeSpy()
+            let unsub = UnsubscribeSpy()
+            let routing = makeRouting(store: store, spy: spy, unsubscribeSpy: unsub)
+            let recorder = BroadcastRecorder()
+
+            let held = try XCTUnwrap(PushGroupRouting.mintSecret())
+            try seedSettled(store: store, accountIdB64: "acct", groupIdHex: "grp", secret: held)
+            let heldGid = try XCTUnwrap(PushGroupRouting.derivePushGid(secret: held))
+
+            let outcome = await routing.rotateIfMembershipShrank(
+                accountIdB64: "acct", groupIdHex: "grp", ownRole: role,
+                previousMemberKeys: ["a", "b", "c"], currentMemberKeys: ["a", "b"],
+                broadcast: { bytes in recorder.record(bytes) })
+            XCTAssertEqual(outcome, .rotated)
+            XCTAssertEqual(recorder.envelopes.count, 1)
+            XCTAssertEqual(unsub.targets, [heldGid])
+        }
+    }
+
+    /// A plain member observing the same shrink rotates nothing — it will
+    /// pick up the new id from the rotator's envelope via the gated receive.
+    func testObservedShrinkDoesNotRotateForAPlainMember() async throws {
+        let store = makeStore()
+        let spy = SubscribeSpy()
+        let unsub = UnsubscribeSpy()
+        let routing = makeRouting(store: store, spy: spy, unsubscribeSpy: unsub)
+        let recorder = BroadcastRecorder()
+
+        let held = try XCTUnwrap(PushGroupRouting.mintSecret())
+        try seedSettled(store: store, accountIdB64: "acct", groupIdHex: "grp", secret: held)
+
+        let outcome = await routing.rotateIfMembershipShrank(
+            accountIdB64: "acct", groupIdHex: "grp", ownRole: .member,
+            previousMemberKeys: ["a", "b", "c"], currentMemberKeys: ["a", "b"],
+            broadcast: { bytes in recorder.record(bytes) })
+        XCTAssertEqual(outcome, .skipNotAuthorized)
+        XCTAssertTrue(recorder.envelopes.isEmpty)
+        XCTAssertTrue(unsub.targets.isEmpty)
+        XCTAssertEqual(store.getSecret(accountIdB64: "acct", groupIdHex: "grp"), held)
+    }
+
+    /// **No rotation on ADD** — the routing id stays stable across every
+    /// ordinary commit, which is the whole point of rotating only at
+    /// removals. A poll that changed nothing is likewise silent, and an
+    /// unknown snapshot never reads as "everyone left".
+    func testAddAndNoChangeAndUnknownNeverRotate() async throws {
+        let store = makeStore()
+        let spy = SubscribeSpy()
+        let unsub = UnsubscribeSpy()
+        let routing = makeRouting(store: store, spy: spy, unsubscribeSpy: unsub)
+        let recorder = BroadcastRecorder()
+
+        let held = try XCTUnwrap(PushGroupRouting.mintSecret())
+        try seedSettled(store: store, accountIdB64: "acct", groupIdHex: "grp", secret: held)
+
+        // An ADD.
+        let onAdd = await routing.rotateIfMembershipShrank(
+            accountIdB64: "acct", groupIdHex: "grp", ownRole: .owner,
+            previousMemberKeys: ["a", "b"], currentMemberKeys: ["a", "b", "c"],
+            broadcast: { bytes in recorder.record(bytes) })
+        XCTAssertEqual(onAdd, .skipNoShrink)
+        // A poll that changed nothing.
+        let onNoChange = await routing.rotateIfMembershipShrank(
+            accountIdB64: "acct", groupIdHex: "grp", ownRole: .owner,
+            previousMemberKeys: ["a", "b"], currentMemberKeys: ["a", "b"],
+            broadcast: { bytes in recorder.record(bytes) })
+        XCTAssertEqual(onNoChange, .skipNoShrink)
+        // A torn / absent snapshot.
+        let onUnknown = await routing.rotateIfMembershipShrank(
+            accountIdB64: "acct", groupIdHex: "grp", ownRole: .owner,
+            previousMemberKeys: nil, currentMemberKeys: ["a"],
+            broadcast: { bytes in recorder.record(bytes) })
+        XCTAssertEqual(onUnknown, .skipUnknownMembership)
+
+        XCTAssertTrue(recorder.envelopes.isEmpty, "no rotation on add / no-change / unknown")
+        XCTAssertTrue(unsub.targets.isEmpty)
+        XCTAssertEqual(
+            store.getSecret(accountIdB64: "acct", groupIdHex: "grp"), held,
+            "the routing id stays stable across every ordinary commit")
+    }
+
+    // MARK: - ADR-0043: the receive-side teardown
+
+    /// **What keeps rotation from being a net loss.** A non-rotating member
+    /// that applies a CHANGED secret must unsubscribe its OWN old gid:
+    /// `group_unsubscribe` deletes exactly the `(device, group)` row named in
+    /// the request and a device knows only its own pseudonym, so the rotator
+    /// cannot do it for anyone else. Skip this and each rotation leaves one
+    /// dead row PER MEMBER — the "live cluster plus an archive of every past
+    /// cluster" ADR-0043 calls strictly worse than not rotating at all.
+    func testNonRotatorApplyingAChangedSecretRetiresItsOwnOldGid() async throws {
+        let store = makeStore()
+        let spy = SubscribeSpy()
+        let unsub = UnsubscribeSpy()
+        let routing = makeRouting(store: store, spy: spy, unsubscribeSpy: unsub)
+        let (group, groupIdHex, ownerLeaf, _) = try makeTwoMemberGroup(
+            owner: try makeIdentity(0x6A), member: try makeIdentity(0x6B))
+
+        let held = try XCTUnwrap(PushGroupRouting.mintSecret())
+        await routing.receiveSecret(
+            accountIdB64: "acct", groupIdHex: groupIdHex, secret: held,
+            group: group, senderLeaf: ownerLeaf)
+        let heldGid = try XCTUnwrap(PushGroupRouting.derivePushGid(secret: held))
+        XCTAssertTrue(unsub.targets.isEmpty, "a first-ever secret retires nothing")
+
+        // The owner rotated; this device applies the CHANGED secret.
+        let rotated = try XCTUnwrap(PushGroupRouting.mintSecret())
+        await routing.receiveSecret(
+            accountIdB64: "acct", groupIdHex: groupIdHex, secret: rotated,
+            group: group, senderLeaf: ownerLeaf)
+        let rotatedGid = try XCTUnwrap(PushGroupRouting.derivePushGid(secret: rotated))
+
+        XCTAssertEqual(unsub.targets, [heldGid], "the OWN old row is torn down")
+        XCTAssertEqual(
+            unsub.subscribesBefore, [2],
+            "and only after the new id is armed (never unsubscribed from both)")
+        XCTAssertNil(store.lookupRoute(pushGidHex: PushGroupRouting.hex(heldGid)))
+        XCTAssertNotNil(store.lookupRoute(pushGidHex: PushGroupRouting.hex(rotatedGid)))
+    }
+
+    /// An IDENTICAL re-broadcast retires nothing — the id did not change, so
+    /// tearing down would unsubscribe the device from its own live routing.
+    func testIdenticalReBroadcastRetiresNothing() async throws {
+        let store = makeStore()
+        let spy = SubscribeSpy()
+        let unsub = UnsubscribeSpy()
+        let routing = makeRouting(store: store, spy: spy, unsubscribeSpy: unsub)
+        let (group, groupIdHex, ownerLeaf, memberLeaf) = try makeTwoMemberGroup(
+            owner: try makeIdentity(0x6C), member: try makeIdentity(0x6D))
+
+        let held = try XCTUnwrap(PushGroupRouting.mintSecret())
+        await routing.receiveSecret(
+            accountIdB64: "acct", groupIdHex: groupIdHex, secret: held,
+            group: group, senderLeaf: ownerLeaf)
+        // The idempotent relay from a plain member.
+        await routing.receiveSecret(
+            accountIdB64: "acct", groupIdHex: groupIdHex, secret: held,
+            group: group, senderLeaf: memberLeaf)
+
+        XCTAssertTrue(unsub.targets.isEmpty)
+        XCTAssertNotNil(store.lookupRoute(
+            pushGidHex: PushGroupRouting.hex(
+                try XCTUnwrap(PushGroupRouting.derivePushGid(secret: held)))))
     }
 }

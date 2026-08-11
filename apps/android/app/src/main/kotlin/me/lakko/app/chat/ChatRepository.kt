@@ -763,7 +763,7 @@ public class ChatRepository(
             ?: throw IllegalStateException(
                 "ChatRepository not bootstrapped — call bootstrap() first",
             )
-        return groupsLock.withLock {
+        val removedCommitId = groupsLock.withLock {
             val record = groups[groupIdHex]
                 ?: throw ChatError(
                     "no live Group handle for $groupIdHex",
@@ -818,6 +818,29 @@ public class ChatRepository(
                 },
             )
         }
+        // ADR-0043 — re-key the group's push routing, STRICTLY AFTER the
+        // Remove commit above (the `groupsLock` block is awaited, so the
+        // commit is on the wire before this line runs). The ordering is
+        // load-bearing, not cosmetic: the distribution envelope is an MLS
+        // application message, so sealed at the PRE-removal epoch the member
+        // being evicted is still in that epoch and can OPEN it — learning the
+        // new secret and defeating the whole rotation. Sealed here it is at
+        // the post-removal epoch, which RFC 9420 forward secrecy denies the
+        // removed leaf.
+        //
+        // Without this the evicted device keeps deriving the current
+        // `push_gid` and push-gw keeps waking it, so it learns "this group
+        // was active at time T" on every send, forever — and nobody else can
+        // stop it, since unsubscribe only ever deletes the caller's OWN row.
+        //
+        // Owner-or-admin (ADR-0043 ratified option (b)); the gate lives
+        // inside `GroupPushRouting.rotate`, which also no-ops when this
+        // device holds no secret, so rotation never becomes a second mint
+        // path. Fire-and-forget: a failed rotation must not unwind the
+        // removal, and a failed BROADCAST leaves the row pending for the
+        // existing `ensure` re-broadcast branch.
+        rotatePushRoutingBestEffort(groupIdHex)
+        return removedCommitId
     }
 
     /**
@@ -1631,6 +1654,27 @@ public class ChatRepository(
     }
 
     /**
+     * ADR-0043 — drop this device's push-gw subscription under a SUPERSEDED
+     * [pushGid]. The FIRST call site [PushClient.unsubscribeGroup] has ever
+     * had: the wrapper shipped with ADR-0042 but was dead code on all three
+     * clients, which is what compounded G-36 residual 2 (an evicted member's
+     * subscription was never torn down by anyone).
+     *
+     * The endpoint deletes exactly the `(device, group)` row named in the
+     * request, and a client knows only its OWN device pseudonym — so this
+     * can only ever retire THIS device's row, never a peer's.
+     */
+    private suspend fun unsubscribePushGidBestEffort(pushGid: ByteArray) {
+        val pseudonym = DevicePushId.getOrCreate(applicationContext)
+        PushClient().use { client ->
+            client.unsubscribeGroup(
+                devicePseudonym = pseudonym,
+                groupPseudonym = pushGid,
+            )
+        }
+    }
+
+    /**
      * ADR-0042 — the `push_gid` this device would route [groupIdHex] under,
      * or `null` when it holds no `push_routing_secret` yet (the caller then
      * DEFERS / SKIPS rather than falling back to `group_id`). Derived from
@@ -1659,6 +1703,7 @@ public class ChatRepository(
             accountIdB64 = currentAccountIdB64.get() ?: "",
             routeStore = pushRouteStore,
             subscribeFn = { pushGid -> subscribePushGidBestEffort(pushGid) },
+            unsubscribeFn = { pushGid -> unsubscribePushGidBestEffort(pushGid) },
             broadcastFn = { envelope -> broadcastControlToGroup(identity, group, envelope) },
         )
 
@@ -1844,6 +1889,129 @@ public class ChatRepository(
     }
 
     /**
+     * ADR-0043 — stable per-member identities for the membership diff: the
+     * lowercase-hex Ed25519 signature public keys from `group.members()`.
+     *
+     * Keys, NOT leaf indices: OpenMLS reuses a vacated leaf for the next
+     * Add, so a remove-then-add pair inside ONE poll batch leaves both the
+     * member COUNT and the leaf-index SET identical while the membership
+     * genuinely changed. The signature key is stable for a member's lifetime
+     * in the group.
+     *
+     * Returns `null` when the snapshot cannot be read (a torn group), which
+     * [GroupPushRouting.membershipRotationDecision] treats as "unknown",
+     * never as "everybody left". Must be called on the [groupsLock] critical
+     * path (the `Group` handle is not safe to touch off it).
+     */
+    private fun memberSignatureKeysOrNull(group: Group): List<String>? =
+        try {
+            group.members().map { DsClient.pseudonymHex(it.signaturePublicKey) }
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "push routing: roster snapshot failed", cause)
+            null
+        }
+
+    /**
+     * ADR-0043 — this device's ADR-0022 role in [group], mapped onto the
+     * FFI-free [GroupPushRouting.RotationRole] the pure decision core takes.
+     * A read failure folds to [GroupPushRouting.RotationRole.NONE], which
+     * never rotates (fail-closed).
+     *
+     * Read SYNCHRONOUSLY by the caller (never on [pushScope]), the same
+     * discipline [ensurePushRoutingBestEffort]'s `ownRole` read follows: on
+     * the poll path that lands inside the [groupsLock] critical section; on
+     * the own-remove path it runs immediately after the lock is released,
+     * exactly where [redistributePushRoutingBestEffort] reads its own group
+     * record after an add.
+     */
+    private fun rotationRole(group: Group, identity: Identity): GroupPushRouting.RotationRole =
+        try {
+            when (group.ownRole(identity)) {
+                Role.OWNER -> GroupPushRouting.RotationRole.OWNER
+                Role.ADMIN -> GroupPushRouting.RotationRole.ADMIN
+                Role.MEMBER -> GroupPushRouting.RotationRole.MEMBER
+                null -> GroupPushRouting.RotationRole.NONE
+            }
+        } catch (_: Throwable) {
+            GroupPushRouting.RotationRole.NONE
+        }
+
+    /**
+     * ADR-0043 — re-key [groupIdHex]'s push routing after a member was
+     * REMOVED, so the evicted device's `push_gid` goes inert.
+     *
+     * **Call ONLY after the Remove commit is published.** The distribution
+     * envelope is an MLS application message: sealed at the pre-removal
+     * epoch the evicted member is still in that epoch and can OPEN it,
+     * learning the new secret and defeating the whole change. Sealed at the
+     * post-removal epoch it is unreadable to the removed leaf (RFC 9420
+     * forward secrecy). At the own-remove call site the ordering is enforced
+     * by awaiting the removal first; on the poll path it holds structurally
+     * (the commit is already applied before the diff is taken).
+     *
+     * Owner-or-admin gated inside [GroupPushRouting.rotate], which also
+     * no-ops when this device holds no secret — so rotation never becomes a
+     * second mint path. Fire-and-forget on the push scope; a rotation
+     * failure must never unwind the membership change that triggered it.
+     */
+    private fun rotatePushRoutingBestEffort(groupIdHex: String) {
+        val identity = canonicalIdentity.get() ?: return
+        val record = groups[groupIdHex] ?: return
+        val role = rotationRole(record.group, identity)
+        pushScope.launch {
+            try {
+                GroupPushRouting.rotate(
+                    accountIdB64 = currentAccountIdB64.get() ?: return@launch,
+                    groupIdHex = groupIdHex,
+                    ownRole = role,
+                    ports = pushRoutingPorts(record.group, identity),
+                )
+            } catch (_: Throwable) {
+                // best-effort — push is a UX nicety
+            }
+        }
+    }
+
+    /**
+     * ADR-0043 — the WIRE-OBSERVED rotation trigger: someone ELSE committed
+     * a Remove and this poll batch applied it, so the membership SHRANK.
+     *
+     * A Commit surfaces from the poll loop carrying no membership delta
+     * (surfacing removed leaves from `lakko-mls` would be exact but is an
+     * invariant-#3 change to the MLS state machine and needs its own ADR),
+     * so the removal is INFERRED from the `members()` snapshot taken either
+     * side of the batch. This device's OWN removals never come through here
+     * — they were applied locally before the poll, so the baseline is
+     * already post-removal and shows no shrink; those rotate directly via
+     * [rotatePushRoutingBestEffort].
+     *
+     * Fire-and-forget; never breaks the poll loop.
+     */
+    private fun rotatePushRoutingIfShrankBestEffort(
+        groupIdHex: String,
+        group: Group,
+        identity: Identity,
+        previousMemberKeys: List<String>?,
+        currentMemberKeys: List<String>?,
+    ) {
+        val role = rotationRole(group, identity)
+        pushScope.launch {
+            try {
+                GroupPushRouting.rotateIfMembershipShrank(
+                    accountIdB64 = currentAccountIdB64.get() ?: return@launch,
+                    groupIdHex = groupIdHex,
+                    ownRole = role,
+                    previousMemberKeys = previousMemberKeys,
+                    currentMemberKeys = currentMemberKeys,
+                    ports = pushRoutingPorts(group, identity),
+                )
+            } catch (_: Throwable) {
+                // best-effort — push is a UX nicety
+            }
+        }
+    }
+
+    /**
      * ADR-0042 — re-broadcast the CURRENT held secret to [groupIdHex] (used
      * right after an add-member commit so the joiner learns it on their next
      * poll). No-op when this device holds no secret. Fire-and-forget on the
@@ -1878,6 +2046,15 @@ public class ChatRepository(
         val record = groups[groupIdHex] ?: return
 
         groupsLock.withLock {
+            // ADR-0043 — baseline for the membership diff, captured BEFORE
+            // this batch applies any commit. A Commit carries no membership
+            // delta out of the poll loop, so a removal committed by SOMEONE
+            // ELSE is inferred from this snapshot against the post-poll one.
+            // This device's OWN removals never show up here (they were
+            // applied locally before this poll, so the baseline is already
+            // post-removal); those rotate directly in
+            // [removeMemberFromGroup].
+            val membersBeforePoll = memberSignatureKeysOrNull(record.group)
             val result = chatClient.pollMessages(
                 identity = identity,
                 group = record.group,
@@ -1906,6 +2083,23 @@ public class ChatRepository(
             if (result.events.isNotEmpty()) {
                 persistSnapshotBestEffort()
             }
+            // ADR-0043 — did someone else's Remove commit just land? Then the
+            // evicted member still holds this group's push_routing_secret and
+            // push-gw is still waking it. Re-key so nobody ever notifies the
+            // id it can derive again. Driven off an actual before/after
+            // member-SET comparison (signature keys, so a remove+add in one
+            // batch is still seen — the count and the leaf indices would BOTH
+            // be unchanged), never off a bare "a poll happened" tick.
+            //
+            // Owner-or-admin only, a no-op on growth, on an unchanged roster,
+            // and on a torn snapshot. Fire-and-forget.
+            rotatePushRoutingIfShrankBestEffort(
+                groupIdHex = groupIdHex,
+                group = record.group,
+                identity = identity,
+                previousMemberKeys = membersBeforePoll,
+                currentMemberKeys = memberSignatureKeysOrNull(record.group),
+            )
             publishThreadList()
         }
     }

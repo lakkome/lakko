@@ -63,6 +63,12 @@ import Foundation
 ///      in the shared suite. Plaintext is REQUIRED so the read-only NSE
 ///      can read it without the device key.
 ///
+/// The two age differently, which ADR-0043 makes load-bearing: a rotation
+/// OVERWRITES the secret row in place (same `(account, group)` key) but only
+/// ADDS to the routes (keyed by the freshly derived `pushGidHex`). The
+/// superseded route entry is therefore retired explicitly, via
+/// ``removeRoute(pushGidHex:)``.
+///
 /// ## Invariants
 ///
 ///   * #2 / #5 — the reverse index maps an OPAQUE `push_gid` to a PUBLIC
@@ -314,6 +320,34 @@ public final class PushRoutingStore {
             return (accountIdB64: pair[0], groupIdHex: pair[1])
         }
         return nil
+    }
+
+    /// Delete ONE reverse-index entry, by its `push_gid` (lowercase hex).
+    ///
+    /// ADR-0043. The asymmetry this closes: the secret row is keyed
+    /// `(account, group)` and is **overwritten in place** by a rotation, but
+    /// a route row is keyed by `pushGidHex`, so a rotation only ever **adds**
+    /// a row — the superseded `push_gid → (account, group_id)` entry survives
+    /// forever. Left behind, each rotation grows the reverse map by one dead
+    /// entry whose `push_gid` nothing will ever notify again.
+    ///
+    /// Removes from BOTH ordered route locations (the App Group shared suite
+    /// AND the app-private fallback), because
+    /// ``lookupRoute(pushGidHex:)`` reads both — deleting from only the
+    /// shared suite would leave a fallback row that still resolves.
+    ///
+    /// A no-op when the row is absent (`removeObject` on an unknown key
+    /// succeeds), so the caller never has to check first — a rotation on a
+    /// device that had not yet indexed the old gid is simply a no-op.
+    ///
+    /// Scoped to the ONE key: never touches the secret store, so it can never
+    /// strand a group by deleting the material a live `push_gid` is derived
+    /// from.
+    public func removeRoute(pushGidHex: String) {
+        let key = Self.routeKey(pushGidHex)
+        for defaults in orderedRouteDefaults() {
+            defaults.removeObject(forKey: key)
+        }
     }
 
     /// Wipe every push-routing secret + reverse-index entry for

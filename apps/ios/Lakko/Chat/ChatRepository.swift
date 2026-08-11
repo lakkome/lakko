@@ -898,6 +898,23 @@ public final class ChatRepository: ObservableObject {
         chatClient.markOwnPublishedCommit(messageId: commitPublish.id)
         ackCommitBestEffort(entryId: entryId, commitMessageId: commitPublish.id)
         state = state.with(threads: buildThreadList())
+        // ADR-0043 — rotate the push routing secret, STRICTLY AFTER the Remove
+        // commit above. The distribution envelope is an MLS application
+        // message: sealed before the commit it would be readable by the member
+        // being evicted (they are still in that epoch) and the rotation would
+        // buy nothing. Sealed here it is at the post-removal epoch, which RFC
+        // 9420 forward secrecy denies the removed leaf. The `await` on
+        // `publishGroup` above is what enforces the ordering.
+        //
+        // Owner-or-admin (ADR-0043 ratified option (b)) — the gate lives
+        // inside `rotateSecret`, which also no-ops when this device holds no
+        // secret, so rotation never becomes a second mint path.
+        //
+        // Fire-and-forget: push is best-effort and a failed rotation must not
+        // unwind the removal. A failed BROADCAST leaves the row pending, and
+        // the existing any-holder re-broadcast branch of `ensureProvisioned`
+        // re-sends it on the next chat-open / launch.
+        rotatePushRoutingSecretAfterRemoval(groupIdHex: groupIdHex)
         return commitPublish.id
     }
 
@@ -1558,6 +1575,80 @@ public final class ChatRepository: ObservableObject {
         }
     }
 
+    /// ADR-0043 — this device just published a Remove commit, so the evicted
+    /// member still holds the group's `push_routing_secret` and push-gw is
+    /// still waking it. Re-key so nobody ever notifies the id it can derive
+    /// again, and retire this device's own subscription under the old id.
+    ///
+    /// The DIRECT entry point (the removing device knows immediately — no
+    /// membership diff needed). The wire-observed twin, for a removal
+    /// committed by SOMEONE ELSE, is
+    /// ``rotatePushRoutingSecretIfMembershipShrank(groupIdHex:previousMemberKeys:)``
+    /// on the poll path. Fire-and-forget.
+    private func rotatePushRoutingSecretAfterRemoval(groupIdHex: String) {
+        guard let accountIdB64 = currentAccountIdB64 else { return }
+        let role = ownRole(groupIdHex: groupIdHex)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.pushRouting.rotateSecret(
+                accountIdB64: accountIdB64,
+                groupIdHex: groupIdHex,
+                ownRole: role,
+                // Throws rather than optional-chaining into a silent success —
+                // see the note in `performEnsurePushRouting`.
+                broadcast: { [weak self] bytes in
+                    guard let self else {
+                        throw ChatError.argument("ChatRepository deallocated mid-broadcast")
+                    }
+                    try await self.broadcastPushRoutingControl(
+                        groupIdHex: groupIdHex, bytes: bytes)
+                }
+            )
+        }
+    }
+
+    /// ADR-0043 — someone ELSE's Remove commit just landed on the journal.
+    /// A Commit surfaces from the poll loop with no membership delta
+    /// attached, so the removal is INFERRED by diffing the member signature
+    /// keys captured BEFORE the poll batch against the post-poll roster.
+    ///
+    /// Keys, not counts and not leaf indices: OpenMLS reuses a vacated leaf
+    /// for the next Add, so a remove+add in one batch leaves both the count
+    /// and the index set unchanged while a member really was evicted.
+    ///
+    /// This device's OWN removals never come through here (they were applied
+    /// locally before this poll, so the baseline is already post-removal and
+    /// shows no shrink); those rotate directly via
+    /// ``rotatePushRoutingSecretAfterRemoval(groupIdHex:)``. Owner-or-admin
+    /// only, no-op on growth. Fire-and-forget: a rotation failure must never
+    /// break the poll loop.
+    private func rotatePushRoutingSecretIfMembershipShrank(
+        groupIdHex: String,
+        previousMemberKeys: [String]?
+    ) {
+        guard let accountIdB64 = currentAccountIdB64,
+              let record = groups[groupIdHex] else { return }
+        let role = ownRole(groupIdHex: groupIdHex)
+        let current = PushGroupRouting.memberSignatureKeys(group: record.group)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.pushRouting.rotateIfMembershipShrank(
+                accountIdB64: accountIdB64,
+                groupIdHex: groupIdHex,
+                ownRole: role,
+                previousMemberKeys: previousMemberKeys,
+                currentMemberKeys: current,
+                broadcast: { [weak self] bytes in
+                    guard let self else {
+                        throw ChatError.argument("ChatRepository deallocated mid-broadcast")
+                    }
+                    try await self.broadcastPushRoutingControl(
+                        groupIdHex: groupIdHex, bytes: bytes)
+                }
+            )
+        }
+    }
+
     /// ADR-0042 — post a control envelope (a push-routing-secret
     /// distribution envelope) to the group journal as an E2EE MLS
     /// application message via the fail-closed persist-before-publish path.
@@ -1596,6 +1687,14 @@ public final class ChatRepository: ObservableObject {
             sweptGroupsThisSession.insert(groupIdHex)
             await sweepPendingCommits(record: record)
         }
+        // ADR-0043 — baseline for the membership diff, captured BEFORE the
+        // poll applies any commit. A Commit carries no membership delta out
+        // of the poll loop, so a removal committed by SOMEONE ELSE is
+        // inferred from this snapshot against the post-poll one. This
+        // device's OWN removals never show up here (they were applied
+        // locally before this poll, so the baseline is already
+        // post-removal); those rotate directly in `removeMemberFromGroup`.
+        let membersBeforePoll = PushGroupRouting.memberSignatureKeys(group: record.group)
         let result = try await chatClient.pollMessages(
             identity: identity,
             group: record.group,
@@ -1621,6 +1720,12 @@ public final class ChatRepository: ObservableObject {
             persistSnapshotBestEffort()
         }
         state = state.with(threads: buildThreadList())
+        // ADR-0043 — did someone else's Remove commit just land? Then the
+        // evicted member still holds this group's push_routing_secret and
+        // push-gw is still waking it. Driven off an ACTUAL before/after
+        // member-set comparison, never off a "a poll happened" tick.
+        rotatePushRoutingSecretIfMembershipShrank(
+            groupIdHex: groupIdHex, previousMemberKeys: membersBeforePoll)
     }
 
     /// Phase 3a9 — closure the UI attaches to dispatch

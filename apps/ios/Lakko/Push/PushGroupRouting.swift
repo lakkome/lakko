@@ -7,7 +7,9 @@ import Security
 
 /// ADR-0042 orchestration — mint / receive / derive / subscribe / notify
 /// the opaque per-group push routing id (`push_gid`), closing the
-/// invariant-#5 push social-graph leak.
+/// invariant-#5 push social-graph leak — plus the ADR-0043 rotation of that
+/// id when a member is REMOVED (see the rotation section at the bottom of
+/// this file for why removal is the only event that rotates).
 ///
 /// Mirror of `apps/web/src/push/group-routing.ts`.
 ///
@@ -40,16 +42,33 @@ import Security
 ///
 ///   * the OWNER may always set the secret (rotate it, whatever is
 ///     stored and in whatever arrival order);
-///   * an ADMIN may only **seed a hole** — set the FIRST-ever secret this
-///     device holds — never overwrite an existing one;
+///   * an ADMIN may **seed a hole** — set the FIRST-ever secret this
+///     device holds — AND (ADR-0043, ratified option (b)) **overwrite** an
+///     established one;
 ///   * a plain member may only re-send the byte-identical value.
 ///
 /// Admitting admins as seeders is what keeps delivery working: ADR-0022
 /// lets owner OR admin add a member, and `redistribute` fires after any
 /// add-member commit, so a member added by a non-owner admin learns the
 /// secret from that admin's re-broadcast (the owner only broadcasts at
-/// mint time). Denying admins the *overwrite* is what keeps the rotation
-/// power owner-only.
+/// mint time). Admitting admins as **rotators** (ADR-0043) is what makes
+/// rotation-on-removal reachable at all, since ADR-0022 also lets an admin
+/// commit the Remove: refusing the overwrite left an admin able to evict a
+/// member but unable to retire that member's routing id, so the eviction
+/// completed with the ex-member's wake stream intact.
+///
+/// The cost of the admin tier is recorded honestly in ADR-0043 § fork (b):
+/// it widens G-36 residual 3 from "a malicious admin can seed a secret to a
+/// member who holds none" to "a malicious admin can churn the group's
+/// routing id at will". The capability gain is small (an admin can already
+/// evict members outright) and the churn is a wake outage, never a
+/// downgrade — a member without the current secret still DEFERS, it never
+/// falls back to the leaky `group_id`.
+///
+/// **Rotation never MINTS.** Option (b) widened OVERWRITE authority, never
+/// MINT authority: ``rotateSecret(accountIdB64:groupIdHex:ownRole:broadcast:)``
+/// is a no-op on a device that holds no secret, so an admin can never become
+/// a second minter and diverge the group's `push_gid`.
 /// See ``classifyIncomingSecret(incoming:stored:senderKey:authority:)``.
 ///
 /// ## A mint is not done until the group has been told
@@ -135,9 +154,41 @@ public final class PushGroupRouting {
     /// network (mirror of the web `PushClient` `vi.mock`).
     private let subscribeUnderPushGid: (Data) async throws -> Void
 
+    /// Unsubscribe seam — `(push_gid) -> ()`. ADR-0043: the counterpart the
+    /// rotation needs to retire a SUPERSEDED id. Defaults to the real
+    /// `POST /push/group/unsubscribe` call, which had **zero call sites**
+    /// before this ADR (the wrapper existed on all three clients and was
+    /// never invoked); injectable so tests can spy on the target.
+    private let unsubscribeUnderPushGid: (Data) async throws -> Void
+
     /// Per-group in-flight provisioning keys, so a concurrent legacy-sweep
     /// + onAppear for the same group mint the random secret exactly once.
     private var inflight: Set<String> = []
+
+    /// Per-group in-flight ROTATION tasks (ADR-0043).
+    ///
+    /// Two triggers can observe the same removal (this device's own
+    /// `removeMemberFromGroup` and a concurrent poll-loop diff). Interleaving
+    /// them is the damaging case: both would read the SAME old secret, both
+    /// mint, the second persist wins — leaving the first new `push_gid`
+    /// subscribed and indexed but never notified again, i.e. exactly the
+    /// orphan this ADR exists to prevent. Coalescing rules that out.
+    ///
+    /// Unlike the provisioning guard (a skip-if-in-flight `Set`) this holds
+    /// the `Task` so a second caller **awaits the same rotation** and observes
+    /// its outcome, rather than silently returning early with a verdict that
+    /// does not describe what happened. Mirrors the web `rotating`
+    /// `Map<string, Promise>`.
+    ///
+    /// The cost is that a SECOND removal observed while a rotation is in
+    /// flight can be folded into it, and that rotation's envelope may have
+    /// been sealed at an epoch where the second evictee was still a member.
+    /// That is tolerable because the poll-path diff is a redundant safety net,
+    /// not the primary path: ADR-0022 requires the Remove committer to be
+    /// owner-or-admin, and that device runs its own rotation strictly AFTER
+    /// its own commit — so every removal already has one correctly-sequenced
+    /// rotation from the device that made it.
+    private var rotating: [String: Task<PushRotationOutcome, Never>] = [:]
 
     /// `nonisolated` so the initializer is callable as a default argument
     /// from a nonisolated context (``ChatRepository/init``); it only assigns
@@ -150,10 +201,18 @@ public final class PushGroupRouting {
                 devicePseudonym: devicePseudonym,
                 groupPseudonym: pushGid
             )
+        },
+        unsubscribeUnderPushGid: @escaping (Data) async throws -> Void = { pushGid in
+            let devicePseudonym = try DevicePushId.getOrCreate()
+            _ = try await PushClient().unsubscribeGroup(
+                devicePseudonym: devicePseudonym,
+                groupPseudonym: pushGid
+            )
         }
     ) {
         self.store = store
         self.subscribeUnderPushGid = subscribeUnderPushGid
+        self.unsubscribeUnderPushGid = unsubscribeUnderPushGid
     }
 
     // MARK: - Primitives (mirror of group-routing.ts helpers)
@@ -267,6 +326,44 @@ public final class PushGroupRouting {
         }
     }
 
+    /// ADR-0043 — retire a SUPERSEDED `push_gid`: drop this device's push-gw
+    /// subscription under it, then delete its reverse-index row.
+    ///
+    /// Called on BOTH sides of a rotation with the OLD secret — by the
+    /// rotator after it re-arms under the new id, and by every remaining
+    /// member when the gated receive path applies a CHANGED secret. Both
+    /// must, and for the same reason: `POST /push/group/unsubscribe` deletes
+    /// exactly the `(device, group)` row named in the request, and a client
+    /// knows only its OWN device pseudonym, so nobody can tear down anyone
+    /// else's row. If only the rotator unsubscribed, every OTHER member would
+    /// leave a live row under the old id — one dead subscription per member
+    /// per rotation, which is the "versioned cluster archive" ADR-0043
+    /// § Context calls strictly worse than not rotating at all.
+    ///
+    /// The **subscription** teardown is what carries the privacy value; the
+    /// route row is local bookkeeping (a reverse-map miss already degrades to
+    /// the generic "New message" banner under the ADR-0041 fail-closed
+    /// posture), so it is deleted immediately — the simpler invariant —
+    /// rather than retained for an overlap window.
+    ///
+    /// Best-effort and never throws: the caller has ALREADY switched to the
+    /// new id, so a failure here must not unwind the rotation. The cost of a
+    /// failed unsubscribe is a stale row that nothing notifies again.
+    public func retireOldPushGid(oldSecret: Data) async {
+        guard let oldGid = Self.derivePushGid(secret: oldSecret) else {
+            NSLog("push-routing old push_gid derivation failed")
+            return
+        }
+        do {
+            try await unsubscribeUnderPushGid(oldGid)
+        } catch {
+            // The new id is already armed; a failed unsubscribe leaves a row
+            // that nothing notifies again, not a broken group.
+            NSLog("push_gid unsubscribe failed: \(error)")
+        }
+        store.removeRoute(pushGidHex: Self.hex(oldGid))
+    }
+
     /// RECEIVE side — a member got the distribution envelope: run the
     /// authority gate, then persist the secret (idempotent) + subscribe
     /// under the derived `push_gid`. Best-effort — never throws into the
@@ -278,13 +375,21 @@ public final class PushGroupRouting {
     /// but without a matching receive-side check ANY member could broadcast
     /// a fresh 32-byte envelope and unilaterally rotate the whole group's
     /// routing id — every member would overwrite their secret and
-    /// re-subscribe, and because there is no per-group unsubscribe each
-    /// churn strands an orphan push-gw subscription that keeps receiving
-    /// wakes. So a *changed* secret is accepted only from the owner, and a
-    /// FIRST-ever secret additionally from an admin (which is how a member
-    /// added by a non-owner admin ever learns it); see
+    /// re-subscribe, stranding an orphan push-gw subscription per churn. So
+    /// a *changed* secret is accepted only from the owner or an ADR-0022
+    /// admin (ADR-0043 option (b)), never a plain member; see
     /// ``classifyIncomingSecret(incoming:stored:senderKey:authority:)`` for
     /// the full matrix.
+    ///
+    /// **ADR-0043 — the receiving half of a rotation.** When the accepted
+    /// secret CHANGES the one this device held, the id it was subscribed
+    /// under is now dead, so the old `push_gid` is retired here too
+    /// (``retireOldPushGid(oldSecret:)``). Every member tears down its OWN
+    /// push-gw row because no client can delete anyone else's; skip this and
+    /// each rotation leaves one dead row PER MEMBER. The old secret is read
+    /// from the `stored` snapshot taken BEFORE the persist below — the secret
+    /// row is overwritten in place, so after the write the old bytes are
+    /// unrecoverable and the retiring id could never be named.
     ///
     /// - Parameters:
     ///   - group: the live MLS `Group` — the ONLY authority for both the
@@ -331,6 +436,9 @@ public final class PushGroupRouting {
             )
             return
         }
+        // ADR-0043 — did this accepted secret SUPERSEDE one we held? Captured
+        // from the pre-persist snapshot, because the row is clobbered in place.
+        let superseded: Data? = (stored != nil && stored != secret) ? stored : nil
         // `distributed: true` — this secret ARRIVED over the group journal,
         // so its distribution envelope is provably on the wire. Since the
         // retry branch of `ensureProvisioned` is open to ANY holder, this flag
@@ -341,7 +449,17 @@ public final class PushGroupRouting {
             distributed: true) != nil else {
             return
         }
+        // Arm the NEW id first, so a failure between the two never leaves this
+        // device subscribed to nothing.
         await subscribeUnderPushGidBestEffort(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        // ADR-0043 — then retire the superseded one. This device is the only
+        // party that can drop its own push-gw row.
+        if let superseded {
+            NSLog(
+                "push-routing secret ROTATED by a peer (retiring the old push_gid; "
+                    + "authority \(resolved.authority.diagnosticTag))")
+            await retireOldPushGid(oldSecret: superseded)
+        }
     }
 
     // MARK: - Receive-side authority gate (lakko-security MEDIUM-1)
@@ -400,8 +518,8 @@ public final class PushGroupRouting {
     /// |---|---|---|
     /// | identical | any sender, incl. a plain member | **accept** (idempotent re-broadcast) |
     /// | changed / first | `.roleTable`, sender == owner | **accept** (the owner may always rotate) |
-    /// | **first, PROVABLY absent** | `.roleTable`, sender ∈ admins | **accept** (an admin may SEED a hole) |
-    /// | **changed**, or absence unprovable | `.roleTable`, sender ∈ admins | **reject** (an admin may not OVERWRITE) |
+    /// | **first, PROVABLY absent** | `.roleTable`, sender ∈ admins | **accept** (an admin SEEDS a hole) |
+    /// | **changed**, or absence unprovable | `.roleTable`, sender ∈ admins | **accept** (ADR-0043 — an admin may ROTATE) |
     /// | changed / first | `.roleTable`, plain member (or no sender) | **reject** |
     /// | changed / first | `.noRoleTable` | **accept** (legacy / open group) |
     /// | changed / first | `.unreadable` | **reject** (fail-closed) |
@@ -411,10 +529,22 @@ public final class PushGroupRouting {
     /// ``redistribute(accountIdB64:groupIdHex:broadcast:)`` fires after any
     /// add-member commit, so a member added by a non-owner admin holds no
     /// secret and would otherwise never get push routing (the owner only
-    /// broadcasts at mint time). Withholding the OVERWRITE from admins is
-    /// what keeps the group-wide rotation power owner-only — an admin can
-    /// fill a hole but can never strand the group on a rotated
-    /// `push_gid`.
+    /// broadcasts at mint time).
+    ///
+    /// **ADR-0043 (ratified option (b)) widened the admin row from a refusal
+    /// to an acceptance.** ADR-0022 lets an admin commit the Remove that
+    /// makes a rotation necessary, so refusing the overwrite left an admin
+    /// able to evict a member but unable to retire that member's routing id.
+    /// The `stored` / `storedUnreadable` pair no longer gates an admin's
+    /// *authority* — it only distinguishes a provable seed from a rotate for
+    /// the diagnostic log. Owner is still evaluated FIRST, so the
+    /// arrival-order-independent "owner takes priority" property is
+    /// unchanged, and the widening stops at the admin tier: a plain member is
+    /// still refused whether or not a secret is held.
+    ///
+    /// This widens G-36 residual 3 to "a malicious admin can churn the
+    /// group's routing id at will" — a wake outage, never a downgrade (a
+    /// member without the current secret DEFERS, invariant #4).
     ///
     /// The byte-identical escape hatch is what keeps the owner's
     /// post-add-member `redistribute` idempotent even when it is relayed by
@@ -425,11 +555,10 @@ public final class PushGroupRouting {
     ///     holds none **or** could not read it.
     ///   - storedUnreadable: set when the local secret could NOT be read
     ///     (no device wrap key, or the AEAD open failed). `stored == nil`
-    ///     then means "unknown", NOT "provably absent" — so the admin
-    ///     hole-fill branch must refuse, else a transient Keychain / decrypt
-    ///     failure would let an admin overwrite a secret this device really
-    ///     holds. The owner branch is unaffected (an owner write is the
-    ///     repair path for exactly that state).
+    ///     then means "unknown", NOT "provably absent" — so an admin write is
+    ///     a ROTATE rather than a seed. Since ADR-0043 option (b) authorises
+    ///     an admin either way this no longer changes the accept/reject
+    ///     outcome; it keeps the diagnostic honest about what was observed.
     public static func classifyIncomingSecret(
         incoming: Data,
         stored: Data?,
@@ -463,16 +592,14 @@ public final class PushGroupRouting {
             // stored and in whatever order the envelopes arrive.
             if senderKey == ownerKey { return .accept }
 
-            // ADMIN — may SEED a hole (nothing stored yet) so a member the
-            // admin added gets routing, but may never OVERWRITE a secret
-            // this device already holds. The hole must be PROVABLE: an
-            // unreadable store is treated as possibly-occupied
-            // (fail-closed, invariant #4).
-            if stored == nil, !storedUnreadable, admins.contains(senderKey) {
-                return .accept
-            }
+            // ADMIN — may SEED a hole (so a member the admin added gets
+            // routing) AND, under ADR-0043 option (b), ROTATE an established
+            // secret (so an admin-committed Remove can retire the evicted
+            // member's routing id). `stored` / `storedUnreadable` no longer
+            // gate the authority; both cases accept.
+            if admins.contains(senderKey) { return .accept }
 
-            // A plain member, or an admin attempting a rotation.
+            // A plain member — the tier boundary the widening did NOT cross.
             return .reject
         }
     }
@@ -748,6 +875,289 @@ public final class PushGroupRouting {
         // subscribes; a member with no secret → deferred (never under
         // group_id).
         await subscribeUnderPushGidBestEffort(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+    }
+
+    // MARK: - ADR-0043: rotate the routing secret when a member is REMOVED
+    //
+    // ## What rotation buys, stated precisely
+    //
+    // A removed member keeps the group's `push_routing_secret` on disk, so it
+    // can still derive the current `push_gid` — and since nothing tears its
+    // subscription down, push-gw keeps waking that device for a group it was
+    // evicted from. The leak is not storage hygiene: an ex-member learns
+    // "this group was active at time T" on every send, indefinitely.
+    //
+    // It cannot be closed by unsubscribing, because
+    // `POST /push/group/unsubscribe` deletes exactly the `(device, group)`
+    // row named in the request and a client knows only its OWN device
+    // pseudonym — no remaining member can reach the ex-member's row, and the
+    // ex-member's client has no "you were removed" handling to do it itself.
+    // Re-keying is the only mechanism the GROUP has: after a rotation nobody
+    // ever notifies the old id again, so that row goes **inert without the
+    // ex-member's cooperation**.
+    //
+    // What it does NOT buy: unlinkability of the CLUSTER. The provider sees
+    // `{A,B,C,D}` under the old id and `{A,B,C}` under the new one and
+    // re-links by token-set intersection — the set difference even names the
+    // evicted device. That is a deliberate, recorded trade (ADR-0043 § crux),
+    // not an oversight: closing it needs per-device-blinded routing ids
+    // (G-36 residual 1).
+    //
+    // ## Rotate on REMOVAL only, never on add
+    //
+    // An added member is *supposed* to route —
+    // ``redistribute(accountIdB64:groupIdHex:broadcast:)`` already hands it
+    // the current secret. Rotating on add would also turn that redistribute
+    // into a CHANGED secret against every existing member's stored one on
+    // every add, for zero privacy gain.
+
+    /// Verdict of the pure ``membershipRotationDecision(previousMemberKeys:currentMemberKeys:ownRole:)``
+    /// core.
+    public enum PushRotationDecision: Equatable {
+        /// Membership SHRANK and this device may rotate.
+        case rotate
+        /// Membership grew or is unchanged — an add / role change / ordinary
+        /// commit. The routing id stays stable, which is the whole point of
+        /// rotating only at removals.
+        case skipNoShrink
+        /// No usable before/after snapshot (first observation of the group,
+        /// or a `members()` read that threw). Never rotate on an unknown
+        /// delta — a missing snapshot would otherwise read as "everyone
+        /// departed".
+        case skipUnknownMembership
+        /// A shrink, but this device is a plain member (or the group has no
+        /// role table). Rotating is owner-or-admin only.
+        case skipNotAuthorized
+    }
+
+    /// Outcome of the rotation orchestration — the decision values plus what
+    /// the IO half resolved to.
+    public enum PushRotationOutcome: Equatable {
+        /// Minted, persisted, broadcast, re-subscribed, old id retired.
+        case rotated
+        /// This device holds no READABLE secret, so there is nothing to
+        /// ROTATE. Minting is owner-only and lives in
+        /// ``ensureProvisioned(accountIdB64:groupIdHex:group:identity:broadcast:)``;
+        /// rotation deliberately never mints a first secret, so an admin can
+        /// never become a second minter and diverge the group's `push_gid`.
+        ///
+        /// Covers the unreadable row too (no device wrap key / AEAD open
+        /// failed): the OLD id could never be named from bytes we cannot
+        /// read, so rotating would strand it subscribed forever.
+        case skipNoSecret
+        /// See ``PushRotationDecision/skipNoShrink``.
+        case skipNoShrink
+        /// See ``PushRotationDecision/skipUnknownMembership``.
+        case skipUnknownMembership
+        /// See ``PushRotationDecision/skipNotAuthorized``.
+        case skipNotAuthorized
+    }
+
+    /// Stable per-member identities for the membership diff: the
+    /// lowercase-hex Ed25519 signature public keys from `Group.members()`.
+    ///
+    /// Keys, NOT leaf indices: OpenMLS reuses a vacated leaf for the next
+    /// Add, so a remove-then-add pair can leave the index set identical while
+    /// the membership genuinely changed. The signature key is stable for a
+    /// member's lifetime in the group.
+    ///
+    /// Returns `nil` when the snapshot cannot be read (a torn group), which
+    /// the decision core treats as "unknown", never as "everybody left".
+    public nonisolated static func memberSignatureKeys(group: Group) -> [String]? {
+        guard let roster = try? group.members() else { return nil }
+        return roster.map { hex($0.signaturePublicKey) }
+    }
+
+    /// Pure decision core — did the membership SHRINK, and may this device
+    /// rotate? No IO, so the whole matrix is directly testable (and is the
+    /// verbatim port of the web `membershipRotationDecision`, like the
+    /// ADR-0037 `restoreVerdict` gate).
+    ///
+    /// "Shrank" = at least one member present in the previous snapshot is
+    /// absent from the current one. Deliberately not a count comparison: a
+    /// poll batch can carry a Remove AND an Add, which leaves the count equal
+    /// while a member was evicted — and that member must still lose its
+    /// routing id.
+    ///
+    /// The authority check is owner-OR-admin (ADR-0043 ratified option (b)),
+    /// matching who ADR-0022 lets commit the Remove in the first place. A
+    /// `nil` role (no role table) does NOT rotate: such a group has no owner,
+    /// so nobody ever minted a secret for it and there is nothing to rotate —
+    /// and letting every member of an un-owned group rotate would have them
+    /// each mint divergent secrets.
+    ///
+    /// - Parameters:
+    ///   - previousMemberKeys: member keys observed BEFORE the commits
+    ///     landed, or `nil` if unknown.
+    ///   - currentMemberKeys: member keys observed AFTER, or `nil` if unknown.
+    ///   - ownRole: this device's ADR-0022 role; `nil` = no role table.
+    public nonisolated static func membershipRotationDecision(
+        previousMemberKeys: [String]?,
+        currentMemberKeys: [String]?,
+        ownRole: Role?
+    ) -> PushRotationDecision {
+        guard let before = previousMemberKeys, let after = currentMemberKeys else {
+            return .skipUnknownMembership
+        }
+        // A first observation has no baseline to diff against.
+        if before.isEmpty { return .skipUnknownMembership }
+        let present = Set(after)
+        guard before.contains(where: { !present.contains($0) }) else { return .skipNoShrink }
+        guard ownRole == .owner || ownRole == .admin else { return .skipNotAuthorized }
+        return .rotate
+    }
+
+    /// ADR-0043 — re-mint the group's `push_routing_secret`, redistribute it,
+    /// and retire the superseded `push_gid`.
+    ///
+    /// **The caller MUST have already published the Remove commit.** The
+    /// envelope is an MLS application message: sealed at epoch N
+    /// (pre-removal) the evicted member is still a member of that epoch and
+    /// can OPEN it, learning the new secret and defeating the whole change.
+    /// Sealed at N+1 it is unreadable to the removed leaf — RFC 9420 forward
+    /// secrecy is exactly the property doing the work here. This is a hard
+    /// sequencing requirement, not an optimisation.
+    ///
+    /// The steps, in the one order that works:
+    ///
+    ///   1. read the OLD secret and 2. derive the OLD `push_gid` — **before**
+    ///      the store write, because the secret row is keyed
+    ///      `(account, group)` and is clobbered in place. Persist first and
+    ///      the id being retired can no longer be named: an undeletable
+    ///      orphan that keeps receiving wakes, i.e. the exact defect being
+    ///      fixed;
+    ///   3. mint the NEW secret and 4. persist it `distributed: false`;
+    ///   5. broadcast, marking distributed only once the send lands. That
+    ///      flag is the whole durability mechanism, reused verbatim from the
+    ///      mint path: a failed rotation broadcast leaves the row PENDING,
+    ///      and the re-broadcast branch of
+    ///      ``ensureProvisioned(accountIdB64:groupIdHex:group:identity:broadcast:)``
+    ///      — open to ANY holder — re-sends the stored (i.e. the new) secret
+    ///      on the next chat-open / launch. Without it, a failed rotation
+    ///      broadcast strands the whole group: the rotator alone on the new
+    ///      id, everyone else on the old one, nobody notifying either;
+    ///   6. subscribe under the NEW id, then 7./8. retire the OLD one
+    ///      (``retireOldPushGid(oldSecret:)``) — in that order, so the device
+    ///      is never unsubscribed from both at once.
+    ///
+    /// Rotation NEVER mints a first secret: with no secret held this is a
+    /// no-op (``PushRotationOutcome/skipNoSecret``). Minting stays owner-only
+    /// in ``ensureProvisioned(accountIdB64:groupIdHex:group:identity:broadcast:)``,
+    /// so widening rotation to admins does not create a second minter.
+    ///
+    /// Never throws — push is best-effort and a rotation failure must not
+    /// unwind the membership change that triggered it.
+    @discardableResult
+    public func rotateSecret(
+        accountIdB64: String,
+        groupIdHex: String,
+        ownRole: Role?,
+        broadcast: @escaping (Data) async throws -> Void
+    ) async -> PushRotationOutcome {
+        guard ownRole == .owner || ownRole == .admin else { return .skipNotAuthorized }
+        let lockKey = accountIdB64 + "\u{0}" + groupIdHex
+        // Coalesce: a second trigger for the same group AWAITS the in-flight
+        // rotation instead of starting a second one (two mints would strand
+        // the first new push_gid subscribed-but-never-notified).
+        if let inflightTask = rotating[lockKey] { return await inflightTask.value }
+
+        let task = Task { @MainActor [weak self] () -> PushRotationOutcome in
+            guard let self else { return .skipNoSecret }
+            return await self.performRotation(
+                accountIdB64: accountIdB64, groupIdHex: groupIdHex, broadcast: broadcast)
+        }
+        rotating[lockKey] = task
+        let outcome = await task.value
+        rotating.removeValue(forKey: lockKey)
+        return outcome
+    }
+
+    /// Body of ``rotateSecret(accountIdB64:groupIdHex:ownRole:broadcast:)``,
+    /// past the authority gate + the in-flight lock. Steps 1-8 of the ADR.
+    private func performRotation(
+        accountIdB64: String,
+        groupIdHex: String,
+        broadcast: (Data) async throws -> Void
+    ) async -> PushRotationOutcome {
+        // (1)+(2) — the OLD secret, read BEFORE anything overwrites it. The
+        // gid is derived from these bytes at teardown time, in
+        // `retireOldPushGid`. An absent OR unreadable row cannot be rotated:
+        // the old id could never be named, so a rotation would strand it
+        // subscribed forever.
+        guard let oldSecret = store.getSecret(
+            accountIdB64: accountIdB64, groupIdHex: groupIdHex) else {
+            return .skipNoSecret
+        }
+
+        // (3)+(4) — mint + persist PENDING. Persist before broadcasting for
+        // the same reason the mint path does: two divergent random secrets
+        // are worse than two identical envelopes.
+        guard let next = Self.mintSecret() else { return .skipNoSecret }
+        guard persistSecret(
+            accountIdB64: accountIdB64, groupIdHex: groupIdHex, secret: next,
+            distributed: false) != nil else {
+            return .skipNoSecret
+        }
+
+        // (5) — redistribute at the POST-removal epoch. Failure leaves the
+        // row pending for the existing any-holder retry branch; it must NOT
+        // abort the local switch, which is already durable.
+        await broadcastAndSettle(
+            secret: next, accountIdB64: accountIdB64, groupIdHex: groupIdHex,
+            what: "rotation", broadcast: broadcast)
+
+        // (6) — arm the NEW id first, so a failure between the two never
+        // leaves this device subscribed to nothing.
+        await subscribeUnderPushGidBestEffort(
+            accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+
+        // (7)+(8) — retire the OLD id: unsubscribe this device's row, drop
+        // the stale reverse-index entry.
+        await retireOldPushGid(oldSecret: oldSecret)
+        return .rotated
+    }
+
+    /// ADR-0043 — the WIRE-OBSERVED trigger: rotate when this device notices
+    /// that the membership shrank, i.e. when SOMEONE ELSE committed the
+    /// Remove.
+    ///
+    /// A Commit surfaces from the poll loop with no membership delta attached
+    /// (surfacing removed leaves from `lakko-mls` would be exact, but it is
+    /// an invariant-#3 change to the MLS state machine and needs its own
+    /// ADR), so the removal is INFERRED from a `members()` snapshot taken
+    /// either side of the poll batch. The snapshot is cheap to read, so the
+    /// diff is effectively free.
+    ///
+    /// The device that performed the removal itself does NOT come through
+    /// here: it applied its own commit locally before the poll, so the next
+    /// poll's baseline is already post-removal and shows no shrink. It
+    /// rotates directly instead, via
+    /// ``rotateSecret(accountIdB64:groupIdHex:ownRole:broadcast:)``, right
+    /// after its Remove commit is published.
+    ///
+    /// Never throws.
+    @discardableResult
+    public func rotateIfMembershipShrank(
+        accountIdB64: String,
+        groupIdHex: String,
+        ownRole: Role?,
+        previousMemberKeys: [String]?,
+        currentMemberKeys: [String]?,
+        broadcast: @escaping (Data) async throws -> Void
+    ) async -> PushRotationOutcome {
+        switch Self.membershipRotationDecision(
+            previousMemberKeys: previousMemberKeys,
+            currentMemberKeys: currentMemberKeys,
+            ownRole: ownRole
+        ) {
+        case .skipNoShrink: return .skipNoShrink
+        case .skipUnknownMembership: return .skipUnknownMembership
+        case .skipNotAuthorized: return .skipNotAuthorized
+        case .rotate:
+            return await rotateSecret(
+                accountIdB64: accountIdB64, groupIdHex: groupIdHex, ownRole: ownRole,
+                broadcast: broadcast)
+        }
     }
 
     // MARK: - Store passthrough
