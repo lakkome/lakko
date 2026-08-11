@@ -503,6 +503,198 @@ final class PushGroupRoutingTests: XCTestCase {
         XCTAssertTrue(spy.targets.isEmpty, "an unreadable secret defers the subscription")
     }
 
+    // MARK: - durable `distributed` flag: the failed-REDISTRIBUTE repair
+
+    /// **The regression this closes.** The `distributed` flag is per-GROUP,
+    /// not per-member. The owner mints and broadcasts successfully (flag
+    /// `true`), a member is added, and the post-add `redistribute` FAILS
+    /// (offline / DS error). With the flag left at `true` no sweep would ever
+    /// re-send, so that new member never learns the secret and defers push
+    /// forever — the same permanent-no-push bug as the failed-mint case,
+    /// scoped to one member. A failed redistribute must un-settle the row.
+    func testFailedRedistributeReBroadcastsOnTheNextProvision() async throws {
+        let store = makeStore()
+        let spy = SubscribeSpy()
+        let routing = makeRouting(store: store, spy: spy)
+        let broadcaster = FlakyBroadcastRecorder(shouldFail: false)
+
+        let identity = try makeIdentity(0x3A)
+        let (group, groupIdHex) = try makeOwnerGroup(identity)
+
+        // Mint + broadcast LANDS — the group is healthy and settled.
+        await routing.ensureProvisioned(
+            accountIdB64: "acctOwner", groupIdHex: groupIdHex, group: group,
+            identity: identity, broadcast: { try broadcaster.send($0) })
+        XCTAssertEqual(broadcaster.envelopes.count, 1)
+        let minted = try XCTUnwrap(
+            store.getRecord(accountIdB64: "acctOwner", groupIdHex: groupIdHex))
+        XCTAssertTrue(minted.distributed, "a landed mint settles the flag")
+
+        // A member is added -> redistribute, and THAT broadcast fails.
+        broadcaster.shouldFail = true
+        await routing.redistribute(
+            accountIdB64: "acctOwner", groupIdHex: groupIdHex,
+            broadcast: { try broadcaster.send($0) })
+
+        XCTAssertEqual(broadcaster.envelopes.count, 2, "the redistribute attempted a broadcast")
+        XCTAssertEqual(
+            store.getRecord(accountIdB64: "acctOwner", groupIdHex: groupIdHex)?.distributed,
+            false,
+            "a failed redistribute must un-settle the row, else the newly-added "
+                + "member is never re-sent the secret")
+        // The secret itself is untouched — only the flag moved.
+        XCTAssertEqual(
+            store.getSecret(accountIdB64: "acctOwner", groupIdHex: groupIdHex), minted.secret)
+
+        // The next provision (relaunch / chat re-open) picks the row up and
+        // re-broadcasts the SAME secret, then settles it.
+        broadcaster.shouldFail = false
+        await routing.ensureProvisioned(
+            accountIdB64: "acctOwner", groupIdHex: groupIdHex, group: group,
+            identity: identity, broadcast: { try broadcaster.send($0) })
+
+        XCTAssertEqual(
+            broadcaster.envelopes.count, 3,
+            "a redistribute-failed row must be RE-BROADCAST on the next provision")
+        XCTAssertEqual(
+            broadcaster.envelopes[0], broadcaster.envelopes[2],
+            "the retry carries the same secret — a re-mint would diverge the routing id")
+        XCTAssertEqual(
+            store.getRecord(accountIdB64: "acctOwner", groupIdHex: groupIdHex)?.distributed,
+            true, "the landed retry settles the flag again")
+
+        // ... and a further provision is silent.
+        await routing.ensureProvisioned(
+            accountIdB64: "acctOwner", groupIdHex: groupIdHex, group: group,
+            identity: identity, broadcast: { try broadcaster.send($0) })
+        XCTAssertEqual(broadcaster.envelopes.count, 3)
+    }
+
+    /// The other half: a redistribute that LANDS leaves the row settled, so
+    /// the healthy add-member path costs no extra journal write.
+    func testSuccessfulRedistributeLeavesTheSecretDistributed() async throws {
+        let store = makeStore()
+        let spy = SubscribeSpy()
+        let routing = makeRouting(store: store, spy: spy)
+        let broadcaster = FlakyBroadcastRecorder(shouldFail: false)
+
+        let identity = try makeIdentity(0x3C)
+        let (group, groupIdHex) = try makeOwnerGroup(identity)
+
+        await routing.ensureProvisioned(
+            accountIdB64: "acctOwner", groupIdHex: groupIdHex, group: group,
+            identity: identity, broadcast: { try broadcaster.send($0) })
+        XCTAssertEqual(broadcaster.envelopes.count, 1)
+
+        await routing.redistribute(
+            accountIdB64: "acctOwner", groupIdHex: groupIdHex,
+            broadcast: { try broadcaster.send($0) })
+        XCTAssertEqual(broadcaster.envelopes.count, 2)
+        XCTAssertEqual(
+            store.getRecord(accountIdB64: "acctOwner", groupIdHex: groupIdHex)?.distributed,
+            true, "a landed redistribute keeps the row settled")
+
+        await routing.ensureProvisioned(
+            accountIdB64: "acctOwner", groupIdHex: groupIdHex, group: group,
+            identity: identity, broadcast: { try broadcaster.send($0) })
+        XCTAssertEqual(
+            broadcaster.envelopes.count, 2,
+            "a settled row must not be re-broadcast after a successful redistribute")
+    }
+
+    /// ADR-0022 lets an ADMIN add a member too, so a NON-owner reaches
+    /// `redistribute` and can therefore mark its own row pending. That must
+    /// stay inert: only the owner's branch of `ensureProvisioned`
+    /// re-broadcasts, so a non-owner never starts broadcasting off the flag.
+    func testNonOwnerPendingRowNeverReBroadcasts() async throws {
+        let store = makeStore()
+        let spy = SubscribeSpy()
+        let routing = makeRouting(store: store, spy: spy)
+        let broadcaster = FlakyBroadcastRecorder(shouldFail: true)
+
+        let ownerIdentity = try makeIdentity(0x3E)
+        let memberIdentity = try makeIdentity(0x3F)
+        let (group, groupIdHex, ownerLeaf, _) = try makeTwoMemberGroup(
+            owner: ownerIdentity, member: memberIdentity)
+
+        // This device is the non-owner MEMBER; it received the secret over the
+        // journal, so its row is stored settled.
+        let secret = try XCTUnwrap(PushGroupRouting.mintSecret())
+        await routing.receiveSecret(
+            accountIdB64: "acctMember", groupIdHex: groupIdHex, secret: secret,
+            group: group, senderLeaf: ownerLeaf)
+        XCTAssertEqual(
+            store.getRecord(accountIdB64: "acctMember", groupIdHex: groupIdHex)?.distributed,
+            true)
+
+        // It adds a member (ADR-0022 admin add) -> redistribute -> fails.
+        await routing.redistribute(
+            accountIdB64: "acctMember", groupIdHex: groupIdHex,
+            broadcast: { try broadcaster.send($0) })
+        XCTAssertEqual(broadcaster.envelopes.count, 1)
+        XCTAssertEqual(
+            store.getRecord(accountIdB64: "acctMember", groupIdHex: groupIdHex)?.distributed,
+            false, "the failed redistribute un-settled this device's row")
+
+        // The next provision on a NON-owner must not broadcast anything: the
+        // re-broadcast branch is gated on `ownRole == .owner`.
+        await routing.ensureProvisioned(
+            accountIdB64: "acctMember", groupIdHex: groupIdHex, group: group,
+            identity: memberIdentity, broadcast: { try broadcaster.send($0) })
+        XCTAssertEqual(
+            broadcaster.envelopes.count, 1,
+            "a non-owner must never broadcast, pending row or not")
+        // It still subscribes under the secret it holds.
+        XCTAssertEqual(
+            spy.targets,
+            [try XCTUnwrap(PushGroupRouting.derivePushGid(secret: secret)),
+             try XCTUnwrap(PushGroupRouting.derivePushGid(secret: secret))])
+    }
+
+    /// `markPending` mirrors `markDistributed`: a no-op on an absent record,
+    /// and bound by the same `matching:` discipline so a failed OLD-secret
+    /// broadcast can never un-settle a NEWLY rotated secret that did travel.
+    func testMarkPendingIsANoOpOnAnAbsentRecordAndHonoursMatching() throws {
+        let store = makeStore()
+        let stored = try XCTUnwrap(PushGroupRouting.mintSecret())
+        let other = try XCTUnwrap(PushGroupRouting.mintSecret())
+        XCTAssertNotEqual(stored, other)
+
+        // Absent record -> no-op, and nothing is created.
+        XCTAssertFalse(store.markPending(
+            accountIdB64: "acct", groupIdHex: "missing", matching: stored))
+        XCTAssertFalse(store.hasSecret(accountIdB64: "acct", groupIdHex: "missing"))
+        XCTAssertNil(store.getRecord(accountIdB64: "acct", groupIdHex: "missing"))
+
+        let gidHex = PushGroupRouting.hex(
+            try XCTUnwrap(PushGroupRouting.derivePushGid(secret: stored)))
+        store.putRouting(
+            accountIdB64: "acct", groupIdHex: "grp", secret: stored, pushGidHex: gidHex,
+            distributed: true)
+
+        // A DIFFERENT secret's failed broadcast must not un-settle this row.
+        XCTAssertFalse(store.markPending(
+            accountIdB64: "acct", groupIdHex: "grp", matching: other))
+        XCTAssertEqual(
+            store.getRecord(accountIdB64: "acct", groupIdHex: "grp")?.distributed, true)
+
+        // The matching one does, and stays idempotent.
+        XCTAssertTrue(store.markPending(
+            accountIdB64: "acct", groupIdHex: "grp", matching: stored))
+        XCTAssertTrue(store.markPending(
+            accountIdB64: "acct", groupIdHex: "grp", matching: stored))
+        let record = try XCTUnwrap(store.getRecord(accountIdB64: "acct", groupIdHex: "grp"))
+        XCTAssertFalse(record.distributed)
+        XCTAssertEqual(record.secret, stored, "un-settling must not disturb the secret")
+
+        // And the row can be settled again afterwards (the flag is a toggle,
+        // not a one-way latch) — what makes the retry loop terminate.
+        XCTAssertTrue(store.markDistributed(
+            accountIdB64: "acct", groupIdHex: "grp", matching: stored))
+        XCTAssertEqual(
+            store.getRecord(accountIdB64: "acct", groupIdHex: "grp")?.distributed, true)
+    }
+
     /// The flag can only ever describe the secret that actually travelled:
     /// `markDistributed` is a no-op when the stored secret has since
     /// changed (an owner rotation racing an in-flight broadcast).

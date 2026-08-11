@@ -81,6 +81,15 @@
  * in-memory MLS state moves on). Re-sending is safe because the value is
  * byte-identical: every member reads it as `accept-identical`.
  *
+ * The same flag has to cover a failed REDISTRIBUTE, not only a failed mint
+ * broadcast. It is per-`(account, group)`, not per-member, so once the mint
+ * lands the row reads `distributed` — and a later
+ * {@link redistributeSecretToGroup} that fails after an add-member would then
+ * never be retried, leaving the NEW member (whose only source of the secret
+ * is that redistribute) deferring push forever: the same permanent-no-push
+ * bug, scoped to one member. So a failed send flips the row back to pending
+ * and the re-broadcast branch below repairs it.
+ *
  * ## Concurrency
  *
  * Provisioning can be triggered from two places in the same session — the
@@ -103,6 +112,7 @@ import {
   getGroupRoutingSecret,
   getGroupRoutingState,
   markGroupRoutingDistributed,
+  markGroupRoutingPending,
   putGroupRouting,
 } from "./group-routing-store";
 
@@ -675,6 +685,25 @@ export function ensureGroupPushRouting(
  * gives, so it clears a pending `distributed` flag too — an add-member that
  * happens to follow a failed mint-broadcast repairs it here rather than
  * waiting for the next provisioning pass.
+ *
+ * A FAILED send does the converse: it marks the row **pending** again. The
+ * `distributed` flag is per-`(account, group)`, not per-member, so without
+ * this a group whose mint broadcast already landed looks settled forever —
+ * no pass re-sends, and the newly-added member, whose ONLY source of the
+ * secret is this redistribute, defers push permanently. Marking pending
+ * re-arms {@link ensureGroupPushRouting}'s existing re-broadcast branch, so
+ * the next launch / chat-open retries until it lands. The retry is
+ * byte-identical, so every existing member reads it as `accept-identical`
+ * (idempotent) while the new member finally gets it; the cost is at most one
+ * extra control message per failed redistribute.
+ *
+ * Only the OWNER's branch in {@link ensureGroupPushRouting} re-broadcasts. An
+ * admin (ADR-0022 lets admins commit an add too) marking its own row pending
+ * is therefore inert — nothing else reads the state — but harmless, and it is
+ * the correct record of "this device's last send did not land".
+ *
+ * Rejects with the broadcast's error after marking, so the caller still logs
+ * the failure exactly as before.
  */
 export async function redistributeSecretToGroup(
   accountId: string,
@@ -686,6 +715,17 @@ export async function redistributeSecretToGroup(
   if (deviceKey === null) return;
   const secret = await getGroupRoutingSecret(accountId, groupIdB64, deviceKey);
   if (secret === null) return;
-  await broadcast(await composeSecretEnvelope(secret));
+  try {
+    await broadcast(await composeSecretEnvelope(secret));
+  } catch (err) {
+    try {
+      await markGroupRoutingPending(accountId, groupIdB64);
+    } catch (markErr) {
+      // Best-effort: a store failure here costs the retry, not correctness.
+      // eslint-disable-next-line no-console
+      console.warn("push-routing pending mark failed", markErr);
+    }
+    throw err;
+  }
   await markGroupRoutingDistributed(accountId, groupIdB64);
 }

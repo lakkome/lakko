@@ -38,7 +38,10 @@ import uniffi.lakko_ffi_uniffi.derivePushGid as ffiDerivePushGid
  * re-sends a still-pending one on every later call. Without that, one
  * failed broadcast (offline, DS error) left the owner's mint guard
  * permanently satisfied and cost the whole group push for good — see
- * [decideEnsureAction].
+ * [decideEnsureAction]. That flag is per-GROUP, so the post-add-member
+ * [redistribute] rewinds it on a failure too: otherwise a group whose
+ * mint DID land stays flagged distributed and the newly-added member
+ * — the only one missing the secret — defers push permanently.
  *
  * On the RECEIVE side that mint authority is mirrored by a rank gate
  * ([decideAcceptReceivedSecret]): the owner may always rotate, an
@@ -518,15 +521,53 @@ public object GroupPushRouting {
      *
      * Marks the row distributed on success (it is a confirmed send of
      * exactly the envelope [ensure] would re-send), so a mint whose own
-     * broadcast failed is also healed by this path. A throw propagates
-     * to the caller and leaves the row pending.
+     * broadcast failed is also healed by this path.
+     *
+     * ## Why a FAILURE marks the row PENDING
+     *
+     * The `distributed` flag is per-GROUP, not per-member, so on its own
+     * it heals only a failed MINT broadcast. The uncovered case: the mint
+     * landed (`distributed = true`), a member was then added, and THIS
+     * re-send failed (offline / DS error). The flag is already `true`, so
+     * [decideEnsureAction] returns [EnsureAction.NONE] and no sweep ever
+     * re-sends — the newly-added member never learns the secret and
+     * defers push forever ([subscribeOrDefer] never falls back to
+     * `group_id`). That is the same permanent-no-push bug the flag was
+     * introduced to kill, merely scoped to one member instead of the
+     * whole group.
+     *
+     * Flipping the row back to pending on a failure hands it to the
+     * existing [EnsureAction.REBROADCAST] branch, which retries on every
+     * later launch / chat-open until one send lands. The retry is safe
+     * and cheap by construction: it re-sends the SAME bytes, which
+     * [decideAcceptReceivedSecret] accepts as byte-identical from ANY
+     * sender, so it is inert for every existing member and is exactly
+     * what the new member needs. The cost ceiling is one extra control
+     * message per failed redistribute.
+     *
+     * A failing [markPending] is swallowed — the original broadcast
+     * failure is what the caller must see, and re-flagging is a
+     * best-effort repair, not a correctness gate.
+     *
+     * Note only the OWNER acts on a pending flag: [decideEnsureAction]
+     * returns [EnsureAction.NONE] for a non-owner regardless of the flag.
+     * An ADMIN may also reach this path (ADR-0022 lets an admin add
+     * members), and its pending mark is simply inert on its own device —
+     * marking pending can never turn a non-owner into a broadcaster.
+     *
+     * A throw propagates to the caller (which is best-effort).
      */
     public suspend fun redistribute(
         groupIdHex: String,
         ports: PushRoutingPorts,
     ) {
         val secret = ports.getSecret(groupIdHex) ?: return
-        ports.broadcast(ports.composeEnvelope(secret))
+        try {
+            ports.broadcast(ports.composeEnvelope(secret))
+        } catch (e: Throwable) {
+            runCatching { ports.markPending(groupIdHex) }
+            throw e
+        }
         ports.markDistributed(groupIdHex)
     }
 
@@ -583,6 +624,12 @@ public interface PushRoutingPorts {
      *  is already flagged. */
     public fun markDistributed(groupIdHex: String)
 
+    /** Durably flag `groupIdHex`'s row NOT distributed — the inverse of
+     *  [markDistributed], called when a broadcast FAILED so the owner's
+     *  next [GroupPushRouting.ensure] re-sends it. No-op when no row is
+     *  held or it is already pending. */
+    public fun markPending(groupIdHex: String)
+
     /** Subscribe this device to push-gw under `pushGid`. */
     public suspend fun subscribeUnderPushGid(pushGid: ByteArray)
 
@@ -635,6 +682,10 @@ public class NativePushRoutingPorts(
 
     override fun markDistributed(groupIdHex: String) {
         PushRoutingSecretStore.markDistributed(context, accountIdB64, groupIdHex)
+    }
+
+    override fun markPending(groupIdHex: String) {
+        PushRoutingSecretStore.markPending(context, accountIdB64, groupIdHex)
     }
 
     override suspend fun subscribeUnderPushGid(pushGid: ByteArray) {

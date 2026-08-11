@@ -13,8 +13,10 @@
  *      decrypt reverse-resolves — and `clearAllGroupRouting` wipes both;
  *   3. the durable `distributed` flag: `getGroupRoutingState` separates
  *      `absent` / `pending` / `distributed`, `markGroupRoutingDistributed`
- *      flips a pending row, and a LEGACY row carrying no flag reads as
- *      `distributed` (so an upgrade does not re-broadcast for every group).
+ *      flips a pending row, `markGroupRoutingPending` flips it BACK (what
+ *      re-arms the retry after a failed redistribute), both are no-ops on an
+ *      absent row, and a LEGACY row carrying no flag reads as `distributed`
+ *      (so an upgrade does not re-broadcast for every group).
  *
  * A small in-memory IndexedDB shim (multi-store + `getKey`) + the real
  * `crypto.subtle` (Node WebCrypto) exercise the actual store code path.
@@ -165,6 +167,7 @@ import {
   hasGroupRoutingSecret,
   lookupPushRoute,
   markGroupRoutingDistributed,
+  markGroupRoutingPending,
   putGroupRouting,
 } from "./group-routing-store";
 
@@ -329,6 +332,56 @@ describe("group-routing-store — the durable `distributed` flag", () => {
     await markGroupRoutingDistributed(ACCT, GROUP);
     expect(await getGroupRoutingState(ACCT, GROUP)).toBe("absent");
     expect(await hasGroupRoutingSecret(ACCT, GROUP)).toBe(false);
+  });
+
+  it("markGroupRoutingPending flips distributed -> pending, keeping the secret intact", async () => {
+    // The flag is per-(account, group), not per-member, so a FAILED
+    // redistribute after a landed mint-broadcast must be able to re-arm the
+    // owner's re-broadcast branch — else the newly-added member, whose only
+    // source of the secret is that redistribute, defers push forever.
+    const deviceKey = await makeDeviceKey();
+    const secret = crypto.getRandomValues(new Uint8Array(32));
+    await putGroupRouting(
+      {
+        accountId: ACCT,
+        groupIdB64: GROUP,
+        secret,
+        pushGidHex: PUSH_GID_HEX,
+        distributed: true,
+      },
+      deviceKey,
+    );
+
+    await markGroupRoutingPending(ACCT, GROUP);
+
+    expect(await getGroupRoutingState(ACCT, GROUP)).toBe("pending");
+    // The read-modify-write must not disturb the ciphertext.
+    const got = await getGroupRoutingSecret(ACCT, GROUP, deviceKey);
+    expect(Array.from(got as Uint8Array)).toEqual(Array.from(secret));
+    // Idempotent, and the pair round-trips back.
+    await markGroupRoutingPending(ACCT, GROUP);
+    expect(await getGroupRoutingState(ACCT, GROUP)).toBe("pending");
+    await markGroupRoutingDistributed(ACCT, GROUP);
+    expect(await getGroupRoutingState(ACCT, GROUP)).toBe("distributed");
+  });
+
+  it("markGroupRoutingPending on an absent row is a no-op (never resurrects a wiped secret)", async () => {
+    await markGroupRoutingPending(ACCT, GROUP);
+    expect(await getGroupRoutingState(ACCT, GROUP)).toBe("absent");
+    expect(await hasGroupRoutingSecret(ACCT, GROUP)).toBe(false);
+    expect(await lookupPushRoute(PUSH_GID_HEX)).toBeNull();
+  });
+
+  it("markGroupRoutingPending downgrades a LEGACY (flag-less) row too", async () => {
+    // A legacy row only READS as distributed — that is an inference, not a
+    // recorded value — so a failed send on such a group must still re-arm the
+    // retry rather than being swallowed.
+    await put(true);
+    stripDistributedField();
+    expect(await getGroupRoutingState(ACCT, GROUP)).toBe("distributed");
+
+    await markGroupRoutingPending(ACCT, GROUP);
+    expect(await getGroupRoutingState(ACCT, GROUP)).toBe("pending");
   });
 
   it("a LEGACY row with no `distributed` field reads as distributed", async () => {

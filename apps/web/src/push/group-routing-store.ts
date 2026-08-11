@@ -46,6 +46,17 @@
  * time** (`composePushRoutingSecret(secret)`). So one durable boolean is the
  * whole mechanism; there is nothing to spool.
  *
+ * The flag is per-`(account, group)`, NOT per-member, so it must be cleared
+ * again whenever a LATER send of the same envelope fails. The case that
+ * matters is the post-add-member **redistribute**: the mint broadcast landed
+ * (`distributed`), a member was added, and the redistribute that carries the
+ * secret to that new member failed. Left `true` the row looks settled, no
+ * pass ever re-sends, and the new member — for whom that redistribute was the
+ * ONLY source of the secret — defers push forever. So a failed send flips the
+ * row back to pending ({@link markGroupRoutingPending}) and the same
+ * re-broadcast branch repairs it; the re-send is byte-identical, hence an
+ * idempotent `accept-identical` for every existing member.
+ *
  * A row written by a build that predates the flag carries no `distributed`
  * field. Such rows are read as **`true`**: those groups were provisioned by
  * the old code and are working today, so treating `undefined` as "not yet
@@ -322,8 +333,7 @@ export async function hasGroupRoutingSecret(
 }
 
 /**
- * Flip a held secret's `distributed` flag to `true` — called only after the
- * distribution envelope is CONFIRMED on the wire (the broadcast resolved).
+ * Set a held secret's `distributed` flag, leaving the ciphertext untouched.
  *
  * Read-modify-write inside ONE transaction, chained through the `get`'s
  * `onsuccess` rather than across an `await`: an IndexedDB transaction
@@ -331,11 +341,15 @@ export async function hasGroupRoutingSecret(
  * read and the write would commit the tx and write into a dead one.
  *
  * A no-op when the row is absent (wiped by a concurrent `forgetDevice`) —
- * it must never resurrect a deleted secret.
+ * it must never resurrect a deleted secret — and when the flag already holds
+ * the target value. A LEGACY row (no field at all) is written either way:
+ * it reads as `distributed`, but that is an inference, not a recorded value,
+ * so an explicit write is always a refinement.
  */
-export async function markGroupRoutingDistributed(
+async function setDistributedFlag(
   accountId: string,
   groupIdB64: string,
+  distributed: boolean,
 ): Promise<void> {
   const db = await openPushRoutingDb();
   try {
@@ -344,13 +358,48 @@ export async function markGroupRoutingDistributed(
     const req = store.get(secretRowKey(accountId, groupIdB64));
     req.onsuccess = (): void => {
       const row = req.result as SecretRow | undefined;
-      if (row === undefined || row.distributed === true) return;
-      store.put({ ...row, distributed: true });
+      if (row === undefined || row.distributed === distributed) return;
+      store.put({ ...row, distributed });
     };
     await awaitTx(tx);
   } finally {
     db.close();
   }
+}
+
+/**
+ * Flip a held secret's `distributed` flag to `true` — called only after the
+ * distribution envelope is CONFIRMED on the wire (the broadcast resolved).
+ *
+ * A no-op when the row is absent (wiped by a concurrent `forgetDevice`).
+ */
+export async function markGroupRoutingDistributed(
+  accountId: string,
+  groupIdB64: string,
+): Promise<void> {
+  return setDistributedFlag(accountId, groupIdB64, true);
+}
+
+/**
+ * Flip a held secret's `distributed` flag back to `false` — called when a
+ * send of the distribution envelope FAILED, so the owner's next provisioning
+ * pass re-broadcasts it.
+ *
+ * This is what makes the retry cover a failed REDISTRIBUTE and not only a
+ * failed MINT broadcast. The flag is per-`(account, group)`, not per-member:
+ * once the mint broadcast lands the row is `distributed`, so a later
+ * `redistributeSecretToGroup` that fails (offline / DS error) after an
+ * add-member would otherwise never be retried, and the NEW member — whose
+ * only source of the secret is that redistribute — would defer push forever.
+ * Marking the row pending again re-arms the existing re-broadcast branch.
+ *
+ * A no-op when the row is absent (wiped by a concurrent `forgetDevice`).
+ */
+export async function markGroupRoutingPending(
+  accountId: string,
+  groupIdB64: string,
+): Promise<void> {
+  return setDistributedFlag(accountId, groupIdB64, false);
 }
 
 /**

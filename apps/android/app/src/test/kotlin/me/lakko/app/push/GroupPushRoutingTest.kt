@@ -34,6 +34,11 @@ import org.junit.Test
  *     it (recomposed from the store, never re-minted) until one lands —
  *     while a legacy row carrying no flag is read as already distributed,
  *     so an upgrade does not re-broadcast every working group;
+ *   - that flag is per-GROUP, so a failed post-add-member `redistribute`
+ *     REWINDS it to pending — otherwise a group whose mint landed stays
+ *     flagged distributed and the newly-added member (the only one
+ *     missing the secret) defers push forever; a successful one leaves it
+ *     distributed, and the rewind never makes a non-owner broadcast;
  *   - a NON-owner never mints, and never broadcasts even holding a
  *     pending row;
  *   - a member that receives the envelope persists + subscribes under the
@@ -122,6 +127,16 @@ class GroupPushRoutingTest {
         override fun markDistributed(groupIdHex: String) {
             if (secrets.containsKey(groupIdHex)) distributed[groupIdHex] = true
         }
+
+        /** Mirrors `PushRoutingSecretStore.markPending`: reads the row
+         *  first and writes nothing when there is none, so an absent row
+         *  can never gain a phantom flag entry. */
+        override fun markPending(groupIdHex: String) {
+            markPendingCount++
+            if (secrets.containsKey(groupIdHex)) distributed[groupIdHex] = false
+        }
+
+        var markPendingCount = 0
 
         override suspend fun subscribeUnderPushGid(pushGid: ByteArray) {
             subscribeCount++
@@ -364,6 +379,142 @@ class GroupPushRoutingTest {
         GroupPushRouting.ensure(account, g, isOwner = true, ports = ports)
         assertEquals(1, ports.broadcastCount)
         assertTrue(ports.isDistributed(g))
+    }
+
+    // -----------------------------------------------------------------
+    // The per-group flag is also what a failed REDISTRIBUTE rewinds
+    //
+    // `distributed` is per-GROUP, not per-member, so on its own it heals
+    // only a failed MINT broadcast. The uncovered case: the mint LANDED
+    // (flag `true`), a member was then added, and the post-add-member
+    // `redistribute` failed. The flag being already `true` made
+    // `decideEnsureAction` return NONE, so no sweep ever re-sent and the
+    // NEW member — the only one missing the secret — deferred push
+    // forever. Same terminal bug, scoped to one member.
+    //
+    // A failure now flips the row back to pending, handing it to the
+    // existing REBROADCAST branch. Safe + cheap: the retry re-sends the
+    // SAME bytes, which every existing member accepts idempotently.
+    // -----------------------------------------------------------------
+
+    @Test
+    fun `a FAILING redistribute rewinds a DISTRIBUTED row to pending for ensure to re-send`() =
+        runTest {
+            val ports = FakePorts(account)
+            val g = "2a".repeat(32)
+
+            // 1. The mint's own broadcast LANDED — fully provisioned group.
+            GroupPushRouting.ensure(account, g, isOwner = true, ports = ports)
+            assertEquals(1, ports.broadcastCount)
+            assertTrue("mint confirmed on the wire", ports.isDistributed(g))
+
+            // 2. A member is added; the post-add-member re-send fails.
+            ports.broadcastFails = true
+            runCatching { GroupPushRouting.redistribute(g, ports) }
+            assertEquals("nothing reached the wire", 1, ports.broadcastCount)
+            assertFalse("row rewound to pending", ports.isDistributed(g))
+
+            // 3. Next launch / chat-open: re-broadcast, never re-mint.
+            ports.broadcastFails = false
+            GroupPushRouting.ensure(account, g, isOwner = true, ports = ports)
+            assertEquals("the pending envelope was re-sent", 2, ports.broadcastCount)
+            assertEquals("NEVER re-minted (a second mint would diverge)", 1, ports.mintCount)
+            assertArrayEquals(
+                "byte-identical re-send (idempotent for every existing member)",
+                ports.broadcastEnvelopes[0],
+                ports.broadcastEnvelopes[1],
+            )
+            assertTrue("flagged distributed once it landed", ports.isDistributed(g))
+
+            // 4. ... and settles: no broadcast storm on later sweeps.
+            repeat(3) { GroupPushRouting.ensure(account, g, isOwner = true, ports = ports) }
+            assertEquals("exactly one retry in total", 2, ports.broadcastCount)
+        }
+
+    @Test
+    fun `a SUCCESSFUL redistribute leaves the row distributed and the next ensure silent`() =
+        runTest {
+            val ports = FakePorts(account)
+            val g = "2b".repeat(32)
+
+            GroupPushRouting.ensure(account, g, isOwner = true, ports = ports)
+            GroupPushRouting.redistribute(g, ports)
+            assertEquals("mint + the add-member re-send", 2, ports.broadcastCount)
+            assertTrue("a send that landed stays flagged distributed", ports.isDistributed(g))
+
+            // The rewind must fire ONLY on a failure — a successful
+            // redistribute must not arm a retry it does not need.
+            repeat(3) { GroupPushRouting.ensure(account, g, isOwner = true, ports = ports) }
+            assertEquals("no re-broadcast after a send that landed", 2, ports.broadcastCount)
+            assertEquals(1, ports.mintCount)
+        }
+
+    @Test
+    fun `marking pending is a no-op on an ABSENT row`() = runTest {
+        val ports = FakePorts(account)
+        val g = "2c".repeat(32)
+
+        // Holding no secret, `redistribute` returns BEFORE any send, so it
+        // never marks at all — there is nothing pending to re-send, and the
+        // owner-mint branch (not the re-broadcast branch) owns "no secret".
+        GroupPushRouting.redistribute(g, ports)
+        assertEquals(0, ports.broadcastCount)
+        assertEquals("never even attempted a mark", 0, ports.markPendingCount)
+
+        // A direct mark on an absent row writes nothing either — mirroring
+        // `PushRoutingSecretStore.markPending`, which reads the entry first
+        // and returns when there is none. A phantom flag row would make
+        // `isDistributed` answer `false` for a group holding no secret and
+        // send the owner into a re-broadcast with nothing to send.
+        ports.markPending(g)
+        assertTrue("no secret row conjured", ports.secrets.isEmpty())
+        assertTrue("no flag row conjured", ports.distributed.isEmpty())
+        assertTrue("an absent row still reads as distributed", ports.isDistributed(g))
+    }
+
+    @Test
+    fun `a failed redistribute never turns a NON-owner into a broadcaster`() = runTest {
+        val ports = FakePorts(account)
+        val g = "2d".repeat(32)
+        // ADR-0022 lets an ADMIN add members, so a NON-owner reaches
+        // `redistribute` too. Its failure rewinds its OWN row...
+        ports.secrets[g] = secretA
+        ports.distributed[g] = true
+
+        ports.broadcastFails = true
+        runCatching { GroupPushRouting.redistribute(g, ports) }
+        assertFalse("its own row is flagged pending", ports.isDistributed(g))
+
+        // ... but a pending flag is INERT on a non-owner: `decideEnsureAction`
+        // returns NONE whatever the flag says, so the rewind can never make a
+        // non-owner start broadcasting.
+        ports.broadcastFails = false
+        repeat(3) { GroupPushRouting.ensure(account, g, isOwner = false, ports = ports) }
+        assertEquals("a non-owner still never broadcasts", 0, ports.broadcastCount)
+        assertEquals(0, ports.mintCount)
+    }
+
+    /** [PushRoutingPorts] whose `markPending` throws (an unwritable
+     *  keystore), delegating everything else. */
+    private class FlakyMarkPending(inner: FakePorts) : PushRoutingPorts by inner {
+        override fun markPending(groupIdHex: String): Unit =
+            throw IllegalStateException("keystore unavailable")
+    }
+
+    @Test
+    fun `a throwing markPending does not mask the broadcast failure`() = runTest {
+        val inner = FakePorts(account)
+        val g = "2e".repeat(32)
+        inner.secrets[g] = secretA
+        inner.distributed[g] = true
+        inner.broadcastFails = true
+
+        val result = runCatching { GroupPushRouting.redistribute(g, FlakyMarkPending(inner)) }
+
+        // The caller must see the ORIGINAL send failure — re-flagging is a
+        // best-effort repair, not a correctness gate.
+        assertTrue("the broadcast failure propagates", result.isFailure)
+        assertEquals("DS unreachable", result.exceptionOrNull()?.message)
     }
 
     /** [PushRoutingPorts] whose flag read always throws (an unreadable

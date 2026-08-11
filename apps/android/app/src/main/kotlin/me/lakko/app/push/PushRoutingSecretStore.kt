@@ -68,6 +68,15 @@ import androidx.security.crypto.MasterKey
  * [me.lakko.app.push.GroupPushRouting.ensure] re-broadcasts a row
  * flagged `distributed = false`.
  *
+ * The flag is per-GROUP, not per-member, so it is also what a failed
+ * **redistribute** must rewind ([markPending]). `redistribute` fires
+ * after an add-member commit to hand the joiner the secret; if that
+ * send fails while the row is already flagged distributed (the mint
+ * DID land), nothing would ever re-send it and the newly-added member
+ * — the only one missing the secret — defers push permanently: the
+ * same terminal bug, scoped to one member instead of the whole group.
+ * Flipping the row back to pending puts it back in the sweep's hands.
+ *
  * Only a boolean is stored — deliberately NOT an ADR-0040-style
  * outbox holding the envelope bytes. A commit's wire bytes are
  * unrecoverable once lost, so that outbox had to persist them; the
@@ -202,6 +211,34 @@ public object PushRoutingSecretStore {
         val current = entry(context, accountIdB64, groupIdHex) ?: return
         if (current.distributed) return
         put(context, accountIdB64, groupIdHex, current.secret, distributed = true)
+    }
+
+    /**
+     * Flip the held row's flag back to `distributed = false` — called
+     * when a distribution broadcast FAILED, so the owner's next
+     * [me.lakko.app.push.GroupPushRouting.ensure] re-sends the envelope.
+     * The exact inverse of [markDistributed].
+     *
+     * The caller is [me.lakko.app.push.GroupPushRouting.redistribute]:
+     * the mint's own failure already leaves the row pending, but a failed
+     * post-add-member re-send on a row that was ALREADY distributed had
+     * nothing to rewind, so the joiner never learned the secret.
+     *
+     * No-op when no row is held, when the row is malformed, or when it is
+     * already pending (so a repeat mark writes nothing). Rewrites the
+     * secret and the flag in ONE value string, exactly like [put] — there
+     * is no window in which the flag is lost while the secret survives
+     * (such a torn row would read back as legacy, i.e. distributed, which
+     * is precisely the bug).
+     */
+    public fun markPending(
+        context: Context,
+        accountIdB64: String,
+        groupIdHex: String,
+    ) {
+        val current = entry(context, accountIdB64, groupIdHex) ?: return
+        if (!current.distributed) return
+        put(context, accountIdB64, groupIdHex, current.secret, distributed = false)
     }
 
     /**

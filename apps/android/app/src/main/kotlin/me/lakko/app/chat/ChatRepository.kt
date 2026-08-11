@@ -737,13 +737,15 @@ public class ChatRepository(
         // newly-added member learns it on their next poll (no-op if this
         // device holds no secret; idempotent for existing members). Runs
         // AFTER the add commit so the new member is already in the group.
-        // Fire-and-forget. A SUCCESS also clears the secret's `distributed`
-        // flag, so this path heals a mint whose own broadcast failed. A
-        // FAILURE here is only retried by the launch / chat-open sweep when
-        // the row is still flagged pending; if the secret was already
-        // distributed, the newly-added member holds nothing until the next
-        // add-member commit fires this again (they defer — never a fallback
-        // to the leaky group_id).
+        // Fire-and-forget. A SUCCESS flags the secret distributed, so this
+        // path also heals a mint whose own broadcast failed. A FAILURE flags
+        // the row PENDING, so the launch / chat-open sweep re-broadcasts it
+        // until one lands. Without that rewind a group whose mint DID land
+        // was already flagged distributed, so nothing ever re-sent and the
+        // newly-added member never learned the secret at all — they defer
+        // forever (never a fallback to the leaky group_id). Only the OWNER's
+        // sweep acts on the pending flag; an ADMIN may also reach this path
+        // (ADR-0022 lets an admin add members) and its mark is inert.
         redistributePushRoutingBestEffort(groupIdHex)
         return addedCommitId
     }

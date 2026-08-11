@@ -67,6 +67,15 @@ import Security
 /// the entire durable state. Re-broadcasting is idempotent for every member
 /// because the receive gate accepts a byte-identical secret from anyone.
 ///
+/// The same one bit covers the *post-add-member*
+/// ``redistribute(accountIdB64:groupIdHex:broadcast:)``, which is where the
+/// per-GROUP flag would otherwise fall short of a per-MEMBER guarantee: that
+/// broadcast runs against a row the mint already settled, for the benefit of
+/// the ONE member just added, so a failure must un-settle the row
+/// (``PushRoutingStore/markPending(accountIdB64:groupIdHex:matching:)``) —
+/// else the flag stays `true`, no sweep re-sends, and that member defers push
+/// forever.
+///
 /// ## Never subscribe under the leaky `group_id`
 ///
 /// The whole point of the ADR is that push-gw + APNs/FCM must not see the
@@ -499,6 +508,22 @@ public final class PushGroupRouting {
     /// No-op when this device does not hold the secret. Idempotent for
     /// existing members (a re-received secret is the same value → an
     /// idempotent re-persist). Best-effort.
+    ///
+    /// Unlike the mint, this runs against a row the mint already settled, so
+    /// BOTH outcomes have to be recorded: a success settles the flag exactly
+    /// like the mint-time broadcast (so an owner whose original broadcast
+    /// failed stops re-broadcasting once ANY of them lands), and a FAILURE
+    /// un-settles it (so the newly-added member this redistribute was for is
+    /// not stranded on a permanently `true` flag that no sweep would ever
+    /// re-send). See ``broadcastAndSettle(secret:accountIdB64:groupIdHex:what:broadcast:)``.
+    ///
+    /// **This device does not have to be the owner** — ADR-0022 lets an admin
+    /// add a member too, so an admin reaches this path. Marking the row
+    /// pending on an admin's device is inert rather than harmful: the
+    /// re-broadcast branch of
+    /// ``ensureProvisioned(accountIdB64:groupIdHex:group:identity:broadcast:)``
+    /// is gated on `ownRole == .owner`, so a non-owner never starts
+    /// broadcasting off the back of this flag.
     public func redistribute(
         accountIdB64: String,
         groupIdHex: String,
@@ -508,26 +533,34 @@ public final class PushGroupRouting {
             accountIdB64: accountIdB64, groupIdHex: groupIdHex) else {
             return
         }
-        // A successful redistribute is a successful distribution — it settles
-        // the flag exactly like the mint-time broadcast, so an owner whose
-        // original broadcast failed stops re-broadcasting once ANY of them
-        // lands. On failure the flag is left alone: still-pending stays
-        // pending (``ensureProvisioned`` retries), already-settled stays
-        // settled.
         await broadcastAndSettle(
             secret: secret, accountIdB64: accountIdB64, groupIdHex: groupIdHex,
             what: "redistribute", broadcast: broadcast)
     }
 
-    /// Compose + broadcast a secret's distribution envelope and, ONLY on
-    /// success, durably record that the group has been told
-    /// (``PushRoutingStore/markDistributed(accountIdB64:groupIdHex:matching:)``).
+    /// Compose + broadcast a secret's distribution envelope, then durably
+    /// record the outcome: on success the group has been told
+    /// (``PushRoutingStore/markDistributed(accountIdB64:groupIdHex:matching:)``),
+    /// on failure it has NOT
+    /// (``PushRoutingStore/markPending(accountIdB64:groupIdHex:matching:)``).
     ///
     /// This is the whole recovery mechanism: the envelope is never stored
     /// because it is recomputable from the secret, so a failed broadcast
     /// needs to leave behind exactly one bit — "not yet on the wire" — and
     /// ``ensureProvisioned(accountIdB64:groupIdHex:group:identity:broadcast:)``
     /// picks it up on the next launch / chat-open.
+    ///
+    /// **Why the failure path WRITES rather than leaving the flag alone.**
+    /// The flag is per-GROUP, not per-member. On the mint / re-broadcast
+    /// paths the row is already pending, so the write is a no-op — but a
+    /// ``redistribute(accountIdB64:groupIdHex:broadcast:)`` runs against a row
+    /// the mint already settled, for the benefit of the ONE member that was
+    /// just added. If that broadcast fails and the flag stays `true`, no
+    /// sweep ever re-sends and the new member defers push forever: the same
+    /// permanent-no-push bug the flag exists to prevent, scoped to one member
+    /// instead of the whole group. Un-settling the row is what puts it back
+    /// in the owner's retry branch, and `matching:` keeps a failed OLD-secret
+    /// broadcast from un-settling a newly rotated secret that did travel.
     private func broadcastAndSettle(
         secret: Data,
         accountIdB64: String,
@@ -540,8 +573,10 @@ public final class PushGroupRouting {
             store.markDistributed(
                 accountIdB64: accountIdB64, groupIdHex: groupIdHex, matching: secret)
         } catch {
+            store.markPending(
+                accountIdB64: accountIdB64, groupIdHex: groupIdHex, matching: secret)
             NSLog(
-                "push-routing secret \(what) failed (secret stays marked "
+                "push-routing secret \(what) failed (secret marked "
                     + "undistributed; the owner re-broadcasts on the next "
                     + "provision): \(error)")
         }

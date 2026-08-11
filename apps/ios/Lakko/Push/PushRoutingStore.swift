@@ -224,14 +224,66 @@ public final class PushRoutingStore {
         groupIdHex: String,
         matching secret: Data
     ) -> Bool {
+        setDistributed(
+            true, accountIdB64: accountIdB64, groupIdHex: groupIdHex, matching: secret)
+    }
+
+    /// Mark a group's stored secret as **pending** distribution, after a
+    /// distribution broadcast for it FAILED. Re-seals the row in place (the
+    /// same single atomic write as ``markDistributed(accountIdB64:groupIdHex:matching:)``);
+    /// the reverse-index row is untouched (the `push_gid` did not change).
+    ///
+    /// This is what makes a failed **redistribute** recoverable. The
+    /// `distributed` flag is per-GROUP, not per-member, so a redistribute
+    /// (fired after an add-member commit, for the benefit of the ONE new
+    /// member) that fails on a row the mint broadcast already settled would
+    /// otherwise leave the flag `true` — no sweep would ever re-send, and
+    /// that new member would defer push forever. Flipping the row back to
+    /// pending puts it in the owner's
+    /// ``PushGroupRouting/ensureProvisioned(accountIdB64:groupIdHex:group:identity:broadcast:)``
+    /// re-broadcast branch, which retries on every launch / chat-open until
+    /// it lands. The retry is byte-identical, so the ADR-0042 receive gate
+    /// reads it as an idempotent no-op re-persist for every member that
+    /// already holds it, and as the seed the new member needs.
+    ///
+    /// - Parameter matching: the secret whose broadcast failed. The flag is
+    ///   flipped ONLY when the stored secret is byte-identical, so a failed
+    ///   OLD-secret broadcast can never un-settle a NEWLY rotated secret
+    ///   that did travel.
+    /// - Returns: whether the stored row is now marked pending. `false`
+    ///   (a no-op) when no row is stored, the stored secret differs, or the
+    ///   re-seal failed.
+    @discardableResult
+    public func markPending(
+        accountIdB64: String,
+        groupIdHex: String,
+        matching secret: Data
+    ) -> Bool {
+        setDistributed(
+            false, accountIdB64: accountIdB64, groupIdHex: groupIdHex, matching: secret)
+    }
+
+    /// Shared body of ``markDistributed(accountIdB64:groupIdHex:matching:)``
+    /// and ``markPending(accountIdB64:groupIdHex:matching:)``: re-seal the row
+    /// with a new flag value in ONE `UserDefaults.set`, so secret + flag can
+    /// never desync (the load-bearing single-write property documented on the
+    /// type). A no-op when the row is absent or holds a different secret.
+    private func setDistributed(
+        _ distributed: Bool,
+        accountIdB64: String,
+        groupIdHex: String,
+        matching secret: Data
+    ) -> Bool {
         guard let record = getRecord(accountIdB64: accountIdB64, groupIdHex: groupIdHex),
               record.secret == secret else {
             return false
         }
-        // Already marked → skip the pointless re-encrypt + write.
-        if record.distributed { return true }
+        // Already in the requested state → skip the pointless re-encrypt + write.
+        if record.distributed == distributed { return true }
         guard let combined = seal(
-            Self.encodeRecord(secret: record.secret, distributed: true)) else { return false }
+            Self.encodeRecord(secret: record.secret, distributed: distributed)) else {
+            return false
+        }
         secretDefaults.set(combined, forKey: Self.secretKey(accountIdB64, groupIdHex))
         return true
     }

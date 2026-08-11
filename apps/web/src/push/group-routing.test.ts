@@ -88,6 +88,14 @@ vi.mock("./group-routing-store", () => ({
       if (h.secrets.has(k)) h.distributed.set(k, true);
     },
   ),
+  // Both marks are no-ops on an absent row — they must never resurrect a
+  // secret a concurrent `forgetDevice` wiped.
+  markGroupRoutingPending: vi.fn(
+    async (accountId: string, groupIdB64: string) => {
+      const k = `${accountId}\0${groupIdB64}`;
+      if (h.secrets.has(k)) h.distributed.set(k, false);
+    },
+  ),
 }));
 
 // getDeviceKey returns a non-null placeholder — the store is mocked, so the
@@ -123,6 +131,7 @@ import {
   mintPushRoutingSecret,
   receivePushRoutingSecret,
   receivePushRoutingSecretGated,
+  redistributeSecretToGroup,
   routingSecretVerdict,
   subscribeGroupUnderPushGid,
   tryDecodeSecretEnvelope,
@@ -479,6 +488,87 @@ describe("distribution durability — a failed broadcast must not strand the gro
     expect(b.sent.length).toBe(0);
     expect(vi.mocked(putGroupRouting)).not.toHaveBeenCalled();
     expect(subscribeGroup).not.toHaveBeenCalled();
+  });
+
+  // -- a failed REDISTRIBUTE must re-arm the same retry -------------------
+  //
+  // The `distributed` flag is per-(account, group), not per-member. Once the
+  // mint broadcast lands the row is `distributed`, so a LATER redistribute
+  // (post-add-member) that fails would never be retried and the NEW member —
+  // whose only source of the secret is that redistribute — would defer push
+  // forever.
+
+  it("a failed REDISTRIBUTE flips the row back to pending and the next provision re-broadcasts", async () => {
+    const group = mockGroup(GROUP_ID, wasm.Role.Owner);
+    const b = recordingBroadcast();
+
+    // Mint + broadcast land cleanly: the row is settled.
+    await ensureGroupPushRouting(ACCT, group, DUMMY_IDENTITY, b.fn);
+    expect(b.sent.length).toBe(1);
+    expect(h.distributed.get(`${ACCT}\0${GRP_B64}`)).toBe(true);
+    const minted = vi.mocked(putGroupRouting).mock.calls[0]![0].secret;
+
+    // A member is added; the redistribute that would carry the secret to them
+    // fails. The caller only logs it — the durable record is what matters.
+    b.failNext(1);
+    await expect(
+      redistributeSecretToGroup(ACCT, group, b.fn),
+    ).rejects.toThrow("DS unreachable");
+    expect(b.sent.length).toBe(2);
+    expect(h.distributed.get(`${ACCT}\0${GRP_B64}`)).toBe(false);
+
+    // Next launch / chat-open: the existing re-broadcast branch repairs it,
+    // carrying the byte-identical secret (never a re-mint — a fresh random
+    // secret would diverge from the one members already hold).
+    await ensureGroupPushRouting(ACCT, group, DUMMY_IDENTITY, b.fn);
+    expect(b.sent.length).toBe(3);
+    expect(Array.from(wasm.decodePushRoutingSecret(b.sent[2]!))).toEqual(
+      Array.from(minted),
+    );
+    expect(vi.mocked(putGroupRouting)).toHaveBeenCalledTimes(1);
+    expect(h.distributed.get(`${ACCT}\0${GRP_B64}`)).toBe(true);
+
+    // Settled again — no further traffic.
+    await ensureGroupPushRouting(ACCT, group, DUMMY_IDENTITY, b.fn);
+    expect(b.sent.length).toBe(3);
+  });
+
+  it("a SUCCESSFUL redistribute leaves the row distributed and the next provision sends nothing", async () => {
+    const group = mockGroup(GROUP_ID, wasm.Role.Owner);
+    const b = recordingBroadcast();
+
+    await ensureGroupPushRouting(ACCT, group, DUMMY_IDENTITY, b.fn);
+    expect(b.sent.length).toBe(1);
+
+    await redistributeSecretToGroup(ACCT, group, b.fn);
+    expect(b.sent.length).toBe(2);
+    expect(h.distributed.get(`${ACCT}\0${GRP_B64}`)).toBe(true);
+
+    // No spurious re-broadcast: the redistribute confirmed the wire itself.
+    await ensureGroupPushRouting(ACCT, group, DUMMY_IDENTITY, b.fn);
+    expect(b.sent.length).toBe(2);
+    expect(vi.mocked(putGroupRouting)).toHaveBeenCalledTimes(1);
+  });
+
+  it("a NON-owner whose redistribute failed still never broadcasts (the mark is inert there)", async () => {
+    // ADR-0022 lets an ADMIN commit an add, so an admin reaches redistribute.
+    // Marking its own row pending must not turn it into a broadcaster — only
+    // the owner branch re-sends.
+    seedStoredSecret(ACCT, GRP_B64, new Uint8Array(32).fill(0x33));
+    h.distributed.set(`${ACCT}\0${GRP_B64}`, true);
+    const nonOwner = mockGroup(GROUP_ID, wasm.Role.Admin);
+    const b = recordingBroadcast();
+
+    b.failNext(1);
+    await expect(
+      redistributeSecretToGroup(ACCT, nonOwner, b.fn),
+    ).rejects.toThrow("DS unreachable");
+    expect(h.distributed.get(`${ACCT}\0${GRP_B64}`)).toBe(false);
+
+    await ensureGroupPushRouting(ACCT, nonOwner, DUMMY_IDENTITY, b.fn);
+    // Only the one failed redistribute attempt — no owner-style re-broadcast.
+    expect(b.sent.length).toBe(1);
+    expect(vi.mocked(putGroupRouting)).not.toHaveBeenCalled();
   });
 });
 
