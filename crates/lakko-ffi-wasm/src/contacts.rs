@@ -42,7 +42,8 @@ use lakko_contacts::media_state::{
 use lakko_contacts::push_routing::{
     compose_push_routing_secret as rust_compose_push_routing_secret,
     decode_push_routing_secret as rust_decode_push_routing_secret,
-    derive_push_gid as rust_derive_push_gid, PUSH_ROUTING_SECRET_LEN,
+    derive_push_gid as rust_derive_push_gid,
+    push_routing_secret_is_newer as rust_push_routing_secret_is_newer, PUSH_ROUTING_SECRET_LEN,
 };
 use lakko_contacts::ACCOUNT_ID_LEN;
 use lakko_contacts::{
@@ -1146,10 +1147,11 @@ pub enum WasmIncomingEnvelopeKind {
     /// [`WasmIncomingEnvelope`]; `payload` is empty.
     MediaState = 3,
     /// In-group push-routing-secret distribution envelope
-    /// (ADR-0042). The decoded 32-byte secret rides the
-    /// `payload` getter of [`WasmIncomingEnvelope`]; `cameraOn`
-    /// is `undefined`. Appended as `4` so the pre-existing tags
-    /// stay fixed.
+    /// (ADR-0042, v2 per ADR-0044). The decoded 32-byte secret
+    /// rides the `payload` getter of [`WasmIncomingEnvelope`]
+    /// and the minter's recency stamp rides the `mintEpoch`
+    /// getter; `cameraOn` is `undefined`. Appended as `4` so the
+    /// pre-existing tags stay fixed.
     PushRoutingSecret = 4,
 }
 
@@ -1162,6 +1164,7 @@ pub struct WasmIncomingEnvelope {
     kind: WasmIncomingEnvelopeKind,
     payload: Vec<u8>,
     camera_on: Option<bool>,
+    mint_epoch: Option<u64>,
 }
 
 #[wasm_bindgen(js_class = IncomingEnvelope)]
@@ -1189,6 +1192,22 @@ impl WasmIncomingEnvelope {
     pub fn camera_on(&self) -> Option<bool> {
         self.camera_on
     }
+
+    /// Set only for `PushRoutingSecret` (ADR-0044): the minter's
+    /// recency stamp, the primary key of the canonical total
+    /// order. `undefined` (`None`) for every other kind. JS reads
+    /// it as a `bigint | undefined` (the field is a `u64`),
+    /// matching the `Group.epoch()` precedent.
+    ///
+    /// The caller MUST NOT store the secret unconditionally —
+    /// run the ADR-0042 / ADR-0043 role gate, then
+    /// `pushRoutingSecretIsNewer` against whatever is already
+    /// stored. A stale re-broadcast carries a valid secret from
+    /// an authorised sender and is refused only by the order.
+    #[wasm_bindgen(getter, js_name = mintEpoch)]
+    pub fn mint_epoch(&self) -> Option<u64> {
+        self.mint_epoch
+    }
 }
 
 /// Single-call dispatcher for opaque relay-payload plaintexts
@@ -1214,26 +1233,31 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<WasmIncomingEnvelo
             kind: WasmIncomingEnvelopeKind::CallWelcome,
             payload: p.to_vec(),
             camera_on: None,
+            mint_epoch: None,
         },
         IncomingEnvelope::CallKeyPackage(p) => WasmIncomingEnvelope {
             kind: WasmIncomingEnvelopeKind::CallKeyPackage,
             payload: p.to_vec(),
             camera_on: None,
+            mint_epoch: None,
         },
         IncomingEnvelope::MediaState { camera_on } => WasmIncomingEnvelope {
             kind: WasmIncomingEnvelopeKind::MediaState,
             payload: Vec::new(),
             camera_on: Some(camera_on),
+            mint_epoch: None,
         },
-        IncomingEnvelope::PushRoutingSecret { secret } => WasmIncomingEnvelope {
+        IncomingEnvelope::PushRoutingSecret { mint_epoch, secret } => WasmIncomingEnvelope {
             kind: WasmIncomingEnvelopeKind::PushRoutingSecret,
             payload: secret.to_vec(),
             camera_on: None,
+            mint_epoch: Some(mint_epoch),
         },
         IncomingEnvelope::IntroMessage(p) => WasmIncomingEnvelope {
             kind: WasmIncomingEnvelopeKind::IntroMessage,
             payload: p.to_vec(),
             camera_on: None,
+            mint_epoch: None,
         },
     })
 }
@@ -1309,42 +1333,129 @@ pub fn derive_push_gid(secret: &[u8]) -> Result<Vec<u8>, JsError> {
     Ok(rust_derive_push_gid(&arr).to_vec())
 }
 
+/// A decoded push-routing-secret distribution envelope
+/// (ADR-0042 v2, per ADR-0044). Output of
+/// `decodePushRoutingSecret`.
+///
+/// TS-facing shape: `{ mintEpoch: bigint, secret: Uint8Array }`.
+/// `mintEpoch` crosses as a `BigInt` (the field is a `u64`),
+/// matching the `Group.epoch()` and `ParsedBody.target`
+/// precedents.
+#[wasm_bindgen(js_name = PushRoutingSecret)]
+pub struct WasmPushRoutingSecret {
+    mint_epoch: u64,
+    secret: Vec<u8>,
+}
+
+#[wasm_bindgen(js_class = PushRoutingSecret)]
+impl WasmPushRoutingSecret {
+    /// The minter's recency stamp, the primary key of the
+    /// canonical total order — a `bigint` on the JS side. Opaque
+    /// to the core: it imposes an order and nothing else, and
+    /// never reaches `derivePushGid`.
+    #[wasm_bindgen(getter, js_name = mintEpoch)]
+    #[must_use]
+    pub fn mint_epoch(&self) -> u64 {
+        self.mint_epoch
+    }
+
+    /// The decoded 32-byte per-group routing secret.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn secret(&self) -> Vec<u8> {
+        self.secret.clone()
+    }
+}
+
 /// Compose the in-group push-routing-secret distribution envelope
-/// (ADR-0042) for a group's 32-byte `push_routing_secret`. The
-/// founder / adder broadcasts the returned bytes as an MLS
-/// application message on the group journal so members + joiners
-/// learn the secret; receivers classify them (via
+/// (ADR-0042 v2, per ADR-0044) for a group's 32-byte
+/// `push_routing_secret`, stamped with `mintEpoch` (a `bigint`).
+/// The founder / adder / rotator broadcasts the returned bytes as
+/// an MLS application message on the group journal so members +
+/// joiners learn the secret; receivers classify them (via
 /// `dispatchIncomingEnvelope` or `decodePushRoutingSecret`) and
 /// persist the secret — never render it as a chat bubble.
 ///
-/// See [`lakko_contacts::push_routing`] for the wire format and
+/// `mintEpoch` is stamped **at mint time** and then travels with
+/// the secret forever: a re-broadcast MUST replay the epoch the
+/// secret was minted under, never a fresh one. Re-stamping on
+/// re-broadcast would make a stale secret out-rank the live one
+/// and reintroduce the F-A replay (G-36 residual 9) this envelope
+/// closes. The caller sources the stamp from the MLS group epoch
+/// (`Group.epoch()`), which is shared state every receiver can
+/// independently observe.
+///
+/// See [`lakko_contacts::push_routing`] for the wire format
+/// (`domain || version || mint_epoch(8, BE) || secret(32)`) and
 /// threat model (the DS sees ciphertext — invariant #2).
 ///
 /// # Errors
 ///
 /// `JsError` when `secret` is not exactly 32 bytes.
 #[wasm_bindgen(js_name = composePushRoutingSecret)]
-pub fn compose_push_routing_secret(secret: &[u8]) -> Result<Vec<u8>, JsError> {
+pub fn compose_push_routing_secret(mint_epoch: u64, secret: &[u8]) -> Result<Vec<u8>, JsError> {
     let arr = push_routing_secret_array(secret)?;
-    Ok(rust_compose_push_routing_secret(&arr))
+    Ok(rust_compose_push_routing_secret(mint_epoch, &arr))
 }
 
 /// Strictly decode a push-routing-secret distribution envelope
-/// (ADR-0042), returning the 32-byte secret. Fail-closed: rejects
-/// a plaintext that does not carry the push-routing-secret domain
-/// separator or whose payload is malformed. Use
-/// `dispatchIncomingEnvelope` instead when the plaintext might be
-/// any relay-payload / in-group envelope kind.
+/// (ADR-0042 v2, per ADR-0044), returning
+/// `{ mintEpoch, secret }`. Fail-closed: rejects a plaintext that
+/// does not carry the push-routing-secret domain separator or
+/// whose payload is malformed — including a retired v1 envelope,
+/// which carries no `mintEpoch` and so cannot be placed in the
+/// total order. Use `dispatchIncomingEnvelope` instead when the
+/// plaintext might be any relay-payload / in-group envelope kind.
 ///
 /// # Errors
 ///
 /// `JsError` when `plaintext` is not a valid push-routing-secret
-/// envelope (wrong domain / bad length / unknown version).
+/// envelope (wrong domain / bad length / unknown version — a v1
+/// envelope lands here).
 #[wasm_bindgen(js_name = decodePushRoutingSecret)]
-pub fn decode_push_routing_secret(plaintext: &[u8]) -> Result<Vec<u8>, JsError> {
+pub fn decode_push_routing_secret(plaintext: &[u8]) -> Result<WasmPushRoutingSecret, JsError> {
     rust_decode_push_routing_secret(plaintext)
-        .map(|secret| secret.to_vec())
+        .map(|envelope| WasmPushRoutingSecret {
+            mint_epoch: envelope.mint_epoch,
+            secret: envelope.secret.to_vec(),
+        })
         .map_err(|err| JsError::new(&err.to_string()))
+}
+
+/// The canonical total order on push-routing secrets (ADR-0044):
+/// `true` when the incoming envelope must supersede the stored
+/// one. Epochs are `bigint`s on the JS side.
+///
+/// Ordered on the pair `(mintEpoch, secretBytes)` — epoch first,
+/// then the 32 secret bytes lexicographically — and **strictly
+/// greater wins; equal is NOT newer**, which is what keeps a
+/// benign retry of the secret a device already holds from reading
+/// as an update.
+///
+/// Exposed on the FFI precisely so no client reimplements the
+/// comparison: three platforms each re-deriving it is the drift
+/// class that produced the F-A stale-re-broadcast replay (G-36
+/// residual 9). Run the ADR-0042 / ADR-0043 role gate first, then
+/// route the accept/refuse decision through this function — an
+/// authorised sender can still be replaying a superseded secret,
+/// and only the order catches that.
+///
+/// Fail-closed on a wrong-length secret on **either** side:
+/// returns `false` (not newer), so a malformed incoming secret
+/// never displaces a stored one and a corrupt stored value is
+/// left in place rather than overwritten. Never throws;
+/// infallible by construction, hence no `Result`.
+///
+/// See [`lakko_contacts::push_routing::push_routing_secret_is_newer`].
+#[wasm_bindgen(js_name = pushRoutingSecretIsNewer)]
+#[must_use]
+pub fn push_routing_secret_is_newer(
+    incoming_epoch: u64,
+    incoming_secret: &[u8],
+    stored_epoch: u64,
+    stored_secret: &[u8],
+) -> bool {
+    rust_push_routing_secret_is_newer(incoming_epoch, incoming_secret, stored_epoch, stored_secret)
 }
 
 // ============================================================================
@@ -1738,5 +1849,107 @@ mod tests {
         assert!(cap.bootstrap_referral());
         assert_eq!(cap.label(), "");
         assert!(cap.is_valid_now(u64::MAX));
+    }
+
+    // -------------------------------------------------------------------
+    // Push-routing-secret v2 — ADR-0044
+    //
+    // Happy paths only, per the module note above: the error paths
+    // construct a `JsError`, which cannot run on a non-wasm target.
+    // `pushRoutingSecretIsNewer` is infallible, so it is covered in
+    // full here.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn push_routing_compose_then_decode_round_trips() {
+        let secret = [0x42u8; 32];
+        let wrapped = compose_push_routing_secret(7, &secret).unwrap();
+        let decoded = decode_push_routing_secret(&wrapped).unwrap();
+        assert_eq!(decoded.mint_epoch(), 7);
+        assert_eq!(decoded.secret(), secret.to_vec());
+    }
+
+    #[test]
+    fn push_routing_round_trips_at_the_mint_epoch_extremes() {
+        // The 8-byte big-endian field must survive the boundary
+        // un-truncated. `u64` crosses to JS as a `BigInt`, so a
+        // reader that narrowed it to a `number` would lose
+        // precision above 2^53 — pinned here at the extremes.
+        let secret = [0x42u8; 32];
+        for epoch in [0u64, 1, u64::from(u32::MAX), u64::MAX - 1, u64::MAX] {
+            let wrapped = compose_push_routing_secret(epoch, &secret).unwrap();
+            let decoded = decode_push_routing_secret(&wrapped).unwrap();
+            assert_eq!(decoded.mint_epoch(), epoch);
+            assert_eq!(decoded.secret(), secret.to_vec());
+        }
+    }
+
+    #[test]
+    fn dispatch_routes_push_routing_secret_envelope() {
+        let secret = [0x42u8; 32];
+        let wrapped = compose_push_routing_secret(9, &secret).unwrap();
+        let result = dispatch_incoming_envelope(&wrapped).unwrap();
+        assert_eq!(result.kind(), WasmIncomingEnvelopeKind::PushRoutingSecret);
+        assert_eq!(result.payload(), secret.to_vec());
+        assert_eq!(result.mint_epoch(), Some(9));
+        assert_eq!(result.camera_on(), None);
+    }
+
+    #[test]
+    fn dispatch_mint_epoch_field_is_none_for_other_kinds() {
+        // `mintEpoch` is meaningful ONLY on `PushRoutingSecret`, so
+        // a JS reader must see `undefined` on any other kind rather
+        // than a stale or defaulted stamp.
+        let media = compose_media_state(true);
+        let result = dispatch_incoming_envelope(&media).unwrap();
+        assert_eq!(result.kind(), WasmIncomingEnvelopeKind::MediaState);
+        assert_eq!(result.mint_epoch(), None);
+
+        let intro = dispatch_incoming_envelope(b"hello alice").unwrap();
+        assert_eq!(intro.kind(), WasmIncomingEnvelopeKind::IntroMessage);
+        assert_eq!(intro.mint_epoch(), None);
+    }
+
+    #[test]
+    fn is_newer_orders_on_the_epoch_then_the_secret_bytes() {
+        let low = [0x11u8; 32];
+        let high = [0x99u8; 32];
+        // Epoch is the primary key and dominates the tiebreak.
+        assert!(push_routing_secret_is_newer(9, &low, 8, &high));
+        assert!(!push_routing_secret_is_newer(7, &high, 8, &low));
+        // Exact epoch tie: the secret bytes decide, lexicographically.
+        assert!(push_routing_secret_is_newer(5, &high, 5, &low));
+        assert!(!push_routing_secret_is_newer(5, &low, 5, &high));
+    }
+
+    #[test]
+    fn is_newer_says_an_identical_pair_is_not_newer() {
+        // THE F-A property: a benign retry of the secret a device
+        // already holds must not read as an update.
+        let secret = [0x42u8; 32];
+        assert!(!push_routing_secret_is_newer(5, &secret, 5, &secret));
+    }
+
+    #[test]
+    fn is_newer_refuses_a_stale_rebroadcast_after_a_rotation() {
+        // The end-to-end F-A scenario at the FFI boundary, for BOTH
+        // tiebreak directions so the result cannot hinge on which
+        // secret happens to sort higher.
+        let low = [0x11u8; 32];
+        let high = [0x99u8; 32];
+        for (older, newer) in [(&low, &high), (&high, &low)] {
+            assert!(!push_routing_secret_is_newer(10, older, 11, newer));
+            assert!(push_routing_secret_is_newer(11, newer, 10, older));
+        }
+    }
+
+    #[test]
+    fn is_newer_is_fail_closed_on_a_wrong_length_secret() {
+        // Neither side may panic or displace on a malformed value.
+        let good = [0x42u8; 32];
+        assert!(!push_routing_secret_is_newer(99, &[0u8; 31], 1, &good));
+        assert!(!push_routing_secret_is_newer(99, &[0u8; 33], 1, &good));
+        assert!(!push_routing_secret_is_newer(99, &good, 1, &[0u8; 31]));
+        assert!(!push_routing_secret_is_newer(99, &good, 1, &[]));
     }
 }

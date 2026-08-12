@@ -104,12 +104,14 @@ import { useChats, type ActiveGroup } from "../chat/ChatContext";
 import {
   ensureGroupPushRouting,
   memberSignatureKeys,
+  publishRemoveThenRotate,
   pushGidForGroup,
   readPushRotationRole,
   receivePushRoutingSecretGated,
   redistributeSecretToGroup,
   rotatePushRoutingSecret,
   rotatePushRoutingSecretIfMembershipShrank,
+  type PushRotationOutcome,
 } from "../push/group-routing";
 import {
   applyOp,
@@ -1620,6 +1622,11 @@ function ChatView(props: {
               groupIdB64,
               e.senderLeaf,
               e.secret,
+              // ADR-0044 — the minter's stamp. The gate refuses anything
+              // ahead of our own epoch (`reject-future`) and anything not
+              // strictly newer than what we hold (`reject-stale`), so a
+              // stale re-broadcast can no longer retire the live routing id.
+              e.mintEpoch,
             ).catch((err) => {
               // eslint-disable-next-line no-console
               console.warn("push-routing secret receive failed", err);
@@ -2264,18 +2271,21 @@ function ChatView(props: {
     setNotice(null);
     setBusy(true);
     try {
-      const result = await contacts.removeMemberFromGroup(
-        props.requireIdentity(),
-        props.entry.group,
-        leafIndex,
-      );
-      chat.markOwnPublishedCommit(result.commitMessageId);
-      // ADR-0043 — rotate the push routing secret, STRICTLY AFTER the Remove
-      // commit above. The distribution envelope is an MLS application
-      // message: sealed before the commit it would be readable by the member
-      // being evicted (they are still in that epoch) and the rotation would
-      // buy nothing. Sealed here it is at the post-removal epoch, which RFC
-      // 9420 forward secrecy denies the removed leaf.
+      // C-61 — rotate STRICTLY AFTER the Remove commit is published. Both
+      // guarantees the ordering buys depend on it:
+      //
+      //   - forward secrecy (ADR-0043): the distribution envelope is an MLS
+      //     application message, so sealed BEFORE the commit it is readable
+      //     by the member being evicted (still in that epoch) and the
+      //     rotation buys nothing;
+      //   - recency (ADR-0044): the new secret is stamped with `group.epoch`
+      //     at mint time, so after the commit it strictly out-ranks the
+      //     secret it replaces. Before it, it would TIE with a stale secret
+      //     minted at the same epoch and win or lose on the byte tiebreak.
+      //
+      // The sequencing lives in `publishRemoveThenRotate` rather than in two
+      // adjacent statements here, so it is pinned by a test instead of by
+      // convention.
       //
       // Owner-or-admin (ADR-0043 ratified option (b)) — the gate lives inside
       // `rotatePushRoutingSecret`, which also no-ops when this device holds no
@@ -2285,23 +2295,34 @@ function ChatView(props: {
       // unwind the removal. A failed BROADCAST leaves the row pending, and
       // the existing `ensureGroupPushRouting` re-broadcast branch re-sends it
       // on the next chat-open / launch.
-      {
-        const s = auth.state();
-        if (s.kind === "session") {
-          // Live role read, same reason as the poll path: the `ownRole()`
-          // signal can still hold a pre-commit value here.
-          void (async () =>
-            rotatePushRoutingSecret(
-              s.account.accountId,
-              props.entry.group,
-              await readOwnRoleNow(),
-              broadcastToGroup,
-            ))().catch((err) => {
-            // eslint-disable-next-line no-console
-            console.warn("push-routing rotation failed", err);
-          });
-        }
-      }
+      const session = auth.state();
+      const result = await publishRemoveThenRotate({
+        publishRemove: async () => {
+          const removed = await contacts.removeMemberFromGroup(
+            props.requireIdentity(),
+            props.entry.group,
+            leafIndex,
+          );
+          chat.markOwnPublishedCommit(removed.commitMessageId);
+          return removed;
+        },
+        rotate:
+          session.kind === "session"
+            ? async (): Promise<PushRotationOutcome> =>
+                rotatePushRoutingSecret(
+                  session.account.accountId,
+                  props.entry.group,
+                  // Live role read, same reason as the poll path: the
+                  // `ownRole()` signal can still hold a pre-commit value.
+                  await readOwnRoleNow(),
+                  broadcastToGroup,
+                )
+            : undefined,
+        onRotationError: (err) => {
+          // eslint-disable-next-line no-console
+          console.warn("push-routing rotation failed", err);
+        },
+      });
       setMemberCount(props.entry.group.memberCount);
       setMembersVersion(membersVersion() + 1);
       setNotice(`Member at leaf #${leafIndex} removed (commit #${result.commitMessageId}).`);

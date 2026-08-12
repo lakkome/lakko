@@ -107,9 +107,11 @@ pub use media_state::{
 pub use pseudonym::{Direction, IdentityPseudonym, PerRelationship, StrangerInbox, PSEUDONYM_LEN};
 pub use push_routing::{
     compose_push_routing_secret, decode_push_routing_secret, derive_push_gid,
-    try_unwrap_push_routing_secret, PushRoutingSecretError, PUSH_GID_DERIVE_DOMAIN_V1,
-    PUSH_GID_LEN, PUSH_ROUTING_SECRET_ENVELOPE_DOMAIN_V1, PUSH_ROUTING_SECRET_LEN,
-    PUSH_ROUTING_SECRET_PAYLOAD_LEN, PUSH_ROUTING_SECRET_VERSION_V1,
+    push_routing_secret_is_newer, try_unwrap_push_routing_secret, PushRoutingSecretEnvelope,
+    PushRoutingSecretError, PUSH_GID_DERIVE_DOMAIN_V1, PUSH_GID_LEN,
+    PUSH_ROUTING_SECRET_ENVELOPE_DOMAIN_V1, PUSH_ROUTING_SECRET_LEN,
+    PUSH_ROUTING_SECRET_MINT_EPOCH_LEN, PUSH_ROUTING_SECRET_PAYLOAD_LEN,
+    PUSH_ROUTING_SECRET_VERSION_V2,
 };
 pub use request::{compose, decode_and_verify, open_envelope, ContactRequest, ACCOUNT_ID_LEN};
 pub use safety::{

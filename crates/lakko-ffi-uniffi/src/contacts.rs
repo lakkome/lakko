@@ -65,7 +65,8 @@ use lakko_contacts::media_state::{
 use lakko_contacts::push_routing::{
     compose_push_routing_secret as rust_compose_push_routing_secret,
     decode_push_routing_secret as rust_decode_push_routing_secret,
-    derive_push_gid as rust_derive_push_gid, PUSH_ROUTING_SECRET_LEN,
+    derive_push_gid as rust_derive_push_gid,
+    push_routing_secret_is_newer as rust_push_routing_secret_is_newer, PUSH_ROUTING_SECRET_LEN,
 };
 use lakko_contacts::{
     compose as rust_compose, decode_and_verify as rust_decode, open_envelope as rust_open,
@@ -1312,9 +1313,10 @@ pub enum FfiIncomingEnvelopeKind {
     /// [`FfiIncomingEnvelope`]; `payload` is empty.
     MediaState,
     /// In-group push-routing-secret distribution envelope
-    /// (ADR-0042). The decoded 32-byte secret rides the
-    /// `payload` field of [`FfiIncomingEnvelope`]; `camera_on`
-    /// is `None`.
+    /// (ADR-0042, v2 per ADR-0044). The decoded 32-byte secret
+    /// rides the `payload` field of [`FfiIncomingEnvelope`] and
+    /// the minter's recency stamp rides `mint_epoch`;
+    /// `camera_on` is `None`.
     PushRoutingSecret,
 }
 
@@ -1336,6 +1338,17 @@ pub struct FfiIncomingEnvelope {
     /// Set only for `MediaState`: whether the sender's camera
     /// is on. `None` for every other kind.
     pub camera_on: Option<bool>,
+    /// Set only for `PushRoutingSecret` (ADR-0044): the
+    /// minter's recency stamp, the primary key of the canonical
+    /// total order. `None` for every other kind.
+    ///
+    /// The caller MUST NOT store the secret unconditionally —
+    /// run the ADR-0042 / ADR-0043 role gate, then
+    /// [`push_routing_secret_is_newer`] against whatever is
+    /// already stored. A stale re-broadcast carries a valid
+    /// secret from an authorised sender and is refused only by
+    /// the order.
+    pub mint_epoch: Option<u64>,
 }
 
 /// Single-call dispatcher for opaque relay-payload plaintexts.
@@ -1356,31 +1369,40 @@ pub struct FfiIncomingEnvelope {
 pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvelope, FfiError> {
     let parsed = rust_dispatch_incoming_envelope(&plaintext)
         .map_err(|err| FfiError::Contacts(err.to_string()))?;
-    let (kind, payload, camera_on) = match parsed {
+    let (kind, payload, camera_on, mint_epoch) = match parsed {
         IncomingEnvelope::CallWelcome(p) => {
-            (FfiIncomingEnvelopeKind::CallWelcome, p.to_vec(), None)
+            (FfiIncomingEnvelopeKind::CallWelcome, p.to_vec(), None, None)
         },
-        IncomingEnvelope::CallKeyPackage(p) => {
-            (FfiIncomingEnvelopeKind::CallKeyPackage, p.to_vec(), None)
-        },
+        IncomingEnvelope::CallKeyPackage(p) => (
+            FfiIncomingEnvelopeKind::CallKeyPackage,
+            p.to_vec(),
+            None,
+            None,
+        ),
         IncomingEnvelope::MediaState { camera_on } => (
             FfiIncomingEnvelopeKind::MediaState,
             Vec::new(),
             Some(camera_on),
+            None,
         ),
-        IncomingEnvelope::PushRoutingSecret { secret } => (
+        IncomingEnvelope::PushRoutingSecret { mint_epoch, secret } => (
             FfiIncomingEnvelopeKind::PushRoutingSecret,
             secret.to_vec(),
             None,
+            Some(mint_epoch),
         ),
-        IncomingEnvelope::IntroMessage(p) => {
-            (FfiIncomingEnvelopeKind::IntroMessage, p.to_vec(), None)
-        },
+        IncomingEnvelope::IntroMessage(p) => (
+            FfiIncomingEnvelopeKind::IntroMessage,
+            p.to_vec(),
+            None,
+            None,
+        ),
     };
     Ok(FfiIncomingEnvelope {
         kind,
         payload,
         camera_on,
+        mint_epoch,
     })
 }
 
@@ -1468,32 +1490,62 @@ pub fn derive_push_gid(secret: Vec<u8>) -> Result<Vec<u8>, FfiError> {
     Ok(rust_derive_push_gid(&arr).to_vec())
 }
 
+/// A decoded push-routing-secret distribution envelope
+/// (ADR-0042 v2, per ADR-0044). Output of
+/// [`decode_push_routing_secret`].
+///
+/// Field order mirrors the wire and, deliberately, the
+/// [`push_routing_secret_is_newer`] total order: `mint_epoch`
+/// first, then the secret bytes.
+#[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
+pub struct FfiPushRoutingSecret {
+    /// The minter's recency stamp, the primary key of the
+    /// canonical total order. Opaque to the core: it imposes an
+    /// order and nothing else, and never reaches
+    /// [`derive_push_gid`].
+    pub mint_epoch: u64,
+    /// The decoded 32-byte per-group routing secret.
+    pub secret: Vec<u8>,
+}
+
 /// Compose the in-group push-routing-secret distribution envelope
-/// (ADR-0042) for a group's 32-byte `push_routing_secret`. The
-/// founder / adder broadcasts the returned bytes as an MLS
+/// (ADR-0042 v2, per ADR-0044) for a group's 32-byte
+/// `push_routing_secret`, stamped with `mint_epoch`. The founder /
+/// adder / rotator broadcasts the returned bytes as an MLS
 /// application message on the group journal so members + joiners
 /// learn the secret; receivers classify them (via
 /// [`dispatch_incoming_envelope`] or [`decode_push_routing_secret`])
 /// and persist the secret — never render it as a chat bubble.
 ///
+/// `mint_epoch` is stamped **at mint time** and then travels with
+/// the secret forever: a re-broadcast MUST replay the epoch the
+/// secret was minted under, never a fresh one. Re-stamping on
+/// re-broadcast would make a stale secret out-rank the live one and
+/// reintroduce the F-A replay (G-36 residual 9) this envelope
+/// closes. The caller sources the stamp from the MLS group epoch
+/// (`Group.epoch()`), which is shared state every receiver can
+/// independently observe.
+///
 /// See [`lakko_contacts::push_routing`] for the wire format
-/// (`domain || version || secret(32)`) and threat model (the DS
-/// sees ciphertext — invariant #2).
+/// (`domain || version || mint_epoch(8, BE) || secret(32)`) and
+/// threat model (the DS sees ciphertext — invariant #2).
 ///
 /// # Errors
 ///
 /// * [`FfiError::Contacts`] when `secret` is not exactly 32
 ///   bytes.
 #[uniffi::export]
-pub fn compose_push_routing_secret(secret: Vec<u8>) -> Result<Vec<u8>, FfiError> {
+pub fn compose_push_routing_secret(mint_epoch: u64, secret: Vec<u8>) -> Result<Vec<u8>, FfiError> {
     let arr = push_routing_secret_array(&secret)?;
-    Ok(rust_compose_push_routing_secret(&arr))
+    Ok(rust_compose_push_routing_secret(mint_epoch, &arr))
 }
 
 /// Strictly decode a push-routing-secret distribution envelope
-/// (ADR-0042), returning the 32-byte secret. Fail-closed: rejects
-/// a plaintext that does not carry the push-routing-secret domain
-/// separator or whose payload is malformed.
+/// (ADR-0042 v2, per ADR-0044), returning the mint epoch + the
+/// 32-byte secret. Fail-closed: rejects a plaintext that does not
+/// carry the push-routing-secret domain separator or whose payload
+/// is malformed — including a retired v1 envelope, which carries no
+/// `mint_epoch` and so cannot be placed in the total order.
 ///
 /// Use [`dispatch_incoming_envelope`] instead when the plaintext
 /// might be any relay-payload / in-group envelope kind (it falls
@@ -1503,12 +1555,55 @@ pub fn compose_push_routing_secret(secret: Vec<u8>) -> Result<Vec<u8>, FfiError>
 ///
 /// * [`FfiError::Contacts`] when `plaintext` is not a valid
 ///   push-routing-secret envelope (wrong domain / bad length /
-///   unknown version).
+///   unknown version — a v1 envelope lands here).
 #[uniffi::export]
-pub fn decode_push_routing_secret(plaintext: Vec<u8>) -> Result<Vec<u8>, FfiError> {
+pub fn decode_push_routing_secret(plaintext: Vec<u8>) -> Result<FfiPushRoutingSecret, FfiError> {
     rust_decode_push_routing_secret(&plaintext)
-        .map(|secret| secret.to_vec())
+        .map(|envelope| FfiPushRoutingSecret {
+            mint_epoch: envelope.mint_epoch,
+            secret: envelope.secret.to_vec(),
+        })
         .map_err(|err| FfiError::Contacts(err.to_string()))
+}
+
+/// The canonical total order on push-routing secrets (ADR-0044):
+/// `true` when the incoming envelope must supersede the stored one.
+///
+/// Ordered on the pair `(mint_epoch, secret_bytes)` — epoch first,
+/// then the 32 secret bytes lexicographically — and **strictly
+/// greater wins; equal is NOT newer**, which is what keeps a benign
+/// retry of the secret a device already holds from reading as an
+/// update.
+///
+/// Exposed on the FFI precisely so no client reimplements the
+/// comparison: three platforms each re-deriving it is the drift
+/// class that produced the F-A stale-re-broadcast replay (G-36
+/// residual 9). Run the ADR-0042 / ADR-0043 role gate first, then
+/// route the accept/refuse decision through this function — an
+/// authorised sender can still be replaying a superseded secret,
+/// and only the order catches that.
+///
+/// Fail-closed on a wrong-length secret on **either** side:
+/// returns `false` (not newer), so a malformed incoming secret
+/// never displaces a stored one and a corrupt stored value is left
+/// in place rather than overwritten. Never panics; infallible by
+/// construction, hence no `Result`.
+///
+/// See [`lakko_contacts::push_routing::push_routing_secret_is_newer`].
+#[uniffi::export]
+#[must_use]
+pub fn push_routing_secret_is_newer(
+    incoming_epoch: u64,
+    incoming_secret: Vec<u8>,
+    stored_epoch: u64,
+    stored_secret: Vec<u8>,
+) -> bool {
+    rust_push_routing_secret_is_newer(
+        incoming_epoch,
+        &incoming_secret,
+        stored_epoch,
+        &stored_secret,
+    )
 }
 
 // ============================================================================
@@ -2322,14 +2417,32 @@ mod tests {
     #[test]
     fn push_routing_compose_then_decode_round_trips() {
         let secret = vec![0x42u8; 32];
-        let wrapped = compose_push_routing_secret(secret.clone()).expect("compose should succeed");
+        let wrapped =
+            compose_push_routing_secret(7, secret.clone()).expect("compose should succeed");
         let decoded = decode_push_routing_secret(wrapped).expect("decode should succeed");
-        assert_eq!(decoded, secret);
+        assert_eq!(decoded.secret, secret);
+        assert_eq!(decoded.mint_epoch, 7);
+    }
+
+    #[test]
+    fn push_routing_round_trips_at_the_mint_epoch_extremes() {
+        // The 8-byte big-endian field must survive the FFI
+        // boundary un-truncated — a `u64` narrowed to a `u32`
+        // anywhere on a platform binding would silently collapse
+        // distant epochs onto each other and break the order.
+        let secret = vec![0x42u8; 32];
+        for epoch in [0u64, 1, u64::from(u32::MAX), u64::MAX - 1, u64::MAX] {
+            let wrapped =
+                compose_push_routing_secret(epoch, secret.clone()).expect("compose should succeed");
+            let decoded = decode_push_routing_secret(wrapped).expect("decode should succeed");
+            assert_eq!(decoded.mint_epoch, epoch);
+            assert_eq!(decoded.secret, secret);
+        }
     }
 
     #[test]
     fn push_routing_compose_rejects_wrong_length_secret() {
-        match compose_push_routing_secret(vec![0u8; 31]) {
+        match compose_push_routing_secret(7, vec![0u8; 31]) {
             Err(FfiError::Contacts(_)) => {},
             other => panic!("expected Contacts error, got {other:?}"),
         }
@@ -2356,10 +2469,171 @@ mod tests {
     #[test]
     fn dispatch_routes_push_routing_secret_envelope() {
         let secret = vec![0x42u8; 32];
-        let wrapped = compose_push_routing_secret(secret.clone()).expect("compose should succeed");
+        let wrapped =
+            compose_push_routing_secret(9, secret.clone()).expect("compose should succeed");
         let result = dispatch_incoming_envelope(wrapped).expect("dispatch should succeed");
         assert_eq!(result.kind, FfiIncomingEnvelopeKind::PushRoutingSecret);
         assert_eq!(result.payload, secret);
         assert_eq!(result.camera_on, None);
+        assert_eq!(result.mint_epoch, Some(9));
+    }
+
+    #[test]
+    fn dispatch_mint_epoch_field_is_none_for_other_kinds() {
+        // Mirror of `dispatch_media_state_field_is_none_for_other_kinds`
+        // for the second optional variant field: `mint_epoch` is
+        // meaningful ONLY on `PushRoutingSecret`, so a platform
+        // reading it on any other kind must see nothing rather
+        // than a stale or defaulted stamp.
+        let welcome = wrap_call_welcome(vec![0xABu8; 256]);
+        let result = dispatch_incoming_envelope(welcome).expect("dispatch should succeed");
+        assert_eq!(result.kind, FfiIncomingEnvelopeKind::CallWelcome);
+        assert_eq!(result.mint_epoch, None);
+
+        let media = compose_media_state(true);
+        let result = dispatch_incoming_envelope(media).expect("dispatch should succeed");
+        assert_eq!(result.kind, FfiIncomingEnvelopeKind::MediaState);
+        assert_eq!(result.mint_epoch, None);
+
+        let intro =
+            dispatch_incoming_envelope(b"hello alice".to_vec()).expect("dispatch should succeed");
+        assert_eq!(intro.kind, FfiIncomingEnvelopeKind::IntroMessage);
+        assert_eq!(intro.mint_epoch, None);
+    }
+
+    #[test]
+    fn decode_push_routing_secret_rejects_a_retired_v1_envelope() {
+        // The ADR-0044 flag day, asserted at the FFI boundary: a
+        // pre-v2 peer's 62-byte envelope carries no `mint_epoch`,
+        // so it cannot be placed in the total order and must be
+        // refused rather than accepted with a defaulted stamp.
+        let mut v1 = b"lakko/push-routing-secret/v1\x00".to_vec();
+        v1.push(0x01);
+        v1.extend_from_slice(&[0x42u8; 32]);
+        assert_eq!(v1.len(), 62);
+        match decode_push_routing_secret(v1) {
+            Err(FfiError::Contacts(_)) => {},
+            other => panic!("expected Contacts error, got {other:?}"),
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // The canonical total order (ADR-0044, G-36 residual 9)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn is_newer_orders_on_the_epoch_then_the_secret_bytes() {
+        let low = vec![0x11u8; 32];
+        let high = vec![0x99u8; 32];
+        // Epoch is the primary key and dominates the tiebreak.
+        assert!(push_routing_secret_is_newer(
+            9,
+            low.clone(),
+            8,
+            high.clone()
+        ));
+        assert!(!push_routing_secret_is_newer(
+            7,
+            high.clone(),
+            8,
+            low.clone()
+        ));
+        // Exact epoch tie: the secret bytes decide, lexicographically.
+        assert!(push_routing_secret_is_newer(
+            5,
+            high.clone(),
+            5,
+            low.clone()
+        ));
+        assert!(!push_routing_secret_is_newer(5, low, 5, high));
+    }
+
+    #[test]
+    fn is_newer_says_an_identical_pair_is_not_newer() {
+        // THE F-A property: a benign retry of the secret a device
+        // already holds must not read as an update.
+        let secret = vec![0x42u8; 32];
+        assert!(!push_routing_secret_is_newer(5, secret.clone(), 5, secret));
+    }
+
+    #[test]
+    fn is_newer_refuses_a_stale_rebroadcast_after_a_rotation() {
+        // The end-to-end F-A scenario at the FFI boundary: a device
+        // re-broadcasts the pre-rotation secret S0 (epoch 10) after
+        // an admin rotated to S1 (epoch 11). Asserted for BOTH
+        // tiebreak directions so the result cannot hinge on which
+        // secret happens to sort higher.
+        let low = vec![0x11u8; 32];
+        let high = vec![0x99u8; 32];
+        for (older, newer) in [(&low, &high), (&high, &low)] {
+            assert!(!push_routing_secret_is_newer(
+                10,
+                older.clone(),
+                11,
+                newer.clone()
+            ));
+            assert!(push_routing_secret_is_newer(
+                11,
+                newer.clone(),
+                10,
+                older.clone()
+            ));
+        }
+    }
+
+    #[test]
+    fn is_newer_is_fail_closed_on_a_wrong_length_secret() {
+        // Neither side may panic or displace on a malformed value.
+        let good = vec![0x42u8; 32];
+        assert!(!push_routing_secret_is_newer(
+            99,
+            vec![0u8; 31],
+            1,
+            good.clone()
+        ));
+        assert!(!push_routing_secret_is_newer(
+            99,
+            vec![0u8; 33],
+            1,
+            good.clone()
+        ));
+        assert!(!push_routing_secret_is_newer(
+            99,
+            good.clone(),
+            1,
+            vec![0u8; 31]
+        ));
+        assert!(!push_routing_secret_is_newer(99, good, 1, Vec::new()));
+    }
+
+    #[test]
+    fn is_newer_agrees_with_the_decoded_envelope_pair() {
+        // Anti-drift: the order a platform computes over a decoded
+        // envelope must match the order over the values that were
+        // composed — no field is truncated or reordered across the
+        // FFI boundary.
+        let low = vec![0x11u8; 32];
+        let high = vec![0x99u8; 32];
+        for (ae, asec) in [(1u64, &low), (1, &high), (2, &low), (u64::MAX, &high)] {
+            for (be, bsec) in [(1u64, &low), (1, &high), (2, &low), (u64::MAX, &high)] {
+                let a = decode_push_routing_secret(
+                    compose_push_routing_secret(ae, asec.clone()).expect("compose"),
+                )
+                .expect("decode");
+                let b = decode_push_routing_secret(
+                    compose_push_routing_secret(be, bsec.clone()).expect("compose"),
+                )
+                .expect("decode");
+                assert_eq!(
+                    push_routing_secret_is_newer(
+                        a.mint_epoch,
+                        a.secret.clone(),
+                        b.mint_epoch,
+                        b.secret.clone()
+                    ),
+                    push_routing_secret_is_newer(ae, asec.clone(), be, bsec.clone()),
+                );
+            }
+        }
     }
 }

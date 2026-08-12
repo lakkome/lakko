@@ -215,6 +215,13 @@ export type IncomingChatEvent =
       messageId: number;
       /** The decoded 32-byte `push_routing_secret`. */
       secret: Uint8Array;
+      /** ADR-0044 — the MLS epoch the MINTER stamped this secret with (NOT
+       *  the epoch this envelope was sealed at: a re-broadcast replays the
+       *  original stamp on a freshly sealed message, which is exactly what
+       *  lets the gate tell a retry from a stale replay). The receive gate
+       *  orders envelopes by `(mintEpoch, secretBytes)` and refuses anything
+       *  not strictly newer than what this device holds. */
+      mintEpoch: bigint;
       /** The MLS leaf that authored this envelope (ADR-0023 precedent).
        *  The receive-side gate resolves it to the sender's signature
        *  public key via `group.members()` and refuses a CHANGED secret
@@ -691,13 +698,18 @@ async function toEvent(
     // ADR-0042 — sniff for a push-routing-secret distribution envelope
     // before the chat parser. The wasm codec is fail-closed (domain +
     // version + exact-length gate), so a non-envelope plaintext returns
-    // null and falls through to the normal chat parse.
+    // null and falls through to the normal chat parse. ADR-0044 made that
+    // gate a hard flag day: a retired v1 envelope (62 bytes, no mint epoch)
+    // is refused here too and simply never surfaces as a routing secret.
     const routingSecret = await tryDecodeSecretEnvelope(bytes);
     if (routingSecret !== null) {
       return {
         kind: "pushRoutingSecret",
         messageId,
-        secret: routingSecret,
+        secret: routingSecret.secret,
+        // ADR-0044 — the minter's recency stamp, carried so the receive gate
+        // can order this envelope against what the device already holds.
+        mintEpoch: routingSecret.mintEpoch,
         // ADR-0042 — carried so the receive-side owner gate can resolve
         // the author's signature key against the role-table owner.
         senderLeaf,

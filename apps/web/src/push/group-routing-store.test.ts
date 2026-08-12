@@ -175,6 +175,7 @@ afterEach(() => {
 import {
   clearAllGroupRouting,
   deleteRoute,
+  getGroupRoutingRecord,
   getGroupRoutingSecret,
   getGroupRoutingState,
   hasGroupRoutingSecret,
@@ -208,6 +209,7 @@ describe("group-routing-store — round-trip", () => {
         secret,
         pushGidHex: PUSH_GID_HEX,
         distributed: true,
+        mintEpoch: 0n,
       },
       deviceKey,
     );
@@ -232,6 +234,7 @@ describe("group-routing-store — round-trip", () => {
         secret: new Uint8Array(32).fill(9),
         pushGidHex: PUSH_GID_HEX,
         distributed: true,
+        mintEpoch: 0n,
       },
       deviceKey,
     );
@@ -247,6 +250,7 @@ describe("group-routing-store — round-trip", () => {
         secret: new Uint8Array(32).fill(1),
         pushGidHex: PUSH_GID_HEX,
         distributed: true,
+        mintEpoch: 0n,
       },
       deviceKey,
     );
@@ -276,6 +280,7 @@ describe("group-routing-store — round-trip", () => {
         secret: new Uint8Array(32).fill(9),
         pushGidHex: PUSH_GID_HEX,
         distributed: true,
+        mintEpoch: 0n,
       },
       deviceKey,
     );
@@ -286,6 +291,7 @@ describe("group-routing-store — round-trip", () => {
         secret: new Uint8Array(32).fill(8),
         pushGidHex: OTHER_GID_HEX,
         distributed: true,
+        mintEpoch: 0n,
       },
       deviceKey,
     );
@@ -313,6 +319,7 @@ describe("group-routing-store — round-trip", () => {
         secret: new Uint8Array(32).fill(2),
         pushGidHex: PUSH_GID_HEX,
         distributed: true,
+        mintEpoch: 0n,
       },
       deviceKey,
     );
@@ -333,6 +340,7 @@ describe("group-routing-store — the durable `distributed` flag", () => {
         secret: new Uint8Array(32).fill(3),
         pushGidHex: PUSH_GID_HEX,
         distributed,
+        mintEpoch: 0n,
       },
       await makeDeviceKey(),
     );
@@ -369,6 +377,7 @@ describe("group-routing-store — the durable `distributed` flag", () => {
         secret,
         pushGidHex: PUSH_GID_HEX,
         distributed: false,
+        mintEpoch: 0n,
       },
       deviceKey,
     );
@@ -404,6 +413,7 @@ describe("group-routing-store — the durable `distributed` flag", () => {
         secret,
         pushGidHex: PUSH_GID_HEX,
         distributed: true,
+        mintEpoch: 0n,
       },
       deviceKey,
     );
@@ -447,5 +457,119 @@ describe("group-routing-store — the durable `distributed` flag", () => {
     // the missing field as `pending` would re-broadcast for every one of
     // them on the first launch after an upgrade.
     expect(await getGroupRoutingState(ACCT, GROUP)).toBe("distributed");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ADR-0044 — the durable `mintEpoch`
+// ---------------------------------------------------------------------------
+
+describe("group-routing-store — the durable `mintEpoch` (ADR-0044)", () => {
+  /** Strip the field from the stored row — the on-disk shape every row
+   *  written before ADR-0044 has. */
+  function stripMintEpochField(): void {
+    const rows = DBS.get("lakko-push-routing")?.stores.get("secrets");
+    expect(rows).toBeDefined();
+    for (const row of (rows as Map<string, Row>).values()) {
+      delete row.mintEpoch;
+    }
+  }
+
+  it("round-trips the secret and its mint epoch as ONE pair", async () => {
+    const deviceKey = await makeDeviceKey();
+    const secret = crypto.getRandomValues(new Uint8Array(32));
+    await putGroupRouting(
+      {
+        accountId: ACCT,
+        groupIdB64: GROUP,
+        secret,
+        pushGidHex: PUSH_GID_HEX,
+        distributed: true,
+        mintEpoch: 4_242n,
+      },
+      deviceKey,
+    );
+
+    const record = await getGroupRoutingRecord(ACCT, GROUP, deviceKey);
+    expect(record).not.toBeNull();
+    expect(Array.from(record!.secret)).toEqual(Array.from(secret));
+    expect(record!.mintEpoch).toBe(4_242n);
+  });
+
+  it("survives the u64 extremes without truncation", async () => {
+    // The stamp is a Rust `u64` on the wire. A `number` round-trip would lose
+    // precision above 2^53 and silently reorder envelopes near the ceiling.
+    const deviceKey = await makeDeviceKey();
+    for (const epoch of [0n, 1n, 2n ** 53n + 1n, 2n ** 64n - 1n]) {
+      await putGroupRouting(
+        {
+          accountId: ACCT,
+          groupIdB64: GROUP,
+          secret: new Uint8Array(32).fill(4),
+          pushGidHex: PUSH_GID_HEX,
+          distributed: true,
+          mintEpoch: epoch,
+        },
+        deviceKey,
+      );
+      expect((await getGroupRoutingRecord(ACCT, GROUP, deviceKey))?.mintEpoch)
+        .toBe(epoch);
+    }
+  });
+
+  it("a LEGACY row with no `mintEpoch` reads as 0n", async () => {
+    // The lowest position in the total order, which is the direction that
+    // converges: any authorised stamped mint supersedes a legacy secret,
+    // rather than a legacy secret out-ranking every rotation forever.
+    const deviceKey = await makeDeviceKey();
+    await putGroupRouting(
+      {
+        accountId: ACCT,
+        groupIdB64: GROUP,
+        secret: new Uint8Array(32).fill(5),
+        pushGidHex: PUSH_GID_HEX,
+        distributed: true,
+        mintEpoch: 99n,
+      },
+      deviceKey,
+    );
+    stripMintEpochField();
+
+    const record = await getGroupRoutingRecord(ACCT, GROUP, deviceKey);
+    expect(record?.mintEpoch).toBe(0n);
+    // ... and the secret is unaffected, so a legacy row is still usable.
+    expect(Array.from(record!.secret)).toEqual(
+      Array.from(new Uint8Array(32).fill(5)),
+    );
+  });
+
+  it("the distributed-flag read-modify-write PRESERVES the mint epoch", async () => {
+    // `setDistributedFlag` rewrites the row. Dropping the epoch there would
+    // silently demote every retried secret to 0n, so the next authorised
+    // envelope of ANY age would supersede it.
+    const deviceKey = await makeDeviceKey();
+    await putGroupRouting(
+      {
+        accountId: ACCT,
+        groupIdB64: GROUP,
+        secret: new Uint8Array(32).fill(6),
+        pushGidHex: PUSH_GID_HEX,
+        distributed: false,
+        mintEpoch: 77n,
+      },
+      deviceKey,
+    );
+
+    await markGroupRoutingDistributed(ACCT, GROUP);
+    expect((await getGroupRoutingRecord(ACCT, GROUP, deviceKey))?.mintEpoch)
+      .toBe(77n);
+    await markGroupRoutingPending(ACCT, GROUP);
+    expect((await getGroupRoutingRecord(ACCT, GROUP, deviceKey))?.mintEpoch)
+      .toBe(77n);
+  });
+
+  it("getGroupRoutingRecord returns null for an unknown group", async () => {
+    const deviceKey = await makeDeviceKey();
+    expect(await getGroupRoutingRecord(ACCT, "Zm9v", deviceKey)).toBeNull();
   });
 });

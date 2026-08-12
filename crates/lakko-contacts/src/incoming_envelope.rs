@@ -94,13 +94,23 @@ pub enum IncomingEnvelope<'a> {
         camera_on: bool,
     },
     /// In-group push-routing-secret distribution envelope
-    /// (ADR-0042). Rides an MLS application message on the group
-    /// journal; carries the 32-byte per-group `push_routing_secret`
-    /// a member/joiner persists to derive the opaque `push_gid`.
-    /// Caller stores the secret + builds the `push_gid →
-    /// (account, group_id)` reverse index — never rendered as a
-    /// chat bubble.
+    /// (ADR-0042, v2). Rides an MLS application message on the
+    /// group journal; carries the 32-byte per-group
+    /// `push_routing_secret` a member/joiner persists to derive the
+    /// opaque `push_gid`. Caller stores the secret + builds the
+    /// `push_gid → (account, group_id)` reverse index — never
+    /// rendered as a chat bubble.
+    ///
+    /// **The caller must not store this unconditionally.** Run the
+    /// role gate, then
+    /// [`crate::push_routing::push_routing_secret_is_newer`]
+    /// against whatever is already stored — a stale re-broadcast
+    /// carries a valid secret from an authorised sender and is
+    /// refused only by the order.
     PushRoutingSecret {
+        /// The minter's recency stamp; the primary key of the
+        /// canonical total order.
+        mint_epoch: u64,
         /// The decoded 32-byte per-group routing secret.
         secret: [u8; crate::push_routing::PUSH_ROUTING_SECRET_LEN],
     },
@@ -168,8 +178,11 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<IncomingEnvelope<'
         });
     }
     // 4. Push-routing-secret — in-group secret distribution (ADR-0042).
-    if let Some(secret) = try_unwrap_push_routing_secret(plaintext)? {
-        return Ok(IncomingEnvelope::PushRoutingSecret { secret });
+    if let Some(envelope) = try_unwrap_push_routing_secret(plaintext)? {
+        return Ok(IncomingEnvelope::PushRoutingSecret {
+            mint_epoch: envelope.mint_epoch,
+            secret: envelope.secret,
+        });
     }
     // 5. Plain intro message — ADR-0005 scenario A.
     Ok(IncomingEnvelope::IntroMessage(plaintext))
@@ -276,9 +289,15 @@ mod tests {
     #[test]
     fn dispatches_push_routing_secret_envelope() {
         let secret = [0x42u8; crate::push_routing::PUSH_ROUTING_SECRET_LEN];
-        let wrapped = crate::push_routing::compose_push_routing_secret(&secret);
+        let wrapped = crate::push_routing::compose_push_routing_secret(0xDEAD_BEEF, &secret);
         let result = dispatch_incoming_envelope(&wrapped).unwrap();
-        assert_eq!(result, IncomingEnvelope::PushRoutingSecret { secret });
+        assert_eq!(
+            result,
+            IncomingEnvelope::PushRoutingSecret {
+                mint_epoch: 0xDEAD_BEEF,
+                secret,
+            },
+        );
     }
 
     #[test]
@@ -287,12 +306,29 @@ mod tests {
         // — fail-closed, not an intro-message fallthrough.
         let mut wrapped = Vec::new();
         wrapped.extend_from_slice(crate::push_routing::PUSH_ROUTING_SECRET_ENVELOPE_DOMAIN_V1);
-        wrapped.push(0x02);
+        wrapped.push(0x7F);
         wrapped.extend_from_slice(&[0u8; crate::push_routing::PUSH_ROUTING_SECRET_LEN]);
         let err = dispatch_incoming_envelope(&wrapped).unwrap_err();
         assert_eq!(
             err,
-            DispatchError::PushRoutingSecret(PushRoutingSecretError::UnknownVersion(0x02)),
+            DispatchError::PushRoutingSecret(PushRoutingSecretError::UnknownVersion(0x7F)),
+        );
+    }
+
+    #[test]
+    fn retired_v1_push_routing_secret_never_reaches_the_chat_parser() {
+        // The v1 -> v2 flag day at the dispatch layer: a pre-v2
+        // peer's envelope must surface as a fail-closed error the
+        // caller drops, NOT fall through to `IntroMessage` and get
+        // rendered as 62 bytes of garbage text in the timeline.
+        let mut wrapped = Vec::new();
+        wrapped.extend_from_slice(crate::push_routing::PUSH_ROUTING_SECRET_ENVELOPE_DOMAIN_V1);
+        wrapped.push(0x01);
+        wrapped.extend_from_slice(&[0x42u8; crate::push_routing::PUSH_ROUTING_SECRET_LEN]);
+        let err = dispatch_incoming_envelope(&wrapped).unwrap_err();
+        assert_eq!(
+            err,
+            DispatchError::PushRoutingSecret(PushRoutingSecretError::UnknownVersion(0x01)),
         );
     }
 

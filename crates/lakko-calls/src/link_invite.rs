@@ -938,7 +938,7 @@ mod tests {
     fn dispatcher_rejects_truncated_welcome_in_full_chain() {
         use lakko_contacts::call_welcome::CALL_WELCOME_ENVELOPE_DOMAIN_V1;
         use lakko_contacts::incoming_envelope::dispatch_incoming_envelope;
-        use lakko_contacts::CallWelcomeError;
+        use lakko_contacts::{CallWelcomeError, DispatchError};
 
         let mut wrapped = Vec::new();
         wrapped.extend_from_slice(CALL_WELCOME_ENVELOPE_DOMAIN_V1);
@@ -946,7 +946,7 @@ mod tests {
         let err = dispatch_incoming_envelope(&wrapped).unwrap_err();
         assert_eq!(
             err,
-            CallWelcomeError::TruncatedPayload { min: 32, got: 8 },
+            DispatchError::Call(CallWelcomeError::TruncatedPayload { min: 32, got: 8 }),
             "truncated welcome must surface as Err, not as a silent intro-message fallthrough",
         );
     }

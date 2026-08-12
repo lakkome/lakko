@@ -40,9 +40,12 @@ import type {
 // `distributed` mirrors the real store's row field: a key ABSENT from the
 // map models a legacy row written before the flag existed, which the store
 // reads as `distributed` (never `pending`).
+// `mintEpochs` mirrors the ADR-0044 field the same way: a key ABSENT models a
+// row written before that field existed, which the store reads as `0n`.
 const h = vi.hoisted(() => ({
   secrets: new Map<string, Uint8Array>(),
   distributed: new Map<string, boolean>(),
+  mintEpochs: new Map<string, bigint>(),
   routes: new Map<string, { accountId: string; groupIdB64: string }>(),
 }));
 
@@ -55,6 +58,7 @@ vi.mock("./group-routing-store", () => ({
         secret: Uint8Array;
         pushGidHex: string;
         distributed: boolean;
+        mintEpoch: bigint;
       },
       _deviceKey: unknown,
     ) => {
@@ -62,6 +66,10 @@ vi.mock("./group-routing-store", () => ({
       h.distributed.set(
         `${args.accountId}\0${args.groupIdB64}`,
         args.distributed,
+      );
+      h.mintEpochs.set(
+        `${args.accountId}\0${args.groupIdB64}`,
+        args.mintEpoch,
       );
       h.routes.set(args.pushGidHex, {
         accountId: args.accountId,
@@ -72,6 +80,16 @@ vi.mock("./group-routing-store", () => ({
   getGroupRoutingSecret: vi.fn(
     async (accountId: string, groupIdB64: string, _dk: unknown) =>
       h.secrets.get(`${accountId}\0${groupIdB64}`) ?? null,
+  ),
+  // ADR-0044 — the pair reader. Mirrors the real store: the epoch and the
+  // secret come from ONE row, and a legacy row (no recorded epoch) reads 0n.
+  getGroupRoutingRecord: vi.fn(
+    async (accountId: string, groupIdB64: string, _dk: unknown) => {
+      const k = `${accountId}\0${groupIdB64}`;
+      const secret = h.secrets.get(k);
+      if (secret === undefined) return null;
+      return { secret, mintEpoch: h.mintEpochs.get(k) ?? 0n };
+    },
   ),
   getGroupRoutingState: vi.fn(
     async (accountId: string, groupIdB64: string) => {
@@ -144,6 +162,7 @@ import {
   membershipRotationDecision,
   memberSignatureKeys,
   mintPushRoutingSecret,
+  publishRemoveThenRotate,
   readPushRotationRole,
   receivePushRoutingSecret,
   receivePushRoutingSecretGated,
@@ -154,10 +173,11 @@ import {
   subscribeGroupUnderPushGid,
   tryDecodeSecretEnvelope,
   verdictAccepts,
+  PUSH_ROUTING_ENVELOPE_LEN,
 } from "./group-routing";
 import {
   deleteRoute,
-  getGroupRoutingSecret,
+  getGroupRoutingRecord,
   putGroupRouting,
 } from "./group-routing-store";
 import { base64Encode } from "../auth/account-id";
@@ -170,11 +190,36 @@ function toHex(bytes: Uint8Array): string {
   return out;
 }
 
-/** A mock group with a fixed group_id + a role the test controls. */
-function mockGroup(groupId: Uint8Array, role: number | undefined): WasmGroup {
+/**
+ * The MLS epoch every mock group reports unless a test says otherwise.
+ * Deliberately well above the epochs the tests stamp their fixture secrets
+ * with, so an ordinary case never trips the ADR-0044 future clamp and the
+ * clamp tests have to opt in.
+ */
+const GROUP_EPOCH = 100n;
+
+/** ADR-0044 — the epoch the receive-gate fixtures' already-HELD secret was
+ *  minted at, and the strictly-greater epoch a rotation of it carries. Both
+ *  well below {@link GROUP_EPOCH}, so an ordinary gate case never trips the
+ *  future clamp. */
+const HELD_EPOCH = 10n;
+const ROTATED_EPOCH = 11n;
+
+/** A mock group with a fixed group_id + a role the test controls. Its
+ *  `epoch` getter is the ADR-0044 stamp source (mint) and clamp ceiling
+ *  (receive); `null` makes the read THROW, modelling a torn group. */
+function mockGroup(
+  groupId: Uint8Array,
+  role: number | undefined,
+  epoch: bigint | null = GROUP_EPOCH,
+): WasmGroup {
   return {
     get groupId(): Uint8Array {
       return groupId;
+    },
+    get epoch(): bigint {
+      if (epoch === null) throw new Error("torn group");
+      return epoch;
     },
     ownRole: (_id: WasmIdentity): number | undefined => role,
   } as unknown as WasmGroup;
@@ -205,16 +250,21 @@ const ADMIN_LEAF = 2;
  *                 the real `roleTableAdmins()` returns. Defaults to
  *                 `[ADMIN_PK]`.
  * @param opts.throws makes ALL reads throw, modelling a torn group.
+ * @param opts.epoch the ADR-0044 clamp ceiling this group reports.
  */
 function mockRoleGroup(
   groupId: Uint8Array,
   ownerKey: Uint8Array | undefined,
-  opts: { throws?: boolean; admins?: Uint8Array[] } = {},
+  opts: { throws?: boolean; admins?: Uint8Array[]; epoch?: bigint } = {},
 ): WasmGroup {
   const admins = opts.admins ?? [ADMIN_PK];
   return {
     get groupId(): Uint8Array {
       return groupId;
+    },
+    get epoch(): bigint {
+      if (opts.throws === true) throw new Error("torn group");
+      return opts.epoch ?? GROUP_EPOCH;
     },
     ownRole: (_id: WasmIdentity): number | undefined => undefined,
     roleTableOwner: (): Uint8Array | undefined => {
@@ -249,13 +299,42 @@ async function flushMicrotasks(times = 50): Promise<void> {
   for (let i = 0; i < times; i += 1) await Promise.resolve();
 }
 
-/** Seed this device's already-held secret for `(account, group)`. */
+/**
+ * Seed this device's already-held secret for `(account, group)`.
+ *
+ * `mintEpoch` defaults to `undefined` = NO recorded epoch, i.e. the legacy
+ * on-disk shape, which the store reads as `0n`. Tests that care about the
+ * ADR-0044 ordering pass one explicitly.
+ */
 function seedStoredSecret(
   accountId: string,
   groupIdB64: string,
   secret: Uint8Array,
+  mintEpoch?: bigint,
 ): void {
   h.secrets.set(`${accountId}\0${groupIdB64}`, secret);
+  if (mintEpoch !== undefined) {
+    h.mintEpochs.set(`${accountId}\0${groupIdB64}`, mintEpoch);
+  }
+}
+
+/** Decode a broadcast envelope back to its `(mintEpoch, secret)` pair. */
+function decodeEnvelope(bytes: Uint8Array): {
+  mintEpoch: bigint;
+  secret: Uint8Array;
+} {
+  const d = wasm.decodePushRoutingSecret(bytes);
+  return { mintEpoch: d.mintEpoch, secret: d.secret };
+}
+
+/** Just the 32-byte secret out of a broadcast envelope. */
+function decodeSecret(bytes: Uint8Array): Uint8Array {
+  return decodeEnvelope(bytes).secret;
+}
+
+/** Just the ADR-0044 stamp out of a broadcast envelope. */
+function decodeMintEpoch(bytes: Uint8Array): bigint {
+  return decodeEnvelope(bytes).mintEpoch;
 }
 
 beforeAll(async () => {
@@ -268,6 +347,7 @@ beforeAll(async () => {
 beforeEach(() => {
   h.secrets.clear();
   h.distributed.clear();
+  h.mintEpochs.clear();
   h.routes.clear();
   subscribeGroup.mockClear();
   unsubscribeGroup.mockClear();
@@ -298,7 +378,7 @@ describe("group-routing orchestration (ADR-0042)", () => {
 
     // Broadcast exactly once; the envelope decodes back to the persisted secret.
     expect(broadcasts.length).toBe(1);
-    const decoded = wasm.decodePushRoutingSecret(broadcasts[0]!);
+    const decoded = decodeSecret(broadcasts[0]!);
     expect(Array.from(decoded)).toEqual(Array.from(putArg.secret));
 
     // push_gid = keyed-BLAKE3(secret) — the persisted hex matches the derivation.
@@ -348,16 +428,24 @@ describe("group-routing orchestration (ADR-0042)", () => {
     // Owner mints a secret + composes the distribution envelope.
     const secret = mintPushRoutingSecret();
     expect(secret.length).toBe(32);
-    const envelope = await composeSecretEnvelope(secret);
+    const envelope = await composeSecretEnvelope(42n, secret);
+    expect(envelope.length).toBe(PUSH_ROUTING_ENVELOPE_LEN);
     const ownerPushGid = wasm.derivePushGid(secret);
 
-    // Non-owner decodes the envelope back to the exact secret ...
+    // Non-owner decodes the envelope back to the exact secret AND the
+    // minter's stamp — the pair the receive gate orders on.
     const decoded = await tryDecodeSecretEnvelope(envelope);
     expect(decoded).not.toBeNull();
-    expect(Array.from(decoded as Uint8Array)).toEqual(Array.from(secret));
+    expect(Array.from(decoded!.secret)).toEqual(Array.from(secret));
+    expect(decoded!.mintEpoch).toBe(42n);
 
     // ... persists it under its own account + subscribes.
-    await receivePushRoutingSecret("acctPeer", "grpB64Peer", decoded as Uint8Array);
+    await receivePushRoutingSecret(
+      "acctPeer",
+      "grpB64Peer",
+      decoded!.secret,
+      decoded!.mintEpoch,
+    );
 
     const calls = vi.mocked(putGroupRouting).mock.calls;
     const putArg = calls[calls.length - 1]![0];
@@ -436,7 +524,7 @@ describe("distribution durability — a failed broadcast must not strand the gro
 
     expect(vi.mocked(putGroupRouting)).toHaveBeenCalledTimes(1);
     expect(b.sent.length).toBe(2);
-    expect(Array.from(wasm.decodePushRoutingSecret(b.sent[1]!))).toEqual(
+    expect(Array.from(decodeSecret(b.sent[1]!))).toEqual(
       Array.from(minted),
     );
     // Confirmed on the wire this time -> flagged distributed.
@@ -491,8 +579,12 @@ describe("distribution durability — a failed broadcast must not strand the gro
 
   it("a RECEIVED secret is stored distributed (a receiver never re-broadcasts)", async () => {
     const secret = mintPushRoutingSecret();
-    await receivePushRoutingSecret(ACCT, GRP_B64, secret);
+    await receivePushRoutingSecret(ACCT, GRP_B64, secret, 7n);
 
+    // ADR-0044 — the MINTER's stamp is persisted, not the receiver's current
+    // epoch: a re-broadcast from here must replay the minter's position in
+    // the order, never invent a fresher one.
+    expect(vi.mocked(putGroupRouting).mock.calls[0]![0].mintEpoch).toBe(7n);
     expect(vi.mocked(putGroupRouting).mock.calls[0]![0].distributed).toBe(true);
     expect(h.distributed.get(`${ACCT}\0${GRP_B64}`)).toBe(true);
 
@@ -556,7 +648,7 @@ describe("distribution durability — a failed broadcast must not strand the gro
     // secret would diverge from the one members already hold).
     await ensureGroupPushRouting(ACCT, group, DUMMY_IDENTITY, b.fn);
     expect(b.sent.length).toBe(3);
-    expect(Array.from(wasm.decodePushRoutingSecret(b.sent[2]!))).toEqual(
+    expect(Array.from(decodeSecret(b.sent[2]!))).toEqual(
       Array.from(minted),
     );
     expect(vi.mocked(putGroupRouting)).toHaveBeenCalledTimes(1);
@@ -614,7 +706,7 @@ describe("distribution durability — a failed broadcast must not strand the gro
     // Next launch / chat-open: the admin repairs ITS OWN failed send.
     await ensureGroupPushRouting(ACCT, admin, DUMMY_IDENTITY, b.fn);
     expect(b.sent.length).toBe(2);
-    expect(Array.from(wasm.decodePushRoutingSecret(b.sent[1]!))).toEqual(
+    expect(Array.from(decodeSecret(b.sent[1]!))).toEqual(
       Array.from(held),
     );
     expect(h.distributed.get(`${ACCT}\0${GRP_B64}`)).toBe(true);
@@ -637,7 +729,7 @@ describe("distribution durability — a failed broadcast must not strand the gro
     await ensureGroupPushRouting(ACCT, member, DUMMY_IDENTITY, b.fn);
 
     expect(b.sent.length).toBe(1);
-    expect(Array.from(wasm.decodePushRoutingSecret(b.sent[0]!))).toEqual(
+    expect(Array.from(decodeSecret(b.sent[0]!))).toEqual(
       Array.from(held),
     );
     expect(h.distributed.get(`${ACCT}\0${GRP_B64}`)).toBe(true);
@@ -699,7 +791,7 @@ describe("receive-side role gate (ADR-0042, lakko-security MEDIUM-1)", () => {
   const ROTATED = new Uint8Array(32).fill(0x22);
 
   it("ACCEPTS a changed secret authored by the OWNER (persists + subscribes)", async () => {
-    seedStoredSecret(ACCT, GRP, HELD);
+    seedStoredSecret(ACCT, GRP, HELD, HELD_EPOCH);
     const group = mockRoleGroup(GROUP_ID, OWNER_PK);
 
     const verdict = await receivePushRoutingSecretGated(
@@ -708,6 +800,7 @@ describe("receive-side role gate (ADR-0042, lakko-security MEDIUM-1)", () => {
       GRP,
       OWNER_LEAF,
       ROTATED,
+      ROTATED_EPOCH,
     );
 
     expect(verdict).toBe("accept-owner");
@@ -720,7 +813,7 @@ describe("receive-side role gate (ADR-0042, lakko-security MEDIUM-1)", () => {
   });
 
   it("REJECTS a changed secret from a PLAIN MEMBER (store unchanged, no subscribe)", async () => {
-    seedStoredSecret(ACCT, GRP, HELD);
+    seedStoredSecret(ACCT, GRP, HELD, HELD_EPOCH);
     const group = mockRoleGroup(GROUP_ID, OWNER_PK);
 
     const verdict = await receivePushRoutingSecretGated(
@@ -729,6 +822,7 @@ describe("receive-side role gate (ADR-0042, lakko-security MEDIUM-1)", () => {
       GRP,
       MEMBER_LEAF,
       ROTATED,
+      ROTATED_EPOCH,
     );
 
     expect(verdict).toBe("reject-not-authorized");
@@ -742,7 +836,7 @@ describe("receive-side role gate (ADR-0042, lakko-security MEDIUM-1)", () => {
   });
 
   it("ACCEPTS an IDENTICAL secret from a plain member (idempotent redistribute relay)", async () => {
-    seedStoredSecret(ACCT, GRP, HELD);
+    seedStoredSecret(ACCT, GRP, HELD, HELD_EPOCH);
     const group = mockRoleGroup(GROUP_ID, OWNER_PK);
 
     const verdict = await receivePushRoutingSecretGated(
@@ -753,6 +847,7 @@ describe("receive-side role gate (ADR-0042, lakko-security MEDIUM-1)", () => {
       // byte-identical to what we already hold (a fresh array, so this is a
       // value comparison, not a reference one)
       new Uint8Array(HELD),
+      HELD_EPOCH,
     );
 
     expect(verdict).toBe("accept-identical");
@@ -763,7 +858,7 @@ describe("receive-side role gate (ADR-0042, lakko-security MEDIUM-1)", () => {
   });
 
   it("ACCEPTS a changed secret in a group with NO role table (legacy / open)", async () => {
-    seedStoredSecret(ACCT, GRP, HELD);
+    seedStoredSecret(ACCT, GRP, HELD, HELD_EPOCH);
     const group = mockRoleGroup(GROUP_ID, undefined);
 
     const verdict = await receivePushRoutingSecretGated(
@@ -772,6 +867,7 @@ describe("receive-side role gate (ADR-0042, lakko-security MEDIUM-1)", () => {
       GRP,
       MEMBER_LEAF,
       ROTATED,
+      ROTATED_EPOCH,
     );
 
     // No owner exists to authorise against — keep the pre-gate behaviour
@@ -789,6 +885,7 @@ describe("receive-side role gate (ADR-0042, lakko-security MEDIUM-1)", () => {
       GRP,
       OWNER_LEAF,
       ROTATED,
+      ROTATED_EPOCH,
     );
 
     expect(verdict).toBe("accept-owner");
@@ -804,6 +901,7 @@ describe("receive-side role gate (ADR-0042, lakko-security MEDIUM-1)", () => {
       GRP,
       MEMBER_LEAF,
       ROTATED,
+      ROTATED_EPOCH,
     );
 
     expect(verdict).toBe("reject-not-authorized");
@@ -826,6 +924,7 @@ describe("receive-side role gate (ADR-0042, lakko-security MEDIUM-1)", () => {
       GRP,
       ADMIN_LEAF,
       ROTATED,
+      ROTATED_EPOCH,
     );
 
     expect(verdict).toBe("accept-admin-seed");
@@ -842,7 +941,7 @@ describe("receive-side role gate (ADR-0042, lakko-security MEDIUM-1)", () => {
     // admin able to evict a member but unable to retire that member's
     // routing id, so the eviction completed with the ex-member's wake stream
     // intact. Reported as `accept-admin-rotate`, distinct from the seed case.
-    seedStoredSecret(ACCT, GRP, HELD);
+    seedStoredSecret(ACCT, GRP, HELD, HELD_EPOCH);
     const group = mockRoleGroup(GROUP_ID, OWNER_PK);
 
     const verdict = await receivePushRoutingSecretGated(
@@ -851,6 +950,7 @@ describe("receive-side role gate (ADR-0042, lakko-security MEDIUM-1)", () => {
       GRP,
       ADMIN_LEAF,
       ROTATED,
+      ROTATED_EPOCH,
     );
 
     expect(verdict).toBe("accept-admin-rotate");
@@ -866,7 +966,7 @@ describe("receive-side role gate (ADR-0042, lakko-security MEDIUM-1)", () => {
 
     // 1. Admin seeds the hole.
     expect(
-      await receivePushRoutingSecretGated(ACCT, group, GRP, ADMIN_LEAF, HELD),
+      await receivePushRoutingSecretGated(ACCT, group, GRP, ADMIN_LEAF, HELD, HELD_EPOCH),
     ).toBe("accept-admin-seed");
     expect(Array.from(h.secrets.get(`${ACCT}\0${GRP}`) as Uint8Array)).toEqual(
       Array.from(HELD),
@@ -876,7 +976,7 @@ describe("receive-side role gate (ADR-0042, lakko-security MEDIUM-1)", () => {
     // level was persisted alongside the admin-seeded secret, so the owner
     // branch is decided without consulting who wrote it.
     expect(
-      await receivePushRoutingSecretGated(ACCT, group, GRP, OWNER_LEAF, ROTATED),
+      await receivePushRoutingSecretGated(ACCT, group, GRP, OWNER_LEAF, ROTATED, ROTATED_EPOCH),
     ).toBe("accept-owner");
     expect(Array.from(h.secrets.get(`${ACCT}\0${GRP}`) as Uint8Array)).toEqual(
       Array.from(ROTATED),
@@ -885,7 +985,7 @@ describe("receive-side role gate (ADR-0042, lakko-security MEDIUM-1)", () => {
 
   it("an ADMIN write over an UNREADABLE store is reported as a ROTATE, not a seed", async () => {
     const group = mockRoleGroup(GROUP_ID, OWNER_PK);
-    vi.mocked(getGroupRoutingSecret).mockRejectedValueOnce(
+    vi.mocked(getGroupRoutingRecord).mockRejectedValueOnce(
       new Error("store unreadable"),
     );
 
@@ -895,6 +995,7 @@ describe("receive-side role gate (ADR-0042, lakko-security MEDIUM-1)", () => {
       GRP,
       ADMIN_LEAF,
       ROTATED,
+      ROTATED_EPOCH,
     );
 
     // `storedSecret === null` here means "unknown", not "provably absent",
@@ -915,6 +1016,7 @@ describe("receive-side role gate (ADR-0042, lakko-security MEDIUM-1)", () => {
       GRP,
       ADMIN_LEAF,
       ROTATED,
+      ROTATED_EPOCH,
     );
 
     expect(verdict).toBe("reject-not-authorized");
@@ -922,12 +1024,12 @@ describe("receive-side role gate (ADR-0042, lakko-security MEDIUM-1)", () => {
   });
 
   it("fails CLOSED on a torn group: changed secret dropped, identical accepted", async () => {
-    seedStoredSecret(ACCT, GRP, HELD);
+    seedStoredSecret(ACCT, GRP, HELD, HELD_EPOCH);
     const torn = mockRoleGroup(GROUP_ID, OWNER_PK, { throws: true });
 
     // Changed + unverifiable -> dropped.
     expect(
-      await receivePushRoutingSecretGated(ACCT, torn, GRP, OWNER_LEAF, ROTATED),
+      await receivePushRoutingSecretGated(ACCT, torn, GRP, OWNER_LEAF, ROTATED, ROTATED_EPOCH),
     ).toBe("reject-unverifiable");
     expect(vi.mocked(putGroupRouting)).not.toHaveBeenCalled();
 
@@ -940,13 +1042,14 @@ describe("receive-side role gate (ADR-0042, lakko-security MEDIUM-1)", () => {
         GRP,
         OWNER_LEAF,
         new Uint8Array(HELD),
+        HELD_EPOCH,
       ),
     ).toBe("accept-identical");
     expect(vi.mocked(putGroupRouting)).toHaveBeenCalledTimes(1);
   });
 
   it("REJECTS a changed secret carrying NO sender leaf (unverifiable authorship)", async () => {
-    seedStoredSecret(ACCT, GRP, HELD);
+    seedStoredSecret(ACCT, GRP, HELD, HELD_EPOCH);
     const group = mockRoleGroup(GROUP_ID, OWNER_PK);
 
     const verdict = await receivePushRoutingSecretGated(
@@ -955,6 +1058,7 @@ describe("receive-side role gate (ADR-0042, lakko-security MEDIUM-1)", () => {
       GRP,
       undefined,
       ROTATED,
+      ROTATED_EPOCH,
     );
 
     expect(verdict).toBe("reject-unverifiable");
@@ -963,7 +1067,7 @@ describe("receive-side role gate (ADR-0042, lakko-security MEDIUM-1)", () => {
   });
 
   it("REJECTS a changed secret from an UNKNOWN leaf (not in the member snapshot)", async () => {
-    seedStoredSecret(ACCT, GRP, HELD);
+    seedStoredSecret(ACCT, GRP, HELD, HELD_EPOCH);
     const group = mockRoleGroup(GROUP_ID, OWNER_PK);
 
     const verdict = await receivePushRoutingSecretGated(
@@ -972,6 +1076,7 @@ describe("receive-side role gate (ADR-0042, lakko-security MEDIUM-1)", () => {
       GRP,
       99,
       ROTATED,
+      ROTATED_EPOCH,
     );
 
     expect(verdict).toBe("reject-unverifiable");
@@ -980,12 +1085,24 @@ describe("receive-side role gate (ADR-0042, lakko-security MEDIUM-1)", () => {
 });
 
 describe("routingSecretVerdict (pure decision core)", () => {
-  const A = new Uint8Array([1, 2, 3]);
-  const B = new Uint8Array([9, 9, 9]);
+  // Real 32-byte secrets. They have to be: ADR-0044's order is fail-closed on
+  // a wrong-length secret (a malformed value must never displace a stored
+  // one), so a 3-byte fixture would land every stored-secret case on
+  // `reject-stale` and mask the AUTHORITY question these cases are about.
+  const A = new Uint8Array(32).fill(0x0a);
+  const B = new Uint8Array(32).fill(0x0b);
+  // The base makes the incoming envelope strictly newer, so each case below
+  // isolates authority; the ordering itself has its own describe. `isNewer`
+  // is the REAL wasm export, never a stub — routing every decision through
+  // the one audited comparison is the entire point of that FFI surface.
   const base = {
     verifyFailed: false,
     storedUnreadable: false,
     adminKeys: [ADMIN_PK],
+    storedMintEpoch: 1n,
+    incomingMintEpoch: 2n,
+    ownEpoch: GROUP_EPOCH,
+    isNewer: wasm.pushRoutingSecretIsNewer,
   };
 
   it("identical short-circuits regardless of authorship", () => {
@@ -1360,7 +1477,7 @@ describe("rotatePushRoutingSecret (ADR-0043)", () => {
 
     // Redistributed to the group — the envelope carries the NEW secret.
     expect(b.sent.length).toBe(1);
-    expect(Array.from(wasm.decodePushRoutingSecret(b.sent[0]!))).toEqual(
+    expect(Array.from(decodeSecret(b.sent[0]!))).toEqual(
       Array.from(stored),
     );
     // Confirmed on the wire.
@@ -1486,7 +1603,7 @@ describe("rotatePushRoutingSecret (ADR-0043)", () => {
     // re-sends the STORED (i.e. the newly rotated) secret. Never a re-mint.
     await ensureGroupPushRouting(ACCT, group, DUMMY_IDENTITY, b.fn);
     expect(b.sent.length).toBe(2);
-    expect(Array.from(wasm.decodePushRoutingSecret(b.sent[1]!))).toEqual(
+    expect(Array.from(decodeSecret(b.sent[1]!))).toEqual(
       Array.from(rotated),
     );
     expect(h.distributed.get(`${ACCT}\0${GRP_B64}`)).toBe(true);
@@ -1536,8 +1653,8 @@ describe("rotatePushRoutingSecret (ADR-0043)", () => {
     // the FIRST envelope was sealed at, so a second seal is the whole point.
     expect(vi.mocked(putGroupRouting)).toHaveBeenCalledTimes(2);
     expect(sent.length).toBe(2);
-    const s1 = wasm.decodePushRoutingSecret(sent[0]!);
-    const s2 = wasm.decodePushRoutingSecret(sent[1]!);
+    const s1 = decodeSecret(sent[0]!);
+    const s2 = decodeSecret(sent[1]!);
     expect(Array.from(s2)).not.toEqual(Array.from(s1));
 
     // Serialised, so the second rotation's "old" secret is the FIRST one's
@@ -1778,7 +1895,7 @@ describe("receive-side teardown of a superseded push_gid (ADR-0043)", () => {
     // only its own device pseudonym, so the rotator cannot do it for anyone
     // else. Skip this and each rotation leaves one dead row PER MEMBER — the
     // versioned-cluster archive ADR-0043 calls worse than not rotating.
-    seedStoredSecret(ACCT, GRP, HELD);
+    seedStoredSecret(ACCT, GRP, HELD, HELD_EPOCH);
     h.routes.set(toHex(wasm.derivePushGid(HELD)), {
       accountId: ACCT,
       groupIdB64: GRP,
@@ -1786,7 +1903,7 @@ describe("receive-side teardown of a superseded push_gid (ADR-0043)", () => {
     const group = mockRoleGroup(GROUP_ID, OWNER_PK);
 
     expect(
-      await receivePushRoutingSecretGated(ACCT, group, GRP, OWNER_LEAF, ROTATED),
+      await receivePushRoutingSecretGated(ACCT, group, GRP, OWNER_LEAF, ROTATED, ROTATED_EPOCH),
     ).toBe("accept-owner");
 
     const oldGidHex = toHex(wasm.derivePushGid(HELD));
@@ -1798,7 +1915,7 @@ describe("receive-side teardown of a superseded push_gid (ADR-0043)", () => {
   });
 
   it("an ADMIN-authored rotation is applied and torn down the same way", async () => {
-    seedStoredSecret(ACCT, GRP, HELD);
+    seedStoredSecret(ACCT, GRP, HELD, HELD_EPOCH);
     h.routes.set(toHex(wasm.derivePushGid(HELD)), {
       accountId: ACCT,
       groupIdB64: GRP,
@@ -1806,7 +1923,7 @@ describe("receive-side teardown of a superseded push_gid (ADR-0043)", () => {
     const group = mockRoleGroup(GROUP_ID, OWNER_PK);
 
     expect(
-      await receivePushRoutingSecretGated(ACCT, group, GRP, ADMIN_LEAF, ROTATED),
+      await receivePushRoutingSecretGated(ACCT, group, GRP, ADMIN_LEAF, ROTATED, ROTATED_EPOCH),
     ).toBe("accept-admin-rotate");
     await vi.waitFor(() => expect(unsubscribeGroup).toHaveBeenCalled());
     expect(toHex(unsubscribeGroup.mock.calls[0]![1])).toBe(
@@ -1815,7 +1932,7 @@ describe("receive-side teardown of a superseded push_gid (ADR-0043)", () => {
   });
 
   it("an IDENTICAL re-broadcast retires nothing (the id did not change)", async () => {
-    seedStoredSecret(ACCT, GRP, HELD);
+    seedStoredSecret(ACCT, GRP, HELD, HELD_EPOCH);
     const group = mockRoleGroup(GROUP_ID, OWNER_PK);
 
     expect(
@@ -1825,6 +1942,7 @@ describe("receive-side teardown of a superseded push_gid (ADR-0043)", () => {
         GRP,
         MEMBER_LEAF,
         new Uint8Array(HELD),
+        HELD_EPOCH,
       ),
     ).toBe("accept-identical");
     expect(unsubscribeGroup).not.toHaveBeenCalled();
@@ -1835,21 +1953,848 @@ describe("receive-side teardown of a superseded push_gid (ADR-0043)", () => {
     const group = mockRoleGroup(GROUP_ID, OWNER_PK);
 
     expect(
-      await receivePushRoutingSecretGated(ACCT, group, GRP, ADMIN_LEAF, ROTATED),
+      await receivePushRoutingSecretGated(ACCT, group, GRP, ADMIN_LEAF, ROTATED, ROTATED_EPOCH),
     ).toBe("accept-admin-seed");
     expect(unsubscribeGroup).not.toHaveBeenCalled();
     expect(vi.mocked(deleteRoute)).not.toHaveBeenCalled();
   });
 
   it("a REFUSED secret retires nothing (the device keeps its id)", async () => {
-    seedStoredSecret(ACCT, GRP, HELD);
+    seedStoredSecret(ACCT, GRP, HELD, HELD_EPOCH);
     const group = mockRoleGroup(GROUP_ID, OWNER_PK);
 
     expect(
-      await receivePushRoutingSecretGated(ACCT, group, GRP, MEMBER_LEAF, ROTATED),
+      await receivePushRoutingSecretGated(ACCT, group, GRP, MEMBER_LEAF, ROTATED, ROTATED_EPOCH),
     ).toBe("reject-not-authorized");
     expect(unsubscribeGroup).not.toHaveBeenCalled();
     expect(vi.mocked(deleteRoute)).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ADR-0044 — mint-epoch recency ordering (G-36 residual 9 / lakko-security F-A)
+// ---------------------------------------------------------------------------
+
+describe("routingSecretVerdict — the ADR-0044 ordering rules", () => {
+  // 32-byte fixtures chosen so the STALE secret sorts STRICTLY HIGHER than
+  // the rotation that replaced it. A gate that compared only bytes, or that
+  // tie-broke before consulting the epoch, would accept the stale one — so
+  // these fixtures are what make the epoch's primacy observable.
+  const STALE = new Uint8Array(32).fill(0xee);
+  const LIVE = new Uint8Array(32).fill(0x11);
+
+  const base = {
+    ownerKey: OWNER_PK,
+    adminKeys: [ADMIN_PK],
+    senderKey: OWNER_PK,
+    storedUnreadable: false,
+    verifyFailed: false,
+    ownEpoch: GROUP_EPOCH,
+    isNewer: wasm.pushRoutingSecretIsNewer,
+  };
+
+  it("REJECTS a stamp ahead of this device's own epoch (reject-future)", () => {
+    expect(
+      routingSecretVerdict({
+        ...base,
+        storedSecret: LIVE,
+        storedMintEpoch: 10n,
+        incomingSecret: STALE,
+        incomingMintEpoch: GROUP_EPOCH + 1n,
+      }),
+    ).toBe("reject-future");
+  });
+
+  it("the future clamp is evaluated BEFORE authority — even the OWNER is refused", () => {
+    // Without this precedence an authorised writer could stamp u64::MAX and
+    // FREEZE the group's routing id: nothing could ever exceed it, so no
+    // later owner rotation could win. That trades G-36 residual 3's
+    // recoverable churn for an unrecoverable denial.
+    for (const senderKey of [OWNER_PK, ADMIN_PK]) {
+      expect(
+        routingSecretVerdict({
+          ...base,
+          senderKey,
+          storedSecret: LIVE,
+          storedMintEpoch: 10n,
+          incomingSecret: STALE,
+          incomingMintEpoch: 2n ** 64n - 1n,
+        }),
+      ).toBe("reject-future");
+    }
+  });
+
+  it("accepts a stamp EQUAL to this device's own epoch (the clamp is not off-by-one)", () => {
+    // `stamp <= seal <= receiver's epoch at dispatch`, so equality is the
+    // ordinary case for a freshly minted rotation applied by a peer that has
+    // processed the same commit. Refusing it would break every rotation.
+    expect(
+      routingSecretVerdict({
+        ...base,
+        storedSecret: LIVE,
+        storedMintEpoch: 10n,
+        incomingSecret: STALE,
+        incomingMintEpoch: GROUP_EPOCH,
+      }),
+    ).toBe("accept-owner");
+  });
+
+  it("REJECTS an AUTHORISED envelope that is older than what is held (reject-stale)", () => {
+    // THE finding. The sender clears authority — it is the owner — and the
+    // stale secret even sorts higher bytewise. Only the epoch refuses it.
+    expect(
+      routingSecretVerdict({
+        ...base,
+        storedSecret: LIVE,
+        storedMintEpoch: 11n,
+        incomingSecret: STALE,
+        incomingMintEpoch: 10n,
+      }),
+    ).toBe("reject-stale");
+  });
+
+  it("an ADMIN's stale re-broadcast is refused the same way", () => {
+    // The reachable shape: ADR-0043 option (b) lets an admin rotate, so an
+    // admin relaying a superseded secret clears authority as `accept-admin-
+    // rotate` and would previously have been applied.
+    expect(
+      routingSecretVerdict({
+        ...base,
+        senderKey: ADMIN_PK,
+        storedSecret: LIVE,
+        storedMintEpoch: 11n,
+        incomingSecret: STALE,
+        incomingMintEpoch: 10n,
+      }),
+    ).toBe("reject-stale");
+  });
+
+  it("a legacy no-role-table group is ordered too (accept-no-owner is not exempt)", () => {
+    expect(
+      routingSecretVerdict({
+        ...base,
+        ownerKey: undefined,
+        adminKeys: [],
+        senderKey: MEMBER_PK,
+        storedSecret: LIVE,
+        storedMintEpoch: 11n,
+        incomingSecret: STALE,
+        incomingMintEpoch: 10n,
+      }),
+    ).toBe("reject-stale");
+  });
+
+  it("accepts a strictly NEWER envelope even when its secret sorts LOWER", () => {
+    // The epoch is the primary key: `LIVE` < `STALE` bytewise, and it still
+    // wins on a greater epoch.
+    expect(
+      routingSecretVerdict({
+        ...base,
+        storedSecret: STALE,
+        storedMintEpoch: 10n,
+        incomingSecret: LIVE,
+        incomingMintEpoch: 11n,
+      }),
+    ).toBe("accept-owner");
+  });
+
+  it("at an EXACT epoch tie the bytes decide — and the owner can LOSE", () => {
+    // The documented semantic narrowing. Under ADR-0043 option (b) one
+    // removal produces N+1 same-epoch mints, so this is the common path, not
+    // a corner case. Asserted so it cannot be "fixed" by accident.
+    const ownerMint = new Uint8Array(32).fill(0x10);
+    const adminMint = new Uint8Array(32).fill(0x90);
+    // The admin's higher-sorting mint is already stored; the owner's
+    // same-epoch envelope arrives and is refused.
+    expect(
+      routingSecretVerdict({
+        ...base,
+        senderKey: OWNER_PK,
+        storedSecret: adminMint,
+        storedMintEpoch: 42n,
+        incomingSecret: ownerMint,
+        incomingMintEpoch: 42n,
+      }),
+    ).toBe("reject-stale");
+    // ... and the converse converges on the same winner, whichever order the
+    // two envelopes arrive in. That arrival-order independence is what
+    // owner-priority used to provide for the owner alone.
+    expect(
+      routingSecretVerdict({
+        ...base,
+        senderKey: ADMIN_PK,
+        storedSecret: ownerMint,
+        storedMintEpoch: 42n,
+        incomingSecret: adminMint,
+        incomingMintEpoch: 42n,
+      }),
+    ).toBe("accept-admin-rotate");
+  });
+
+  it("a SEED (no stored secret) is never ordered — any stamp is accepted", () => {
+    // Nothing to compare against; refusing here would leave a member that
+    // holds none deferring push forever.
+    expect(
+      routingSecretVerdict({
+        ...base,
+        senderKey: ADMIN_PK,
+        storedSecret: null,
+        storedMintEpoch: 0n,
+        incomingSecret: STALE,
+        incomingMintEpoch: 0n,
+      }),
+    ).toBe("accept-admin-seed");
+  });
+
+  it("an unreadable own epoch fails CLOSED (no ceiling, no accept)", () => {
+    expect(
+      routingSecretVerdict({
+        ...base,
+        ownEpoch: undefined,
+        storedSecret: LIVE,
+        storedMintEpoch: 10n,
+        incomingSecret: STALE,
+        incomingMintEpoch: 11n,
+      }),
+    ).toBe("reject-unverifiable");
+  });
+
+  // -- the accept-identical fast path must bypass BOTH new rules -----------
+  //
+  // This is what preserves retry semantics. The any-holder re-broadcast, the
+  // post-add redistribute and any relay all re-emit the identical pair, so
+  // they must never be read as an update NOR as a stale replay.
+
+  it("accept-identical short-circuits the future clamp AND the order", () => {
+    for (const incomingMintEpoch of [0n, 10n, GROUP_EPOCH + 999n]) {
+      expect(
+        routingSecretVerdict({
+          ...base,
+          senderKey: MEMBER_PK,
+          storedSecret: LIVE,
+          storedMintEpoch: 10n,
+          incomingSecret: new Uint8Array(LIVE),
+          incomingMintEpoch,
+        }),
+      ).toBe("accept-identical");
+    }
+  });
+
+  it("accept-identical still wins with an unreadable own epoch (a torn group)", () => {
+    expect(
+      routingSecretVerdict({
+        ...base,
+        ownEpoch: undefined,
+        verifyFailed: true,
+        storedSecret: LIVE,
+        storedMintEpoch: 10n,
+        incomingSecret: new Uint8Array(LIVE),
+        incomingMintEpoch: 10n,
+      }),
+    ).toBe("accept-identical");
+  });
+
+  it("a wrong-length incoming secret can never displace a stored one", () => {
+    // The core's fail-closed rule, surfaced through the gate: a malformed
+    // value is not "newer", whatever epoch it claims.
+    expect(
+      routingSecretVerdict({
+        ...base,
+        storedSecret: LIVE,
+        storedMintEpoch: 10n,
+        incomingSecret: new Uint8Array(31).fill(0xff),
+        incomingMintEpoch: 99n,
+      }),
+    ).toBe("reject-stale");
+  });
+
+  it("verdictAccepts partitions the two NEW verdicts as rejections", () => {
+    expect(verdictAccepts("reject-future")).toBe(false);
+    expect(verdictAccepts("reject-stale")).toBe(false);
+  });
+});
+
+describe("the F-A replay, end to end (G-36 residual 9)", () => {
+  const ACCT = "acctFA";
+  const GRP = "grpFAB64";
+  const GROUP_ID = new Uint8Array([0xfa, 0xfa, 0xfa, 0xfa]);
+  // Again: the STALE secret sorts HIGHER, so nothing but the epoch saves us.
+  const S_OLD = new Uint8Array(32).fill(0xee);
+  const S1 = new Uint8Array(32).fill(0x11);
+
+  it("a stale re-broadcast is refused and does NOT retire the live gid", async () => {
+    // The scenario, exactly as `lakko-security` F-A describes it:
+    //
+    //   1. the group is on S_OLD, minted at epoch 10;
+    //   2. an admin removes a member and rotates to S1 at epoch 11 — this
+    //      device applies it, retiring gid(S_OLD);
+    //   3. a device whose earlier broadcast FAILED still holds S_OLD in a
+    //      pending row and re-broadcasts it. It is relayed by an authorised
+    //      sender, so the authority gate alone would accept it.
+    //
+    // Before ADR-0044 step 3 was applied by every member, retiring gid(S1)
+    // and migrating the whole group BACK onto the routing id the evicted
+    // member still derives — permanently, since no further shrink occurs.
+    seedStoredSecret(ACCT, GRP, S_OLD, 10n);
+    h.routes.set(toHex(wasm.derivePushGid(S_OLD)), {
+      accountId: ACCT,
+      groupIdB64: GRP,
+    });
+    const group = mockRoleGroup(GROUP_ID, OWNER_PK, { epoch: 11n });
+
+    // (2) the rotation lands.
+    expect(
+      await receivePushRoutingSecretGated(ACCT, group, GRP, ADMIN_LEAF, S1, 11n),
+    ).toBe("accept-admin-rotate");
+    const gidOld = toHex(wasm.derivePushGid(S_OLD));
+    const gidLive = toHex(wasm.derivePushGid(S1));
+    await vi.waitFor(() => expect(unsubscribeGroup).toHaveBeenCalledTimes(1));
+    expect(toHex(unsubscribeGroup.mock.calls[0]![1])).toBe(gidOld);
+    expect(h.routes.has(gidLive)).toBe(true);
+
+    // (3) the stale re-broadcast — from the OWNER, the highest authority
+    // there is, so this cannot be refused on authorship.
+    expect(
+      await receivePushRoutingSecretGated(
+        ACCT,
+        group,
+        GRP,
+        OWNER_LEAF,
+        S_OLD,
+        10n,
+      ),
+    ).toBe("reject-stale");
+
+    // Nothing moved: the store still holds S1 ...
+    expect(Array.from(h.secrets.get(`${ACCT}\0${GRP}`) as Uint8Array)).toEqual(
+      Array.from(S1),
+    );
+    // ... gid(S1) is STILL the live route, not retired ...
+    expect(h.routes.has(gidLive)).toBe(true);
+    // ... no second teardown fired (the retire is what made F-A permanent) ...
+    expect(unsubscribeGroup).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(deleteRoute)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(deleteRoute)).not.toHaveBeenCalledWith(gidLive);
+    // ... and nothing was persisted for the refused envelope.
+    expect(vi.mocked(putGroupRouting)).toHaveBeenCalledTimes(1);
+  });
+
+  it("the same stale replay from an ADMIN is refused too", async () => {
+    seedStoredSecret(ACCT, GRP, S1, 11n);
+    const group = mockRoleGroup(GROUP_ID, OWNER_PK, { epoch: 11n });
+
+    expect(
+      await receivePushRoutingSecretGated(
+        ACCT,
+        group,
+        GRP,
+        ADMIN_LEAF,
+        S_OLD,
+        10n,
+      ),
+    ).toBe("reject-stale");
+    expect(vi.mocked(putGroupRouting)).not.toHaveBeenCalled();
+    expect(unsubscribeGroup).not.toHaveBeenCalled();
+  });
+
+  it("a LEGACY stored row (no recorded epoch) reads as 0n and is superseded", async () => {
+    // A row written before ADR-0044 carries no stamp. Reading it as 0n is the
+    // direction that converges: an authorised stamped mint supersedes it,
+    // rather than an unstamped legacy secret out-ranking every rotation.
+    seedStoredSecret(ACCT, GRP, S_OLD); // NO epoch recorded
+    expect(h.mintEpochs.has(`${ACCT}\0${GRP}`)).toBe(false);
+    const group = mockRoleGroup(GROUP_ID, OWNER_PK);
+
+    expect(
+      await receivePushRoutingSecretGated(ACCT, group, GRP, OWNER_LEAF, S1, 1n),
+    ).toBe("accept-owner");
+    expect(Array.from(h.secrets.get(`${ACCT}\0${GRP}`) as Uint8Array)).toEqual(
+      Array.from(S1),
+    );
+    expect(h.mintEpochs.get(`${ACCT}\0${GRP}`)).toBe(1n);
+  });
+
+  it("an identical re-broadcast of a legacy secret is still idempotent", async () => {
+    // The upgrade-day case: a peer still on the legacy row re-emits the same
+    // bytes. `accept-identical` matches on the SECRET, before any epoch is
+    // consulted, so a stamp mismatch cannot turn a benign retry into churn.
+    seedStoredSecret(ACCT, GRP, S_OLD, 10n);
+    const group = mockRoleGroup(GROUP_ID, OWNER_PK);
+
+    expect(
+      await receivePushRoutingSecretGated(
+        ACCT,
+        group,
+        GRP,
+        MEMBER_LEAF,
+        new Uint8Array(S_OLD),
+        0n,
+      ),
+    ).toBe("accept-identical");
+    expect(unsubscribeGroup).not.toHaveBeenCalled();
+    // The stored epoch is left UNTOUCHED — see the inflation test below.
+    expect(h.mintEpochs.get(`${ACCT}\0${GRP}`)).toBe(10n);
+  });
+
+  it("accept-identical cannot INFLATE the stored epoch (a plain member freeze)", async () => {
+    // `accept-identical` clears NEITHER the authority gate nor the future
+    // clamp — it short-circuits both by design, so a retry stays idempotent
+    // for any sender. That makes the re-persist an epoch-inflation channel if
+    // it writes the INCOMING stamp: a plain member relays the group's current
+    // secret bytes stamped u64::MAX, the stored epoch jumps to the ceiling,
+    // and every later rotation — the OWNER's included — is refused
+    // `reject-stale` forever. That is precisely the permanent freeze the
+    // clamp exists to prevent, reached around it. So the stored epoch must
+    // survive the write.
+    seedStoredSecret(ACCT, GRP, S_OLD, 10n);
+    const group = mockRoleGroup(GROUP_ID, OWNER_PK);
+
+    expect(
+      await receivePushRoutingSecretGated(
+        ACCT,
+        group,
+        GRP,
+        MEMBER_LEAF,
+        new Uint8Array(S_OLD),
+        2n ** 64n - 1n,
+      ),
+    ).toBe("accept-identical");
+    expect(h.mintEpochs.get(`${ACCT}\0${GRP}`)).toBe(10n);
+
+    // ... and a legitimate owner rotation at a modest epoch still lands.
+    expect(
+      await receivePushRoutingSecretGated(ACCT, group, GRP, OWNER_LEAF, S1, 11n),
+    ).toBe("accept-owner");
+    expect(Array.from(h.secrets.get(`${ACCT}\0${GRP}`) as Uint8Array)).toEqual(
+      Array.from(S1),
+    );
+    expect(h.mintEpochs.get(`${ACCT}\0${GRP}`)).toBe(11n);
+  });
+
+  it("an accepted DIFFERENT secret clears a stale PENDING re-broadcast", async () => {
+    // ADR-0044's complementary fix. The order rule stops a stale value from
+    // SPREADING; this stops the device still holding one from re-emitting it.
+    // On web both fall out of the same atomic row write: applying an accepted
+    // secret replaces the bytes AND the pending flag in one
+    // `putGroupRouting`, so after any accept there is nothing stale left to
+    // re-broadcast. Pinned here rather than left incidental.
+    seedStoredSecret(ACCT, GRP, S_OLD, 10n);
+    h.distributed.set(`${ACCT}\0${GRP}`, false); // its broadcast failed
+    const group = mockRoleGroup(GROUP_ID, OWNER_PK, { epoch: 11n });
+
+    expect(
+      await receivePushRoutingSecretGated(ACCT, group, GRP, OWNER_LEAF, S1, 11n),
+    ).toBe("accept-owner");
+
+    // The pending flag is gone ...
+    expect(h.distributed.get(`${ACCT}\0${GRP}`)).toBe(true);
+    // ... so the next provisioning pass re-broadcasts NOTHING.
+    const sent: Uint8Array[] = [];
+    await ensureGroupPushRouting(
+      ACCT,
+      mockGroup(GROUP_ID, wasm.Role.Member, 11n),
+      DUMMY_IDENTITY,
+      async (b) => {
+        sent.push(b);
+      },
+    );
+    expect(sent.length).toBe(0);
+  });
+});
+
+describe("the mint epoch is stamped once and REPLAYED verbatim (ADR-0044)", () => {
+  const ACCT = "acctStamp";
+  const GROUP_ID = new Uint8Array([0x5a, 0x5a]);
+  const GRP_B64 = base64Encode(GROUP_ID);
+
+  it("the OWNER's MINT stamps the group's CURRENT epoch", async () => {
+    const sent: Uint8Array[] = [];
+    await ensureGroupPushRouting(
+      ACCT,
+      mockGroup(GROUP_ID, wasm.Role.Owner, 33n),
+      DUMMY_IDENTITY,
+      async (b) => {
+        sent.push(b);
+      },
+    );
+
+    expect(sent.length).toBe(1);
+    expect(decodeMintEpoch(sent[0]!)).toBe(33n);
+    // ... and the same value is persisted, so a later re-broadcast can
+    // replay it.
+    expect(vi.mocked(putGroupRouting).mock.calls[0]![0].mintEpoch).toBe(33n);
+  });
+
+  it("a MINT is REFUSED when the group epoch cannot be read (fail-closed)", async () => {
+    // An unstamped secret has no position in the total order, which is the
+    // one thing v2 exists to eliminate — so no secret at all beats an
+    // unordered one.
+    const sent: Uint8Array[] = [];
+    await ensureGroupPushRouting(
+      ACCT,
+      mockGroup(GROUP_ID, wasm.Role.Owner, null),
+      DUMMY_IDENTITY,
+      async (b) => {
+        sent.push(b);
+      },
+    );
+
+    expect(sent.length).toBe(0);
+    expect(vi.mocked(putGroupRouting)).not.toHaveBeenCalled();
+  });
+
+  it("the PENDING re-broadcast replays the STORED epoch, not the current one", async () => {
+    // THE site the F-A replay travels through. The group has advanced to
+    // epoch 100 since this secret was minted at 5; re-stamping 100 here would
+    // hand the stale secret a newer position than the rotation that
+    // superseded it and reproduce the finding with the gate fully armed.
+    seedStoredSecret(ACCT, GRP_B64, new Uint8Array(32).fill(0x42), 5n);
+    h.distributed.set(`${ACCT}\0${GRP_B64}`, false);
+    const sent: Uint8Array[] = [];
+
+    await ensureGroupPushRouting(
+      ACCT,
+      mockGroup(GROUP_ID, wasm.Role.Member, 100n),
+      DUMMY_IDENTITY,
+      async (b) => {
+        sent.push(b);
+      },
+    );
+
+    expect(sent.length).toBe(1);
+    expect(decodeMintEpoch(sent[0]!)).toBe(5n);
+    expect(decodeMintEpoch(sent[0]!)).not.toBe(100n);
+  });
+
+  it("the post-add REDISTRIBUTE replays the STORED epoch too", async () => {
+    // The secret did not change, only its audience did. Re-stamping would let
+    // a routine add-member out-rank a rotation minted at a higher epoch.
+    seedStoredSecret(ACCT, GRP_B64, new Uint8Array(32).fill(0x43), 5n);
+    const sent: Uint8Array[] = [];
+
+    await redistributeSecretToGroup(
+      ACCT,
+      mockGroup(GROUP_ID, wasm.Role.Owner, 100n),
+      async (b) => {
+        sent.push(b);
+      },
+    );
+
+    expect(sent.length).toBe(1);
+    expect(decodeMintEpoch(sent[0]!)).toBe(5n);
+  });
+
+  it("a LEGACY stored row re-broadcasts at 0n rather than inventing a stamp", async () => {
+    seedStoredSecret(ACCT, GRP_B64, new Uint8Array(32).fill(0x44)); // no epoch
+    h.distributed.set(`${ACCT}\0${GRP_B64}`, false);
+    const sent: Uint8Array[] = [];
+
+    await ensureGroupPushRouting(
+      ACCT,
+      mockGroup(GROUP_ID, wasm.Role.Member, 100n),
+      DUMMY_IDENTITY,
+      async (b) => {
+        sent.push(b);
+      },
+    );
+
+    expect(sent.length).toBe(1);
+    expect(decodeMintEpoch(sent[0]!)).toBe(0n);
+  });
+
+  it("a ROTATION stamps the current epoch, and its RETRY replays that stamp", async () => {
+    seedStoredSecret(ACCT, GRP_B64, new Uint8Array(32).fill(0x45), 5n);
+    h.distributed.set(`${ACCT}\0${GRP_B64}`, true);
+    const sent: Uint8Array[] = [];
+    let failNext = true;
+    const broadcast = async (b: Uint8Array): Promise<void> => {
+      sent.push(b);
+      if (failNext) {
+        failNext = false;
+        throw new Error("DS unreachable");
+      }
+    };
+
+    // Rotate at epoch 11; the broadcast fails, leaving the row pending.
+    expect(
+      await rotatePushRoutingSecret(
+        ACCT,
+        mockGroup(GROUP_ID, undefined, 11n),
+        "owner",
+        broadcast,
+      ),
+    ).toBe("rotated");
+    expect(decodeMintEpoch(sent[0]!)).toBe(11n);
+
+    // The retry fires much later, at epoch 50 — and must STILL carry 11.
+    await ensureGroupPushRouting(
+      ACCT,
+      mockGroup(GROUP_ID, wasm.Role.Owner, 50n),
+      DUMMY_IDENTITY,
+      broadcast,
+    );
+    expect(sent.length).toBe(2);
+    expect(decodeMintEpoch(sent[1]!)).toBe(11n);
+    expect(Array.from(decodeSecret(sent[1]!))).toEqual(
+      Array.from(decodeSecret(sent[0]!)),
+    );
+  });
+
+  it("a ROTATION is abandoned when the epoch cannot be read (fail-closed)", async () => {
+    const held = new Uint8Array(32).fill(0x46);
+    seedStoredSecret(ACCT, GRP_B64, held, 5n);
+    const sent: Uint8Array[] = [];
+
+    expect(
+      await rotatePushRoutingSecret(
+        ACCT,
+        mockGroup(GROUP_ID, undefined, null),
+        "owner",
+        async (b) => {
+          sent.push(b);
+        },
+      ),
+    ).toBe("skip-unknown-epoch");
+    expect(sent.length).toBe(0);
+    expect(vi.mocked(putGroupRouting)).not.toHaveBeenCalled();
+    // The old secret survives, so a later trigger can still rotate.
+    expect(Array.from(h.secrets.get(`${ACCT}\0${GRP_B64}`) as Uint8Array))
+      .toEqual(Array.from(held));
+    expect(unsubscribeGroup).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C-61 — the rotation broadcast STRICTLY FOLLOWS the Remove commit
+// ---------------------------------------------------------------------------
+
+describe("C-61 — publish the Remove commit, THEN rotate", () => {
+  const ACCT = "acctC61";
+  const GROUP_ID = new Uint8Array([0xc6, 0x10]);
+  const GRP_B64 = base64Encode(GROUP_ID);
+  /** The secret the evicted member is holding, minted pre-removal. */
+  const S_OLD = new Uint8Array(32).fill(0xee);
+  const PRE_REMOVAL_EPOCH = 10n;
+  const POST_REMOVAL_EPOCH = 11n;
+
+  /** A group whose epoch the test advances, exactly as applying a Remove
+   *  commit locally does. */
+  function epochGroup(): { group: WasmGroup; advance: () => void } {
+    let epoch = PRE_REMOVAL_EPOCH;
+    return {
+      group: {
+        get groupId(): Uint8Array {
+          return GROUP_ID;
+        },
+        get epoch(): bigint {
+          return epoch;
+        },
+        ownRole: (): number | undefined => undefined,
+      } as unknown as WasmGroup,
+      advance: (): void => {
+        epoch = POST_REMOVAL_EPOCH;
+      },
+    };
+  }
+
+  function seedSettled(): void {
+    seedStoredSecret(ACCT, GRP_B64, S_OLD, PRE_REMOVAL_EPOCH);
+    h.distributed.set(`${ACCT}\0${GRP_B64}`, true);
+  }
+
+  it("stamps the rotation at the POST-removal epoch, so it out-ranks the secret it replaces", async () => {
+    // How this fails under a SWAP: the assertions below read the epoch the
+    // emitted envelope was STAMPED with. `rotatePushRoutingSecret` reads
+    // `group.epoch` at mint time, and `advance()` — the local application of
+    // the Remove commit — is what moves that value from 10 to 11. Start the
+    // rotation before the removal and the stamp is 10, so
+    // `decodeMintEpoch(...) === POST_REMOVAL_EPOCH` fails outright, and the
+    // `isNewer` assertion below flips from "the rotation always wins" to a
+    // same-epoch tie decided by the 32 secret bytes. The companion test after
+    // this one runs exactly that swap and records both consequences.
+    seedSettled();
+    const { group, advance } = epochGroup();
+    const sent: Uint8Array[] = [];
+    let rotation!: Promise<Awaited<ReturnType<typeof rotatePushRoutingSecret>>>;
+
+    const commitId = await publishRemoveThenRotate({
+      publishRemove: async () => {
+        // Applying + publishing the Remove commit advances the local epoch.
+        advance();
+        return 4242;
+      },
+      rotate: () => {
+        rotation = rotatePushRoutingSecret(ACCT, group, "owner", async (b) => {
+          sent.push(b);
+        });
+        return rotation;
+      },
+    });
+    expect(commitId).toBe(4242);
+    expect(await rotation).toBe("rotated");
+
+    // The rotation was sealed AND stamped after the removal.
+    expect(sent.length).toBe(1);
+    expect(decodeMintEpoch(sent[0]!)).toBe(POST_REMOVAL_EPOCH);
+
+    // ... which is what makes the ordering a GUARANTEE rather than a coin
+    // flip: the evicted member's secret sorts HIGHER bytewise, so only the
+    // strictly greater epoch puts the rotation on top.
+    const rotated = decodeSecret(sent[0]!);
+    expect(
+      wasm.pushRoutingSecretIsNewer(
+        POST_REMOVAL_EPOCH,
+        rotated,
+        PRE_REMOVAL_EPOCH,
+        S_OLD,
+      ),
+    ).toBe(true);
+    expect(
+      wasm.pushRoutingSecretIsNewer(
+        PRE_REMOVAL_EPOCH,
+        S_OLD,
+        POST_REMOVAL_EPOCH,
+        rotated,
+      ),
+    ).toBe(false);
+  });
+
+  it("the INVERTED order would stamp the pre-removal epoch and lose the guarantee", async () => {
+    // Not a test of production code — a demonstration that the assertion
+    // above actually discriminates. Rotating BEFORE the Remove commit lands
+    // stamps epoch 10, tying with the secret the evicted member holds, so the
+    // outcome falls to the byte comparison. With these fixtures the stale
+    // secret sorts higher and the rotation LOSES outright.
+    seedSettled();
+    const { group, advance } = epochGroup();
+    const sent: Uint8Array[] = [];
+
+    await rotatePushRoutingSecret(ACCT, group, "owner", async (b) => {
+      sent.push(b);
+    });
+    advance(); // the Remove commit lands afterwards — too late
+
+    expect(decodeMintEpoch(sent[0]!)).toBe(PRE_REMOVAL_EPOCH);
+    const rotated = decodeSecret(sent[0]!);
+    // Tied on epoch, so the bytes decide — and here the stale secret wins.
+    expect(
+      wasm.pushRoutingSecretIsNewer(
+        PRE_REMOVAL_EPOCH,
+        rotated,
+        PRE_REMOVAL_EPOCH,
+        S_OLD,
+      ),
+    ).toBe(false);
+    expect(
+      wasm.pushRoutingSecretIsNewer(
+        PRE_REMOVAL_EPOCH,
+        S_OLD,
+        PRE_REMOVAL_EPOCH,
+        rotated,
+      ),
+    ).toBe(true);
+  });
+
+  it("the rotation is not STARTED until the removal resolves", async () => {
+    // The ordering is about start time, not completion: the rotation stays
+    // fire-and-forget so a push failure never unwinds a membership change.
+    seedSettled();
+    const { group, advance } = epochGroup();
+    const order: string[] = [];
+    let releaseRemove!: () => void;
+    const removeGate = new Promise<void>((r) => {
+      releaseRemove = r;
+    });
+    let rotation!: Promise<Awaited<ReturnType<typeof rotatePushRoutingSecret>>>;
+
+    const pending = publishRemoveThenRotate({
+      publishRemove: async () => {
+        order.push("remove-started");
+        await removeGate;
+        advance();
+        order.push("remove-published");
+        return 1;
+      },
+      rotate: () => {
+        order.push("rotate-started");
+        rotation = rotatePushRoutingSecret(ACCT, group, "owner", async (b) => {
+          order.push(`rotate-broadcast@${decodeMintEpoch(b)}`);
+        });
+        return rotation;
+      },
+    });
+
+    await flushMicrotasks();
+    // The removal is parked; nothing about the rotation has happened.
+    expect(order).toEqual(["remove-started"]);
+
+    releaseRemove();
+    await pending;
+    await rotation;
+
+    expect(order).toEqual([
+      "remove-started",
+      "remove-published",
+      "rotate-started",
+      `rotate-broadcast@${POST_REMOVAL_EPOCH}`,
+    ]);
+  });
+
+  it("a FAILED removal never rotates", async () => {
+    // A rotation after a removal that did not land would re-key the group for
+    // nothing and, worse, seal at the pre-removal epoch.
+    seedSettled();
+    const { group } = epochGroup();
+    const sent: Uint8Array[] = [];
+
+    await expect(
+      publishRemoveThenRotate({
+        publishRemove: async () => {
+          throw new Error("commit rejected");
+        },
+        rotate: () =>
+          rotatePushRoutingSecret(ACCT, group, "owner", async (b) => {
+            sent.push(b);
+          }),
+      }),
+    ).rejects.toThrow("commit rejected");
+
+    await flushMicrotasks();
+    expect(sent.length).toBe(0);
+    expect(vi.mocked(putGroupRouting)).not.toHaveBeenCalled();
+  });
+
+  it("a rotation failure is reported, not thrown at the removal's caller", async () => {
+    seedSettled();
+    const { group, advance } = epochGroup();
+    const errors: unknown[] = [];
+
+    const commitId = await publishRemoveThenRotate({
+      publishRemove: async () => {
+        advance();
+        return 7;
+      },
+      rotate: () => Promise.reject(new Error("rotation blew up")),
+      onRotationError: (err) => errors.push(err),
+    });
+
+    expect(commitId).toBe(7);
+    await flushMicrotasks();
+    expect(errors).toHaveLength(1);
+    expect((errors[0] as Error).message).toBe("rotation blew up");
+    // Nothing about the group's own epoch was disturbed.
+    expect(group.epoch).toBe(POST_REMOVAL_EPOCH);
+  });
+
+  it("no session means no rotation, and the removal still lands", async () => {
+    seedSettled();
+    expect(
+      await publishRemoveThenRotate({
+        publishRemove: async () => 9,
+      }),
+    ).toBe(9);
+    await flushMicrotasks();
+    expect(vi.mocked(putGroupRouting)).not.toHaveBeenCalled();
   });
 });
 

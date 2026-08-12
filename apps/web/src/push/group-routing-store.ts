@@ -48,9 +48,11 @@
  * The fix records whether the envelope was **confirmed on the wire**. Unlike
  * the ADR-0040 commit outbox — which must store the commit BYTES, because
  * they are unrecoverable once the in-memory MLS state moves on — the
- * distribution envelope is **recomputable from the stored secret at any
- * time** (`composePushRoutingSecret(secret)`). So one durable boolean is the
- * whole mechanism; there is nothing to spool.
+ * distribution envelope is **recomputable from the stored row at any time**
+ * (`composePushRoutingSecret(mintEpoch, secret)` — both operands durable
+ * here, which is exactly why the ADR-0044 stamp had to become a stored field
+ * rather than a transient wire one). So one durable boolean is the whole
+ * retry mechanism; there is nothing to spool.
  *
  * The flag is per-`(account, group)`, NOT per-member, so it must be cleared
  * again whenever a LATER send of the same envelope fails. The case that
@@ -70,6 +72,34 @@
  * an upgrade. Only an explicit `false` — written by the mint path in this
  * build — means "pending".
  *
+ * ## The `mintEpoch` field — ADR-0044, durable state, NOT a wire field
+ *
+ * The v2 distribution envelope carries an 8-byte `mint_epoch` the minter
+ * stamps from `Group.epoch` at MINT time, and the receive gate orders
+ * envelopes by the pair `(mintEpoch, secretBytes)`. That order is only sound
+ * if the stamp **travels with the secret for that secret's whole life**: every
+ * re-broadcast recomposes the envelope from the stored secret, so it must
+ * replay the epoch the secret was MINTED under, never the current one. A
+ * re-stamp at send time would make a stale secret out-rank the live one and
+ * reproduce the very F-A replay the order exists to close — with the ordering
+ * gate fully in place and working as specified.
+ *
+ * So the epoch is durable per-`(account, group)` state and lives here,
+ * plaintext beside `distributed`: it is a monotone counter, not key material
+ * (invariant #2 — nothing here is secret except the AES-GCM-wrapped secret
+ * itself), and the ADR explicitly notes it may be logged.
+ *
+ * **No `DB_VERSION` bump.** An IndexedDB object store holds arbitrary
+ * structured-cloneable values; only its `keyPath` and its indexes are schema.
+ * `secrets` has `keyPath: "key"` and NO indexes, so adding a field is not a
+ * schema change and needs no upgrade transaction. (A bump would also be
+ * actively unhelpful: `public/sw.js` opens this database with a version-less
+ * `indexedDB.open(name)`, so a foreground upgrade it does not participate in
+ * buys nothing.) A row written before this field existed carries none and is
+ * read as **`0n`** — the lowest position in the order, so any authorised
+ * stamped mint supersedes a legacy secret, which is the direction that
+ * converges.
+ *
  * ```text
  *   db   "lakko-push-routing"  v1
  *   ├── store "secrets"  keyPath: "key"  (string = accountId "\0" groupIdB64)
@@ -78,7 +108,8 @@
  *   │       accountId:  <b64-uuidv7>,
  *   │       groupIdB64: <b64 group_id>,
  *   │       ciphertext: Uint8Array,  // [12-byte IV | AES-GCM(secret)+tag]
- *   │       distributed?: boolean    // absent (legacy) === true
+ *   │       distributed?: boolean,   // absent (legacy) === true
+ *   │       mintEpoch?: bigint       // absent (legacy) === 0n  (ADR-0044)
  *   │     }
  *   └── store "routes"  keyPath: "pushGidHex"  (string, 64 lowercase hex)
  *         row {
@@ -126,6 +157,28 @@ interface SecretRow {
    *  none, and {@link getGroupRoutingState} reads that as `true` (see the
    *  module doc). Only an explicit `false` means "pending". */
   distributed?: boolean;
+  /** ADR-0044 — the MLS group epoch this secret was MINTED under, replayed
+   *  verbatim by every re-broadcast. **Optional on purpose** — a row written
+   *  before this field existed has none, and {@link getGroupRoutingRecord}
+   *  reads that as `0n` (see the module doc). */
+  mintEpoch?: bigint;
+}
+
+/**
+ * A stored secret together with the mint epoch it was stamped under —
+ * ADR-0044's unit of state.
+ *
+ * Read as a PAIR, from ONE row, deliberately. Reading the secret and its
+ * epoch through two separate transactions could tear across a concurrent
+ * receive (secret from before the write, epoch from after), and a torn pair
+ * composes an envelope claiming a live epoch for a superseded secret — which
+ * is precisely the F-A shape the ordering exists to refuse.
+ */
+export interface GroupRoutingRecord {
+  /** The 32-byte `push_routing_secret`. */
+  secret: Uint8Array;
+  /** The epoch this secret was minted under. `0n` for a legacy row. */
+  mintEpoch: bigint;
 }
 
 /**
@@ -229,6 +282,12 @@ async function decrypt(
  *                   on the owner's mint (the broadcast has not happened
  *                   yet); `true` on a RECEIVE (a secret that arrived over
  *                   the journal is trivially already on the wire).
+ * @param args.mintEpoch ADR-0044 — the epoch this secret was MINTED under.
+ *                   On a mint / rotation that is `Group.epoch` read at mint
+ *                   time; on a RECEIVE it is the epoch carried by the
+ *                   accepted envelope, NOT the receiver's current epoch —
+ *                   the stamp identifies the secret, not the moment it was
+ *                   applied.
  * @param deviceKey  the non-extractable AES-GCM device root key. When
  *                   `null` (half-reset — `forgetDevice` in flight) the
  *                   caller must not reach here; this throws rather than
@@ -241,6 +300,7 @@ export async function putGroupRouting(
     secret: Uint8Array;
     pushGidHex: string;
     distributed: boolean;
+    mintEpoch: bigint;
   },
   deviceKey: CryptoKey,
 ): Promise<void> {
@@ -251,6 +311,7 @@ export async function putGroupRouting(
     groupIdB64: args.groupIdB64,
     ciphertext,
     distributed: args.distributed,
+    mintEpoch: args.mintEpoch,
   };
   const routeRow: RouteRow = {
     pushGidHex: args.pushGidHex,
@@ -269,19 +330,50 @@ export async function putGroupRouting(
 }
 
 /**
+ * ADR-0044 — read + decrypt a group's `push_routing_secret` TOGETHER with the
+ * mint epoch it was stamped under, or `null` when this device holds none for
+ * the `(account, group)` pair. Throws only on an actual AES-GCM decrypt
+ * failure (key mismatch / tampered ciphertext).
+ *
+ * This is the reader every ordering-sensitive caller must use — the compose
+ * sites (which replay the stored epoch verbatim) and the receive gate (which
+ * compares against it). One `get`, so the pair can never tear; see
+ * {@link GroupRoutingRecord}.
+ *
+ * A legacy row carrying no `mintEpoch` reports `0n`, the lowest position in
+ * the order.
+ */
+export async function getGroupRoutingRecord(
+  accountId: string,
+  groupIdB64: string,
+  deviceKey: CryptoKey,
+): Promise<GroupRoutingRecord | null> {
+  const row = await readSecretRow(accountId, groupIdB64);
+  if (row === undefined) return null;
+  return {
+    secret: await decrypt(deviceKey, row.ciphertext),
+    mintEpoch: row.mintEpoch ?? 0n,
+  };
+}
+
+/**
  * Read + decrypt a group's `push_routing_secret`, or `null` when this
  * device holds none for the `(account, group)` pair (a member that has
  * not yet received the distribution envelope). Throws only on an actual
  * AES-GCM decrypt failure (key mismatch / tampered ciphertext).
+ *
+ * Prefer {@link getGroupRoutingRecord} anywhere the epoch matters — i.e.
+ * anywhere an envelope is composed or an incoming one is ordered. This
+ * remains for the callers that genuinely only need the bytes (deriving the
+ * `push_gid`).
  */
 export async function getGroupRoutingSecret(
   accountId: string,
   groupIdB64: string,
   deviceKey: CryptoKey,
 ): Promise<Uint8Array | null> {
-  const row = await readSecretRow(accountId, groupIdB64);
-  if (row === undefined) return null;
-  return decrypt(deviceKey, row.ciphertext);
+  return (await getGroupRoutingRecord(accountId, groupIdB64, deviceKey))
+    ?.secret ?? null;
 }
 
 /** Read the raw `secrets` row (still encrypted), or `undefined`. */
