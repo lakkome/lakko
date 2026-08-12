@@ -2939,15 +2939,30 @@ gate, like G-26) — the reorder + torn-write + sweep are proven by the per-plat
 unit suites. Option B (defer the eager merge in the MLS core until publish is
 confirmed) stays deferred as a future refinement.
 
-### G-36: Push routing under an opaque `push_gid` — the co-membership cluster, the stable provider pseudonym, and three delivery-side residuals ([ADR-0042](../adr/0042-push-opaque-group-routing-id.md), 2026-08)
+### G-36: Push routing under an opaque `push_gid` — the co-membership cluster and the surviving delivery-side residuals ([ADR-0042](../adr/0042-push-opaque-group-routing-id.md) + [ADR-0043](../adr/0043-push-routing-secret-rotation-on-removal.md), 2026-08)
 
 [ADR-0042](../adr/0042-push-opaque-group-routing-id.md) landed end-to-end (core +
 FFI + web + iOS + Android; `lakko-security` **APPROVE-WITH-NOTES**, no
 CRITICAL/HIGH) and is recorded as **C-60**. This entry is the honest inventory of
 what it did **not** close. Like G-33 / G-34 / G-35 this is a **free-form audit
 record** — it adds **no** indexed C / I / T invariant of its own (C-60 is ADR-0042's
-positive property; the counts move to **8 I + 60 C + 15 T** because of C-60, not
-because of this gap).
+positive property and **C-61** is ADR-0043's; the counts move to
+**8 I + 61 C + 15 T** because of those two, not because of this gap).
+
+**Update (2026-08-11) — [ADR-0043](../adr/0043-push-routing-secret-rotation-on-removal.md)
+landed on all three clients (`935250a` web, `a6ed544` iOS + Android), rotating the
+secret on member removal.** It **closes residual 2** (both halves), **widens
+residual 3**, leaves **residual 1** substantively intact, and **adds residuals 5
+and 6**. C-60 is **refined** rather than renumbered (the routing id is the same
+property, now also forward-unlinkable across a removal), and the sequencing rule
+the rotation depends on is pinned as the new **C-61**. The `lakko-security` pass
+ADR-0043 declares mandatory for option (b) **was run: APPROVE-WITH-NOTES, no
+CRITICAL/HIGH, no invariant #2/#3/#4 break on the live path**, with one blocking
+MEDIUM (**F1** — a coalescing rotation lock on web + iOS folded a second, distinct
+removal into an in-flight rotation, handing the second evictee the new secret;
+Android's serializing `Mutex` was already correct) now fixed on both platforms by
+adopting Android's lock. Its remaining findings are carried as residuals 3, 5, 6
+and 7 below.
 
 **What ADR-0042 actually bought, stated precisely.** Push subscribe / notify / the
 delivered payload now route under `push_gid = keyed-BLAKE3(push_routing_secret,
@@ -2962,41 +2977,142 @@ push-gw↔DS cross-correlation is impossible without the secret. That removes th
 (`push_group_subscriptions`), and APNs / FCM still receive a **stable per-group
 pseudonym in cleartext** (the wake payload `g` plus the APNs `thread-id`, both
 `hex::encode` of the routing id — `providers/apns.rs:368`/`:371`,
-`providers/fcm.rs:369`). Because `push_gid` **never rotates**, a provider (or
-push-gw itself) can still observe "these N device tokens share one opaque group
-handle" and track that cluster **and its churn** for the group's entire lifetime —
+`providers/fcm.rs:369`). A provider (or push-gw itself) can observe "these N device
+tokens share one opaque group handle" and track that cluster **and its churn** —
 it simply can no longer join that handle to the DS journal key. The set-membership
-and its evolution over time remain visible; only the group's *name* is now opaque.
+and its evolution over time remain visible; only the group's *name* is opaque.
 WebPush is unaffected either way (the whole `WakeBody` is RFC-8291
 `aes128gcm`-encrypted before it leaves push-gw, `providers/webpush.rs:252-256`).
-Closing this needs a rotating or per-device-blinded routing id (the ADR's rejected
-Option A direction) plus payload minimisation, not a renaming.
 
-#### Residual 2 — no rotation on membership change, compounded by dead unsubscribe
+**ADR-0043's rotation does NOT close this, and the precise reason matters.**
+Rotation **renames** the cluster; it does not unlink it. A rotation is not a
+mixnet — the device-token set is identical-or-near-identical either side of the
+boundary, so the provider **re-links across it by token-set intersection**. Worse,
+the set *difference* across the boundary **names the evicted device**, which is
+arguably a signal the stable id did not hand over so legibly: before ADR-0043 a
+removal was invisible to the provider (nothing changed); after it, a removal is a
+visible re-keying event with an identifiable diff. That trade was made
+deliberately — it buys the closure of residual 2, a live channel to an
+already-adversarial evicted party, at the cost of legibility to a party that
+already watches the cluster continuously — but it is a judgement, and it means the
+cluster leak is **unchanged in substance**.
 
-V1 deliberately does not re-mint the secret when a member is removed, so **a removed
-member keeps a valid `push_gid`** and can keep deriving the group's current routing
-id. This is compounded by a second, independent finding: **per-group unsubscribe is
-never called anywhere.** `unsubscribeGroup` exists on all three clients
+Closing this needs **per-device-blinded routing ids** — each subscriber
+registering under an id only it and the publisher can compute, so no two devices
+ever share a key-space value — plus payload minimisation. That is the first change
+in this arc that would **not** leave `services/push-gw` untouched (notify would
+need per-recipient ids rather than one JOIN key). A rotating id is not a
+substitute.
+
+#### ~~Residual 2 — no rotation on membership change, compounded by dead unsubscribe~~ CLOSED (2026-08-11, ADR-0043)
+
+**The original finding.** V1 deliberately did not re-mint the secret when a member
+was removed, so **a removed member kept a valid `push_gid`** and kept deriving the
+group's current routing id — an ongoing post-eviction metadata channel ("this group
+was active at time T"), not merely stale rows. This was compounded by a second,
+independent finding: **per-group unsubscribe was never called anywhere.**
+`unsubscribeGroup` existed on all three clients
 (`apps/web/src/push/client.ts:204`, `apps/ios/Lakko/Push/PushClient.swift:165`,
 `apps/android/.../push/PushClient.kt:197`) and the `POST /push/group/unsubscribe`
-endpoint is live (`services/push-gw/src/main.rs:250`), but **no call site exists** —
-it is dead code on every client. So an ex-member's push-gw subscription is never
-torn down and **keeps receiving wakes** for a group it has left. The two compound:
-rotation alone would not help while the stale subscription persists, and unsubscribe
-alone would not help while the ex-member still derives the id.
+endpoint was live (`services/push-gw/src/main.rs:250`), but **no call site existed**
+— dead code on every client. The two compounded: rotation alone would not help
+while the stale subscription persisted, and unsubscribe alone would not help while
+the ex-member could still derive the id.
 
-#### Residual 3 — admin-seed denial of service
+**Both halves are now closed by [ADR-0043](../adr/0043-push-routing-secret-rotation-on-removal.md).**
+
+- **The wake stream ends — but state the mechanism exactly.** On a membership
+  shrink the owner **or an admin** (ratified option (b)) re-mints and
+  redistributes the secret, sealed at the **post-remove epoch**, so RFC 9420
+  forward secrecy denies the evicted leaf the envelope. The ex-member's push-gw
+  row is **never deleted** — nobody else *can* delete it (`group_unsubscribe`
+  removes only the `(device, group)` row named in the request, and a device knows
+  only its own pseudonym) and no client has "you were removed" handling. It goes
+  **INERT**: nothing ever notifies the old gid again. **That inertness is the
+  win** — the ex-member stops learning the group is active — and it is
+  deliberately *not* cleanup. The row persists.
+- **Per-group unsubscribe stops being dead code.** Its **first real caller** on
+  every client is the receive-side teardown, in which each remaining member
+  retires **its own** old gid (unsubscribe + delete the reverse-index row): web
+  `apps/web/src/push/group-routing.ts:336`, iOS
+  `apps/ios/Lakko/Push/PushGroupRouting.swift:220`, Android
+  `apps/android/.../chat/ChatRepository.kt:1670`. This half is **required, not
+  hygiene**: without it every member would leave one live push-gw row per
+  rotation, turning a single live cluster into a live cluster **plus a frozen
+  archive of every previous one** — a strictly richer artifact for residual 1 than
+  not rotating at all.
+
+Rotation fires only on a membership **shrink**, detected as a set difference over
+member Ed25519 signature keys (not counts, not leaf indices — OpenMLS reuses a
+vacated leaf for the next Add). It **never mints**: a device holding no secret is a
+no-op, so widening rotation to admins cannot create a second minter.
+
+#### Residual 3 — admin denial of service, WIDENED from seed to churn (ADR-0043)
 
 The `62f23ad` refinement widened the receive gate from owner-only to **owner +
 admins** to fix a real delivery regression (ADR-0022 lets an admin add members, and
-a member added by a non-owner admin would otherwise never receive the secret). An
-admin may **seed** a secret into a hole but never **overwrite** a stored one. The
-residual: **a malicious admin can seed a bogus secret to a member who holds none**,
-denying that member's push wakes until the owner next rotates. Bounded — foreground
-polling still delivers messages, so this is a wake-latency denial rather than a
-message-loss one, and an admin can already remove the member outright, so it grants
-no capability an admin lacks. Accepted, not closed.
+a member added by a non-owner admin would otherwise never receive the secret). At
+that point an admin could **seed** a secret into a hole but never **overwrite** a
+stored one, so the residual was: a malicious admin can seed a bogus secret to a
+member who holds none, denying that member's wakes until the owner next rotates.
+
+**ADR-0043's ratified option (b) widens this.** The gate's admin row flipped from a
+refusal to an acceptance (`reject-admin-overwrite` -> `accept-admin-rotate` on web;
+the natives keep a binary accept/reject and simply flip the row), so an admin may
+now **overwrite whatever is stored**. The residual therefore generalises from *"a
+malicious admin can seed a member holding none"* to **"a malicious admin can churn
+the whole group's routing id at will"**, repeatedly denying **every** member's
+wakes until the owner rotates back.
+
+Still bounded, and for the same reasons as before: foreground polling keeps
+delivering messages, so this is a wake-latency denial rather than message loss; and
+an admin can already remove members outright, so the capability gain is small. But
+the widening is real and is recorded rather than waived — it re-opens the shape of
+the `lakko-security` **MEDIUM-1** fix (`21554f2`), which existed precisely to stop
+a non-owner from unilaterally rotating the routing id.
+
+**Android additionally deleted a prior hardening to make (b) work.** The
+strip-admins-on-unreadable-store rule (from the MEDIUM-1 arc) narrowed the admin
+set when the secret-store read *threw*, so an unreadable store could not be
+mistaken for a fillable hole. Under (b) that premise is gone — an admin may
+overwrite whatever is stored — so keeping the rule would have refused the very
+admin rotation (b) exists to permit, on nothing more than a transient store error.
+It is removed (`GroupPushRouting.kt:499-504`, historical note `:464-474`). Who may
+write is still decided by the role table and is still fail-closed; an unreadable
+**role table** (as opposed to an unreadable secret store) still refuses. Web and
+iOS encoded the same premise inline via a `storedUnreadable` flag rather than by
+rewriting the authority, and both kept the parameter in a demoted role (web picks
+*which* accept to report; iOS keeps it as an unread diagnostic).
+
+**What did NOT change, and is what keeps (b) bounded:** rotation **never mints**.
+Option (b) widened *overwrite* authority only, so an admin can replace a secret the
+group already holds but can never bring one into existence — minting stays
+owner-only, so the group's `push_gid` can never diverge into two.
+
+**One further consequence, and the server-side premises it rests on.** Under (b) a
+malicious admin can keep **re-establishing** a routing id it shares with an evicted
+party *after each owner rotation*, rather than only leaking the current one once.
+This is **not a new capability class** — an admin could always exfiltrate the
+current secret out-of-band — but it turns a one-shot leak into a **sustained** one,
+because the admin can re-converge the group onto a secret of its choosing every
+time the owner rotates away from it. Two server-side facts make that directly
+exploitable and are worth stating as premises rather than leaving implicit:
+
+- **`POST /push/group/subscribe` performs no membership check.** push-gw cannot
+  perform one — it is opaque to group membership by design (invariant #2) — so a
+  shared secret is *directly subscribable* by a non-member. Possession of the
+  secret **is** the authorisation.
+- **`POST /push/group/unsubscribe` carries no ownership proof.** It deletes
+  whatever `(device, group)` pair is named in the request and is PoW-gated only.
+  So the claim elsewhere in this entry that "no remaining member can tear down the
+  ex-member's row" rests on **the device pseudonym never being published**, not on
+  any server-side authorization. That is a confidentiality assumption about an
+  identifier, not an access-control guarantee.
+
+Accepted, not closed. This residual is the substance of the `lakko-security` pass
+ADR-0043 declares mandatory for option (b), which **was run — APPROVE-WITH-NOTES,
+no CRITICAL/HIGH** — and which recorded both server-side premises above as explicit
+judgements rather than leaving them implicit.
 
 #### Residual 4 — legacy / no-role-table groups get no push at all
 
@@ -3009,6 +3125,197 @@ raw `group_id`. The privacy posture is the preferred one (invariant #4 — no si
 downgrade), but the functional consequence is real and silent: **pre-ADR-0022 groups
 receive no push wakes whatsoever**, with no user-visible signal. A provisioning path
 for legacy groups (or an explicit UI state) is unbuilt.
+
+**ADR-0043 does not change this, and adds a second clause: such groups now also
+never rotate.** The rotation decision refuses a group whose local role resolves to
+neither owner nor admin, which a no-role-table group always does
+(`skip-not-authorized`). Note the asymmetry, because it is easy to invert: the
+**receive gate** *accepts* a changed secret in a no-role-table group
+(`accept-no-owner` on web; the same branch on both natives) — that is the legacy /
+open-group behaviour ADR-0042 established. It is the **rotation** decision that
+refuses. Receive-accept and rotate-refuse are different questions about the same
+group.
+
+#### Residual 5 — the old gid can be orphaned, and NOT only by a crash (new, ADR-0043)
+
+ADR-0043 prescribed a durable pending-rotation record modelled on the ADR-0040
+commit outbox. **It was deliberately not built**, because its stated justification
+went stale between that ADR being written (`5665018`) and being implemented: the
+three commits `5729aa0` -> `9cb8f06` -> `7e7d143` had meanwhile added a durable
+`distributed` flag on the secret row plus a re-broadcast branch open to **any**
+holder, reached from both chat-open and the launch sweep — so a failed rotation
+broadcast is already retried without a new record.
+
+**What the flag does not cover** is the other side effect. It recovers the
+**broadcast**, never the **teardown**: nothing anywhere records the OLD gid
+awaiting retirement, which lives only as an in-memory local between the persist and
+the unsubscribe. Once the secrets row is overwritten (it is keyed
+`(account, group)` and clobbered in place) the old bytes are unrecoverable, the old
+`push_gid` can never be named again, and its push-gw subscription plus
+reverse-index row become a **permanent orphan**.
+
+**Three paths reach it, and none of the likelier two involves a crash at all:**
+
+1. **A crash** between the persist and the teardown.
+2. **A transient secret-store read failure on the receive path.** The teardown is
+   conditioned on the *previously stored* secret, snapshotted before the persist.
+   If that read fails it yields `stored = null` on all three clients — which is
+   indistinguishable from "this device held nothing" — so the new secret is
+   persisted and the teardown is simply **skipped**. No crash, no error surfaced,
+   same inert orphan. This is **more likely** than the crash window, since it needs
+   only a momentary store hiccup rather than process death inside a narrow window.
+3. **A rotation/receive interleaving** (`lakko-security` **F-E**). Rotation and
+   receive are **not mutually excluded** — `receivePushRoutingSecretGated` takes no
+   rotation lock on any client — so a peer's envelope can interleave with a local
+   rotation and leave an **intermediate** gid subscribed with nothing pointing at
+   it. Bounded the same way as the other two: every candidate id in that
+   interleaving is **post-removal**, so it is never an id an evicted member can
+   derive.
+
+**Verdict: accepted, and the durable record should NOT be built** — an explicit
+`lakko-security` judgement on this arc, not merely this entry's opinion. The orphan is
+**inert** — nothing ever notifies the old gid again — so this is an accumulation
+defect, not a live channel, the same class as residual 2's ex-member row. What the
+row leaks is bounded to "this device was once in *some* group", with no linkage to
+which group or to the current cluster. Building the durable record to reclaim it
+would cost a persist on a hot path plus a launch sweep, which is not proportionate
+to reclaiming a row that leaks nothing further. Recorded rather than fixed. (Were
+it ever built, it would be **lighter** than ADR-0043 prescribed: the new secret is
+already durable by then, so only the *old gid* needs recording — an "old gids
+awaiting retirement" list.) All three paths are accepted on the same reasoning.
+
+#### Residual 6 — the post-Remove-epoch ordering (C-61) is enforced structurally, with no test (new, ADR-0043)
+
+The whole of residual 2's closure depends on the rotation broadcast being emitted
+**strictly after** the Remove commit, so that the envelope is sealed at the
+post-remove epoch and RFC 9420 forward secrecy denies it to the evicted leaf. That
+rule is pinned as **C-61**. It is currently enforced **structurally only** — by
+call-site sequencing (an awaited publish, or a lock block that closes) on each
+client — and **no test pins it on any client**; the sibling
+read-old-before-overwrite rule *is* test-pinned.
+
+This is exactly the property a refactor can silently break: hoisting the rotation
+above the publish, or making the publish non-blocking, would pass every existing
+test while restoring the leak, and the failure is **invisible at runtime** — the
+evicted member simply keeps receiving wakes, as it did before ADR-0043. ADR-0043
+itself states the ordering "must be asserted in a test"; **that requirement is
+unmet**. A regression test on each client is the fix. (`lakko-security` **F3**,
+LOW — the review reached the same finding independently.)
+
+#### Residual 7 — concurrent rotators can strand a device on a superseded secret (new, ADR-0043; `lakko-security` F2, MEDIUM)
+
+A rotator applies **its own** mint at **local** time, not at its own position in
+the DS journal. So a device that publishes its rotation at journal id `p` and then
+polls an earlier message `q < p` it had not yet seen will **overwrite its own newer
+secret with the older one** — and the row is then marked `distributed: true`, so
+nothing ever re-broadcasts to repair it.
+
+Under option (b) this is **routine rather than a race**: one removal produces
+**N+1 rotations** in a group with an owner and N admins, because the committer
+rotates from its own remove path while every other owner/admin observes the same
+shrink through its poll diff and rotates too. The affected device keeps deferring
+or routes under a gid nobody notifies, self-healing only at the next rotation.
+Foreground polling delivers messages throughout, so this is a **wake-delivery
+defect, not message loss**.
+
+**Recorded, not fixed.** The **web-only stale-role sub-case is fixed** — that is
+true for the case it names (the `ownRole()` signal holding a pre-poll value; web now
+reads the role off the live group via `readOwnRoleNow`).
+
+**A narrower stale-role window survives on ALL THREE, and is narrowed rather than
+eliminated** (`lakko-security` **F-D**). Every client captures the role **before**
+the rotation queues behind a predecessor on the serializing lock — web
+`Chat.tsx:2297` (`await readOwnRoleNow()` feeding a call that then takes the
+`rotating` chain), iOS `ChatRepository.swift:1590` (`ownRole(groupIdHex:)` read
+before the `Task` at `:1591` chains), Android `:1960` and `:1997`
+(`rotationRole(...)` read before `pushScope.launch`). A **demotion that lands during
+the queue wait** therefore rotates on a **stale** role: peers run the receive gate
+against the *current* role table, refuse the envelope, and the rotator **strands
+itself** on a secret nobody else accepts. **Availability-only** — it is the
+fail-closed gate behaving correctly — and it **self-heals at the next authorised
+envelope**, since the rotator's row still accepts any owner/admin write. Not fixed;
+closing it would mean re-reading the role *after* acquiring the lock.
+
+Note this also falsifies the convergence argument ADR-0043 originally offered for
+option (b) ("the DS journal is a total order, so last-accepted-wins converges"),
+which is corrected in that ADR.
+
+#### Residual 8 — the receive-side teardown can precede the new subscription (new, web only; `lakko-security` F4, LOW)
+
+On web the receive-side teardown may run **before** the new subscription is
+established, leaving the device briefly subscribed to **neither** the old gid nor
+the new one. A wake arriving in that window is not delivered; the message itself is
+unaffected and arrives on the next poll. Recorded as a follow-up, not fixed.
+
+#### Residual 9 — a stale `pending` re-broadcast can silently UNDO a rotation, permanently (new, ADR-0043 re-review; `lakko-security` F-A)
+
+The one residual on this list whose consequence is **confidentiality rather than
+wake delivery**, and it needs **no malice and no crash** — only a failed broadcast
+followed by someone else's rotation.
+
+1. An owner/admin's post-add `redistributeSecretToGroup` **broadcast fails**. The
+   failure path marks the row `pending` (`markGroupRoutingPending`), so that device
+   now holds the **PRE-rotation** secret `S_old` in an un-settled row.
+2. Meanwhile another admin removes a member and rotates the group to `S1`
+   (ADR-0043, ratified option (b) — any owner *or* admin may rotate).
+3. The first device runs `ensureGroupPushRouting` **BEFORE** it applies the `S1`
+   envelope. Its `pending` branch — the any-holder re-broadcast added in `7e7d143`
+   — re-sends **`S_old`**.
+4. Every member resolves that envelope as `accept-owner` / `accept-admin-rotate`,
+   persists `S_old`, **and retires `gid(S1)`**. The group migrates **BACK** onto the
+   id the evicted member still derives and is still subscribed to.
+5. No further membership shrink occurs, so **no further rotation fires**. The state
+   is **permanent, not transient** — unlike residual 7, nothing self-heals it.
+
+**Root cause, stated plainly: the receive gate has no recency or monotonicity
+notion at all.** `routingSecretVerdict` (web) and its iOS/Android twins ask only
+*who sent it* — owner / admin / member, against the ADR-0022 role table — and never
+*is it newer than what I hold*. Every input to the verdict is an authority question.
+The any-holder re-broadcast branch and rotation are individually sound; they
+interact badly precisely because no ordering predicate exists to separate a
+**retry** of the current secret from a **replay** of a superseded one. The two are
+byte-indistinguishable to the gate.
+
+**Reachability differs per client**, and the ordering that narrows it is incidental
+rather than designed:
+
+- **Web** narrows it: `Chat.tsx:2497` `await refresh()` before `provisionPushRouting()`
+  at `:2504`, so a normal chat-open applies the pending `S1` envelope first. But
+  `refresh()` catches its own errors (`Chat.tsx:1694-1698` — `setError` and return,
+  never rethrow), so a transient poll failure resolves the await normally and lets
+  provisioning run anyway. Narrowed, not closed.
+- **iOS** (`ChatRepository.swift:1471`) and **Android** (`:229`, `:339`, `:375`,
+  `:1888`) fire provisioning on **independent tasks** with no such ordering, so the
+  window is **wider** there.
+
+**Severity: recorded, not blocking.** The worst case is **exactly the pre-ADR-0043
+status quo** — the evicted member keeps receiving wakes under an id it already
+holds — plus some inert orphan rows of the residual-5 class. It fails **TO** the old
+behaviour, never below it: no member is downgraded to the leaky raw `group_id`
+(invariant #4 holds), the DS and push-gw stay opaque (invariant #2), and no message
+content is exposed. What it does is silently **revoke the ADR-0043 win** for that
+group, with no user-visible signal — which is why it is recorded here rather than
+folded into residual 7.
+
+Note also that **residual 7's framing understates this variant.** That entry closes
+with "a wake-delivery defect, not message loss", which is accurate for its own
+scenario (a device stranded on a superseded secret misses wakes). This one is not a
+delivery defect at all: its consequence is the **confidentiality** property C-60
+sub-invariant 6 and C-61 exist to protect.
+
+**Fix direction — recorded as a follow-up, deliberately NOT built here:**
+
+1. **The general fix** — carry a **monotone counter or the minting epoch inside the
+   62-byte distribution envelope** and refuse a non-increasing value on receive.
+   This gives the gate the recency predicate it structurally lacks and closes the
+   whole class, not just this path. It is a **`crates/lakko-contacts` wire change**
+   (the envelope is `domain(29) ‖ version(1) ‖ secret(32)`, a fixed-length payload
+   with a version discriminator), so it needs an envelope version bump, the
+   fail-closed codec extended, its fuzz target updated
+   (`push_routing_secret_decode`), and all three clients moved together.
+2. **The narrow fix** — clear or skip the `pending` re-broadcast once a
+   **different** secret has been accepted. Purely client-side, no wire change, but
+   it patches this path rather than the missing predicate.
 
 #### Two loose ends found during the arc
 
@@ -3027,13 +3334,40 @@ for legacy groups (or an explicit UI state) is unbuilt.
   subscribe, or create anything — and a malformed / unknown / still-opaque
   `push_gid` value is dropped silently. The stale SW comment is corrected. The
   Android tap deep-link already worked (`7da84ee`).
-- **`unsubscribeGroup` is dead code on all three clients** — see Residual 2.
+- **~~`unsubscribeGroup` is dead code on all three clients.~~ CLOSED** (2026-08-11,
+  ADR-0043) — the receive-side teardown is its first real caller on every client;
+  see Residual 2.
 
-**Status: OPEN (accepted residuals).** Residual 1 is the substantive privacy limit
-and is inherent to a stable routing id; residuals 2-4 and both loose ends are
-delivery-side / functional and independently fixable. Invariants: #2 holds (push-gw
-handles the same opaque `BINARY(32)` it always did; the secret rides an E2EE MLS
-application message), #4 holds (defer rather than downgrade; the receive gate
-rejects on an unreadable role table or an unresolvable sender), #5 is **improved but
-not fully satisfied** — the server no longer materialises a *DS-linkable* social
-graph, but it does still materialise an opaque co-membership cluster.
+**Status: OPEN (accepted residuals).** **Residual 1 is the substantive privacy
+limit and survives ADR-0043 intact** — it is inherent to *any* group-shared routing
+id, not merely a stable one: rotation renames the cluster, the provider re-links
+across the boundary by token-set intersection, and the set difference names the
+evicted device. Closing it needs per-device-blinded ids. **Residual 2 is CLOSED**
+(rotation on removal + live per-group unsubscribe). **Residual 3 is WIDENED** from
+admin-seed to admin-churn by the ratified option (b); the `lakko-security` pass
+ADR-0043 declares mandatory for (b) **was run and returned APPROVE-WITH-NOTES, no
+CRITICAL/HIGH**, its one blocking MEDIUM (F1, the coalescing rotation lock) fixed.
+**Residual 4 is unchanged** and gains a second clause (such groups now also never
+rotate). **Residuals 5-9 are new** — the orphaned old gid (reachable by a transient
+store-read failure or a rotation/receive interleaving, not only a crash; accepted,
+inert, deliberately not fixed), the untested C-61 ordering that residual 2's closure
+depends on (F3), concurrent rotators stranding a device on a superseded secret (F2,
+web sub-case fixed, with a narrower stale-role window surviving on all three per
+F-D), the web teardown-before-subscribe window (F4), and — **the one whose
+consequence is confidentiality rather than wake delivery** — a stale `pending`
+re-broadcast silently and **permanently** undoing a rotation (F-A), rooted in the
+receive gate having **no recency or monotonicity notion at all**. Residual 9 fails
+**to** the pre-ADR-0043 status quo, never below it, which is why it is recorded
+rather than blocking. The `lakko-security` pass on option
+(b) **is done — APPROVE-WITH-NOTES, no CRITICAL/HIGH, no invariant #2/#3/#4 break
+on the live path** — with its one blocking MEDIUM (F1, the coalescing rotation
+lock) fixed on web + iOS by adopting Android's serializing lock.
+Invariants: #2 holds
+(push-gw is byte-identical unchanged across both ADRs and handles the same opaque
+`BINARY(32)`; the secret rides an E2EE MLS application message), #4 holds (defer
+rather than downgrade — a member without the current secret does not subscribe at
+all; the receive gate still rejects on an unreadable role table or an unresolvable
+sender), #5 is **improved but not fully satisfied** — the server no longer
+materialises a *DS-linkable* social graph, and the cluster is no longer
+*forward*-linkable across a removal by the evicted party, but an opaque
+co-membership cluster is still materialised and still re-linkable by intersection.

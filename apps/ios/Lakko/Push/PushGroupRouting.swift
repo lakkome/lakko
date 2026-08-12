@@ -125,6 +125,13 @@ import Security
 /// once (a second concurrent mint would overwrite + double-broadcast a
 /// DIFFERENT secret).
 ///
+/// ROTATION uses the other shape — a per-group **serializing** chain
+/// (``rotateSecret(accountIdB64:groupIdHex:ownRole:broadcast:)``), not a
+/// coalescing one. Provisioning may coalesce because a second trigger wants
+/// the identical outcome ("this group has a secret"); rotations may not,
+/// because two triggers can be answering two DIFFERENT removals and the
+/// second one still needs a seal of its own.
+///
 /// `@MainActor` so the owner-role check + the E2EE `broadcast` (which runs
 /// `Group.createApplicationMessage` in ``ChatRepository``) stay on the same
 /// actor that owns the MLS `Group` handle.
@@ -165,29 +172,35 @@ public final class PushGroupRouting {
     /// + onAppear for the same group mint the random secret exactly once.
     private var inflight: Set<String> = []
 
-    /// Per-group in-flight ROTATION tasks (ADR-0043).
+    /// Per-group ROTATION chain tail (ADR-0043) — a **serializing** lock, the
+    /// Swift counterpart of the Android `ConcurrentHashMap<String, Mutex>`.
     ///
-    /// Two triggers can observe the same removal (this device's own
-    /// `removeMemberFromGroup` and a concurrent poll-loop diff). Interleaving
-    /// them is the damaging case: both would read the SAME old secret, both
-    /// mint, the second persist wins — leaving the first new `push_gid`
+    /// Two triggers can observe a removal (this device's own
+    /// `removeMemberFromGroup` and a concurrent poll-loop diff). Running them
+    /// concurrently is the damaging case: both would read the SAME old secret,
+    /// both mint, the second persist wins — leaving the first new `push_gid`
     /// subscribed and indexed but never notified again, i.e. exactly the
-    /// orphan this ADR exists to prevent. Coalescing rules that out.
+    /// orphan this ADR exists to prevent.
     ///
-    /// Unlike the provisioning guard (a skip-if-in-flight `Set`) this holds
-    /// the `Task` so a second caller **awaits the same rotation** and observes
-    /// its outcome, rather than silently returning early with a verdict that
-    /// does not describe what happened. Mirrors the web `rotating`
-    /// `Map<string, Promise>`.
+    /// **A second trigger therefore WAITS and then rotates again; it is never
+    /// folded into the rotation already running.** Coalescing is only correct
+    /// when both triggers observe the SAME removal, and it is silently wrong
+    /// when they observe DIFFERENT ones: a rotation seals its envelope at the
+    /// epoch it starts in, then spends three network round-trips (broadcast,
+    /// subscribe, unsubscribe) in flight. A removal committed inside that
+    /// window would be folded into a rotation whose envelope the *new* evictee
+    /// was still a member of — so it opens the envelope, learns the current
+    /// secret, keeps a live subscription, and nothing ever rotates again (the
+    /// removing device's own poll baseline is already post-removal, so no
+    /// shrink is ever seen). The single load-bearing property of the ADR would
+    /// be void for that member. Serializing rules it out: the second rotation
+    /// runs in full, reading the first rotation's output as its old secret, so
+    /// every intermediate id is retired and every caller observes a real
+    /// rotation.
     ///
-    /// The cost is that a SECOND removal observed while a rotation is in
-    /// flight can be folded into it, and that rotation's envelope may have
-    /// been sealed at an epoch where the second evictee was still a member.
-    /// That is tolerable because the poll-path diff is a redundant safety net,
-    /// not the primary path: ADR-0022 requires the Remove committer to be
-    /// owner-or-admin, and that device runs its own rotation strictly AFTER
-    /// its own commit — so every removal already has one correctly-sequenced
-    /// rotation from the device that made it.
+    /// The tail `Task` is what the next caller chains behind. It is cleared
+    /// only by the caller that is still the tail when its own rotation
+    /// finishes, so a queued successor is never evicted from the chain.
     private var rotating: [String: Task<PushRotationOutcome, Never>] = [:]
 
     /// `nonisolated` so the initializer is callable as a default argument
@@ -1056,24 +1069,41 @@ public final class PushGroupRouting {
     ) async -> PushRotationOutcome {
         guard ownRole == .owner || ownRole == .admin else { return .skipNotAuthorized }
         let lockKey = accountIdB64 + "\u{0}" + groupIdHex
-        // Coalesce: a second trigger for the same group AWAITS the in-flight
-        // rotation instead of starting a second one (two mints would strand
-        // the first new push_gid subscribed-but-never-notified).
-        if let inflightTask = rotating[lockKey] { return await inflightTask.value }
-
+        // SERIALIZE: a second trigger for the same group QUEUES behind the
+        // in-flight rotation and then runs its own, in full. Running them
+        // concurrently would have both mint off the same old secret and strand
+        // the first new push_gid subscribed-but-never-notified; *folding* the
+        // second into the first would leave a removal committed mid-flight
+        // with no rotation sealed after it at all. Chaining is the only shape
+        // that avoids both: the successor reads this rotation's output as its
+        // own old secret.
+        //
+        // Read + replace the tail synchronously — `@MainActor` with no `await`
+        // between them, so two callers can never both see the same predecessor.
+        let predecessor = rotating[lockKey]
         let task = Task { @MainActor [weak self] () -> PushRotationOutcome in
+            // Wait for everything already queued for this group. `Never`-failing
+            // and best-effort throughout, so this can neither throw nor hang on
+            // a predecessor's failure.
+            _ = await predecessor?.value
             guard let self else { return .skipNoSecret }
             return await self.performRotation(
                 accountIdB64: accountIdB64, groupIdHex: groupIdHex, broadcast: broadcast)
         }
         rotating[lockKey] = task
         let outcome = await task.value
-        rotating.removeValue(forKey: lockKey)
+        // Only the CURRENT tail clears the slot: a successor that queued behind
+        // this rotation is the tail now, and dropping it would let the next
+        // caller start concurrently with it — reopening the race.
+        if rotating[lockKey] == task { rotating.removeValue(forKey: lockKey) }
         return outcome
     }
 
     /// Body of ``rotateSecret(accountIdB64:groupIdHex:ownRole:broadcast:)``,
-    /// past the authority gate + the in-flight lock. Steps 1-8 of the ADR.
+    /// past the authority gate + the serializing chain lock. Steps 1-8 of the
+    /// ADR. Runs alone for its group: the caller guarantees no other rotation
+    /// of the same `(account, group)` overlaps it, which is what lets step (1)
+    /// read an old secret no concurrent rotation is about to clobber.
     private func performRotation(
         accountIdB64: String,
         groupIdHex: String,

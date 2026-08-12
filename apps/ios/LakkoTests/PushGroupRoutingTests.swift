@@ -40,6 +40,10 @@ import LakkoCore
 ///     that order;
 ///   * a failed rotation broadcast leaves the row PENDING for the existing
 ///     any-holder retry;
+///   * the per-group lock SERIALISES concurrent rotations — a second trigger
+///     queues and then rotates in full, never folds into the first (folding
+///     would leave a removal committed mid-flight with no rotation sealed
+///     after it, voiding the ADR for that member);
 ///   * the receive-side teardown, which is what keeps a rotation from
 ///     leaving one dead push-gw row per member.
 ///
@@ -89,6 +93,58 @@ final class PushGroupRoutingTests: XCTestCase {
             envelopes.append(bytes)
             if shouldFail { throw Failure() }
         }
+    }
+
+    /// A one-shot async gate. ``wait()`` parks the caller until ``open()`` is
+    /// called; after that it never parks again.
+    ///
+    /// Used to hold a rotation inside its broadcast — the exact window the
+    /// ADR-0043 rotation spends on the wire — so a second trigger provably
+    /// arrives while the first is still in flight. Without it a "concurrent"
+    /// rotation test would just run the two back-to-back and pass under the
+    /// broken coalescing shape too.
+    @MainActor
+    private final class Gate {
+        struct NeverParked: Error {}
+
+        private var isOpen = false
+        private var waiters: [CheckedContinuation<Void, Never>] = []
+        /// How many times ``wait()`` has been entered.
+        private(set) var waitCount = 0
+
+        func wait() async {
+            waitCount += 1
+            if isOpen { return }
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                waiters.append(continuation)
+            }
+        }
+
+        func open() {
+            isOpen = true
+            let parked = waiters
+            waiters = []
+            for continuation in parked { continuation.resume() }
+        }
+
+        /// Yield until something has parked in ``wait()``. Bounded, so a
+        /// regression fails loudly instead of hanging the suite.
+        func awaitFirstWaiter() async throws {
+            for _ in 0..<PushGroupRoutingTests.maxYields {
+                if waitCount >= 1 { return }
+                await Task.yield()
+            }
+            throw NeverParked()
+        }
+    }
+
+    /// Upper bound on cooperative yields before a wait is declared stuck.
+    private static let maxYields = 10_000
+
+    /// Let every task currently runnable on the main actor make progress, so a
+    /// "has NOT started yet" assertion means something.
+    private static func settle() async {
+        for _ in 0..<500 { await Task.yield() }
     }
 
     private var suiteName: String = ""
@@ -1807,32 +1863,106 @@ final class PushGroupRoutingTests: XCTestCase {
             store.getSecret(accountIdB64: "acct", groupIdHex: groupIdHex), rotated)
     }
 
-    /// Two concurrent triggers (this device's own removal + a poll-loop diff)
-    /// coalesce into ONE rotation. Two mints would strand the first new
-    /// `push_gid` as a subscribed-but-never-notified id — the orphan this ADR
-    /// exists to prevent.
-    func testConcurrentTriggersCoalesceIntoOneRotation() async throws {
+    /// The per-group lock SERIALISES concurrent rotations — it must never fold
+    /// the second into the first.
+    ///
+    /// Coalescing is correct only when both triggers observe the SAME removal,
+    /// and silently wrong when they observe DIFFERENT ones. A rotation seals
+    /// its envelope at the epoch it starts in and then spends three network
+    /// round-trips in flight; a removal committed inside that window that got
+    /// folded into it would leave **no rotation sealed after it at all** — the
+    /// new evictee was still a member at the sealed epoch, so it opens the
+    /// envelope, learns the current secret and keeps a live subscription, and
+    /// nothing re-rotates afterwards (the removing device's own poll baseline
+    /// is already post-removal, so no shrink is ever seen). The single
+    /// load-bearing property of ADR-0043 would be void for that member.
+    ///
+    /// Mirror of the Android
+    /// `the per-group lock SERIALISES concurrent rotations` test: two rotations
+    /// triggered while the first is in flight must produce TWO distinct
+    /// secrets, the second reading the first's output as its old secret, with
+    /// BOTH prior gids retired and exactly ONE route row surviving.
+    func testConcurrentTriggersSerialiseIntoTwoRotations() async throws {
         let store = makeStore()
         let spy = SubscribeSpy()
         let unsub = UnsubscribeSpy()
         let routing = makeRouting(store: store, spy: spy, unsubscribeSpy: unsub)
         let recorder = BroadcastRecorder()
+        // Parks the FIRST broadcast so the second trigger genuinely arrives
+        // while rotation 1 is in flight (the coalescing shape's whole window).
+        let gate = Gate()
 
         let old = try XCTUnwrap(PushGroupRouting.mintSecret())
         try seedSettled(store: store, accountIdB64: "acct", groupIdHex: "grp", secret: old)
+        let oldGid = try XCTUnwrap(PushGroupRouting.derivePushGid(secret: old))
 
-        async let first = routing.rotateSecret(
-            accountIdB64: "acct", groupIdHex: "grp", ownRole: .owner,
-            broadcast: { bytes in recorder.record(bytes) })
-        async let second = routing.rotateSecret(
-            accountIdB64: "acct", groupIdHex: "grp", ownRole: .owner,
-            broadcast: { bytes in recorder.record(bytes) })
-        let outcomes = await [first, second]
+        let first = Task { @MainActor in
+            await routing.rotateSecret(
+                accountIdB64: "acct", groupIdHex: "grp", ownRole: .owner,
+                broadcast: { bytes in
+                    recorder.record(bytes)
+                    await gate.wait()
+                })
+        }
+        // Let rotation 1 run up to (and park inside) its broadcast.
+        try await gate.awaitFirstWaiter()
+        XCTAssertEqual(recorder.envelopes.count, 1, "rotation 1 is parked in its broadcast")
 
+        // The SECOND trigger, raised while rotation 1 is still in flight — the
+        // interleave the coalescing fold answered with rotation 1's own result.
+        let second = Task { @MainActor in
+            await routing.rotateSecret(
+                accountIdB64: "acct", groupIdHex: "grp", ownRole: .owner,
+                broadcast: { bytes in
+                    recorder.record(bytes)
+                    await gate.wait()
+                })
+        }
+        // Behind the lock it has NOT started: still exactly one broadcast.
+        await Self.settle()
+        XCTAssertEqual(
+            recorder.envelopes.count, 1,
+            "the second rotation must queue behind the first, not run beside it")
+
+        gate.open()
+        let outcomes = await [first.value, second.value]
+
+        // BOTH callers observe a real rotation of their own — never one
+        // rotation's verdict handed to two different removals.
         XCTAssertEqual(outcomes, [.rotated, .rotated])
-        XCTAssertEqual(recorder.envelopes.count, 1, "exactly ONE mint + broadcast")
-        XCTAssertEqual(spy.targets.count, 1)
-        XCTAssertEqual(unsub.targets.count, 1)
+        // Guarded rather than asserted, so the coalescing shape (which sends
+        // ONE envelope) fails here loudly instead of trapping on the index
+        // below.
+        guard recorder.envelopes.count == 2 else {
+            return XCTFail(
+                "TWO mints + TWO broadcasts expected, got \(recorder.envelopes.count) — "
+                    + "the second rotation was folded into the first")
+        }
+
+        // Serialised, so the second rotation's "old" secret is the FIRST one's
+        // output: three distinct secrets in a chain, no orphan.
+        let firstSecret = try XCTUnwrap(
+            PushGroupRouting.tryDecodeSecretEnvelope(recorder.envelopes[0]))
+        let finalSecret = try XCTUnwrap(
+            PushGroupRouting.tryDecodeSecretEnvelope(recorder.envelopes[1]))
+        XCTAssertNotEqual(firstSecret, old)
+        XCTAssertNotEqual(finalSecret, firstSecret, "the second rotation minted its OWN secret")
+        XCTAssertEqual(
+            store.getSecret(accountIdB64: "acct", groupIdHex: "grp"), finalSecret,
+            "the stored secret is the LAST rotation's, so the second read the first's output")
+
+        let firstGid = try XCTUnwrap(PushGroupRouting.derivePushGid(secret: firstSecret))
+        let finalGid = try XCTUnwrap(PushGroupRouting.derivePushGid(secret: finalSecret))
+        XCTAssertEqual(spy.targets, [firstGid, finalGid])
+        // Every intermediate id is retired — including the one rotation 1
+        // minted, which a fold would have left subscribed but never notified.
+        XCTAssertEqual(unsub.targets, [oldGid, firstGid])
+
+        // Exactly one live route row: the reverse index does not grow a dead
+        // entry per rotation.
+        XCTAssertNotNil(store.lookupRoute(pushGidHex: PushGroupRouting.hex(finalGid)))
+        XCTAssertNil(store.lookupRoute(pushGidHex: PushGroupRouting.hex(firstGid)))
+        XCTAssertNil(store.lookupRoute(pushGidHex: PushGroupRouting.hex(oldGid)))
     }
 
     // MARK: - ADR-0043: the membership-shrink trigger entry point

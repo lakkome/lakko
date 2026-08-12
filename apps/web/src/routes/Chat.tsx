@@ -105,6 +105,7 @@ import {
   ensureGroupPushRouting,
   memberSignatureKeys,
   pushGidForGroup,
+  readPushRotationRole,
   receivePushRoutingSecretGated,
   redistributeSecretToGroup,
   rotatePushRoutingSecret,
@@ -1254,25 +1255,43 @@ function ChatView(props: {
   // (`processIncomingVerifyingRoles`) is the real boundary; this just hides
   // affordances a plain member's commit would be refused for anyway.
   const [ownRole, setOwnRole] = createSignal<"owner" | "admin" | "member" | null>(null);
+
+  /**
+   * Read this device's ADR-0022 role off the LIVE group, right now.
+   *
+   * The `ownRole` signal is refreshed asynchronously by the effect below, so
+   * at any given instant it can lag the group state by one poll. That is fine
+   * for hiding affordances, and NOT fine for the ADR-0043 rotation call sites:
+   * a poll batch carrying a demotion AND a removal would have a just-demoted
+   * admin rotate off the stale "admin" value, every peer refuse the envelope
+   * (`reject-not-authorized`), and the rotator strand itself on a secret
+   * nobody else holds. iOS and Android read the role off the live group at
+   * rotation time; this is the web equivalent.
+   *
+   * Never throws — a torn group reads as `null` (which does not rotate).
+   */
+  async function readOwnRoleNow(): Promise<
+    "owner" | "admin" | "member" | null
+  > {
+    try {
+      const secrets = props.requireIdentity();
+      const wasm = await loadWasmForCalls();
+      const identity = wasm.Identity.fromSeed(secrets.accountIdentitySeed);
+      try {
+        return await readPushRotationRole(props.entry.group, identity);
+      } finally {
+        identity.free();
+      }
+    } catch {
+      return null;
+    }
+  }
+
   createEffect(() => {
     membersVersion(); // recompute when the roster / epoch changes
-    const secrets = props.requireIdentity();
+    props.requireIdentity(); // track the identity dependency
     void (async () => {
-      try {
-        const wasm = await loadWasmForCalls();
-        const identity = wasm.Identity.fromSeed(secrets.accountIdentitySeed);
-        try {
-          const r = props.entry.group.ownRole(identity);
-          if (r === wasm.Role.Owner) setOwnRole("owner");
-          else if (r === wasm.Role.Admin) setOwnRole("admin");
-          else if (r === wasm.Role.Member) setOwnRole("member");
-          else setOwnRole(null);
-        } finally {
-          identity.free();
-        }
-      } catch {
-        setOwnRole(null);
-      }
+      setOwnRole(await readOwnRoleNow());
     })();
   });
   // A plain member may not add / remove; everyone else (owner, admin, or an
@@ -1645,17 +1664,28 @@ function ChatView(props: {
       // Owner-or-admin only, no-op on growth, and a no-op on this device's
       // own removals (their baseline is already post-removal). Fire-and-
       // forget: a rotation failure must never break the poll loop.
+      //
+      // The role is read off the LIVE group (`readOwnRoleNow`), never from the
+      // `ownRole()` signal: that signal is refreshed by an async effect and at
+      // this point still holds the PRE-poll role, so a batch carrying a
+      // demotion AND a removal would have a just-demoted admin rotate into a
+      // secret every peer refuses.
       {
         const s = auth.state();
         if (s.kind === "session") {
-          void rotatePushRoutingSecretIfMembershipShrank({
-            accountId: s.account.accountId,
-            group: props.entry.group,
-            ownRole: ownRole(),
-            previousMemberKeys: membersBeforePoll,
-            currentMemberKeys: memberSignatureKeys(props.entry.group),
-            broadcast: broadcastToGroup,
-          }).catch((err) => {
+          // Snapshot the post-poll roster synchronously, before the awaited
+          // role read lets another poll advance the group.
+          const currentMemberKeys = memberSignatureKeys(props.entry.group);
+          void (async () => {
+            await rotatePushRoutingSecretIfMembershipShrank({
+              accountId: s.account.accountId,
+              group: props.entry.group,
+              ownRole: await readOwnRoleNow(),
+              previousMemberKeys: membersBeforePoll,
+              currentMemberKeys,
+              broadcast: broadcastToGroup,
+            });
+          })().catch((err) => {
             // eslint-disable-next-line no-console
             console.warn("push-routing rotation failed", err);
           });
@@ -2258,12 +2288,15 @@ function ChatView(props: {
       {
         const s = auth.state();
         if (s.kind === "session") {
-          void rotatePushRoutingSecret(
-            s.account.accountId,
-            props.entry.group,
-            ownRole(),
-            broadcastToGroup,
-          ).catch((err) => {
+          // Live role read, same reason as the poll path: the `ownRole()`
+          // signal can still hold a pre-commit value here.
+          void (async () =>
+            rotatePushRoutingSecret(
+              s.account.accountId,
+              props.entry.group,
+              await readOwnRoleNow(),
+              broadcastToGroup,
+            ))().catch((err) => {
             // eslint-disable-next-line no-console
             console.warn("push-routing rotation failed", err);
           });

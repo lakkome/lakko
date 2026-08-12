@@ -144,6 +144,7 @@ import {
   membershipRotationDecision,
   memberSignatureKeys,
   mintPushRoutingSecret,
+  readPushRotationRole,
   receivePushRoutingSecret,
   receivePushRoutingSecretGated,
   redistributeSecretToGroup,
@@ -237,6 +238,15 @@ function mockRoleGroup(
       ];
     },
   } as unknown as WasmGroup;
+}
+
+/**
+ * Yield the microtask queue enough times for an in-flight rotation to run to
+ * its next real suspension point (the mocked store / client calls all settle
+ * as immediately-resolved promises, so no timers are involved).
+ */
+async function flushMicrotasks(times = 50): Promise<void> {
+  for (let i = 0; i < times; i += 1) await Promise.resolve();
 }
 
 /** Seed this device's already-held secret for `(account, group)`. */
@@ -1485,25 +1495,183 @@ describe("rotatePushRoutingSecret (ADR-0043)", () => {
     );
   });
 
-  it("two concurrent triggers coalesce into ONE rotation (never two mints)", async () => {
-    // This device's own `onRemoveMember` and a poll-loop diff can both fire.
-    // A second mint would strand the first new push_gid as a subscribed but
-    // never-notified id — the orphan this ADR exists to prevent.
+  it("the per-group lock SERIALISES concurrent rotations (never two mints off one old secret)", async () => {
+    // The damaging interleave: this device's own `onRemoveMember` and a
+    // concurrent poll-loop diff both read the SAME old secret, both mint, the
+    // second persist wins — leaving the first new push_gid subscribed and
+    // indexed but never notified again, i.e. exactly the orphan this ADR
+    // exists to prevent. The lock must serialise them, not fold them.
     seedSettled(OLD);
+    const oldGidHex = toHex(wasm.derivePushGid(OLD));
     const group = mockGroup(GROUP_ID, undefined);
-    const b = recordingBroadcast();
 
-    const [x, y] = await Promise.all([
-      rotatePushRoutingSecret(ACCT, group, "owner", b.fn),
-      rotatePushRoutingSecret(ACCT, group, "owner", b.fn),
+    // Park the FIRST rotation inside its broadcast — that is the window (of
+    // three network round-trips) in which the second removal happens.
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const sent: Uint8Array[] = [];
+    const broadcast = async (bytes: Uint8Array): Promise<void> => {
+      sent.push(bytes);
+      if (sent.length === 1) await gate;
+    };
+
+    const first = rotatePushRoutingSecret(ACCT, group, "owner", broadcast);
+    await flushMicrotasks();
+    expect(sent.length).toBe(1); // parked inside its broadcast
+
+    // A SECOND, DIFFERENT removal is observed while the first is in flight.
+    const second = rotatePushRoutingSecret(ACCT, group, "owner", broadcast);
+    await flushMicrotasks();
+    // Behind the lock: without it the second would ALREADY have minted off the
+    // same old secret; folded into the first it would never mint at all.
+    expect(vi.mocked(putGroupRouting)).toHaveBeenCalledTimes(1);
+    expect(sent.length).toBe(1);
+
+    release();
+    expect(await Promise.all([first, second])).toEqual(["rotated", "rotated"]);
+
+    // TWO real rotations: the second evictee was still a member at the epoch
+    // the FIRST envelope was sealed at, so a second seal is the whole point.
+    expect(vi.mocked(putGroupRouting)).toHaveBeenCalledTimes(2);
+    expect(sent.length).toBe(2);
+    const s1 = wasm.decodePushRoutingSecret(sent[0]!);
+    const s2 = wasm.decodePushRoutingSecret(sent[1]!);
+    expect(Array.from(s2)).not.toEqual(Array.from(s1));
+
+    // Serialised, so the second rotation's "old" secret is the FIRST one's
+    // output — every intermediate id is retired in turn, none stranded.
+    const stored = h.secrets.get(`${ACCT}\0${GRP_B64}`) as Uint8Array;
+    expect(Array.from(stored)).toEqual(Array.from(s2));
+    const gid1 = toHex(wasm.derivePushGid(s1));
+    const finalGid = toHex(wasm.derivePushGid(s2));
+    expect(unsubscribeGroup).toHaveBeenCalledTimes(2);
+    expect(unsubscribeGroup.mock.calls.map((c) => toHex(c[1]))).toEqual([
+      oldGidHex,
+      gid1,
     ]);
 
-    expect([x, y]).toEqual(["rotated", "rotated"]);
-    expect(b.sent.length).toBe(1);
-    expect(vi.mocked(putGroupRouting)).toHaveBeenCalledTimes(1);
-    expect(unsubscribeGroup).toHaveBeenCalledTimes(1);
+    // Exactly one live route row — the reverse index carries only the id that
+    // is actually being notified.
+    expect(h.routes.size).toBe(1);
+    expect(h.routes.has(finalGid)).toBe(true);
+    expect(h.routes.has(oldGidHex)).toBe(false);
+    expect(h.routes.has(gid1)).toBe(false);
+  });
+
+  it("a rotation queued behind a FAILING one still runs (a predecessor's failure is not contagious)", async () => {
+    // The removal that triggered the second rotation still needs a re-key
+    // regardless of why the first one blew up.
+    seedSettled(OLD);
+    const group = mockGroup(GROUP_ID, undefined);
+
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    let calls = 0;
+    const broadcast = async (): Promise<void> => {
+      calls += 1;
+      if (calls === 1) {
+        await gate;
+        throw new Error("boom");
+      }
+    };
+
+    const first = rotatePushRoutingSecret(ACCT, group, "owner", broadcast);
+    await flushMicrotasks();
+    const second = rotatePushRoutingSecret(ACCT, group, "owner", broadcast);
+    await flushMicrotasks();
+    release();
+
+    // The broadcast failure is swallowed into a PENDING row (existing
+    // behaviour), so both still report `rotated` — what matters here is that
+    // the second one actually ran.
+    await Promise.allSettled([first, second]);
+    expect(calls).toBe(2);
+    expect(vi.mocked(putGroupRouting)).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("readPushRotationRole — the LIVE role read (lakko-security F2)", () => {
+  /** A group whose role the test can flip between reads, modelling a poll
+   *  batch that lands a demotion. */
+  function mutableRoleGroup(): {
+    group: WasmGroup;
+    setRole: (r: number | undefined) => void;
+  } {
+    let role: number | undefined = wasm.Role.Admin;
+    return {
+      group: {
+        get groupId(): Uint8Array {
+          return new Uint8Array([9, 9]);
+        },
+        ownRole: (_id: WasmIdentity): number | undefined => role,
+      } as unknown as WasmGroup,
+      setRole: (r): void => {
+        role = r;
+      },
+    };
+  }
+
+  it("maps the ADR-0022 role table onto the rotation role", async () => {
+    const m = mutableRoleGroup();
+    for (const [wasmRole, expected] of [
+      [wasm.Role.Owner, "owner"],
+      [wasm.Role.Admin, "admin"],
+      [wasm.Role.Member, "member"],
+      [undefined, null], // open / legacy group with no role table
+    ] as const) {
+      m.setRole(wasmRole);
+      expect(await readPushRotationRole(m.group, DUMMY_IDENTITY)).toBe(expected);
+    }
+  });
+
+  it("re-reads the group EVERY call, so a demotion is observed immediately", async () => {
+    // The F2 defect: the chat view holds `ownRole` in a signal refreshed by an
+    // async effect, so at a poll-path rotation call site it still carries the
+    // PRE-poll role. A batch carrying a demotion AND a removal would then have
+    // a just-demoted admin rotate — every peer refuses the envelope on the
+    // receive-side role gate and the rotator strands itself on a secret nobody
+    // else holds. A live read observes the demotion the moment it lands.
+    const m = mutableRoleGroup();
+    expect(await readPushRotationRole(m.group, DUMMY_IDENTITY)).toBe("admin");
+
+    m.setRole(wasm.Role.Member); // the demotion lands in this poll batch
+    expect(await readPushRotationRole(m.group, DUMMY_IDENTITY)).toBe("member");
+
+    // ... and a demoted device does not rotate, so nothing is stranded.
+    seedStoredSecret("acctF2", base64Encode(new Uint8Array([9, 9])), OLD_F2);
+    expect(
+      await rotatePushRoutingSecretIfMembershipShrank({
+        accountId: "acctF2",
+        group: m.group,
+        ownRole: await readPushRotationRole(m.group, DUMMY_IDENTITY),
+        previousMemberKeys: ["aa".repeat(32), "bb".repeat(32)],
+        currentMemberKeys: ["aa".repeat(32)],
+        broadcast: async () => {
+          throw new Error("a demoted device must not broadcast");
+        },
+      }),
+    ).toBe("skip-not-authorized");
+    expect(vi.mocked(putGroupRouting)).not.toHaveBeenCalled();
+  });
+
+  it("a torn group reads as `null` — fail-closed, never rotates", async () => {
+    const torn = {
+      get groupId(): Uint8Array {
+        return new Uint8Array([9, 9]);
+      },
+      ownRole: (): number | undefined => {
+        throw new Error("torn group");
+      },
+    } as unknown as WasmGroup;
+    expect(await readPushRotationRole(torn, DUMMY_IDENTITY)).toBeNull();
+  });
+});
+
+const OLD_F2 = new Uint8Array(32).fill(0x5a);
 
 describe("rotation trigger — the membership-shrink entry point (ADR-0043)", () => {
   const ACCT = "acctTrig";

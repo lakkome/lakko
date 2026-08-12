@@ -915,6 +915,38 @@ export async function redistributeSecretToGroup(
  *  already computes it. `null` = an open / legacy group with no role table. */
 export type PushRotationRole = "owner" | "admin" | "member" | null;
 
+/**
+ * Read this device's ADR-0022 role off the LIVE group, at the moment of the
+ * call.
+ *
+ * The rotation call sites MUST use this rather than a cached / signal-held
+ * role. On web the chat view keeps `ownRole` in a signal refreshed by an async
+ * effect, so it lags the group by up to one poll — and a poll batch carrying a
+ * demotion AND a removal would then have a just-demoted admin rotate: every
+ * peer refuses the envelope on the receive-side role gate
+ * (`reject-not-authorized`) and the rotator strands itself on a secret nobody
+ * else holds, i.e. the group's wakes stop. iOS and Android read the role
+ * synchronously off the group at rotation time; this is the web equivalent.
+ *
+ * Never throws — a torn group reads as `null`, which does not rotate
+ * (fail-closed).
+ */
+export async function readPushRotationRole(
+  group: WasmGroup,
+  identity: WasmIdentity,
+): Promise<PushRotationRole> {
+  try {
+    const wasm = await loadWasm();
+    const r = group.ownRole(identity);
+    if (r === wasm.Role.Owner) return "owner";
+    if (r === wasm.Role.Admin) return "admin";
+    if (r === wasm.Role.Member) return "member";
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 /** Verdict of the pure {@link membershipRotationDecision} core. */
 export type PushRotationDecision =
   /** Membership SHRANK and this device may rotate. */
@@ -1009,22 +1041,35 @@ export function membershipRotationDecision(args: {
 }
 
 /**
- * Per-group in-flight rotation promise.
+ * Per-group rotation queue — a SERIALIZING lock, not a coalescing one.
  *
- * Two triggers can observe the same removal (this device's own
- * `onRemoveMember` and a concurrent poll-loop diff). Interleaving them is the
- * damaging case: both would read the SAME old secret, both mint, the second
- * persist wins — leaving the first new `push_gid` subscribed and indexed but
- * never notified again, i.e. exactly the orphan this ADR exists to prevent.
- * Coalescing (the same shape as the `provisioning` mint lock) rules that out.
+ * Two triggers can fire for one group (this device's own `onRemoveMember` and
+ * a concurrent poll-loop diff). Interleaving them is one damaging case: both
+ * would read the SAME old secret, both mint, the second persist wins — leaving
+ * the first new `push_gid` subscribed and indexed but never notified again,
+ * i.e. exactly the orphan this ADR exists to prevent.
  *
- * The cost is that a SECOND removal observed while a rotation is in flight can
- * be folded into it, and that rotation's envelope may have been sealed at an
- * epoch where the second evictee was still a member. That is tolerable
- * because the poll-path diff is a redundant safety net, not the primary path:
- * ADR-0022 requires the Remove committer to be owner-or-admin, and that device
- * runs its own rotation strictly AFTER its own commit — so every removal
- * already has one correctly-sequenced rotation from the device that made it.
+ * COALESCING (returning the in-flight promise to the second caller) rules that
+ * out but voids the ADR's core property whenever the two triggers observe
+ * DIFFERENT removals. An admin removes X (commit → epoch N+1); rotation R1
+ * seals its envelope at N+1 and then spends three network round-trips
+ * (broadcast, subscribe, unsubscribe); during that window the user removes Y.
+ * Folding Y's trigger into R1 means NO rotation is ever sealed after Y left —
+ * and Y, still a member at N+1, opens R1's envelope, learns the current
+ * secret, and keeps its subscription live. Nothing re-rotates afterwards: the
+ * removing device's own poll baseline is already post-removal, so no shrink is
+ * ever seen. The "every removal already has one correctly-sequenced rotation
+ * from the device that made it" argument does NOT hold, because the direct
+ * path takes this same lock.
+ *
+ * So the second caller WAITS and then runs a full second rotation, reading the
+ * first rotation's output as its own old secret. Every intermediate `push_gid`
+ * is retired in turn and both callers observe a real rotation. The guarantee is
+ * NOT that no envelope is ever sealed pre-eviction — R1's envelope *is*
+ * pre-eviction with respect to Y, who is removed while R1 is in flight — but
+ * that every eviction is followed by SOME seal at a strictly later epoch: Y's
+ * own trigger queues behind R1 and seals R2 at an epoch Y is no longer in.
+ * (Matches the per-`(account, group)` `Mutex` the Android client uses.)
  */
 const rotating = new Map<string, Promise<PushRotationOutcome>>();
 
@@ -1077,10 +1122,21 @@ export function rotatePushRoutingSecret(
   }
   const groupIdB64 = base64Encode(group.groupId);
   const lockKey = `${accountId} ${groupIdB64}`;
-  const inflight = rotating.get(lockKey);
-  if (inflight !== undefined) return inflight;
+  const previous = rotating.get(lockKey);
 
   const run = (async (): Promise<PushRotationOutcome> => {
+    // Queue behind any in-flight rotation for this group, so the read of the
+    // OLD secret below observes the predecessor's OUTPUT rather than racing
+    // it. A predecessor failure is its own business and must not cancel this
+    // rotation — the removal that triggered it still needs a re-key.
+    if (previous !== undefined) {
+      try {
+        await previous;
+      } catch {
+        /* handled by whoever awaited the predecessor */
+      }
+    }
+
     const deviceKey = await getDeviceKey(accountId);
     if (deviceKey === null) return "skip-no-device-key";
 
@@ -1128,11 +1184,19 @@ export function rotatePushRoutingSecret(
     // stale reverse-index entry.
     await retireOldPushGid(oldSecret);
     return "rotated";
-  })().finally(() => {
-    rotating.delete(lockKey);
-  });
+  })();
 
   rotating.set(lockKey, run);
+  // Release only if nothing queued behind this run in the meantime — a later
+  // rotation has already replaced the entry with ITS promise, and deleting
+  // that would let a third trigger race the second instead of queueing.
+  // `catch` before `finally` so a rejected run never surfaces as an unhandled
+  // rejection through this bookkeeping chain (the caller still sees `run`).
+  void run
+    .catch(() => undefined)
+    .finally(() => {
+      if (rotating.get(lockKey) === run) rotating.delete(lockKey);
+    });
   return run;
 }
 

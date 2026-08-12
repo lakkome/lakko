@@ -437,8 +437,11 @@ public object GroupPushRouting {
     ) {
         val pushGid = ports.derivePushGid(secret)
         // Persisted as ALREADY distributed: this secret arrived off the
-        // group journal, so it is by definition on the wire. A receiver
-        // never re-broadcasts — only the owner does ([ensure]).
+        // group journal, so its distribution envelope is provably on the
+        // wire. Since [decideEnsureAction]'s REBROADCAST branch is open to
+        // ANY holder, this flag is what keeps a receiver from re-sending an
+        // envelope it just watched travel: a settled row is never retried
+        // by anyone.
         ports.persist(groupIdHex, secret, pushGid, distributed = true)
         subscribeOrDefer(groupIdHex, ports)
     }
@@ -873,24 +876,35 @@ public object GroupPushRouting {
     }
 
     /**
-     * Per-`(account, group)` in-flight ROTATION lock, separate from the
-     * [inflight] mint lock.
+     * Per-`(account, group)` ROTATION lock — a **serializing** [Mutex],
+     * separate from the [inflight] mint lock. (The web `rotating` promise
+     * chain and the iOS `rotating` task chain are the same shape.)
      *
-     * Two triggers can observe the same removal (this device's own
-     * `removeMemberFromGroup` and a concurrent poll-loop diff).
-     * Interleaving them is the damaging case: both would read the SAME old
+     * Two triggers can observe a removal (this device's own
+     * `removeMemberFromGroup` and a concurrent poll-loop diff). Running
+     * them concurrently is the damaging case: both would read the SAME old
      * secret, both mint, the second persist wins — leaving the first new
      * `push_gid` subscribed and indexed but never notified again, i.e.
      * exactly the orphan this ADR exists to prevent.
      *
-     * The cost is that a SECOND removal observed while a rotation is in
-     * flight can be folded into it, and that rotation's envelope may have
-     * been sealed at an epoch where the second evictee was still a member.
-     * Tolerable because the poll-path diff is a redundant safety net, not
-     * the primary path: ADR-0022 requires the Remove committer to be
-     * owner-or-admin, and that device runs its own rotation strictly AFTER
-     * its own commit — so every removal already has one correctly-sequenced
-     * rotation from the device that made it.
+     * **A second trigger therefore WAITS and then rotates again; it is
+     * never folded into the rotation already running.** COALESCING is only
+     * correct when both triggers observe the SAME removal, and it is
+     * silently wrong when they observe DIFFERENT ones: a rotation seals its
+     * envelope at the epoch it starts in, then spends three network
+     * round-trips (broadcast, subscribe, unsubscribe) in flight. A removal
+     * committed inside that window would be folded into a rotation whose
+     * envelope the *new* evictee was still a member of — so that evictee
+     * opens it, learns the current secret, keeps a live subscription, and
+     * nothing ever rotates again (the removing device's own poll baseline
+     * is already post-removal, so no shrink is ever seen). The ADR's single
+     * load-bearing property would be void for that member.
+     *
+     * Serializing rules it out: because [rotate] reads the old secret INSIDE
+     * `withLock`, the queued second rotation runs in full against the first
+     * rotation's output, so every intermediate id is retired in turn, each
+     * eviction is followed by a seal at a strictly later epoch, and both
+     * callers observe a real rotation.
      */
     private val rotatingLocks = ConcurrentHashMap<String, Mutex>()
 
