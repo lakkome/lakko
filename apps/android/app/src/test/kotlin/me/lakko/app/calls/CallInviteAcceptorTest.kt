@@ -1,0 +1,104 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+package me.lakko.app.calls
+
+import io.ktor.client.engine.mock.MockEngine
+import io.ktor.client.engine.mock.respond
+import io.ktor.http.HttpHeaders
+import io.ktor.http.HttpStatusCode
+import io.ktor.http.headersOf
+import kotlinx.coroutines.test.runTest
+import me.lakko.app.auth.base64UrlEncodeNoPad
+import me.lakko.app.discovery.DiscoveryClient
+import org.junit.Assert.assertTrue
+import org.junit.Test
+import uniffi.lakko_ffi_uniffi.Identity
+import uniffi.lakko_ffi_uniffi.NoHandle
+
+/**
+ * Host-side unit tests for [CallInviteAcceptor]'s slug gate.
+ *
+ * These sit one level ABOVE `CallInviteUrlTest`, which drives
+ * [parseCallInviteSlug] directly. The level that matters for a
+ * user is the acceptor: `acceptFromSlug` catches only
+ * [CallInviteUrlException] (`CallInviteAcceptor.kt` step 1), so a
+ * RAW `IllegalArgumentException` escaping the parser would blow
+ * straight past that handler and out of the whole pipeline — on
+ * input that is, by construction, a link a stranger handed the
+ * user. A parser-only test cannot see that; this one can.
+ *
+ * ## Why the joiner identity is a fake
+ *
+ * `Identity(NoHandle)` is UniFFI's sanctioned test constructor for
+ * an object with no connected Rust handle — it loads no native
+ * library, so these tests run under `:app:testDebugUnitTest` on the
+ * host JVM. Touching the fake would throw, which is exactly the
+ * property we want: both tests below return before
+ * `joinerIdentity` is ever dereferenced (the parse gate and the
+ * fetch gate both short-circuit ahead of step 6's
+ * `acceptCallInvite`), so a green run also proves the pipeline
+ * really did stop where we claim it did.
+ */
+class CallInviteAcceptorTest {
+
+    /** A 16-byte UUIDv7-shaped account id; never reaches the wire
+     *  in either test, both of which return before consume. */
+    private fun joinerAccountId(): ByteArray = ByteArray(16) { it.toByte() }
+
+    @Test
+    fun `acceptFromSlug returns MalformedSlug for characters outside the base64url alphabet`() =
+        runTest {
+            // `*` is not in the base64url alphabet. `java.util.Base64`
+            // throws `IllegalArgumentException`; `parseCallInviteSlug`
+            // must translate it to `CallInviteUrlException` so the
+            // acceptor's step-1 handler can catch it.
+            val engine = MockEngine {
+                error("discovery must never be reached for a malformed slug")
+            }
+            val result = DiscoveryClient(baseUrl = "http://test.invalid", engine = engine)
+                .use { discovery ->
+                    CallInviteAcceptor(discovery).acceptFromSlug(
+                        slug = "not*valid*base64*url",
+                        joinerAccountId = joinerAccountId(),
+                        joinerIdentity = Identity(NoHandle),
+                    )
+                }
+            assertTrue(
+                "expected MalformedSlug, got $result",
+                result is CallInviteAcceptor.Result.MalformedSlug,
+            )
+        }
+
+    @Test
+    fun `acceptFromSlug reaches discovery for a well-formed pointer slug`() = runTest {
+        // Positive control for the test above: a 32-byte pointer slug
+        // clears the parse gate, so the failure must come from the
+        // FETCH (404 -> NotFound) rather than the parser. Without
+        // this, a MalformedSlug result could equally mean the
+        // pipeline never ran at all.
+        var requests = 0
+        val engine = MockEngine {
+            requests += 1
+            respond(
+                content = "",
+                status = HttpStatusCode.NotFound,
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+        val slug = base64UrlEncodeNoPad(ByteArray(CALL_INVITE_BLOB_ID_LEN) { it.toByte() })
+        val result = DiscoveryClient(baseUrl = "http://test.invalid", engine = engine)
+            .use { discovery ->
+                CallInviteAcceptor(discovery).acceptFromSlug(
+                    slug = slug,
+                    joinerAccountId = joinerAccountId(),
+                    joinerIdentity = Identity(NoHandle),
+                )
+            }
+        assertTrue(
+            "expected NotFound, got $result",
+            result is CallInviteAcceptor.Result.NotFound,
+        )
+        assertTrue("discovery should have been called", requests > 0)
+    }
+}

@@ -72,8 +72,16 @@ class AuthClientTest {
             // JSON literal that hits the wire. `OutgoingContent.NoContent`
             // is what `client.post(url) { /* no body */ }` produces,
             // i.e. the `/pow/challenge` shape.
+            // The `OutgoingContent.ByteArrayContent` branch is the catch-all
+            // for a body Ktor's `defaultTransformers` wrapped (a raw String /
+            // ByteArray `setBody` lands in an ANONYMOUS subclass of the
+            // ABSTRACT type, which the concrete `TextContent` check above
+            // does NOT match). `TextContent` stays first so a
+            // ContentNegotiation-serialized body is read losslessly from
+            // `.text` rather than round-tripped through a charset.
             val rawBody: String? = when (val outgoing = request.body) {
                 is TextContent -> outgoing.text
+                is OutgoingContent.ByteArrayContent -> outgoing.bytes().toString(Charsets.UTF_8)
                 is OutgoingContent.NoContent -> null
                 else -> error("unexpected OutgoingContent: ${outgoing::class}")
             }

@@ -163,8 +163,18 @@ public sealed class ParsedCallInvite {
  *         decoded byte count falls outside both branches.
  */
 public fun parseCallInviteSlug(slug: String): ParsedCallInvite {
-    val bytes = base64UrlDecodeNoPad(slug)
-        ?: throw CallInviteUrlException.InvalidBase64Url
+    // `base64UrlDecodeNoPad` returns a NON-null ByteArray and THROWS
+    // `IllegalArgumentException` on a character outside the base64url
+    // alphabet — it never returns null, so an elvis here would be dead
+    // code and the raw exception would escape to the caller. The slug
+    // comes from a link a stranger handed the user, so it must surface
+    // as a typed `CallInviteUrlException` the callers already handle.
+    // Same shape as `parseGroupInviteSlug` in `chat/GroupInviteUrl.kt`.
+    val bytes = try {
+        base64UrlDecodeNoPad(slug)
+    } catch (e: IllegalArgumentException) {
+        throw CallInviteUrlException.InvalidBase64Url
+    }
     return when {
         bytes.size == CALL_INVITE_BLOB_ID_LEN -> ParsedCallInvite.Pointer(bytes)
         bytes.size >= CALL_INVITE_INLINE_MIN_LEN -> ParsedCallInvite.Inline(bytes)

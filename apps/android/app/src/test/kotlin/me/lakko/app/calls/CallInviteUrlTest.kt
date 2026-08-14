@@ -141,8 +141,9 @@ class CallInviteUrlTest {
 
     @Test
     fun `parse rejects malformed base64`() {
-        // `*` is not in the base64url alphabet — decoder returns
-        // null which the parser maps to InvalidBase64Url.
+        // `*` is not in the base64url alphabet — the decoder THROWS
+        // `IllegalArgumentException`, which the parser catches and
+        // re-raises as the typed InvalidBase64Url.
         assertThrows(CallInviteUrlException.InvalidBase64Url::class.java) {
             parseCallInviteSlug("not*valid*base64*url")
         }

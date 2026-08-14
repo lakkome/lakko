@@ -8,7 +8,6 @@ import io.ktor.client.engine.mock.respond
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
-import io.ktor.http.content.ByteArrayContent
 import io.ktor.http.content.OutgoingContent
 import io.ktor.http.headersOf
 import java.io.IOException
@@ -61,8 +60,16 @@ class DsClientTest {
     ): DsClient {
         var index = 0
         val engine = MockEngine { request ->
+            // Match the ABSTRACT `OutgoingContent.ByteArrayContent`, not the
+            // concrete `io.ktor.http.content.ByteArrayContent`. Ktor's
+            // `defaultTransformers` wraps a raw `ByteArray` body in an
+            // ANONYMOUS subclass of the abstract type, so an `is` check
+            // against the concrete class silently misses every request the
+            // client actually sends. The abstract type covers all three
+            // shapes we can see here: that anonymous wrapper, the concrete
+            // `ByteArrayContent`, and `TextContent`.
             val rawBody: ByteArray? = when (val outgoing = request.body) {
-                is ByteArrayContent -> outgoing.bytes()
+                is OutgoingContent.ByteArrayContent -> outgoing.bytes()
                 is OutgoingContent.NoContent -> null
                 else -> error("unexpected OutgoingContent: ${outgoing::class}")
             }

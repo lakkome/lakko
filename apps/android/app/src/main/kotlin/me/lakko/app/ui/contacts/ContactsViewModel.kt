@@ -279,7 +279,16 @@ public class ContactsViewModel(
         val snapshot = mutableUi.value
         if (snapshot.revokingActiveInviteSlug != null) return
         val row = snapshot.activeInvites.firstOrNull { it.blobIdSlug == slug } ?: return
-        val blobId = me.lakko.app.auth.base64UrlDecodeNoPad(row.blobIdSlug) ?: run {
+        // `base64UrlDecodeNoPad` returns a NON-null ByteArray and THROWS
+        // `IllegalArgumentException` on a character outside the base64url
+        // alphabet — it never returns null, so an elvis here would be dead
+        // code and the raw exception would escape into the click handler.
+        // The slug is server-supplied (it arrives on the active-invites
+        // list), so a malformed one must land in the error state rather
+        // than crash the screen.
+        val blobId = try {
+            me.lakko.app.auth.base64UrlDecodeNoPad(row.blobIdSlug)
+        } catch (e: IllegalArgumentException) {
             mutableUi.update {
                 it.copy(activeInvitesError = "malformed blob_id slug — cannot revoke")
             }
