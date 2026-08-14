@@ -37,14 +37,41 @@ import Foundation
 /// the load-bearing property; the one wasted byte of ciphertext is the
 /// whole cost.
 ///
+/// ## The `mintEpoch` field — ADR-0044, durable state, NOT a wire field
+///
+/// The v2 distribution envelope carries an 8-byte `mint_epoch` the minter
+/// stamps from `Group.epoch()` at MINT time, and the receive gate orders
+/// envelopes by the pair `(mintEpoch, secretBytes)`. That order is only
+/// sound if the stamp **travels with the secret for that secret's whole
+/// life**: every re-broadcast recomposes the envelope from the stored
+/// secret, so it must replay the epoch the secret was MINTED under, never
+/// the current one. A re-stamp at send time would make a stale secret
+/// out-rank the live one and reproduce the very F-A replay the order
+/// exists to close — with the ordering gate fully in place and working as
+/// specified.
+///
+/// So the epoch is durable per-`(account, group)` state and lives here,
+/// inside the same sealed single-write record as the secret + flag. It is
+/// a monotone counter, not key material (invariant #2 — nothing here is
+/// secret except the AEAD-wrapped secret itself), so sealing it is a
+/// consequence of the single-write property, not a confidentiality need.
+///
 /// ## Record layout (inside the sealed plaintext)
 ///
-///   * **legacy** — exactly ``secretLen`` bytes, a bare secret written
-///     before this flag existed. Read as `distributed == true`: those
-///     groups are provisioned and working today, and re-broadcasting for
-///     every one of them on upgrade would be a pointless journal write.
-///   * **current** — `flag(1) ‖ secret(32)`, flag `0x00` pending /
-///     `0x01` distributed.
+///   * **legacy, pre-flag** — exactly ``secretLen`` bytes, a bare secret
+///     written before the `distributed` flag existed. Read as
+///     `distributed == true` (those groups are provisioned and working
+///     today, and re-broadcasting for every one of them on upgrade would
+///     be a pointless journal write) and `mintEpoch == 0`.
+///   * **legacy, pre-epoch (ADR-0042 / ADR-0043)** — `flag(1) ‖
+///     secret(32)`. Read with its recorded flag and `mintEpoch == 0`.
+///   * **current (ADR-0044)** — `flag(1) ‖ mintEpoch(8, BE) ‖ secret(32)`,
+///     flag `0x00` pending / `0x01` distributed.
+///
+/// A legacy row reads as epoch **0**, the LOWEST position in the canonical
+/// order, so any authorised stamped mint supersedes a legacy secret —
+/// the direction that converges. The inverse default (a high epoch) would
+/// let an unstamped legacy secret out-rank every future rotation.
 ///
 /// Any other length or an unknown flag byte is unreadable → the record
 /// reads as `nil` while ``hasSecret(accountIdB64:groupIdHex:)`` stays
@@ -93,10 +120,21 @@ public final class PushRoutingStore {
         public let secret: Data
         /// Whether the distribution broadcast for ``secret`` succeeded.
         public let distributed: Bool
+        /// ADR-0044 — the MLS group epoch ``secret`` was MINTED under,
+        /// replayed verbatim by every re-broadcast and compared by the
+        /// receive gate's canonical order. `0` for a legacy row written
+        /// before this field existed (the lowest position in the order).
+        ///
+        /// Read as part of the record, never separately: the secret and its
+        /// stamp are ONE value. A torn read could pair a superseded secret
+        /// with a live epoch, which is precisely the F-A shape the order
+        /// exists to refuse.
+        public let mintEpoch: UInt64
 
-        public init(secret: Data, distributed: Bool) {
+        public init(secret: Data, distributed: Bool, mintEpoch: UInt64) {
             self.secret = secret
             self.distributed = distributed
+            self.mintEpoch = mintEpoch
         }
     }
 
@@ -105,6 +143,10 @@ public final class PushRoutingStore {
     /// ``PushGroupRouting``) to keep this store FFI-clean: it is compiled
     /// into the NSE target, which does not link `LakkoCore`.
     private static let secretLen: Int = 32
+
+    /// ADR-0044 — byte length of the big-endian `mintEpoch` field, mirroring
+    /// the Rust `PUSH_ROUTING_SECRET_MINT_EPOCH_LEN`.
+    private static let mintEpochLen: Int = 8
 
     /// Record flag byte — the distribution broadcast has not been confirmed.
     private static let flagPending: UInt8 = 0x00
@@ -164,15 +206,22 @@ public final class PushRoutingStore {
     ///   that is how it got here). Deliberately has **no default**: guessing
     ///   wrong in either direction is a delivery bug, so every call site
     ///   states it.
+    /// - Parameter mintEpoch: ADR-0044 — the epoch this secret was MINTED
+    ///   under. On a mint / rotation that is `Group.epoch()` read at mint
+    ///   time; on a RECEIVE it is the epoch carried by the accepted
+    ///   envelope, NOT the receiver's current epoch — the stamp identifies
+    ///   the secret, not the moment it was applied. Also has no default,
+    ///   for the same reason: a guessed stamp silently reorders the group.
     public func putRouting(
         accountIdB64: String,
         groupIdHex: String,
         secret: Data,
         pushGidHex: String,
-        distributed: Bool
+        distributed: Bool,
+        mintEpoch: UInt64
     ) {
-        guard let combined = seal(
-            Self.encodeRecord(secret: secret, distributed: distributed)) else { return }
+        guard let combined = seal(Self.encodeRecord(
+            secret: secret, distributed: distributed, mintEpoch: mintEpoch)) else { return }
         secretDefaults.set(combined, forKey: Self.secretKey(accountIdB64, groupIdHex))
         // The plaintext reverse-index row: [account, group] keyed by push_gid.
         routeDefaults.set(
@@ -290,8 +339,15 @@ public final class PushRoutingStore {
         }
         // Already in the requested state → skip the pointless re-encrypt + write.
         if record.distributed == distributed { return true }
-        guard let combined = seal(
-            Self.encodeRecord(secret: record.secret, distributed: distributed)) else {
+        // ADR-0044 — re-seal with the STORED `mintEpoch`, never a fresh one.
+        // This path only records whether the envelope reached the wire; the
+        // secret's identity, stamp included, is untouched. Re-stamping here
+        // would let a settle/un-settle bookkeeping write silently promote a
+        // secret's position in the total order.
+        guard let combined = seal(Self.encodeRecord(
+            secret: record.secret,
+            distributed: distributed,
+            mintEpoch: record.mintEpoch)) else {
             return false
         }
         secretDefaults.set(combined, forKey: Self.secretKey(accountIdB64, groupIdHex))
@@ -406,27 +462,67 @@ public final class PushRoutingStore {
         return try? AES.GCM.seal(plaintext, using: wrapKey).combined
     }
 
-    /// `flag(1) ‖ secret(32)`.
-    private static func encodeRecord(secret: Data, distributed: Bool) -> Data {
+    /// `flag(1) ‖ mintEpoch(8, BE) ‖ secret(32)` — ADR-0044.
+    ///
+    /// Big-endian, matching the wire encoding the Rust core pins, so the
+    /// stored stamp and the transmitted one are the same number written the
+    /// same way and a store round-trip can never reorder a group.
+    private static func encodeRecord(
+        secret: Data,
+        distributed: Bool,
+        mintEpoch: UInt64
+    ) -> Data {
         var out = Data([distributed ? flagDistributed : flagPending])
+        out.append(contentsOf: withUnsafeBytes(of: mintEpoch.bigEndian) { Array($0) })
         out.append(secret)
         return out
     }
 
-    /// Parse a sealed record plaintext. A bare ``secretLen``-byte payload is
-    /// a LEGACY row written before the flag existed: it is read as
-    /// **distributed**, so an upgrade does not re-broadcast for every group
-    /// that already works. Anything else unrecognised → `nil` (unreadable,
-    /// fail-closed) rather than a guessed flag.
+    /// Parse a sealed record plaintext, newest layout first.
+    ///
+    ///   * `flag(1) ‖ mintEpoch(8, BE) ‖ secret(32)` — the ADR-0044 record.
+    ///   * `flag(1) ‖ secret(32)` — a LEGACY row from ADR-0042 / ADR-0043,
+    ///     read with its recorded flag and `mintEpoch == 0`.
+    ///   * a bare ``secretLen``-byte payload — a LEGACY row from before the
+    ///     flag existed, read as **distributed** (so an upgrade does not
+    ///     re-broadcast for every group that already works) and
+    ///     `mintEpoch == 0`.
+    ///
+    /// Epoch `0` is the LOWEST position in the canonical order, so a legacy
+    /// secret is superseded by the first authorised stamped mint rather than
+    /// out-ranking every future rotation.
+    ///
+    /// Anything else unrecognised → `nil` (unreadable, fail-closed) rather
+    /// than a guessed flag or a guessed stamp.
     private static func decodeRecord(_ plaintext: Data) -> PushRoutingRecord? {
+        // Legacy, pre-flag: a bare secret.
         if plaintext.count == secretLen {
-            return PushRoutingRecord(secret: plaintext, distributed: true)
+            return PushRoutingRecord(secret: plaintext, distributed: true, mintEpoch: 0)
         }
-        guard plaintext.count == secretLen + 1, let flag = plaintext.first else { return nil }
-        let secret = Data(plaintext.dropFirst())
+        guard let flag = plaintext.first, let distributed = flagValue(flag) else { return nil }
+        let body = plaintext.dropFirst()
+        // Legacy, pre-epoch: flag + secret, no stamp.
+        if body.count == secretLen {
+            return PushRoutingRecord(
+                secret: Data(body), distributed: distributed, mintEpoch: 0)
+        }
+        // Current: flag + big-endian epoch + secret.
+        guard body.count == mintEpochLen + secretLen else { return nil }
+        let epochBytes = body.prefix(mintEpochLen)
+        let epoch = epochBytes.reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
+        return PushRoutingRecord(
+            secret: Data(body.dropFirst(mintEpochLen)),
+            distributed: distributed,
+            mintEpoch: epoch
+        )
+    }
+
+    /// Interpret a record flag byte; `nil` for an unknown value (fail-closed
+    /// — the row reads as unreadable rather than defaulting a flag).
+    private static func flagValue(_ flag: UInt8) -> Bool? {
         switch flag {
-        case flagPending: return PushRoutingRecord(secret: secret, distributed: false)
-        case flagDistributed: return PushRoutingRecord(secret: secret, distributed: true)
+        case flagPending: return false
+        case flagDistributed: return true
         default: return nil
         }
     }

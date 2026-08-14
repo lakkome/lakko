@@ -6,10 +6,13 @@ package me.lakko.app.push
 import android.content.Context
 import java.security.SecureRandom
 import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import uniffi.lakko_ffi_uniffi.composePushRoutingSecret
 import uniffi.lakko_ffi_uniffi.derivePushGid as ffiDerivePushGid
+import uniffi.lakko_ffi_uniffi.pushRoutingSecretIsNewer as ffiPushRoutingSecretIsNewer
 
 /**
  * ADR-0042 orchestration — mint / receive / derive / subscribe the
@@ -61,6 +64,45 @@ import uniffi.lakko_ffi_uniffi.derivePushGid as ffiDerivePushGid
  * a rotation necessary), and a plain member may only relay a
  * byte-identical secret.
  *
+ * ## ADR-0044 — WHO may write, then WHICH write survives
+ *
+ * The rank gate above answers only "who may write". Until ADR-0044 that
+ * was the WHOLE decision surface, so a **retry** of the current secret
+ * and a **replay** of a superseded one were byte-indistinguishable — and
+ * that omission made a silent, permanent rotation undo reachable with no
+ * malice and no crash (`lakko-security` **F-A**, G-36 residual 9): a
+ * device whose broadcast failed holds the PRE-rotation secret in a
+ * `pending` row, another admin rotates the group to `S1`, and that
+ * device's any-holder re-broadcast re-sends the OLD secret — which every
+ * member accepted, retiring `gid(S1)` and migrating the group back onto
+ * the routing id the EVICTED member still derives. With no further shrink
+ * there is no further rotation, so it was permanent.
+ *
+ * v2 of the distribution envelope adds the missing recency notion: an
+ * 8-byte `mint_epoch` the minter stamps from `Group.epoch()` at MINT
+ * time, and the canonical total order on the pair
+ * `(mintEpoch, secretBytes)` — defined ONCE, in the audited Rust core,
+ * and reached here only through [PushRoutingPorts.isNewer]. Three clients
+ * each re-deriving that comparison is precisely the drift class that
+ * produced F-A, so no Kotlin re-implementation exists.
+ *
+ * Two rules carry the fix, and both are easy to break silently:
+ *
+ *   - **The stamp is minted once and REPLAYED verbatim.** Every
+ *     re-broadcast recomposes the envelope from the STORED secret, so it
+ *     must replay the epoch that secret was MINTED under. Re-stamping the
+ *     current epoch at send time hands the stale secret a NEWER position
+ *     than the rotation that superseded it, reproducing F-A with the
+ *     ordering gate fully armed. [MintStamp] makes that decision a
+ *     TYPE: a caller cannot compose an envelope without naming the
+ *     stamp's origin.
+ *   - **The future is clamped, BEFORE authority.** An unbounded order
+ *     would hand any authorised writer a permanent FREEZE (stamp
+ *     `ULong.MAX_VALUE` and nothing can ever exceed it), which is
+ *     strictly worse than the churn G-36 residual 3 already records —
+ *     a churn self-repairs at the next owner rotation, a freeze does
+ *     not.
+ *
  * ## ADR-0043 — the routing id ROTATES when a member is removed
  *
  * The id is stable across every ordinary commit, but a REMOVAL re-keys
@@ -98,12 +140,19 @@ import uniffi.lakko_ffi_uniffi.derivePushGid as ffiDerivePushGid
  */
 public object GroupPushRouting {
 
-    /** Total distribution-envelope length (bytes): the 29-byte
-     *  domain separator + 1 version byte + the 32-byte secret.
-     *  Mirrors `lakko_contacts::push_routing` (29 + 1 + 32). Used
-     *  only as a cheap receive-side pre-filter before the
-     *  authoritative FFI decode. */
-    public const val ENVELOPE_LEN: Int = 62
+    /** Total distribution-envelope length (bytes) of the ADR-0044 **v2**
+     *  envelope: the 29-byte domain separator + 1 version byte + the
+     *  8-byte big-endian `mint_epoch` + the 32-byte secret. Mirrors
+     *  `lakko_contacts::push_routing` (29 + 1 + 8 + 32). Used only as a
+     *  cheap receive-side pre-filter before the authoritative FFI decode.
+     *
+     *  The v1 envelope was 62 bytes; the flag day is hard (no
+     *  dual-accept), and a v1 envelope is refused by the FFI decode with
+     *  `UnknownVersion` even if it somehow cleared this pre-filter. Both
+     *  cross-version refusals fail closed to DEFER — a member never falls
+     *  back to the leaky `group_id` — so invariant #4 holds throughout the
+     *  transition. */
+    public const val ENVELOPE_LEN: Int = 70
 
     /** First byte of the envelope domain separator (`'l'` of
      *  `"lakko/push-routing-secret/v1\x00"`). The cheap pre-filter;
@@ -114,9 +163,167 @@ public object GroupPushRouting {
     /** Result of a subscribe attempt. */
     public enum class SubscribeOutcome { SUBSCRIBED, DEFERRED }
 
-    /** Verdict of the receive-side authority gate ([decideAcceptReceivedSecret]).
-     *  [REJECT] means DROP — no persist, no subscribe, no re-broadcast. */
-    public enum class ReceiveVerdict { ACCEPT, REJECT }
+    /**
+     * Verdict of the receive-side gate ([decideAcceptReceivedSecret]).
+     * Every `REJECT_*` means DROP — no persist, no subscribe, no
+     * teardown, no re-broadcast.
+     *
+     * ADR-0044 WIDENED this from a binary `ACCEPT` / `REJECT` for two
+     * concrete reasons, neither cosmetic:
+     *
+     *   1. **The gate's own verdict now decides what gets persisted.**
+     *      [ACCEPT_IDENTICAL] must leave the stored `(secret, mintEpoch)`
+     *      pair UNTOUCHED (see its own doc), while every other accept
+     *      persists the incoming stamp. With a binary verdict the
+     *      orchestration would have to re-derive "was it identical?" by
+     *      comparing the bytes a SECOND time — a duplicate of rule (1)
+     *      free to drift from it, which is the exact defect class
+     *      ADR-0044 exists to close.
+     *   2. **The two new refusals are operationally distinct.** A
+     *      [REJECT_STALE] is the F-A signature (somebody is re-emitting a
+     *      superseded secret); a [REJECT_FUTURE] is an out-of-range stamp;
+     *      a [REJECT_NOT_AUTHORIZED] is a rank failure. The single
+     *      generic log line the caller used to emit would now be actively
+     *      wrong for two thirds of the refusals.
+     *
+     * @property accepts whether the envelope is applied. The partition is
+     *   exhaustive: every verdict either persists or drops.
+     */
+    public enum class ReceiveVerdict(public val accepts: Boolean) {
+        /** Byte-identical to the secret already held — an idempotent
+         *  no-op re-persist. Needs NO authority and NO ordering, which is
+         *  what keeps the any-holder re-broadcast, the post-add
+         *  [redistribute] and any relay idempotent for every member
+         *  whatever their rank.
+         *
+         *  Because it clears NEITHER the authority gate NOR the future
+         *  clamp, it must never write the INCOMING stamp — doing so would
+         *  be an epoch-inflation channel open to a plain member. See
+         *  [receiveGated]. */
+        ACCEPT_IDENTICAL(true),
+
+        /** A CHANGED secret authored by the ADR-0022 role-table OWNER. */
+        ACCEPT_OWNER(true),
+
+        /** A first-ever secret authored by an ADR-0022 ADMIN while this
+         *  device PROVABLY holds none — the admin-seed path that makes an
+         *  admin-performed add-member deliver routing to the new member. */
+        ACCEPT_ADMIN_SEED(true),
+
+        /** A CHANGED secret authored by an ADR-0022 ADMIN over one this
+         *  device already holds (or cannot prove it lacks) — ADR-0043
+         *  ratified option (b). A DISTINCT verdict from
+         *  [ACCEPT_ADMIN_SEED] so a rotation is legible in the log; both
+         *  accept. */
+        ACCEPT_ADMIN_ROTATE(true),
+
+        /** A CHANGED secret in a group with NO role table (legacy / open
+         *  group). No owner or admin set to check against, so this keeps
+         *  the pre-gate behaviour rather than silently breaking those
+         *  groups. */
+        ACCEPT_NO_OWNER(true),
+
+        /** A CHANGED secret from a member that is neither owner nor
+         *  admin. */
+        REJECT_NOT_AUTHORIZED(false),
+
+        /** A CHANGED secret whose authorship could not be established
+         *  (the role table / roster read threw, the frame carried no
+         *  sender leaf, or — ADR-0044 — this device's own group epoch
+         *  could not be read, so the future clamp had no ceiling to check
+         *  against). Dropped, fail-closed. */
+        REJECT_UNVERIFIABLE(false),
+
+        /** ADR-0044 — the envelope's `mintEpoch` is ahead of this device's
+         *  OWN current group epoch, which an honest stamp can never be
+         *  (`stamp <= seal epoch <= receiver's epoch at dispatch`).
+         *  Refused BEFORE authority is consulted, so not even the owner
+         *  can stamp `ULong.MAX_VALUE` and freeze the group's routing id
+         *  permanently. */
+        REJECT_FUTURE(false),
+
+        /** ADR-0044 — an AUTHORISED envelope that is not strictly newer
+         *  than what this device holds under the canonical
+         *  `(mintEpoch, secretBytes)` order. The F-A replay lands here.
+         *  Dropped: no persist, no subscribe, and — the one that carries
+         *  the security value — no teardown, so a stale replay can never
+         *  retire the LIVE routing id. */
+        REJECT_STALE(false),
+    }
+
+    /**
+     * ADR-0044 — an envelope's mint stamp, tagged with WHERE it came
+     * from.
+     *
+     * This type exists for exactly one reason: [PushRoutingPorts.composeEnvelope]
+     * takes a `MintStamp`, so a caller **cannot** compose a distribution
+     * envelope without stating, in the type, whether the epoch is a FRESH
+     * read of `Group.epoch()` at mint time or a REPLAY of the epoch a
+     * stored secret was minted under. Getting that wrong is the single
+     * mistake that turns the whole ordering gate into a silent no-op, and
+     * it is invisible in a `ULong` parameter.
+     *
+     * Both constructors are `internal` so the only intended producers are
+     * the two documented ones:
+     *
+     *   - [Fresh] — [PushRoutingPorts.freshMintStamp], which reads the
+     *     live MLS group epoch. The ONLY way a new epoch value enters the
+     *     system.
+     *   - [Replayed] — [StoredSecret.replayStamp], which carries the
+     *     epoch straight off the stored row.
+     */
+    public sealed class MintStamp(public val epoch: ULong) {
+        /** A FRESH stamp, read from the live `Group.epoch()` at MINT
+         *  time. Reached only via [PushRoutingPorts.freshMintStamp]. */
+        public class Fresh internal constructor(epoch: ULong) : MintStamp(epoch)
+
+        /** The epoch a STORED secret was minted under, replayed
+         *  VERBATIM. Reached only via [StoredSecret.replayStamp]. */
+        public class Replayed internal constructor(epoch: ULong) : MintStamp(epoch)
+    }
+
+    /**
+     * ADR-0044 — a stored `push_routing_secret` together with the epoch
+     * it was MINTED under.
+     *
+     * Read as a PAIR, from ONE store read, deliberately: fetching the
+     * secret and its epoch through two separate reads could tear across a
+     * concurrent receive (secret from before the write, epoch from
+     * after), and a torn pair composes an envelope claiming a live epoch
+     * for a superseded secret — precisely the F-A shape the ordering
+     * exists to refuse.
+     */
+    public class StoredSecret(public val secret: ByteArray, public val mintEpoch: ULong) {
+        /** The stamp a RE-BROADCAST of [secret] must carry: the epoch it
+         *  was minted under, never a fresh one. */
+        public val replayStamp: MintStamp.Replayed get() = MintStamp.Replayed(mintEpoch)
+    }
+
+    /**
+     * ADR-0044 — the canonical recency order: true when `incoming` must
+     * supersede `stored`.
+     *
+     * Ordered on the pair `(mintEpoch, secretBytes)` — epoch first, then
+     * the 32 secret bytes lexicographically — and **strictly greater**
+     * wins, so equal is NOT newer (which is what keeps a benign retry
+     * from reading as an update). Fail-closed to `false` on a
+     * wrong-length secret on either side.
+     *
+     * Declared as a seam so the decision core stays FFI-free and
+     * host-testable, and bound in production to the audited Rust
+     * `pushRoutingSecretIsNewer` — never re-derived in Kotlin. Three
+     * clients each hand-rolling this comparison is the drift class that
+     * produced F-A in the first place.
+     */
+    public fun interface PushRoutingSecretIsNewer {
+        /** @see PushRoutingSecretIsNewer */
+        public fun isNewer(
+            incomingEpoch: ULong,
+            incomingSecret: ByteArray,
+            storedEpoch: ULong,
+            storedSecret: ByteArray,
+        ): Boolean
+    }
 
     /** What [ensure]'s provisioning step must do this call
      *  ([decideEnsureAction]). Subscription is decided separately and
@@ -276,21 +483,58 @@ public object GroupPushRouting {
      * unsubscribe is never called, each churn strands an orphan push-gw
      * subscription that keeps receiving wakes.
      *
+     * ## The five steps, in this order (ADR-0044)
+     *
+     *   1. **identical bytes → [ReceiveVerdict.ACCEPT_IDENTICAL].** No
+     *      authority, no ordering. UNCHANGED by ADR-0044, and this is
+     *      exactly what preserves retry semantics. Matched on the SECRET
+     *      BYTES alone: a retry that reached us over a different route is
+     *      still the same value, whatever epoch it claims.
+     *   2. **`incomingMintEpoch > ownGroupEpoch` →
+     *      [ReceiveVerdict.REJECT_FUTURE].** Evaluated BEFORE authority,
+     *      so not even the owner can freeze the group's routing id.
+     *      Sound because an honest stamp can never exceed the receiver's
+     *      own epoch (`stamp <= seal <= receiver's epoch at dispatch`),
+     *      so it never refuses an honest envelope. An UNREADABLE own
+     *      epoch is [ReceiveVerdict.REJECT_UNVERIFIABLE] — with no
+     *      ceiling a stamp cannot be bounded at all.
+     *   3. the ADR-0042 / ADR-0043 **authority** gate below — UNCHANGED,
+     *      including the rank, the owner-evaluated-first branch, the
+     *      fail-closed refusals, and the legacy no-role-table acceptance.
+     *   4. **no stored secret → accept** (the seed path; nothing to order
+     *      against).
+     *   5. **strictly newer under `(mintEpoch, secretBytes)` → accept**,
+     *      otherwise [ReceiveVerdict.REJECT_STALE].
+     *
      * ## The rule — OWNER outranks ADMIN outranks MEMBER
      *
      * Authority is expressed as *who may overwrite what*, deliberately
      * WITHOUT persisting an authority level alongside the secret (the
-     * stored state stays exactly the 32 secret bytes):
+     * stored state stays the 32 secret bytes plus bookkeeping):
      *
      * | stored | sender | verdict |
      * |---|---|---|
-     * | identical to incoming | anyone (member too) | ACCEPT |
-     * | any (or none) | OWNER | ACCEPT |
-     * | **none** (first-ever) | ADMIN | ACCEPT (seed) |
-     * | present + changed | ADMIN | ACCEPT (rotate, ADR-0043 (b)) |
-     * | any changed | plain member | REJECT |
-     * | changed, no role table | any | ACCEPT |
-     * | changed, roles unreadable / sender unresolved | any | REJECT |
+     * | identical to incoming | anyone (member too) | ACCEPT_IDENTICAL |
+     * | any (or none) | OWNER | ACCEPT_OWNER |
+     * | **none** (provably) | ADMIN | ACCEPT_ADMIN_SEED |
+     * | present / unprovable | ADMIN | ACCEPT_ADMIN_ROTATE (ADR-0043 (b)) |
+     * | any changed | plain member | REJECT_NOT_AUTHORIZED |
+     * | changed, no role table | any | ACCEPT_NO_OWNER |
+     * | changed, roles unreadable / sender unresolved | any | REJECT_UNVERIFIABLE |
+     *
+     * ## The semantic narrowing ADR-0044 records
+     *
+     * A total order and unconditional owner-priority cannot both hold.
+     * The owner branch is still decided before anything is read about
+     * what is stored, so the owner still clears AUTHORITY first — but its
+     * envelope now also has to WIN THE ORDER, and **at an exact epoch tie
+     * the bytes decide and the owner can lose to an admin**. That is
+     * deliberate: the property owner-priority existed to provide
+     * (arrival-order independence) is preserved by a strictly stronger
+     * mechanism — a total order is arrival-order independent for EVERY
+     * participant, not merely for the owner's envelope. Under ADR-0043
+     * option (b) one removal yields N+1 same-epoch mints, so the tie is
+     * the common path, not a corner case.
      *
      *   - **Identical → always ACCEPT**, regardless of sender: it needs
      *     no authority because it rotates nothing. This is what keeps the
@@ -344,39 +588,86 @@ public object GroupPushRouting {
      *   public key, or `null` when it could not be resolved.
      * @param owner the group's role-table lookup outcome (owner + admins).
      * @param incomingSecret the secret carried by the received envelope.
-     * @param storedSecret the secret this device already holds, or
-     *   `null` when it holds none.
+     * @param incomingMintEpoch ADR-0044 — the `mint_epoch` that envelope
+     *   carried.
+     * @param stored what this device already holds — the secret AND the
+     *   epoch it was minted under, read as one pair — or `null` when it
+     *   holds none (or could not read it, see [storedUnreadable]).
+     * @param storedUnreadable set when the local row could NOT be read
+     *   (the store threw). `stored == null` then means "unknown", not
+     *   "provably absent", so an admin write is reported as a ROTATE
+     *   rather than a SEED. It does not change the accept/reject outcome
+     *   (ADR-0043 option (b) lets an admin overwrite either way); it
+     *   keeps the verdict honest about what was actually observed.
+     * @param ownGroupEpoch ADR-0044 — this device's OWN current MLS group
+     *   epoch, the clamp ceiling. `null` when `Group.epoch()` could not
+     *   be read, which FAILS CLOSED: with no ceiling there is nothing to
+     *   bound an incoming stamp against.
+     * @param isNewer the canonical order — MUST be
+     *   [PushRoutingPorts.isNewer], i.e. the audited Rust
+     *   `pushRoutingSecretIsNewer`. Threaded in rather than re-derived
+     *   here so the order stays defined once.
      */
     public fun decideAcceptReceivedSecret(
         senderSignatureKey: ByteArray?,
         owner: OwnerLookup,
         incomingSecret: ByteArray,
-        storedSecret: ByteArray?,
+        incomingMintEpoch: ULong,
+        stored: StoredSecret?,
+        storedUnreadable: Boolean,
+        ownGroupEpoch: ULong?,
+        isNewer: PushRoutingSecretIsNewer,
     ): ReceiveVerdict {
-        // Unchanged secret -> always idempotent-accept, regardless of
-        // sender: it rotates nothing, so a relay by any member is inert
-        // (and this is exactly the post-add-member `redistribute`).
-        if (storedSecret != null && incomingSecret.contentEquals(storedSecret)) {
-            return ReceiveVerdict.ACCEPT
+        // (1) Unchanged secret -> always idempotent-accept, regardless of
+        // sender AND regardless of the stamp it claims: it rotates
+        // nothing, so a relay by any member is inert (and this is exactly
+        // the post-add-member `redistribute`).
+        if (stored != null && incomingSecret.contentEquals(stored.secret)) {
+            return ReceiveVerdict.ACCEPT_IDENTICAL
         }
         // The secret CHANGES (or is the first-ever) from here on.
-        return when (owner) {
-            is OwnerLookup.Unavailable -> ReceiveVerdict.REJECT
-            is OwnerLookup.NoRoleTable -> ReceiveVerdict.ACCEPT
+        //
+        // (2) ADR-0044 — clamp the future BEFORE authority. An unbounded
+        // ordering rule would hand ANY authorised writer a permanent
+        // freeze, strictly worse than the churn it already has: a churn
+        // self-repairs at the next owner rotation, a freeze does not.
+        if (ownGroupEpoch == null) return ReceiveVerdict.REJECT_UNVERIFIABLE
+        if (incomingMintEpoch > ownGroupEpoch) return ReceiveVerdict.REJECT_FUTURE
+        // (3) Authority — unchanged from ADR-0042 / ADR-0043.
+        val authorised = when (owner) {
+            is OwnerLookup.Unavailable -> ReceiveVerdict.REJECT_UNVERIFIABLE
+            is OwnerLookup.NoRoleTable -> ReceiveVerdict.ACCEPT_NO_OWNER
             is OwnerLookup.Known -> when {
-                senderSignatureKey == null -> ReceiveVerdict.REJECT
-                // The owner outranks everyone: may seed AND may rotate,
-                // whatever is stored and whatever arrived first.
-                senderSignatureKey.contentEquals(owner.owner) -> ReceiveVerdict.ACCEPT
+                senderSignatureKey == null -> ReceiveVerdict.REJECT_UNVERIFIABLE
+                // The owner outranks everyone on AUTHORITY: it may seed AND
+                // rotate, whatever is stored and whatever arrived first.
+                senderSignatureKey.contentEquals(owner.owner) -> ReceiveVerdict.ACCEPT_OWNER
                 // An admin may FILL A HOLE *and* OVERWRITE an established
                 // secret (ADR-0043 ratified option (b)) — ADR-0022 lets an
                 // admin commit both the ADD that needs a seed and the REMOVE
                 // that needs a rotation. What is stored no longer gates the
-                // admin's authority.
-                owner.admins.any { it.contentEquals(senderSignatureKey) } -> ReceiveVerdict.ACCEPT
+                // admin's authority; it only decides which verdict NAMES it.
+                owner.admins.any { it.contentEquals(senderSignatureKey) } ->
+                    if (stored == null && !storedUnreadable) {
+                        ReceiveVerdict.ACCEPT_ADMIN_SEED
+                    } else {
+                        ReceiveVerdict.ACCEPT_ADMIN_ROTATE
+                    }
                 // A plain member (or a non-member key) may never change it.
-                else -> ReceiveVerdict.REJECT
+                else -> ReceiveVerdict.REJECT_NOT_AUTHORIZED
             }
+        }
+        if (!authorised.accepts) return authorised
+        // (4) Nothing stored to order against — the seed path.
+        if (stored == null) return authorised
+        // (5) ADR-0044 — the order decides WHICH authorised write
+        // survives. This is the step that refuses the F-A stale replay.
+        return if (
+            isNewer.isNewer(incomingMintEpoch, incomingSecret, stored.mintEpoch, stored.secret)
+        ) {
+            authorised
+        } else {
+            ReceiveVerdict.REJECT_STALE
         }
     }
 
@@ -411,7 +702,7 @@ public object GroupPushRouting {
         // rotate path, and an escaping read error there would skip the
         // ADR-0043 teardown that follows it. Deferring is the safe verdict
         // either way — it never falls back to the leaky `group_id`.
-        val secret = runCatching { ports.getSecret(groupIdHex) }.getOrNull()
+        val secret = runCatching { ports.getRecord(groupIdHex) }.getOrNull()?.secret
             ?: return SubscribeOutcome.DEFERRED
         val pushGid = ports.derivePushGid(secret)
         try {
@@ -428,11 +719,20 @@ public object GroupPushRouting {
      * under the derived `push_gid`. Never mints.
      *
      * UNGATED — callers on the wire path MUST use [receiveGated], which
-     * runs the [decideAcceptReceivedSecret] authority check first.
+     * runs the [decideAcceptReceivedSecret] authority + ordering check
+     * first.
+     *
+     * @param mintEpoch ADR-0044 — the epoch to FILE this secret under.
+     *   For a genuinely new secret that is the epoch its envelope
+     *   carried (the MINTER's stamp), never the receiver's current
+     *   epoch: the stamp identifies the secret, not the moment it was
+     *   applied, so this device's own later re-broadcast replays the
+     *   minter's stamp instead of inventing a fresher one.
      */
     public suspend fun receive(
         groupIdHex: String,
         secret: ByteArray,
+        mintEpoch: ULong,
         ports: PushRoutingPorts,
     ) {
         val pushGid = ports.derivePushGid(secret)
@@ -442,21 +742,22 @@ public object GroupPushRouting {
         // ANY holder, this flag is what keeps a receiver from re-sending an
         // envelope it just watched travel: a settled row is never retried
         // by anyone.
-        ports.persist(groupIdHex, secret, pushGid, distributed = true)
+        ports.persist(groupIdHex, secret, mintEpoch, pushGid, distributed = true)
         subscribeOrDefer(groupIdHex, ports)
     }
 
     /**
-     * RECEIVE side WITH the authority gate — the entry point the chat
-     * receive loop uses. Reads the currently-held secret, runs
-     * [decideAcceptReceivedSecret], and only on
-     * [ReceiveVerdict.ACCEPT] does it fall through to [receive]. A
-     * [ReceiveVerdict.REJECT] is a pure DROP: no persist, no
-     * reverse-index write, no subscribe — so nobody below owner rank can
-     * rotate the group's `push_gid` (and cannot strand an orphan push-gw
-     * subscription).
+     * RECEIVE side WITH the authority + ordering gate — the entry point
+     * the chat receive loop uses. Reads the currently-held
+     * `(secret, mintEpoch)` pair, runs [decideAcceptReceivedSecret], and
+     * only on an ACCEPTING verdict does it fall through to [receive]. A
+     * refusal is a pure DROP: no persist, no reverse-index write, no
+     * subscribe, and no teardown — so nobody below owner rank can rotate
+     * the group's `push_gid` (and cannot strand an orphan push-gw
+     * subscription), and — ADR-0044 — no STALE replay can retire the
+     * live one.
      *
-     * A throwing `getSecret` degrades to "no stored secret", which stays
+     * A throwing `getRecord` degrades to "no stored secret", which stays
      * STRICTER, never more permissive: it loses the byte-identical fast
      * path, so an unreadable store can only push a decision INTO the
      * authority check, never around it.
@@ -485,33 +786,81 @@ public object GroupPushRouting {
      * old secret is read from the snapshot taken BEFORE [receive] persists,
      * since the row is overwritten in place.
      *
-     * @return the verdict, so the caller can log a refusal.
+     * ## ADR-0044 — clearing a stale `pending` re-broadcast
+     *
+     * The order rule stops a stale secret from SPREADING; it does not by
+     * itself stop the device still HOLDING one from re-emitting it. That
+     * device keeps `S_old` in a `pending` row and re-broadcasts it on
+     * every provisioning pass.
+     *
+     * On Android that repair is **structural, not extra machinery**:
+     * [PushRoutingSecretStore] keeps the secret, the `distributed` flag
+     * and the mint epoch in ONE value string, and [receive] persists with
+     * `distributed = true` — so applying an accepted DIFFERENT secret
+     * replaces the bytes AND clears the pending flag in the SAME atomic
+     * write. After any accept there is nothing stale left to re-broadcast.
+     * Pinned by a test rather than left incidental, because it is a
+     * property of the row encoding (which could change) rather than of
+     * this function.
+     *
+     * @param mintEpoch ADR-0044 — the stamp the incoming envelope carried.
+     * @param ownGroupEpoch ADR-0044 — this device's OWN current group
+     *   epoch (the clamp ceiling), read by the caller off the live
+     *   `Group`. `null` fails closed.
+     * @return the verdict, so the caller can log a refusal by NAME.
      */
     public suspend fun receiveGated(
         groupIdHex: String,
         secret: ByteArray,
+        mintEpoch: ULong,
         senderSignatureKey: ByteArray?,
         owner: OwnerLookup,
+        ownGroupEpoch: ULong?,
         ports: PushRoutingPorts,
     ): ReceiveVerdict {
-        val read: Result<ByteArray?> = runCatching { ports.getSecret(groupIdHex) }
+        // ONE read for the pair — a torn (secret, epoch) read could rank a
+        // superseded secret at a live epoch.
+        val read: Result<StoredSecret?> = runCatching { ports.getRecord(groupIdHex) }
         val stored = read.getOrNull()
         val verdict = decideAcceptReceivedSecret(
             senderSignatureKey = senderSignatureKey,
             owner = owner,
             incomingSecret = secret,
-            storedSecret = stored,
+            incomingMintEpoch = mintEpoch,
+            stored = stored,
+            storedUnreadable = read.isFailure,
+            ownGroupEpoch = ownGroupEpoch,
+            isNewer = ports.isNewer,
         )
-        if (verdict == ReceiveVerdict.ACCEPT) {
+        if (verdict.accepts) {
             try {
-                receive(groupIdHex, secret, ports)
+                // ADR-0044 — an ACCEPT_IDENTICAL re-persist must leave the
+                // STORED epoch untouched. It is the one accept that clears
+                // NEITHER the authority gate NOR the future clamp (it
+                // short-circuits both, deliberately, so a retry stays
+                // idempotent for any sender), so writing the INCOMING stamp
+                // here would be an **epoch-inflation channel open to a plain
+                // member**: relay the group's current secret bytes stamped
+                // ULong.MAX_VALUE and every later rotation — the OWNER's
+                // included — is refused REJECT_STALE forever. That is exactly
+                // the permanent freeze the clamp exists to prevent, reached
+                // AROUND it. The write itself is kept (it re-arms the
+                // subscription and is otherwise a content no-op).
+                //
+                // `stored` is non-null on that branch by construction: rule
+                // (1) of the gate only fires against a stored secret.
+                val epochToPersist = when (verdict) {
+                    ReceiveVerdict.ACCEPT_IDENTICAL -> stored?.mintEpoch ?: mintEpoch
+                    else -> mintEpoch
+                }
+                receive(groupIdHex, secret, epochToPersist, ports)
                 // ADR-0043 — the applied secret SUPERSEDED one this device
                 // held, so the id it was subscribed under is now dead. Retire
                 // it. Read from the pre-persist snapshot above: `receive`
                 // overwrote the row in place, so after it the old bytes are
                 // unrecoverable and the retiring id would be unnameable.
-                if (stored != null && !stored.contentEquals(secret)) {
-                    retireOldPushGid(stored, ports)
+                if (stored != null && !stored.secret.contentEquals(secret)) {
+                    retireOldPushGid(stored.secret, ports)
                 }
             } catch (_: Throwable) {
                 // Best-effort — the poll loop calls this per message, so a
@@ -583,23 +932,44 @@ public object GroupPushRouting {
 
             when (action) {
                 EnsureAction.MINT_AND_BROADCAST -> {
-                    val secret = ports.mintSecret()
-                    val pushGid = ports.derivePushGid(secret)
-                    // Persist BEFORE broadcasting, flagged NOT distributed.
-                    // The order is deliberate: minting twice would diverge
-                    // the group's push_gid, so a crash between the two must
-                    // leave the secret durable — and the flag is what makes
-                    // the un-broadcast state recoverable rather than
-                    // terminal (the next `ensure` takes the REBROADCAST
-                    // branch below).
-                    ports.persist(groupIdHex, secret, pushGid, distributed = false)
-                    broadcastAndMark(groupIdHex, secret, ports)
+                    // ADR-0044 — the ONE place in this function that reads
+                    // the group's epoch: a MINT stamps the current one. A
+                    // failed read fails CLOSED (no mint, hence no push)
+                    // rather than stamping a guess — an unordered secret is
+                    // exactly what the v2 envelope exists to eliminate.
+                    val stamp = ports.freshMintStamp()
+                    if (stamp != null) {
+                        val secret = ports.mintSecret()
+                        val pushGid = ports.derivePushGid(secret)
+                        // Persist BEFORE broadcasting, flagged NOT distributed.
+                        // The order is deliberate: minting twice would diverge
+                        // the group's push_gid, so a crash between the two must
+                        // leave the secret durable — and the flag is what makes
+                        // the un-broadcast state recoverable rather than
+                        // terminal (the next `ensure` takes the REBROADCAST
+                        // branch below).
+                        ports.persist(groupIdHex, secret, stamp.epoch, pushGid, distributed = false)
+                        broadcastAndMark(groupIdHex, stamp, secret, ports)
+                    }
                 }
 
                 EnsureAction.REBROADCAST -> {
                     // Recomposed from the stored secret — never re-minted.
-                    val secret = ports.getSecret(groupIdHex)
-                    if (secret != null) broadcastAndMark(groupIdHex, secret, ports)
+                    //
+                    // ADR-0044 — and REPLAYING the stored stamp, never
+                    // re-stamping the current epoch. This is the exact site
+                    // the F-A replay travels through: re-stamping here would
+                    // hand a stale secret a NEWER position than the rotation
+                    // that superseded it and reproduce the finding with the
+                    // ordering gate fully armed. The stamp is taken from the
+                    // record itself ([StoredSecret.replayStamp]) so there is
+                    // no epoch value in scope that could be passed by
+                    // mistake, and the pair is read in ONE call so it cannot
+                    // tear across a concurrent receive.
+                    val record = ports.getRecord(groupIdHex)
+                    if (record != null) {
+                        broadcastAndMark(groupIdHex, record.replayStamp, record.secret, ports)
+                    }
                 }
 
                 EnsureAction.NONE -> Unit
@@ -620,14 +990,23 @@ public object GroupPushRouting {
      * flagged NOT distributed, so the next [ensure] re-broadcasts. A
      * throwing `markDistributed` lands in the same place — the row
      * stays pending and the (idempotent) broadcast simply repeats.
+     *
+     * ADR-0044 — [stamp] is a PARAMETER, never read from the group here.
+     * Every caller has to say explicitly which epoch it is emitting, and
+     * the [MintStamp] type makes it say which KIND: a MINT passes the
+     * [MintStamp.Fresh] it just read, a RE-BROADCAST passes the
+     * [MintStamp.Replayed] off the stored row. Sourcing it inside this
+     * helper would silently re-stamp on every retry, which is the one
+     * mistake that turns the whole ordering gate into a no-op.
      */
     private suspend fun broadcastAndMark(
         groupIdHex: String,
+        stamp: MintStamp,
         secret: ByteArray,
         ports: PushRoutingPorts,
     ) {
         try {
-            ports.broadcast(ports.composeEnvelope(secret))
+            ports.broadcast(ports.composeEnvelope(stamp, secret))
             ports.markDistributed(groupIdHex)
         } catch (_: Throwable) {
             // Left pending on purpose — the next `ensure` retries.
@@ -683,14 +1062,20 @@ public object GroupPushRouting {
      * before rank is consulted), so the retry is safe wherever it fires.
      *
      * A throw propagates to the caller (which is best-effort).
+     *
+     * ADR-0044 — this is a RE-BROADCAST of an already-minted secret, so
+     * it REPLAYS the stored stamp ([StoredSecret.replayStamp]). It must
+     * not stamp the post-add epoch: the secret did not change, only its
+     * audience did, and re-stamping would let a routine add-member
+     * out-rank a rotation minted at a higher epoch.
      */
     public suspend fun redistribute(
         groupIdHex: String,
         ports: PushRoutingPorts,
     ) {
-        val secret = ports.getSecret(groupIdHex) ?: return
+        val record = ports.getRecord(groupIdHex) ?: return
         try {
-            ports.broadcast(ports.composeEnvelope(secret))
+            ports.broadcast(ports.composeEnvelope(record.replayStamp, record.secret))
         } catch (e: Throwable) {
             runCatching { ports.markPending(groupIdHex) }
             throw e
@@ -783,6 +1168,14 @@ public object GroupPushRouting {
          *  Also covers an UNREADABLE row — one whose old id could never be
          *  named, so rotating it would strand it subscribed forever. */
         SKIP_NO_SECRET,
+
+        /** ADR-0044 — this device's own `Group.epoch()` could not be read,
+         *  so the new secret could not be STAMPED. Fail-closed: an
+         *  unstamped mint has no position in the total order, which is
+         *  exactly what the v2 envelope exists to eliminate, and guessing
+         *  a stamp is worse than not rotating (the group keeps a working,
+         *  ordered secret; only the eviction's re-key is deferred). */
+        SKIP_UNKNOWN_EPOCH,
     }
 
     /**
@@ -912,14 +1305,24 @@ public object GroupPushRouting {
      * ADR-0043 — re-mint the group's `push_routing_secret`, redistribute
      * it, and retire the superseded `push_gid`.
      *
-     * **The caller MUST have already published the Remove commit.** The
-     * envelope is an MLS application message: sealed at epoch N
+     * **The caller MUST have already published the Remove commit** —
+     * C-61, and under ADR-0044 it carries TWO guarantees, not one.
+     *
+     * The envelope is an MLS application message: sealed at epoch N
      * (pre-removal) the evicted member is still a member of that epoch and
      * can OPEN it, learning the new secret and defeating the whole change.
      * Sealed at N+1 it is unreadable to the removed leaf — RFC 9420 forward
-     * secrecy is exactly the property doing the work here. A hard
-     * sequencing requirement, not an optimisation. `ChatRepository`
-     * enforces it by awaiting the Remove commit's publish before calling.
+     * secrecy is exactly the property doing the work here.
+     *
+     * ADR-0044 adds the second: the new secret is STAMPED with the epoch
+     * read HERE, so publishing the Remove first is also what makes the
+     * rotation strictly OUT-RANK the secret it replaces. Get the order
+     * wrong and the stamp is the PRE-removal epoch, which TIES with a
+     * stale secret minted at that same epoch — the tie falls to the 32
+     * secret bytes and the rotation may simply LOSE. The guarantee
+     * degrades from "always wins" to "coin flip", silently. Use
+     * [publishRemoveThenRotate] at the call site, which is where that
+     * ordering is pinned by a test.
      *
      * The steps, in the one order that works:
      *
@@ -930,7 +1333,11 @@ public object GroupPushRouting {
      *      wakes, i.e. the exact defect being fixed. (The derivation happens
      *      at teardown time inside [retireOldPushGid]; what is load-bearing
      *      is that the BYTES are captured before the overwrite.)
-     *   3. mint the NEW secret and 4. persist it NOT distributed;
+     *   3. ADR-0044 — read the CURRENT (post-removal) epoch as the mint
+     *      stamp, INSIDE the lock and AFTER any queue wait, so a rotation
+     *      that queued behind a predecessor stamps the epoch it actually
+     *      mints at rather than the one it was triggered at;
+     *   4. mint the NEW secret and persist it NOT distributed;
      *   5. broadcast, flagging distributed only once the send lands. That
      *      flag is the whole durability mechanism, reused verbatim from the
      *      mint path: a failed rotation broadcast leaves the row PENDING and
@@ -964,33 +1371,112 @@ public object GroupPushRouting {
             // (1)+(2) — the OLD secret, read BEFORE anything overwrites it.
             // An unreadable row cannot be rotated: the old id could never be
             // named, so a rotation would strand it subscribed forever.
-            val oldSecret = runCatching { ports.getSecret(groupIdHex) }.getOrNull()
-            if (oldSecret == null) {
-                RotationOutcome.SKIP_NO_SECRET
-            } else {
-                // (3)+(4) — mint + persist PENDING. Persist before
-                // broadcasting for the same reason the mint path does: two
-                // divergent random secrets are worse than two identical
-                // envelopes.
-                val next = ports.mintSecret()
-                val pushGid = ports.derivePushGid(next)
-                ports.persist(groupIdHex, next, pushGid, distributed = false)
+            val oldSecret = runCatching { ports.getRecord(groupIdHex) }.getOrNull()?.secret
+            // (3) — ADR-0044: the mint stamp, read HERE, INSIDE the lock and
+            // after the queue wait, so a rotation that queued behind a
+            // predecessor stamps the epoch it actually mints at. C-61 is what
+            // makes this stamp meaningful: the caller published the Remove
+            // commit first, so this is already the POST-removal epoch and the
+            // mint strictly out-ranks anything the evicted member could hold.
+            // Fail-closed on an unreadable epoch.
+            val stamp = if (oldSecret == null) null else ports.freshMintStamp()
+            when {
+                oldSecret == null -> RotationOutcome.SKIP_NO_SECRET
+                stamp == null -> RotationOutcome.SKIP_UNKNOWN_EPOCH
+                else -> {
+                    // (4) — mint + persist PENDING. Persist before
+                    // broadcasting for the same reason the mint path does: two
+                    // divergent random secrets are worse than two identical
+                    // envelopes.
+                    val next = ports.mintSecret()
+                    val pushGid = ports.derivePushGid(next)
+                    ports.persist(groupIdHex, next, stamp.epoch, pushGid, distributed = false)
 
-                // (5) — redistribute at the POST-removal epoch. A failure
-                // leaves the row pending for the existing retry branch; it
-                // must NOT abort the local switch, which is already durable.
-                broadcastAndMark(groupIdHex, next, ports)
+                    // (5) — redistribute at the POST-removal epoch. A failure
+                    // leaves the row pending for the existing retry branch; it
+                    // must NOT abort the local switch, which is already durable.
+                    broadcastAndMark(groupIdHex, stamp, next, ports)
 
-                // (6) — arm the NEW id FIRST, so a failure between the two
-                // never leaves this device subscribed to nothing.
-                runCatching { subscribeOrDefer(groupIdHex, ports) }
+                    // (6) — arm the NEW id FIRST, so a failure between the two
+                    // never leaves this device subscribed to nothing.
+                    runCatching { subscribeOrDefer(groupIdHex, ports) }
 
-                // (7)+(8) — retire the OLD id: unsubscribe this device's
-                // row, drop the stale reverse-index entry.
-                retireOldPushGid(oldSecret, ports)
-                RotationOutcome.ROTATED
+                    // (7)+(8) — retire the OLD id: unsubscribe this device's
+                    // row, drop the stale reverse-index entry.
+                    retireOldPushGid(oldSecret, ports)
+                    RotationOutcome.ROTATED
+                }
             }
         }
+    }
+
+    /**
+     * **C-61 — publish the Remove commit, THEN rotate.** The single call
+     * site for this device's own removal path, and the reason that
+     * ordering is testable at all rather than being two adjacent
+     * statements anyone can reorder.
+     *
+     * Both halves of what C-61 buys depend on [publishRemove] having
+     * RETURNED before [rotate] is even started:
+     *
+     *   - **Forward secrecy (ADR-0043).** The rotation envelope is an MLS
+     *     application message. Sealed before the Remove commit it is
+     *     sealed at the pre-removal epoch, where the evicted member is
+     *     still a member and can open it — learning the very secret the
+     *     rotation exists to deny it.
+     *   - **Recency (ADR-0044).** [rotate] stamps the new secret with
+     *     `Group.epoch()` read at mint time. After the commit that is the
+     *     POST-removal epoch, so the rotation strictly out-ranks the
+     *     secret it replaces and a stale re-broadcast of that older secret
+     *     is refused [ReceiveVerdict.REJECT_STALE] by every member. Before
+     *     the commit it is the PRE-removal epoch — the same epoch the
+     *     stale secret carries — so the two TIE, the tie falls to the 32
+     *     secret bytes, and the rotation wins or loses by a coin flip with
+     *     no signal either way.
+     *
+     * ADR-0043 required this ordering but enforced it only structurally,
+     * by call-site sequencing, with no test on any client. ADR-0044
+     * promotes it from a property that protects one guarantee to a
+     * precondition of two, so it is pinned here — where a test can drive
+     * both callbacks and observe which epoch the emitted envelope was
+     * STAMPED at.
+     *
+     * The rotation is deliberately fire-and-forget on [scope]: push is
+     * best-effort and a rotation failure must never unwind the membership
+     * change that triggered it. "Ordered" means the rotation is not
+     * STARTED until the removal has landed, not that the caller waits for
+     * it.
+     *
+     * @param scope the (long-lived, app-scoped) scope the rotation runs
+     *   on — never the caller's, which may complete first.
+     * @param publishRemove applies + publishes the Remove commit,
+     *   advancing the local MLS epoch. Its throw PROPAGATES — a removal
+     *   that failed must not rotate.
+     * @param rotate started ONLY after [publishRemove] returned. `null`
+     *   skips the rotation entirely (no session / no group record —
+     *   nothing to rotate for).
+     * @param onRotationError receives a rotation failure. The removal
+     *   itself is already durable.
+     * @return whatever [publishRemove] returned, so the caller keeps its
+     *   commit id (echo suppression, notices).
+     */
+    public suspend fun <T> publishRemoveThenRotate(
+        scope: CoroutineScope,
+        publishRemove: suspend () -> T,
+        rotate: (suspend () -> RotationOutcome)?,
+        onRotationError: ((Throwable) -> Unit)? = null,
+    ): T {
+        val result = publishRemove()
+        if (rotate != null) {
+            scope.launch {
+                try {
+                    rotate()
+                } catch (cause: Throwable) {
+                    onRotationError?.invoke(cause)
+                }
+            }
+        }
+        return result
     }
 
     /**
@@ -1055,14 +1541,64 @@ public interface PushRoutingPorts {
      *  Deterministic across every member that holds the same secret. */
     public fun derivePushGid(secret: ByteArray): ByteArray
 
-    /** Compose the E2EE distribution-envelope bytes for a secret. */
-    public fun composeEnvelope(secret: ByteArray): ByteArray
+    /**
+     * ADR-0044 — the canonical recency order, bound in production to the
+     * audited Rust `pushRoutingSecretIsNewer` FFI. NEVER re-implemented
+     * in Kotlin: three clients each hand-rolling this comparison is
+     * precisely the drift class that produced the F-A replay.
+     *
+     * A property (not a method) so it can be handed straight to the pure
+     * [GroupPushRouting.decideAcceptReceivedSecret], keeping that
+     * decision core FFI-free and host-testable.
+     */
+    public val isNewer: GroupPushRouting.PushRoutingSecretIsNewer
+
+    /**
+     * ADR-0044 — compose the E2EE distribution-envelope bytes for
+     * [secret], stamped with [stamp].
+     *
+     * [stamp] is a [GroupPushRouting.MintStamp], not a bare `ULong`, so a
+     * caller cannot reach this method without stating whether the epoch
+     * is a FRESH read of the live group ([freshMintStamp]) or a REPLAY of
+     * the epoch a stored secret was minted under
+     * ([GroupPushRouting.StoredSecret.replayStamp]). Re-stamping a
+     * re-broadcast is the one mistake that silently voids the whole
+     * ordering gate, and it is invisible in a `ULong`.
+     */
+    public fun composeEnvelope(
+        stamp: GroupPushRouting.MintStamp,
+        secret: ByteArray,
+    ): ByteArray
+
+    /**
+     * ADR-0044 — read this device's OWN current MLS group epoch as a
+     * FRESH mint stamp, or `null` when it cannot be read (fail-closed: a
+     * mint that cannot be stamped is not performed).
+     *
+     * The ONLY producer of a [GroupPushRouting.MintStamp.Fresh], and
+     * therefore the only way a new epoch value enters the system.
+     * Deliberately a suspending PORT rather than a caller-supplied value:
+     * the rotation path must read the epoch INSIDE its serializing lock,
+     * AFTER any queue wait, so a rotation queued behind a predecessor
+     * stamps the epoch it actually mints at — a value resolved at the
+     * call site would be read before the wait.
+     */
+    public suspend fun freshMintStamp(): GroupPushRouting.MintStamp.Fresh?
 
     /** Has this device a persisted secret for `groupIdHex`? */
     public fun hasSecret(groupIdHex: String): Boolean
 
-    /** Read the persisted secret for `groupIdHex`, or `null`. */
-    public fun getSecret(groupIdHex: String): ByteArray?
+    /**
+     * ADR-0044 — read the persisted secret for `groupIdHex` TOGETHER
+     * with the epoch it was minted under, or `null` when this device
+     * holds none.
+     *
+     * One read for the PAIR, deliberately: two separate reads could tear
+     * across a concurrent receive (secret from before the write, epoch
+     * from after), and a torn pair composes an envelope claiming a live
+     * epoch for a superseded secret — the F-A shape itself.
+     */
+    public fun getRecord(groupIdHex: String): GroupPushRouting.StoredSecret?
 
     /** Has the held secret's distribution envelope been confirmed on
      *  the wire? `true` when nothing is held (there is nothing pending
@@ -1073,11 +1609,18 @@ public interface PushRoutingPorts {
     /** Persist the secret (encrypted at rest) AND the
      *  `push_gid -> (account, group)` reverse-index entry, together
      *  with whether its distribution envelope is already on the wire
-     *  ([distributed]). The owner mint passes `false`; a received
-     *  secret passes `true`. */
+     *  ([distributed]) and the ADR-0044 [mintEpoch] it was minted under.
+     *  The owner mint passes `false`; a received secret passes `true`.
+     *
+     *  [mintEpoch] is a bare `ULong` rather than a
+     *  [GroupPushRouting.MintStamp] on purpose: a RECEIVE files the epoch
+     *  the accepted ENVELOPE carried, which is neither a fresh read nor a
+     *  replay of anything stored. The stamp type governs COMPOSING, which
+     *  is where the F-A defect lives. */
     public fun persist(
         groupIdHex: String,
         secret: ByteArray,
+        mintEpoch: ULong,
         pushGid: ByteArray,
         distributed: Boolean,
     )
@@ -1145,6 +1688,7 @@ public class NativePushRoutingPorts(
     private val subscribeFn: suspend (ByteArray) -> Unit,
     private val unsubscribeFn: suspend (ByteArray) -> Unit,
     private val broadcastFn: suspend (ByteArray) -> Unit,
+    private val groupEpochFn: suspend () -> ULong?,
 ) : PushRoutingPorts {
 
     override fun mintSecret(): ByteArray =
@@ -1152,13 +1696,27 @@ public class NativePushRoutingPorts(
 
     override fun derivePushGid(secret: ByteArray): ByteArray = ffiDerivePushGid(secret)
 
-    override fun composeEnvelope(secret: ByteArray): ByteArray = composePushRoutingSecret(secret)
+    /** ADR-0044 — the audited Rust order, verbatim. No Kotlin
+     *  re-derivation exists anywhere in this client. */
+    override val isNewer: GroupPushRouting.PushRoutingSecretIsNewer =
+        GroupPushRouting.PushRoutingSecretIsNewer(::ffiPushRoutingSecretIsNewer)
+
+    override fun composeEnvelope(
+        stamp: GroupPushRouting.MintStamp,
+        secret: ByteArray,
+    ): ByteArray = composePushRoutingSecret(stamp.epoch, secret)
+
+    /** ADR-0044 — the live `Group.epoch()`, or `null` when it could not be
+     *  read (fail-closed: an unstamped mint is never performed). */
+    override suspend fun freshMintStamp(): GroupPushRouting.MintStamp.Fresh? =
+        groupEpochFn()?.let { GroupPushRouting.MintStamp.Fresh(it) }
 
     override fun hasSecret(groupIdHex: String): Boolean =
         PushRoutingSecretStore.has(context, accountIdB64, groupIdHex)
 
-    override fun getSecret(groupIdHex: String): ByteArray? =
-        PushRoutingSecretStore.get(context, accountIdB64, groupIdHex)
+    override fun getRecord(groupIdHex: String): GroupPushRouting.StoredSecret? =
+        PushRoutingSecretStore.entry(context, accountIdB64, groupIdHex)
+            ?.let { GroupPushRouting.StoredSecret(it.secret, it.mintEpoch) }
 
     override fun isDistributed(groupIdHex: String): Boolean =
         PushRoutingSecretStore.isDistributed(context, accountIdB64, groupIdHex)
@@ -1166,10 +1724,18 @@ public class NativePushRoutingPorts(
     override fun persist(
         groupIdHex: String,
         secret: ByteArray,
+        mintEpoch: ULong,
         pushGid: ByteArray,
         distributed: Boolean,
     ) {
-        PushRoutingSecretStore.put(context, accountIdB64, groupIdHex, secret, distributed)
+        PushRoutingSecretStore.put(
+            context,
+            accountIdB64,
+            groupIdHex,
+            secret,
+            distributed,
+            mintEpoch,
+        )
         routeStore.put(PushClient.pseudonymHex(pushGid), accountIdB64, groupIdHex)
     }
 

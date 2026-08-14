@@ -381,10 +381,11 @@ public final class ChatClient {
             // The MLS-authenticated `senderLeaf` rides along so the receive
             // side can enforce the owner gate (`lakko-security` MEDIUM-1) —
             // the same attribution the ADR-0023 author-only gate uses.
-            if let secret = PushGroupRouting.tryDecodeSecretEnvelope(data) {
+            if let decoded = PushGroupRouting.tryDecodeSecretEnvelope(data) {
                 return .pushRoutingSecret(
                     messageId: messageId,
-                    secret: secret,
+                    secret: decoded.secret,
+                    mintEpoch: decoded.mintEpoch,
                     senderLeaf: senderLeaf,
                     createdAt: createdAt
                 )
@@ -599,9 +600,15 @@ public enum IncomingChatEvent: Equatable {
     /// table so only the OWNER can *change* the group's routing secret
     /// (`lakko-security` MEDIUM-1). `nil` ⇒ unattributable ⇒ only a
     /// byte-identical re-send is accepted.
+    ///
+    /// `mintEpoch` is the ADR-0044 recency stamp the envelope carried — the
+    /// primary key of the canonical total order. It travels WITH the secret
+    /// all the way to the gate: a stale re-broadcast carries a valid secret
+    /// from an authorised sender and is refused only by that order.
     case pushRoutingSecret(
         messageId: Int64,
         secret: Data,
+        mintEpoch: UInt64,
         senderLeaf: UInt32?,
         createdAt: String
     )

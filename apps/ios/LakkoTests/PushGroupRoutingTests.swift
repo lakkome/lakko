@@ -190,6 +190,58 @@ final class PushGroupRoutingTests: XCTestCase {
         try Identity.fromSeed(seed: Data(repeating: seedByte, count: 32))
     }
 
+    // MARK: - ADR-0044 test-side epoch helpers
+
+    /// The group's LIVE MLS epoch — the ceiling the receive-side clamp checks
+    /// an incoming stamp against, and the stamp a later envelope for that
+    /// group carries.
+    ///
+    /// Read from the real `Group` rather than hard-coded, so a change in how
+    /// many commits a fixture performs cannot silently turn an
+    /// ordering-sensitive assertion into a same-epoch tie. The fixtures assert
+    /// their own epoch is `>= 1` for exactly that reason.
+    private func liveEpoch(_ group: Group) -> UInt64 {
+        (try? group.epoch()) ?? 0
+    }
+
+    /// The stamp a rotation mints at, for the rotation tests that use a
+    /// STORE-only fixture (no live `Group` handle — those tests exercise the
+    /// mint / persist / broadcast / teardown mechanics, not the ordering).
+    /// Any value works there because nothing compares against it; the ordering
+    /// itself is pinned by the dedicated ADR-0044 tests below.
+    private static let rotationEpoch: UInt64 = 7
+
+    /// The ADR-0042 / ADR-0043 AUTHORITY matrix runs through this shim so its
+    /// rows keep asking the question they are about — *who may write* — rather
+    /// than tripping over ADR-0044's ordering.
+    ///
+    /// The two ordering defaults are chosen to be inert, deliberately:
+    /// `incomingMintEpoch: 5` is strictly greater than `storedMintEpoch: 0`,
+    /// so an authorised change is never masked by `rejectStale`; and
+    /// `ownEpoch: 100` is comfortably above the incoming stamp, so it is never
+    /// masked by `rejectFuture`. Both refusals get their own dedicated tests.
+    private func classify(
+        incoming: Data,
+        stored: Data?,
+        storedUnreadable: Bool = false,
+        senderKey: Data?,
+        authority: PushGroupRouting.SecretAuthority,
+        incomingMintEpoch: UInt64 = 5,
+        storedMintEpoch: UInt64 = 0,
+        ownEpoch: UInt64? = 100
+    ) -> PushGroupRouting.SecretVerdict {
+        PushGroupRouting.classifyIncomingSecret(
+            incoming: incoming,
+            incomingMintEpoch: incomingMintEpoch,
+            stored: stored,
+            storedMintEpoch: storedMintEpoch,
+            storedUnreadable: storedUnreadable,
+            ownEpoch: ownEpoch,
+            senderKey: senderKey,
+            authority: authority
+        )
+    }
+
     /// A real MLS group whose founder (`identity`) is the ADR-0022 owner.
     private func makeOwnerGroup(_ identity: Identity) throws -> (Group, String) {
         let group = try Group.create(identity: identity)
@@ -217,6 +269,14 @@ final class PushGroupRoutingTests: XCTestCase {
         let memberLeaf = try XCTUnwrap(
             roster.first { $0.signaturePublicKey != ownerKey }?.leafIndex)
         XCTAssertNotEqual(ownerLeaf, memberLeaf)
+        // ADR-0044 — the add commit advanced the epoch past 0, which is what
+        // lets a test seed a secret at epoch 0 and have a LATER envelope
+        // stamped `liveEpoch(group)` strictly out-rank it. If this ever became
+        // 0 the two would TIE and the outcome would fall to the random secret
+        // bytes, so assert it here rather than let a test flake.
+        XCTAssertGreaterThanOrEqual(
+            try group.epoch(), 1,
+            "fixture must sit above epoch 0 so `liveEpoch` out-ranks a 0-stamped seed")
         return (group, groupIdHex, ownerLeaf, memberLeaf)
     }
 
@@ -263,6 +323,10 @@ final class PushGroupRoutingTests: XCTestCase {
                        "the promotion commit must be reflected in the live role table")
         XCTAssertFalse(table.admins.contains(memberEntry.signaturePublicKey),
                        "the plain member must NOT be an admin")
+        // ADR-0044 — see the note in `makeTwoMemberGroup`.
+        XCTAssertGreaterThanOrEqual(
+            try group.epoch(), 1,
+            "fixture must sit above epoch 0 so `liveEpoch` out-ranks a 0-stamped seed")
 
         return (group, groupIdHex, ownerLeaf, adminEntry.leafIndex, memberEntry.leafIndex)
     }
@@ -290,10 +354,11 @@ final class PushGroupRoutingTests: XCTestCase {
 
     func testComposeDecodeRoundTrip() throws {
         let secret = try XCTUnwrap(PushGroupRouting.mintSecret())
-        let envelope = try PushGroupRouting.composeSecretEnvelope(secret: secret)
+        let envelope = try PushGroupRouting.composeSecretEnvelope(mintEpoch: 0, secret: secret)
         XCTAssertEqual(envelope.count, PushGroupRouting.envelopeLen)
-        let decoded = PushGroupRouting.tryDecodeSecretEnvelope(envelope)
-        XCTAssertEqual(decoded, secret)
+        let decoded = try XCTUnwrap(PushGroupRouting.tryDecodeSecretEnvelope(envelope))
+        XCTAssertEqual(decoded.secret, secret)
+        XCTAssertEqual(decoded.mintEpoch, 0)
     }
 
     func testTryDecodeFailClosedRejectsNonEnvelope() {
@@ -318,7 +383,7 @@ final class PushGroupRoutingTests: XCTestCase {
         XCTAssertFalse(store.hasSecret(accountIdB64: "acct", groupIdHex: "grp"))
         store.putRouting(
             accountIdB64: "acct", groupIdHex: "grp", secret: secret, pushGidHex: pushGidHex,
-            distributed: true)
+            distributed: true, mintEpoch: 0)
 
         // Presence check (no device key needed).
         XCTAssertTrue(store.hasSecret(accountIdB64: "acct", groupIdHex: "grp"))
@@ -359,7 +424,7 @@ final class PushGroupRoutingTests: XCTestCase {
         // Broadcast exactly once; the envelope decodes back to a 32-byte secret.
         XCTAssertEqual(recorder.envelopes.count, 1)
         let secret = try XCTUnwrap(
-            PushGroupRouting.tryDecodeSecretEnvelope(recorder.envelopes[0]))
+            PushGroupRouting.tryDecodeSecretEnvelope(recorder.envelopes[0])?.secret)
         XCTAssertEqual(secret.count, 32)
 
         // The secret is persisted (device-key-encrypted) + hasSecret true.
@@ -445,7 +510,7 @@ final class PushGroupRoutingTests: XCTestCase {
         // deterministic in the secret, so byte-equality proves no re-mint.
         XCTAssertEqual(broadcaster.envelopes[0], broadcaster.envelopes[1])
         XCTAssertEqual(
-            PushGroupRouting.tryDecodeSecretEnvelope(broadcaster.envelopes[1]), minted.secret)
+            PushGroupRouting.tryDecodeSecretEnvelope(broadcaster.envelopes[1])?.secret, minted.secret)
 
         // The successful re-broadcast settles the flag ...
         XCTAssertEqual(
@@ -540,6 +605,7 @@ final class PushGroupRoutingTests: XCTestCase {
         let secret = try XCTUnwrap(PushGroupRouting.mintSecret())
         await routing.receiveSecret(
             accountIdB64: "acctPeer", groupIdHex: groupIdHex, secret: secret,
+            mintEpoch: 0,
             group: group, senderLeaf: ownerLeaf)
 
         let record = try XCTUnwrap(
@@ -730,6 +796,7 @@ final class PushGroupRoutingTests: XCTestCase {
         let secret = try XCTUnwrap(PushGroupRouting.mintSecret())
         await routing.receiveSecret(
             accountIdB64: "acctMember", groupIdHex: groupIdHex, secret: secret,
+            mintEpoch: 0,
             group: group, senderLeaf: ownerLeaf)
         XCTAssertEqual(
             store.getRecord(accountIdB64: "acctMember", groupIdHex: groupIdHex)?.distributed,
@@ -843,7 +910,7 @@ final class PushGroupRoutingTests: XCTestCase {
             try XCTUnwrap(PushGroupRouting.derivePushGid(secret: stored)))
         store.putRouting(
             accountIdB64: "acct", groupIdHex: "grp", secret: stored, pushGidHex: gidHex,
-            distributed: true)
+            distributed: true, mintEpoch: 0)
 
         // A DIFFERENT secret's failed broadcast must not un-settle this row.
         XCTAssertFalse(store.markPending(
@@ -881,7 +948,7 @@ final class PushGroupRoutingTests: XCTestCase {
 
         store.putRouting(
             accountIdB64: "acct", groupIdHex: "grp", secret: stored, pushGidHex: gidHex,
-            distributed: false)
+            distributed: false, mintEpoch: 0)
 
         // A different secret's broadcast must not settle this row.
         XCTAssertFalse(store.markDistributed(
@@ -939,11 +1006,11 @@ final class PushGroupRoutingTests: XCTestCase {
 
         // Owner mints a secret + composes the distribution envelope.
         let ownerSecret = try XCTUnwrap(PushGroupRouting.mintSecret())
-        let envelope = try PushGroupRouting.composeSecretEnvelope(secret: ownerSecret)
+        let envelope = try PushGroupRouting.composeSecretEnvelope(mintEpoch: 0, secret: ownerSecret)
         let ownerPushGid = try XCTUnwrap(PushGroupRouting.derivePushGid(secret: ownerSecret))
 
         // Non-owner decodes the envelope back to the exact secret ...
-        let decoded = try XCTUnwrap(PushGroupRouting.tryDecodeSecretEnvelope(envelope))
+        let decoded = try XCTUnwrap(PushGroupRouting.tryDecodeSecretEnvelope(envelope)).secret
         XCTAssertEqual(decoded, ownerSecret)
 
         // ... persists it under its own account + subscribes under push_gid.
@@ -951,6 +1018,7 @@ final class PushGroupRoutingTests: XCTestCase {
             accountIdB64: "acctPeer",
             groupIdHex: groupIdHex,
             secret: decoded,
+            mintEpoch: 0,
             group: group,
             senderLeaf: ownerLeaf
         )
@@ -981,71 +1049,73 @@ final class PushGroupRoutingTests: XCTestCase {
         // --- CHANGED secret (something already stored) ---------------------
         // OWNER authored the change -> accept (the owner may always rotate)
         XCTAssertEqual(
-            PushGroupRouting.classifyIncomingSecret(
+            classify(
                 incoming: b, stored: a, senderKey: ownerKey, authority: roles),
             .accept)
         // ADMIN authored the change -> ACCEPT (ADR-0043 ratified option (b):
         // ADR-0022 lets an admin commit the Remove, so an admin must be able
         // to retire the evicted member's routing id).
         XCTAssertEqual(
-            PushGroupRouting.classifyIncomingSecret(
+            classify(
                 incoming: b, stored: a, senderKey: adminKey, authority: roles),
             .accept)
         // a PLAIN MEMBER authored the change -> REJECT
         XCTAssertEqual(
-            PushGroupRouting.classifyIncomingSecret(
+            classify(
                 incoming: b, stored: a, senderKey: memberKey, authority: roles),
             .reject)
         // unattributable sender (no leaf / leaf not in roster) -> REJECT
         XCTAssertEqual(
-            PushGroupRouting.classifyIncomingSecret(
+            classify(
                 incoming: b, stored: a, senderKey: nil, authority: roles),
             .reject)
         // legacy / open group with no role table -> accept (pre-gate behaviour)
         XCTAssertEqual(
-            PushGroupRouting.classifyIncomingSecret(
+            classify(
                 incoming: b, stored: a, senderKey: memberKey, authority: .noRoleTable),
             .accept)
         // roster / role read threw -> REJECT (fail-closed, invariant #4)
         XCTAssertEqual(
-            PushGroupRouting.classifyIncomingSecret(
+            classify(
                 incoming: b, stored: a, senderKey: memberKey, authority: .unreadable),
             .reject)
 
         // --- IDENTICAL secret: accepted from ANYONE (idempotent redistribute)
+        // ADR-0044 gives this its own verdict, because the caller must NOT
+        // update the stored epoch on it (see the epoch-inflation test).
         for authority: PushGroupRouting.SecretAuthority in
             [roles, .noRoleTable, .unreadable] {
             for sender: Data? in [ownerKey, adminKey, memberKey, nil] {
                 XCTAssertEqual(
-                    PushGroupRouting.classifyIncomingSecret(
+                    classify(
                         incoming: a, stored: a, senderKey: sender, authority: authority),
-                    .accept)
+                    .acceptIdentical)
             }
         }
 
         // --- FIRST-EVER secret (nothing stored) ----------------------------
         // OWNER seeds -> accept
         XCTAssertEqual(
-            PushGroupRouting.classifyIncomingSecret(
+            classify(
                 incoming: a, stored: nil, senderKey: ownerKey, authority: roles),
             .accept)
         // ADMIN seeds a HOLE -> accept (closes the admin-add delivery gap)
         XCTAssertEqual(
-            PushGroupRouting.classifyIncomingSecret(
+            classify(
                 incoming: a, stored: nil, senderKey: adminKey, authority: roles),
             .accept)
         // a PLAIN MEMBER seeds -> REJECT (even with nothing stored)
         XCTAssertEqual(
-            PushGroupRouting.classifyIncomingSecret(
+            classify(
                 incoming: a, stored: nil, senderKey: memberKey, authority: roles),
             .reject)
         // unattributable / unreadable seeds -> REJECT
         XCTAssertEqual(
-            PushGroupRouting.classifyIncomingSecret(
+            classify(
                 incoming: a, stored: nil, senderKey: nil, authority: roles),
             .reject)
         XCTAssertEqual(
-            PushGroupRouting.classifyIncomingSecret(
+            classify(
                 incoming: a, stored: nil, senderKey: nil, authority: .unreadable),
             .reject)
 
@@ -1053,7 +1123,7 @@ final class PushGroupRoutingTests: XCTestCase {
         // Arrival order must not matter — whatever an admin seeded, the
         // owner's value wins.
         XCTAssertEqual(
-            PushGroupRouting.classifyIncomingSecret(
+            classify(
                 incoming: b, stored: a, senderKey: ownerKey, authority: roles),
             .accept)
 
@@ -1061,7 +1131,7 @@ final class PushGroupRoutingTests: XCTestCase {
         // An empty resolved sender key must not match an empty owner/admin
         // entry (no authority level is inferred from a degenerate table).
         XCTAssertEqual(
-            PushGroupRouting.classifyIncomingSecret(
+            classify(
                 incoming: a, stored: nil, senderKey: Data(),
                 authority: .roleTable(owner: Data(), admins: [Data()])),
             .reject)
@@ -1073,19 +1143,19 @@ final class PushGroupRoutingTests: XCTestCase {
         // authorised either way, so this no longer changes the outcome — the
         // distinction survives only in the diagnostic log.
         XCTAssertEqual(
-            PushGroupRouting.classifyIncomingSecret(
+            classify(
                 incoming: a, stored: nil, storedUnreadable: true,
                 senderKey: adminKey, authority: roles),
             .accept)
         // The OWNER may still write over an unreadable store — the repair path.
         XCTAssertEqual(
-            PushGroupRouting.classifyIncomingSecret(
+            classify(
                 incoming: a, stored: nil, storedUnreadable: true,
                 senderKey: ownerKey, authority: roles),
             .accept)
         // A provable hole (the default) still lets the admin seed.
         XCTAssertEqual(
-            PushGroupRouting.classifyIncomingSecret(
+            classify(
                 incoming: a, stored: nil, storedUnreadable: false,
                 senderKey: adminKey, authority: roles),
             .accept)
@@ -1093,12 +1163,12 @@ final class PushGroupRoutingTests: XCTestCase {
         // the admin widening must not leak downward.
         for unreadable in [true, false] {
             XCTAssertEqual(
-                PushGroupRouting.classifyIncomingSecret(
+                classify(
                     incoming: b, stored: a, storedUnreadable: unreadable,
                     senderKey: memberKey, authority: roles),
                 .reject)
             XCTAssertEqual(
-                PushGroupRouting.classifyIncomingSecret(
+                classify(
                     incoming: a, stored: nil, storedUnreadable: unreadable,
                     senderKey: memberKey, authority: roles),
                 .reject)
@@ -1109,11 +1179,11 @@ final class PushGroupRoutingTests: XCTestCase {
         let multi = PushGroupRouting.SecretAuthority.roleTable(
             owner: ownerKey, admins: [adminKey, admin2])
         XCTAssertEqual(
-            PushGroupRouting.classifyIncomingSecret(
+            classify(
                 incoming: a, stored: nil, senderKey: admin2, authority: multi),
             .accept)
         XCTAssertEqual(
-            PushGroupRouting.classifyIncomingSecret(
+            classify(
                 incoming: b, stored: a, senderKey: admin2, authority: multi),
             .accept)
     }
@@ -1160,6 +1230,7 @@ final class PushGroupRoutingTests: XCTestCase {
         let first = try XCTUnwrap(PushGroupRouting.mintSecret())
         await routing.receiveSecret(
             accountIdB64: "acct", groupIdHex: groupIdHex, secret: first,
+            mintEpoch: 0,
             group: group, senderLeaf: ownerLeaf)
         XCTAssertEqual(store.getSecret(accountIdB64: "acct", groupIdHex: groupIdHex), first)
 
@@ -1169,6 +1240,7 @@ final class PushGroupRoutingTests: XCTestCase {
         XCTAssertNotEqual(rotated, first)
         await routing.receiveSecret(
             accountIdB64: "acct", groupIdHex: groupIdHex, secret: rotated,
+            mintEpoch: liveEpoch(group),
             group: group, senderLeaf: ownerLeaf)
 
         XCTAssertEqual(store.getSecret(accountIdB64: "acct", groupIdHex: groupIdHex), rotated)
@@ -1189,6 +1261,7 @@ final class PushGroupRoutingTests: XCTestCase {
         let ownerSecret = try XCTUnwrap(PushGroupRouting.mintSecret())
         await routing.receiveSecret(
             accountIdB64: "acct", groupIdHex: groupIdHex, secret: ownerSecret,
+            mintEpoch: 0,
             group: group, senderLeaf: ownerLeaf)
         let ownerPushGid = try XCTUnwrap(PushGroupRouting.derivePushGid(secret: ownerSecret))
         XCTAssertEqual(spy.targets, [ownerPushGid])
@@ -1200,6 +1273,7 @@ final class PushGroupRoutingTests: XCTestCase {
         XCTAssertNotEqual(rogue, ownerSecret)
         await routing.receiveSecret(
             accountIdB64: "acct", groupIdHex: groupIdHex, secret: rogue,
+            mintEpoch: liveEpoch(group),
             group: group, senderLeaf: memberLeaf)
 
         XCTAssertEqual(
@@ -1262,6 +1336,7 @@ final class PushGroupRoutingTests: XCTestCase {
         let secret = try XCTUnwrap(PushGroupRouting.mintSecret())
         await routing.receiveSecret(
             accountIdB64: "acctNew", groupIdHex: groupIdHex, secret: secret,
+            mintEpoch: 0,
             group: group, senderLeaf: adminLeaf)
 
         let pushGid = try XCTUnwrap(PushGroupRouting.derivePushGid(secret: secret))
@@ -1292,6 +1367,7 @@ final class PushGroupRoutingTests: XCTestCase {
         let ownerSecret = try XCTUnwrap(PushGroupRouting.mintSecret())
         await routing.receiveSecret(
             accountIdB64: "acct", groupIdHex: groupIdHex, secret: ownerSecret,
+            mintEpoch: 0,
             group: group, senderLeaf: ownerLeaf)
         let ownerPushGid = try XCTUnwrap(PushGroupRouting.derivePushGid(secret: ownerSecret))
         XCTAssertEqual(spy.targets, [ownerPushGid])
@@ -1300,6 +1376,7 @@ final class PushGroupRoutingTests: XCTestCase {
         XCTAssertNotEqual(rotated, ownerSecret)
         await routing.receiveSecret(
             accountIdB64: "acct", groupIdHex: groupIdHex, secret: rotated,
+            mintEpoch: liveEpoch(group),
             group: group, senderLeaf: adminLeaf)
 
         let rotatedGid = try XCTUnwrap(PushGroupRouting.derivePushGid(secret: rotated))
@@ -1332,6 +1409,7 @@ final class PushGroupRoutingTests: XCTestCase {
         let ownerSecret = try XCTUnwrap(PushGroupRouting.mintSecret())
         await routing.receiveSecret(
             accountIdB64: "acct", groupIdHex: groupIdHex, secret: ownerSecret,
+            mintEpoch: 0,
             group: group, senderLeaf: ownerLeaf)
         let ownerPushGid = try XCTUnwrap(PushGroupRouting.derivePushGid(secret: ownerSecret))
 
@@ -1339,6 +1417,7 @@ final class PushGroupRoutingTests: XCTestCase {
         XCTAssertNotEqual(rogue, ownerSecret)
         await routing.receiveSecret(
             accountIdB64: "acct", groupIdHex: groupIdHex, secret: rogue,
+            mintEpoch: liveEpoch(group),
             group: group, senderLeaf: memberLeaf)
 
         XCTAssertEqual(
@@ -1364,6 +1443,7 @@ final class PushGroupRoutingTests: XCTestCase {
         let adminSeeded = try XCTUnwrap(PushGroupRouting.mintSecret())
         await routing.receiveSecret(
             accountIdB64: "acct", groupIdHex: groupIdHex, secret: adminSeeded,
+            mintEpoch: 0,
             group: group, senderLeaf: adminLeaf)
         XCTAssertEqual(store.getSecret(accountIdB64: "acct", groupIdHex: groupIdHex), adminSeeded)
 
@@ -1371,6 +1451,7 @@ final class PushGroupRoutingTests: XCTestCase {
         XCTAssertNotEqual(ownerSecret, adminSeeded)
         await routing.receiveSecret(
             accountIdB64: "acct", groupIdHex: groupIdHex, secret: ownerSecret,
+            mintEpoch: liveEpoch(group),
             group: group, senderLeaf: ownerLeaf)
 
         XCTAssertEqual(
@@ -1396,6 +1477,7 @@ final class PushGroupRoutingTests: XCTestCase {
         let secret = try XCTUnwrap(PushGroupRouting.mintSecret())
         await routing.receiveSecret(
             accountIdB64: "acct", groupIdHex: groupIdHex, secret: secret,
+            mintEpoch: 0,
             group: group, senderLeaf: memberLeaf)
 
         XCTAssertNil(
@@ -1417,10 +1499,12 @@ final class PushGroupRoutingTests: XCTestCase {
         let secret = try XCTUnwrap(PushGroupRouting.mintSecret())
         await routing.receiveSecret(
             accountIdB64: "acct", groupIdHex: groupIdHex, secret: secret,
+            mintEpoch: 0,
             group: group, senderLeaf: ownerLeaf)
 
         await routing.receiveSecret(
             accountIdB64: "acct", groupIdHex: groupIdHex, secret: secret,
+            mintEpoch: 0,
             group: group, senderLeaf: memberLeaf)
 
         let pushGid = try XCTUnwrap(PushGroupRouting.derivePushGid(secret: secret))
@@ -1439,6 +1523,7 @@ final class PushGroupRoutingTests: XCTestCase {
         let secret = try XCTUnwrap(PushGroupRouting.mintSecret())
         await routing.receiveSecret(
             accountIdB64: "acct", groupIdHex: groupIdHex, secret: secret,
+            mintEpoch: 0,
             group: group, senderLeaf: nil)
 
         XCTAssertNil(store.getSecret(accountIdB64: "acct", groupIdHex: groupIdHex))
@@ -1456,6 +1541,7 @@ final class PushGroupRoutingTests: XCTestCase {
         let secret = try XCTUnwrap(PushGroupRouting.mintSecret())
         await routing.receiveSecret(
             accountIdB64: "acct", groupIdHex: groupIdHex, secret: secret,
+            mintEpoch: 0,
             group: group, senderLeaf: 9999)
 
         XCTAssertNil(store.getSecret(accountIdB64: "acct", groupIdHex: groupIdHex))
@@ -1491,10 +1577,10 @@ final class PushGroupRoutingTests: XCTestCase {
 
         store.putRouting(
             accountIdB64: "acct", groupIdHex: "grp", secret: secret, pushGidHex: gidHex,
-            distributed: true)
+            distributed: true, mintEpoch: 0)
         store.putRouting(
             accountIdB64: "acct", groupIdHex: "grp2", secret: other, pushGidHex: otherGidHex,
-            distributed: true)
+            distributed: true, mintEpoch: 0)
 
         store.removeRoute(pushGidHex: gidHex)
 
@@ -1629,13 +1715,14 @@ final class PushGroupRoutingTests: XCTestCase {
         store: PushRoutingStore,
         accountIdB64: String,
         groupIdHex: String,
-        secret: Data
+        secret: Data,
+        mintEpoch: UInt64 = 0
     ) throws {
         let gidHex = PushGroupRouting.hex(
             try XCTUnwrap(PushGroupRouting.derivePushGid(secret: secret)))
         store.putRouting(
             accountIdB64: accountIdB64, groupIdHex: groupIdHex, secret: secret,
-            pushGidHex: gidHex, distributed: true)
+            pushGidHex: gidHex, distributed: true, mintEpoch: mintEpoch)
     }
 
     /// The whole rotation, end to end: a genuinely NEW secret is persisted +
@@ -1654,6 +1741,7 @@ final class PushGroupRoutingTests: XCTestCase {
 
         let outcome = await routing.rotateSecret(
             accountIdB64: "acct", groupIdHex: "grp", ownRole: .owner,
+            mintEpoch: { Self.rotationEpoch },
             broadcast: { bytes in recorder.record(bytes) })
         XCTAssertEqual(outcome, .rotated)
 
@@ -1667,7 +1755,7 @@ final class PushGroupRoutingTests: XCTestCase {
         // Redistributed to the group — the envelope carries the NEW secret ...
         XCTAssertEqual(recorder.envelopes.count, 1)
         XCTAssertEqual(
-            PushGroupRouting.tryDecodeSecretEnvelope(try XCTUnwrap(recorder.envelopes.first)),
+            PushGroupRouting.tryDecodeSecretEnvelope(try XCTUnwrap(recorder.envelopes.first))?.secret,
             stored)
         // ... and is confirmed on the wire.
         XCTAssertEqual(
@@ -1698,6 +1786,7 @@ final class PushGroupRoutingTests: XCTestCase {
 
         let outcome = await routing.rotateSecret(
             accountIdB64: "acct", groupIdHex: "grp", ownRole: .admin,
+            mintEpoch: { Self.rotationEpoch },
             broadcast: { bytes in recorder.record(bytes) })
         XCTAssertEqual(outcome, .rotated)
         XCTAssertEqual(recorder.envelopes.count, 1)
@@ -1720,6 +1809,7 @@ final class PushGroupRoutingTests: XCTestCase {
         for role: Role? in [.member, nil] {
             let outcome = await routing.rotateSecret(
                 accountIdB64: "acct", groupIdHex: "grp", ownRole: role,
+                mintEpoch: { Self.rotationEpoch },
                 broadcast: { bytes in recorder.record(bytes) })
             XCTAssertEqual(outcome, .skipNotAuthorized)
         }
@@ -1746,6 +1836,7 @@ final class PushGroupRoutingTests: XCTestCase {
         for role: Role in [.admin, .owner] {
             let outcome = await routing.rotateSecret(
                 accountIdB64: "acct", groupIdHex: "emptyGrp", ownRole: role,
+                mintEpoch: { Self.rotationEpoch },
                 broadcast: { bytes in recorder.record(bytes) })
             XCTAssertEqual(outcome, .skipNoSecret)
         }
@@ -1772,6 +1863,7 @@ final class PushGroupRoutingTests: XCTestCase {
 
         let outcome = await routing.rotateSecret(
             accountIdB64: "acct", groupIdHex: "grp", ownRole: .owner,
+            mintEpoch: { Self.rotationEpoch },
             broadcast: { bytes in recorder.record(bytes) })
         XCTAssertEqual(outcome, .skipNoSecret)
         XCTAssertTrue(recorder.envelopes.isEmpty)
@@ -1798,6 +1890,7 @@ final class PushGroupRoutingTests: XCTestCase {
 
         await routing.rotateSecret(
             accountIdB64: "acct", groupIdHex: "grp", ownRole: .owner,
+            mintEpoch: { Self.rotationEpoch },
             broadcast: { bytes in recorder.record(bytes) })
 
         let newGid = try XCTUnwrap(PushGroupRouting.derivePushGid(
@@ -1833,6 +1926,7 @@ final class PushGroupRoutingTests: XCTestCase {
 
         let outcome = await routing.rotateSecret(
             accountIdB64: "acct", groupIdHex: groupIdHex, ownRole: .owner,
+            mintEpoch: { Self.rotationEpoch },
             broadcast: { try broadcaster.send($0) })
         XCTAssertEqual(outcome, .rotated)
 
@@ -1854,7 +1948,7 @@ final class PushGroupRoutingTests: XCTestCase {
 
         XCTAssertEqual(broadcaster.envelopes.count, 2)
         XCTAssertEqual(
-            PushGroupRouting.tryDecodeSecretEnvelope(try XCTUnwrap(broadcaster.envelopes.last)),
+            PushGroupRouting.tryDecodeSecretEnvelope(try XCTUnwrap(broadcaster.envelopes.last))?.secret,
             rotated,
             "the retry re-sends the ROTATED secret — a re-mint would diverge the routing id")
         XCTAssertEqual(
@@ -1899,6 +1993,7 @@ final class PushGroupRoutingTests: XCTestCase {
         let first = Task { @MainActor in
             await routing.rotateSecret(
                 accountIdB64: "acct", groupIdHex: "grp", ownRole: .owner,
+                mintEpoch: { Self.rotationEpoch },
                 broadcast: { bytes in
                     recorder.record(bytes)
                     await gate.wait()
@@ -1913,6 +2008,7 @@ final class PushGroupRoutingTests: XCTestCase {
         let second = Task { @MainActor in
             await routing.rotateSecret(
                 accountIdB64: "acct", groupIdHex: "grp", ownRole: .owner,
+                mintEpoch: { Self.rotationEpoch },
                 broadcast: { bytes in
                     recorder.record(bytes)
                     await gate.wait()
@@ -1942,9 +2038,9 @@ final class PushGroupRoutingTests: XCTestCase {
         // Serialised, so the second rotation's "old" secret is the FIRST one's
         // output: three distinct secrets in a chain, no orphan.
         let firstSecret = try XCTUnwrap(
-            PushGroupRouting.tryDecodeSecretEnvelope(recorder.envelopes[0]))
+            PushGroupRouting.tryDecodeSecretEnvelope(recorder.envelopes[0])?.secret)
         let finalSecret = try XCTUnwrap(
-            PushGroupRouting.tryDecodeSecretEnvelope(recorder.envelopes[1]))
+            PushGroupRouting.tryDecodeSecretEnvelope(recorder.envelopes[1])?.secret)
         XCTAssertNotEqual(firstSecret, old)
         XCTAssertNotEqual(finalSecret, firstSecret, "the second rotation minted its OWN secret")
         XCTAssertEqual(
@@ -1984,6 +2080,7 @@ final class PushGroupRoutingTests: XCTestCase {
             let outcome = await routing.rotateIfMembershipShrank(
                 accountIdB64: "acct", groupIdHex: "grp", ownRole: role,
                 previousMemberKeys: ["a", "b", "c"], currentMemberKeys: ["a", "b"],
+                mintEpoch: { Self.rotationEpoch },
                 broadcast: { bytes in recorder.record(bytes) })
             XCTAssertEqual(outcome, .rotated)
             XCTAssertEqual(recorder.envelopes.count, 1)
@@ -2006,6 +2103,7 @@ final class PushGroupRoutingTests: XCTestCase {
         let outcome = await routing.rotateIfMembershipShrank(
             accountIdB64: "acct", groupIdHex: "grp", ownRole: .member,
             previousMemberKeys: ["a", "b", "c"], currentMemberKeys: ["a", "b"],
+            mintEpoch: { Self.rotationEpoch },
             broadcast: { bytes in recorder.record(bytes) })
         XCTAssertEqual(outcome, .skipNotAuthorized)
         XCTAssertTrue(recorder.envelopes.isEmpty)
@@ -2031,18 +2129,21 @@ final class PushGroupRoutingTests: XCTestCase {
         let onAdd = await routing.rotateIfMembershipShrank(
             accountIdB64: "acct", groupIdHex: "grp", ownRole: .owner,
             previousMemberKeys: ["a", "b"], currentMemberKeys: ["a", "b", "c"],
+            mintEpoch: { Self.rotationEpoch },
             broadcast: { bytes in recorder.record(bytes) })
         XCTAssertEqual(onAdd, .skipNoShrink)
         // A poll that changed nothing.
         let onNoChange = await routing.rotateIfMembershipShrank(
             accountIdB64: "acct", groupIdHex: "grp", ownRole: .owner,
             previousMemberKeys: ["a", "b"], currentMemberKeys: ["a", "b"],
+            mintEpoch: { Self.rotationEpoch },
             broadcast: { bytes in recorder.record(bytes) })
         XCTAssertEqual(onNoChange, .skipNoShrink)
         // A torn / absent snapshot.
         let onUnknown = await routing.rotateIfMembershipShrank(
             accountIdB64: "acct", groupIdHex: "grp", ownRole: .owner,
             previousMemberKeys: nil, currentMemberKeys: ["a"],
+            mintEpoch: { Self.rotationEpoch },
             broadcast: { bytes in recorder.record(bytes) })
         XCTAssertEqual(onUnknown, .skipUnknownMembership)
 
@@ -2073,6 +2174,7 @@ final class PushGroupRoutingTests: XCTestCase {
         let held = try XCTUnwrap(PushGroupRouting.mintSecret())
         await routing.receiveSecret(
             accountIdB64: "acct", groupIdHex: groupIdHex, secret: held,
+            mintEpoch: 0,
             group: group, senderLeaf: ownerLeaf)
         let heldGid = try XCTUnwrap(PushGroupRouting.derivePushGid(secret: held))
         XCTAssertTrue(unsub.targets.isEmpty, "a first-ever secret retires nothing")
@@ -2081,6 +2183,7 @@ final class PushGroupRoutingTests: XCTestCase {
         let rotated = try XCTUnwrap(PushGroupRouting.mintSecret())
         await routing.receiveSecret(
             accountIdB64: "acct", groupIdHex: groupIdHex, secret: rotated,
+            mintEpoch: liveEpoch(group),
             group: group, senderLeaf: ownerLeaf)
         let rotatedGid = try XCTUnwrap(PushGroupRouting.derivePushGid(secret: rotated))
 
@@ -2105,15 +2208,761 @@ final class PushGroupRoutingTests: XCTestCase {
         let held = try XCTUnwrap(PushGroupRouting.mintSecret())
         await routing.receiveSecret(
             accountIdB64: "acct", groupIdHex: groupIdHex, secret: held,
+            mintEpoch: 0,
             group: group, senderLeaf: ownerLeaf)
         // The idempotent relay from a plain member.
         await routing.receiveSecret(
             accountIdB64: "acct", groupIdHex: groupIdHex, secret: held,
+            mintEpoch: 0,
             group: group, senderLeaf: memberLeaf)
 
         XCTAssertTrue(unsub.targets.isEmpty)
         XCTAssertNotNil(store.lookupRoute(
             pushGidHex: PushGroupRouting.hex(
                 try XCTUnwrap(PushGroupRouting.derivePushGid(secret: held)))))
+    }
+
+    // =======================================================================
+    // ADR-0044 — mint-epoch recency ordering (G-36 residual 9 / lakko-security
+    // F-A: a stale re-broadcast silently and permanently undoing a rotation)
+    // =======================================================================
+
+    /// A mutable MLS epoch a test advances exactly where the real client's
+    /// local application of a Remove commit advances `Group.epoch()`.
+    ///
+    /// The rotation entry point takes a `mintEpoch` PROVIDER, not a value, so
+    /// a test drives the stamp source the same way production does: the read
+    /// happens at mint time, whatever has moved by then.
+    @MainActor
+    private final class EpochBox {
+        private(set) var value: UInt64
+        init(_ value: UInt64) { self.value = value }
+        func advance(to next: UInt64) { value = next }
+    }
+
+    /// The epoch the evicted member's secret was minted under.
+    private static let preRemovalEpoch: UInt64 = 10
+    /// The epoch the group reaches once the Remove commit is applied locally.
+    private static let postRemovalEpoch: UInt64 = 11
+
+    /// The secret a stale device is holding, and the MAXIMUM possible value
+    /// bytewise.
+    ///
+    /// `0xFF` × 32 is deliberate, and it is what makes the C-61 companion test
+    /// a real discriminator rather than a coin flip. On an exact epoch tie the
+    /// canonical order falls to a lexicographic compare of the 32 secret
+    /// bytes, and a freshly minted secret is random — so a mid-range fixture
+    /// would make the swapped-order assertion pass only *most* of the time.
+    /// Against the maximum value no random secret can ever sort higher (and
+    /// equal is not newer), so under a swap the rotation loses with certainty.
+    private static let maximalStaleSecret = Data(repeating: 0xFF, count: 32)
+
+    // MARK: - store: the epoch is durable, and legacy rows read as 0
+
+    func testStoreRoundTripsTheMintEpoch() throws {
+        let store = makeStore()
+        let secret = try XCTUnwrap(PushGroupRouting.mintSecret())
+        let gidHex = PushGroupRouting.hex(
+            try XCTUnwrap(PushGroupRouting.derivePushGid(secret: secret)))
+
+        for epoch: UInt64 in [0, 1, 7, UInt64(UInt32.max), UInt64.max - 1, UInt64.max] {
+            store.putRouting(
+                accountIdB64: "acct", groupIdHex: "grp", secret: secret,
+                pushGidHex: gidHex, distributed: true, mintEpoch: epoch)
+            let record = try XCTUnwrap(
+                store.getRecord(accountIdB64: "acct", groupIdHex: "grp"))
+            XCTAssertEqual(record.mintEpoch, epoch, "the stamp must survive the seal")
+            XCTAssertEqual(record.secret, secret)
+            XCTAssertTrue(record.distributed)
+        }
+    }
+
+    /// A row written by a build that predates ADR-0044 carries no stamp. It
+    /// must read as **0** — the LOWEST position in the order — so the first
+    /// authorised stamped mint supersedes it. The inverse default would let an
+    /// unstamped legacy secret out-rank every future rotation, permanently.
+    ///
+    /// Both legacy shapes are covered: the pre-flag bare secret (ADR-0042's
+    /// first cut) and the flag-plus-secret record (ADR-0042 / ADR-0043).
+    func testLegacyRecordWithNoEpochReadsAsZero() throws {
+        let store = makeStore()
+        let secret = try XCTUnwrap(PushGroupRouting.mintSecret())
+
+        // Shape 1 — pre-flag: a bare 32-byte secret.
+        store.putRawRecordForTesting(
+            accountIdB64: "acct", groupIdHex: "bare", plaintext: secret)
+        let bare = try XCTUnwrap(store.getRecord(accountIdB64: "acct", groupIdHex: "bare"))
+        XCTAssertEqual(bare.secret, secret)
+        XCTAssertEqual(bare.mintEpoch, 0, "a legacy row is the lowest position in the order")
+        XCTAssertTrue(bare.distributed, "an unflagged legacy row still reads as distributed")
+
+        // Shape 2 — ADR-0042 / ADR-0043: flag + secret, no stamp.
+        var flagged = Data([0x01])
+        flagged.append(secret)
+        store.putRawRecordForTesting(
+            accountIdB64: "acct", groupIdHex: "flagged", plaintext: flagged)
+        let withFlag = try XCTUnwrap(
+            store.getRecord(accountIdB64: "acct", groupIdHex: "flagged"))
+        XCTAssertEqual(withFlag.secret, secret)
+        XCTAssertEqual(withFlag.mintEpoch, 0)
+        XCTAssertTrue(withFlag.distributed)
+
+        // A pending legacy row keeps its flag AND reads epoch 0.
+        var pending = Data([0x00])
+        pending.append(secret)
+        store.putRawRecordForTesting(
+            accountIdB64: "acct", groupIdHex: "pending", plaintext: pending)
+        let stale = try XCTUnwrap(store.getRecord(accountIdB64: "acct", groupIdHex: "pending"))
+        XCTAssertFalse(stale.distributed)
+        XCTAssertEqual(stale.mintEpoch, 0)
+
+        // And an unrecognised length is still UNREADABLE, not a guessed stamp.
+        store.putRawRecordForTesting(
+            accountIdB64: "acct", groupIdHex: "junk", plaintext: Data([0x01, 0x02, 0x03]))
+        XCTAssertNil(store.getRecord(accountIdB64: "acct", groupIdHex: "junk"))
+        XCTAssertTrue(store.hasSecret(accountIdB64: "acct", groupIdHex: "junk"))
+    }
+
+    /// The distribution bookkeeping must never re-stamp. `markDistributed` /
+    /// `markPending` only record whether the envelope reached the wire; the
+    /// secret's identity, stamp included, is untouched — otherwise a settle
+    /// could silently promote a secret's position in the total order.
+    func testSettleAndUnsettlePreserveTheMintEpoch() throws {
+        let store = makeStore()
+        let secret = try XCTUnwrap(PushGroupRouting.mintSecret())
+        let gidHex = PushGroupRouting.hex(
+            try XCTUnwrap(PushGroupRouting.derivePushGid(secret: secret)))
+        store.putRouting(
+            accountIdB64: "acct", groupIdHex: "grp", secret: secret,
+            pushGidHex: gidHex, distributed: false, mintEpoch: 9)
+
+        XCTAssertTrue(store.markDistributed(
+            accountIdB64: "acct", groupIdHex: "grp", matching: secret))
+        XCTAssertEqual(
+            store.getRecord(accountIdB64: "acct", groupIdHex: "grp")?.mintEpoch, 9)
+
+        XCTAssertTrue(store.markPending(
+            accountIdB64: "acct", groupIdHex: "grp", matching: secret))
+        let after = try XCTUnwrap(store.getRecord(accountIdB64: "acct", groupIdHex: "grp"))
+        XCTAssertEqual(after.mintEpoch, 9, "un-settling must not re-stamp either")
+        XCTAssertFalse(after.distributed)
+        XCTAssertEqual(after.secret, secret)
+    }
+
+    // MARK: - the gate: reject-future, reject-stale, accept-identical
+
+    /// The clamp (ADR-0044 § 4). An ordering rule with no upper bound hands
+    /// any authorised writer a PERMANENT FREEZE: stamp `UInt64.max` and
+    /// nothing can ever exceed it, so no later owner rotation can win. That
+    /// would escalate G-36 residual 3 from a churn an owner rotation repairs
+    /// into an unrecoverable freeze, so the clamp runs BEFORE authority — not
+    /// even the owner may do it.
+    func testRejectsAStampAheadOfThisDevicesOwnEpoch() {
+        let ownerKey = Data(repeating: 0x01, count: 32)
+        let adminKey = Data(repeating: 0x02, count: 32)
+        let held = Data(repeating: 0xA1, count: 32)
+        let incoming = Data(repeating: 0xB2, count: 32)
+        let roles = PushGroupRouting.SecretAuthority.roleTable(
+            owner: ownerKey, admins: [adminKey])
+
+        // Even the OWNER cannot stamp past this device's own epoch.
+        for sender in [ownerKey, adminKey] {
+            XCTAssertEqual(
+                classify(
+                    incoming: incoming, stored: held, senderKey: sender, authority: roles,
+                    incomingMintEpoch: 11, storedMintEpoch: 1, ownEpoch: 10),
+                .rejectFuture)
+            XCTAssertEqual(
+                classify(
+                    incoming: incoming, stored: held, senderKey: sender, authority: roles,
+                    incomingMintEpoch: UInt64.max, storedMintEpoch: 1, ownEpoch: 10),
+                .rejectFuture,
+                "the permanent-freeze stamp is exactly what the clamp exists to refuse")
+        }
+        // ... nor on a legacy no-role-table group, which is otherwise open.
+        XCTAssertEqual(
+            classify(
+                incoming: incoming, stored: held, senderKey: nil, authority: .noRoleTable,
+                incomingMintEpoch: 11, storedMintEpoch: 1, ownEpoch: 10),
+            .rejectFuture)
+        // ... nor when seeding a hole (nothing stored is not a bypass).
+        XCTAssertEqual(
+            classify(
+                incoming: incoming, stored: nil, senderKey: ownerKey, authority: roles,
+                incomingMintEpoch: 11, ownEpoch: 10),
+            .rejectFuture)
+
+        // EXACTLY at the ceiling is honest and must pass: an envelope sealed
+        // at the receiver's current epoch is the normal case.
+        XCTAssertEqual(
+            classify(
+                incoming: incoming, stored: held, senderKey: ownerKey, authority: roles,
+                incomingMintEpoch: 10, storedMintEpoch: 1, ownEpoch: 10),
+            .accept)
+
+        // An UNREADABLE own epoch fails closed — with no ceiling there is
+        // nothing to bound a stamp against.
+        XCTAssertEqual(
+            classify(
+                incoming: incoming, stored: held, senderKey: ownerKey, authority: roles,
+                incomingMintEpoch: 1, storedMintEpoch: 0, ownEpoch: nil),
+            .rejectFuture)
+    }
+
+    /// The order itself. An AUTHORISED envelope that is not strictly newer
+    /// than what this device holds is dropped — this is the verdict the F-A
+    /// stale re-broadcast lands on.
+    func testRejectsAnAuthorisedEnvelopeThatIsNotStrictlyNewer() {
+        let ownerKey = Data(repeating: 0x01, count: 32)
+        let adminKey = Data(repeating: 0x02, count: 32)
+        let low = Data(repeating: 0x11, count: 32)
+        let high = Data(repeating: 0x99, count: 32)
+        let roles = PushGroupRouting.SecretAuthority.roleTable(
+            owner: ownerKey, admins: [adminKey])
+
+        // An OLDER epoch loses regardless of how the bytes sort — the epoch is
+        // the primary key, and this is the exact shape of the stale replay.
+        for (older, newer) in [(low, high), (high, low)] {
+            XCTAssertEqual(
+                classify(
+                    incoming: older, stored: newer, senderKey: ownerKey, authority: roles,
+                    incomingMintEpoch: 10, storedMintEpoch: 11, ownEpoch: 20),
+                .rejectStale)
+            XCTAssertEqual(
+                classify(
+                    incoming: newer, stored: older, senderKey: adminKey, authority: roles,
+                    incomingMintEpoch: 11, storedMintEpoch: 10, ownEpoch: 20),
+                .accept,
+                "the rotation must supersede the secret it replaced")
+        }
+
+        // At an EXACT tie the 32 secret bytes decide — and the owner can lose
+        // to an admin. Documented, deliberate, and asserted so it cannot be
+        // "fixed" by accident: a total order and unconditional owner-priority
+        // cannot both hold.
+        XCTAssertEqual(
+            classify(
+                incoming: low, stored: high, senderKey: ownerKey, authority: roles,
+                incomingMintEpoch: 42, storedMintEpoch: 42, ownEpoch: 99),
+            .rejectStale,
+            "the owner loses an exact tie when its bytes sort lower")
+        XCTAssertEqual(
+            classify(
+                incoming: high, stored: low, senderKey: adminKey, authority: roles,
+                incomingMintEpoch: 42, storedMintEpoch: 42, ownEpoch: 99),
+            .accept)
+
+        // A legacy no-role-table group is ORDERED too — open on authority is
+        // not open on recency.
+        XCTAssertEqual(
+            classify(
+                incoming: low, stored: high, senderKey: nil, authority: .noRoleTable,
+                incomingMintEpoch: 10, storedMintEpoch: 11, ownEpoch: 20),
+            .rejectStale)
+
+        // A legacy STORED row (epoch 0) is superseded by any stamped mint —
+        // the direction that converges.
+        XCTAssertEqual(
+            classify(
+                incoming: low, stored: high, senderKey: ownerKey, authority: roles,
+                incomingMintEpoch: 1, storedMintEpoch: 0, ownEpoch: 20),
+            .accept)
+
+        // Authority is still decided FIRST: an unauthorised sender is refused
+        // on authority, not reported as stale.
+        XCTAssertEqual(
+            classify(
+                incoming: low, stored: high,
+                senderKey: Data(repeating: 0x03, count: 32), authority: roles,
+                incomingMintEpoch: 10, storedMintEpoch: 11, ownEpoch: 20),
+            .reject)
+
+        XCTAssertFalse(PushGroupRouting.SecretVerdict.rejectStale.accepts)
+        XCTAssertFalse(PushGroupRouting.SecretVerdict.rejectFuture.accepts)
+        XCTAssertTrue(PushGroupRouting.SecretVerdict.acceptIdentical.accepts)
+    }
+
+    /// The identical fast path still short-circuits EVERYTHING — that is what
+    /// keeps the any-holder re-broadcast, the post-add redistribute and any
+    /// relay idempotent, whoever forwarded them and whatever epoch they claim.
+    func testAcceptIdenticalStillBypassesAuthorityAndOrderingAndTheClamp() {
+        let held = Data(repeating: 0xA1, count: 32)
+        let roles = PushGroupRouting.SecretAuthority.roleTable(
+            owner: Data(repeating: 0x01, count: 32),
+            admins: [Data(repeating: 0x02, count: 32)])
+
+        for authority: PushGroupRouting.SecretAuthority in
+            [roles, .noRoleTable, .unreadable] {
+            // A plain member, an unresolvable sender — anyone.
+            for sender: Data? in [Data(repeating: 0x03, count: 32), nil] {
+                // An OLDER stamp (a benign retry), a TIE, a FUTURE stamp, and
+                // an unreadable own epoch all resolve identically.
+                for (incomingEpoch, ownEpoch) in [
+                    (UInt64(1), UInt64?(10)), (5, 10), (UInt64.max, 10), (5, nil),
+                ] {
+                    XCTAssertEqual(
+                        classify(
+                            incoming: held, stored: held, senderKey: sender,
+                            authority: authority,
+                            incomingMintEpoch: incomingEpoch, storedMintEpoch: 5,
+                            ownEpoch: ownEpoch),
+                        .acceptIdentical)
+                }
+            }
+        }
+    }
+
+    /// **The defect the web tests caught — it must not exist here either.**
+    ///
+    /// `acceptIdentical` short-circuits BOTH the authority gate and the future
+    /// clamp. If the receive path then re-persisted the row using the INCOMING
+    /// epoch, it would become an epoch-inflation channel open to a **plain
+    /// member**: relay the group's CURRENT secret bytes stamped `UInt64.max`,
+    /// and every later rotation — the owner's included — is refused
+    /// `rejectStale` forever. That reaches the exact permanent freeze the
+    /// clamp exists to prevent, around it.
+    ///
+    /// So the identical path must leave the stored `(secret, mintEpoch)`
+    /// untouched, and a subsequent genuine owner rotation must still win.
+    func testAcceptIdenticalCannotInflateTheStoredEpoch() async throws {
+        let store = makeStore()
+        let spy = SubscribeSpy()
+        let unsub = UnsubscribeSpy()
+        let routing = makeRouting(store: store, spy: spy, unsubscribeSpy: unsub)
+        let (group, groupIdHex, ownerLeaf, _, memberLeaf) = try makeGroupWithAdmin(
+            owner: try makeIdentity(0x91), admin: try makeIdentity(0x92),
+            member: try makeIdentity(0x93))
+
+        // The group is on S0, minted at epoch 0.
+        let s0 = try XCTUnwrap(PushGroupRouting.mintSecret())
+        await routing.receiveSecret(
+            accountIdB64: "acct", groupIdHex: groupIdHex, secret: s0,
+            mintEpoch: 0, group: group, senderLeaf: ownerLeaf)
+        XCTAssertEqual(
+            store.getRecord(accountIdB64: "acct", groupIdHex: groupIdHex)?.mintEpoch, 0)
+
+        // A PLAIN MEMBER relays the identical bytes, stamped as high as it can
+        // possibly claim. Accepted (it changes nothing) — but the stored stamp
+        // must NOT move.
+        await routing.receiveSecret(
+            accountIdB64: "acct", groupIdHex: groupIdHex, secret: s0,
+            mintEpoch: UInt64.max, group: group, senderLeaf: memberLeaf)
+
+        let after = try XCTUnwrap(store.getRecord(accountIdB64: "acct", groupIdHex: groupIdHex))
+        XCTAssertEqual(after.secret, s0, "the identical relay is still applied")
+        XCTAssertEqual(
+            after.mintEpoch, 0,
+            "an identical relay MUST NOT inflate the stored epoch — that would be a "
+                + "permanent freeze reachable by a plain member, around the clamp")
+        XCTAssertTrue(unsub.targets.isEmpty, "nothing was superseded, so nothing is retired")
+
+        // The proof that the freeze did not happen: a genuine owner rotation
+        // at a modest epoch still wins.
+        let s1 = try XCTUnwrap(PushGroupRouting.mintSecret())
+        await routing.receiveSecret(
+            accountIdB64: "acct", groupIdHex: groupIdHex, secret: s1,
+            mintEpoch: liveEpoch(group), group: group, senderLeaf: ownerLeaf)
+        XCTAssertEqual(
+            store.getSecret(accountIdB64: "acct", groupIdHex: groupIdHex), s1,
+            "the owner's later rotation must still be able to supersede")
+    }
+
+    // MARK: - the literal F-A scenario, end to end
+
+    /// **G-36 residual 9 / `lakko-security` F-A, reproduced end to end.**
+    ///
+    /// A device's post-add redistribute broadcast failed, so it holds the
+    /// PRE-rotation secret `S0` in a pending row. Meanwhile an admin removed a
+    /// member and rotated the group to `S1`. The first device's any-holder
+    /// re-broadcast then re-sends `S0` — a valid secret, from an AUTHORISED
+    /// sender. Before ADR-0044 every member accepted it, persisted `S0`, and
+    /// **retired `gid(S1)`**, migrating the group back onto the routing id the
+    /// evicted member still derives and is still subscribed to; with no
+    /// further shrink no further rotation fires, so the undo is PERMANENT.
+    ///
+    /// The order refuses it. The load-bearing assertions are the two negative
+    /// ones: the store still holds `S1`, and `gid(S1)` was never torn down.
+    func testAStaleReplayFromAnAdminDoesNotUndoARotation() async throws {
+        let store = makeStore()
+        let spy = SubscribeSpy()
+        let unsub = UnsubscribeSpy()
+        let routing = makeRouting(store: store, spy: spy, unsubscribeSpy: unsub)
+        let (group, groupIdHex, ownerLeaf, adminLeaf, _) = try makeGroupWithAdmin(
+            owner: try makeIdentity(0xA1), admin: try makeIdentity(0xA2),
+            member: try makeIdentity(0xA3))
+        // The fixture must sit above the rotation epoch used below, or the
+        // clamp — not the order — would be doing the refusing.
+        XCTAssertGreaterThanOrEqual(liveEpoch(group), 2)
+
+        // (1) The group is on S0, minted at epoch 1.
+        let s0 = try XCTUnwrap(PushGroupRouting.mintSecret())
+        await routing.receiveSecret(
+            accountIdB64: "acct", groupIdHex: groupIdHex, secret: s0,
+            mintEpoch: 1, group: group, senderLeaf: ownerLeaf)
+        let gid0 = try XCTUnwrap(PushGroupRouting.derivePushGid(secret: s0))
+        XCTAssertEqual(store.getSecret(accountIdB64: "acct", groupIdHex: groupIdHex), s0)
+
+        // (2) A member is removed; an ADMIN rotates the group to S1 at the
+        // post-removal epoch 2. This device applies it and retires gid(S0).
+        let s1 = try XCTUnwrap(PushGroupRouting.mintSecret())
+        await routing.receiveSecret(
+            accountIdB64: "acct", groupIdHex: groupIdHex, secret: s1,
+            mintEpoch: 2, group: group, senderLeaf: adminLeaf)
+        let gid1 = try XCTUnwrap(PushGroupRouting.derivePushGid(secret: s1))
+        XCTAssertEqual(store.getSecret(accountIdB64: "acct", groupIdHex: groupIdHex), s1)
+        XCTAssertEqual(unsub.targets, [gid0], "the rotation retires the superseded gid")
+        let subscribesAfterRotation = spy.targets.count
+
+        // (3) THE REPLAY. The stale device re-broadcasts S0 — still stamped
+        // with the epoch it was MINTED under, because every re-broadcast path
+        // replays the stored stamp rather than inventing a fresh one. The
+        // sender is an admin, so AUTHORITY passes: only the order refuses it.
+        await routing.receiveSecret(
+            accountIdB64: "acct", groupIdHex: groupIdHex, secret: s0,
+            mintEpoch: 1, group: group, senderLeaf: adminLeaf)
+
+        XCTAssertEqual(
+            store.getSecret(accountIdB64: "acct", groupIdHex: groupIdHex), s1,
+            "the stale replay must not overwrite the live secret")
+        XCTAssertEqual(
+            store.getRecord(accountIdB64: "acct", groupIdHex: groupIdHex)?.mintEpoch, 2,
+            "nor roll the stamp backwards")
+        XCTAssertEqual(
+            unsub.targets, [gid0],
+            "gid(S1) MUST NOT be retired — retiring it is the whole of F-A, because it "
+                + "migrates the group back onto the id the evicted member still derives")
+        XCTAssertNotNil(
+            store.lookupRoute(pushGidHex: PushGroupRouting.hex(gid1)),
+            "the live route survives the replay")
+        XCTAssertEqual(
+            spy.targets.count, subscribesAfterRotation,
+            "a refused envelope subscribes to nothing")
+    }
+
+    // MARK: - the stamp: minted fresh once, replayed verbatim thereafter
+
+    /// The owner's MINT is the only path that reads the group's epoch — and it
+    /// stamps the current one.
+    func testTheOwnerMintStampsTheGroupEpoch() async throws {
+        let store = makeStore()
+        let spy = SubscribeSpy()
+        let routing = makeRouting(store: store, spy: spy)
+        let recorder = BroadcastRecorder()
+        let owner = try makeIdentity(0xB1)
+        let (group, groupIdHex) = try makeOwnerGroup(owner)
+        // Advance the group past epoch 0 so the assertion is not vacuous.
+        _ = try group.addMemberFromWire(
+            identity: owner, keyPackage: try makeIdentity(0xB2).createKeyPackage())
+        let expected = liveEpoch(group)
+        XCTAssertGreaterThanOrEqual(expected, 1)
+
+        await routing.ensureProvisioned(
+            accountIdB64: "acctOwner", groupIdHex: groupIdHex, group: group,
+            identity: owner, broadcast: { bytes in recorder.record(bytes) })
+
+        let sent = try XCTUnwrap(
+            PushGroupRouting.tryDecodeSecretEnvelope(try XCTUnwrap(recorder.envelopes.first)))
+        XCTAssertEqual(sent.mintEpoch, expected, "a mint stamps the CURRENT group epoch")
+        XCTAssertEqual(
+            store.getRecord(accountIdB64: "acctOwner", groupIdHex: groupIdHex)?.mintEpoch,
+            expected,
+            "and persists it, so every later re-broadcast can replay it")
+    }
+
+    /// **The single easiest thing in ADR-0044 to get wrong.** Every path that
+    /// recomposes an envelope from an ALREADY-STORED secret must replay the
+    /// stored stamp verbatim. Re-stamping at send time would hand a stale
+    /// secret a newer position in the order than the live rotation it was
+    /// superseded by — reproducing F-A with the ordering gate fully armed.
+    ///
+    /// Covers both replay sites: the pending re-broadcast branch of
+    /// `ensureProvisioned` and the post-add `redistribute`.
+    func testEveryReBroadcastReplaysTheStoredStampNeverAFreshOne() async throws {
+        let store = makeStore()
+        let spy = SubscribeSpy()
+        let routing = makeRouting(store: store, spy: spy)
+        let owner = try makeIdentity(0xC1)
+        let (group, groupIdHex) = try makeOwnerGroup(owner)
+        _ = try group.addMemberFromWire(
+            identity: owner, keyPackage: try makeIdentity(0xC2).createKeyPackage())
+        // The group has moved WELL past the epoch the secret was minted at, so
+        // a re-stamp would be plainly visible.
+        XCTAssertGreaterThanOrEqual(liveEpoch(group), 1)
+
+        let secret = try XCTUnwrap(PushGroupRouting.mintSecret())
+        let gidHex = PushGroupRouting.hex(
+            try XCTUnwrap(PushGroupRouting.derivePushGid(secret: secret)))
+        // A PENDING row: the mint's broadcast never landed. Minted at epoch 0.
+        store.putRouting(
+            accountIdB64: "acct", groupIdHex: groupIdHex, secret: secret,
+            pushGidHex: gidHex, distributed: false, mintEpoch: 0)
+
+        // (a) the any-holder re-broadcast branch
+        let rebroadcast = BroadcastRecorder()
+        await routing.ensureProvisioned(
+            accountIdB64: "acct", groupIdHex: groupIdHex, group: group,
+            identity: owner, broadcast: { bytes in rebroadcast.record(bytes) })
+        let resent = try XCTUnwrap(
+            PushGroupRouting.tryDecodeSecretEnvelope(try XCTUnwrap(rebroadcast.envelopes.first)))
+        XCTAssertEqual(resent.secret, secret)
+        XCTAssertEqual(
+            resent.mintEpoch, 0,
+            "a re-broadcast MUST replay the stored stamp, never the current epoch")
+
+        // (b) the post-add redistribute
+        let redistributed = BroadcastRecorder()
+        await routing.redistribute(
+            accountIdB64: "acct", groupIdHex: groupIdHex,
+            broadcast: { bytes in redistributed.record(bytes) })
+        let again = try XCTUnwrap(
+            PushGroupRouting.tryDecodeSecretEnvelope(
+                try XCTUnwrap(redistributed.envelopes.first)))
+        XCTAssertEqual(again.secret, secret)
+        XCTAssertEqual(
+            again.mintEpoch, 0,
+            "a redistribute changes the AUDIENCE, not the secret — so not the stamp")
+    }
+
+    /// A rotation that cannot read the group's epoch is ABANDONED rather than
+    /// performed unordered: an unstamped secret has no position in the total
+    /// order, which is exactly what v2 exists to eliminate. The old secret
+    /// stays in place so a later trigger can still rotate.
+    func testRotationFailsClosedWhenTheEpochIsUnreadable() async throws {
+        let store = makeStore()
+        let spy = SubscribeSpy()
+        let unsub = UnsubscribeSpy()
+        let routing = makeRouting(store: store, spy: spy, unsubscribeSpy: unsub)
+        let recorder = BroadcastRecorder()
+        let held = try XCTUnwrap(PushGroupRouting.mintSecret())
+        try seedSettled(store: store, accountIdB64: "acct", groupIdHex: "grp", secret: held)
+
+        let outcome = await routing.rotateSecret(
+            accountIdB64: "acct", groupIdHex: "grp", ownRole: .owner,
+            mintEpoch: { nil },
+            broadcast: { bytes in recorder.record(bytes) })
+
+        XCTAssertEqual(outcome, .skipUnknownEpoch)
+        XCTAssertTrue(recorder.envelopes.isEmpty, "nothing unordered reaches the wire")
+        XCTAssertEqual(
+            store.getSecret(accountIdB64: "acct", groupIdHex: "grp"), held,
+            "the old secret survives, so a later trigger can still rotate")
+        XCTAssertTrue(unsub.targets.isEmpty)
+    }
+
+    // =======================================================================
+    // C-61 — the rotation broadcast STRICTLY FOLLOWS the Remove commit
+    // =======================================================================
+
+    /// **C-61, and under ADR-0044 it underwrites TWO guarantees, not one.**
+    ///
+    /// The rotation envelope is an MLS application message: sealed before the
+    /// Remove commit it is readable by the member being evicted (forward
+    /// secrecy, ADR-0043). ADR-0044 adds the second: the new secret is STAMPED
+    /// at `Group.epoch()` read at mint time, so publishing the Remove first is
+    /// also what makes the rotation strictly OUT-RANK the secret it replaces.
+    ///
+    /// **How this test fails under a swap.** The assertion reads the epoch the
+    /// EMITTED envelope was stamped with. `rotateSecret` calls its `mintEpoch`
+    /// provider at mint time, and `advance(to:)` — standing in for the local
+    /// application of the Remove commit — is what moves that value from 10 to
+    /// 11. Start the rotation before the removal and the stamp is 10, so
+    /// `decoded.mintEpoch == postRemovalEpoch` fails outright; the `isNewer`
+    /// assertions below flip too, from "the rotation always wins" to a
+    /// same-epoch tie decided by the secret bytes. The companion test
+    /// immediately after runs exactly that swap and asserts both consequences,
+    /// so the discrimination is proven rather than claimed.
+    func testTheRotationIsStampedAtThePostRemovalEpoch() async throws {
+        let store = makeStore()
+        let spy = SubscribeSpy()
+        let unsub = UnsubscribeSpy()
+        let routing = makeRouting(store: store, spy: spy, unsubscribeSpy: unsub)
+        let recorder = BroadcastRecorder()
+        let sOld = Self.maximalStaleSecret
+        try seedSettled(
+            store: store, accountIdB64: "acct", groupIdHex: "grp", secret: sOld,
+            mintEpoch: Self.preRemovalEpoch)
+        let epoch = EpochBox(Self.preRemovalEpoch)
+
+        var rotation: Task<PushGroupRouting.PushRotationOutcome, Never>?
+        let commitId: Int64 = try await PushGroupRouting.publishRemoveThenRotate(
+            publishRemove: {
+                // Applying + publishing the Remove commit advances the epoch.
+                epoch.advance(to: Self.postRemovalEpoch)
+                return Int64(4242)
+            },
+            rotate: {
+                await routing.rotateSecret(
+                    accountIdB64: "acct", groupIdHex: "grp", ownRole: .owner,
+                    mintEpoch: { epoch.value },
+                    broadcast: { bytes in recorder.record(bytes) })
+            },
+            onRotationStarted: { rotation = $0 }
+        )
+        XCTAssertEqual(commitId, 4242)
+        let rotationOutcome = await (try XCTUnwrap(rotation)).value
+        XCTAssertEqual(rotationOutcome, .rotated)
+
+        // The rotation was sealed AND stamped after the removal.
+        XCTAssertEqual(recorder.envelopes.count, 1)
+        let sent = try XCTUnwrap(
+            PushGroupRouting.tryDecodeSecretEnvelope(try XCTUnwrap(recorder.envelopes.first)))
+        XCTAssertEqual(sent.mintEpoch, Self.postRemovalEpoch)
+
+        // ... which is what makes the ordering a GUARANTEE rather than a coin
+        // flip: the evicted member's secret is the maximum possible value
+        // bytewise, so ONLY the strictly greater epoch puts the rotation on top.
+        XCTAssertTrue(PushGroupRouting.isNewer(
+            incomingEpoch: sent.mintEpoch, incomingSecret: sent.secret,
+            storedEpoch: Self.preRemovalEpoch, storedSecret: sOld))
+        XCTAssertFalse(PushGroupRouting.isNewer(
+            incomingEpoch: Self.preRemovalEpoch, incomingSecret: sOld,
+            storedEpoch: sent.mintEpoch, storedSecret: sent.secret))
+    }
+
+    /// Not a test of production code — a demonstration that the assertion
+    /// above actually DISCRIMINATES. Rotating BEFORE the Remove commit lands
+    /// stamps the pre-removal epoch, tying with the secret the evicted member
+    /// holds, so the outcome falls to the byte comparison. With this fixture
+    /// (`0xFF` × 32, the maximum value) the stale secret wins outright, so the
+    /// rotation LOSES rather than merely coin-flipping.
+    func testTheInvertedOrderStampsThePreRemovalEpochAndTheRotationLoses() async throws {
+        let store = makeStore()
+        let spy = SubscribeSpy()
+        let unsub = UnsubscribeSpy()
+        let routing = makeRouting(store: store, spy: spy, unsubscribeSpy: unsub)
+        let recorder = BroadcastRecorder()
+        let sOld = Self.maximalStaleSecret
+        try seedSettled(
+            store: store, accountIdB64: "acct", groupIdHex: "grp", secret: sOld,
+            mintEpoch: Self.preRemovalEpoch)
+        let epoch = EpochBox(Self.preRemovalEpoch)
+
+        // THE SWAP: rotate first, remove afterwards.
+        let outcome = await routing.rotateSecret(
+            accountIdB64: "acct", groupIdHex: "grp", ownRole: .owner,
+            mintEpoch: { epoch.value },
+            broadcast: { bytes in recorder.record(bytes) })
+        epoch.advance(to: Self.postRemovalEpoch)  // the Remove lands — too late
+        XCTAssertEqual(outcome, .rotated)
+
+        let sent = try XCTUnwrap(
+            PushGroupRouting.tryDecodeSecretEnvelope(try XCTUnwrap(recorder.envelopes.first)))
+        // (a) the stamp assertion the correctly-ordered test makes would FAIL here
+        XCTAssertEqual(sent.mintEpoch, Self.preRemovalEpoch)
+        XCTAssertNotEqual(
+            sent.mintEpoch, Self.postRemovalEpoch,
+            "the swap is exactly what the ordered test's stamp assertion catches")
+        // (b) and the guarantee degrades from "always wins" to a LOSS
+        XCTAssertFalse(
+            PushGroupRouting.isNewer(
+                incomingEpoch: Self.preRemovalEpoch, incomingSecret: sent.secret,
+                storedEpoch: Self.preRemovalEpoch, storedSecret: sOld),
+            "tied on epoch, the rotation loses the byte comparison to the stale secret")
+        XCTAssertTrue(PushGroupRouting.isNewer(
+            incomingEpoch: Self.preRemovalEpoch, incomingSecret: sOld,
+            storedEpoch: Self.preRemovalEpoch, storedSecret: sent.secret))
+    }
+
+    /// The ordering is about START time, not completion: the rotation stays
+    /// fire-and-forget so a push failure never unwinds a membership change.
+    func testTheRotationIsNotStartedUntilTheRemovalResolves() async throws {
+        let store = makeStore()
+        let spy = SubscribeSpy()
+        let routing = makeRouting(store: store, spy: spy)
+        let held = try XCTUnwrap(PushGroupRouting.mintSecret())
+        try seedSettled(
+            store: store, accountIdB64: "acct", groupIdHex: "grp", secret: held,
+            mintEpoch: Self.preRemovalEpoch)
+        let epoch = EpochBox(Self.preRemovalEpoch)
+        let gate = Gate()
+        var order: [String] = []
+
+        var rotation: Task<PushGroupRouting.PushRotationOutcome, Never>?
+        let pending = Task { @MainActor in
+            try await PushGroupRouting.publishRemoveThenRotate(
+                publishRemove: { () async throws -> Int64 in
+                    order.append("remove-started")
+                    await gate.wait()
+                    epoch.advance(to: Self.postRemovalEpoch)
+                    order.append("remove-published")
+                    return Int64(1)
+                },
+                rotate: {
+                    order.append("rotate-started")
+                    return await routing.rotateSecret(
+                        accountIdB64: "acct", groupIdHex: "grp", ownRole: .owner,
+                        mintEpoch: { epoch.value },
+                        broadcast: { bytes in
+                            let decoded = PushGroupRouting.tryDecodeSecretEnvelope(bytes)
+                            order.append("rotate-broadcast@\(decoded?.mintEpoch ?? 0)")
+                        })
+                },
+                onRotationStarted: { rotation = $0 }
+            )
+        }
+
+        try await gate.awaitFirstWaiter()
+        await Self.settle()
+        // The removal is parked; nothing about the rotation has happened.
+        XCTAssertEqual(order, ["remove-started"])
+
+        gate.open()
+        _ = try await pending.value
+        _ = await (try XCTUnwrap(rotation)).value
+
+        XCTAssertEqual(order, [
+            "remove-started",
+            "remove-published",
+            "rotate-started",
+            "rotate-broadcast@\(Self.postRemovalEpoch)",
+        ])
+    }
+
+    /// A rotation after a removal that did not land would re-key the group for
+    /// nothing and, worse, seal + stamp at the pre-removal epoch.
+    func testAFailedRemovalNeverRotates() async throws {
+        struct RemoveFailed: Error {}
+        let store = makeStore()
+        let spy = SubscribeSpy()
+        let routing = makeRouting(store: store, spy: spy)
+        let recorder = BroadcastRecorder()
+        let held = try XCTUnwrap(PushGroupRouting.mintSecret())
+        try seedSettled(
+            store: store, accountIdB64: "acct", groupIdHex: "grp", secret: held,
+            mintEpoch: Self.preRemovalEpoch)
+
+        var started = false
+        do {
+            _ = try await PushGroupRouting.publishRemoveThenRotate(
+                publishRemove: { () async throws -> Int64 in throw RemoveFailed() },
+                rotate: {
+                    started = true
+                    return await routing.rotateSecret(
+                        accountIdB64: "acct", groupIdHex: "grp", ownRole: .owner,
+                        mintEpoch: { Self.preRemovalEpoch },
+                        broadcast: { bytes in recorder.record(bytes) })
+                }
+            )
+            XCTFail("a failed removal must propagate")
+        } catch is RemoveFailed {
+            // expected
+        }
+
+        await Self.settle()
+        XCTAssertFalse(started, "the rotation must never be started")
+        XCTAssertTrue(recorder.envelopes.isEmpty)
+        XCTAssertEqual(store.getSecret(accountIdB64: "acct", groupIdHex: "grp"), held)
+        XCTAssertEqual(
+            store.getRecord(accountIdB64: "acct", groupIdHex: "grp")?.mintEpoch,
+            Self.preRemovalEpoch)
+    }
+
+    /// No rotation half at all (no session) still lands the removal.
+    func testNoRotationHalfStillLandsTheRemoval() async throws {
+        let commitId: Int64 = try await PushGroupRouting.publishRemoveThenRotate(
+            publishRemove: { Int64(9) },
+            rotate: nil
+        )
+        XCTAssertEqual(commitId, 9)
     }
 }

@@ -47,12 +47,37 @@ import androidx.security.crypto.MasterKey
  * [clearForAccount] match every group of an account by the
  * `prefix + accountIdB64 + NUL` key prefix).
  *
- * Value: `base64(secret) + ":" + ('1' | '0')` — the 32 raw secret
- * bytes plus the durable **distributed** flag ([Entry.distributed]).
- * Base64 (`A-Za-z0-9+/=`) contains no `':'`, so the suffix is
- * unambiguous. Flag and secret live in ONE row so a single [put]
- * writes both atomically — there is no torn "secret without a flag"
- * state to reconcile.
+ * Value: `base64(secret) + ":" + ('1' | '0') + ":" + <decimal mint epoch>`
+ * — the 32 raw secret bytes, the durable **distributed** flag
+ * ([Entry.distributed]), and the ADR-0044 **mint epoch**
+ * ([Entry.mintEpoch]). Base64 (`A-Za-z0-9+/=`) contains no `':'`, so
+ * the suffixes are unambiguous. All three live in ONE row so a single
+ * [put] writes them atomically — there is no torn "secret without a
+ * flag" (or "secret without its stamp") state to reconcile.
+ *
+ * ## Why the mint epoch is STORED, not just carried on the wire
+ *
+ * ADR-0044. The v2 distribution envelope carries an 8-byte `mint_epoch`
+ * the minter stamps from `Group.epoch()` at MINT time, and the receive
+ * gate orders envelopes by the pair `(mintEpoch, secretBytes)`. That
+ * order is only sound if the stamp **travels with the secret for that
+ * secret's whole life**: every re-broadcast recomposes the envelope from
+ * the STORED secret, so it must replay the epoch the secret was MINTED
+ * under, never the current one. A re-stamp at send time would make a
+ * stale secret out-rank the live one and reproduce the very F-A replay
+ * (G-36 residual 9) the order exists to close — with the ordering gate
+ * fully in place and working as specified.
+ *
+ * So the epoch is durable per-`(account, group)` state and lives here,
+ * beside the flag. It is a monotone counter, not key material (the whole
+ * row is encrypted at rest regardless), and ADR-0044 explicitly notes it
+ * may be logged.
+ *
+ * The atomicity is load-bearing for a SECOND reason: because the flag
+ * and the secret are replaced by one write, applying an accepted
+ * DIFFERENT secret also clears a stale `pending` re-broadcast in the
+ * same stroke — see
+ * [me.lakko.app.push.GroupPushRouting.receiveGated].
  *
  * ## Why a distributed flag
  *
@@ -91,6 +116,13 @@ import androidx.security.crypto.MasterKey
  * and working today; treating them as pending would re-broadcast for
  * every group on the first launch after an upgrade, for no benefit.
  *
+ * A row written before the ADR-0044 epoch existed (one `':'` suffix,
+ * the flag alone) is read as **`mintEpoch = 0`** ([LEGACY_MINT_EPOCH])
+ * — the LOWEST position in the total order, so any authorised stamped
+ * mint supersedes a legacy secret. That is the direction that
+ * converges: the alternative (guessing "current") would let a legacy
+ * secret out-rank a live rotation, which is the F-A shape itself.
+ *
  * ## Invariants
  *
  * - #2 / #5 — the raw secret never leaves the device; push-gw only
@@ -108,9 +140,21 @@ public object PushRoutingSecretStore {
     public const val SECRET_LENGTH: Int = 32
 
     /**
-     * One stored row: the 32-byte `push_routing_secret` plus whether
-     * its in-group distribution envelope has been confirmed on the
-     * wire.
+     * ADR-0044 — the mint epoch a row written before the stamp existed
+     * is read as: `0`, the LOWEST position in the
+     * `(mintEpoch, secretBytes)` total order.
+     *
+     * Deliberately the floor rather than a guess at the current epoch:
+     * any authorised stamped mint then supersedes a legacy secret,
+     * which is the direction that converges. Guessing "current" would
+     * let a legacy secret out-rank a live rotation.
+     */
+    public const val LEGACY_MINT_EPOCH: ULong = 0uL
+
+    /**
+     * One stored row: the 32-byte `push_routing_secret`, whether its
+     * in-group distribution envelope has been confirmed on the wire,
+     * and the MLS group epoch the secret was MINTED under.
      *
      * @property distributed `false` means a send of this secret's
      *   distribution envelope has NOT been confirmed on the wire — the
@@ -119,28 +163,51 @@ public object PushRoutingSecretStore {
      *   [me.lakko.app.push.GroupPushRouting.ensure] must re-broadcast
      *   it (recomposing the envelope from [secret]). A legacy row
      *   written before the flag existed reads as `true`.
+     * @property mintEpoch ADR-0044 — the `Group.epoch()` value the
+     *   MINTER stamped this secret with, to be replayed VERBATIM by
+     *   every re-broadcast of it (never re-stamped at send time — see
+     *   the class doc). A row written before the stamp existed reads as
+     *   [LEGACY_MINT_EPOCH].
      */
-    public data class Entry(val secret: ByteArray, val distributed: Boolean) {
+    public data class Entry(
+        val secret: ByteArray,
+        val distributed: Boolean,
+        val mintEpoch: ULong,
+    ) {
         override fun equals(other: Any?): Boolean =
             this === other ||
                 (
                     other is Entry &&
                         distributed == other.distributed &&
+                        mintEpoch == other.mintEpoch &&
                         secret.contentEquals(other.secret)
                     )
 
-        override fun hashCode(): Int = 31 * secret.contentHashCode() + distributed.hashCode()
+        override fun hashCode(): Int {
+            var result = secret.contentHashCode()
+            result = 31 * result + distributed.hashCode()
+            result = 31 * result + mintEpoch.hashCode()
+            return result
+        }
     }
 
     /**
      * Persist [secret] (32 bytes) for `(accountIdB64, groupIdHex)`
-     * together with its [distributed] flag. Overwrites any prior row
-     * (secret AND flag, atomically — one value string).
+     * together with its [distributed] flag and its ADR-0044
+     * [mintEpoch]. Overwrites any prior row (all three atomically — one
+     * value string).
      *
      * Callers: the owner mint persists `distributed = false` (nothing
      * is on the wire yet); a RECEIVED secret persists
      * `distributed = true` (it demonstrably travelled the journal to
      * get here, and a receiver never re-broadcasts).
+     *
+     * [mintEpoch] is the epoch the secret was MINTED under — on a mint /
+     * rotation the `Group.epoch()` read at mint time; on a RECEIVE the
+     * epoch the accepted envelope CARRIED, never the receiver's current
+     * one. The stamp identifies the secret, not the moment it was
+     * applied, so a later re-broadcast from this device replays the
+     * minter's stamp rather than inventing a fresher one.
      *
      * @throws IllegalArgumentException when `secret.size != 32`.
      */
@@ -150,13 +217,17 @@ public object PushRoutingSecretStore {
         groupIdHex: String,
         secret: ByteArray,
         distributed: Boolean,
+        mintEpoch: ULong,
     ) {
         require(secret.size == SECRET_LENGTH) {
             "push_routing_secret must be $SECRET_LENGTH bytes (got ${secret.size})"
         }
         openPrefs(context)
             .edit()
-            .putString(rowKey(accountIdB64, groupIdHex), encodeValue(secret, distributed))
+            .putString(
+                rowKey(accountIdB64, groupIdHex),
+                encodeValue(secret, distributed, mintEpoch),
+            )
             .apply()
     }
 
@@ -212,7 +283,16 @@ public object PushRoutingSecretStore {
     ) {
         val current = entry(context, accountIdB64, groupIdHex) ?: return
         if (current.distributed) return
-        put(context, accountIdB64, groupIdHex, current.secret, distributed = true)
+        // ADR-0044 — the stamp is REPLAYED, never refreshed: this write
+        // flips a flag, it does not mint anything.
+        put(
+            context,
+            accountIdB64,
+            groupIdHex,
+            current.secret,
+            distributed = true,
+            mintEpoch = current.mintEpoch,
+        )
     }
 
     /**
@@ -248,7 +328,16 @@ public object PushRoutingSecretStore {
     ) {
         val current = entry(context, accountIdB64, groupIdHex) ?: return
         if (!current.distributed) return
-        put(context, accountIdB64, groupIdHex, current.secret, distributed = false)
+        // ADR-0044 — the stamp is REPLAYED, never refreshed (see
+        // [markDistributed]).
+        put(
+            context,
+            accountIdB64,
+            groupIdHex,
+            current.secret,
+            distributed = false,
+            mintEpoch = current.mintEpoch,
+        )
     }
 
     /**
@@ -283,58 +372,101 @@ public object PushRoutingSecretStore {
     // Row-value codec (PURE — no Android framework, host-JVM testable)
     // -----------------------------------------------------------------
 
-    /** Separates the base64 secret from the flag character in a row
-     *  value. Absent from the base64 alphabet (`A-Za-z0-9+/=`), so the
-     *  split is unambiguous. */
-    private const val FLAG_SEPARATOR = ':'
+    /** Separates the base64 secret from the flag character, and the flag
+     *  from the ADR-0044 mint epoch, in a row value. Absent from the
+     *  base64 alphabet (`A-Za-z0-9+/=`) and from a decimal integer, so
+     *  the split is unambiguous. */
+    private const val FIELD_SEPARATOR = ':'
 
     private const val FLAG_DISTRIBUTED = '1'
     private const val FLAG_PENDING = '0'
 
-    /** A row value split into its two parts, before the base64 decode. */
-    public data class ParsedValue(val encodedSecret: String, val distributed: Boolean)
+    /** A row value split into its parts, before the base64 decode. */
+    public data class ParsedValue(
+        val encodedSecret: String,
+        val distributed: Boolean,
+        val mintEpoch: ULong,
+    )
 
     /**
-     * Render a row value: the already-base64'd secret plus the flag
-     * suffix. PURE — the inverse of [parseValue].
+     * Render a row value: the already-base64'd secret, the flag, and the
+     * ADR-0044 mint epoch as an unsigned decimal. PURE — the inverse of
+     * [parseValue].
      */
-    public fun formatValue(encodedSecret: String, distributed: Boolean): String =
-        encodedSecret + FLAG_SEPARATOR + (if (distributed) FLAG_DISTRIBUTED else FLAG_PENDING)
+    public fun formatValue(
+        encodedSecret: String,
+        distributed: Boolean,
+        mintEpoch: ULong,
+    ): String =
+        encodedSecret +
+            FIELD_SEPARATOR + (if (distributed) FLAG_DISTRIBUTED else FLAG_PENDING) +
+            FIELD_SEPARATOR + mintEpoch.toString()
 
     /**
-     * Split a stored row value into its base64 secret + distributed
-     * flag. PURE — no Android framework, so the LEGACY-row rule below
-     * is host-JVM unit-testable.
+     * Split a stored row value into its base64 secret + distributed flag
+     * + ADR-0044 mint epoch. PURE — no Android framework, so the two
+     * LEGACY-row rules below are host-JVM unit-testable.
+     *
+     * Three accepted shapes, one per schema generation:
+     *
+     * | shape | written by | read as |
+     * |---|---|---|
+     * | `body` | pre-ADR-0042-flag | `distributed = true`, `mintEpoch = 0` |
+     * | `body:flag` | ADR-0042 / ADR-0043 | flag, `mintEpoch = 0` |
+     * | `body:flag:epoch` | ADR-0044 | flag, epoch |
      *
      *   - `null` in → `null` out (no row held).
-     *   - **No `':'` suffix → a LEGACY row → `distributed = true`.**
-     *     Rows written before the flag existed belong to groups that
-     *     are provisioned and working; reading them as pending would
+     *   - **No suffix → a LEGACY row → `distributed = true`.** Rows
+     *     written before the flag existed belong to groups that are
+     *     provisioned and working; reading them as pending would
      *     re-broadcast for every group on the first launch after an
      *     upgrade, for no benefit.
-     *   - A `':'` suffix that is not exactly one recognised flag
-     *     character → `null` (malformed; the same fail-closed posture
-     *     as an undecodable base64 body). This client is the only
-     *     writer, so that is corruption, not a format to accept.
+     *   - **No epoch field → `mintEpoch = 0`** ([LEGACY_MINT_EPOCH]),
+     *     the lowest position in the ADR-0044 order, so any authorised
+     *     stamped mint supersedes it.
+     *   - Anything else — an unrecognised flag character, a
+     *     non-decimal / out-of-`u64`-range epoch, or a fourth field →
+     *     `null` (malformed; the same fail-closed posture as an
+     *     undecodable base64 body). This client is the only writer, so
+     *     that is corruption, not a format to accept.
      */
     public fun parseValue(raw: String?): ParsedValue? {
         val value = raw ?: return null
-        val sep = value.indexOf(FLAG_SEPARATOR)
-        if (sep < 0) return ParsedValue(value, distributed = true)
-        val distributed = when (value.substring(sep + 1)) {
-            FLAG_DISTRIBUTED.toString() -> true
-            FLAG_PENDING.toString() -> false
-            else -> return null
+        val parts = value.split(FIELD_SEPARATOR)
+        return when (parts.size) {
+            1 -> ParsedValue(parts[0], distributed = true, mintEpoch = LEGACY_MINT_EPOCH)
+            2 -> ParsedValue(
+                parts[0],
+                distributed = parseFlag(parts[1]) ?: return null,
+                mintEpoch = LEGACY_MINT_EPOCH,
+            )
+            3 -> ParsedValue(
+                parts[0],
+                distributed = parseFlag(parts[1]) ?: return null,
+                // `toULongOrNull` rejects a sign, a non-digit, and any
+                // value past u64::MAX — all corruption, all fail-closed.
+                mintEpoch = parts[2].toULongOrNull() ?: return null,
+            )
+            else -> null
         }
-        return ParsedValue(value.substring(0, sep), distributed)
+    }
+
+    /** One flag character, or `null` when it is neither. */
+    private fun parseFlag(raw: String): Boolean? = when (raw) {
+        FLAG_DISTRIBUTED.toString() -> true
+        FLAG_PENDING.toString() -> false
+        else -> null
     }
 
     // -----------------------------------------------------------------
     // Internal
     // -----------------------------------------------------------------
 
-    private fun encodeValue(secret: ByteArray, distributed: Boolean): String =
-        formatValue(Base64.encodeToString(secret, Base64.NO_WRAP), distributed)
+    private fun encodeValue(
+        secret: ByteArray,
+        distributed: Boolean,
+        mintEpoch: ULong,
+    ): String = formatValue(Base64.encodeToString(secret, Base64.NO_WRAP), distributed, mintEpoch)
 
     private fun decodeValue(raw: String?): Entry? {
         val parsed = parseValue(raw) ?: return null
@@ -344,7 +476,7 @@ public object PushRoutingSecretStore {
             return null
         }
         return if (decoded.size == SECRET_LENGTH) {
-            Entry(decoded, parsed.distributed)
+            Entry(decoded, parsed.distributed, parsed.mintEpoch)
         } else {
             null
         }

@@ -70,6 +70,44 @@ import org.junit.Test
 private fun hex(bytes: ByteArray): String =
     bytes.joinToString("") { "%02x".format(it.toInt() and 0xFF) }
 
+/** Big-endian wire encoding of an ADR-0044 mint epoch (8 bytes). */
+private fun beBytes(epoch: ULong): ByteArray =
+    ByteArray(8) { ((epoch shr (56 - 8 * it)) and 0xFFuL).toByte() }
+
+/**
+ * Compare two `(mintEpoch, secret)` pairs as their concatenated
+ * big-endian wire bytes — the flat form the Rust
+ * `is_newer_matches_lexicographic_wire_bytes` test pins as equivalent to
+ * the structured comparison, so the fake order cannot drift from the
+ * core's.
+ */
+private fun compareWire(
+    aEpoch: ULong,
+    aSecret: ByteArray,
+    bEpoch: ULong,
+    bSecret: ByteArray,
+): Int {
+    val a = beBytes(aEpoch) + aSecret
+    val b = beBytes(bEpoch) + bSecret
+    for (i in 0 until minOf(a.size, b.size)) {
+        val d = (a[i].toInt() and 0xFF) - (b[i].toInt() and 0xFF)
+        if (d != 0) return d
+    }
+    return a.size - b.size
+}
+
+/** The mint epoch a [GroupPushRouting.PushRoutingPorts.composeEnvelope]
+ *  envelope was stamped with, read back off the fake wire form
+ *  `0x6c || mint_epoch_be(8) || secret(32)`. */
+private fun stampOf(envelope: ByteArray): ULong {
+    var out = 0uL
+    for (i in 1..8) out = (out shl 8) or (envelope[i].toLong() and 0xFF).toULong()
+    return out
+}
+
+/** The 32 secret bytes of a fake envelope. */
+private fun secretOf(envelope: ByteArray): ByteArray = envelope.copyOfRange(9, envelope.size)
+
 class GroupPushRoutingTest {
 
     private val account = "acctB64=="
@@ -91,6 +129,23 @@ class GroupPushRoutingTest {
         var mintCount = 0
         var broadcastCount = 0
         val secrets = mutableMapOf<String, ByteArray>()
+
+        /** ADR-0044 — the durable mint epoch, per group. A group present in
+         *  [secrets] but ABSENT here is a row written by a build that
+         *  predates the stamp, which the real store reads as
+         *  [PushRoutingSecretStore.LEGACY_MINT_EPOCH]. */
+        val mintEpochs = mutableMapOf<String, ULong>()
+
+        /** ADR-0044 — this device's current MLS group epoch, as
+         *  [freshMintStamp] would read it. `null` models a torn `Group`
+         *  read, which fails a mint CLOSED. */
+        var groupEpoch: ULong? = 0uL
+
+        /** Every `(stamp, secret)` pair handed to [composeEnvelope], in
+         *  call order — so a test can assert WHICH epoch an emitted
+         *  envelope was stamped at, and whether the stamp was a FRESH
+         *  read or a REPLAY of a stored one. */
+        val composedStamps = mutableListOf<GroupPushRouting.MintStamp>()
 
         /** The durable `distributed` flag, per group — mirrors the
          *  `PushRoutingSecretStore` row column. A group present in
@@ -114,25 +169,71 @@ class GroupPushRoutingTest {
         override fun derivePushGid(secret: ByteArray): ByteArray =
             ByteArray(32) { (secret[31 - it].toInt() xor 0x5A).toByte() }
 
-        override fun composeEnvelope(secret: ByteArray): ByteArray =
-            ByteArray(1) { 0x6c } + secret
+        /**
+         * ADR-0044 — the canonical order. In PRODUCTION this is bound to
+         * the audited Rust `pushRoutingSecretIsNewer` FFI, which the host
+         * JVM cannot load; the fake implements the documented rule
+         * directly — compare the flat wire bytes
+         * `mint_epoch_be(8) || secret(32)` lexicographically, strictly
+         * greater wins, fail-closed on a wrong-length secret.
+         *
+         * That flat form is not a second interpretation of the order: the
+         * Rust `is_newer_matches_lexicographic_wire_bytes` test pins that
+         * comparing the structured `(u64, [u8;32])` pair and comparing the
+         * concatenated big-endian wire bytes agree on every input, so this
+         * fake and the core cannot disagree. The REAL FFI order is
+         * exercised in [GroupPushRoutingInstrumentedTest].
+         */
+        override val isNewer: GroupPushRouting.PushRoutingSecretIsNewer =
+            GroupPushRouting.PushRoutingSecretIsNewer { inEpoch, inSecret, stEpoch, stSecret ->
+                if (inSecret.size != 32 || stSecret.size != 32) {
+                    false
+                } else {
+                    compareWire(inEpoch, inSecret, stEpoch, stSecret) > 0
+                }
+            }
+
+        /** The envelope carries its stamp so a test can read it back:
+         *  `0x6c || mint_epoch_be(8) || secret(32)`. */
+        override fun composeEnvelope(
+            stamp: GroupPushRouting.MintStamp,
+            secret: ByteArray,
+        ): ByteArray {
+            composedStamps.add(stamp)
+            return ByteArray(1) { 0x6c } + beBytes(stamp.epoch) + secret
+        }
+
+        override suspend fun freshMintStamp(): GroupPushRouting.MintStamp.Fresh? =
+            groupEpoch?.let { GroupPushRouting.MintStamp.Fresh(it) }
 
         override fun hasSecret(groupIdHex: String): Boolean = secrets.containsKey(groupIdHex)
 
-        override fun getSecret(groupIdHex: String): ByteArray? = secrets[groupIdHex]
+        override fun getRecord(groupIdHex: String): GroupPushRouting.StoredSecret? =
+            secrets[groupIdHex]?.let {
+                GroupPushRouting.StoredSecret(
+                    it,
+                    // An absent entry models a pre-ADR-0044 row.
+                    mintEpochs[groupIdHex] ?: PushRoutingSecretStore.LEGACY_MINT_EPOCH,
+                )
+            }
 
         // Absent flag == a legacy row == already distributed, exactly as
         // `PushRoutingSecretStore.parseValue` reads a suffix-less value.
         override fun isDistributed(groupIdHex: String): Boolean = distributed[groupIdHex] ?: true
 
+        /** Mirrors the real store: secret + flag + stamp are ONE atomic
+         *  row write, which is what makes an accepted DIFFERENT secret
+         *  clear a stale `pending` re-broadcast for free. */
         override fun persist(
             groupIdHex: String,
             secret: ByteArray,
+            mintEpoch: ULong,
             pushGid: ByteArray,
             distributed: Boolean,
         ) {
             secrets[groupIdHex] = secret
             this.distributed[groupIdHex] = distributed
+            mintEpochs[groupIdHex] = mintEpoch
             routes[hex(pushGid)] = Route(accountIdB64, groupIdHex)
         }
 
@@ -288,9 +389,9 @@ class GroupPushRoutingTest {
         assertEquals("the pending envelope was re-sent", 1, ports.broadcastCount)
         assertArrayEquals("same secret, recomposed from the store", minted, ports.secrets[g])
         assertArrayEquals(
-            "the envelope is the one composed from the STORED secret",
-            ports.composeEnvelope(minted),
-            ports.broadcastEnvelopes.single(),
+            "the envelope carries the STORED secret",
+            minted,
+            secretOf(ports.broadcastEnvelopes.single()),
         )
         assertTrue("flagged distributed on success", ports.isDistributed(g))
     }
@@ -354,7 +455,7 @@ class GroupPushRoutingTest {
         val ports = FakePorts(account)
         val g = "25".repeat(32)
 
-        GroupPushRouting.receive(g, secretA, ports)
+        GroupPushRouting.receive(g, secretA, defaultStamp, ports)
         assertTrue("arrived off the journal, so it is by definition on the wire", ports.isDistributed(g))
 
         // Even if this device were the owner, there is nothing pending.
@@ -380,8 +481,8 @@ class GroupPushRoutingTest {
             assertEquals("the pending envelope was re-sent", 1, ports.broadcastCount)
             assertArrayEquals(
                 "recomposed from the STORED secret, never re-minted",
-                ports.composeEnvelope(secretA),
-                ports.broadcastEnvelopes.single(),
+                secretA,
+                secretOf(ports.broadcastEnvelopes.single()),
             )
             assertEquals("a non-owner still NEVER mints", 0, ports.mintCount)
             assertTrue("flagged distributed once it landed", ports.isDistributed(g))
@@ -542,8 +643,8 @@ class GroupPushRoutingTest {
         assertEquals("the admin re-sent its own pending row", 1, ports.broadcastCount)
         assertArrayEquals(
             "byte-identical bytes — accepted by every peer regardless of rank",
-            ports.composeEnvelope(secretA),
-            ports.broadcastEnvelopes.single(),
+            secretA,
+            secretOf(ports.broadcastEnvelopes.single()),
         )
         assertTrue("settled", ports.isDistributed(g))
         assertEquals("re-sending is not minting — a non-owner still never mints", 0, ports.mintCount)
@@ -668,7 +769,7 @@ class GroupPushRoutingTest {
 
         // A different account receives the SAME secret bytes off the journal.
         val peerPorts = FakePorts("acctPeer")
-        GroupPushRouting.receive(g, secret, peerPorts)
+        GroupPushRouting.receive(g, secret, defaultStamp, peerPorts)
 
         // Peer persisted under its OWN account + subscribed under the SAME
         // push_gid the owner derived (the property that makes the notify
@@ -707,19 +808,34 @@ class GroupPushRoutingTest {
 
     @Test
     fun `looksLikeSecretEnvelope is fail-closed`() {
-        // A well-formed 62-byte, 0x6c-prefixed envelope passes the pre-filter.
-        val ok = ByteArray(62).also { it[0] = 0x6c }
+        // ADR-0044 — the v2 envelope is 70 bytes: the 29-byte domain
+        // separator + 1 version byte + the 8-byte big-endian mint_epoch +
+        // the 32-byte secret.
+        assertEquals(70, GroupPushRouting.ENVELOPE_LEN)
+        val ok = ByteArray(70).also { it[0] = 0x6c }
         assertTrue(GroupPushRouting.looksLikeSecretEnvelope(ok))
+
+        // The RETIRED 62-byte v1 envelope no longer clears the pre-filter.
+        // The flag day is hard (no dual-accept): a v1 envelope carries no
+        // mint_epoch, so it has no position in the recency order, and
+        // admitting one would re-open the very F-A replay v2 closes. The
+        // refusal is fail-closed to DEFER — a member never falls back to
+        // the leaky group_id — so invariant #4 holds across the
+        // transition.
+        assertFalse(
+            "a retired v1 envelope must not pass the pre-filter",
+            GroupPushRouting.looksLikeSecretEnvelope(ByteArray(62).also { it[0] = 0x6c }),
+        )
 
         // A plain chat JSON envelope (first byte '{' = 0x7B) is rejected.
         val chat = "{\"v\":1,\"t\":\"hello\"}".toByteArray(Charsets.UTF_8)
         assertFalse(GroupPushRouting.looksLikeSecretEnvelope(chat))
 
         // Right length, wrong first byte.
-        assertFalse(GroupPushRouting.looksLikeSecretEnvelope(ByteArray(62) { 0x7b }))
+        assertFalse(GroupPushRouting.looksLikeSecretEnvelope(ByteArray(70) { 0x7b }))
 
         // Wrong length, right first byte.
-        assertFalse(GroupPushRouting.looksLikeSecretEnvelope(ByteArray(61).also { it[0] = 0x6c }))
+        assertFalse(GroupPushRouting.looksLikeSecretEnvelope(ByteArray(69).also { it[0] = 0x6c }))
 
         // Empty.
         assertFalse(GroupPushRouting.looksLikeSecretEnvelope(ByteArray(0)))
@@ -778,6 +894,66 @@ class GroupPushRoutingTest {
     private fun knownRoles() =
         GroupPushRouting.OwnerLookup.Known(ownerKey, listOf(adminKey, otherAdminKey))
 
+    // -----------------------------------------------------------------
+    // ADR-0044 call-shape helpers
+    //
+    // The ADR-0044 gate takes two more inputs than the ADR-0042 one: the
+    // incoming stamp and this device's own epoch (the clamp ceiling).
+    // Every pre-0044 test is about AUTHORITY, so these helpers default
+    // them to a pair that clears both new steps — a stamp EQUAL to the
+    // ceiling (so the clamp passes, and is not off-by-one) and strictly
+    // above the epoch a seeded row carries (so the ORDER passes) — which
+    // keeps those tests asserting exactly what they always asserted.
+    // The ordering and clamp rules get their own dedicated sections
+    // below, where the defaults are overridden explicitly.
+    // -----------------------------------------------------------------
+
+    /** The stamp a test's incoming envelope carries unless it says
+     *  otherwise. Strictly above [PushRoutingSecretStore.LEGACY_MINT_EPOCH],
+     *  which is what an un-stamped seeded row reads as. */
+    private val defaultStamp: ULong = 9uL
+
+    private suspend fun receiveGated(
+        groupIdHex: String,
+        secret: ByteArray,
+        senderSignatureKey: ByteArray?,
+        owner: GroupPushRouting.OwnerLookup,
+        ports: PushRoutingPorts,
+        mintEpoch: ULong = defaultStamp,
+        ownGroupEpoch: ULong? = defaultStamp,
+    ): GroupPushRouting.ReceiveVerdict = GroupPushRouting.receiveGated(
+        groupIdHex = groupIdHex,
+        secret = secret,
+        mintEpoch = mintEpoch,
+        senderSignatureKey = senderSignatureKey,
+        owner = owner,
+        ownGroupEpoch = ownGroupEpoch,
+        ports = ports,
+    )
+
+    /** The pure gate, with the ADR-0044 inputs defaulted as above and the
+     *  order supplied by a [FakePorts] instance (never re-derived here —
+     *  production routes through the audited Rust FFI). */
+    private fun decide(
+        sender: ByteArray?,
+        owner: GroupPushRouting.OwnerLookup,
+        incoming: ByteArray,
+        stored: ByteArray?,
+        storedEpoch: ULong = PushRoutingSecretStore.LEGACY_MINT_EPOCH,
+        storedUnreadable: Boolean = false,
+        mintEpoch: ULong = defaultStamp,
+        ownGroupEpoch: ULong? = defaultStamp,
+    ): GroupPushRouting.ReceiveVerdict = GroupPushRouting.decideAcceptReceivedSecret(
+        senderSignatureKey = sender,
+        owner = owner,
+        incomingSecret = incoming,
+        incomingMintEpoch = mintEpoch,
+        stored = stored?.let { GroupPushRouting.StoredSecret(it, storedEpoch) },
+        storedUnreadable = storedUnreadable,
+        ownGroupEpoch = ownGroupEpoch,
+        isNewer = FakePorts("order").isNewer,
+    )
+
     /** Asserts the REJECT contract: nothing persisted, nothing subscribed,
      *  no reverse-index row — and any pre-existing secret left untouched. */
     private fun assertDropped(ports: FakePorts, groupHex: String, before: ByteArray?) {
@@ -796,7 +972,7 @@ class GroupPushRoutingTest {
         val g = "01".repeat(32)
         ports.secrets[g] = secretA
 
-        val verdict = GroupPushRouting.receiveGated(
+        val verdict = receiveGated(
             groupIdHex = g,
             secret = secretB,
             senderSignatureKey = ownerKey,
@@ -804,7 +980,7 @@ class GroupPushRoutingTest {
             ports = ports,
         )
 
-        assertEquals(GroupPushRouting.ReceiveVerdict.ACCEPT, verdict)
+        assertTrue("verdict must accept: " + verdict, verdict.accepts)
         assertArrayEquals("rotated to the owner's new secret", secretB, ports.secrets[g])
         assertEquals(1, ports.subscribeCount)
         assertArrayEquals(ports.derivePushGid(secretB), ports.lastSubscribeTarget)
@@ -816,7 +992,7 @@ class GroupPushRoutingTest {
         val g = "02".repeat(32)
         ports.secrets[g] = secretA
 
-        val verdict = GroupPushRouting.receiveGated(
+        val verdict = receiveGated(
             groupIdHex = g,
             secret = secretB,
             senderSignatureKey = memberKey,
@@ -824,7 +1000,7 @@ class GroupPushRoutingTest {
             ports = ports,
         )
 
-        assertEquals(GroupPushRouting.ReceiveVerdict.REJECT, verdict)
+        assertFalse("verdict must refuse: " + verdict, verdict.accepts)
         assertDropped(ports, g, before = secretA)
     }
 
@@ -833,7 +1009,7 @@ class GroupPushRoutingTest {
         val ports = FakePorts(account)
         val g = "03".repeat(32)
 
-        val verdict = GroupPushRouting.receiveGated(
+        val verdict = receiveGated(
             groupIdHex = g,
             secret = secretB,
             senderSignatureKey = memberKey,
@@ -841,7 +1017,7 @@ class GroupPushRoutingTest {
             ports = ports,
         )
 
-        assertEquals(GroupPushRouting.ReceiveVerdict.REJECT, verdict)
+        assertFalse("verdict must refuse: " + verdict, verdict.accepts)
         assertDropped(ports, g, before = null)
     }
 
@@ -852,7 +1028,7 @@ class GroupPushRoutingTest {
             val g = "04".repeat(32)
             ports.secrets[g] = secretA
 
-            val verdict = GroupPushRouting.receiveGated(
+            val verdict = receiveGated(
                 groupIdHex = g,
                 secret = secretA.copyOf(),
                 senderSignatureKey = memberKey,
@@ -861,7 +1037,7 @@ class GroupPushRoutingTest {
             )
 
             // Identical bytes rotate nothing, so the relayer's identity is moot.
-            assertEquals(GroupPushRouting.ReceiveVerdict.ACCEPT, verdict)
+            assertTrue("verdict must accept: " + verdict, verdict.accepts)
             assertArrayEquals(secretA, ports.secrets[g])
             assertEquals(1, ports.subscribeCount)
         }
@@ -876,7 +1052,7 @@ class GroupPushRoutingTest {
         // added: the owner already broadcast at mint time, so the ONLY
         // envelope this device will ever see is the admin's `redistribute`.
 
-        val verdict = GroupPushRouting.receiveGated(
+        val verdict = receiveGated(
             groupIdHex = g,
             secret = secretB,
             senderSignatureKey = adminKey,
@@ -884,7 +1060,7 @@ class GroupPushRoutingTest {
             ports = ports,
         )
 
-        assertEquals(GroupPushRouting.ReceiveVerdict.ACCEPT, verdict)
+        assertTrue("verdict must accept: " + verdict, verdict.accepts)
         assertArrayEquals("admin filled the hole", secretB, ports.secrets[g])
         assertEquals("subscribed under the derived push_gid", 1, ports.subscribeCount)
         assertArrayEquals(ports.derivePushGid(secretB), ports.lastSubscribeTarget)
@@ -903,7 +1079,7 @@ class GroupPushRoutingTest {
         ports.secrets[g] = secretA
         ports.routes[hex(ports.derivePushGid(secretA))] = Route(account, g)
 
-        val verdict = GroupPushRouting.receiveGated(
+        val verdict = receiveGated(
             groupIdHex = g,
             secret = secretB,
             senderSignatureKey = adminKey,
@@ -911,7 +1087,7 @@ class GroupPushRoutingTest {
             ports = ports,
         )
 
-        assertEquals(GroupPushRouting.ReceiveVerdict.ACCEPT, verdict)
+        assertTrue("verdict must accept: " + verdict, verdict.accepts)
         assertArrayEquals("admin's rotation applied", secretB, ports.secrets[g])
         assertArrayEquals(
             "subscribed under the NEW push_gid",
@@ -934,26 +1110,26 @@ class GroupPushRoutingTest {
             val g = "0c".repeat(32)
 
             // 1. An admin seeds the hole first.
-            val seeded = GroupPushRouting.receiveGated(
+            val seeded = receiveGated(
                 groupIdHex = g,
                 secret = secretA,
                 senderSignatureKey = adminKey,
                 owner = knownRoles(),
                 ports = ports,
             )
-            assertEquals(GroupPushRouting.ReceiveVerdict.ACCEPT, seeded)
+            assertTrue("verdict must accept: " + seeded, seeded.accepts)
             assertArrayEquals(secretA, ports.secrets[g])
 
             // 2. The owner's own secret lands AFTER it and still wins — owner
             //    acceptance never depends on what is already stored.
-            val rotated = GroupPushRouting.receiveGated(
+            val rotated = receiveGated(
                 groupIdHex = g,
                 secret = secretB,
                 senderSignatureKey = ownerKey,
                 owner = knownRoles(),
                 ports = ports,
             )
-            assertEquals(GroupPushRouting.ReceiveVerdict.ACCEPT, rotated)
+            assertTrue("verdict must accept: " + rotated, rotated.accepts)
             assertArrayEquals("owner overwrote the admin-seeded secret", secretB, ports.secrets[g])
             assertArrayEquals(ports.derivePushGid(secretB), ports.lastSubscribeTarget)
         }
@@ -964,7 +1140,7 @@ class GroupPushRoutingTest {
             val ports = FakePorts(account)
             val g = "0d".repeat(32)
 
-            val verdict = GroupPushRouting.receiveGated(
+            val verdict = receiveGated(
                 groupIdHex = g,
                 secret = secretB,
                 senderSignatureKey = otherAdminKey,
@@ -972,7 +1148,7 @@ class GroupPushRoutingTest {
                 ports = ports,
             )
 
-            assertEquals(GroupPushRouting.ReceiveVerdict.ACCEPT, verdict)
+            assertTrue("verdict must accept: " + verdict, verdict.accepts)
             assertArrayEquals(secretB, ports.secrets[g])
         }
 
@@ -983,7 +1159,7 @@ class GroupPushRoutingTest {
             val g = "0e".repeat(32)
             ports.secrets[g] = secretA
 
-            val verdict = GroupPushRouting.receiveGated(
+            val verdict = receiveGated(
                 groupIdHex = g,
                 secret = secretA.copyOf(),
                 senderSignatureKey = adminKey,
@@ -991,7 +1167,7 @@ class GroupPushRoutingTest {
                 ports = ports,
             )
 
-            assertEquals(GroupPushRouting.ReceiveVerdict.ACCEPT, verdict)
+            assertTrue("verdict must accept: " + verdict, verdict.accepts)
             assertArrayEquals(secretA, ports.secrets[g])
         }
 
@@ -1001,7 +1177,7 @@ class GroupPushRoutingTest {
         val g = "05".repeat(32)
         ports.secrets[g] = secretA
 
-        val verdict = GroupPushRouting.receiveGated(
+        val verdict = receiveGated(
             groupIdHex = g,
             secret = secretB,
             senderSignatureKey = memberKey,
@@ -1011,7 +1187,7 @@ class GroupPushRoutingTest {
 
         // A legacy / open group has no owner to check against — unchanged
         // behaviour, deliberately not a regression for pre-ADR-0022 groups.
-        assertEquals(GroupPushRouting.ReceiveVerdict.ACCEPT, verdict)
+        assertTrue("verdict must accept: " + verdict, verdict.accepts)
         assertArrayEquals(secretB, ports.secrets[g])
     }
 
@@ -1021,7 +1197,7 @@ class GroupPushRoutingTest {
         val g = "06".repeat(32)
         ports.secrets[g] = secretA
 
-        val verdict = GroupPushRouting.receiveGated(
+        val verdict = receiveGated(
             groupIdHex = g,
             secret = secretB,
             senderSignatureKey = ownerKey,
@@ -1031,7 +1207,7 @@ class GroupPushRoutingTest {
 
         // Even a would-be OWNER is refused: an unreadable roster / role table
         // must never widen who may rotate (invariant #4).
-        assertEquals(GroupPushRouting.ReceiveVerdict.REJECT, verdict)
+        assertFalse("verdict must refuse: " + verdict, verdict.accepts)
         assertDropped(ports, g, before = secretA)
     }
 
@@ -1041,7 +1217,7 @@ class GroupPushRoutingTest {
         val g = "07".repeat(32)
         ports.secrets[g] = secretA
 
-        val verdict = GroupPushRouting.receiveGated(
+        val verdict = receiveGated(
             groupIdHex = g,
             secret = secretA.copyOf(),
             senderSignatureKey = null,
@@ -1049,7 +1225,7 @@ class GroupPushRoutingTest {
             ports = ports,
         )
 
-        assertEquals(GroupPushRouting.ReceiveVerdict.ACCEPT, verdict)
+        assertTrue("verdict must accept: " + verdict, verdict.accepts)
     }
 
     @Test
@@ -1058,7 +1234,7 @@ class GroupPushRoutingTest {
         val g = "08".repeat(32)
         ports.secrets[g] = secretA
 
-        val verdict = GroupPushRouting.receiveGated(
+        val verdict = receiveGated(
             groupIdHex = g,
             secret = secretB,
             // `null` = external sender / leaf absent from the roster / FFI throw.
@@ -1067,7 +1243,7 @@ class GroupPushRoutingTest {
             ports = ports,
         )
 
-        assertEquals(GroupPushRouting.ReceiveVerdict.REJECT, verdict)
+        assertFalse("verdict must refuse: " + verdict, verdict.accepts)
         assertDropped(ports, g, before = secretA)
     }
 
@@ -1084,17 +1260,17 @@ class GroupPushRoutingTest {
     ) : PushRoutingPorts by inner {
         private var reads = 0
 
-        override fun getSecret(groupIdHex: String): ByteArray? {
+        override fun getRecord(groupIdHex: String): GroupPushRouting.StoredSecret? {
             reads++
             if (reads <= failures) throw IllegalStateException("keystore unavailable")
-            return inner.getSecret(groupIdHex)
+            return inner.getRecord(groupIdHex)
         }
     }
 
     @Test
-    fun `a throwing getSecret degrades to strict, never permissive`() = runTest {
+    fun `a throwing getRecord degrades to strict, never permissive`() = runTest {
         val inner = FakePorts(account)
-        val verdict = GroupPushRouting.receiveGated(
+        val verdict = receiveGated(
             groupIdHex = "09".repeat(32),
             secret = secretB,
             senderSignatureKey = memberKey,
@@ -1103,16 +1279,16 @@ class GroupPushRoutingTest {
         )
 
         // Losing the byte-identical fast path can only make the gate stricter.
-        assertEquals(GroupPushRouting.ReceiveVerdict.REJECT, verdict)
+        assertFalse("verdict must refuse: " + verdict, verdict.accepts)
         assertTrue("nothing persisted", inner.secrets.isEmpty())
     }
 
     @Test
-    fun `a throwing getSecret still lets an ADMIN through (ADR-0043 (b) - stored state is moot)`() =
+    fun `a throwing getRecord still lets an ADMIN through (ADR-0043 (b) - stored state is moot)`() =
         runTest {
             val inner = FakePorts(account)
             val g = "0f".repeat(32)
-            val verdict = GroupPushRouting.receiveGated(
+            val verdict = receiveGated(
                 groupIdHex = g,
                 secret = secretB,
                 senderSignatureKey = adminKey,
@@ -1129,7 +1305,7 @@ class GroupPushRoutingTest {
             // more than a transient store error. The check that still guards
             // WHO may write is the role table, and it still fails closed
             // (see the Unavailable cases).
-            assertEquals(GroupPushRouting.ReceiveVerdict.ACCEPT, verdict)
+            assertTrue("verdict must accept: " + verdict, verdict.accepts)
             assertArrayEquals("admin's secret persisted", secretB, inner.secrets[g])
             // Nothing is retired: an unreadable store yields no OLD bytes, so
             // no old gid can be NAMED — the teardown is skipped rather than
@@ -1138,12 +1314,12 @@ class GroupPushRoutingTest {
         }
 
     @Test
-    fun `a throwing getSecret still lets the OWNER through (it may rotate anything)`() = runTest {
+    fun `a throwing getRecord still lets the OWNER through (it may rotate anything)`() = runTest {
         val inner = FakePorts(account)
         val g = "10".repeat(32)
         // Only the GATE read fails; the owner may rotate whatever is stored,
         // so an unknown stored state changes nothing for it.
-        val verdict = GroupPushRouting.receiveGated(
+        val verdict = receiveGated(
             groupIdHex = g,
             secret = secretB,
             senderSignatureKey = ownerKey,
@@ -1151,64 +1327,95 @@ class GroupPushRoutingTest {
             ports = FlakyStore(1, inner),
         )
 
-        assertEquals(GroupPushRouting.ReceiveVerdict.ACCEPT, verdict)
+        assertTrue("verdict must accept: " + verdict, verdict.accepts)
         assertArrayEquals("owner's secret persisted", secretB, inner.secrets[g])
     }
 
     @Test
     fun `the pure decision function covers the whole matrix`() {
         val known = knownRoles()
-        fun decide(
-            sender: ByteArray?,
-            owner: GroupPushRouting.OwnerLookup,
-            incoming: ByteArray,
-            stored: ByteArray?,
-        ) = GroupPushRouting.decideAcceptReceivedSecret(sender, owner, incoming, stored)
 
-        val accept = GroupPushRouting.ReceiveVerdict.ACCEPT
-        val reject = GroupPushRouting.ReceiveVerdict.REJECT
+        val identical = GroupPushRouting.ReceiveVerdict.ACCEPT_IDENTICAL
+        val owner = GroupPushRouting.ReceiveVerdict.ACCEPT_OWNER
+        val seed = GroupPushRouting.ReceiveVerdict.ACCEPT_ADMIN_SEED
+        val adminRotate = GroupPushRouting.ReceiveVerdict.ACCEPT_ADMIN_ROTATE
+        val noOwner = GroupPushRouting.ReceiveVerdict.ACCEPT_NO_OWNER
+        val notAuthorized = GroupPushRouting.ReceiveVerdict.REJECT_NOT_AUTHORIZED
+        val unverifiable = GroupPushRouting.ReceiveVerdict.REJECT_UNVERIFIABLE
 
         // --- OWNER: may seed AND may rotate, whatever is stored ---
-        assertEquals(accept, decide(ownerKey, known, secretB, secretA))
-        assertEquals(accept, decide(ownerKey, known, secretA, null))
+        assertEquals(owner, decide(ownerKey, known, secretB, secretA))
+        assertEquals(owner, decide(ownerKey, known, secretA, null))
 
-        // --- ADMIN: may SEED a hole AND rotate (ADR-0043 option (b)) ---
-        assertEquals(accept, decide(adminKey, known, secretA, null))
-        assertEquals(accept, decide(otherAdminKey, known, secretA, null))
-        assertEquals(accept, decide(adminKey, known, secretB, secretA))
-        assertEquals(accept, decide(otherAdminKey, known, secretB, secretA))
+        // --- ADMIN: may SEED a hole AND rotate (ADR-0043 option (b)).
+        //     The two are reported SEPARATELY — a provable hole is a seed,
+        //     anything else is a rotate — but both accept.
+        assertEquals(seed, decide(adminKey, known, secretA, null))
+        assertEquals(seed, decide(otherAdminKey, known, secretA, null))
+        assertEquals(adminRotate, decide(adminKey, known, secretB, secretA))
+        assertEquals(adminRotate, decide(otherAdminKey, known, secretB, secretA))
+        // An UNREADABLE store makes an admin write a ROTATE, not a seed:
+        // `stored == null` then means "unknown", not "provably absent".
+        assertEquals(
+            adminRotate,
+            decide(adminKey, known, secretA, null, storedUnreadable = true),
+        )
 
         // --- plain MEMBER: may never change it, seed or overwrite ---
-        assertEquals(reject, decide(memberKey, known, secretB, secretA))
-        assertEquals(reject, decide(memberKey, known, secretA, null))
+        assertEquals(notAuthorized, decide(memberKey, known, secretB, secretA))
+        assertEquals(notAuthorized, decide(memberKey, known, secretA, null))
 
         // --- identical always accepted, whoever relayed it (needs no rank) ---
-        assertEquals(accept, decide(memberKey, known, secretA, secretA.copyOf()))
-        assertEquals(accept, decide(adminKey, known, secretA, secretA.copyOf()))
-        assertEquals(accept, decide(null, known, secretA, secretA.copyOf()))
+        assertEquals(identical, decide(memberKey, known, secretA, secretA.copyOf()))
+        assertEquals(identical, decide(adminKey, known, secretA, secretA.copyOf()))
+        assertEquals(identical, decide(null, known, secretA, secretA.copyOf()))
 
         // --- no role table -> open; unreadable -> fail closed for EVERY rank ---
         val open = GroupPushRouting.OwnerLookup.NoRoleTable
         val unreadable = GroupPushRouting.OwnerLookup.Unavailable
-        assertEquals(accept, decide(memberKey, open, secretB, secretA))
-        assertEquals(accept, decide(memberKey, open, secretA, null))
-        assertEquals(reject, decide(ownerKey, unreadable, secretB, secretA))
-        assertEquals(reject, decide(adminKey, unreadable, secretA, null))
+        assertEquals(noOwner, decide(memberKey, open, secretB, secretA))
+        assertEquals(noOwner, decide(memberKey, open, secretA, null))
+        assertEquals(unverifiable, decide(ownerKey, unreadable, secretB, secretA))
+        assertEquals(unverifiable, decide(adminKey, unreadable, secretA, null))
 
         // --- an unresolved sender matches neither owner nor any admin ---
-        assertEquals(reject, decide(null, known, secretB, secretA))
-        assertEquals(reject, decide(null, known, secretA, null))
+        assertEquals(unverifiable, decide(null, known, secretB, secretA))
+        assertEquals(unverifiable, decide(null, known, secretA, null))
 
         // --- near-miss keys (one byte off) match neither rank ---
         val nearOwner = ownerKey.copyOf().also { it[31] = 0x12 }
         val nearAdmin = adminKey.copyOf().also { it[31] = 0x34 }
-        assertEquals(reject, decide(nearOwner, known, secretB, secretA))
-        assertEquals(reject, decide(nearAdmin, known, secretA, null))
+        assertEquals(notAuthorized, decide(nearOwner, known, secretB, secretA))
+        assertEquals(notAuthorized, decide(nearAdmin, known, secretA, null))
 
         // --- an EMPTY admin set degenerates to the owner-only gate ---
         val ownerOnly = GroupPushRouting.OwnerLookup.Known(ownerKey)
-        assertEquals(accept, decide(ownerKey, ownerOnly, secretB, secretA))
-        assertEquals(reject, decide(adminKey, ownerOnly, secretA, null))
+        assertEquals(owner, decide(ownerKey, ownerOnly, secretB, secretA))
+        assertEquals(notAuthorized, decide(adminKey, ownerOnly, secretA, null))
+    }
+
+    @Test
+    fun `the accepts partition is exhaustive and matches the verdict names`() {
+        // Nothing may sit outside the accept/refuse partition, and the
+        // naming must not drift from it — the orchestration branches on
+        // `.accepts` alone.
+        for (verdict in GroupPushRouting.ReceiveVerdict.entries) {
+            assertEquals(
+                "$verdict: `accepts` must agree with the name",
+                verdict.name.startsWith("ACCEPT"),
+                verdict.accepts,
+            )
+        }
+        assertEquals(
+            "five accepts",
+            5,
+            GroupPushRouting.ReceiveVerdict.entries.count { it.accepts },
+        )
+        assertEquals(
+            "four refusals",
+            4,
+            GroupPushRouting.ReceiveVerdict.entries.count { !it.accepts },
+        )
     }
 
     @Test
@@ -1400,7 +1607,7 @@ class GroupPushRoutingTest {
             assertFalse("the secret actually changed", next.contentEquals(secretA))
             // ...was redistributed at the POST-removal epoch...
             assertEquals(1, ports.broadcastCount)
-            assertArrayEquals(ports.composeEnvelope(next), ports.broadcastEnvelopes.single())
+            assertArrayEquals(next, secretOf(ports.broadcastEnvelopes.single()))
             assertTrue("broadcast confirmed", ports.isDistributed(g))
             // ...this device re-armed under the NEW id...
             val newGid = ports.derivePushGid(next)
@@ -1556,7 +1763,7 @@ class GroupPushRoutingTest {
 
             assertEquals("no second mint", 1, ports.mintCount)
             assertEquals(1, ports.broadcastCount)
-            assertArrayEquals(ports.composeEnvelope(next), ports.broadcastEnvelopes.single())
+            assertArrayEquals(next, secretOf(ports.broadcastEnvelopes.single()))
             assertTrue("now confirmed", ports.isDistributed(g))
         }
 
@@ -1747,7 +1954,7 @@ class GroupPushRoutingTest {
         seedRouting(ports, g, secretA)
         val oldGid = ports.derivePushGid(secretA)
 
-        val verdict = GroupPushRouting.receiveGated(
+        val verdict = receiveGated(
             groupIdHex = g,
             secret = secretB,
             senderSignatureKey = ownerKey,
@@ -1755,7 +1962,7 @@ class GroupPushRoutingTest {
             ports = ports,
         )
 
-        assertEquals(GroupPushRouting.ReceiveVerdict.ACCEPT, verdict)
+        assertTrue("verdict must accept: " + verdict, verdict.accepts)
         assertArrayEquals(secretB, ports.secrets[g])
         assertArrayEquals(ports.derivePushGid(secretB), ports.lastSubscribeTarget)
         assertEquals(1, ports.unsubscribeCount)
@@ -1773,7 +1980,7 @@ class GroupPushRoutingTest {
         val g = "3d".repeat(32)
         seedRouting(ports, g, secretA)
 
-        val verdict = GroupPushRouting.receiveGated(
+        val verdict = receiveGated(
             groupIdHex = g,
             secret = secretA.copyOf(),
             senderSignatureKey = memberKey,
@@ -1781,7 +1988,7 @@ class GroupPushRoutingTest {
             ports = ports,
         )
 
-        assertEquals(GroupPushRouting.ReceiveVerdict.ACCEPT, verdict)
+        assertTrue("verdict must accept: " + verdict, verdict.accepts)
         assertEquals("nothing to retire", 0, ports.unsubscribeCount)
         assertEquals(Route(account, g), ports.routes[hex(ports.derivePushGid(secretA))])
     }
@@ -1791,7 +1998,7 @@ class GroupPushRoutingTest {
         val ports = FakePorts(account)
         val g = "3e".repeat(32)
 
-        val verdict = GroupPushRouting.receiveGated(
+        val verdict = receiveGated(
             groupIdHex = g,
             secret = secretB,
             senderSignatureKey = adminKey,
@@ -1799,7 +2006,7 @@ class GroupPushRoutingTest {
             ports = ports,
         )
 
-        assertEquals(GroupPushRouting.ReceiveVerdict.ACCEPT, verdict)
+        assertTrue("verdict must accept: " + verdict, verdict.accepts)
         assertEquals(0, ports.unsubscribeCount)
     }
 
@@ -1809,7 +2016,7 @@ class GroupPushRoutingTest {
         val g = "3f".repeat(32)
         seedRouting(ports, g, secretA)
 
-        val verdict = GroupPushRouting.receiveGated(
+        val verdict = receiveGated(
             groupIdHex = g,
             secret = secretB,
             senderSignatureKey = memberKey,
@@ -1817,7 +2024,7 @@ class GroupPushRoutingTest {
             ports = ports,
         )
 
-        assertEquals(GroupPushRouting.ReceiveVerdict.REJECT, verdict)
+        assertFalse("verdict must refuse: " + verdict, verdict.accepts)
         assertEquals("a refusal must not tear down a LIVE subscription", 0, ports.unsubscribeCount)
         assertArrayEquals(secretA, ports.secrets[g])
         assertEquals(Route(account, g), ports.routes[hex(ports.derivePushGid(secretA))])
@@ -1840,5 +2047,843 @@ class GroupPushRoutingTest {
         // The composed key shape is `<a>NUL<b>` — unambiguous because neither
         // base64 nor lowercase hex contains a NUL.
         assertEquals("acct\u0000group", "acct" + "\u0000" + "group")
+    }
+
+    // =================================================================
+    // ADR-0044 — the RECENCY ORDER (lakko-security F-A, G-36 residual 9)
+    //
+    // The ADR-0042 / ADR-0043 gate asked only WHO sent a secret, never
+    // whether it was NEWER. So a retry of the current secret and a replay
+    // of a superseded one were byte-indistinguishable, which made a
+    // silent, PERMANENT rotation undo reachable with no malice and no
+    // crash. The sections below pin the two rules that close it (the
+    // total order and the future clamp), the two places the fix is
+    // easiest to void silently (a re-stamped re-broadcast, and an
+    // epoch-inflating identical accept), and the sequencing rule the
+    // whole closure rests on (C-61).
+    // =================================================================
+
+    /** The pre-rotation secret an evicted member still holds. Sorts
+     *  HIGHER bytewise than every fake mint (0x30, 0x31, ...), which is
+     *  what makes the EPOCH — not the byte tiebreak — the thing under
+     *  test, and what makes the C-61 swapped companion below a real
+     *  demonstration rather than a coin flip. */
+    private val staleSecret = ByteArray(32) { 0xC3.toByte() }
+
+    @Test
+    fun `REJECTS a stamp ahead of this device's own epoch (reject-future)`() {
+        // An honest stamp can never exceed the receiver's own epoch:
+        // `stamp <= seal epoch <= receiver's epoch at dispatch`. So the
+        // clamp never refuses an honest envelope, and it is what stops an
+        // authorised writer stamping ULong.MAX_VALUE and FREEZING the
+        // group's routing id forever — strictly worse than the churn
+        // G-36 residual 3 already records, because a churn self-repairs at
+        // the next owner rotation and a freeze does not.
+        assertEquals(
+            GroupPushRouting.ReceiveVerdict.REJECT_FUTURE,
+            decide(
+                ownerKey, knownRoles(), secretB, secretA,
+                mintEpoch = 12uL, ownGroupEpoch = 11uL,
+            ),
+        )
+    }
+
+    @Test
+    fun `the future clamp runs BEFORE authority - even the OWNER is refused`() {
+        // The ordering of steps (2) and (3) is the whole point: if
+        // authority ran first, the owner would clear it and go on to
+        // freeze the group with an out-of-range stamp. Asserted for every
+        // authorised rank, plus the legacy open group.
+        for (sender in listOf(ownerKey, adminKey)) {
+            assertEquals(
+                GroupPushRouting.ReceiveVerdict.REJECT_FUTURE,
+                decide(
+                    sender, knownRoles(), secretB, secretA,
+                    mintEpoch = ULong.MAX_VALUE, ownGroupEpoch = 11uL,
+                ),
+            )
+        }
+        assertEquals(
+            GroupPushRouting.ReceiveVerdict.REJECT_FUTURE,
+            decide(
+                memberKey, GroupPushRouting.OwnerLookup.NoRoleTable, secretB, secretA,
+                mintEpoch = ULong.MAX_VALUE, ownGroupEpoch = 11uL,
+            ),
+        )
+    }
+
+    @Test
+    fun `a stamp EQUAL to this device's own epoch is accepted (the clamp is not off-by-one)`() {
+        // The common case: a peer mints at epoch N and this device applies
+        // the commit carrying that envelope, so it too is at N. An
+        // off-by-one clamp would refuse every rotation in the group.
+        assertEquals(
+            GroupPushRouting.ReceiveVerdict.ACCEPT_OWNER,
+            decide(
+                ownerKey, knownRoles(), secretB, secretA,
+                storedEpoch = 10uL, mintEpoch = 11uL, ownGroupEpoch = 11uL,
+            ),
+        )
+    }
+
+    @Test
+    fun `an UNREADABLE own epoch fails CLOSED (no ceiling, no accept)`() {
+        // With no ceiling a stamp cannot be bounded at all, so the
+        // envelope is unverifiable rather than merely unordered.
+        assertEquals(
+            GroupPushRouting.ReceiveVerdict.REJECT_UNVERIFIABLE,
+            decide(ownerKey, knownRoles(), secretB, secretA, ownGroupEpoch = null),
+        )
+    }
+
+    @Test
+    fun `REJECTS an AUTHORISED envelope older than what is held (reject-stale)`() {
+        // The F-A shape at the decision layer, for BOTH authorised ranks:
+        // authority alone is no longer enough, the envelope must also win
+        // the order.
+        for (sender in listOf(ownerKey, adminKey)) {
+            assertEquals(
+                GroupPushRouting.ReceiveVerdict.REJECT_STALE,
+                decide(
+                    sender, knownRoles(), staleSecret, secretB,
+                    storedEpoch = 11uL, mintEpoch = 10uL, ownGroupEpoch = 11uL,
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun `a legacy no-role-table group is ORDERED too (accept-no-owner is not exempt)`() {
+        // The open-group branch clears AUTHORITY, not the order. Skipping
+        // the order there would leave the F-A replay wide open for exactly
+        // the groups that have no owner to repair it.
+        assertEquals(
+            GroupPushRouting.ReceiveVerdict.REJECT_STALE,
+            decide(
+                memberKey, GroupPushRouting.OwnerLookup.NoRoleTable, staleSecret, secretB,
+                storedEpoch = 11uL, mintEpoch = 10uL, ownGroupEpoch = 11uL,
+            ),
+        )
+        assertEquals(
+            GroupPushRouting.ReceiveVerdict.ACCEPT_NO_OWNER,
+            decide(
+                memberKey, GroupPushRouting.OwnerLookup.NoRoleTable, secretB, staleSecret,
+                storedEpoch = 10uL, mintEpoch = 11uL, ownGroupEpoch = 11uL,
+            ),
+        )
+    }
+
+    @Test
+    fun `the EPOCH dominates the byte tiebreak`() {
+        // A newer envelope wins even when its secret sorts LOWER, and an
+        // older one loses even when its secret sorts HIGHER. Without this
+        // the order would be decided by the bytes, i.e. by nothing.
+        assertEquals(
+            GroupPushRouting.ReceiveVerdict.ACCEPT_OWNER,
+            decide(
+                ownerKey, knownRoles(), secretA, staleSecret,
+                storedEpoch = 10uL, mintEpoch = 11uL, ownGroupEpoch = 11uL,
+            ),
+        )
+        assertEquals(
+            GroupPushRouting.ReceiveVerdict.REJECT_STALE,
+            decide(
+                ownerKey, knownRoles(), staleSecret, secretA,
+                storedEpoch = 11uL, mintEpoch = 10uL, ownGroupEpoch = 11uL,
+            ),
+        )
+    }
+
+    @Test
+    fun `at an EXACT epoch tie the bytes decide - and the OWNER can LOSE`() {
+        // The documented semantic narrowing, asserted so it cannot be
+        // "fixed" by accident. A total order and unconditional
+        // owner-priority cannot both hold; under ADR-0043 option (b) one
+        // removal yields N+1 same-epoch mints, so the tie is the common
+        // path. What owner-priority existed to provide (arrival-order
+        // independence) is preserved by a STRICTLY STRONGER mechanism.
+        assertEquals(
+            "the owner's lower-sorting mint LOSES a tie",
+            GroupPushRouting.ReceiveVerdict.REJECT_STALE,
+            decide(
+                ownerKey, knownRoles(), secretA, staleSecret,
+                storedEpoch = 42uL, mintEpoch = 42uL, ownGroupEpoch = 42uL,
+            ),
+        )
+        assertEquals(
+            "and its higher-sorting mint wins one",
+            GroupPushRouting.ReceiveVerdict.ACCEPT_OWNER,
+            decide(
+                ownerKey, knownRoles(), staleSecret, secretA,
+                storedEpoch = 42uL, mintEpoch = 42uL, ownGroupEpoch = 42uL,
+            ),
+        )
+    }
+
+    @Test
+    fun `a SEED (nothing stored) is never ordered - any stamp is accepted`() {
+        // There is nothing to order against, so step (5) is skipped. A
+        // fresh device joining an old group must not be refused because
+        // its first envelope's stamp happens to be low.
+        assertEquals(
+            GroupPushRouting.ReceiveVerdict.ACCEPT_ADMIN_SEED,
+            decide(adminKey, knownRoles(), secretA, null, mintEpoch = 0uL, ownGroupEpoch = 9uL),
+        )
+    }
+
+    @Test
+    fun `accept-identical short-circuits BOTH the clamp and the order`() {
+        // Rule (1) is unchanged by ADR-0044 and deliberately runs first:
+        // a retry that reached us over a different route is still the same
+        // value, whatever epoch it claims and whoever relayed it. That is
+        // what keeps the any-holder re-broadcast idempotent.
+        assertEquals(
+            "an out-of-range stamp on identical bytes is still identical",
+            GroupPushRouting.ReceiveVerdict.ACCEPT_IDENTICAL,
+            decide(
+                memberKey, knownRoles(), secretA, secretA.copyOf(),
+                storedEpoch = 5uL, mintEpoch = ULong.MAX_VALUE, ownGroupEpoch = 9uL,
+            ),
+        )
+        assertEquals(
+            "a torn own-epoch read does not break the retry path",
+            GroupPushRouting.ReceiveVerdict.ACCEPT_IDENTICAL,
+            decide(
+                null, GroupPushRouting.OwnerLookup.Unavailable, secretA, secretA.copyOf(),
+                ownGroupEpoch = null,
+            ),
+        )
+    }
+
+    @Test
+    fun `a wrong-length incoming secret can never displace a stored one`() {
+        // The order is fail-closed on either side: a malformed incoming
+        // secret never displaces a stored one, and a corrupt stored value
+        // is left in place rather than overwritten on the strength of a
+        // comparison against something that was never a secret.
+        assertEquals(
+            GroupPushRouting.ReceiveVerdict.REJECT_STALE,
+            decide(
+                ownerKey, knownRoles(), ByteArray(31), secretA,
+                storedEpoch = 1uL, mintEpoch = 9uL, ownGroupEpoch = 9uL,
+            ),
+        )
+    }
+
+    // -----------------------------------------------------------------
+    // The F-A replay, end to end
+    // -----------------------------------------------------------------
+
+    @Test
+    fun `a stale re-broadcast is refused and does NOT retire the live gid`() = runTest {
+        // The literal finding. A device's post-add redistribute broadcast
+        // failed, so it holds the PRE-rotation secret S0 in a pending row;
+        // another admin has since rotated the group to S1. That device's
+        // any-holder re-broadcast re-sends S0 — and before ADR-0044 every
+        // member accepted it (authorised sender, changed bytes), persisted
+        // S0, and RETIRED gid(S1), migrating the group back onto the id
+        // the EVICTED member still derives. With no further shrink there
+        // was no further rotation, so it was PERMANENT.
+        val ports = FakePorts(account)
+        val g = "50".repeat(32)
+        // This member is on S1, minted at the post-removal epoch 11.
+        ports.secrets[g] = secretB
+        ports.mintEpochs[g] = 11uL
+        ports.distributed[g] = true
+        val liveGid = ports.derivePushGid(secretB)
+        ports.routes[hex(liveGid)] = Route(account, g)
+
+        // The stale S0 arrives from an AUTHORISED sender, stamped 10.
+        val verdict = receiveGated(
+            groupIdHex = g,
+            secret = staleSecret,
+            senderSignatureKey = ownerKey,
+            owner = knownRoles(),
+            ports = ports,
+            mintEpoch = 10uL,
+            ownGroupEpoch = 11uL,
+        )
+
+        assertEquals(GroupPushRouting.ReceiveVerdict.REJECT_STALE, verdict)
+        // Nothing moved: the live secret, its stamp, its subscription and
+        // its route row all survive...
+        assertArrayEquals("the live secret survives", secretB, ports.secrets[g])
+        assertEquals("its stamp survives", 11uL, ports.mintEpochs[g])
+        assertEquals("no re-subscribe", 0, ports.subscribeCount)
+        assertEquals(Route(account, g), ports.routes[hex(liveGid)])
+        // ...and — the assertion that carries the security value — the
+        // LIVE gid was NOT retired.
+        assertEquals("a stale replay must retire NOTHING", 0, ports.unsubscribeCount)
+        assertTrue("no gid torn down at all", ports.unsubscribed.isEmpty())
+    }
+
+    @Test
+    fun `the same stale replay from an ADMIN is refused too`() = runTest {
+        // ADR-0043 option (b) widened OVERWRITE authority to admins, which
+        // is what makes the replay reachable from more devices. Authority
+        // is not what refuses it — the order is.
+        val ports = FakePorts(account)
+        val g = "51".repeat(32)
+        ports.secrets[g] = secretB
+        ports.mintEpochs[g] = 11uL
+        ports.distributed[g] = true
+
+        val verdict = receiveGated(
+            groupIdHex = g,
+            secret = staleSecret,
+            senderSignatureKey = adminKey,
+            owner = knownRoles(),
+            ports = ports,
+            mintEpoch = 10uL,
+            ownGroupEpoch = 11uL,
+        )
+
+        assertEquals(GroupPushRouting.ReceiveVerdict.REJECT_STALE, verdict)
+        assertArrayEquals(secretB, ports.secrets[g])
+        assertEquals(0, ports.unsubscribeCount)
+    }
+
+    @Test
+    fun `a LEGACY stored row (no recorded stamp) reads as 0 and IS superseded`() = runTest {
+        // An upgrade must converge, and it converges in this direction:
+        // the legacy row sits at the FLOOR of the order, so the first
+        // authorised stamped mint replaces it. The inverse default
+        // ("current") would let a legacy secret out-rank a live rotation —
+        // the F-A shape itself.
+        val ports = FakePorts(account)
+        val g = "52".repeat(32)
+        ports.secrets[g] = staleSecret // no `mintEpochs` entry == legacy
+        ports.distributed[g] = true
+        val oldGid = ports.derivePushGid(staleSecret)
+        ports.routes[hex(oldGid)] = Route(account, g)
+
+        val verdict = receiveGated(
+            groupIdHex = g,
+            secret = secretB,
+            senderSignatureKey = ownerKey,
+            owner = knownRoles(),
+            ports = ports,
+            mintEpoch = 1uL,
+            ownGroupEpoch = 9uL,
+        )
+
+        assertEquals(GroupPushRouting.ReceiveVerdict.ACCEPT_OWNER, verdict)
+        assertArrayEquals(secretB, ports.secrets[g])
+        assertEquals("the stamp is now recorded", 1uL, ports.mintEpochs[g])
+        assertEquals("the legacy gid was retired", 1, ports.unsubscribeCount)
+        assertArrayEquals(oldGid, ports.unsubscribed.single())
+    }
+
+    @Test
+    fun `an IDENTICAL relay of a legacy secret is still idempotent`() = runTest {
+        val ports = FakePorts(account)
+        val g = "53".repeat(32)
+        ports.secrets[g] = staleSecret // legacy: no recorded stamp
+        ports.distributed[g] = true
+
+        val verdict = receiveGated(
+            groupIdHex = g,
+            secret = staleSecret.copyOf(),
+            senderSignatureKey = memberKey,
+            owner = knownRoles(),
+            ports = ports,
+        )
+
+        assertEquals(GroupPushRouting.ReceiveVerdict.ACCEPT_IDENTICAL, verdict)
+        assertEquals("nothing retired", 0, ports.unsubscribeCount)
+    }
+
+    @Test
+    fun `accept-identical cannot INFLATE the stored epoch (a plain-member freeze)`() = runTest {
+        // The defect the web suite caught, pinned here so this client
+        // cannot reproduce it.
+        //
+        // `accept-identical` clears NEITHER the authority gate NOR the
+        // future clamp — it short-circuits both by design, so a retry
+        // stays idempotent for any sender. That makes the re-persist an
+        // EPOCH-INFLATION CHANNEL if it writes the INCOMING stamp: a PLAIN
+        // MEMBER relays the group's current secret bytes stamped
+        // ULong.MAX_VALUE, the stored epoch jumps to the ceiling, and
+        // every later rotation — the OWNER's included — is refused
+        // REJECT_STALE forever. That is precisely the permanent freeze the
+        // clamp exists to prevent, reached AROUND it. So the stored stamp
+        // must survive the write.
+        val ports = FakePorts(account)
+        val g = "54".repeat(32)
+        ports.secrets[g] = staleSecret
+        ports.mintEpochs[g] = 10uL
+        ports.distributed[g] = true
+
+        val relayed = receiveGated(
+            groupIdHex = g,
+            secret = staleSecret.copyOf(),
+            senderSignatureKey = memberKey,
+            owner = knownRoles(),
+            ports = ports,
+            mintEpoch = ULong.MAX_VALUE,
+            ownGroupEpoch = 11uL,
+        )
+        assertEquals(GroupPushRouting.ReceiveVerdict.ACCEPT_IDENTICAL, relayed)
+        assertEquals("the STORED stamp must survive", 10uL, ports.mintEpochs[g])
+
+        // ... and a legitimate owner rotation at a modest epoch still
+        // lands, which is the property the inflation would have destroyed.
+        val rotated = receiveGated(
+            groupIdHex = g,
+            secret = secretB,
+            senderSignatureKey = ownerKey,
+            owner = knownRoles(),
+            ports = ports,
+            mintEpoch = 11uL,
+            ownGroupEpoch = 11uL,
+        )
+        assertEquals(GroupPushRouting.ReceiveVerdict.ACCEPT_OWNER, rotated)
+        assertArrayEquals(secretB, ports.secrets[g])
+        assertEquals(11uL, ports.mintEpochs[g])
+    }
+
+    @Test
+    fun `an accepted DIFFERENT secret clears a stale PENDING re-broadcast`() = runTest {
+        // ADR-0044's complementary repair. The order rule stops a stale
+        // value from SPREADING; this stops the device still holding one
+        // from re-emitting it.
+        //
+        // On Android that falls out of the row encoding rather than out of
+        // any extra machinery: `PushRoutingSecretStore` keeps the secret,
+        // the flag and the stamp in ONE value string and `receive`
+        // persists with `distributed = true`, so applying an accepted
+        // DIFFERENT secret replaces the bytes AND clears the pending flag
+        // in the SAME atomic write. Pinned here rather than left
+        // incidental, because it is a property of the row encoding —
+        // which could change — not of the gate.
+        val ports = FakePorts(account)
+        val g = "55".repeat(32)
+        ports.secrets[g] = staleSecret
+        ports.mintEpochs[g] = 10uL
+        ports.distributed[g] = false // its broadcast failed
+
+        val verdict = receiveGated(
+            groupIdHex = g,
+            secret = secretB,
+            senderSignatureKey = ownerKey,
+            owner = knownRoles(),
+            ports = ports,
+            mintEpoch = 11uL,
+            ownGroupEpoch = 11uL,
+        )
+        assertEquals(GroupPushRouting.ReceiveVerdict.ACCEPT_OWNER, verdict)
+
+        // The pending flag is gone ...
+        assertTrue("the pending re-broadcast was cleared", ports.isDistributed(g))
+        // ... so the next provisioning pass re-broadcasts NOTHING.
+        ports.groupEpoch = 11uL
+        GroupPushRouting.ensure(account, g, isOwner = false, ports = ports)
+        assertEquals("nothing stale is ever re-emitted", 0, ports.broadcastCount)
+    }
+
+    // -----------------------------------------------------------------
+    // The stamp is minted ONCE and REPLAYED verbatim
+    //
+    // The single easiest thing in ADR-0044 to get wrong, and getting it
+    // wrong makes the whole fix a silent no-op: if a path recomposing an
+    // envelope from an ALREADY-STORED secret re-stamps the CURRENT epoch
+    // at send time, the stale envelope arrives carrying a NEWER stamp than
+    // the live rotation, wins the comparison, and F-A is reproduced with
+    // the ordering gate fully in place and working as specified.
+    // -----------------------------------------------------------------
+
+    @Test
+    fun `the OWNER's MINT stamps the group's CURRENT epoch`() = runTest {
+        val ports = FakePorts(account)
+        val g = "60".repeat(32)
+        ports.groupEpoch = 7uL
+
+        GroupPushRouting.ensure(account, g, isOwner = true, ports = ports)
+
+        assertEquals(1, ports.broadcastCount)
+        assertEquals("stamped at the live epoch", 7uL, stampOf(ports.broadcastEnvelopes.single()))
+        assertEquals("and recorded durably", 7uL, ports.mintEpochs[g])
+        assertTrue(
+            "a mint is the ONLY fresh stamp",
+            ports.composedStamps.single() is GroupPushRouting.MintStamp.Fresh,
+        )
+    }
+
+    @Test
+    fun `a MINT is REFUSED when the group epoch cannot be read (fail-closed)`() = runTest {
+        // An unstamped secret has no position in the order, which is
+        // exactly what the v2 envelope exists to eliminate. Better no push
+        // for this group than an unorderable secret.
+        val ports = FakePorts(account)
+        val g = "61".repeat(32)
+        ports.groupEpoch = null
+
+        GroupPushRouting.ensure(account, g, isOwner = true, ports = ports)
+
+        assertEquals("nothing minted", 0, ports.mintCount)
+        assertEquals("nothing broadcast", 0, ports.broadcastCount)
+        assertTrue("nothing persisted", ports.secrets.isEmpty())
+    }
+
+    @Test
+    fun `the PENDING re-broadcast REPLAYS the stored stamp, not the current epoch`() = runTest {
+        // The exact site the F-A replay travels through.
+        val ports = FakePorts(account)
+        val g = "62".repeat(32)
+        ports.secrets[g] = staleSecret
+        ports.mintEpochs[g] = 3uL
+        ports.distributed[g] = false
+        // The group has moved on a long way since that secret was minted.
+        ports.groupEpoch = 99uL
+
+        GroupPushRouting.ensure(account, g, isOwner = true, ports = ports)
+
+        assertEquals(1, ports.broadcastCount)
+        assertEquals(
+            "the MINT epoch is replayed, never refreshed",
+            3uL,
+            stampOf(ports.broadcastEnvelopes.single()),
+        )
+        assertTrue(
+            "and the stamp is typed as a REPLAY",
+            ports.composedStamps.single() is GroupPushRouting.MintStamp.Replayed,
+        )
+        assertEquals("the stored stamp is untouched", 3uL, ports.mintEpochs[g])
+        assertEquals("never re-minted", 0, ports.mintCount)
+    }
+
+    @Test
+    fun `the post-add REDISTRIBUTE replays the stored stamp too`() = runTest {
+        // The secret did not change, only its audience did. Re-stamping
+        // would let a routine add-member out-rank a rotation minted at a
+        // higher epoch.
+        val ports = FakePorts(account)
+        val g = "63".repeat(32)
+        ports.secrets[g] = staleSecret
+        ports.mintEpochs[g] = 4uL
+        ports.distributed[g] = true
+        ports.groupEpoch = 40uL
+
+        GroupPushRouting.redistribute(g, ports)
+
+        assertEquals(4uL, stampOf(ports.broadcastEnvelopes.single()))
+        assertTrue(ports.composedStamps.single() is GroupPushRouting.MintStamp.Replayed)
+    }
+
+    @Test
+    fun `a LEGACY row re-broadcasts at 0 rather than inventing a stamp`() = runTest {
+        val ports = FakePorts(account)
+        val g = "64".repeat(32)
+        ports.secrets[g] = staleSecret // no recorded stamp
+        ports.distributed[g] = false
+        ports.groupEpoch = 55uL
+
+        GroupPushRouting.ensure(account, g, isOwner = true, ports = ports)
+
+        assertEquals(
+            "a legacy secret keeps its floor position",
+            PushRoutingSecretStore.LEGACY_MINT_EPOCH,
+            stampOf(ports.broadcastEnvelopes.single()),
+        )
+    }
+
+    @Test
+    fun `a ROTATION stamps the CURRENT epoch, and its RETRY replays that stamp`() = runTest {
+        val ports = FakePorts(account)
+        val g = "65".repeat(32)
+        ports.secrets[g] = staleSecret
+        ports.mintEpochs[g] = 10uL
+        ports.distributed[g] = true
+        ports.groupEpoch = 11uL // post-removal
+        ports.broadcastFails = true
+
+        val outcome = GroupPushRouting.rotate(
+            account, g, GroupPushRouting.RotationRole.OWNER, ports,
+        )
+        assertEquals(GroupPushRouting.RotationOutcome.ROTATED, outcome)
+        assertEquals("the rotation stamped the post-removal epoch", 11uL, ports.mintEpochs[g])
+
+        // The retry re-sends the STORED (new) secret at the STORED stamp —
+        // even though the group has since advanced again.
+        ports.broadcastFails = false
+        ports.groupEpoch = 20uL
+        GroupPushRouting.ensure(account, g, isOwner = true, ports = ports)
+
+        assertEquals(1, ports.broadcastCount)
+        assertEquals(
+            "the retry replays 11, not 20",
+            11uL,
+            stampOf(ports.broadcastEnvelopes.single()),
+        )
+        assertEquals("no second mint", 1, ports.mintCount)
+    }
+
+    @Test
+    fun `a ROTATION is ABANDONED when the epoch cannot be read (fail-closed)`() = runTest {
+        val ports = FakePorts(account)
+        val g = "66".repeat(32)
+        ports.secrets[g] = staleSecret
+        ports.mintEpochs[g] = 10uL
+        ports.distributed[g] = true
+        ports.groupEpoch = null
+
+        val outcome = GroupPushRouting.rotate(
+            account, g, GroupPushRouting.RotationRole.OWNER, ports,
+        )
+
+        assertEquals(GroupPushRouting.RotationOutcome.SKIP_UNKNOWN_EPOCH, outcome)
+        assertEquals("nothing minted", 0, ports.mintCount)
+        assertArrayEquals("the live secret is untouched", staleSecret, ports.secrets[g])
+        assertEquals("nothing torn down", 0, ports.unsubscribeCount)
+    }
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `a QUEUED rotation stamps the epoch it MINTS at, not the one it was triggered at`() =
+        runTest {
+            // ADR-0044 requires the stamp to be read INSIDE the serializing
+            // rotation lock, AFTER any queue wait. A value resolved at the
+            // call site would be read BEFORE the wait, so a rotation queued
+            // behind a predecessor would stamp a stale epoch — and could
+            // then TIE with, or lose to, the predecessor's own output.
+            val ports = DistinctMintPorts(account)
+            val g = "67".repeat(32)
+            seedRouting(ports, g, secretA)
+            ports.mintEpochs[g] = 10uL
+            ports.groupEpoch = 11uL
+
+            val owner = GroupPushRouting.RotationRole.OWNER
+            launch { GroupPushRouting.rotate(account, g, owner, ports) }
+            launch { GroupPushRouting.rotate(account, g, owner, ports) }
+            runCurrent()
+
+            // The first rotation is parked inside its broadcast; the group
+            // advances again (another commit lands) before the second one
+            // gets the lock.
+            assertEquals("second rotation is behind the lock", 1, ports.mintCount)
+            ports.groupEpoch = 12uL
+            ports.broadcastGate.complete(Unit)
+            advanceUntilIdle()
+
+            assertEquals(2, ports.mintCount)
+            assertEquals(
+                "the queued rotation stamped 12 (read after the wait), not 11",
+                12uL,
+                ports.mintEpochs[g],
+            )
+            assertEquals(11uL, stampOf(ports.broadcastEnvelopes[0]))
+            assertEquals(12uL, stampOf(ports.broadcastEnvelopes[1]))
+        }
+
+    // -----------------------------------------------------------------
+    // C-61 — publish the Remove commit, THEN rotate
+    //
+    // ADR-0043 required this ordering but enforced it STRUCTURALLY only,
+    // with no test on any client. ADR-0044 promotes it from a property
+    // that protects one guarantee (the envelope's forward secrecy) to a
+    // PRECONDITION OF TWO: the rotation's stamp is `Group.epoch()` read at
+    // mint time, so rotating first stamps the PRE-removal epoch, TIES with
+    // the secret the evicted member holds, and falls to the byte tiebreak
+    // — the guarantee degrades from "always wins" to "coin flip",
+    // silently.
+    // -----------------------------------------------------------------
+
+    /** The epoch before the Remove commit is applied locally. */
+    private val preRemovalEpoch: ULong = 10uL
+
+    /** ... and after. */
+    private val postRemovalEpoch: ULong = 11uL
+
+    /** A device holding the secret the EVICTED member also holds, minted
+     *  pre-removal. [staleSecret] sorts HIGHER than every fake mint, so at
+     *  an epoch TIE the stale secret wins OUTRIGHT — which is what makes
+     *  the swapped companion below a real demonstration. */
+    private fun seedC61(ports: FakePorts, g: String) {
+        ports.secrets[g] = staleSecret
+        ports.mintEpochs[g] = preRemovalEpoch
+        ports.distributed[g] = true
+        ports.groupEpoch = preRemovalEpoch
+    }
+
+    @Test
+    fun `C-61 - the rotation is stamped POST-removal and OUT-RANKS the stale secret`() = runTest {
+        // HOW THIS FAILS UNDER A SWAP: the assertion below reads the epoch
+        // the EMITTED envelope was stamped with. `rotate` reads
+        // `freshMintStamp()` at mint time, and applying the Remove commit
+        // is what moves that value from 10 to 11. Start the rotation
+        // before the removal and the stamp is 10, so
+        // `assertEquals(postRemovalEpoch, stampOf(...))` fails outright;
+        // the `isNewer` assertion after it then flips from "the rotation
+        // always wins" to a same-epoch tie decided by the 32 secret bytes
+        // — which, with this fixture, the STALE secret wins. The companion
+        // test below runs exactly that swap and asserts both consequences.
+        val ports = FakePorts(account)
+        val g = "70".repeat(32)
+        seedC61(ports, g)
+
+        val commitId = GroupPushRouting.publishRemoveThenRotate(
+            scope = this,
+            publishRemove = {
+                // Applying + publishing the Remove commit advances the
+                // local MLS epoch.
+                ports.groupEpoch = postRemovalEpoch
+                4242L
+            },
+            rotate = {
+                GroupPushRouting.rotate(account, g, GroupPushRouting.RotationRole.OWNER, ports)
+            },
+        )
+        advanceUntilIdle()
+
+        assertEquals(4242L, commitId)
+        assertEquals(1, ports.broadcastCount)
+
+        // The rotation was sealed AND stamped after the removal.
+        val emitted = ports.broadcastEnvelopes.single()
+        assertEquals(postRemovalEpoch, stampOf(emitted))
+
+        // ... which is what makes the ordering a GUARANTEE rather than a
+        // coin flip: the evicted member's secret sorts HIGHER bytewise, so
+        // ONLY the strictly greater epoch puts the rotation on top.
+        val rotated = secretOf(emitted)
+        assertTrue(
+            "the rotation supersedes the secret it replaces",
+            ports.isNewer.isNewer(postRemovalEpoch, rotated, preRemovalEpoch, staleSecret),
+        )
+        assertFalse(
+            "and the stale secret can never supersede the rotation",
+            ports.isNewer.isNewer(preRemovalEpoch, staleSecret, postRemovalEpoch, rotated),
+        )
+    }
+
+    @Test
+    fun `C-61 - the INVERTED order stamps PRE-removal and the rotation LOSES`() = runTest {
+        // Not a test of production code — a demonstration that the
+        // assertion above actually DISCRIMINATES. Rotating BEFORE the
+        // Remove commit lands stamps epoch 10, tying with the secret the
+        // evicted member holds, so the outcome falls to the byte
+        // comparison — and with this fixture the stale secret sorts
+        // higher, so the rotation loses OUTRIGHT.
+        val ports = FakePorts(account)
+        val g = "71".repeat(32)
+        seedC61(ports, g)
+
+        GroupPushRouting.rotate(account, g, GroupPushRouting.RotationRole.OWNER, ports)
+        ports.groupEpoch = postRemovalEpoch // the Remove lands afterwards — too late
+
+        val emitted = ports.broadcastEnvelopes.single()
+        assertEquals(
+            "the swapped order stamps the PRE-removal epoch",
+            preRemovalEpoch,
+            stampOf(emitted),
+        )
+        assertNotEquals(
+            "which is exactly what the ordered test asserts against",
+            postRemovalEpoch,
+            stampOf(emitted),
+        )
+
+        val rotated = secretOf(emitted)
+        // Tied on epoch, so the bytes decide — and here the STALE secret
+        // wins, i.e. the rotation is silently undone.
+        assertFalse(
+            "the rotation does NOT supersede the stale secret",
+            ports.isNewer.isNewer(preRemovalEpoch, rotated, preRemovalEpoch, staleSecret),
+        )
+        assertTrue(
+            "the stale secret supersedes the ROTATION - F-A, reproduced",
+            ports.isNewer.isNewer(preRemovalEpoch, staleSecret, preRemovalEpoch, rotated),
+        )
+
+        // And the gate agrees: a peer holding the rotation would ACCEPT the
+        // stale replay back over it.
+        assertEquals(
+            GroupPushRouting.ReceiveVerdict.ACCEPT_OWNER,
+            decide(
+                ownerKey, knownRoles(), staleSecret, rotated,
+                storedEpoch = preRemovalEpoch,
+                mintEpoch = preRemovalEpoch,
+                ownGroupEpoch = postRemovalEpoch,
+            ),
+        )
+    }
+
+    @Test
+    fun `C-61 - the rotation is not STARTED until the removal returns`() = runTest {
+        // The ordering is about START time, not completion: the rotation
+        // stays fire-and-forget so a push failure never unwinds a
+        // membership change.
+        val ports = FakePorts(account)
+        val g = "72".repeat(32)
+        seedC61(ports, g)
+        val order = mutableListOf<String>()
+
+        GroupPushRouting.publishRemoveThenRotate(
+            scope = this,
+            publishRemove = {
+                order.add("remove")
+                ports.groupEpoch = postRemovalEpoch
+                1L
+            },
+            rotate = {
+                order.add("rotate")
+                GroupPushRouting.rotate(account, g, GroupPushRouting.RotationRole.OWNER, ports)
+            },
+        )
+        advanceUntilIdle()
+
+        assertEquals(listOf("remove", "rotate"), order)
+    }
+
+    @Test
+    fun `C-61 - a FAILED removal never rotates`() = runTest {
+        val ports = FakePorts(account)
+        val g = "73".repeat(32)
+        seedC61(ports, g)
+
+        val result = runCatching {
+            GroupPushRouting.publishRemoveThenRotate(
+                scope = this,
+                publishRemove = { throw IllegalStateException("DS unreachable") },
+                rotate = {
+                    GroupPushRouting.rotate(account, g, GroupPushRouting.RotationRole.OWNER, ports)
+                },
+            )
+        }
+        advanceUntilIdle()
+
+        assertTrue("the removal failure propagates", result.isFailure)
+        assertEquals("no rotation for a removal that never landed", 0, ports.mintCount)
+        assertEquals(0, ports.broadcastCount)
+    }
+
+    @Test
+    fun `C-61 - a rotation failure is reported, never thrown at the removal's caller`() = runTest {
+        val ports = FakePorts(account)
+        val g = "74".repeat(32)
+        seedC61(ports, g)
+        var reported: Throwable? = null
+
+        val commitId = GroupPushRouting.publishRemoveThenRotate(
+            scope = this,
+            publishRemove = { 7L },
+            rotate = { throw IllegalStateException("rotation exploded") },
+            onRotationError = { reported = it },
+        )
+        advanceUntilIdle()
+
+        assertEquals("the removal still lands", 7L, commitId)
+        assertEquals("rotation exploded", reported?.message)
+    }
+
+    @Test
+    fun `C-61 - no rotation step means the removal still lands`() = runTest {
+        val commitId = GroupPushRouting.publishRemoveThenRotate<Long>(
+            scope = this,
+            publishRemove = { 9L },
+            rotate = null,
+        )
+        advanceUntilIdle()
+        assertEquals(9L, commitId)
     }
 }

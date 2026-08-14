@@ -2572,8 +2572,16 @@ describe("C-61 — publish the Remove commit, THEN rotate", () => {
   const ACCT = "acctC61";
   const GROUP_ID = new Uint8Array([0xc6, 0x10]);
   const GRP_B64 = base64Encode(GROUP_ID);
-  /** The secret the evicted member is holding, minted pre-removal. */
-  const S_OLD = new Uint8Array(32).fill(0xee);
+  /** The secret the evicted member is holding, minted pre-removal.
+   *
+   *  0xFF is deliberate, not arbitrary: the inverted-order test below ties on
+   *  epoch and falls to the byte comparison against a freshly minted RANDOM
+   *  secret. Only the bytewise maximum makes the rotation lose with certainty
+   *  (a random 32-byte value exceeds it with probability 2^-256). A smaller
+   *  filler leaves a real flake window — 0xEE, for instance, is beaten by
+   *  roughly one random secret in fourteen, which would make the companion
+   *  test pass or fail by luck instead of by the ordering it exists to pin. */
+  const S_OLD = new Uint8Array(32).fill(0xff);
   const PRE_REMOVAL_EPOCH = 10n;
   const POST_REMOVAL_EPOCH = 11n;
 

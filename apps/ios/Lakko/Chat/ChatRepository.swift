@@ -848,6 +848,44 @@ public final class ChatRepository: ObservableObject {
         guard let record = groups[groupIdHex] else {
             throw ChatError.argument("no live Group handle for \(groupIdHex)")
         }
+        // ADR-0043 C-61 / ADR-0044 — the Remove commit is published FIRST and
+        // the rotation is not STARTED until it has landed. The ordering is
+        // pinned behind this one seam rather than left as two adjacent
+        // statements, because it now underwrites TWO guarantees: forward
+        // secrecy (the rotation envelope is sealed at the post-removal epoch,
+        // unreadable to the evicted leaf) AND recency (the new secret is
+        // STAMPED at that epoch, so it strictly out-ranks the secret the
+        // evicted member still holds instead of merely tying with it).
+        return try await PushGroupRouting.publishRemoveThenRotate(
+            publishRemove: {
+                try await self.publishRemoveCommit(
+                    groupIdHex: groupIdHex,
+                    leafIndex: leafIndex,
+                    identity: identity,
+                    record: record
+                )
+            },
+            // Resolved INSIDE the closure, so this device's ADR-0022 role is
+            // read after the removal landed — the same moment the previous
+            // fire-and-forget call site read it.
+            rotate: { [weak self] in
+                guard let self,
+                      let body = self.rotationAfterRemoval(groupIdHex: groupIdHex)
+                else { return .skipNoSecret }
+                return await body()
+            }
+        )
+    }
+
+    /// Apply + persist + publish a Remove commit. The `publishRemove` half of
+    /// C-61: everything that must have COMPLETED before a rotation may start.
+    /// Returns the commit's DS message id.
+    private func publishRemoveCommit(
+        groupIdHex: String,
+        leafIndex: UInt32,
+        identity: Identity,
+        record: GroupRecord
+    ) async throws -> Int64 {
         let commitBytes: Data
         do {
             commitBytes = try record.group.removeMember(
@@ -898,23 +936,6 @@ public final class ChatRepository: ObservableObject {
         chatClient.markOwnPublishedCommit(messageId: commitPublish.id)
         ackCommitBestEffort(entryId: entryId, commitMessageId: commitPublish.id)
         state = state.with(threads: buildThreadList())
-        // ADR-0043 — rotate the push routing secret, STRICTLY AFTER the Remove
-        // commit above. The distribution envelope is an MLS application
-        // message: sealed before the commit it would be readable by the member
-        // being evicted (they are still in that epoch) and the rotation would
-        // buy nothing. Sealed here it is at the post-removal epoch, which RFC
-        // 9420 forward secrecy denies the removed leaf. The `await` on
-        // `publishGroup` above is what enforces the ordering.
-        //
-        // Owner-or-admin (ADR-0043 ratified option (b)) — the gate lives
-        // inside `rotateSecret`, which also no-ops when this device holds no
-        // secret, so rotation never becomes a second mint path.
-        //
-        // Fire-and-forget: push is best-effort and a failed rotation must not
-        // unwind the removal. A failed BROADCAST leaves the row pending, and
-        // the existing any-holder re-broadcast branch of `ensureProvisioned`
-        // re-sends it on the next chat-open / launch.
-        rotatePushRoutingSecretAfterRemoval(groupIdHex: groupIdHex)
         return commitPublish.id
     }
 
@@ -1521,12 +1542,14 @@ public final class ChatRepository: ObservableObject {
     public func receivePushRoutingSecret(
         groupIdHex: String,
         secret: Data,
+        mintEpoch: UInt64,
         senderLeaf: UInt32?
     ) {
         guard currentAccountIdB64 != nil, groups[groupIdHex] != nil else { return }
         Task { @MainActor [weak self] in
             await self?.performReceivePushRoutingSecret(
-                groupIdHex: groupIdHex, secret: secret, senderLeaf: senderLeaf)
+                groupIdHex: groupIdHex, secret: secret, mintEpoch: mintEpoch,
+                senderLeaf: senderLeaf)
         }
     }
 
@@ -1539,6 +1562,7 @@ public final class ChatRepository: ObservableObject {
     private func performReceivePushRoutingSecret(
         groupIdHex: String,
         secret: Data,
+        mintEpoch: UInt64,
         senderLeaf: UInt32?
     ) async {
         guard let accountIdB64 = currentAccountIdB64,
@@ -1547,6 +1571,7 @@ public final class ChatRepository: ObservableObject {
             accountIdB64: accountIdB64,
             groupIdHex: groupIdHex,
             secret: secret,
+            mintEpoch: mintEpoch,
             group: record.group,
             senderLeaf: senderLeaf
         )
@@ -1585,15 +1610,31 @@ public final class ChatRepository: ObservableObject {
     /// committed by SOMEONE ELSE, is
     /// ``rotatePushRoutingSecretIfMembershipShrank(groupIdHex:previousMemberKeys:)``
     /// on the poll path. Fire-and-forget.
-    private func rotatePushRoutingSecretAfterRemoval(groupIdHex: String) {
-        guard let accountIdB64 = currentAccountIdB64 else { return }
-        let role = ownRole(groupIdHex: groupIdHex)
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            await self.pushRouting.rotateSecret(
+    /// ADR-0044 — the rotation body, as a closure
+    /// ``PushGroupRouting/publishRemoveThenRotate(publishRemove:rotate:onRotationStarted:)``
+    /// starts only AFTER the Remove commit has landed (C-61). The `mintEpoch`
+    /// provider reads the LIVE group's epoch at mint time, so the stamp is the
+    /// post-removal one and the rotation strictly out-ranks the secret the
+    /// evicted member still holds.
+    private func rotatePushRoutingSecretBody(
+        accountIdB64: String,
+        groupIdHex: String,
+        role: Role?
+    ) -> @MainActor () async -> PushGroupRouting.PushRotationOutcome {
+        { [weak self] in
+            guard let self else { return .skipNoSecret }
+            return await self.pushRouting.rotateSecret(
                 accountIdB64: accountIdB64,
                 groupIdHex: groupIdHex,
                 ownRole: role,
+                // ADR-0044 — read LAZILY, at mint time (inside the serializing
+                // rotation chain), never captured up front: a rotation queued
+                // behind a predecessor must stamp the epoch it actually mints
+                // at. An unreadable epoch fails closed to `skipUnknownEpoch`.
+                mintEpoch: { [weak self] in
+                    guard let group = self?.groups[groupIdHex]?.group else { return nil }
+                    return PushGroupRouting.readGroupEpoch(group)
+                },
                 // Throws rather than optional-chaining into a silent success —
                 // see the note in `performEnsurePushRouting`.
                 broadcast: { [weak self] bytes in
@@ -1605,6 +1646,19 @@ public final class ChatRepository: ObservableObject {
                 }
             )
         }
+    }
+
+    /// The rotation half of C-61, handed to
+    /// ``PushGroupRouting/publishRemoveThenRotate(publishRemove:rotate:onRotationStarted:)``.
+    /// `nil` when there is no session, which skips the rotation entirely.
+    private func rotationAfterRemoval(
+        groupIdHex: String
+    ) -> (@MainActor () async -> PushGroupRouting.PushRotationOutcome)? {
+        guard let accountIdB64 = currentAccountIdB64 else { return nil }
+        // The role is read here, on the removing device, at removal time.
+        let role = ownRole(groupIdHex: groupIdHex)
+        return rotatePushRoutingSecretBody(
+            accountIdB64: accountIdB64, groupIdHex: groupIdHex, role: role)
     }
 
     /// ADR-0043 — someone ELSE's Remove commit just landed on the journal.
@@ -1638,6 +1692,14 @@ public final class ChatRepository: ObservableObject {
                 ownRole: role,
                 previousMemberKeys: previousMemberKeys,
                 currentMemberKeys: current,
+                // ADR-0044 — the same lazy post-commit read as the direct
+                // path. The poll already applied the peer's Remove commit
+                // locally before this runs, so the live epoch is the
+                // post-removal one.
+                mintEpoch: { [weak self] in
+                    guard let group = self?.groups[groupIdHex]?.group else { return nil }
+                    return PushGroupRouting.readGroupEpoch(group)
+                },
                 broadcast: { [weak self] bytes in
                     guard let self else {
                         throw ChatError.argument("ChatRepository deallocated mid-broadcast")
@@ -1709,11 +1771,12 @@ public final class ChatRepository: ObservableObject {
             chatStatusSink: { [weak self] status in
                 self?.chatStatusSink?(groupIdHex, status)
             },
-            pushRoutingSecretSink: { [weak self] secret, senderLeaf in
+            pushRoutingSecretSink: { [weak self] secret, mintEpoch, senderLeaf in
                 // ADR-0042 — owner-gate, then persist the secret + subscribe
-                // under `push_gid`.
+                // under `push_gid`. ADR-0044 — plus the recency order.
                 self?.receivePushRoutingSecret(
-                    groupIdHex: groupIdHex, secret: secret, senderLeaf: senderLeaf)
+                    groupIdHex: groupIdHex, secret: secret, mintEpoch: mintEpoch,
+                    senderLeaf: senderLeaf)
             }
         )
         if !result.events.isEmpty {
@@ -2369,7 +2432,7 @@ private final class GroupRecord {
         _ result: PollMessagesResult,
         callSignalingSink: ((Data) -> Void)? = nil,
         chatStatusSink: ((ChatStatusEvent) -> Void)? = nil,
-        pushRoutingSecretSink: ((Data, UInt32?) -> Void)? = nil
+        pushRoutingSecretSink: ((Data, UInt64, UInt32?) -> Void)? = nil
     ) {
         for event in result.events {
             switch event {
@@ -2440,7 +2503,7 @@ private final class GroupRecord {
                 // below nudges the view model to re-query when its sheet is
                 // open.
                 break
-            case .pushRoutingSecret(_, let secret, let senderLeaf, _):
+            case .pushRoutingSecret(_, let secret, let mintEpoch, let senderLeaf, _):
                 // ADR-0042 — a `push_routing_secret` distribution envelope.
                 // Not a timeline row: routed out to the repository, which owns
                 // the push-routing store AND the live `Group` handle the owner
@@ -2448,8 +2511,10 @@ private final class GroupRecord {
                 // only the ADR-0022 owner can CHANGE the secret
                 // (`lakko-security` MEDIUM-1); on accept the repository persists
                 // it (idempotent) + subscribes under the derived opaque
-                // `push_gid` (invariant #5).
-                pushRoutingSecretSink?(secret, senderLeaf)
+                // `push_gid` (invariant #5). ADR-0044 — the `mintEpoch` rides
+                // along so the gate can also ask whether the envelope is NEWER
+                // than what is held, which is what refuses a stale replay.
+                pushRoutingSecretSink?(secret, mintEpoch, senderLeaf)
             }
         }
         cursor = result.cursor

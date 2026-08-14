@@ -754,6 +754,35 @@ public class ChatRepository(
      * Remove a member from an EXISTING group by leaf index. Publishes the
      * removal commit to the group journal (own-marked for echo suppression).
      * Returns the commit's DS message id.
+     *
+     * ADR-0043 / ADR-0044 (**C-61**) — the push-routing re-key is started
+     * STRICTLY AFTER the Remove commit is published, and that ordering is
+     * expressed by the [GroupPushRouting.publishRemoveThenRotate] seam
+     * rather than by two adjacent statements. It is load-bearing twice
+     * over:
+     *
+     *   - the distribution envelope is an MLS application message, so
+     *     sealed at the PRE-removal epoch the member being evicted is
+     *     still in that epoch and can OPEN it — learning the new secret
+     *     and defeating the whole rotation. Sealed after, it is at the
+     *     post-removal epoch, which RFC 9420 forward secrecy denies the
+     *     removed leaf;
+     *   - ADR-0044 — the rotation STAMPS the new secret with
+     *     `Group.epoch()` read at mint time, so publishing first is also
+     *     what makes it strictly out-rank the secret it replaces. Before
+     *     the commit the stamp would be the PRE-removal epoch, which TIES
+     *     with the secret the evicted member holds; the tie falls to the
+     *     32 secret bytes and the rotation may simply LOSE, silently.
+     *
+     * Without a rotation at all the evicted device keeps deriving the
+     * current `push_gid` and push-gw keeps waking it, so it learns "this
+     * group was active at time T" on every send, forever — and nobody else
+     * can stop it, since unsubscribe only ever deletes the caller's OWN
+     * row.
+     *
+     * The rotation is fire-and-forget on the push scope: a failed rotation
+     * must not unwind the removal, and a failed BROADCAST leaves the row
+     * pending for the existing `ensure` re-broadcast branch.
      */
     public suspend fun removeMemberFromGroup(
         groupIdHex: String,
@@ -763,7 +792,31 @@ public class ChatRepository(
             ?: throw IllegalStateException(
                 "ChatRepository not bootstrapped — call bootstrap() first",
             )
-        val removedCommitId = groupsLock.withLock {
+        return GroupPushRouting.publishRemoveThenRotate(
+            scope = pushScope,
+            // Owner-or-admin gated inside `GroupPushRouting.rotate`, which
+            // also no-ops when this device holds no secret, so rotation
+            // never becomes a second mint path.
+            rotate = rotationStepOrNull(groupIdHex),
+            onRotationError = { cause ->
+                android.util.Log.w("ChatRepository", "push routing: rotation failed", cause)
+            },
+            publishRemove = { publishRemoveCommit(groupIdHex, identity, leafIndex) },
+        )
+    }
+
+    /**
+     * The Remove-commit half of [removeMemberFromGroup]: apply + durably
+     * record + publish the commit, returning its DS message id. Split out
+     * so the C-61 ordering can be expressed as one
+     * [GroupPushRouting.publishRemoveThenRotate] call.
+     */
+    private suspend fun publishRemoveCommit(
+        groupIdHex: String,
+        identity: Identity,
+        leafIndex: UInt,
+    ): Long =
+        groupsLock.withLock {
             val record = groups[groupIdHex]
                 ?: throw ChatError(
                     "no live Group handle for $groupIdHex",
@@ -818,30 +871,6 @@ public class ChatRepository(
                 },
             )
         }
-        // ADR-0043 — re-key the group's push routing, STRICTLY AFTER the
-        // Remove commit above (the `groupsLock` block is awaited, so the
-        // commit is on the wire before this line runs). The ordering is
-        // load-bearing, not cosmetic: the distribution envelope is an MLS
-        // application message, so sealed at the PRE-removal epoch the member
-        // being evicted is still in that epoch and can OPEN it — learning the
-        // new secret and defeating the whole rotation. Sealed here it is at
-        // the post-removal epoch, which RFC 9420 forward secrecy denies the
-        // removed leaf.
-        //
-        // Without this the evicted device keeps deriving the current
-        // `push_gid` and push-gw keeps waking it, so it learns "this group
-        // was active at time T" on every send, forever — and nobody else can
-        // stop it, since unsubscribe only ever deletes the caller's OWN row.
-        //
-        // Owner-or-admin (ADR-0043 ratified option (b)); the gate lives
-        // inside `GroupPushRouting.rotate`, which also no-ops when this
-        // device holds no secret, so rotation never becomes a second mint
-        // path. Fire-and-forget: a failed rotation must not unwind the
-        // removal, and a failed BROADCAST leaves the row pending for the
-        // existing `ensure` re-broadcast branch.
-        rotatePushRoutingBestEffort(groupIdHex)
-        return removedCommitId
-    }
 
     /**
      * ADR-0027 (G-3) — the joiner signature keys of the external-join requests
@@ -1705,6 +1734,18 @@ public class ChatRepository(
             subscribeFn = { pushGid -> subscribePushGidBestEffort(pushGid) },
             unsubscribeFn = { pushGid -> unsubscribePushGidBestEffort(pushGid) },
             broadcastFn = { envelope -> broadcastControlToGroup(identity, group, envelope) },
+            // ADR-0044 — the MINT stamp source. Read under [groupsLock]
+            // (the `Group` handle is not safe to touch off it, the same
+            // discipline `broadcastControlToGroup` follows) and read
+            // LAZILY, per call: `GroupPushRouting.rotate` invokes this
+            // INSIDE its serializing rotation lock, after any queue wait,
+            // so a rotation queued behind a predecessor stamps the epoch
+            // it actually mints at rather than the one it was triggered
+            // at. A read failure yields `null`, which fails the mint
+            // closed rather than stamping a guess.
+            groupEpochFn = {
+                groupsLock.withLock { runCatching { group.epoch() }.getOrNull() }
+            },
         )
 
     /**
@@ -1834,6 +1875,7 @@ public class ChatRepository(
         group: Group,
         identity: Identity,
         secret: ByteArray,
+        mintEpoch: ULong,
         senderLeaf: UInt?,
     ) {
         val groupIdHex = try {
@@ -1843,21 +1885,42 @@ public class ChatRepository(
         }
         val owner = roleTableOwner(group)
         val senderKey = signatureKeyForLeaf(group, senderLeaf)
+        // ADR-0044 — this device's OWN current epoch: the clamp ceiling the
+        // gate bounds the incoming stamp against. Read SYNCHRONOUSLY here,
+        // alongside the role table and the roster, because this runs inside
+        // the poll loop's [groupsLock] critical section. `null` (a torn
+        // read) fails the gate CLOSED — with no ceiling a stamp cannot be
+        // bounded at all.
+        val ownGroupEpoch = try {
+            group.epoch()
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "push routing: epoch read failed", cause)
+            null
+        }
         pushScope.launch {
             try {
                 val verdict = GroupPushRouting.receiveGated(
                     groupIdHex = groupIdHex,
                     secret = secret,
+                    mintEpoch = mintEpoch,
                     senderSignatureKey = senderKey,
                     owner = owner,
+                    ownGroupEpoch = ownGroupEpoch,
                     ports = pushRoutingPorts(group, identity),
                 )
-                if (verdict == GroupPushRouting.ReceiveVerdict.REJECT) {
+                if (!verdict.accepts) {
+                    // ADR-0044 — the verdict is logged by NAME. The three
+                    // refusal classes are operationally distinct: STALE is
+                    // the F-A signature (somebody re-emitting a superseded
+                    // secret), FUTURE is an out-of-range stamp, and the
+                    // others are rank / verifiability failures. Both epochs
+                    // are non-secret and a stale replay is invisible in the
+                    // field without them (ADR-0044 open question).
                     android.util.Log.w(
                         "ChatRepository",
-                        "push routing: refused a changed secret from an unauthorised " +
-                            "sender (only the owner may rotate; an admin may only seed) " +
-                            "(group=$groupIdHex, leaf=$senderLeaf)",
+                        "push routing: REFUSED a secret ($verdict) " +
+                            "(group=$groupIdHex, leaf=$senderLeaf, " +
+                            "mintEpoch=$mintEpoch, ownEpoch=$ownGroupEpoch)",
                     )
                 }
             } catch (_: Throwable) {
@@ -1937,38 +2000,42 @@ public class ChatRepository(
         }
 
     /**
-     * ADR-0043 — re-key [groupIdHex]'s push routing after a member was
-     * REMOVED, so the evicted device's `push_gid` goes inert.
+     * ADR-0043 / ADR-0044 (C-61) — the rotation STEP for [groupIdHex], as
+     * a suspending closure the caller hands to
+     * [GroupPushRouting.publishRemoveThenRotate], or `null` when there is
+     * no session / live group record to rotate for.
      *
-     * **Call ONLY after the Remove commit is published.** The distribution
-     * envelope is an MLS application message: sealed at the pre-removal
-     * epoch the evicted member is still in that epoch and can OPEN it,
-     * learning the new secret and defeating the whole change. Sealed at the
-     * post-removal epoch it is unreadable to the removed leaf (RFC 9420
-     * forward secrecy). At the own-remove call site the ordering is enforced
-     * by awaiting the removal first; on the poll path it holds structurally
-     * (the commit is already applied before the diff is taken).
+     * Deliberately NOT a fire-and-forget helper that launches on its own.
+     * C-61 requires the rotation to be STARTED only after the Remove
+     * commit has been published, and under ADR-0044 that ordering carries
+     * two guarantees rather than one: the envelope's forward secrecy AND
+     * the epoch it is STAMPED with (the mint reads `Group.epoch()`, so a
+     * pre-commit rotation stamps the PRE-removal epoch, ties with the
+     * secret it is replacing, and may lose the byte tiebreak). Returning a
+     * closure instead of launching is what lets that ordering live in one
+     * seam a test can drive, instead of in two adjacent statements anyone
+     * can reorder.
      *
-     * Owner-or-admin gated inside [GroupPushRouting.rotate], which also
-     * no-ops when this device holds no secret — so rotation never becomes a
-     * second mint path. Fire-and-forget on the push scope; a rotation
-     * failure must never unwind the membership change that triggered it.
+     * The ADR-0022 role is read INSIDE the closure — i.e. after the
+     * removal has landed — under [groupsLock], the same discipline
+     * `broadcastControlToGroup` follows. Owner-or-admin gated inside
+     * [GroupPushRouting.rotate], which also no-ops when this device holds
+     * no secret, so rotation never becomes a second mint path.
      */
-    private fun rotatePushRoutingBestEffort(groupIdHex: String) {
-        val identity = canonicalIdentity.get() ?: return
-        val record = groups[groupIdHex] ?: return
-        val role = rotationRole(record.group, identity)
-        pushScope.launch {
-            try {
-                GroupPushRouting.rotate(
-                    accountIdB64 = currentAccountIdB64.get() ?: return@launch,
-                    groupIdHex = groupIdHex,
-                    ownRole = role,
-                    ports = pushRoutingPorts(record.group, identity),
-                )
-            } catch (_: Throwable) {
-                // best-effort — push is a UX nicety
-            }
+    private fun rotationStepOrNull(
+        groupIdHex: String,
+    ): (suspend () -> GroupPushRouting.RotationOutcome)? {
+        val identity = canonicalIdentity.get() ?: return null
+        val record = groups[groupIdHex] ?: return null
+        val accountIdB64 = currentAccountIdB64.get() ?: return null
+        return {
+            val role = groupsLock.withLock { rotationRole(record.group, identity) }
+            GroupPushRouting.rotate(
+                accountIdB64 = accountIdB64,
+                groupIdHex = groupIdHex,
+                ownRole = role,
+                ports = pushRoutingPorts(record.group, identity),
+            )
         }
     }
 
@@ -1983,7 +2050,7 @@ public class ChatRepository(
      * side of the batch. This device's OWN removals never come through here
      * — they were applied locally before the poll, so the baseline is
      * already post-removal and shows no shrink; those rotate directly via
-     * [rotatePushRoutingBestEffort].
+     * [rotationStepOrNull] behind [GroupPushRouting.publishRemoveThenRotate].
      *
      * Fire-and-forget; never breaks the poll loop.
      */
@@ -2066,16 +2133,20 @@ public class ChatRepository(
                 callSignalingSink = { payload ->
                     callSignalingSink?.invoke(groupIdHex, payload)
                 },
-                pushRoutingSecretSink = { secret, senderLeaf ->
+                pushRoutingSecretSink = { secret, mintEpoch, senderLeaf ->
                     // ADR-0042 — gate on the MLS-authenticated sender leaf
                     // (only the ADR-0022 owner may CHANGE the secret), then
                     // persist + subscribe under the derived opaque `push_gid`.
+                    // ADR-0044 — and only if the envelope is strictly NEWER
+                    // than what this device holds, and no further ahead than
+                    // this device's own epoch.
                     // Fire-and-forget on the push scope so the poll loop is
                     // never blocked on the network subscribe; best-effort.
                     receivePushRoutingSecretBestEffort(
                         record.group,
                         identity,
                         secret,
+                        mintEpoch,
                         senderLeaf,
                     )
                 },
@@ -2724,7 +2795,7 @@ private class GroupRecord(
     fun applyPollResult(
         result: PollMessagesResult,
         callSignalingSink: ((ByteArray) -> Unit)? = null,
-        pushRoutingSecretSink: ((ByteArray, UInt?) -> Unit)? = null,
+        pushRoutingSecretSink: ((ByteArray, ULong, UInt?) -> Unit)? = null,
     ) {
         for (event in result.events) {
             when (event) {
@@ -2782,8 +2853,9 @@ private class GroupRecord(
                     // persists + subscribes under the derived opaque `push_gid`.
                     // Handed to the sink (which fires the async receive on the
                     // push scope) together with the MLS-authenticated sender
-                    // leaf the gate needs.
-                    pushRoutingSecretSink?.invoke(event.secret, event.senderLeaf)
+                    // leaf the gate needs, and — ADR-0044 — the MINTER's
+                    // `mint_epoch` the gate orders it by.
+                    pushRoutingSecretSink?.invoke(event.secret, event.mintEpoch, event.senderLeaf)
                 }
             }
         }

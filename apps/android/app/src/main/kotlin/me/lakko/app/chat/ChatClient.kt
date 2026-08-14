@@ -12,6 +12,7 @@ import me.lakko.app.ds.DsNetworkError
 import me.lakko.app.push.GroupPushRouting
 import uniffi.lakko_ffi_uniffi.AttachmentRef
 import uniffi.lakko_ffi_uniffi.FfiException
+import uniffi.lakko_ffi_uniffi.FfiPushRoutingSecret
 import uniffi.lakko_ffi_uniffi.Group
 import uniffi.lakko_ffi_uniffi.Identity
 import uniffi.lakko_ffi_uniffi.MessageBodyKind
@@ -322,7 +323,13 @@ private fun toEvent(
             // plaintext returns `null` and falls through to the normal
             // chat parse. First byte `'l'` (0x6c) is disjoint from both
             // the chat `{` (0x7B) and the call-signaling tags below.
-            val routingSecret: ByteArray? =
+            // ADR-0044 — the v2 decode yields the 32-byte secret AND the
+            // `mint_epoch` the MINTER stamped it with. A retired v1
+            // envelope (no stamp, hence no position in the recency order)
+            // is refused by the FFI with `UnknownVersion` and lands in
+            // the `null` branch — a fail-closed drop, never a
+            // downgrade.
+            val routingSecret: FfiPushRoutingSecret? =
                 if (GroupPushRouting.looksLikeSecretEnvelope(processed.data)) {
                     try {
                         decodePushRoutingSecret(processed.data)
@@ -364,7 +371,11 @@ private fun toEvent(
                 // below.
                 IncomingChatEvent.PushRoutingSecret(
                     messageId = messageId,
-                    secret = routingSecret,
+                    secret = routingSecret.secret,
+                    // ADR-0044 — the MINTER's stamp, carried through so the
+                    // receive gate can order it against what is held. NOT
+                    // the receiver's own epoch.
+                    mintEpoch = routingSecret.mintEpoch,
                     senderLeaf = processed.senderLeaf,
                     createdAt = createdAt,
                 )
@@ -652,10 +663,18 @@ public sealed interface IncomingChatEvent {
      *  from a non-owner — only the owner may rotate a group's
      *  `push_gid`. It is carried on the event because the classifier is
      *  the only place the `ProcessedMessage.Application.senderLeaf`
-     *  binding is still in hand. */
+     *  binding is still in hand.
+     *
+     *  ADR-0044 — [PushRoutingSecret.mintEpoch] is the `Group.epoch()`
+     *  value the MINTER stamped this secret with, carried verbatim off
+     *  the v2 envelope. The receive gate orders envelopes by
+     *  `(mintEpoch, secretBytes)` and clamps the stamp against the
+     *  receiver's OWN epoch, which is what refuses a stale re-broadcast
+     *  of a superseded secret (`lakko-security` F-A, G-36 residual 9). */
     public data class PushRoutingSecret(
         val messageId: Long,
         val secret: ByteArray,
+        val mintEpoch: ULong,
         val senderLeaf: UInt?,
         val createdAt: String,
     ) : IncomingChatEvent {
@@ -664,6 +683,7 @@ public sealed interface IncomingChatEvent {
             if (other !is PushRoutingSecret) return false
             return messageId == other.messageId &&
                 secret.contentEquals(other.secret) &&
+                mintEpoch == other.mintEpoch &&
                 senderLeaf == other.senderLeaf &&
                 createdAt == other.createdAt
         }
@@ -671,6 +691,7 @@ public sealed interface IncomingChatEvent {
         override fun hashCode(): Int {
             var result = messageId.hashCode()
             result = 31 * result + secret.contentHashCode()
+            result = 31 * result + mintEpoch.hashCode()
             result = 31 * result + (senderLeaf?.hashCode() ?: 0)
             result = 31 * result + createdAt.hashCode()
             return result
