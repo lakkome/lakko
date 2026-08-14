@@ -26,7 +26,15 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import initWasm, * as wasm from "../../wasm/lakko_ffi_wasm";
 import type {
   Group as WasmGroup,
@@ -170,6 +178,7 @@ import {
   rotatePushRoutingSecret,
   rotatePushRoutingSecretIfMembershipShrank,
   routingSecretVerdict,
+  ROUTING_NETWORK_TIMEOUT_MS,
   subscribeGroupUnderPushGid,
   tryDecodeSecretEnvelope,
   verdictAccepts,
@@ -3143,3 +3152,389 @@ describe("the routing-row lock spans receive AND rotate (F-E)", () => {
 function base64OfGroupId(groupId: Uint8Array): string {
   return base64Encode(groupId);
 }
+
+// ---------------------------------------------------------------------------
+// lakko-security ADR-0044 lock review — finding 1 (cross-tab) + finding 2
+// (bounded hold time)
+// ---------------------------------------------------------------------------
+
+/**
+ * Model of the **per-ORIGIN** Web Locks space, i.e. the one thing the
+ * module-level `routingRowQueue` provably is not: a lock space that a holder
+ * this realm never created can already own.
+ *
+ * Deterministic on purpose. Node only grew a real `navigator.locks` in v24, so
+ * the suite would otherwise take the Web Lock path on a dev machine and the
+ * fallback path on CI (node 20) — the two branches silently swapping under
+ * the same assertions. Installing a double pins which branch each test means.
+ */
+function makeOriginLockSpace(): {
+  /** Every lock name the code under test requested, in order. */
+  names: string[];
+  locks: {
+    request: <T>(name: string, callback: () => Promise<T>) => Promise<T>;
+  };
+} {
+  const held = new Map<string, Promise<unknown>>();
+  const names: string[] = [];
+  const request = <T>(name: string, callback: () => Promise<T>): Promise<T> => {
+    names.push(name);
+    const previous = held.get(name);
+    const run = (async (): Promise<T> => {
+      if (previous !== undefined) {
+        try {
+          await previous;
+        } catch {
+          /* a holder's failure must not block the next waiter */
+        }
+      }
+      return callback();
+    })();
+    held.set(name, run);
+    void run
+      .catch(() => undefined)
+      .finally(() => {
+        if (held.get(name) === run) held.delete(name);
+      });
+    return run;
+  };
+  return { names, locks: { request } };
+}
+
+/**
+ * Install `navigator.locks` (or, with `undefined`, a `navigator` that has
+ * none — the real non-secure-context / old-browser state). Returns the
+ * restore function.
+ */
+function installNavigatorLocks(locks: unknown | undefined): () => void {
+  const original = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  Object.defineProperty(globalThis, "navigator", {
+    value: locks === undefined ? {} : { locks },
+    configurable: true,
+    writable: true,
+  });
+  return (): void => {
+    if (original === undefined) {
+      delete (globalThis as { navigator?: unknown }).navigator;
+    } else {
+      Object.defineProperty(globalThis, "navigator", original);
+    }
+  };
+}
+
+describe("the routing-row lock is CROSS-TAB, not per-JS-realm", () => {
+  const ACCT = "acctTabs";
+  const GROUP_ID = new Uint8Array([0x7a, 0xb5]);
+  const GRP_B64 = base64Encode(GROUP_ID);
+  const OTHER_GROUP_ID = new Uint8Array([0x7a, 0xb6]);
+  const HELD = new Uint8Array(32).fill(0x44);
+
+  let restoreNavigator: (() => void) | undefined;
+
+  afterEach(() => {
+    restoreNavigator?.();
+    restoreNavigator = undefined;
+  });
+
+  it("WAITS for a holder it did not create — the property the in-process Map cannot have", async () => {
+    // The discriminating shape. `routingRowQueue` is module state, so it can
+    // only ever order callers this realm launched; a second TAB on the same
+    // origin writes the same IndexedDB row with no exclusion at all. Here the
+    // TEST is that other tab: it takes the row's lock first, out of band, and
+    // the entry point must be held behind it.
+    //
+    // Without the Web Lock the entry point consults nothing shared, so it
+    // mints straight through the foreign holder — which is the finding.
+    const space = makeOriginLockSpace();
+    restoreNavigator = installNavigatorLocks(space.locks);
+
+    // Tab 2 acquires the row's lock and parks inside it.
+    let releaseOtherTab!: () => void;
+    const otherTabDone = new Promise<void>((r) => {
+      releaseOtherTab = r;
+    });
+    const otherTabName = `lakko/push-routing/${ACCT} ${GRP_B64}`;
+    void space.locks.request(otherTabName, async () => {
+      await otherTabDone;
+    });
+
+    // Tab 1 (the code under test) tries to provision the SAME row.
+    const group = mockGroup(GROUP_ID, wasm.Role.Owner);
+    const sent: Uint8Array[] = [];
+    const broadcast = async (bytes: Uint8Array): Promise<void> => {
+      sent.push(bytes);
+    };
+    const provision = ensureGroupPushRouting(
+      ACCT,
+      group,
+      DUMMY_IDENTITY,
+      broadcast,
+    );
+
+    await flushMicrotasks();
+    // Held behind the foreign holder: no mint, no persist, no broadcast.
+    expect(vi.mocked(putGroupRouting)).not.toHaveBeenCalled();
+    expect(sent.length).toBe(0);
+    expect(h.secrets.has(`${ACCT}\0${GRP_B64}`)).toBe(false);
+
+    releaseOtherTab();
+    await provision;
+
+    // …and it proceeds once the other tab lets go.
+    expect(vi.mocked(putGroupRouting)).toHaveBeenCalledTimes(1);
+    expect(sent.length).toBe(1);
+
+    // The lock it took is the PER-ROW one, under the module's namespace —
+    // pinned so a future rename cannot silently widen or narrow the scope.
+    expect(space.names).toContain(otherTabName);
+  });
+
+  it("is keyed per (account, group): another row's holder never blocks", async () => {
+    // The corollary of the assertion above: cross-tab exclusion must not
+    // become a cross-tab GLOBAL lock, or one wedged group would stall every
+    // other group in every tab.
+    //
+    // The parked holder is created by driving the PRODUCTION path, not by
+    // requesting a name this test picked. That is what makes the assertion
+    // discriminating: a test that named the lock itself would still pass
+    // against an implementation that locked one global name, because the two
+    // names simply would not collide.
+    const space = makeOriginLockSpace();
+    restoreNavigator = installNavigatorLocks(space.locks);
+
+    seedStoredSecret(ACCT, GRP_B64, HELD, 5n);
+    h.distributed.set(`${ACCT}\0${GRP_B64}`, true);
+    let releaseHolder!: () => void;
+    const holderGate = new Promise<void>((r) => {
+      releaseHolder = r;
+    });
+    const parked = rotatePushRoutingSecret(
+      ACCT,
+      mockGroup(GROUP_ID, undefined),
+      "owner",
+      async () => {
+        await holderGate;
+      },
+    );
+    await flushMicrotasks();
+
+    // A DIFFERENT group provisions while that holder is parked.
+    const other = mockGroup(OTHER_GROUP_ID, wasm.Role.Owner);
+    const sent: Uint8Array[] = [];
+    await ensureGroupPushRouting(ACCT, other, DUMMY_IDENTITY, async (b) => {
+      sent.push(b);
+    });
+    expect(sent.length).toBe(1);
+    expect(h.secrets.has(`${ACCT}\0${base64Encode(OTHER_GROUP_ID)}`)).toBe(true);
+
+    releaseHolder();
+    expect(await parked).toBe("rotated");
+  });
+
+  it("releases the cross-tab lock when the task REJECTS", async () => {
+    // A rejecting task must not wedge the OTHER tabs — the failure mode a
+    // hand-rolled acquire/release would introduce. `navigator.locks.request`
+    // releases when the callback settles either way; this pins that the
+    // module relies on that rather than on a success-only release path.
+    const space = makeOriginLockSpace();
+    restoreNavigator = installNavigatorLocks(space.locks);
+
+    seedStoredSecret(ACCT, GRP_B64, HELD, 5n);
+    const group = mockGroup(GROUP_ID, undefined);
+
+    await expect(
+      redistributeSecretToGroup(ACCT, group, async () => {
+        throw new Error("DS down");
+      }),
+    ).rejects.toThrow("DS down");
+
+    // Tab 2 gets the row immediately afterwards.
+    let ranInOtherTab = false;
+    await space.locks.request(
+      `lakko/push-routing/${ACCT} ${GRP_B64}`,
+      async () => {
+        ranInOtherTab = true;
+      },
+    );
+    expect(ranInOtherTab).toBe(true);
+  });
+
+  it("falls back to the in-process queue when navigator.locks is ABSENT — never unserialised", async () => {
+    // `navigator.locks` is SECURE-CONTEXT only, so this is a real deployment
+    // state. The requirement is that it degrades to same-tab serialisation,
+    // NOT that it silently runs concurrently: two rotations must still be two
+    // sequential mints off each other's output, exactly as with the API
+    // present.
+    restoreNavigator = installNavigatorLocks(undefined);
+
+    seedStoredSecret(ACCT, GRP_B64, HELD, 5n);
+    h.distributed.set(`${ACCT}\0${GRP_B64}`, true);
+    const group = mockGroup(GROUP_ID, undefined);
+
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const sent: Uint8Array[] = [];
+    const broadcast = async (bytes: Uint8Array): Promise<void> => {
+      sent.push(bytes);
+      if (sent.length === 1) await gate;
+    };
+
+    const first = rotatePushRoutingSecret(ACCT, group, "owner", broadcast);
+    await flushMicrotasks();
+    expect(sent.length).toBe(1);
+
+    const second = rotatePushRoutingSecret(ACCT, group, "owner", broadcast);
+    await flushMicrotasks();
+    // Still serialised: the second has not minted off the same old secret.
+    expect(vi.mocked(putGroupRouting)).toHaveBeenCalledTimes(1);
+
+    release();
+    expect(await Promise.all([first, second])).toEqual(["rotated", "rotated"]);
+    expect(vi.mocked(putGroupRouting)).toHaveBeenCalledTimes(2);
+    expect(Array.from(decodeSecret(sent[1]!))).not.toEqual(
+      Array.from(decodeSecret(sent[0]!)),
+    );
+  });
+});
+
+describe("network IO under the lock is BOUNDED (the row cannot wedge)", () => {
+  const ACCT = "acctWedge";
+  const GROUP_ID = new Uint8Array([0xbe, 0xef]);
+  const GRP_B64 = base64Encode(GROUP_ID);
+  const HELD = new Uint8Array(32).fill(0x22);
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("a HUNG broadcast times out, and a later envelope still applies", async () => {
+    // The finding: `broadcast` / `subscribe` / `unsubscribe` run under the
+    // routing-row lock by design, and neither the chat client nor the push
+    // client carries an AbortSignal or a timeout. One POST that never settles
+    // therefore holds the lock for the life of the tab — every later envelope
+    // queues behind it forever, so the device never applies a peer's rotation
+    // and keeps notifying an id an evicted member still derives.
+    seedStoredSecret(ACCT, GRP_B64, HELD, 10n);
+    h.distributed.set(`${ACCT}\0${GRP_B64}`, true);
+    const group = mockRoleGroup(GROUP_ID, OWNER_PK, { epoch: 11n });
+
+    // A broadcast that NEVER settles.
+    const hung = rotatePushRoutingSecret(
+      ACCT,
+      group,
+      "owner",
+      () => new Promise<void>(() => undefined),
+    );
+    let hungSettled = false;
+    void hung.then(() => {
+      hungSettled = true;
+    });
+
+    await flushMicrotasks();
+    expect(hungSettled).toBe(false);
+
+    // A peer's envelope, newer than anything held, arrives while the row is
+    // occupied. It must eventually be applied rather than queued forever.
+    //
+    // `0xff` — the bytewise MAXIMUM — is load-bearing, not decoration. The
+    // rotation this queues behind mints a RANDOM secret and stamps it at the
+    // same epoch 11 (the clamp forbids stamping higher than the group's own),
+    // so the pair `(11, incoming)` ties on epoch and falls to the byte
+    // tiebreak. Any other fixture would win or lose by chance and make the
+    // test flaky — the same trap the C-61 fixture hit with `0xEE`.
+    const NEWER = new Uint8Array(32).fill(0xff);
+    const later = receivePushRoutingSecretGated(
+      ACCT,
+      group,
+      GRP_B64,
+      OWNER_LEAF,
+      NEWER,
+      11n,
+    );
+    let laterSettled = false;
+    void later.then(() => {
+      laterSettled = true;
+    });
+
+    await flushMicrotasks();
+    // Both still parked behind the hung POST — this is the wedge.
+    expect(hungSettled).toBe(false);
+    expect(laterSettled).toBe(false);
+
+    // Only the passage of time can break it, and it must.
+    await vi.advanceTimersByTimeAsync(ROUTING_NETWORK_TIMEOUT_MS + 1);
+
+    expect(await hung).toBe("rotated");
+    expect(await later).toBe("accept-owner");
+    // The row moved on: the peer's newer secret is what this device holds.
+    expect(
+      Array.from(h.secrets.get(`${ACCT}\0${GRP_B64}`) as Uint8Array),
+    ).toEqual(Array.from(NEWER));
+  });
+
+  it("a timed-out broadcast leaves the row REPAIRABLE, never advanced", async () => {
+    // Fail-closed for CORRECTNESS: the timeout aborts a wait, never a
+    // decision. Nothing is recorded as confirmed on the strength of a call
+    // that timed out, so the existing pending/re-broadcast machinery repairs
+    // it on the next pass — which is exactly what makes bounding the wait the
+    // safe side of the trade rather than a lost message.
+    seedStoredSecret(ACCT, GRP_B64, HELD, 10n);
+    h.distributed.set(`${ACCT}\0${GRP_B64}`, true);
+    const group = mockGroup(GROUP_ID, undefined, 11n);
+
+    const rotation = rotatePushRoutingSecret(
+      ACCT,
+      group,
+      "owner",
+      () => new Promise<void>(() => undefined),
+    );
+    await vi.advanceTimersByTimeAsync(ROUTING_NETWORK_TIMEOUT_MS + 1);
+    expect(await rotation).toBe("rotated");
+
+    // The send was never confirmed, so the row is PENDING (not "distributed"
+    // on the strength of a POST that never landed).
+    expect(h.distributed.get(`${ACCT}\0${GRP_B64}`)).toBe(false);
+    const rotated = h.secrets.get(`${ACCT}\0${GRP_B64}`) as Uint8Array;
+    expect(Array.from(rotated)).not.toEqual(Array.from(HELD));
+
+    // …and the existing repair path re-sends the STORED (rotated) secret.
+    const resent: Uint8Array[] = [];
+    await ensureGroupPushRouting(ACCT, group, DUMMY_IDENTITY, async (b) => {
+      resent.push(b);
+    });
+    expect(resent.length).toBe(1);
+    expect(Array.from(decodeSecret(resent[0]!))).toEqual(Array.from(rotated));
+    expect(h.distributed.get(`${ACCT}\0${GRP_B64}`)).toBe(true);
+  });
+
+  it("a hung SUBSCRIBE also cannot wedge the row", async () => {
+    // The broadcast is not the only awaited network call under the lock:
+    // `rotatePushRoutingSecret` awaits the push-gw subscribe too, and
+    // `retireOldPushGid` awaits the unsubscribe. All are bounded.
+    seedStoredSecret(ACCT, GRP_B64, HELD, 10n);
+    h.distributed.set(`${ACCT}\0${GRP_B64}`, true);
+    const group = mockGroup(GROUP_ID, undefined, 11n);
+
+    subscribeGroup.mockImplementationOnce(
+      () => new Promise<{ inserted: boolean }>(() => undefined),
+    );
+
+    const rotation = rotatePushRoutingSecret(ACCT, group, "owner", async () => {
+      /* the broadcast lands */
+    });
+    let settled = false;
+    void rotation.then(() => {
+      settled = true;
+    });
+    await flushMicrotasks();
+    expect(settled).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(ROUTING_NETWORK_TIMEOUT_MS + 1);
+    expect(await rotation).toBe("rotated");
+  });
+});

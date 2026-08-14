@@ -3306,10 +3306,9 @@ entry there was **no ordering gate at all**: nothing anywhere could ask *is this
 newer than what I hold*, so a **retry** of the current secret and a **replay** of a
 superseded one were byte-indistinguishable to every client. That omission was
 structural rather than a bug in one client — all three decision cores took only
-authority inputs — and it makes a **silent, permanent rotation undo** reachable
+authority inputs — and it made a **silent, permanent rotation undo** reachable
 with no malice and no crash (`lakko-security` **F-A**, **G-36 residual 9**, which
-this entry is intended to close and, as shipped, **does not yet** — see the end of
-this entry): a device
+this entry closes for the single-context case — see sub-invariant 5): a device
 holding a stale secret in an un-settled `pending` row re-broadcasts it after
 somebody else has rotated, every member's gate sees an authorised sender and
 accepts, and the group migrates **back** onto the routing id an evicted member
@@ -3318,7 +3317,9 @@ the state does not self-heal.
 
 This entry is pinned separately from C-60 for the same reason C-61 is: it is a
 distinct rule with a distinct failure mode, and C-60's authority gate is
-**unchanged** by it. Four sub-invariants.
+**unchanged** by it. **Five** sub-invariants — four about the order itself, and a
+fifth about the path that consumes it, added after the arc's own review showed
+that the first four are inert without it.
 
 1. **The order is total, canonical, and defined exactly once.** Envelopes are
    ordered on the pair `(mint_epoch, secret_bytes)` — the 8-byte big-endian epoch
@@ -3421,45 +3422,81 @@ distinct rule with a distinct failure mode, and C-60's authority gate is
    Generalised: **a rule that short-circuits a gate must not write any state that
    gate protects.**
 
-**What this buys — and the precondition that is NOT yet met.** The four
-sub-invariants above are **built and armed on all three clients** (`936d849`,
-`014e84e`), and the primitive is correct. **They do not yet deliver their intended
-closure, and this entry must not be read as though they do.**
+5. **The gate must run against CURRENT state: its read, decision and persist are
+   serialized per `(account, group)`.** This is the sub-invariant the arc's own
+   review had to teach it, and it is the reason the other four are not
+   self-sufficient. The gate is a **read-modify-write** — read the stored
+   `(secret, mint_epoch)`, decide, persist — with suspension points between the
+   read and the write. If two envelopes decide against the **same snapshot**, a
+   correct total order changes nothing: the survivor is whichever task wrote last.
+   **Stated generally, and this is the durable lesson: an ordering rule is a
+   property of the state the deciding read observed, so a total order is only
+   meaningful if the gate consuming it runs against current state.** Enforcement is
+   **one serializing (never coalescing) lock per `(account, group)`**, held across
+   the whole read-decide-write, and **shared** across **four** entry points —
+   receive, rotate, ensure, **redistribute**. Two design points are load-bearing
+   rather than incidental: the lock must be **shared**, not one per entry point
+   (Android proved this by probe — with receive on its own lock the F-A and
+   N-rotation cases pass while **F-E** still fails), and it must be **serializing**,
+   because a coalescing lock folds a second, distinct trigger into an in-flight one
+   (the ADR-0043 F1 finding). `redistribute` is included because it is the same
+   read-then-write and unserialized it puts a **PRE-rotation** secret back on the
+   wire mid-rotation. **Every network call taken under the lock is individually
+   bounded** — web 30 s, iOS 15 s, Android 15 s — because a wedged row is not
+   merely unavailable: it is the row that never applies a peer's rotation, so the
+   device keeps notifying an id an evicted member still derives. That timeout is
+   **fail-closed for the operation** (an expired call is treated as failed, never
+   as optimistically succeeded; neither the authority gate nor the order is
+   relaxed, and both still run in full inside the lock against a fresh read) and
+   **fail-open for the row** (the lock is released so the queue proceeds, because
+   the work queued behind it is precisely the peer rotation that retires an evicted
+   member's id). **This is not the ADR-0033 fail-open**, which relaxes an
+   anti-abuse *gate*; here no gate is relaxed at all. Serialization is per
+   **process context**, which is the exact boundary of this sub-invariant's claim —
+   see the status note below.
 
-The `lakko-security` review of the landed arc returned **REQUEST CHANGES** and
+**What this buys.** All five sub-invariants are **built and armed on all three
+clients** — `936d849` / `014e84e` (the order, the clamp, the persist-verbatim
+rule, the `accept-identical` hardening) and `9a0f539` (the serializing lock), with
+the cross-tab and bounded-hold follow-ups landing on top.
+
+The path was not straight, and the record is kept because the lesson is. The
+`lakko-security` review of the **first** landing returned **REQUEST CHANGES** and
 **reproduced the defect by execution** on web: two envelopes driven concurrently
 the way `Chat.tsx` actually drives them produced verdicts
 `['accept-admin-rotate', 'accept-identical']` and a final stored secret of `0xEE`
-at epoch 10 — the **stale** one. The cause is **G-36 residual 10** (HIGH, open):
-the receive gate is a **read-modify-write** with suspension points between the read
-and the write, and **no client serializes it per `(account, group)`** — web
-dispatches it `void`-prefixed and fire-and-forget from a batch loop, Android
-launches it per envelope on `pushScope` (its `inflight` and `rotatingLocks` mutexes
-guard `ensure` and `rotate`, not receive), and iOS spawns a detached `Task` where
-`@MainActor` serializes execution but not across `await`. Two routing envelopes
-from one poll batch therefore both decide against the **same pre-batch snapshot**.
+at epoch 10 — the **stale** one (**G-36 residual 10**). Sub-invariant 4 was the
+vehicle: `accept-identical` deliberately short-circuits both the clamp and the
+order, which is correct for a benign retry and which sub-invariant 4 correctly
+stopped from moving the stored epoch — but nothing stopped it being **reached on a
+stale snapshot**, and the losing gate files the *stored* epoch it read, the stale
+one. **The gate was bypassed, not defeated**: nothing in that finding said the
+order was wrong, which is why this entry stands as written with sub-invariant 5
+added rather than being withdrawn. The review of the fix returned **APPROVE WITH
+NOTES**, no CRITICAL / HIGH; both of its actionable findings — a web lock that was
+per-JS-realm rather than cross-tab, and the lock held across unbounded network
+I/O — are closed.
 
-**The gate is bypassed, not defeated** — an important distinction for triage, and
-the reason this entry stands as written rather than being withdrawn. Sub-invariant
-4 is the vehicle: `accept-identical` deliberately short-circuits both the clamp and
-the order, which is correct for a benign retry and which sub-invariant 4 correctly
-stopped from moving the stored epoch — but nothing stops it being **reached on a
-stale snapshot**, where the incoming bytes match a secret the device has already
-superseded, and rewriting it. Sub-invariant 4's hardening does not help there,
-because the losing gate files the *stored* epoch it read, which is the stale one.
+Consequently **G-36 residual 9 closes**, and residual 7's concurrent-rotator core
+closes — the N+1 same-epoch mints from one removal are totally ordered *and* now
+compared against current state, so devices converge on the single maximum rather
+than by scheduling order. Sharing one lock rather than several additionally closes
+**residual 5's rotate-vs-receive (F-E) path**.
 
-Consequently: **G-36 residual 9 is NOT closed**, and residual 7's
-concurrent-rotator core is **NOT closed** — the N+1 same-epoch mints from one
-removal arrive in one batch and all compare against one snapshot, so the survivor
-is scheduling order. Stated exactly: **sub-invariant 1's arrival-order independence
-is a property of the pure order function, not yet of the path that calls it.** A
-per-`(account, group)` serializing lock spanning the gate's read and write is in
-flight on all three clients; this entry's closure claims become true when it lands.
+**The qualification on those closures is exact and is sub-invariant 5's scope: the
+single PROCESS CONTEXT.** On web the cross-tab boundary is covered by a Web Lock
+(`navigator.locks`) nested inside the in-process queue — but that API is
+**secure-context only**, so an insecure-context origin, an old browser or an
+embedded webview degrades to same-tab-only serialization. The in-process queue is
+deliberately kept beneath it precisely so that state is a **degradation** rather
+than a silent unserialized run. On the natives the equivalent multi-process
+boundary — the ADR-0041 / C-59 NSE and background decrypt versus the app — was
+**not examined** by this arc. Tracked as the re-scoped **G-36 residual 10**.
 
-Even then, two things stay out of scope: the order **does not repair a device
+Three things stay out of scope regardless: the order **does not repair a device
 already holding a stale value** (it stops a stale value spreading; it pushes
-nothing), and it has no bearing on residual 7's **F-D stale-role window**, which is
-an authority refusal. Residuals 1 / 3 / 4 / 5 / 8 are untouched.
+nothing), it has no bearing on residual 7's **F-D stale-role window**, which is an
+authority refusal, and residuals 1 / 3 / 4 / 8 are untouched.
 
 **One transition-window caveat on sub-invariant 2.** A legacy unstamped row reads
 `mint_epoch = 0` on all three platforms — the floor, so any stamped mint supersedes
@@ -3483,13 +3520,26 @@ distinctions as diagnostic tags, and maps an unreadable own epoch to
 `.rejectFuture` where the other two use `reject-unverifiable` — different labels,
 identical fail-closed effect.
 
+That whole rule sequence runs **inside** the sub-invariant-5 lock, against a read
+taken inside it: web `withRoutingRowLock` (the in-process queue plus a nested
+`withWebLock`, with `withNetworkTimeout` / `ROUTING_NETWORK_TIMEOUT_MS` bounding
+each call under it) in `apps/web/src/push/group-routing.ts`; iOS `withRoutingLock`
+plus `withNetworkTimeout` / `defaultNetworkCallTimeout` in
+`apps/ios/Lakko/Push/PushGroupRouting.swift`; Android `routingLock` plus `bounded`
+/ `NETWORK_CALL_TIMEOUT_MS` — and `boundedOrNull` on `freshMintStamp()`, for the
+`ChatRepository.groupsLock` reason recorded as **G-37** — in
+`apps/android/.../push/GroupPushRouting.kt`.
+
 Invariants: **#2** (the `mint_epoch` rides inside the same E2EE MLS
 application-message plaintext; the DS sees ciphertext, push-gw sees only the
 derived 32-byte id and is **byte-identical unchanged**), **#3** (no
 `crates/lakko-mls` edit — the clients read `Group::epoch()`, an accessor that
 already existed on both FFI surfaces), **#4** (the fail-closed surface **widens**:
 reject-future, reject-stale, and both cross-version refusals all drop or defer,
-never downgrade; the codec stays bounded and exact-length), **#5** (unchanged
+never downgrade; the codec stays bounded and exact-length. The one fail-**open** in
+this entry is scoped to the lock's *hold time* under sub-invariant 5 and relaxes
+**no gate** — every expired call is treated as failed, and both the authority gate
+and the order still run in full against a fresh in-lock read), **#5** (unchanged
 posture — this restores the ADR-0043 forward-unlinkability in the cases the
 finding was silently revoking it, and does not touch the co-membership cluster).
 

@@ -2914,6 +2914,285 @@ final class PushGroupRoutingTests: XCTestCase {
         XCTAssertNotNil(store.lookupRoute(pushGidHex: PushGroupRouting.hex(peerGid)))
     }
 
+    // MARK: - the routing row is held across network I/O, but BOUNDED
+
+    /// A hang that does **not** respond to task cancellation: a continuation
+    /// nothing ever resumes.
+    ///
+    /// Deliberately harsher than a `Task.sleep`, because a bound that merely
+    /// cancels and then awaits the unwind would still be stuck on this. The
+    /// production deadline ABANDONS, so it escapes even here — and a real
+    /// hung socket is much closer to this than to a cooperative sleeper.
+    @MainActor
+    private final class DeadHang {
+        private var parked: [CheckedContinuation<Void, Never>] = []
+        /// How many callers have entered ``hang()``.
+        private(set) var entered = 0
+
+        func hang() async {
+            entered += 1
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                parked.append(continuation)
+            }
+        }
+
+        /// Teardown only — releases the abandoned callers so the test does not
+        /// leave leaked continuations behind. By then the deadline has long
+        /// since resumed the real caller, so these resumes are inert.
+        func release() {
+            let waiting = parked
+            parked = []
+            for continuation in waiting { continuation.resume() }
+        }
+    }
+
+    /// The deadline these tests run the orchestrator under. Short, because
+    /// unlike the Android mirror (whose `runTest` virtual clock advances a
+    /// `withTimeoutOrNull` instantly) XCTest has no virtual clock, so the
+    /// production 15 s would be 15 seconds of wall time per test.
+    private static let testNetworkTimeout: TimeInterval = 0.05
+
+    /// A routing instance whose network seams are BOUNDED at
+    /// ``testNetworkTimeout``, with either seam optionally made to hang.
+    ///
+    /// Separate from ``makeRouting(store:spy:unsubscribeSpy:)`` on purpose:
+    /// every existing test keeps the production deadline and the production
+    /// seams, so nothing already pinned is relaxed to accommodate this arc.
+    private func makeBoundedRouting(
+        store: PushRoutingStore,
+        spy: SubscribeSpy,
+        unsubscribeSpy: UnsubscribeSpy? = nil,
+        hangSubscribe: DeadHang? = nil
+    ) -> PushGroupRouting {
+        PushGroupRouting(
+            networkCallTimeout: Self.testNetworkTimeout,
+            store: store,
+            subscribeUnderPushGid: { pushGid in
+                spy.record(pushGid)
+                if let hangSubscribe { await hangSubscribe.hang() }
+            },
+            unsubscribeUnderPushGid: { pushGid in
+                unsubscribeSpy?.record(pushGid, subscribesSoFar: spy.targets.count)
+            }
+        )
+    }
+
+    /// Raised by ``waitUntil(_:within:_:)`` so a stuck test ABORTS.
+    ///
+    /// Throwing rather than only `XCTFail`-ing is load-bearing: `XCTFail`
+    /// records a failure and lets execution continue, and the very next line
+    /// of each of these tests awaits the section that is wedged — so on the
+    /// unbounded shape the test would hang forever instead of failing. The
+    /// throw is what turns "wedged" into a reported failure.
+    private struct WaitTimedOut: Error, CustomStringConvertible {
+        let what: String
+        let seconds: Double
+        var description: String { "timed out after \(seconds)s waiting for: \(what)" }
+    }
+
+    /// Poll `condition` in small REAL-time steps until it holds.
+    ///
+    /// The rest of this suite settles cooperatively (``settle()``), which is
+    /// right when the property is an ordering. Here the property under test IS
+    /// a wall-clock deadline, and Swift has no virtual clock, so real time is
+    /// unavoidable. Bounded generously, so the unbounded shape fails in a few
+    /// seconds instead of hanging the suite until XCTest gives up.
+    private func waitUntil(
+        _ what: String,
+        within seconds: Double = 5,
+        _ condition: @MainActor () -> Bool
+    ) async throws {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            if condition() { return }
+            try? await Task.sleep(nanoseconds: 2_000_000)
+        }
+        throw WaitTimedOut(what: what, seconds: seconds)
+    }
+
+    /// **The finding.** The serializing lock spans the whole
+    /// read-decide-write INCLUDING the network round-trips — which is correct,
+    /// and is what closes the ADR-0044 HIGH — but while that I/O was unbounded
+    /// a single hung request wedged the row for the rest of the process's
+    /// life. Every later envelope queued behind it forever, so this device
+    /// never applied a peer's rotation and kept notifying, and stayed
+    /// subscribed to, a routing id an evicted member can still derive: an
+    /// ADR-0043 guarantee lost to a stalled socket, with no error raised.
+    ///
+    /// The counterpart of ``testAnInboundSecretCannotBeAppliedMidRotation()``:
+    /// there the gate opens and the queued envelope must WAIT its turn; here
+    /// the gate never opens and it must still GET a turn.
+    func testAHungBroadcastDoesNotWedgeTheRowAndALaterEnvelopeStillApplies() async throws {
+        let store = makeStore()
+        let spy = SubscribeSpy()
+        let unsub = UnsubscribeSpy()
+        let routing = makeBoundedRouting(store: store, spy: spy, unsubscribeSpy: unsub)
+        let recorder = BroadcastRecorder()
+        let hang = DeadHang()
+        defer { hang.release() }
+
+        let (group, groupIdHex, ownerLeaf, _, _) = try makeGroupWithAdmin(
+            owner: try makeIdentity(0xB1), admin: try makeIdentity(0xB2),
+            member: try makeIdentity(0xB3))
+        // The peer envelope is stamped 3, so it strictly out-ranks the
+        // rotation's 2 rather than tying and falling to a random byte compare.
+        XCTAssertGreaterThanOrEqual(liveEpoch(group), 3)
+
+        let old = try XCTUnwrap(PushGroupRouting.mintSecret())
+        try seedSettled(
+            store: store, accountIdB64: "acct", groupIdHex: groupIdHex,
+            secret: old, mintEpoch: 1)
+
+        // A rotation parks in its broadcast and NEVER comes back.
+        let rotation = Task { @MainActor in
+            await routing.rotateSecret(
+                accountIdB64: "acct", groupIdHex: groupIdHex, ownRole: .owner,
+                mintEpoch: { 2 },
+                broadcast: { bytes in
+                    recorder.record(bytes)
+                    await hang.hang()
+                })
+        }
+        try await waitUntil("the rotation's broadcast to park") { hang.entered >= 1 }
+        let rotated = try XCTUnwrap(
+            PushGroupRouting.tryDecodeSecretEnvelope(
+                try XCTUnwrap(recorder.envelopes.first))?.secret)
+        let rotatedGid = try XCTUnwrap(PushGroupRouting.derivePushGid(secret: rotated))
+
+        // A peer's rotation envelope arrives for the same row.
+        let peer = try XCTUnwrap(PushGroupRouting.mintSecret())
+        let peerGid = try XCTUnwrap(PushGroupRouting.derivePushGid(secret: peer))
+        let receive = Task { @MainActor in
+            await routing.receiveSecret(
+                accountIdB64: "acct", groupIdHex: groupIdHex, secret: peer,
+                mintEpoch: 3, group: group, senderLeaf: ownerLeaf)
+        }
+
+        // THE DISCRIMINATING ASSERTION. Unbounded, the row is wedged behind a
+        // broadcast that never returns and this never becomes true.
+        try await waitUntil("the queued envelope to apply once the deadline frees the row") {
+            store.getSecret(accountIdB64: "acct", groupIdHex: groupIdHex) == peer
+        }
+
+        // Both sections really did finish — the wedge is gone, not merely
+        // stepped over.
+        let outcome = await rotation.value
+        await receive.value
+        XCTAssertEqual(
+            outcome, .rotated,
+            "the local re-key is durable even though its broadcast never landed")
+        XCTAssertEqual(
+            store.getSecret(accountIdB64: "acct", groupIdHex: groupIdHex), peer)
+        // Serialized as before: the receive read the rotation's OUTPUT as its
+        // stored value, so it retired the id the rotation had armed. Bounding
+        // the I/O did not turn the lock into a coalescing one.
+        XCTAssertEqual(spy.targets, [rotatedGid, peerGid])
+        XCTAssertTrue(
+            unsub.targets.contains(rotatedGid),
+            "the intermediate id must still be retired, not stranded")
+        XCTAssertNotNil(store.lookupRoute(pushGidHex: PushGroupRouting.hex(peerGid)))
+    }
+
+    /// The deadline fails CLOSED **for correctness**: a broadcast that merely
+    /// stopped answering is treated as FAILED, never as optimistically
+    /// delivered. So the row is left `pending` — the state the any-holder
+    /// re-broadcast branch repairs — and is never flagged distributed on a
+    /// send nobody can confirm.
+    ///
+    /// The rest of the section still runs: the deadline aborts ONE call, not
+    /// the whole locked body, which is why no half-applied shape exists.
+    func testATimedOutBroadcastLeavesTheRowPendingForTheRetry() async throws {
+        let store = makeStore()
+        let spy = SubscribeSpy()
+        let unsub = UnsubscribeSpy()
+        let routing = makeBoundedRouting(store: store, spy: spy, unsubscribeSpy: unsub)
+        let recorder = BroadcastRecorder()
+        let hang = DeadHang()
+        defer { hang.release() }
+
+        let old = try XCTUnwrap(PushGroupRouting.mintSecret())
+        try seedSettled(store: store, accountIdB64: "acct", groupIdHex: "grp", secret: old)
+        let oldGid = try XCTUnwrap(PushGroupRouting.derivePushGid(secret: old))
+
+        // Dispatched rather than awaited directly, so the UNBOUNDED shape
+        // fails this test with a message instead of hanging the suite.
+        let rotation = Task { @MainActor in
+            await routing.rotateSecret(
+                accountIdB64: "acct", groupIdHex: "grp", ownRole: .owner,
+                mintEpoch: { Self.rotationEpoch },
+                broadcast: { bytes in
+                    recorder.record(bytes)
+                    await hang.hang()
+                })
+        }
+        try await waitUntil("the rotation to return despite a broadcast that never does") {
+            unsub.targets.count == 1
+        }
+        let outcome = await rotation.value
+
+        XCTAssertEqual(outcome, .rotated)
+        let record = try XCTUnwrap(store.getRecord(accountIdB64: "acct", groupIdHex: "grp"))
+        XCTAssertNotEqual(record.secret, old, "the local re-key is durable")
+        XCTAssertFalse(
+            record.distributed,
+            "a broadcast that timed out must NEVER be recorded as delivered — "
+                + "that would disarm the only branch that re-sends it")
+        // Steps (6)-(8) still ran: the new id armed, the old one retired.
+        let newGid = try XCTUnwrap(PushGroupRouting.derivePushGid(secret: record.secret))
+        XCTAssertEqual(spy.targets, [newGid])
+        XCTAssertEqual(unsub.targets, [oldGid])
+    }
+
+    /// The push-gw subscribe is the OTHER seam taken under the lock, and it is
+    /// bounded for the same reason — one bounded call does not make the next
+    /// one bounded. Here the broadcast is fast and the SUBSCRIBE is what
+    /// hangs, mid-rotation, with a peer envelope queued behind it.
+    func testAHungSubscribeDoesNotWedgeTheRowEither() async throws {
+        let store = makeStore()
+        let spy = SubscribeSpy()
+        let unsub = UnsubscribeSpy()
+        let hang = DeadHang()
+        defer { hang.release() }
+        let routing = makeBoundedRouting(
+            store: store, spy: spy, unsubscribeSpy: unsub, hangSubscribe: hang)
+        let recorder = BroadcastRecorder()
+
+        let (group, groupIdHex, ownerLeaf, _, _) = try makeGroupWithAdmin(
+            owner: try makeIdentity(0xC1), admin: try makeIdentity(0xC2),
+            member: try makeIdentity(0xC3))
+        XCTAssertGreaterThanOrEqual(liveEpoch(group), 3)
+
+        let old = try XCTUnwrap(PushGroupRouting.mintSecret())
+        try seedSettled(
+            store: store, accountIdB64: "acct", groupIdHex: groupIdHex,
+            secret: old, mintEpoch: 1)
+
+        let rotation = Task { @MainActor in
+            await routing.rotateSecret(
+                accountIdB64: "acct", groupIdHex: groupIdHex, ownRole: .owner,
+                mintEpoch: { 2 },
+                broadcast: { bytes in recorder.record(bytes) })
+        }
+        try await waitUntil("the rotation's subscribe to park") { hang.entered >= 1 }
+
+        let peer = try XCTUnwrap(PushGroupRouting.mintSecret())
+        let receive = Task { @MainActor in
+            await routing.receiveSecret(
+                accountIdB64: "acct", groupIdHex: groupIdHex, secret: peer,
+                mintEpoch: 3, group: group, senderLeaf: ownerLeaf)
+        }
+
+        try await waitUntil("the queued envelope to apply once the deadline frees the row") {
+            store.getSecret(accountIdB64: "acct", groupIdHex: groupIdHex) == peer
+        }
+        let outcome = await rotation.value
+        await receive.value
+        XCTAssertEqual(outcome, .rotated)
+        // The receive's OWN subscribe hangs too and is bounded the same way —
+        // so the envelope is applied and the section returns regardless.
+        XCTAssertEqual(hang.entered, 2)
+    }
+
     // MARK: - the stamp: minted fresh once, replayed verbatim thereafter
 
     /// The owner's MINT is the only path that reads the group's epoch — and it

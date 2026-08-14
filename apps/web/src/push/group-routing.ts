@@ -141,6 +141,56 @@
  * Serializing, never coalescing — see {@link withRoutingRowLock} for why the
  * distinction is the security property and not an implementation detail.
  *
+ * The lock has TWO layers, because IndexedDB is shared across every tab on
+ * the origin while a module-level `Map` is not: an in-process queue that
+ * orders callers within this JS realm, and a **Web Lock** (`navigator.locks`)
+ * of the same name that excludes OTHER tabs. See {@link withRoutingRowLock}
+ * for why both are kept and what happens where `navigator.locks` is absent.
+ *
+ * ## Bounded hold time — the lock must never wedge (availability)
+ *
+ * Three of the four entry points perform network IO **while holding the
+ * lock**, and that is deliberate (ADR-0043's serialization argument is
+ * explicitly about the window of "three network round-trips" a rotation
+ * spends broadcasting, subscribing and unsubscribing). But an unbounded await
+ * there means a single hung POST wedges that `(account, group)` row
+ * **forever**: every later envelope queues behind it, so the device never
+ * applies a peer's rotation and keeps notifying an id an evicted member still
+ * derives — the F-A consequence, reached through availability rather than
+ * through the gate.
+ *
+ * So every network call made under the lock is bounded by
+ * {@link ROUTING_NETWORK_TIMEOUT_MS} ({@link withNetworkTimeout}).
+ *
+ * **The trade, stated rather than left implicit.** ADR-0033 is the precedent
+ * for failing OPEN on a bounded resource, on the reasoning that failing closed
+ * there is self-inflicted denial of service; this lands on the same side, but
+ * for a stronger reason than availability. Holding the lock forever is not
+ * merely less available — it is **less safe**, because the wedged row is
+ * exactly the row that stops accepting rotations. Refusing to proceed is not
+ * an option that preserves anything here.
+ *
+ * The timeout is nevertheless **fail-closed for correctness**: it aborts only
+ * the *wait*, never a decision. Each bounded call already sits in a failure
+ * path that leaves the row repairable rather than advanced —
+ *
+ *   - a timed-out broadcast leaves `distributed` **false**, which is precisely
+ *     the flag {@link ensureGroupPushRouting}'s re-broadcast branch retries;
+ *   - a timed-out subscribe leaves this device unsubscribed under the CURRENT
+ *     id, re-armed by the next provisioning pass;
+ *   - a timed-out unsubscribe leaves a stale push-gw row that nothing ever
+ *     notifies again — the residual ADR-0043 already records.
+ *
+ * No store write is ever made on the strength of a call that timed out, and
+ * the underlying request is merely abandoned (not cancelled): should it land
+ * late it is byte-identical and idempotent, an `accept-identical` for every
+ * receiver.
+ *
+ * The two fixes compose, and the composition is load-bearing: because every
+ * hold is bounded, waiting UNBOUNDEDLY for the cross-tab Web Lock is safe —
+ * no tab can hold it indefinitely. Bounding the *wait* instead would mean
+ * proceeding unserialized, which is the defect itself.
+ *
  * The lock is deliberately taken ONLY at those four entry points; every
  * helper they call (`subscribeGroupUnderPushGid`, `pushGidForGroup`,
  * `retireOldPushGid`, `persistGroupRoutingSecret`, …) is lock-FREE. That is a
@@ -375,7 +425,14 @@ export async function subscribeGroupUnderPushGid(
   const pushGid = await pushGidForGroup(accountId, groupIdB64);
   if (pushGid === null) return "deferred";
   const devicePseudonym = getOrCreateDevicePushId();
-  await new PushClient().subscribeGroup(devicePseudonym, pushGid);
+  // Bounded: `rotatePushRoutingSecret` awaits this WHILE HOLDING the routing-row
+  // lock, so a hung POST here would wedge the row (and with it every later
+  // envelope) permanently. A timeout leaves this device unsubscribed under the
+  // current id — repaired by the next provisioning pass, which re-subscribes
+  // unconditionally.
+  await withNetworkTimeout("subscribe", () =>
+    new PushClient().subscribeGroup(devicePseudonym, pushGid),
+  );
   return "subscribed";
 }
 
@@ -428,7 +485,12 @@ export async function retireOldPushGid(oldSecret: Uint8Array): Promise<void> {
     return;
   }
   try {
-    await new PushClient().unsubscribeGroup(getOrCreateDevicePushId(), oldGid);
+    // Bounded for the same reason as the subscribe above: this runs under the
+    // routing-row lock on both the rotate and the receive path. A timeout
+    // lands in the existing catch, i.e. a stale row nothing notifies again.
+    await withNetworkTimeout("unsubscribe", () =>
+      new PushClient().unsubscribeGroup(getOrCreateDevicePushId(), oldGid),
+    );
   } catch (err) {
     // The new id is already armed; a failed unsubscribe leaves a row that
     // nothing notifies again, not a broken group.
@@ -735,6 +797,103 @@ function routingRowLockKey(accountId: string, groupIdB64: string): string {
 }
 
 /**
+ * Namespace for the cross-tab Web Lock names, so a routing-row lock can never
+ * collide with any other `navigator.locks` user on the origin (the lock space
+ * is per-ORIGIN and flat, shared with anything else the app might ever lock).
+ */
+const WEB_LOCK_PREFIX = "lakko/push-routing/";
+
+/** The slice of `navigator.locks` this module uses. Declared structurally
+ *  rather than relying on `LockManager` from `lib.dom`, so the module also
+ *  type-checks under the tests' `node` environment. */
+type WebLockManager = {
+  request: <T>(name: string, callback: () => Promise<T>) => Promise<T>;
+};
+
+/**
+ * The origin's `navigator.locks`, or `undefined` where the Web Locks API is
+ * unavailable.
+ *
+ * Resolved **lazily, per call** — never captured at module load. Two reasons:
+ * a test must be able to drive both branches, and `navigator.locks` is
+ * SECURE-CONTEXT ONLY, so the absent branch is a real deployment state (a
+ * plain-HTTP origin, an old browser, an embedded webview) rather than a
+ * defensive stub.
+ */
+function webLockManager(): WebLockManager | undefined {
+  const nav = (globalThis as { navigator?: { locks?: unknown } }).navigator;
+  const locks = nav?.locks as WebLockManager | undefined;
+  return typeof locks?.request === "function" ? locks : undefined;
+}
+
+/**
+ * Run `task` holding the CROSS-TAB Web Lock named after the routing row, or
+ * run it directly where the API is absent.
+ *
+ * `navigator.locks.request` resolves with the callback's return value and
+ * releases the lock when the callback settles — including when it THROWS —
+ * so no explicit release is needed and a rejecting task cannot wedge the lock
+ * for the other tabs.
+ *
+ * The wait is deliberately UNBOUNDED (no `AbortSignal`): a bounded wait that
+ * gave up and ran anyway would be running unserialized, which is the very
+ * defect the lock exists to close. What makes an unbounded wait safe is that
+ * every hold is itself bounded — see {@link ROUTING_NETWORK_TIMEOUT_MS}.
+ */
+function withWebLock<T>(lockKey: string, task: () => Promise<T>): Promise<T> {
+  const locks = webLockManager();
+  if (locks === undefined) return task();
+  return locks.request(`${WEB_LOCK_PREFIX}${lockKey}`, task);
+}
+
+/**
+ * Upper bound on any single network call made while holding the routing-row
+ * lock. A policy constant, NOT a measurement: it is chosen to sit far above a
+ * healthy round-trip and far below "forever", and its only job is to
+ * guarantee the lock is eventually released. Nothing about correctness
+ * depends on the value — see the module header for why a timeout here is
+ * fail-closed for correctness and why bounding it is the safer side.
+ */
+export const ROUTING_NETWORK_TIMEOUT_MS = 30_000;
+
+/**
+ * Bound a network call so it cannot wedge the routing row.
+ *
+ * Races `op()` against a timer and rejects on expiry. The underlying request
+ * is ABANDONED, not cancelled — neither the DS broadcast callback nor
+ * {@link PushClient} accepts an `AbortSignal`, and threading one through both
+ * would be a far larger change for no additional guarantee: a late-landing
+ * request is byte-identical and idempotent (`accept-identical` for every
+ * receiver, an upsert at push-gw), and no store write is made on the strength
+ * of a call that timed out.
+ *
+ * The timer is always cleared, so a fast call leaves nothing pending that
+ * could hold a test's (or a page's) event loop open.
+ */
+async function withNetworkTimeout<T>(
+  label: string,
+  op: () => Promise<T>,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      op(),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          reject(
+            new Error(
+              `push-routing ${label} timed out after ${ROUTING_NETWORK_TIMEOUT_MS} ms`,
+            ),
+          );
+        }, ROUTING_NETWORK_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+/**
  * Run `task` with exclusive access to the `(account, group)` routing row.
  *
  * ## Why a lock at all
@@ -780,6 +939,39 @@ function routingRowLockKey(accountId: string, groupIdB64: string): string {
  * exactly what goes stale. `task` must therefore contain the whole
  * read-decide-write, which is why each entry point wraps its ENTIRE body.
  *
+ * ## TWO layers, because a module `Map` is not the sharing boundary
+ *
+ * {@link routingRowQueue} is module-level state, so it orders callers within
+ * ONE JS realm. The row it protects is not: `lakko-push-routing` is an
+ * IndexedDB database shared by every tab on the origin. Two tabs open on the
+ * same account therefore read-modify-write the same row with no mutual
+ * exclusion at all, so the in-process queue alone leaves the race it was
+ * added to close still reachable — usually as a lost update (G-36 residual 7),
+ * and in the narrow interleaving above as the full F-A confidentiality shape:
+ * the device ends on the PRE-rotation secret and keeps notifying an id the
+ * evicted member still derives.
+ *
+ * So the task additionally runs under a **Web Lock** ({@link withWebLock}) of
+ * the same name, which IS per-origin and therefore cross-tab.
+ *
+ * **Both layers are kept.** `navigator.locks` alone would in principle do the
+ * whole job — it serializes same-realm callers too — but:
+ *
+ *   1. it is **secure-context only**, so `undefined` is a real deployment
+ *      state, not a hypothetical. With one mechanism, that state is a silent
+ *      unserialized run: the failure mode is invisible and is precisely the
+ *      defect. The in-process queue is the floor that state falls back to —
+ *      degraded (same-tab only) rather than absent;
+ *   2. the queue's ordering is captured **synchronously**, so a burst of
+ *      calls in one turn runs in CALL order — for the poll loop, DS journal
+ *      order. That is a property this file states and tests assert, and it is
+ *      cheaper to keep owning it than to re-derive it from another
+ *      implementation's grant order.
+ *
+ * The two nest in a fixed order (queue, then Web Lock) under an identical key,
+ * and no entry point re-enters another, so there is no lock-ordering hazard
+ * and no reentrancy: the deadlock shapes both would need are unreachable.
+ *
  * ## Ordering, failure isolation, release
  *
  *   - the predecessor is captured and the queue entry replaced
@@ -812,7 +1004,10 @@ function withRoutingRowLock<T>(
         /* the predecessor's own caller owns that failure */
       }
     }
-    return task();
+    // Cross-tab layer INSIDE the in-realm one: the queue has already fixed
+    // this realm's order, so the Web Lock is only ever contended by OTHER
+    // tabs. Where the API is absent this is a direct `task()` call.
+    return withWebLock(lockKey, task);
   })();
 
   routingRowQueue.set(lockKey, run);
@@ -1029,7 +1224,12 @@ async function broadcastAndMarkDistributed(
   broadcast: (envelopeBytes: Uint8Array) => Promise<void>,
 ): Promise<void> {
   try {
-    await broadcast(await composeSecretEnvelope(mintEpoch, secret));
+    // Compose (wasm, local) OUTSIDE the race; only the send is bounded. A
+    // timeout skips `markGroupRoutingDistributed`, so the row stays `pending`
+    // and the re-broadcast branch retries it — the failure path this helper
+    // was already built around, reached by a new cause.
+    const envelope = await composeSecretEnvelope(mintEpoch, secret);
+    await withNetworkTimeout("broadcast", () => broadcast(envelope));
     await markGroupRoutingDistributed(accountId, groupIdB64);
   } catch (err) {
     // eslint-disable-next-line no-console
@@ -1291,9 +1491,14 @@ export async function redistributeSecretToGroup(
     );
     if (record === null) return;
     try {
-      await broadcast(
-        await composeSecretEnvelope(record.mintEpoch, record.secret),
+      const envelope = await composeSecretEnvelope(
+        record.mintEpoch,
+        record.secret,
       );
+      // Bounded — this send is awaited under the routing-row lock. A timeout
+      // takes the existing failure path: mark pending (so the re-broadcast
+      // branch retries) and reject, exactly as a DS error already does.
+      await withNetworkTimeout("redistribute", () => broadcast(envelope));
     } catch (err) {
       try {
         await markGroupRoutingPending(accountId, groupIdB64);

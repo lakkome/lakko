@@ -5,23 +5,27 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0044: Mint-epoch recency ordering for the push routing secret — close the stale-replay rotation undo (G-36 residual 9)
 
-- **Status:** **Proposed.** Built end-to-end — **`936d849`** (core + FFI + web
+- **Status:** **Accepted.** Built end-to-end — **`936d849`** (core + FFI + web
   reference) and **`014e84e`** (iOS + Android) — and the flag day is over, with no
-  client left on the v1 gate. **But it is NOT accepted, because it does not yet
-  achieve what it was written to achieve.** The `lakko-security` review of the
-  landed arc returned **REQUEST CHANGES** on a blocking **HIGH** and **reproduced
-  the defect by execution** on web: two envelopes driven concurrently the way
-  `Chat.tsx` actually drives them yielded verdicts
+  client left on the v1 gate. The first `lakko-security` review of that arc
+  returned **REQUEST CHANGES** on a blocking **HIGH** and **reproduced the defect
+  by execution** on web: two envelopes driven concurrently the way `Chat.tsx`
+  actually drives them yielded verdicts
   `['accept-admin-rotate', 'accept-identical']` and a final stored secret of
-  `0xEE` **at epoch 10** — the **stale** one. **F-A does not close as shipped.**
-  The ordering primitive is correct and the gate is armed, but the receive path is
-  an **unserialized read-modify-write dispatched fire-and-forget per envelope**,
-  so the gate is handed a stale snapshot: it is **bypassed, not defeated** (see
-  § The blocking defect, and **G-36 residual 10**). A per-`(account, group)`
-  serializing lock spanning the read and the write is in flight on all three
-  clients; this ADR flips to **Accepted** only once that lands and is verified.
-  S1-S6 of the sprint decomposition landed; S7 is this docs reconcile. This ADR
-  **extends**
+  `0xEE` **at epoch 10** — the **stale** one. The ordering primitive was correct
+  and the gate was armed, but the receive path was an **unserialized
+  read-modify-write dispatched fire-and-forget per envelope**, so the gate was
+  handed a stale snapshot: **bypassed, not defeated**. **That finding is now
+  closed** by one per-`(account, group)` **serializing** lock spanning the whole
+  read-decide-write and **shared** across all four entry points — receive, rotate,
+  ensure, redistribute (**`9a0f539`**; see § The blocking defect, and how it was
+  closed). The `lakko-security` review of that fix returned **APPROVE WITH
+  NOTES**, no CRITICAL / HIGH, and both of its actionable findings have since been
+  closed too: the web lock was **per-JS-realm rather than cross-tab** (a nested
+  Web Lock now sits inside the retained in-process queue), and on all three the
+  lock was **held across unbounded network I/O** (every call taken under it is now
+  individually bounded). S1-S6 landed with the arc; S7 was the first docs
+  reconcile; **S8** is this one. This ADR **extends**
   [ADR-0042](0042-push-opaque-group-routing-id.md) **and**
   [ADR-0043](0043-push-routing-secret-rotation-on-removal.md) — it supersedes
   neither. The `push_gid` derivation and its golden, the 29-byte domain
@@ -31,14 +35,18 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
   through verbatim. It revisits exactly one property both ADRs ratified
   **implicitly, by omission**: that the receive gate has no recency notion at
   all.
-- **Date:** 2026-08-12 (proposed) · 2026-08-14 (arc built; review returned
-  REQUEST CHANGES, status held at Proposed)
-- **Context:** Phase 3 — the push subsystem. **Intends** to close **G-36 residual
-  9** (`lakko-security` **F-A**, raised in the ADR-0043 pre-merge re-review) and
-  the concurrent-rotator core of **G-36 residual 7** (`lakko-security` **F2**).
-  **Neither closes as shipped** — both are blocked on the same unserialized
-  receive path (**residual 10**). What the arc *did* close outright is **G-36
-  residual 6**: C-61 now has a regression test on all three clients.
+- **Date:** 2026-08-12 (proposed) · 2026-08-14 (arc built; first review returned
+  REQUEST CHANGES, status held at Proposed) · 2026-08-14 (serializing lock landed
+  in `9a0f539`; second review **APPROVE WITH NOTES**, its two findings closed;
+  **Accepted**)
+- **Context:** Phase 3 — the push subsystem. Closes **G-36 residual 9**
+  (`lakko-security` **F-A**, raised in the ADR-0043 pre-merge re-review) and the
+  concurrent-rotator core of **G-36 residual 7** (`lakko-security` **F2**) — both
+  **for the single-context case**, which is the qualification the whole arc turns
+  on and which § The blocking defect states exactly. It also closed **G-36
+  residual 6** outright (C-61 now has a regression test on all three clients) and,
+  by sharing one lock rather than several, the rotate-vs-receive half of **G-36
+  residual 5 / F-E**.
 
 **Anchor convention.** Line numbers throughout the § Context recon and the
 § References are as of **`820230d`** — the commit this ADR was written against,
@@ -540,47 +548,45 @@ rule rather than letting it pass as an implementation detail.
 
 ## Consequences
 
-- **Positive — subject to the blocking defect below, which currently voids the
-  first two claims in practice.** The *intended* closure is: the stale `S_old` was
-  minted at some epoch `E_old` no later than the pre-removal epoch; the rotation
-  to `S1` is broadcast strictly after the Remove commit (C-61), so it is stamped
-  at `E_rot >= E_remove > E_old`, and the re-broadcast of `S_old` is refused as
-  stale by every member holding `S1`. **F2 / residual 7** was to follow: the N+1
-  same-epoch rotations from one removal are totally ordered, so every device
-  converges on the single maximum instead of partitioning by arrival order.
-  **Neither holds yet** — see § The blocking defect. What **does** hold today,
-  independently of it: the order is defined **once**, in the audited core, rather
-  than three times; the v2 codec is bounded, fail-closed and fuzzed; the future
-  clamp exists; and **C-61 gained its first regression test on any client**,
-  closing **G-36 residual 6** outright.
+- **Positive.** The stale `S_old` was minted at some epoch `E_old` no later than
+  the pre-removal epoch; the rotation to `S1` is broadcast strictly after the
+  Remove commit (C-61), so it is stamped at `E_rot >= E_remove > E_old`, and the
+  re-broadcast of `S_old` is refused as **stale** by every member holding `S1` —
+  **F-A / residual 9 closes**. **F2 / residual 7** follows for its
+  concurrent-rotator core: the N+1 same-epoch rotations from one removal are
+  totally ordered, so every device converges on the single maximum instead of
+  partitioning by arrival order. **Both closures are qualified to the
+  single-context case** and were false until the serializing lock landed — see
+  § The blocking defect. Independently of that: the order is defined **once**, in
+  the audited core, rather than three times; the v2 codec is bounded, fail-closed
+  and fuzzed; the future clamp exists; and **C-61 gained its first regression test
+  on any client**, closing **G-36 residual 6** outright.
 
-### The blocking defect — the gate is bypassed, not defeated
+### The blocking defect, and how it was closed — the gate was bypassed, not defeated
 
-`lakko-security` returned **REQUEST CHANGES** on the landed arc and **reproduced
-the defect by execution** on web: two envelopes driven concurrently the way
-`Chat.tsx` actually drives them produced verdicts
+The first `lakko-security` review returned **REQUEST CHANGES** on the landed arc
+and **reproduced the defect by execution** on web: two envelopes driven
+concurrently the way `Chat.tsx` actually drives them produced verdicts
 `['accept-admin-rotate', 'accept-identical']` and a final stored secret of `0xEE`
-**at epoch 10** — the stale one. Tracked in full as **G-36 residual 10**
-(**HIGH**, open).
+**at epoch 10** — the stale one. Tracked as **G-36 residual 10**.
 
-**The primitive is not at fault.** `push_routing_secret_is_newer` is a correct
+**The primitive was not at fault.** `push_routing_secret_is_newer` is a correct
 strict total order, the clamp is correctly placed ahead of authority, and the
-gate's rule sequence is as specified. The defect is one layer up: the gate is a
+gate's rule sequence is as specified. The defect was one layer up: the gate is a
 **read-modify-write** — read the stored `(secret, mint_epoch)`, decide, persist —
 with **suspension points between the read and the write**, and **no client
-serializes it per `(account, group)`**. Web dispatches it `void`-prefixed and
-fire-and-forget from a batch loop that never awaits; Android launches it per
-envelope on `pushScope` (`inflight` guards `ensure`, `rotatingLocks` guards
-`rotate` — neither covers receive); iOS spawns a detached `Task`, and `@MainActor`
-serializes execution but **not across `await`**. So two routing envelopes in one
-poll batch both decide against the **same pre-batch snapshot**, and the survivor
-is decided by scheduling.
+serialized it per `(account, group)`**. Web dispatched it `void`-prefixed and
+fire-and-forget from a batch loop that never awaited; Android launched it per
+envelope on `pushScope` (`inflight` guarded `ensure`, `rotatingLocks` guarded
+`rotate` — neither covered receive); iOS spawned a detached `Task`. So two routing
+envelopes in one poll batch both decided against the **same pre-batch snapshot**,
+and the survivor was decided by scheduling.
 
-**`accept-identical` is the vehicle, and precisely why is worth stating.** That
+**`accept-identical` was the vehicle, and precisely why is worth stating.** That
 rule deliberately short-circuits **both** the future clamp and the total order —
 correct behaviour for a benign retry, and § 5 correctly stopped it from moving the
-stored epoch. But **nothing stops it being *reached* on a stale snapshot.** In the
-exact journal order F-A describes — a device holding `S_OLD@10` polling
+stored epoch. But **nothing stopped it being *reached* on a stale snapshot.** In
+the exact journal order F-A describes — a device holding `S_OLD@10` polling
 `[rotation S1@11, stale S_OLD@10]` — gate A accepts the rotation and persists
 `(S1, 11)`, while gate B, reading the same obsolete `(S_OLD, 10)`, finds its
 incoming bytes byte-identical to it, resolves `accept-identical`, and rewrites the
@@ -588,19 +594,156 @@ superseded secret one turn behind A. The § 5 hardening does not help: B files t
 *stored* epoch it read, which is the stale `10`. The whole verdict was computed
 against a snapshot that was already gone.
 
-The same cause undercuts residual 7: the N+1 same-epoch rotations from one removal
-typically arrive in **one batch**, so all N+1 gates compare against one snapshot
-and the winner is scheduling order. **Stated exactly: the total order's
-arrival-order independence holds for the pure function, but not for the path that
-calls it.** It becomes a property of the device's resulting state only once the
-gate that consumes it is serialized.
+The same cause undercut residual 7: the N+1 same-epoch rotations from one removal
+typically arrive in **one batch**, so all N+1 gates compared against one snapshot
+and the winner was scheduling order. **Stated exactly: the total order's
+arrival-order independence holds for the pure function, but not automatically for
+the path that calls it.** It becomes a property of the device's resulting state
+only once the gate that consumes it is serialized. That is the single most
+important lesson of this arc, and it is now pinned as **C-62 sub-invariant 5**
+rather than left as prose here.
 
-**Fix in flight** — a per-`(account, group)` serializing lock spanning the read
-and the write, on all three clients. Each already has the machinery (Android's
-`ConcurrentHashMap<String, Mutex>` keyed on `lockKey(accountIdB64, groupIdHex)`,
-web's per-group promise chain, iOS's serializing predecessor task). Taking the
-**same** lock the rotate path takes would additionally close the rotate-vs-receive
-interleaving of **residual 5 / F-E**.
+#### The fix — one SHARED serializing lock spanning the whole read-decide-write
+
+Landed on all three clients in **`9a0f539`**: a per-`(account, group)`
+**serializing** (never coalescing) lock held across the gate's read, decision and
+persist, and **shared across four entry points — receive, rotate, ensure,
+redistribute**.
+
+**`redistribute` was included deliberately**, beyond the minimum the finding
+required. It is the same read-then-write shape, and unserialized it puts a
+**PRE-rotation** secret back on the wire mid-rotation — the same F-A shape, emitted
+*by* this device rather than relayed *to* it. Sharing **one** lock rather than
+several also closes the recorded **F-E / residual 5** rotate-vs-receive
+interleaving, since rotate and receive now exclude each other rather than each
+merely excluding itself.
+
+**Per platform, honestly — the defect was not uniform:**
+
+- **Web and Android: real, and reproduced by execution.** Both were driven into
+  the failure before the fix and observed to produce it, with the signature
+  `expected 'accept-identical' to be 'reject-stale'`. On Android the concurrency
+  is genuinely **parallel**, not merely interleaved (`pushScope` is
+  `Dispatchers.IO`, a multi-threaded pool), so a confined dispatcher would have
+  **masked** it. Android additionally **proved the lock must be SHARED** by probe:
+  with receive on its own separate lock the F-A and N-rotation tests pass while
+  **F-E still fails**.
+- **iOS: the batch race was REFUTED, not fixed.** The span from the `getRecord`
+  read to the persist contains **no suspension point** (both `await`s sit after
+  the write), and `PushRoutingStore` has **no `async` at all**, so `@MainActor`
+  already made that span mutually exclusive; a pre-change run showed the stale
+  envelope correctly reading the rotation's already-written row. The lock was
+  nevertheless added, because the safety was **incidental** — one added `await`
+  would have reopened it silently — so the lock makes it **structural**. iOS was
+  **not** defect-free: its rotation *does* park in its broadcast, so the
+  rotate-vs-receive interleave (**F-E**) was real there and its test failed four
+  assertions before the fix.
+
+#### Review of the fix, and the two findings it raised — both closed
+
+The `lakko-security` pass on the lock returned **APPROVE WITH NOTES**, no
+CRITICAL / HIGH. Its two actionable findings are closed:
+
+**MEDIUM (web) — the lock was per-JS-realm, not cross-tab.** `routingRowQueue` is
+module-level state, so it ordered callers within **one** JS realm; the row it
+protects is not — `lakko-push-routing` is an IndexedDB database shared by **every
+tab on the origin**. Two tabs on one account were therefore unserialized, and in a
+narrow interleaving that reaches the full **F-A confidentiality shape**, not merely
+a lost update. Fixed by nesting a **Web Lock** (`navigator.locks`) of the same
+per-row key *inside* the in-process queue (`withWebLock` inside
+`withRoutingRowLock`).
+
+**The in-process queue was deliberately KEPT rather than replaced**, and the
+reasoning is the load-bearing part. `navigator.locks` alone would in principle do
+the whole job — it serializes same-realm callers too — but it is
+**secure-context only**, so `undefined` is a real deployment state (a plain-HTTP
+origin, an old browser, an embedded webview) and **not** a hypothetical. With one
+mechanism, that state is a **silent unserialized run**: the failure mode is
+invisible and is precisely the defect. The queue is the floor that state falls back
+to — degraded (same-tab only) rather than absent. It is also what captures ordering
+**synchronously**, so a burst of calls in one turn runs in **call order**, which
+for the poll loop is **DS journal order** — a property this file states and its
+tests assert. The two nest in a fixed order (queue, then Web Lock) under an
+identical key and no entry point re-enters another, so neither a lock-ordering
+hazard nor reentrancy is reachable.
+
+**LOW (all three) — the lock was held across unbounded network I/O.** Three of the
+four entry points perform network I/O *while holding the lock*, which is
+deliberate (ADR-0043's serialization argument is explicitly about the window of
+three round-trips a rotation spends broadcasting, subscribing and unsubscribing).
+Unbounded, one hung request wedged the row **permanently**. Now **every network
+call taken under the lock is individually bounded** — web 30 s
+(`ROUTING_NETWORK_TIMEOUT_MS`, `withNetworkTimeout`), iOS 15 s
+(`defaultNetworkCallTimeout`, `withNetworkTimeout`), Android 15 s
+(`NETWORK_CALL_TIMEOUT_MS`, `bounded`). **Android additionally bounds
+`freshMintStamp()`** (`boundedOrNull`) at **both** sites that await it under the
+lock — `rotate` and `ensure`'s MINT branch — for a reason external to the push
+path, recorded as **G-37**: that read hops through `ChatRepository.groupsLock`,
+which *is* held across unbounded DS publishes, so the chain
+`routing-row lock -> freshMintStamp() -> groupsLock -> a hung DS publish` wedges
+the routing row exactly as an unbounded broadcast would, one hop removed.
+
+**A correction to this ADR's own earlier framing.** Treating a wedged row as
+merely an *availability* problem is wrong. The row that never unwedges is the row
+that never applies a **peer's rotation**, so the device goes on notifying — and
+stays subscribed to — an id an evicted member still derives. That is the **F-A
+consequence reached through availability**, which makes bounding the hold the safe
+side on **both** axes rather than a trade between them.
+
+#### The availability decision, stated because the trade is real
+
+A deadline is a choice about what to do when the network stops answering, and this
+one resolves in **two directions at once** — which is why "fail open or fail
+closed" has to be asked of the **operation** and the **row** separately:
+
+- **The operation fails CLOSED.** An expired call is treated as **failed**, never
+  as optimistically succeeded. A timed-out broadcast is never flagged
+  `distributed`; a timed-out unsubscribe never claims the old id was retired.
+  Nothing that decides *who may write* (the ADR-0042 authority gate) or *which
+  write survives* (this ADR's order) is relaxed — **both still run in full, inside
+  the lock, against a fresh read**. A deadline can only turn a would-be success
+  into a treated-as-failure; it can never admit an envelope the gate refused,
+  persist an unordered secret, or mark an undelivered one distributed.
+- **The row fails OPEN.** The lock is released and the next queued section runs.
+  That is the entire point: a wedged row is strictly worse than a repeated
+  round-trip, because the work queued behind it is **precisely the peer rotation
+  that retires an evicted member's id**.
+
+Each expiry lands in that call's **already existing** failure handler, so no new
+state shape exists anywhere: a timed-out broadcast leaves the row `pending` (the
+re-broadcast branch retries it), a timed-out subscribe leaves the device
+unsubscribed under the current id (the next provisioning pass re-arms it), a
+timed-out unsubscribe leaves a stale push-gw row nothing ever notifies again (the
+cost ADR-0043 already documents), and a timed-out `freshMintStamp` collapses into
+the `null` an unreadable epoch already produces — no mint, nothing sent.
+
+**This is NOT the ADR-0033 fail-open.** That one relaxes an anti-abuse **gate** on
+a store error, reasoning that failing closed there would be self-inflicted denial
+of service. Here **no gate is relaxed at all**: the fail-open governs only how long
+one section may occupy the row, and its cost is an extra idempotent retry paid on a
+network that is already failing.
+
+The two fixes compose, and on web the composition is load-bearing: because every
+hold is bounded, waiting **unboundedly** for the cross-tab Web Lock is safe — no
+tab can hold it indefinitely. Bounding the *wait* instead would mean proceeding
+unserialized, which is the defect itself.
+
+#### Two web lock-scope questions, examined and deliberately left alone
+
+Recorded rather than fixed, because the analysis is the deliverable:
+
+- **`clearAllGroupRouting()` writes the store outside the lock.** It is called
+  from `AuthContext.tsx` on `forgetDevice` / logout and clears both object stores
+  in one transaction. Judged safe because it is a **whole-store teardown**, not a
+  per-row read-modify-write: it does not read, decide and write back, so it cannot
+  lose an update or resolve a verdict against a stale snapshot. A concurrent entry
+  point racing it observes an emptied row, which is exactly the
+  no-secret / no-record state every entry point already handles defensively.
+- **The service workers touch the same database, and need no lock.** `sw.js` and
+  `sw-push-decrypt.js` read `lakko-push-routing` only for the `routes` reverse
+  index, only in **`readonly`** transactions (`db.transaction(store, "readonly")`).
+  They never write, so they are not a party to the read-modify-write the lock
+  serializes.
 
 - **Negative / new risks.** A **`crates/lakko-contacts` wire-format change** — a
   hard flag day with no dual-accept — plus a **store schema change on all three
@@ -634,6 +777,17 @@ interleaving of **residual 5 / F-E**.
   envelope kind is disturbed.
 
 ### What this does NOT fix
+
+- **Serialization is per PROCESS-CONTEXT, and one context boundary is covered
+  while others are not.** The closures above are exact only for the
+  single-context case. On **web** the cross-tab boundary is now handled by the
+  nested Web Lock — but a browser without `navigator.locks` (an insecure context,
+  an old browser, an embedded webview) degrades to **same-tab-only**
+  serialization, silently. On the **natives** the equivalent multi-process
+  boundary — the iOS NSE and the Android background decrypt versus the foreground
+  app (ADR-0041 / C-59) — **was not examined by this arc**; whether either of those
+  contexts reaches the routing row's write path at all is an open question, not a
+  cleared one. Tracked as the re-scoped **G-36 residual 10**.
 
 - **F-D (the stale-role window) is untouched and orthogonal.** A demoted
   rotator's envelope is refused on **authority**, not on recency: it queued behind
@@ -760,28 +914,32 @@ so it would invent an order rather than recover one.
   Still **improved but not fully satisfied**. This ADR restores the ADR-0043
   forward-unlinkability property in the cases F-A was silently revoking it; it
   does not touch the cluster (residual 1).
-- **Invariant-index / gap touchpoints (landed in the S7 docs reconcile).**
-  **C-60** is amended for the v2 envelope, with the `derive_push_gid` stability
-  property called out as explicitly **unchanged** (no epoch input — that is what
-  lets a subscriber survive ordinary commits without re-subscribing); **C-61**
-  records its now-live regression coverage on all three clients and its promotion
-  to a precondition of the recency fix; a new **C-62** pins the recency ordering
-  itself (the total order, the persist-and-replay-verbatim rule, the future
-  clamp, and the rule that `accept-identical` never moves the stored stamp);
-  **G-36 residual 6 CLOSES** (C-61 test-pinned on all three clients); **residual
-  9 STAYS OPEN** and **residual 7 is NOT core-closed**, both blocked on the new
-  **residual 10** (the unserialized receive path, HIGH); residuals 1 / 3 / 4 / 5 /
-  8 are untouched. C-62 is minted with its closure claims explicitly conditioned
-  on residual 10.
+- **Invariant-index / gap touchpoints.** **C-60** is amended for the v2 envelope,
+  with the `derive_push_gid` stability property called out as explicitly
+  **unchanged** (no epoch input — that is what lets a subscriber survive ordinary
+  commits without re-subscribing); **C-61** records its now-live regression
+  coverage on all three clients and its promotion to a precondition of the recency
+  fix; **C-62** pins the recency ordering itself — the total order, the
+  persist-and-replay-verbatim rule, the future clamp, the rule that
+  `accept-identical` never moves the stored stamp, and (added in S8)
+  **sub-invariant 5: the gate must run against current state**. **G-36 residual 6
+  CLOSES** (C-61 test-pinned on all three clients); **residuals 9 and 7 CLOSE for
+  the single-context case**, and **residual 5's rotate-vs-receive half closes**
+  because the lock is shared; **residual 10 is RE-SCOPED**, not deleted, to the
+  cross-context remainder; residuals 1 / 3 / 4 / 8 are untouched. **G-37** is
+  minted for the `groupsLock`-across-unbounded-DS-I/O hazard.
 
-**`lakko-security` gate — required before merge.** This change touches a
-`crates/lakko-contacts` wire format and the security gate that ADR-0042's
-MEDIUM-1 finding installed. It narrows a previously stated property
+**`lakko-security` gate — required before merge, and DONE, twice.** This change
+touches a `crates/lakko-contacts` wire format and the security gate that
+ADR-0042's MEDIUM-1 finding installed. It narrows a previously stated property
 (owner-priority at a tie), adds two new refusal paths on a hot receive path, and
 its correctness depends on a sequencing rule (C-61) that was untested when this
-ADR was written and is now test-pinned on all three clients. **A review of the
-landed arc is in flight at the time of this reconcile; its findings are not yet
-folded in here.**
+ADR was written and is now test-pinned on all three clients. The **first** review,
+of the landed arc, returned **REQUEST CHANGES** on one blocking HIGH, reproduced
+by execution (§ The blocking defect). The **second**, of the serializing-lock fix,
+returned **APPROVE WITH NOTES**, no CRITICAL / HIGH; its two actionable findings —
+the per-realm web lock, and the unbounded hold across network I/O — are both
+closed, and this ADR is Accepted on that basis.
 
 ## Open questions
 
@@ -817,11 +975,12 @@ folded in here.**
 
 ## Sprint decomposition
 
-**All of S1-S6 landed** — `936d849` (S1-S4: core, fuzz + dispatch, FFI, web
-reference) and `014e84e` (S5-S6: the iOS + Android mirrors and the C-61
-regression tests on all three). S7 is this reconcile. The per-sprint text below
-is kept as written, with landing notes where the implementation diverged from the
-plan.
+**All of S1-S8 landed** — `936d849` (S1-S4: core, fuzz + dispatch, FFI, web
+reference), `014e84e` (S5-S6: the iOS + Android mirrors and the C-61 regression
+tests on all three), `9a0f539` (S7's first docs cut, together with the serializing
+lock the first review demanded), and the working tree at the time of writing (S8:
+the two review findings + this reconcile). The per-sprint text below is kept as
+written, with landing notes where the implementation diverged from the plan.
 
 **Verification, as recorded firsthand on the two commits.** `936d849`:
 `cargo test -p lakko-contacts` (214 passed), `cargo check --workspace
@@ -839,6 +998,18 @@ suite's own Ktor `MockEngine` handler raises `error("unexpected OutgoingContent"
 — Ktor's `defaultTransformers` now yields an anonymous subclass of the **abstract**
 `OutgoingContent.ByteArrayContent` while those tests match the concrete
 `io.ktor.http.content.ByteArrayContent`.
+
+**Verification of S7 + S8.** `9a0f539` recorded, firsthand: `apps/web` vitest
+`group-routing` 117 and the full suite 555, `tsc` clean, `vite build` ok;
+`gradlew :app:compileDebugKotlin` BUILD SUCCESSFUL with `GroupPushRoutingTest` 102
+and zero failures; `xcodebuild` BUILD SUCCEEDED with `LakkoTests` 321/321
+excluding the two dockerised-SFU tests; `audit-index-check` clean. For S8, the
+gates recorded firsthand by the maintainer against the working tree: `apps/web`
+`tsc --noEmit` clean and vitest **562**; Android `:app:compileDebugKotlin` BUILD
+SUCCESSFUL with `GroupPushRoutingTest` **107** and `PushRoutingSecretStoreTest`
+**10**, zero failures; iOS `xcodebuild` BUILD SUCCEEDED with
+`PushGroupRoutingTests` **73**, zero failures. `audit-index-check` re-run for this
+reconcile: clean (8 I + 62 C + 15 T).
 
 - **S1 — core.** `crates/lakko-contacts/src/push_routing.rs`: the v2 envelope
   (`PUSH_ROUTING_SECRET_VERSION_V2`, `mint_epoch(8, BE)`, 41-byte payload /
@@ -901,10 +1072,27 @@ suite's own Ktor `MockEngine` handler raises `error("unexpected OutgoingContent"
   on iOS, six on Android, each including a permanent inverted-order companion, and
   on both natives the discrimination was proven by running the swap rather than
   asserted. The `0xEE` -> `0xFF` fixture fix belongs to this sprint.
-- **S7 — docs reconcile.** Flip this ADR's status; update **C-60** and **C-61**;
-  mint **C-62** for the recency ordering; close **G-36 residual 9**, **residual
-  6**, and the concurrent-rotator core of **residual 7**; update the `CLAUDE.md`
-  ADR table + the `lakko-contacts` module-map row + the fuzz-target description.
+- **S7 — the serializing lock, and the first docs cut.** Not in the original plan;
+  added by the first `lakko-security` review. One per-`(account, group)`
+  serializing lock spanning the whole read-decide-write, **shared** across receive,
+  rotate, ensure and redistribute, on all three clients. **Landed in `9a0f539`**
+  alongside a docs pass that minted **C-62** (with its closure claims explicitly
+  conditioned on residual 10), closed **G-36 residual 6**, and deliberately left
+  residuals 7, 9 and 10 recorded as OPEN with this ADR held at Proposed — because
+  the fix had not itself been reviewed. That commit also corrected three
+  pre-existing docs errors: the invariant-index C-60 row still described the
+  retired 62-byte envelope, C-61 still claimed no client test pinned the ordering,
+  and the `G-` quick stats still said `G-1..G-27` with 27 open while `known-gaps.md`
+  had reached G-36.
+- **S8 — the two review findings, and this reconcile.** The `lakko-security` pass
+  on the lock returned **APPROVE WITH NOTES**; both findings closed — the
+  cross-tab Web Lock nested inside the retained in-process queue on web, and a
+  per-call network bound on all three (plus Android's `boundedOrNull` on
+  `freshMintStamp()` at both sites that await it under the lock). Docs: flip this
+  ADR to **Accepted**; add **C-62 sub-invariant 5** (serialization); close **G-36
+  residuals 9 and 7** for the single-context case; **re-scope** residual 10 rather
+  than deleting it; mint **G-37** for the `groupsLock`-across-unbounded-DS-I/O
+  hazard the Android work surfaced; update the `CLAUDE.md` ADR row.
 
 ## References
 
@@ -924,7 +1112,19 @@ suite's own Ktor `MockEngine` handler raises `error("unexpected OutgoingContent"
   this ADR's order also closes. **Residual 6** (`:3187-3203`) — the untested C-61
   ordering.
 - **C-60** / **C-61** (`docs/security/invariant-index.md:193`, `:199`) — the
-  indexed properties this ADR refines rather than replaces.
+  indexed properties this ADR refines rather than replaces. **C-62** is this
+  ADR's own, minted in `9a0f539`; its **sub-invariant 5** (the gate must run
+  against current state) is the S8 addition and the arc's durable lesson.
+- **G-36 residual 10** — re-scoped by S8 from "no client serializes the receive
+  gate" to the narrower cross-context remainder. **G-37** — the
+  `ChatRepository.groupsLock`-held-across-unbounded-DS-I/O hazard the Android
+  bounding work surfaced; a chat-path item that merely happened to surface here.
+- The four serializing-lock entry points, per client:
+  `apps/web/src/push/group-routing.ts` (`withRoutingRowLock`, plus `withWebLock` /
+  `withNetworkTimeout`) · `apps/ios/Lakko/Push/PushGroupRouting.swift`
+  (`withRoutingLock`, `withNetworkTimeout`) ·
+  `apps/android/.../push/GroupPushRouting.kt` (`routingLock`, `bounded`,
+  `boundedOrNull`).
 - `crates/lakko-contacts/src/push_routing.rs` — the v2 envelope, the canonical
   order (`:313-331`), the caller's non-decreasing obligation (`:241-250`), the
   re-broadcast-must-replay rule (`:358-362`), version-before-length (`:434`).

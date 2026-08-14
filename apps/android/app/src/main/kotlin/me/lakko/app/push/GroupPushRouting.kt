@@ -10,6 +10,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import uniffi.lakko_ffi_uniffi.composePushRoutingSecret
 import uniffi.lakko_ffi_uniffi.derivePushGid as ffiDerivePushGid
 import uniffi.lakko_ffi_uniffi.pushRoutingSecretIsNewer as ffiPushRoutingSecretIsNewer
@@ -745,6 +746,71 @@ public object GroupPushRouting {
      * decisions, and only the second one's re-read can see the first one's
      * write.
      *
+     * ## …but every network round-trip taken under it is BOUNDED
+     *
+     * Holding the row across network I/O is only safe while that I/O cannot
+     * run forever. Unbounded, ONE hung request wedged the row
+     * **permanently**: every later envelope queued behind it, so this device
+     * never applied a peer's rotation and kept notifying — and stayed
+     * subscribed to — a routing id an evicted member can still derive. An
+     * ADR-0043 guarantee lost to a stalled socket, with no error raised
+     * anywhere.
+     *
+     * So each awaited network call under this lock runs inside [bounded],
+     * with a [NETWORK_CALL_TIMEOUT_MS] deadline. The bound is per CALL rather
+     * than per section, deliberately: a whole-section deadline would abort at
+     * an arbitrary point and invent a new half-applied shape, whereas a
+     * per-call deadline lands in that call's **already existing** failure
+     * handler, so no new state exists anywhere —
+     *
+     *   - a **broadcast** timeout leaves the row `pending`, exactly as a DS
+     *     error does, and [EnsureAction.REBROADCAST] re-sends it;
+     *   - a **subscribe** timeout is swallowed, exactly as an unreachable
+     *     push-gw is, and the next [ensure] re-subscribes at its tail;
+     *   - an **unsubscribe** timeout is swallowed, exactly as an unreachable
+     *     push-gw is, leaving a stale push-gw row nothing ever notifies again
+     *     — already the documented cost in [retireOldPushGid];
+     *   - a **[PushRoutingPorts.freshMintStamp]** timeout collapses into the
+     *     `null` that path already returns for an unreadable epoch, so it
+     *     fails closed to [RotationOutcome.SKIP_UNKNOWN_EPOCH] (or, in
+     *     [ensure], to no mint at all) rather than stamping a guess. That
+     *     one is bounded for a reason EXTERNAL to this file — see
+     *     [boundedOrNull].
+     *
+     * A rotation therefore occupies the row for at most four deadlines
+     * instead of forever, and every expiry leaves it in a state a later
+     * trigger repairs.
+     *
+     * ## The availability decision, stated because the trade is real
+     *
+     * A deadline is a choice about what to do when the network stops
+     * answering, and this one resolves in TWO directions at once — which is
+     * why "fail open or fail closed" has to be asked of the OPERATION and the
+     * ROW separately:
+     *
+     *   - **the operation fails CLOSED.** An expired call is treated as
+     *     FAILED, never as optimistically succeeded. A timed-out broadcast is
+     *     never flagged distributed; a timed-out unsubscribe never claims the
+     *     old id was retired. Nothing that decides *who may write* (the
+     *     ADR-0042 authority gate) or *which write survives* (the ADR-0044
+     *     order) is relaxed — both still run in full, inside the lock,
+     *     against a fresh read. A deadline can only turn a would-be success
+     *     into a treated-as-failure; it can never admit an envelope the gate
+     *     refused, persist an unordered secret, or mark an undelivered one
+     *     distributed.
+     *   - **the row fails OPEN.** The lock is released and the next queued
+     *     section runs. That is the entire point: a wedged row is strictly
+     *     worse than a repeated round-trip, because the work queued behind it
+     *     is precisely the peer rotation that retires an evicted member's id.
+     *
+     * This is **not** the ADR-0033 fail-open. That one relaxes an anti-abuse
+     * GATE on a store error, reasoning that failing closed there would be
+     * self-inflicted denial of service. Here no gate is relaxed at all: the
+     * fail-open governs only how long one section may occupy the row, and its
+     * cost is an extra idempotent retry, paid on a network that is already
+     * failing. The confidentiality- and ordering-relevant properties are
+     * untouched in both directions.
+     *
      * ## Lock order — this lock, then the caller's group lock, never back
      *
      * [ensure] / [rotate] / [redistribute] reach `ChatRepository.groupsLock`
@@ -774,6 +840,94 @@ public object GroupPushRouting {
     /** The serializing [routingLocks] entry for one `(account, group)`. */
     private fun routingLock(accountIdB64: String, groupIdHex: String): Mutex =
         routingLocks.getOrPut(lockKey(accountIdB64, groupIdHex)) { Mutex() }
+
+    /**
+     * Deadline (ms) for ONE network round-trip taken under [routingLocks] —
+     * see that field's "every network round-trip taken under it is BOUNDED"
+     * section for why one is needed and which way it fails.
+     *
+     * Chosen, not measured: comfortably above a healthy mobile round-trip,
+     * and low enough that a stalled connection is bounded by this lock's
+     * needs rather than by whatever the HTTP client's own timeouts happen to
+     * be. It caps a rotation's worst-case hold on the row at three deadlines
+     * (broadcast + subscribe + unsubscribe). The exact value is not
+     * load-bearing — being finite is.
+     */
+    public const val NETWORK_CALL_TIMEOUT_MS: Long = 15_000L
+
+    /**
+     * Raised by [bounded] when a network call taken under the routing-row
+     * lock outlives [NETWORK_CALL_TIMEOUT_MS].
+     *
+     * Never a new failure MODE — every call site folds it into that call's
+     * already-existing handler (a broadcast leaves the row pending, a
+     * subscribe / unsubscribe is swallowed), so a hung socket produces
+     * exactly the state an outright network error already produced.
+     *
+     * @property what which call expired. Low-cardinality, for the log —
+     *   never key material.
+     */
+    public class NetworkCallTimedOut(public val what: String) :
+        Exception("push-routing $what exceeded ${NETWORK_CALL_TIMEOUT_MS}ms under the routing lock")
+
+    /**
+     * Run one network round-trip under a deadline, so it cannot hold the
+     * serializing routing-row lock forever.
+     *
+     * [withTimeoutOrNull] cancels the call and awaits its unwind, which is
+     * Kotlin's idiom and is sufficient here because every suspending HTTP
+     * client in this app (Ktor over OkHttp) is cancellable — a stalled socket
+     * unwinds promptly on cancellation. It is the one mechanical difference
+     * from the iOS mirror, whose `withNetworkTimeout` ABANDONS: Swift has no
+     * `withTimeout` at all, so the race had to be hand-written there, and the
+     * abandoning form was no larger than the awaiting one. A helper that
+     * deliberately ignored cancellation would defeat this bound; nothing
+     * reachable from here does.
+     *
+     * A timeout surfaces as a THROW rather than a silent no-op so every call
+     * site keeps routing it through the same handler it already routes a DS
+     * or push-gw error through — which is what makes this change introduce no
+     * new state.
+     */
+    private suspend fun bounded(what: String, call: suspend () -> Unit) {
+        withTimeoutOrNull(NETWORK_CALL_TIMEOUT_MS) { call() } ?: throw NetworkCallTimedOut(what)
+    }
+
+    /**
+     * Run one awaited call under the SAME [NETWORK_CALL_TIMEOUT_MS] deadline
+     * as [bounded], but surfacing expiry as `null` rather than a throw — for
+     * the one site whose existing failure shape is already a `null`.
+     *
+     * ## Why this exists — the reason is EXTERNAL to this file
+     *
+     * That site is [PushRoutingPorts.freshMintStamp], which is **not network
+     * I/O**. It reads `Group.epoch()`, and it is bounded anyway because in
+     * production it hops through `ChatRepository.groupsLock` — and that lock
+     * IS held across unbounded DS publishes (`publishGroup` on the
+     * role-change / add-member / remove-member commit paths,
+     * `publishMailbox` on the invite paths). So the chain
+     *
+     *     routing-row lock -> freshMintStamp() -> groupsLock -> a hung DS publish
+     *
+     * wedges the routing row exactly as an unbounded broadcast would, one hop
+     * removed: every later envelope queues behind it, so this device never
+     * applies a peer's rotation and keeps notifying an id an evicted member
+     * can still derive.
+     *
+     * **Removing this bound re-opens that wedge**, and nothing in this file
+     * would show it — the hazard lives in `ChatRepository`. Bounding those DS
+     * publishes under `groupsLock` is the deeper fix and belongs to the chat
+     * path; until then this is what keeps the routing row's occupancy finite.
+     *
+     * Expiry deliberately collapses into the same `null` an unreadable epoch
+     * produces, so it lands in the EXISTING
+     * [RotationOutcome.SKIP_UNKNOWN_EPOCH] shape (and in [ensure], in the
+     * existing no-mint branch) rather than inventing a new one: fail-closed,
+     * nothing minted or sent, and repairable at the next shrink or the next
+     * authorised envelope.
+     */
+    private suspend fun <T> boundedOrNull(call: suspend () -> T?): T? =
+        withTimeoutOrNull(NETWORK_CALL_TIMEOUT_MS) { call() }
 
     /**
      * Cheap length + first-byte pre-filter mirroring the web
@@ -806,7 +960,12 @@ public object GroupPushRouting {
             ?: return SubscribeOutcome.DEFERRED
         val pushGid = ports.derivePushGid(secret)
         try {
-            ports.subscribeUnderPushGid(pushGid)
+            // BOUNDED: this runs under the serializing routing-row lock, so a
+            // hung push-gw would otherwise wedge the row and stop this device
+            // ever applying a peer's rotation. A deadline lands in the same
+            // swallow below as an unreachable push-gw, and the next `ensure`
+            // re-subscribes at its tail.
+            bounded("subscribe") { ports.subscribeUnderPushGid(pushGid) }
         } catch (_: Throwable) {
             // Best-effort — push is a UX nicety; foreground polling covers it.
         }
@@ -1057,7 +1216,15 @@ public object GroupPushRouting {
                     // failed read fails CLOSED (no mint, hence no push)
                     // rather than stamping a guess — an unordered secret is
                     // exactly what the v2 envelope exists to eliminate.
-                    val stamp = ports.freshMintStamp()
+                    //
+                    // BOUNDED, and NOT because this is network I/O: in
+                    // production it hops through `ChatRepository.groupsLock`,
+                    // which is held across unbounded DS publishes, so a hung
+                    // publish would wedge this routing row through it. A
+                    // deadline collapses into the same `null` an unreadable
+                    // epoch gives, i.e. this branch's existing no-mint shape.
+                    // See [boundedOrNull].
+                    val stamp = boundedOrNull { ports.freshMintStamp() }
                     if (stamp != null) {
                         val secret = ports.mintSecret()
                         val pushGid = ports.derivePushGid(secret)
@@ -1126,7 +1293,14 @@ public object GroupPushRouting {
         ports: PushRoutingPorts,
     ) {
         try {
-            ports.broadcast(ports.composeEnvelope(stamp, secret))
+            // BOUNDED: this runs under the serializing routing-row lock, so a
+            // hung DS would otherwise wedge the row forever. A deadline lands
+            // in the `catch` below — the SAME branch a DS error takes — so the
+            // row is left pending and the any-holder re-broadcast re-sends it.
+            // The row is never flagged distributed on a call that merely
+            // stopped answering.
+            val envelope = ports.composeEnvelope(stamp, secret)
+            bounded("broadcast") { ports.broadcast(envelope) }
             ports.markDistributed(groupIdHex)
         } catch (_: Throwable) {
             // Left pending on purpose — the next `ensure` retries.
@@ -1215,7 +1389,12 @@ public object GroupPushRouting {
         routingLock(accountIdB64, groupIdHex).withLock {
             val record = ports.getRecord(groupIdHex) ?: return
             try {
-                ports.broadcast(ports.composeEnvelope(record.replayStamp, record.secret))
+                // BOUNDED for the same reason as every other call under this
+                // lock. A deadline reaches the SAME `catch` a DS error does, so
+                // it rewinds the row to pending and rethrows — this function's
+                // documented contract, deliberately unchanged.
+                val envelope = ports.composeEnvelope(record.replayStamp, record.secret)
+                bounded("redistribute") { ports.broadcast(envelope) }
             } catch (e: Throwable) {
                 runCatching { ports.markPending(groupIdHex) }
                 throw e
@@ -1351,7 +1530,12 @@ public object GroupPushRouting {
             return
         }
         try {
-            ports.unsubscribeFromPushGid(oldGid)
+            // BOUNDED: same reason as the subscribe — this is the tail of a
+            // rotation, still holding the routing row, and a hung push-gw here
+            // would wedge it. A deadline is swallowed exactly as an
+            // unreachable push-gw is, at the cost this function already
+            // documents: a stale row nothing notifies again.
+            bounded("unsubscribe") { ports.unsubscribeFromPushGid(oldGid) }
         } catch (_: Throwable) {
             // The new id is already armed; a failed unsubscribe leaves a row
             // nothing notifies again, not a broken group.
@@ -1523,7 +1707,17 @@ public object GroupPushRouting {
             // commit first, so this is already the POST-removal epoch and the
             // mint strictly out-ranks anything the evicted member could hold.
             // Fail-closed on an unreadable epoch.
-            val stamp = if (oldSecret == null) null else ports.freshMintStamp()
+            //
+            // BOUNDED, and NOT because this is network I/O: in production it
+            // hops through `ChatRepository.groupsLock`, which is held across
+            // unbounded DS publishes, so a hung publish would wedge this
+            // routing row through it — the same wedge one hop removed. A
+            // deadline collapses into the same `null` an unreadable epoch
+            // gives, so it lands in the EXISTING
+            // [RotationOutcome.SKIP_UNKNOWN_EPOCH] below: nothing minted,
+            // nothing sent, the old secret left intact and repairable at the
+            // next shrink. See [boundedOrNull].
+            val stamp = if (oldSecret == null) null else boundedOrNull { ports.freshMintStamp() }
             when {
                 oldSecret == null -> RotationOutcome.SKIP_NO_SECRET
                 stamp == null -> RotationOutcome.SKIP_UNKNOWN_EPOCH

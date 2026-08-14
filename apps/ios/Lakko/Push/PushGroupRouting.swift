@@ -145,6 +145,64 @@ import Security
 /// semantics, not a cost to be trimmed: those are exactly the two writers
 /// that must not interleave.
 ///
+/// ### …but every one of those round-trips is BOUNDED
+///
+/// Holding the row across network I/O is only safe while that I/O cannot run
+/// forever. Unbounded, ONE hung request wedges the row **permanently**: every
+/// later envelope queues behind it, so this device never applies a peer's
+/// rotation and keeps notifying — and stays subscribed to — a routing id an
+/// evicted member can still derive. An ADR-0043 guarantee lost to a stalled
+/// socket, with no error raised anywhere.
+///
+/// So each awaited network call under the lock runs inside
+/// ``withNetworkTimeout(_:_:)``, bounded by ``networkCallTimeout``. The bound
+/// is per CALL rather than per section, deliberately: a whole-section
+/// deadline would abort at an arbitrary point and invent a new half-applied
+/// shape, whereas a per-call deadline lands in that call's **already
+/// existing** failure handler, so no new state exists anywhere —
+///
+///   * a **broadcast** timeout leaves the row `pending`, exactly as a DS
+///     error does, and the any-holder re-broadcast branch re-sends it;
+///   * a **subscribe** timeout is swallowed, exactly as an unreachable
+///     push-gw is, and the next
+///     ``ensureProvisioned(accountIdB64:groupIdHex:group:identity:broadcast:)``
+///     re-subscribes at its tail;
+///   * an **unsubscribe** timeout is swallowed, exactly as an unreachable
+///     push-gw is, leaving a stale push-gw row that nothing ever notifies
+///     again — already the documented cost in ``retireOldPushGid(oldSecret:)``.
+///
+/// A rotation therefore occupies the row for at most three deadlines instead
+/// of forever, and every expiry leaves it in a state a later trigger repairs.
+///
+/// ### The availability decision, stated because the trade is real
+///
+/// A deadline is a choice about what to do when the network stops answering,
+/// and this one resolves in TWO directions at once — which is why "fail open
+/// or fail closed" has to be asked of the OPERATION and the ROW separately:
+///
+///   * **the operation fails CLOSED.** An expired call is treated as FAILED,
+///     never as optimistically succeeded. A timed-out broadcast is never
+///     flagged distributed; a timed-out unsubscribe never claims the old id
+///     was retired. Nothing that decides *who may write* (the ADR-0042
+///     authority gate) or *which write survives* (the ADR-0044 order) is
+///     relaxed — both still run in full, inside the lock, against a fresh
+///     read. A deadline can only turn a would-be success into a
+///     treated-as-failure; it can never admit an envelope the gate refused,
+///     persist an unordered secret, or mark an undelivered one distributed.
+///   * **the row fails OPEN.** The lock is released and the next queued
+///     section runs. That is the entire point of the change: a wedged row is
+///     strictly worse than a repeated round-trip, because the work queued
+///     behind it is precisely the peer rotation that retires an evicted
+///     member's id.
+///
+/// This is **not** the ADR-0033 fail-open. That one relaxes an anti-abuse
+/// GATE on a store error, reasoning that failing closed there would be
+/// self-inflicted denial of service. Here no gate is relaxed at all: the
+/// fail-open governs only how long one section may occupy the row, and its
+/// cost is an extra idempotent retry, paid on a network that is already
+/// failing. The confidentiality- and ordering-relevant properties are
+/// untouched in both directions.
+///
 /// `@MainActor` so the owner-role check + the E2EE `broadcast` (which runs
 /// `Group.createApplicationMessage` in ``ChatRepository``) stay on the same
 /// actor that owns the MLS `Group` handle.
@@ -172,6 +230,27 @@ public final class PushGroupRouting {
     /// `"lakko/push-routing-secret\0"`). The cheap pre-filter; the FFI
     /// `decodePushRoutingSecret` is the authoritative fail-closed check.
     private static let envelopeFirstByte: UInt8 = 0x6c
+
+    /// Default deadline (seconds) for ONE network round-trip taken under the
+    /// serializing routing-row lock — see the "every one of those round-trips
+    /// is BOUNDED" section of the type doc.
+    ///
+    /// Chosen, not measured: comfortably above a healthy mobile round-trip,
+    /// and below `URLSession`'s own 60 s default request timeout so a stalled
+    /// connection is bounded by THIS lock's needs rather than by the
+    /// transport's. It caps a rotation's worst-case hold on the row at three
+    /// deadlines (broadcast + subscribe + unsubscribe). The exact value is not
+    /// load-bearing — being finite is.
+    public static let defaultNetworkCallTimeout: TimeInterval = 15
+
+    /// Deadline for one network round-trip under the routing-row lock.
+    ///
+    /// Injectable ONLY so tests can pick a short one: unlike the Android
+    /// mirror — where `runTest`'s virtual clock advances a `withTimeoutOrNull`
+    /// instantly and the bound can stay a plain constant — XCTest has no
+    /// virtual clock, so a test of the production 15 s would sleep for 15 real
+    /// seconds. Production always takes ``defaultNetworkCallTimeout``.
+    private let networkCallTimeout: TimeInterval
 
     private let store: PushRoutingStore
 
@@ -284,10 +363,111 @@ public final class PushGroupRouting {
         return outcome
     }
 
+    // MARK: - Bounding the network I/O taken under the routing-row lock
+
+    /// Raised by ``withNetworkTimeout(_:_:)`` when a network round-trip taken
+    /// under the routing-row lock outlives ``networkCallTimeout``.
+    ///
+    /// It is never a new failure MODE — every call site folds it into that
+    /// call's already-existing handler (a broadcast leaves the row pending, a
+    /// subscribe / unsubscribe is swallowed), so a hung socket produces
+    /// exactly the state an outright network error already produced.
+    public struct NetworkCallTimedOut: Error {
+        /// Which call expired. Low-cardinality, for the log — never key
+        /// material.
+        public let what: String
+    }
+
+    /// One-shot "who got there first" flag for ``withNetworkTimeout(_:_:)``.
+    /// `@MainActor`-confined, so the operation and the timer can never both
+    /// observe it unclaimed and double-resume the continuation.
+    @MainActor
+    private final class RaceLatch {
+        private var claimed = false
+        /// `true` for exactly one caller — the winner of the race.
+        func claim() -> Bool {
+            if claimed { return false }
+            claimed = true
+            return true
+        }
+    }
+
+    /// Holds the timer task so the winner can cancel the loser rather than
+    /// leaving a sleeper parked for the rest of the deadline.
+    @MainActor
+    private final class TaskBox {
+        var task: Task<Void, Never>?
+        func cancel() { task?.cancel() }
+    }
+
+    /// Run one network round-trip with a deadline, so it cannot hold the
+    /// serializing routing-row lock forever.
+    ///
+    /// **Abandons rather than merely cancelling.** On expiry the caller is
+    /// resumed immediately with ``NetworkCallTimedOut`` and the operation is
+    /// left to unwind on its own; `work.cancel()` is a courtesy that lets a
+    /// cooperative operation (`URLSession`'s async API is one) stop early.
+    /// Waiting for cancellation to be *observed* would reopen the exact hole
+    /// this closes for any operation that does not observe it — and the
+    /// requirement is that the row is freed, not that the socket is tidy.
+    /// This is the one place the two platforms differ in mechanism: Kotlin's
+    /// `withTimeoutOrNull` cancels and awaits the unwind, which is that
+    /// language's idiom and is sufficient for a cancellable HTTP client;
+    /// Swift has no `withTimeout` at all, so the race had to be written by
+    /// hand, and writing the abandoning one is no larger than the awaiting
+    /// one while being strictly stronger.
+    ///
+    /// Abandoning is safe HERE specifically because nothing in the routing
+    /// row is written by the operation itself: `broadcast`, `subscribe` and
+    /// `unsubscribe` are all remote calls whose only local effect happens in
+    /// the caller AFTER they return. A late-completing abandoned call
+    /// therefore cannot write anything behind a successor's back.
+    ///
+    /// It is also why every caller passes its seam in through a **capture
+    /// list** (`{ [subscribeUnderPushGid] in … }`) rather than reaching
+    /// through `self`: the `work` task can outlive this call by an unbounded
+    /// margin, and an implicit `self` capture would keep the whole
+    /// ``PushGroupRouting`` — and its store — alive for exactly as long as
+    /// the hang lasts.
+    ///
+    /// - Parameters:
+    ///   - what: low-cardinality tag naming the call, for the log.
+    ///   - operation: the network round-trip. Its own throw propagates
+    ///     unchanged, so a real error and a deadline reach the same handler.
+    private func withNetworkTimeout(
+        _ what: String,
+        _ operation: @escaping @MainActor () async throws -> Void
+    ) async throws {
+        // Floor the deadline so a degenerate injected value cannot make the
+        // timer fire before the operation is even started.
+        let deadlineNanos = UInt64(max(networkCallTimeout, 0.001) * 1_000_000_000)
+        let latch = RaceLatch()
+        let timer = TaskBox()
+        defer { timer.cancel() }
+        try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<Void, Error>) in
+            let work = Task { @MainActor in
+                do {
+                    try await operation()
+                    if latch.claim() { continuation.resume() }
+                } catch {
+                    if latch.claim() { continuation.resume(throwing: error) }
+                }
+            }
+            timer.task = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: deadlineNanos)
+                guard latch.claim() else { return }
+                work.cancel()
+                continuation.resume(throwing: NetworkCallTimedOut(what: what))
+            }
+        }
+    }
+
     /// `nonisolated` so the initializer is callable as a default argument
     /// from a nonisolated context (``ChatRepository/init``); it only assigns
     /// stored properties.
     public nonisolated init(
+        networkCallTimeout: TimeInterval = PushGroupRouting.defaultNetworkCallTimeout,
         store: PushRoutingStore = PushRoutingStore(),
         subscribeUnderPushGid: @escaping (Data) async throws -> Void = { pushGid in
             let devicePseudonym = try DevicePushId.getOrCreate()
@@ -304,6 +484,7 @@ public final class PushGroupRouting {
             )
         }
     ) {
+        self.networkCallTimeout = networkCallTimeout
         self.store = store
         self.subscribeUnderPushGid = subscribeUnderPushGid
         self.unsubscribeUnderPushGid = unsubscribeUnderPushGid
@@ -489,7 +670,14 @@ public final class PushGroupRouting {
             return
         }
         do {
-            try await subscribeUnderPushGid(pushGid)
+            // BOUNDED: this runs under the serializing routing-row lock, so a
+            // hung push-gw would otherwise wedge the row and stop this device
+            // ever applying a peer's rotation. A deadline lands in the same
+            // swallow below as an unreachable push-gw, and the next
+            // `ensureProvisioned` re-subscribes at its tail.
+            try await withNetworkTimeout("subscribe") { [subscribeUnderPushGid] in
+                try await subscribeUnderPushGid(pushGid)
+            }
         } catch {
             NSLog("push_gid subscribe failed: \(error)")
         }
@@ -524,7 +712,14 @@ public final class PushGroupRouting {
             return
         }
         do {
-            try await unsubscribeUnderPushGid(oldGid)
+            // BOUNDED: same reason as the subscribe — this is the tail of a
+            // rotation, still holding the routing row, and a hung push-gw
+            // here would wedge it. A deadline is swallowed exactly as an
+            // unreachable push-gw is, at the cost this method already
+            // documents: a stale row that nothing notifies again.
+            try await withNetworkTimeout("unsubscribe") { [unsubscribeUnderPushGid] in
+                try await unsubscribeUnderPushGid(oldGid)
+            }
         } catch {
             // The new id is already armed; a failed unsubscribe leaves a row
             // that nothing notifies again, not a broken group.
@@ -1131,17 +1326,27 @@ public final class PushGroupRouting {
     /// epoch. Sourcing it inside this helper would silently re-stamp on every
     /// retry, which is the one mistake that turns the whole ordering gate into
     /// a no-op.
+    ///
+    /// **The broadcast is BOUNDED** (``withNetworkTimeout(_:_:)``): it runs
+    /// under the serializing routing-row lock, so a hung DS would otherwise
+    /// wedge the row forever. A deadline lands in the `catch` below — the
+    /// SAME branch a DS error takes — so the row is left `pending` and the
+    /// any-holder re-broadcast branch re-sends it. The row is never flagged
+    /// distributed on a call that merely stopped answering.
     private func broadcastAndSettle(
         secret: Data,
         mintEpoch: UInt64,
         accountIdB64: String,
         groupIdHex: String,
         what: String,
-        broadcast: (Data) async throws -> Void
+        broadcast: @escaping (Data) async throws -> Void
     ) async {
         do {
-            try await broadcast(
-                try Self.composeSecretEnvelope(mintEpoch: mintEpoch, secret: secret))
+            let envelope = try Self.composeSecretEnvelope(
+                mintEpoch: mintEpoch, secret: secret)
+            try await withNetworkTimeout("broadcast") {
+                try await broadcast(envelope)
+            }
             store.markDistributed(
                 accountIdB64: accountIdB64, groupIdHex: groupIdHex, matching: secret)
         } catch {
@@ -1264,7 +1469,7 @@ public final class PushGroupRouting {
         groupIdHex: String,
         group: Group,
         identity: Identity,
-        broadcast: (Data) async throws -> Void
+        broadcast: @escaping (Data) async throws -> Void
     ) async {
         // ADR-0022 role: `.owner`. `nil` = open / legacy group with no role
         // table — nobody mints (avoids divergence), matching the ADR-0042
@@ -1588,7 +1793,7 @@ public final class PushGroupRouting {
         accountIdB64: String,
         groupIdHex: String,
         mintEpoch: @MainActor () -> UInt64?,
-        broadcast: (Data) async throws -> Void
+        broadcast: @escaping (Data) async throws -> Void
     ) async -> PushRotationOutcome {
         // (1)+(2) — the OLD secret, read BEFORE anything overwrites it. The
         // gid is derived from these bytes at teardown time, in

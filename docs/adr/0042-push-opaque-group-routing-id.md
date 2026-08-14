@@ -252,7 +252,7 @@ enhancement** (§ Open questions).
   id that is **unlinkable to the DS `group_id`** — on both fronts, the
   push-gw-internal subscription/notify materialisation **and** the external
   APNs/FCM cleartext `g`/`thread-id` correlation — with **zero push-gw code or
-  schema change** (verified: `git diff 51fe05d..HEAD -- services/` is empty; the
+  schema change** (verified: `git diff 51fe05d..HEAD -- services/push-gw` is empty; the
   server stays opaque, invariant #2). The routing id is stable, so the reverse-map
   is a fixed per-group entry, subscribers survive membership commits without
   re-subscribing, and iOS lock-screen grouping stays intact. The distribution
@@ -349,7 +349,7 @@ named.
 | 2 | **FFI** — landed together with Sprint 1 | `0d349f6` |
 | 3 | **Clients.** Mint (owner) + persist + redistribute + subscribe/notify under `push_gid` + the reverse index — web reference, then the iOS + Android mirrors | `024b3c9` (web), `ea2c513` (iOS + Android) |
 | 4 | **ADR-0041 decrypt reverse-map.** `resolveAccount` on all three clients reverse-maps `push_gid → (account, group_id)`; the DS fetch keeps the real `group_id`. The Android notification **tap** deep-link reverse-resolves too | `981bc91`, `7da84ee` |
-| 5 | **push-gw — no change, verified.** `git diff 51fe05d..HEAD -- services/` is **empty**: the code, schema, and tests are byte-identical. push-gw keeps treating the value as an opaque `BINARY(32)` | (verified, no commit) |
+| 5 | **push-gw — no change, verified.** `git diff 51fe05d..HEAD -- services/push-gw` is **empty**: the code, schema, and tests are byte-identical. push-gw keeps treating the value as an opaque `BINARY(32)` | (verified, no commit) |
 | 6 | **`lakko-security` review** — **APPROVE-WITH-NOTES**, no CRITICAL/HIGH. Two MEDIUM findings fixed (below); four residuals recorded as G-36 | `21554f2`, `62f23ad` |
 | 7 | **Docs reconcile** — this status flip + **G-36** + **C-60** + the `CLAUDE.md` ADR table / module map / fuzz list | (this change) |
 

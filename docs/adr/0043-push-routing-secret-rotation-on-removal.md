@@ -21,8 +21,10 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
   "the secret does not rotate on member removal in V1" — and realises the
   rotation-on-removal enhancement ADR-0042 explicitly parked.
 - **Date:** 2026-08-10 (proposed) / 2026-08-11 (accepted — implemented on all
-  three clients; client-only, `git diff 5665018..HEAD -- crates/ services/
-  schemas/` is **empty**)
+  three clients; client-only, `git diff 5665018..a6ed544 -- crates/ services/
+  schemas/` is **empty** — the endpoint is pinned to this ADR's own landing
+  commit, since a HEAD-relative form decays: ADR-0044 later changed
+  `crates/lakko-contacts` for the v2 envelope)
 - **Context:** Phase 3 — the push subsystem. Addresses **G-36 residual 2** (a
   removed member keeps a valid `push_gid`, compounded by per-group unsubscribe
   being dead code on all three clients).
@@ -687,9 +689,14 @@ a client-side `members()` diff.
 
 ## Outcome — what landed
 
-Implemented client-only on all three clients; `git diff 5665018..HEAD -- crates/
-services/ schemas/` is **empty**, so the ADR-0042 `push_gid` derivation, the
-62-byte envelope, the fuzz target, and `services/push-gw` are all untouched.
+Implemented client-only on all three clients; `git diff 5665018..a6ed544 --
+crates/ services/ schemas/` is **empty**, so the ADR-0042 `push_gid` derivation,
+the 62-byte envelope, the fuzz target, and `services/push-gw` were all untouched
+by *this* ADR. The endpoint is pinned to this ADR's own landing commit rather
+than `HEAD`, because the HEAD-relative form decays as later work lands:
+[ADR-0044](0044-push-routing-secret-recency.md) subsequently changed
+`crates/lakko-contacts` (the envelope went v2, 70 bytes) and the fuzz target with
+it. `services/push-gw` remains byte-identical through both arcs.
 
 **Anchor convention for this section:** every line number below is as of
 **`a6ed544`** (the commit that landed the iOS + Android mirrors), verified against

@@ -1847,6 +1847,323 @@ class GroupPushRoutingTest {
             assertNull("the original id was retired", ports.routes[hex(oldGid)])
         }
 
+    // -----------------------------------------------------------------
+    // The routing row is held across network I/O, but BOUNDED
+    //
+    // Spanning the whole read-decide-write with the lock is correct — it is
+    // what closes the ADR-0044 HIGH — but while the network calls under it
+    // were UNBOUNDED, one hung request wedged the row permanently: every
+    // later envelope queued behind it forever, so this device never applied
+    // a peer's rotation and kept notifying, and stayed subscribed to, a
+    // routing id an evicted member can still derive. An ADR-0043 guarantee
+    // lost to a stalled socket, with no error raised anywhere.
+    //
+    // These run on `runTest`'s VIRTUAL clock, so `advanceUntilIdle` crosses
+    // the production 15 s deadline instantly — which is why the Android
+    // bound can stay a plain constant while the iOS mirror has to inject a
+    // short one (XCTest has no virtual clock).
+    // -----------------------------------------------------------------
+
+    /** A DS that accepts the envelope and then never answers. The hang is a
+     *  `CompletableDeferred.await()` — cancellable, exactly like a stalled
+     *  Ktor/OkHttp call, which is what [GroupPushRouting.bounded]'s
+     *  `withTimeoutOrNull` relies on. */
+    private class HungBroadcastPorts(accountIdB64: String) : FakePorts(accountIdB64) {
+        private val neverAnswers = CompletableDeferred<Unit>()
+
+        /** How many broadcasts have PARKED (recorded before hanging, so a
+         *  test can tell "never attempted" from "attempted and stuck"). */
+        var broadcastsEntered = 0
+
+        /** A distinct secret per mint, so a rotation is distinguishable from
+         *  the seeded row. */
+        override fun mintSecret(): ByteArray {
+            mintCount++
+            return ByteArray(32) { (0x40 + mintCount).toByte() }
+        }
+
+        override suspend fun broadcast(envelope: ByteArray) {
+            broadcastsEntered++
+            broadcastEnvelopes.add(envelope)
+            neverAnswers.await()
+        }
+    }
+
+    /** A push-gw that accepts the subscribe and then never answers. */
+    private class HungSubscribePorts(accountIdB64: String) : FakePorts(accountIdB64) {
+        private val neverAnswers = CompletableDeferred<Unit>()
+
+        override fun mintSecret(): ByteArray {
+            mintCount++
+            return ByteArray(32) { (0x40 + mintCount).toByte() }
+        }
+
+        override suspend fun subscribeUnderPushGid(pushGid: ByteArray) {
+            super.subscribeUnderPushGid(pushGid)
+            neverAnswers.await()
+        }
+    }
+
+    /**
+     * **The finding.** The counterpart of
+     * `an inbound secret cannot be applied mid-rotation`: there the rotation
+     * eventually completes and the queued envelope must WAIT its turn; here
+     * the broadcast never completes and it must still GET a turn.
+     */
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `a HUNG broadcast does not wedge the row - a later envelope still applies`() = runTest {
+        val ports = HungBroadcastPorts(account)
+        val g = "77".repeat(32)
+        seedRouting(ports, g, secretA)
+        // The rotation stamps 2; the peer envelope 3, so it strictly
+        // out-ranks rather than tying and falling to a byte compare.
+        ports.groupEpoch = 2uL
+
+        launch {
+            GroupPushRouting.rotate(account, g, GroupPushRouting.RotationRole.OWNER, ports)
+        }
+        runCurrent()
+        assertEquals("the rotation is parked in its broadcast", 1, ports.broadcastsEntered)
+
+        val peer = ByteArray(32) { 0xEE.toByte() }
+        var verdict: GroupPushRouting.ReceiveVerdict? = null
+        launch {
+            verdict = receiveGated(
+                g, peer, ownerKey, knownRoles(), ports,
+                mintEpoch = 3uL, ownGroupEpoch = 3uL,
+            )
+        }
+        runCurrent()
+        // Serializing, not coalescing — still true. Bounding the I/O did not
+        // let the queued envelope skip ahead of the in-flight rotation.
+        assertNull("the envelope waits while the broadcast is still in flight", verdict)
+
+        // Virtual time crosses the deadline, which is the ONLY thing that
+        // frees the row here. Unbounded, this advances nothing and the
+        // assertions below fail.
+        advanceUntilIdle()
+
+        assertEquals(
+            "the queued envelope applies once the deadline frees the row",
+            GroupPushRouting.ReceiveVerdict.ACCEPT_OWNER,
+            verdict,
+        )
+        assertArrayEquals(peer, ports.secrets[g])
+        // The receive read the rotation's OUTPUT as its stored value, so it
+        // retired the id the rotation had armed — nothing stranded.
+        assertEquals(2, ports.unsubscribeCount)
+    }
+
+    /**
+     * The deadline fails CLOSED **for correctness**: a broadcast that merely
+     * stopped answering is treated as FAILED, never as optimistically
+     * delivered — so the row is left `pending`, which is the state
+     * [GroupPushRouting.EnsureAction.REBROADCAST] repairs.
+     *
+     * The rest of the section still runs: the deadline aborts ONE call, not
+     * the whole locked body, which is why no half-applied shape exists.
+     */
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `a TIMED-OUT broadcast leaves the row PENDING for the retry`() = runTest {
+        val ports = HungBroadcastPorts(account)
+        val g = "78".repeat(32)
+        seedRouting(ports, g, secretA)
+        ports.groupEpoch = 2uL
+        val oldGid = ports.derivePushGid(secretA)
+
+        var outcome: GroupPushRouting.RotationOutcome? = null
+        launch {
+            outcome = GroupPushRouting.rotate(
+                account, g, GroupPushRouting.RotationRole.OWNER, ports,
+            )
+        }
+        advanceUntilIdle()
+
+        assertEquals(
+            "the rotation returns despite a broadcast that never does",
+            GroupPushRouting.RotationOutcome.ROTATED,
+            outcome,
+        )
+        assertFalse(
+            "a broadcast that timed out must NEVER be recorded as delivered — " +
+                "that would disarm the only branch that re-sends it",
+            ports.distributed[g]!!,
+        )
+        assertFalse("the local re-key is durable", ports.secrets[g]!!.contentEquals(secretA))
+        // Steps (6)-(8) still ran: the new id armed, the old one retired.
+        assertEquals(1, ports.subscribeCount)
+        assertArrayEquals(ports.derivePushGid(ports.secrets[g]!!), ports.lastSubscribeTarget)
+        assertArrayEquals(oldGid, ports.unsubscribed.single())
+    }
+
+    /**
+     * A `freshMintStamp` that never answers.
+     *
+     * NOT network I/O — it reads `Group.epoch()`. It is bounded because in
+     * production it hops through `ChatRepository.groupsLock`, and that lock
+     * IS held across unbounded DS publishes (`publishGroup` on the
+     * role-change / add-member / remove-member commits, `publishMailbox` on
+     * the invite paths). So a hung DS publish wedges the routing row through
+     * it, one hop removed. This fake stands in for that whole chain.
+     */
+    private class HungStampPorts(accountIdB64: String) : FakePorts(accountIdB64) {
+        private val neverAnswers = CompletableDeferred<Unit>()
+
+        /** How many stamp reads have PARKED. */
+        var stampsEntered = 0
+
+        override fun mintSecret(): ByteArray {
+            mintCount++
+            return ByteArray(32) { (0x40 + mintCount).toByte() }
+        }
+
+        override suspend fun freshMintStamp(): GroupPushRouting.MintStamp.Fresh? {
+            stampsEntered++
+            neverAnswers.await()
+            return super.freshMintStamp()
+        }
+    }
+
+    /**
+     * The stamp read is the fourth awaited call under the lock, and the only
+     * one whose hazard is EXTERNAL to this file (see [HungStampPorts]).
+     *
+     * It fails closed into the SHAPE THAT ALREADY EXISTS for an unreadable
+     * epoch — [GroupPushRouting.RotationOutcome.SKIP_UNKNOWN_EPOCH] — so
+     * nothing is minted, nothing is sent, and the held secret is left intact
+     * for the next shrink or the next authorised envelope to repair.
+     */
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `a HUNG mint-stamp read does not wedge the row - it fails closed`() = runTest {
+        val ports = HungStampPorts(account)
+        val g = "7a".repeat(32)
+        seedRouting(ports, g, secretA)
+        ports.groupEpoch = 2uL
+
+        var outcome: GroupPushRouting.RotationOutcome? = null
+        launch {
+            outcome = GroupPushRouting.rotate(
+                account, g, GroupPushRouting.RotationRole.OWNER, ports,
+            )
+        }
+        runCurrent()
+        assertEquals("the rotation is parked reading its mint stamp", 1, ports.stampsEntered)
+
+        val peer = ByteArray(32) { 0xEE.toByte() }
+        var verdict: GroupPushRouting.ReceiveVerdict? = null
+        launch {
+            verdict = receiveGated(
+                g, peer, ownerKey, knownRoles(), ports,
+                mintEpoch = 3uL, ownGroupEpoch = 3uL,
+            )
+        }
+        runCurrent()
+        assertNull("the envelope waits while the stamp read is still in flight", verdict)
+
+        advanceUntilIdle()
+
+        assertEquals(
+            "an unanswered stamp read fails CLOSED into the existing shape",
+            GroupPushRouting.RotationOutcome.SKIP_UNKNOWN_EPOCH,
+            outcome,
+        )
+        // Fail-closed means the rotation left the row exactly as it found it.
+        assertEquals("no mint without a stamp", 0, ports.mintCount)
+        assertEquals("nothing broadcast without a stamp", 0, ports.broadcastCount)
+        // Which the queued envelope then proves from the other side: its
+        // "old" secret was still `secretA`, so that is the id it retired.
+        assertEquals(
+            "the queued envelope applies once the deadline frees the row",
+            GroupPushRouting.ReceiveVerdict.ACCEPT_OWNER,
+            verdict,
+        )
+        assertArrayEquals(peer, ports.secrets[g])
+        assertArrayEquals(ports.derivePushGid(secretA), ports.unsubscribed.single())
+    }
+
+    /** [GroupPushRouting.ensure] awaits the same stamp read under the same
+     *  lock, so it carries the same wedge and the same bound. Here the owner
+     *  holds nothing, so it is the MINT branch that parks. */
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `a HUNG mint-stamp read does not wedge ensure's row either`() = runTest {
+        val ports = HungStampPorts(account)
+        val g = "7b".repeat(32)
+
+        launch { GroupPushRouting.ensure(account, g, isOwner = true, ports) }
+        runCurrent()
+        assertEquals("the mint is parked reading its stamp", 1, ports.stampsEntered)
+
+        val peer = ByteArray(32) { 0xEE.toByte() }
+        var verdict: GroupPushRouting.ReceiveVerdict? = null
+        launch {
+            verdict = receiveGated(
+                g, peer, ownerKey, knownRoles(), ports,
+                mintEpoch = 3uL, ownGroupEpoch = 3uL,
+            )
+        }
+        runCurrent()
+        assertNull("the envelope waits while the stamp read is still in flight", verdict)
+
+        advanceUntilIdle()
+
+        assertEquals("no mint without a stamp", 0, ports.mintCount)
+        assertEquals("nothing broadcast without a stamp", 0, ports.broadcastCount)
+        assertEquals(
+            "the queued envelope applies once the deadline frees the row",
+            GroupPushRouting.ReceiveVerdict.ACCEPT_OWNER,
+            verdict,
+        )
+        assertArrayEquals(peer, ports.secrets[g])
+    }
+
+    /**
+     * The push-gw subscribe is the OTHER seam taken under the lock, and it
+     * is bounded for the same reason — one bounded call does not make the
+     * next one bounded. Here the broadcast is fast and the SUBSCRIBE is what
+     * hangs, mid-rotation, with a peer envelope queued behind it.
+     */
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `a HUNG subscribe does not wedge the row either`() = runTest {
+        val ports = HungSubscribePorts(account)
+        val g = "79".repeat(32)
+        seedRouting(ports, g, secretA)
+        ports.groupEpoch = 2uL
+
+        launch {
+            GroupPushRouting.rotate(account, g, GroupPushRouting.RotationRole.OWNER, ports)
+        }
+        runCurrent()
+        assertEquals("the rotation is parked in its subscribe", 1, ports.subscribeCount)
+
+        val peer = ByteArray(32) { 0xEE.toByte() }
+        var verdict: GroupPushRouting.ReceiveVerdict? = null
+        launch {
+            verdict = receiveGated(
+                g, peer, ownerKey, knownRoles(), ports,
+                mintEpoch = 3uL, ownGroupEpoch = 3uL,
+            )
+        }
+        runCurrent()
+        assertNull("the envelope waits while the subscribe is still in flight", verdict)
+
+        advanceUntilIdle()
+
+        assertEquals(
+            "the queued envelope applies once the deadline frees the row",
+            GroupPushRouting.ReceiveVerdict.ACCEPT_OWNER,
+            verdict,
+        )
+        assertArrayEquals(peer, ports.secrets[g])
+        // The receive's OWN subscribe hangs too and is bounded the same way,
+        // so it applied the envelope and returned regardless.
+        assertEquals(2, ports.subscribeCount)
+    }
+
     // ---- the membership-shrink entry point ----
 
     @Test
