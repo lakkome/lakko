@@ -126,13 +126,31 @@
  *     introduce divergence, and it grants nobody a new capability: a member
  *     could already replay a byte-identical envelope and have it accepted.
  *
- * ## Concurrency
+ * ## Concurrency — ONE serializing lock per routing row
  *
- * Provisioning can be triggered from two places in the same session — the
- * legacy-sweep on rehydrate and the chat view's onMount. A per-group
- * in-flight lock coalesces them so the random secret is minted exactly
- * once (a second concurrent mint would overwrite + double-broadcast a
- * DIFFERENT secret).
+ * Every orchestration entry point here is a read-modify-write of the SAME
+ * per-`(account, group)` store row, with `await` suspension points between
+ * the read and the write. Run two of them concurrently and both read the
+ * pre-write value, so the survivor is decided by microtask scheduling rather
+ * than by any rule this file states. {@link withRoutingRowLock} is the single
+ * mechanism that stops that: it **serializes** the whole read-decide-write of
+ * each of the four entry points ({@link receivePushRoutingSecretGated},
+ * {@link ensureGroupPushRouting}, {@link rotatePushRoutingSecret},
+ * {@link redistributeSecretToGroup}) against every other one for that row.
+ *
+ * Serializing, never coalescing — see {@link withRoutingRowLock} for why the
+ * distinction is the security property and not an implementation detail.
+ *
+ * The lock is deliberately taken ONLY at those four entry points; every
+ * helper they call (`subscribeGroupUnderPushGid`, `pushGidForGroup`,
+ * `retireOldPushGid`, `persistGroupRoutingSecret`, …) is lock-FREE. That is a
+ * requirement, not an accident: `rotatePushRoutingSecret` awaits
+ * `subscribeGroupUnderPushGid` **while holding the lock**, so a lock inside
+ * that helper would deadlock a non-reentrant lock instantly. None of the four
+ * entry points calls another, so no reentrancy is possible today — and the
+ * `broadcast` callback, the one caller-supplied function invoked under the
+ * lock, must not re-enter them either (both production callbacks route to
+ * `ChatClient.broadcastControl`, which publishes to the DS and returns).
  */
 
 import type {
@@ -701,6 +719,112 @@ export function routingSecretVerdict(args: {
 }
 
 /**
+ * The per-`(account, group)` routing-row queue. ONE lock per row, shared by
+ * every path that reads-then-writes it. See {@link withRoutingRowLock}.
+ */
+const routingRowQueue = new Map<string, Promise<unknown>>();
+
+/**
+ * Compose the routing-row lock key. A space separator is unambiguous:
+ * `accountId` and `groupIdB64` are both base64, whose alphabet contains no
+ * space. (The store's own row key uses a NUL for the same reason; this one
+ * stays printable so a lock key can be logged.)
+ */
+function routingRowLockKey(accountId: string, groupIdB64: string): string {
+  return `${accountId} ${groupIdB64}`;
+}
+
+/**
+ * Run `task` with exclusive access to the `(account, group)` routing row.
+ *
+ * ## Why a lock at all
+ *
+ * Each entry point reads the stored `(secret, mintEpoch)` pair, decides
+ * against it, and writes — with `await`s in between (the device key, the
+ * IndexedDB read, the wasm load). The receive path's only production caller
+ * is fire-and-forget inside a poll-batch loop that never awaits, so two
+ * envelopes from one batch are launched in the same synchronous turn and both
+ * complete their read of the PRE-BATCH row before either persists.
+ *
+ * That is not a theoretical race — it **restores F-A** (G-36 residual 9), the
+ * finding this whole ADR-0044 arc exists to close, with no malice and no
+ * crash. A device holding `S_OLD@10` polls `[rotation S1@11, stale S_OLD@10]`:
+ * the rotation reads `(S_OLD, 10)`, accepts, persists `(S1, 11)` and retires
+ * `gid(S_OLD)`; the replay reads that SAME pre-batch row, so its bytes are
+ * byte-IDENTICAL to it and it takes the `accept-identical` fast path — which
+ * by design short-circuits BOTH the future clamp and the order — re-persisting
+ * `S_OLD` one microtask behind. The device ends on the superseded secret: the
+ * id the evicted member still derives and is still subscribed to.
+ *
+ * It also undercuts G-36 residual 7. Under ADR-0043 option (b) ONE removal
+ * yields N+1 same-epoch rotations, which typically arrive in a single batch,
+ * so all N+1 gates compare against one snapshot and the winner is scheduling
+ * order rather than the canonical `(mintEpoch, secretBytes)` total order.
+ *
+ * ## SERIALIZING, never coalescing
+ *
+ * A second caller **queues and then runs in full** against the first's
+ * committed result. It is NOT folded into the in-flight run.
+ *
+ * That distinction is the security property. Coalescing here was
+ * `lakko-security` **F1** in the ADR-0043 review: web and iOS folded a second,
+ * DISTINCT removal into an in-flight rotation, so no rotation was ever sealed
+ * after the second member left and that member kept a live subscription. The
+ * same reasoning applies verbatim to the receive path — folding a second
+ * envelope into the first would silently drop it, and a dropped envelope is a
+ * device stranded on a superseded secret.
+ *
+ * ## The lock spans the READ as well as the write
+ *
+ * Acquiring it after the stored-record read would fix nothing: the read is
+ * exactly what goes stale. `task` must therefore contain the whole
+ * read-decide-write, which is why each entry point wraps its ENTIRE body.
+ *
+ * ## Ordering, failure isolation, release
+ *
+ *   - the predecessor is captured and the queue entry replaced
+ *     **synchronously**, so runs execute in call order — for the poll loop
+ *     that is DS journal order, the total order every client already agrees
+ *     on;
+ *   - a predecessor's rejection is swallowed HERE (`try`/`catch` around the
+ *     wait) so it never becomes contagious — its own caller still observes it,
+ *     and the queued task's trigger (an eviction, an arriving envelope) is
+ *     still real regardless of why the previous one failed;
+ *   - release is TAIL-GUARDED: the entry is dropped only if it is still this
+ *     run's promise, so a later task that already replaced it keeps its place
+ *     and a third caller queues behind IT rather than racing it. The
+ *     `.catch()` before `.finally()` keeps this bookkeeping chain from
+ *     surfacing an unhandled rejection (the caller still sees the real one).
+ */
+function withRoutingRowLock<T>(
+  accountId: string,
+  groupIdB64: string,
+  task: () => Promise<T>,
+): Promise<T> {
+  const lockKey = routingRowLockKey(accountId, groupIdB64);
+  const previous = routingRowQueue.get(lockKey);
+
+  const run = (async (): Promise<T> => {
+    if (previous !== undefined) {
+      try {
+        await previous;
+      } catch {
+        /* the predecessor's own caller owns that failure */
+      }
+    }
+    return task();
+  })();
+
+  routingRowQueue.set(lockKey, run);
+  void run
+    .catch(() => undefined)
+    .finally(() => {
+      if (routingRowQueue.get(lockKey) === run) routingRowQueue.delete(lockKey);
+    });
+  return run;
+}
+
+/**
  * RECEIVE side, GATED — the production entry point for an incoming
  * push-routing distribution envelope.
  *
@@ -733,9 +857,20 @@ export function routingSecretVerdict(args: {
  *
  * Never throws — the poll loop calls this per message.
  *
+ * **SERIALIZED per `(account, group)`** ({@link withRoutingRowLock}). Without
+ * it this whole function is a read-modify-write across `await` boundaries
+ * whose only production caller is fire-and-forget inside a batch loop that
+ * never awaits — so two envelopes from ONE batch both read the pre-batch row
+ * and the survivor is decided by microtask scheduling. Concretely that
+ * restores F-A: the stale replay is judged against the row the rotation has
+ * not yet written, matches it byte-for-byte, and takes the `accept-identical`
+ * fast path straight past the clamp and the order. The lock must span the
+ * stored-record READ, which is why it wraps the entire body rather than just
+ * the persist.
+ *
  * @returns the verdict, so the caller can log / assert on it.
  */
-export async function receivePushRoutingSecretGated(
+export function receivePushRoutingSecretGated(
   accountId: string,
   group: WasmGroup,
   groupIdB64: string,
@@ -743,135 +878,133 @@ export async function receivePushRoutingSecretGated(
   secret: Uint8Array,
   mintEpoch: bigint,
 ): Promise<RoutingSecretVerdict> {
-  let storedSecret: Uint8Array | null = null;
-  let storedMintEpoch = 0n;
-  let storedUnreadable = false;
-  try {
-    const deviceKey = await getDeviceKey(accountId);
-    if (deviceKey === null) {
-      // Half-reset: the store cannot be read at all, so "this device holds
-      // none" is unprovable. (A persist would no-op for the same reason.)
+  return withRoutingRowLock(accountId, groupIdB64, async () => {
+    let storedSecret: Uint8Array | null = null;
+    let storedMintEpoch = 0n;
+    let storedUnreadable = false;
+    try {
+      const deviceKey = await getDeviceKey(accountId);
+      if (deviceKey === null) {
+        // Half-reset: the store cannot be read at all, so "this device holds
+        // none" is unprovable. (A persist would no-op for the same reason.)
+        storedUnreadable = true;
+      } else {
+        // ONE read for the pair — a torn (secret, epoch) read could rank a
+        // superseded secret at a live epoch.
+        const record = await getGroupRoutingRecord(
+          accountId,
+          groupIdB64,
+          deviceKey,
+        );
+        storedSecret = record?.secret ?? null;
+        storedMintEpoch = record?.mintEpoch ?? 0n;
+      }
+    } catch {
+      // Unreadable local secret — cannot prove "identical" NOR "absent"; the
+      // role check below still decides, fail-closed on the admin-seed branch.
+      storedSecret = null;
+      storedMintEpoch = 0n;
       storedUnreadable = true;
-    } else {
-      // ONE read for the pair — a torn (secret, epoch) read could rank a
-      // superseded secret at a live epoch.
-      const record = await getGroupRoutingRecord(
+    }
+
+    let ownerKey: Uint8Array | undefined;
+    let adminKeys: Uint8Array[] = [];
+    let senderKey: Uint8Array | undefined;
+    let verifyFailed = false;
+    try {
+      ownerKey = group.roleTableOwner() ?? undefined;
+      // Flat concatenation of 32-byte admin signature keys (empty for an open
+      // group), sliced the same way `contacts/client.ts` does.
+      const flatAdmins = group.roleTableAdmins();
+      for (let i = 0; i + 32 <= flatAdmins.length; i += 32) {
+        adminKeys.push(flatAdmins.slice(i, i + 32));
+      }
+      if (senderLeaf !== undefined) {
+        const members = group.members() as Array<{
+          leafIndex: number;
+          signaturePublicKey: Uint8Array;
+        }>;
+        senderKey = members.find((m) => m.leafIndex === senderLeaf)
+          ?.signaturePublicKey;
+      }
+    } catch {
+      // A torn group / unreadable role table — authorship is unverifiable.
+      verifyFailed = true;
+      adminKeys = [];
+    }
+
+    // ADR-0044 — the clamp ceiling. `undefined` (a torn group) fails closed in
+    // the decision core, since with no ceiling a stamp cannot be bounded.
+    const ownEpoch = readGroupEpoch(group);
+
+    const verdict = routingSecretVerdict({
+      ownerKey,
+      adminKeys,
+      senderKey,
+      storedSecret,
+      storedMintEpoch,
+      storedUnreadable,
+      incomingSecret: secret,
+      incomingMintEpoch: mintEpoch,
+      ownEpoch,
+      verifyFailed,
+      isNewer: await loadIsNewer(),
+    });
+
+    if (!verdictAccepts(verdict)) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        "push-routing secret REFUSED (ADR-0042 role gate / ADR-0044 order)",
+        verdict,
+        "senderLeaf",
+        senderLeaf,
+        // ADR-0044 open question: neither epoch is secret, and a stale replay
+        // is invisible in the field without them.
+        "mintEpoch",
+        mintEpoch,
+        "storedMintEpoch",
+        storedMintEpoch,
+      );
+      return verdict;
+    }
+
+    // ADR-0044 — an `accept-identical` re-persist must leave the STORED epoch
+    // untouched. It is the one accept that clears NEITHER the authority gate
+    // nor the future clamp (it short-circuits both, deliberately, so a retry
+    // stays idempotent for any sender), so writing the incoming stamp here
+    // would be an **epoch-inflation channel open to a plain member**: relay the
+    // group's current secret bytes stamped `u64::MAX` and every later rotation
+    // — including the owner's — is refused `reject-stale` forever. That is
+    // exactly the permanent freeze the clamp exists to prevent, reached around
+    // it. The write itself is kept (it re-arms the subscription and is
+    // otherwise a content no-op).
+    const epochToPersist =
+      verdict === "accept-identical" ? storedMintEpoch : mintEpoch;
+
+    try {
+      await receivePushRoutingSecret(
         accountId,
         groupIdB64,
-        deviceKey,
+        secret,
+        epochToPersist,
       );
-      storedSecret = record?.secret ?? null;
-      storedMintEpoch = record?.mintEpoch ?? 0n;
+      // ADR-0043 — the applied secret SUPERSEDED one this device held, so the
+      // id it was subscribed under is now dead. Retire it: this device is the
+      // only party that can drop its own push-gw row. Read from the snapshot
+      // taken BEFORE the persist above — the `secrets` row is overwritten in
+      // place, so after the write the old bytes are unrecoverable.
+      if (storedSecret !== null && !bytesEqual(storedSecret, secret)) {
+        await retireOldPushGid(storedSecret);
+      }
+    } catch (err) {
+      // Best-effort, exactly as before the gate — never throw out of the
+      // poll loop.
+      // eslint-disable-next-line no-console
+      console.warn("push-routing secret receive failed", err);
     }
-  } catch {
-    // Unreadable local secret — cannot prove "identical" NOR "absent"; the
-    // role check below still decides, fail-closed on the admin-seed branch.
-    storedSecret = null;
-    storedMintEpoch = 0n;
-    storedUnreadable = true;
-  }
-
-  let ownerKey: Uint8Array | undefined;
-  let adminKeys: Uint8Array[] = [];
-  let senderKey: Uint8Array | undefined;
-  let verifyFailed = false;
-  try {
-    ownerKey = group.roleTableOwner() ?? undefined;
-    // Flat concatenation of 32-byte admin signature keys (empty for an open
-    // group), sliced the same way `contacts/client.ts` does.
-    const flatAdmins = group.roleTableAdmins();
-    for (let i = 0; i + 32 <= flatAdmins.length; i += 32) {
-      adminKeys.push(flatAdmins.slice(i, i + 32));
-    }
-    if (senderLeaf !== undefined) {
-      const members = group.members() as Array<{
-        leafIndex: number;
-        signaturePublicKey: Uint8Array;
-      }>;
-      senderKey = members.find((m) => m.leafIndex === senderLeaf)
-        ?.signaturePublicKey;
-    }
-  } catch {
-    // A torn group / unreadable role table — authorship is unverifiable.
-    verifyFailed = true;
-    adminKeys = [];
-  }
-
-  // ADR-0044 — the clamp ceiling. `undefined` (a torn group) fails closed in
-  // the decision core, since with no ceiling a stamp cannot be bounded.
-  const ownEpoch = readGroupEpoch(group);
-
-  const verdict = routingSecretVerdict({
-    ownerKey,
-    adminKeys,
-    senderKey,
-    storedSecret,
-    storedMintEpoch,
-    storedUnreadable,
-    incomingSecret: secret,
-    incomingMintEpoch: mintEpoch,
-    ownEpoch,
-    verifyFailed,
-    isNewer: await loadIsNewer(),
-  });
-
-  if (!verdictAccepts(verdict)) {
-    // eslint-disable-next-line no-console
-    console.warn(
-      "push-routing secret REFUSED (ADR-0042 role gate / ADR-0044 order)",
-      verdict,
-      "senderLeaf",
-      senderLeaf,
-      // ADR-0044 open question: neither epoch is secret, and a stale replay
-      // is invisible in the field without them.
-      "mintEpoch",
-      mintEpoch,
-      "storedMintEpoch",
-      storedMintEpoch,
-    );
     return verdict;
-  }
-
-  // ADR-0044 — an `accept-identical` re-persist must leave the STORED epoch
-  // untouched. It is the one accept that clears NEITHER the authority gate
-  // nor the future clamp (it short-circuits both, deliberately, so a retry
-  // stays idempotent for any sender), so writing the incoming stamp here
-  // would be an **epoch-inflation channel open to a plain member**: relay the
-  // group's current secret bytes stamped `u64::MAX` and every later rotation
-  // — including the owner's — is refused `reject-stale` forever. That is
-  // exactly the permanent freeze the clamp exists to prevent, reached around
-  // it. The write itself is kept (it re-arms the subscription and is
-  // otherwise a content no-op).
-  const epochToPersist =
-    verdict === "accept-identical" ? storedMintEpoch : mintEpoch;
-
-  try {
-    await receivePushRoutingSecret(
-      accountId,
-      groupIdB64,
-      secret,
-      epochToPersist,
-    );
-    // ADR-0043 — the applied secret SUPERSEDED one this device held, so the
-    // id it was subscribed under is now dead. Retire it: this device is the
-    // only party that can drop its own push-gw row. Read from the snapshot
-    // taken BEFORE the persist above — the `secrets` row is overwritten in
-    // place, so after the write the old bytes are unrecoverable.
-    if (storedSecret !== null && !bytesEqual(storedSecret, secret)) {
-      await retireOldPushGid(storedSecret);
-    }
-  } catch (err) {
-    // Best-effort, exactly as before the gate — never throw out of the
-    // poll loop.
-    // eslint-disable-next-line no-console
-    console.warn("push-routing secret receive failed", err);
-  }
-  return verdict;
+  });
 }
-
-/** Per-group in-flight provisioning promise, so a concurrent legacy-sweep
- *  + onMount for the same group mint the random secret exactly once. */
-const provisioning = new Map<string, Promise<void>>();
 
 /**
  * Send the distribution envelope for a secret and, ONLY once the broadcast
@@ -939,10 +1072,28 @@ async function broadcastAndMarkDistributed(
  * founded group) AND the legacy-sweep (any member opens / rehydrates a group
  * whose last send is unconfirmed).
  *
+ * **SERIALIZED per `(account, group)`** on the SAME {@link withRoutingRowLock}
+ * every other routing-row writer takes. Provisioning can fire twice in one
+ * session (the rehydrate legacy-sweep and the chat view's onMount), and it
+ * previously held a private COALESCING lock: a second concurrent caller got
+ * the in-flight promise back rather than running.
+ *
+ * Serializing preserves the mint-once property that lock existed for, and by
+ * a stronger mechanism. `getGroupRoutingState` is read INSIDE the lock, so a
+ * queued second pass observes the first pass's committed row: `absent` has
+ * become `distributed`, the mint branch does not fire, and no second random
+ * secret is generated. Coalescing only held while the two calls genuinely
+ * overlapped; the in-lock re-read holds however they are staggered.
+ *
+ * Sharing the lock with the receive + rotate paths is what it buys: a
+ * provisioning pass and an arriving envelope (or a rotation) can no longer
+ * read the same row and write over each other.
+ *
  * @param broadcast posts the distribution-envelope bytes to the group
  *                  journal as an E2EE MLS application message (persist-
  *                  before-publish). Invoked on the owner's mint branch and on
- *                  ANY holder's re-broadcast branch.
+ *                  ANY holder's re-broadcast branch. Must not re-enter this
+ *                  module's entry points — it is called under the lock.
  */
 export function ensureGroupPushRouting(
   accountId: string,
@@ -951,11 +1102,7 @@ export function ensureGroupPushRouting(
   broadcast: (envelopeBytes: Uint8Array) => Promise<void>,
 ): Promise<void> {
   const groupIdB64 = base64Encode(group.groupId);
-  const lockKey = `${accountId} ${groupIdB64}`;
-  const inflight = provisioning.get(lockKey);
-  if (inflight !== undefined) return inflight;
-
-  const run = (async (): Promise<void> => {
+  return withRoutingRowLock(accountId, groupIdB64, async (): Promise<void> => {
     // ADR-0022 role table: `Owner` (0). `undefined` = open / legacy group
     // with no role table — nobody mints (avoids divergence), matching the
     // ADR-0042 open-question decision to keep un-owned legacy groups on
@@ -1060,13 +1207,12 @@ export function ensureGroupPushRouting(
 
     // Subscribe (or defer) under push_gid. Owner just minted → subscribes;
     // a member with no secret → deferred (never under group_id).
+    //
+    // Fire-and-forget, so it does NOT extend the lock — and it must not, since
+    // `subscribeGroupUnderPushGid` re-reads the row and taking the lock inside
+    // it would deadlock the paths that await it while holding it.
     subscribeGroupUnderPushGidBestEffort(accountId, groupIdB64);
-  })().finally(() => {
-    provisioning.delete(lockKey);
   });
-
-  provisioning.set(lockKey, run);
-  return run;
 }
 
 /**
@@ -1112,32 +1258,54 @@ export function ensureGroupPushRouting(
  * replays the STORED `mintEpoch`. It must not stamp the post-add epoch: the
  * secret did not change, only its audience did, and re-stamping would let a
  * routine add-member out-rank a rotation minted at a higher epoch.
+ *
+ * **SERIALIZED per `(account, group)`** on the shared
+ * {@link withRoutingRowLock}, for that same reason. This reads the stored
+ * record, spends a network round-trip broadcasting it, then writes the
+ * `distributed` flag — so unserialised it can read the PRE-rotation secret and
+ * put a superseded value back on the wire while a rotation is in flight,
+ * which is the F-A replay shape emitted by this device rather than relayed to
+ * it. Under the lock it reads the rotation's committed output instead.
+ *
+ * Still rejects with the broadcast's error (the lock propagates it verbatim),
+ * and a rejection here never poisons the queue — the next task swallows the
+ * predecessor's failure.
  */
 export async function redistributeSecretToGroup(
   accountId: string,
   group: WasmGroup,
   broadcast: (envelopeBytes: Uint8Array) => Promise<void>,
 ): Promise<void> {
+  // Read inside the async function so a torn `group.groupId` surfaces as a
+  // REJECTION, exactly as before — the fire-and-forget call site catches a
+  // rejected promise, not a synchronous throw. The lock is still acquired
+  // synchronously relative to the call: nothing is awaited before it.
   const groupIdB64 = base64Encode(group.groupId);
-  const deviceKey = await getDeviceKey(accountId);
-  if (deviceKey === null) return;
-  const record = await getGroupRoutingRecord(accountId, groupIdB64, deviceKey);
-  if (record === null) return;
-  try {
-    await broadcast(
-      await composeSecretEnvelope(record.mintEpoch, record.secret),
+  return withRoutingRowLock(accountId, groupIdB64, async (): Promise<void> => {
+    const deviceKey = await getDeviceKey(accountId);
+    if (deviceKey === null) return;
+    const record = await getGroupRoutingRecord(
+      accountId,
+      groupIdB64,
+      deviceKey,
     );
-  } catch (err) {
+    if (record === null) return;
     try {
-      await markGroupRoutingPending(accountId, groupIdB64);
-    } catch (markErr) {
-      // Best-effort: a store failure here costs the retry, not correctness.
-      // eslint-disable-next-line no-console
-      console.warn("push-routing pending mark failed", markErr);
+      await broadcast(
+        await composeSecretEnvelope(record.mintEpoch, record.secret),
+      );
+    } catch (err) {
+      try {
+        await markGroupRoutingPending(accountId, groupIdB64);
+      } catch (markErr) {
+        // Best-effort: a store failure here costs the retry, not correctness.
+        // eslint-disable-next-line no-console
+        console.warn("push-routing pending mark failed", markErr);
+      }
+      throw err;
     }
-    throw err;
-  }
-  await markGroupRoutingDistributed(accountId, groupIdB64);
+    await markGroupRoutingDistributed(accountId, groupIdB64);
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1308,14 +1476,19 @@ export function membershipRotationDecision(args: {
   return "rotate";
 }
 
-/**
- * Per-group rotation queue — a SERIALIZING lock, not a coalescing one.
+/*
+ * ## Why rotation takes the routing-row lock, and why SERIALIZING
+ *
+ * (The mechanism is the shared {@link withRoutingRowLock}; this is the
+ * rotation-specific case for it, kept beside the rotation because the X / Y
+ * scenario below is what fixes the semantics as serializing rather than
+ * coalescing.)
  *
  * Two triggers can fire for one group (this device's own `onRemoveMember` and
  * a concurrent poll-loop diff). Interleaving them is one damaging case: both
  * would read the SAME old secret, both mint, the second persist wins — leaving
  * the first new `push_gid` subscribed and indexed but never notified again,
- * i.e. exactly the orphan this ADR exists to prevent.
+ * i.e. exactly the orphan ADR-0043 exists to prevent.
  *
  * COALESCING (returning the in-flight promise to the second caller) rules that
  * out but voids the ADR's core property whenever the two triggers observe
@@ -1338,8 +1511,12 @@ export function membershipRotationDecision(args: {
  * that every eviction is followed by SOME seal at a strictly later epoch: Y's
  * own trigger queues behind R1 and seals R2 at an epoch Y is no longer in.
  * (Matches the per-`(account, group)` `Mutex` the Android client uses.)
+ *
+ * Since ADR-0044's serialization fix this is no longer a rotation-private
+ * queue: rotation shares ONE lock per row with the receive + provisioning +
+ * redistribute paths, so a rotation can no longer interleave with an arriving
+ * envelope either (the recorded F-E residual).
  */
-const rotating = new Map<string, Promise<PushRotationOutcome>>();
 
 /**
  * ADR-0043 — re-mint the group's `push_routing_secret`, redistribute it, and
@@ -1387,6 +1564,12 @@ const rotating = new Map<string, Promise<PushRotationOutcome>>();
  *
  * Never throws — push is best-effort and a rotation failure must not unwind
  * the membership change that triggered it.
+ *
+ * **SERIALIZED per `(account, group)`** on the shared
+ * {@link withRoutingRowLock} — see the block above for the rotation-specific
+ * case, and the helper for why it must serialize rather than coalesce. The
+ * whole body runs after the queue wait, which is what lets the OLD-secret read
+ * AND the epoch stamp observe the predecessor's committed output.
  */
 export function rotatePushRoutingSecret(
   accountId: string,
@@ -1394,106 +1577,90 @@ export function rotatePushRoutingSecret(
   ownRole: PushRotationRole,
   broadcast: (envelopeBytes: Uint8Array) => Promise<void>,
 ): Promise<PushRotationOutcome> {
+  // The authority check needs no row state, so it stays OUTSIDE the lock — an
+  // unauthorised trigger must not queue behind an in-flight rotation just to
+  // report a verdict that never depended on it.
   if (ownRole !== "owner" && ownRole !== "admin") {
     return Promise.resolve("skip-not-authorized");
   }
   const groupIdB64 = base64Encode(group.groupId);
-  const lockKey = `${accountId} ${groupIdB64}`;
-  const previous = rotating.get(lockKey);
 
-  const run = (async (): Promise<PushRotationOutcome> => {
-    // Queue behind any in-flight rotation for this group, so the read of the
-    // OLD secret below observes the predecessor's OUTPUT rather than racing
-    // it. A predecessor failure is its own business and must not cancel this
-    // rotation — the removal that triggered it still needs a re-key.
-    if (previous !== undefined) {
+  return withRoutingRowLock(
+    accountId,
+    groupIdB64,
+    async (): Promise<PushRotationOutcome> => {
+      const deviceKey = await getDeviceKey(accountId);
+      if (deviceKey === null) return "skip-no-device-key";
+
+      // (1)+(2) — the OLD secret, read BEFORE anything overwrites it. The gid is
+      // derived from these bytes at teardown time, in `retireOldPushGid`.
+      let oldSecret: Uint8Array | null = null;
       try {
-        await previous;
-      } catch {
-        /* handled by whoever awaited the predecessor */
+        oldSecret = await getGroupRoutingSecret(
+          accountId,
+          groupIdB64,
+          deviceKey,
+        );
+      } catch (err) {
+        // An unreadable row cannot be rotated: the old id could never be named,
+        // so a rotation would strand it subscribed forever.
+        // eslint-disable-next-line no-console
+        console.warn("push-routing secret unreadable, rotation skipped", err);
+        return "skip-no-secret";
       }
-    }
+      if (oldSecret === null) return "skip-no-secret";
 
-    const deviceKey = await getDeviceKey(accountId);
-    if (deviceKey === null) return "skip-no-device-key";
+      // (3) — ADR-0044: stamp the mint with the group's CURRENT epoch, read
+      // HERE, after the queue wait, so a rotation queued behind a predecessor
+      // still stamps the epoch it actually mints at. C-61 is what makes this
+      // stamp meaningful: the caller published the Remove commit first, so
+      // `group.epoch` is already the POST-removal epoch and this mint strictly
+      // out-ranks anything the evicted member could have been holding. If C-61
+      // were violated the stamp would be the PRE-removal epoch, tie with the
+      // stale secret, and fall to the byte tiebreak — a coin flip instead of a
+      // guarantee. Fail-closed on an unreadable epoch.
+      const mintEpoch = readGroupEpoch(group);
+      if (mintEpoch === undefined) return "skip-unknown-epoch";
 
-    // (1)+(2) — the OLD secret, read BEFORE anything overwrites it. The gid is
-    // derived from these bytes at teardown time, in `retireOldPushGid`.
-    let oldSecret: Uint8Array | null = null;
-    try {
-      oldSecret = await getGroupRoutingSecret(accountId, groupIdB64, deviceKey);
-    } catch (err) {
-      // An unreadable row cannot be rotated: the old id could never be named,
-      // so a rotation would strand it subscribed forever.
-      // eslint-disable-next-line no-console
-      console.warn("push-routing secret unreadable, rotation skipped", err);
-      return "skip-no-secret";
-    }
-    if (oldSecret === null) return "skip-no-secret";
+      // (4) — mint + persist PENDING. Persist before broadcasting for the
+      // same reason the mint path does: two divergent random secrets are worse
+      // than two identical envelopes.
+      const next = mintPushRoutingSecret();
+      const pushGid = await persistGroupRoutingSecret(
+        accountId,
+        groupIdB64,
+        next,
+        mintEpoch,
+        false,
+      );
+      if (pushGid === null) return "skip-no-device-key";
 
-    // (3) — ADR-0044: stamp the mint with the group's CURRENT epoch, read
-    // HERE, after the queue wait, so a rotation queued behind a predecessor
-    // still stamps the epoch it actually mints at. C-61 is what makes this
-    // stamp meaningful: the caller published the Remove commit first, so
-    // `group.epoch` is already the POST-removal epoch and this mint strictly
-    // out-ranks anything the evicted member could have been holding. If C-61
-    // were violated the stamp would be the PRE-removal epoch, tie with the
-    // stale secret, and fall to the byte tiebreak — a coin flip instead of a
-    // guarantee. Fail-closed on an unreadable epoch.
-    const mintEpoch = readGroupEpoch(group);
-    if (mintEpoch === undefined) return "skip-unknown-epoch";
+      // (5) — redistribute at the POST-removal epoch. Failure leaves the row
+      // pending for the existing retry branch; it must NOT abort the local
+      // switch, which is already durable.
+      await broadcastAndMarkDistributed(
+        accountId,
+        groupIdB64,
+        next,
+        mintEpoch,
+        broadcast,
+      );
 
-    // (4) — mint + persist PENDING. Persist before broadcasting for the
-    // same reason the mint path does: two divergent random secrets are worse
-    // than two identical envelopes.
-    const next = mintPushRoutingSecret();
-    const pushGid = await persistGroupRoutingSecret(
-      accountId,
-      groupIdB64,
-      next,
-      mintEpoch,
-      false,
-    );
-    if (pushGid === null) return "skip-no-device-key";
+      // (6) — arm the NEW id first, so a failure between the two never leaves
+      // this device subscribed to nothing.
+      try {
+        await subscribeGroupUnderPushGid(accountId, groupIdB64);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("push_gid subscribe failed", err);
+      }
 
-    // (5) — redistribute at the POST-removal epoch. Failure leaves the row
-    // pending for the existing retry branch; it must NOT abort the local
-    // switch, which is already durable.
-    await broadcastAndMarkDistributed(
-      accountId,
-      groupIdB64,
-      next,
-      mintEpoch,
-      broadcast,
-    );
-
-    // (6) — arm the NEW id first, so a failure between the two never leaves
-    // this device subscribed to nothing.
-    try {
-      await subscribeGroupUnderPushGid(accountId, groupIdB64);
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.warn("push_gid subscribe failed", err);
-    }
-
-    // (7)+(8) — retire the OLD id: unsubscribe this device's row, drop the
-    // stale reverse-index entry.
-    await retireOldPushGid(oldSecret);
-    return "rotated";
-  })();
-
-  rotating.set(lockKey, run);
-  // Release only if nothing queued behind this run in the meantime — a later
-  // rotation has already replaced the entry with ITS promise, and deleting
-  // that would let a third trigger race the second instead of queueing.
-  // `catch` before `finally` so a rejected run never surfaces as an unhandled
-  // rejection through this bookkeeping chain (the caller still sees `run`).
-  void run
-    .catch(() => undefined)
-    .finally(() => {
-      if (rotating.get(lockKey) === run) rotating.delete(lockKey);
-    });
-  return run;
+      // (7)+(8) — retire the OLD id: unsubscribe this device's row, drop the
+      // stale reverse-index entry.
+      await retireOldPushGid(oldSecret);
+      return "rotated";
+    },
+  );
 }
 
 /**

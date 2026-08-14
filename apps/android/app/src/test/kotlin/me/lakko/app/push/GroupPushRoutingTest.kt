@@ -504,7 +504,7 @@ class GroupPushRoutingTest {
         // An add-member commit fires `redistribute`; that send IS the
         // envelope `ensure` would have re-sent, so it clears the flag too.
         ports.broadcastFails = false
-        GroupPushRouting.redistribute(g, ports)
+        GroupPushRouting.redistribute(account, g, ports)
         assertTrue(ports.isDistributed(g))
 
         GroupPushRouting.ensure(account, g, isOwner = true, ports = ports)
@@ -520,7 +520,7 @@ class GroupPushRoutingTest {
 
         // `redistribute` propagates (its caller is best-effort) and must
         // NOT mark a send that never happened.
-        runCatching { GroupPushRouting.redistribute(g, ports) }
+        runCatching { GroupPushRouting.redistribute(account, g, ports) }
         assertFalse(ports.isDistributed(g))
 
         ports.broadcastFails = false
@@ -558,7 +558,7 @@ class GroupPushRoutingTest {
 
             // 2. A member is added; the post-add-member re-send fails.
             ports.broadcastFails = true
-            runCatching { GroupPushRouting.redistribute(g, ports) }
+            runCatching { GroupPushRouting.redistribute(account, g, ports) }
             assertEquals("nothing reached the wire", 1, ports.broadcastCount)
             assertFalse("row rewound to pending", ports.isDistributed(g))
 
@@ -586,7 +586,7 @@ class GroupPushRoutingTest {
             val g = "2b".repeat(32)
 
             GroupPushRouting.ensure(account, g, isOwner = true, ports = ports)
-            GroupPushRouting.redistribute(g, ports)
+            GroupPushRouting.redistribute(account, g, ports)
             assertEquals("mint + the add-member re-send", 2, ports.broadcastCount)
             assertTrue("a send that landed stays flagged distributed", ports.isDistributed(g))
 
@@ -605,7 +605,7 @@ class GroupPushRoutingTest {
         // Holding no secret, `redistribute` returns BEFORE any send, so it
         // never marks at all — there is nothing pending to re-send, and the
         // owner-mint branch (not the re-broadcast branch) owns "no secret".
-        GroupPushRouting.redistribute(g, ports)
+        GroupPushRouting.redistribute(account, g, ports)
         assertEquals(0, ports.broadcastCount)
         assertEquals("never even attempted a mark", 0, ports.markPendingCount)
 
@@ -630,7 +630,7 @@ class GroupPushRoutingTest {
         ports.distributed[g] = true
 
         ports.broadcastFails = true
-        runCatching { GroupPushRouting.redistribute(g, ports) }
+        runCatching { GroupPushRouting.redistribute(account, g, ports) }
         assertFalse("its own row is flagged pending", ports.isDistributed(g))
 
         // The other half of the hole: with an owner-only retry that pending
@@ -684,7 +684,9 @@ class GroupPushRoutingTest {
         inner.distributed[g] = true
         inner.broadcastFails = true
 
-        val result = runCatching { GroupPushRouting.redistribute(g, FlakyMarkPending(inner)) }
+        val result = runCatching {
+            GroupPushRouting.redistribute(account, g, FlakyMarkPending(inner))
+        }
 
         // The caller must see the ORIGINAL send failure — re-flagging is a
         // best-effort repair, not a correctness gate.
@@ -792,13 +794,13 @@ class GroupPushRoutingTest {
         val ports = FakePorts(account)
         val g = "ff".repeat(32)
         // No secret held yet -> no broadcast.
-        GroupPushRouting.redistribute(g, ports)
+        GroupPushRouting.redistribute(account, g, ports)
         assertEquals(0, ports.broadcastCount)
 
         // Provision (owner mint) then redistribute -> one more broadcast.
         GroupPushRouting.ensure(account, g, isOwner = true, ports = ports)
         val afterMint = ports.broadcastCount
-        GroupPushRouting.redistribute(g, ports)
+        GroupPushRouting.redistribute(account, g, ports)
         assertEquals(afterMint + 1, ports.broadcastCount)
     }
 
@@ -921,7 +923,9 @@ class GroupPushRoutingTest {
         ports: PushRoutingPorts,
         mintEpoch: ULong = defaultStamp,
         ownGroupEpoch: ULong? = defaultStamp,
+        accountIdB64: String = account,
     ): GroupPushRouting.ReceiveVerdict = GroupPushRouting.receiveGated(
+        accountIdB64 = accountIdB64,
         groupIdHex = groupIdHex,
         secret = secret,
         mintEpoch = mintEpoch,
@@ -2564,7 +2568,7 @@ class GroupPushRoutingTest {
         ports.distributed[g] = true
         ports.groupEpoch = 40uL
 
-        GroupPushRouting.redistribute(g, ports)
+        GroupPushRouting.redistribute(account, g, ports)
 
         assertEquals(4uL, stampOf(ports.broadcastEnvelopes.single()))
         assertTrue(ports.composedStamps.single() is GroupPushRouting.MintStamp.Replayed)
@@ -2886,4 +2890,474 @@ class GroupPushRoutingTest {
         advanceUntilIdle()
         assertEquals(9L, commitId)
     }
+
+    // -----------------------------------------------------------------
+    // The receive-side RACE — `receiveGated` must serialize
+    //
+    // `receiveGated` is a read-modify-write: it reads the stored
+    // `(secret, mintEpoch)` pair at the top and persists several calls
+    // down. Its production caller fires it PER ENVELOPE, fire-and-forget,
+    // on the multi-threaded `pushScope` — so two routing envelopes in one
+    // poll batch used to run as two genuinely parallel coroutines and both
+    // could finish their read of the PRE-batch row before either wrote.
+    // The survivor was then decided by SCHEDULING rather than by the
+    // ADR-0044 total order, which restores F-A with no malice and no
+    // crash — see the [GroupPushRouting] lock doc for the full trace.
+    //
+    // These tests run on REAL threads (`Dispatchers.Default`, not the
+    // virtual-time test dispatcher) because the defect is genuine
+    // parallelism: there is no suspension point between the read and the
+    // write inside ONE coroutine, so a confined dispatcher would hide it
+    // rather than close it.
+    // -----------------------------------------------------------------
+
+    /**
+     * ONE routing row, shared by two or more [RacePorts] instances — so
+     * concurrently dispatched receives contend on a single row exactly as
+     * the per-envelope launches of one poll batch do.
+     */
+    private class RaceStore {
+        @Volatile
+        var secret: ByteArray? = null
+
+        @Volatile
+        var mintEpoch: ULong = 0uL
+
+        @Volatile
+        var distributed: Boolean = true
+
+        /** Shared across every [RacePorts] over this row, so a concurrent
+         *  mint is counted once for the GROUP rather than once per port. */
+        val mintCount = java.util.concurrent.atomic.AtomicInteger(0)
+
+        val routes: MutableSet<String> =
+            java.util.Collections.synchronizedSet(LinkedHashSet<String>())
+        val subscribed: MutableList<String> =
+            java.util.Collections.synchronizedList(mutableListOf<String>())
+        val unsubscribed: MutableList<String> =
+            java.util.Collections.synchronizedList(mutableListOf<String>())
+    }
+
+    /**
+     * A [PushRoutingPorts] over a SHARED [RaceStore], with a one-shot
+     * [afterRead] hook that fires on this instance's FIRST
+     * [PushRoutingPorts.getRecord] — i.e. exactly the gate read at the top
+     * of `receiveGated`, never the incidental re-read inside
+     * `subscribeOrDefer`. That hook is what lets a test park one receive
+     * between its read and its write and drive the interleave
+     * deterministically instead of hoping for it.
+     *
+     * The pure transforms ([PushRoutingPorts.derivePushGid], the ADR-0044
+     * order, the envelope codec) are DELEGATED to a [FakePorts] instance
+     * rather than re-implemented, so this class cannot drift from the rest
+     * of the suite.
+     */
+    private class RacePorts(
+        private val store: RaceStore,
+        private val stampEpoch: ULong = 0uL,
+        private val beforeStamp: suspend () -> Unit = {},
+        private val afterRead: () -> Unit = {},
+    ) : PushRoutingPorts {
+        private val pure = FakePorts("race")
+        private val hookArmed = java.util.concurrent.atomic.AtomicBoolean(true)
+
+        init {
+            pure.groupEpoch = stampEpoch
+        }
+
+        /** A distinct 32-byte secret per GROUP-wide mint, so two rotations
+         *  off one row are always distinguishable. */
+        override fun mintSecret(): ByteArray {
+            val n = store.mintCount.incrementAndGet()
+            return ByteArray(32) { (0x40 + n).toByte() }
+        }
+
+        override fun derivePushGid(secret: ByteArray): ByteArray = pure.derivePushGid(secret)
+
+        override val isNewer: GroupPushRouting.PushRoutingSecretIsNewer = pure.isNewer
+
+        override fun composeEnvelope(
+            stamp: GroupPushRouting.MintStamp,
+            secret: ByteArray,
+        ): ByteArray = pure.composeEnvelope(stamp, secret)
+
+        /** The REAL suspension inside `rotate`'s read-modify-write: it sits
+         *  between the old-secret read and the persist (in production a hop
+         *  through `ChatRepository`'s own group lock to read `Group.epoch()`).
+         *  [beforeStamp] parks a rotation exactly there — the F-E window. */
+        override suspend fun freshMintStamp(): GroupPushRouting.MintStamp.Fresh? {
+            beforeStamp()
+            return pure.freshMintStamp()
+        }
+
+        override fun hasSecret(groupIdHex: String): Boolean = store.secret != null
+
+        override fun getRecord(groupIdHex: String): GroupPushRouting.StoredSecret? {
+            val held = store.secret?.let { GroupPushRouting.StoredSecret(it, store.mintEpoch) }
+            if (hookArmed.compareAndSet(true, false)) afterRead()
+            return held
+        }
+
+        override fun isDistributed(groupIdHex: String): Boolean = store.distributed
+
+        override fun persist(
+            groupIdHex: String,
+            secret: ByteArray,
+            mintEpoch: ULong,
+            pushGid: ByteArray,
+            distributed: Boolean,
+        ) {
+            store.secret = secret
+            store.mintEpoch = mintEpoch
+            store.distributed = distributed
+            store.routes.add(hex(pushGid))
+        }
+
+        override fun markDistributed(groupIdHex: String) {
+            store.distributed = true
+        }
+
+        override fun markPending(groupIdHex: String) {
+            store.distributed = false
+        }
+
+        override suspend fun subscribeUnderPushGid(pushGid: ByteArray) {
+            store.subscribed.add(hex(pushGid))
+        }
+
+        override suspend fun unsubscribeFromPushGid(pushGid: ByteArray) {
+            store.unsubscribed.add(hex(pushGid))
+        }
+
+        override fun deleteRoute(pushGid: ByteArray) {
+            store.routes.remove(hex(pushGid))
+        }
+
+        override suspend fun broadcast(envelope: ByteArray) = Unit
+    }
+
+    /** Long enough that a coroutine reliably reaches its gate read. */
+    private val startupWaitMs = 5_000L
+
+    /** How long a parked receive waits for its counterpart before giving
+     *  up. WITH the lock the counterpart is queued behind it and can never
+     *  arrive, so this timeout is the (bounded) cost of the test; WITHOUT
+     *  it the handoff happens immediately and the timeout is never hit. */
+    private val interleaveWaitMs = 500L
+
+    private fun await(latch: java.util.concurrent.CountDownLatch, ms: Long) {
+        latch.await(ms, java.util.concurrent.TimeUnit.MILLISECONDS)
+    }
+
+    @Test
+    fun `two receives from ONE poll batch cannot let the STALE one win - the F-A race`() =
+        kotlinx.coroutines.runBlocking {
+            // The literal F-A batch. This device holds S_OLD minted at epoch
+            // 10 and polls `[rotation S1@11, stale S_OLD@10]`:
+            //
+            //   gate A reads (S_OLD,10) -> ACCEPT_ADMIN_ROTATE -> persists
+            //     (S1,11), retires gid(S_OLD)
+            //   gate B reads that SAME pre-batch snapshot, so its own bytes
+            //     are byte-IDENTICAL -> ACCEPT_IDENTICAL, which by design
+            //     short-circuits BOTH the clamp and the order -> re-persists
+            //     S_OLD one turn behind A
+            //
+            // The device ends on the superseded secret: the id the evicted
+            // member still derives and is still subscribed to.
+            //
+            // Note the failure is NOT a lost update — it is the
+            // ACCEPT_IDENTICAL fast path. That is exactly why every
+            // SEQUENTIAL F-A test in this file passed throughout: only a
+            // concurrent read makes a stale envelope look byte-identical to
+            // what the reader believes is stored, and ACCEPT_IDENTICAL by
+            // design bypasses BOTH the clamp and the order. So the verdict
+            // itself is asserted below, not just its after-effects.
+            val store = RaceStore()
+            val g = "80".repeat(32)
+            val sOld = ByteArray(32) { 0x0A }
+            val s1 = ByteArray(32) { 0x0B }
+            store.secret = sOld
+            store.mintEpoch = 10uL
+
+            val rotationRead = java.util.concurrent.CountDownLatch(1)
+            val staleRead = java.util.concurrent.CountDownLatch(1)
+            val rotationDone = java.util.concurrent.CountDownLatch(1)
+
+            // A parks between its read and its write until B has read...
+            val rotationPorts = RacePorts(store) {
+                rotationRead.countDown()
+                await(staleRead, interleaveWaitMs)
+            }
+            // ...and B parks after its read until A has fully applied, so
+            // its write lands LAST. Both waits are bounded, so with the lock
+            // in place (where neither handoff can happen — the second
+            // receive is queued behind the first) the test still terminates.
+            val stalePorts = RacePorts(store) {
+                staleRead.countDown()
+                await(rotationDone, interleaveWaitMs)
+            }
+            val gidOld = hex(rotationPorts.derivePushGid(sOld))
+            val gidNew = hex(rotationPorts.derivePushGid(s1))
+            store.routes.add(gidOld)
+            var staleVerdict: GroupPushRouting.ReceiveVerdict? = null
+
+            kotlinx.coroutines.coroutineScope {
+                val rotation = launch(kotlinx.coroutines.Dispatchers.Default) {
+                    GroupPushRouting.receiveGated(
+                        accountIdB64 = account,
+                        groupIdHex = g,
+                        secret = s1,
+                        mintEpoch = 11uL,
+                        senderSignatureKey = adminKey,
+                        owner = knownRoles(),
+                        ownGroupEpoch = 11uL,
+                        ports = rotationPorts,
+                    )
+                    rotationDone.countDown()
+                }
+                // Dispatch the stale envelope only once the rotation is at
+                // its gate read — the interleave being probed.
+                await(rotationRead, startupWaitMs)
+                val stale = launch(kotlinx.coroutines.Dispatchers.Default) {
+                    staleVerdict = GroupPushRouting.receiveGated(
+                        accountIdB64 = account,
+                        groupIdHex = g,
+                        secret = sOld,
+                        mintEpoch = 10uL,
+                        senderSignatureKey = adminKey,
+                        owner = knownRoles(),
+                        ownGroupEpoch = 11uL,
+                        ports = stalePorts,
+                    )
+                }
+                kotlinx.coroutines.joinAll(rotation, stale)
+            }
+
+            // The load-bearing assertion: the stale envelope must be judged
+            // against the row the rotation COMMITTED, so it can never present
+            // as ACCEPT_IDENTICAL.
+            assertEquals(
+                "the stale envelope must lose the ORDER, not slip through as identical",
+                GroupPushRouting.ReceiveVerdict.REJECT_STALE,
+                staleVerdict,
+            )
+            assertArrayEquals(
+                "the device must end on the ROTATION's secret, not the stale one",
+                s1,
+                store.secret,
+            )
+            assertEquals("filed at the rotation's epoch", 11uL, store.mintEpoch)
+            assertTrue("gid(S1) is live", store.routes.contains(gidNew))
+            assertTrue("subscribed under gid(S1)", store.subscribed.contains(gidNew))
+            assertFalse(
+                "gid(S_OLD) must not be resurrected — the evicted member derives it",
+                store.routes.contains(gidOld),
+            )
+            assertTrue("gid(S_OLD) was retired", store.unsubscribed.contains(gidOld))
+        }
+
+    @Test
+    fun `N concurrent same-epoch rotations converge on the total-order winner`() =
+        kotlinx.coroutines.runBlocking {
+            // ADR-0043 option (b) lets an ADMIN rotate, so ONE removal
+            // yields N+1 same-epoch mints that typically arrive in a single
+            // poll batch. They TIE on the epoch, so the canonical order
+            // falls to the 32 secret bytes and there is exactly one right
+            // answer — the same one whatever order they land in.
+            //
+            // Unserialized, all N decide against the SAME pre-batch row, all
+            // clear the order against it, and the winner is whichever
+            // coroutine happens to write last — plus one live route row per
+            // accepted secret instead of one.
+            val store = RaceStore()
+            val g = "81".repeat(32)
+            val sOld = ByteArray(32) { 0x0A }
+            store.secret = sOld
+            store.mintEpoch = 10uL
+
+            // Deliberately NOT dispatched in byte order: the winner must be
+            // the total-order maximum, not the last arrival.
+            val candidates = listOf(
+                ByteArray(32) { 0x31 },
+                ByteArray(32) { 0x77 },
+                ByteArray(32) { 0x12 },
+                ByteArray(32) { 0x55 },
+            )
+            val winner = candidates.maxWithOrNull(
+                Comparator { a, b -> compareWire(11uL, a, 11uL, b) },
+            )!!
+
+            // A soft barrier: each receive parks after its read until every
+            // one of them has read (or the bound elapses). Unserialized that
+            // makes every gate decide against the pre-batch row; serialized
+            // it can never complete, so each simply pays the bound.
+            val allRead = java.util.concurrent.CountDownLatch(candidates.size)
+            val portsList = candidates.map {
+                RacePorts(store) {
+                    allRead.countDown()
+                    await(allRead, interleaveWaitMs)
+                }
+            }
+            val gidOld = hex(portsList[0].derivePushGid(sOld))
+            val gidWinner = hex(portsList[0].derivePushGid(winner))
+            store.routes.add(gidOld)
+
+            kotlinx.coroutines.coroutineScope {
+                candidates.forEachIndexed { i, secret ->
+                    launch(kotlinx.coroutines.Dispatchers.Default) {
+                        GroupPushRouting.receiveGated(
+                            accountIdB64 = account,
+                            groupIdHex = g,
+                            secret = secret,
+                            mintEpoch = 11uL,
+                            senderSignatureKey = adminKey,
+                            owner = knownRoles(),
+                            ownGroupEpoch = 11uL,
+                            ports = portsList[i],
+                        )
+                    }
+                }
+            }
+
+            assertArrayEquals(
+                "the total-order maximum survives, not the last writer",
+                winner,
+                store.secret,
+            )
+            assertEquals("filed at the shared epoch", 11uL, store.mintEpoch)
+            assertEquals(
+                "exactly one live route row — every superseded id was retired",
+                setOf(gidWinner),
+                store.routes.toSet(),
+            )
+            assertFalse("the pre-batch id is gone", store.routes.contains(gidOld))
+        }
+
+    @Test
+    fun `a receive landing mid-rotation cannot strand an orphan gid - F-E`() =
+        kotlinx.coroutines.runBlocking {
+            // The ADR-0043 **F-E** residual, closed by SHARING the lock with
+            // `rotate` rather than giving the receive path its own.
+            //
+            // `rotate`'s read-modify-write straddles a REAL suspension: it
+            // reads the old secret, AWAITS `freshMintStamp` (in production a
+            // hop through `ChatRepository`'s group lock), and only then
+            // persists. A receive that commits S1 inside that window is
+            // overwritten by the rotation's S2 — and the rotation then
+            // retires `gid(S_OLD)`, the id it captured BEFORE the wait,
+            // leaving `gid(S1)` subscribed, indexed, and un-retirable by
+            // anyone: nothing ever notifies it again and no later rotation
+            // can name it.
+            //
+            // Parking the rotation inside its BROADCAST instead would prove
+            // nothing — `rotate` persists BEFORE it broadcasts, so by then
+            // the receive already reads the fresh row and the test passes
+            // against unfixed code.
+            val store = RaceStore()
+            val g = "82".repeat(32)
+            val sOld = ByteArray(32) { 0x0A }
+            val s1 = ByteArray(32) { 0x0B }
+            store.secret = sOld
+            store.mintEpoch = 10uL
+
+            val atStamp = java.util.concurrent.CountDownLatch(1)
+            val receiveDone = java.util.concurrent.CountDownLatch(1)
+
+            // The rotation parks between its old-secret read and its persist.
+            // WITH the shared lock the receive is queued behind it and can
+            // never arrive, so this simply pays the bound.
+            val rotationPorts = RacePorts(
+                store = store,
+                stampEpoch = 12uL,
+                beforeStamp = {
+                    atStamp.countDown()
+                    await(receiveDone, interleaveWaitMs)
+                },
+            )
+            val receivePorts = RacePorts(store, stampEpoch = 12uL)
+            val gidOld = hex(rotationPorts.derivePushGid(sOld))
+            val gidS1 = hex(rotationPorts.derivePushGid(s1))
+            store.routes.add(gidOld)
+
+            kotlinx.coroutines.coroutineScope {
+                val rotation = launch(kotlinx.coroutines.Dispatchers.Default) {
+                    GroupPushRouting.rotate(
+                        accountIdB64 = account,
+                        groupIdHex = g,
+                        ownRole = GroupPushRouting.RotationRole.OWNER,
+                        ports = rotationPorts,
+                    )
+                }
+                await(atStamp, startupWaitMs)
+                val receive = launch(kotlinx.coroutines.Dispatchers.Default) {
+                    GroupPushRouting.receiveGated(
+                        accountIdB64 = account,
+                        groupIdHex = g,
+                        secret = s1,
+                        mintEpoch = 11uL,
+                        senderSignatureKey = adminKey,
+                        owner = knownRoles(),
+                        ownGroupEpoch = 12uL,
+                        ports = receivePorts,
+                    )
+                    receiveDone.countDown()
+                }
+                kotlinx.coroutines.joinAll(rotation, receive)
+            }
+
+            // Whichever of the two ends up holding the row, the invariant is
+            // the same and it is the one F-E broke: there is exactly ONE live
+            // routing id, and every id this device ever armed other than that
+            // one was retired. An orphan shows up as a second live row.
+            val live = hex(rotationPorts.derivePushGid(store.secret!!))
+            assertEquals(
+                "exactly one live route row — an orphaned gid is a second one",
+                setOf(live),
+                store.routes.toSet(),
+            )
+            val stranded = store.subscribed.toSet() - store.unsubscribed.toSet() - setOf(live)
+            assertEquals(
+                "no gid was left subscribed but un-retirable",
+                emptySet<String>(),
+                stranded,
+            )
+            assertFalse("gid(S1) must not be a second live id", store.routes.contains(gidS1))
+            assertTrue("the pre-rotation id was retired", store.unsubscribed.contains(gidOld))
+        }
+
+    @Test
+    fun `concurrent provisioning still mints exactly once`() =
+        kotlinx.coroutines.runBlocking {
+            // Collapsing `ensure`'s own lock into the shared serializing one
+            // must not weaken mint-once. It does not, and the mechanism is
+            // worth naming because it is a STRONGER one than a coalescing
+            // lock: `ensure` re-reads `hasSecret` / `isDistributed` INSIDE
+            // the critical section, so a queued second pass sees the row the
+            // first one committed and takes EnsureAction.NONE. Coalescing
+            // only ever held while two calls genuinely overlapped; the
+            // in-lock re-read holds however they are staggered.
+            val store = RaceStore()
+            val g = "83".repeat(32)
+            val ports = List(4) { RacePorts(store, stampEpoch = 5uL) }
+
+            kotlinx.coroutines.coroutineScope {
+                ports.forEach { p ->
+                    launch(kotlinx.coroutines.Dispatchers.Default) {
+                        GroupPushRouting.ensure(
+                            accountIdB64 = account,
+                            groupIdHex = g,
+                            isOwner = true,
+                            ports = p,
+                        )
+                    }
+                }
+            }
+
+            assertEquals("minted exactly once for the group", 1, store.mintCount.get())
+            assertEquals(
+                "exactly one live route row",
+                setOf(hex(ports[0].derivePushGid(store.secret!!))),
+                store.routes.toSet(),
+            )
+        }
 }

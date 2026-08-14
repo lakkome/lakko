@@ -3063,18 +3063,52 @@ Six sub-invariants — 1-5 from ADR-0042, 6 added by
    neither server holds. The output is 32 bytes, so it drops into push-gw's
    existing `BINARY(32)` / hex key-space unchanged.
 
+   **The derivation is UNCHANGED by the ADR-0044 v2 envelope, and that is a
+   load-bearing property rather than an incidental one.** The `mint_epoch` v2
+   added is an **ordering** field only: it never enters `derive_push_gid`
+   (`derive_push_gid_ignores_the_mint_epoch`), so the golden vector, the domain
+   message, and the function's whole signature are untouched. The consequence is
+   the one that matters operationally: `push_gid` remains a **stable** per-group
+   value with **no epoch input**, so a subscriber survives ordinary membership
+   commits **without re-subscribing** and the iOS `thread-id` stays constant. Had
+   the epoch been folded into the derivation, every commit would have silently
+   re-keyed the routing id and every member would have had to re-subscribe — a
+   far larger change than the one ADR-0044 was making. Rotation on a member
+   removal (sub-invariant 6) changes the routing id by changing the **secret**,
+   never by changing the derivation.
+
 2. **The secret is distributed only inside the E2EE group.** It rides an **MLS
-   application message** on the group journal as a fixed 62-byte
-   domain-separated envelope
-   (`PUSH_ROUTING_SECRET_ENVELOPE_DOMAIN_V1 || version || secret(32)`), so the DS
-   and push-gw see only **ciphertext** (invariant #2) and the separator's trailing
-   `0x00` keeps it byte-distinct from every sibling envelope kind
-   (`separator_distinct_from_sibling_domains`, plus a no-cross-dispatch test).
-   The codec is bounded and fail-closed — exact-length + domain-match + version
-   gate, `WrongDomain` / `BadLength` / `UnknownVersion` — and is fuzzed
+   application message** on the group journal as a fixed-length domain-separated
+   envelope, so the DS and push-gw see only **ciphertext** (invariant #2) and the
+   separator's trailing `0x00` keeps it byte-distinct from every sibling envelope
+   kind (`separator_distinct_from_sibling_domains`, plus a no-cross-dispatch
+   test). The codec is bounded and fail-closed — exact-length + domain-match +
+   version gate, `WrongDomain` / `BadLength` / `UnknownVersion` — and is fuzzed
    (`push_routing_secret_decode`, the same threat class as `media_state_decode`,
    since the receive-loop dispatch reaches it on attacker-touchable journal bytes
    before any state is consulted).
+
+   **AMENDED by [ADR-0044](../adr/0044-push-routing-secret-recency.md): the
+   envelope is v2, 70 bytes.** It was
+   `PUSH_ROUTING_SECRET_ENVELOPE_DOMAIN_V1 || version || secret(32)` (62 bytes);
+   it is now
+   `PUSH_ROUTING_SECRET_ENVELOPE_DOMAIN_V1 || version=0x02 || mint_epoch(8, BE u64) || secret(32)`.
+   The **29 domain bytes are byte-identical** and frozen forever
+   (`domain_separator_bytes_survived_the_v2_bump`) — they are the
+   `incoming_envelope` dispatch prefix, so changing them would make a peer fall
+   through to the chat parser; the in-payload version byte is the knob that moves,
+   and `_V1` in the constant's name denotes the envelope **family**, not the
+   schema version. This is a **hard flag day with no dual-accept**: a retired v1
+   envelope is refused with `UnknownVersion`, because it carries no `mint_epoch`
+   and so has **no position in the C-62 order** — admitting one would re-open the
+   replay v2 exists to close. The decoder deliberately gates **version before
+   length**, so a v1 envelope names the actual problem rather than reporting a
+   truncation-looking `BadLength`. Both cross-version refusals (old client meeting
+   v2 -> `BadLength`; new client meeting v1 -> `UnknownVersion`) are fail-closed to
+   **defer**, never to the raw `group_id`, so invariant #4 held through the
+   transition. The `IncomingEnvelope::PushRoutingSecret` dispatch variant carries
+   the `mint_epoch` alongside the secret, and the fuzz target drives both the
+   widened parse and the order it feeds.
 
 3. **No client ever subscribes or notifies under the raw `group_id` (invariant
    #4).** A member that does not hold the secret **defers**: it does not subscribe
@@ -3123,6 +3157,26 @@ Six sub-invariants — 1-5 from ADR-0042, 6 added by
    CRITICAL/HIGH, no invariant #2/#3/#4 break on the live path**, its one blocking
    MEDIUM (a coalescing rotation lock that folded a second removal into an
    in-flight rotation on web + iOS) fixed by adopting Android's serializing lock.
+
+   **COMPOSED WITH (not replaced by) [ADR-0044](../adr/0044-push-routing-secret-recency.md).**
+   Everything above is an **authority** question, and that was the whole of the
+   gate's decision surface until ADR-0044 — it could ask *who sent this* but never
+   *is this newer than what I hold*, which is what made a silent permanent rotation
+   undo reachable (**G-36 residual 9**). ADR-0044 adds an **ordering** gate
+   alongside it, pinned separately as **C-62**. The authority rules here are
+   **unchanged** — same rank, same owner-evaluated-first branch, same fail-closed
+   unreadable-role-table and unresolvable-sender refusals, same legacy
+   no-role-table acceptance. The clean split: **authority decides WHO may write;
+   the order decides WHICH write survives**, and the order arbitrates only between
+   envelopes that already cleared authority. One consequence is a **deliberate
+   narrowing of a property stated above**: a total order and *unconditional*
+   owner-priority cannot both hold, so while the owner still wins whenever it mints
+   at a later epoch (the normal case), at an **exact epoch tie** the secret bytes
+   decide and the owner can lose to an admin. Arrival-order independence — the
+   property owner-priority existed to provide — is preserved by the strictly
+   stronger mechanism of a total order, which is arrival-order independent for
+   *every* participant rather than only for the owner's envelope. Recorded as a
+   narrowing in the same way ADR-0043's removed Android strip-admins rule was.
 
 5. **The server is untouched and stays opaque (invariant #2).** `services/push-gw`
    is **byte-identical** across the whole arc (`git diff 51fe05d..HEAD --
@@ -3194,29 +3248,250 @@ must be read BEFORE the in-place store overwrite.** The secret row is keyed
 `push_gid`; persist-first permanently loses the ability to name the row being
 retired.
 
-**Enforcement status — honest, and the reason this entry exists.** (Line anchors
-below are as of `a6ed544`, the commit that landed the native mirrors; symbol names
-are the durable reference.)
+**Enforcement status.** (Line anchors are as of `a6ed544`, the commit that landed
+the native mirrors; symbol names are the durable reference.)
 
 | Rule | How enforced | Test |
 |---|---|---|
-| Broadcast follows the Remove commit | **Structural only** — the call-site sequencing: web awaits `removeMemberFromGroup` before the rotate call (`Chat.tsx:2267-2271` -> `:2293-2299`); iOS awaits the publish at `ChatRepository.swift:891-894` before `:917`; Android rotates at `:842`, after the `groupsLock` block closes at `:820`. On the poll path it holds because the commit is applied by the poll before the membership diff runs | **NONE.** No test pins it on any client |
+| Broadcast follows the Remove commit | Structural — the call-site sequencing: web awaits `removeMemberFromGroup` before the rotate call (`Chat.tsx:2267-2271` -> `:2293-2299`); iOS awaits the publish at `ChatRepository.swift:891-894` before `:917`; Android rotates at `:842`, after the `groupsLock` block closes at `:820`. On the poll path it holds because the commit is applied by the poll before the membership diff runs. [ADR-0044](../adr/0044-push-routing-secret-recency.md) additionally moved the sequencing behind **one named seam** per client (e.g. iOS `PushGroupRouting.publishRemoveThenRotate`, whose sole production call site is `ChatRepository.removeMemberFromGroup`), so the two steps can no longer be reordered independently | **Pinned on all three clients** since `936d849` (web) / `014e84e` (iOS + Android) — six tests on web, five on iOS, six on Android |
 | Old secret read before overwrite | Executed order inside the rotation/receive paths | Pinned, e.g. `apps/ios/LakkoTests/PushGroupRoutingTests.swift:1805` ("the teardown names the OLD id") and `:1680` both assert the unsubscribe targets the **old** gid |
 
-The first rule is therefore **exactly the kind of property a refactor can silently
-break**: moving the rotation call above the publish, or making the publish
-non-blocking, would still pass every existing test while quietly restoring the
-leak — and the failure is invisible at runtime, since the evicted member simply
-keeps receiving wakes as it did before. ADR-0043 itself states this "must be
-asserted in a test"; **that requirement is unmet**. Recorded as a gap under
-**G-36**, and independently raised by the ADR-0043 `lakko-security` review as
-finding **F3** (LOW).
+**This entry previously read "NONE — no test pins it on any client", and that is
+the state ADR-0043 shipped in.** The rule was exactly the kind a refactor can
+silently break: moving the rotation call above the publish, or making the publish
+non-blocking, would have passed every existing test while quietly restoring the
+leak, invisibly at runtime. ADR-0043 stated the ordering "must be asserted in a
+test"; the requirement went unmet and was recorded as a gap under **G-36**
+(residual 6) and independently as `lakko-security` **F3** (LOW).
+
+**How it is pinned now.** Each client asserts on the **emitted envelope's
+`mint_epoch` stamp** rather than on call order — a strictly stronger check, since
+it fails on any path that reaches the broadcast carrying a pre-removal epoch,
+however the reordering arose — and each carries a **permanent inverted-order
+companion** that runs the swap and asserts the consequence (web `the INVERTED
+order would stamp the pre-removal epoch and lose the guarantee`; iOS
+`testTheInvertedOrderStampsThePreRemovalEpochAndTheRotationLoses`; Android
+`` `C-61 - the INVERTED order stamps PRE-removal and the rotation LOSES` ``, which
+also asserts the receive gate resolves the stale replay as `ACCEPT_OWNER` over the
+rotation). On both natives the discrimination was **proven by running the swap**,
+not asserted: iOS temporarily added an inverted copy and recorded three failures;
+Android replaced the seam with rotate-then-advance and recorded the stamp
+assertion failing 11 vs 10. Both probes were reverted. The fixture is load-bearing
+— at an epoch tie the bytewise-greater secret wins, so the stale secret is filled
+`0xFF` (the maximum) to make the rotation lose deterministically under the swap;
+the first web cut used `0xEE`, against which a random rotation secret sorts higher
+roughly once in fourteen runs, so the test would occasionally have proved nothing.
+
+**ADR-0044 also sharpened what a regression costs, which is why the tests stopped
+being optional.** Under ADR-0043 alone, breaking this ordering cost the rotation's
+**forward secrecy** — the envelope sealed at the pre-removal epoch, openable by the
+evicted member. Under ADR-0044 it costs that **and inverts the C-62 recency
+comparison**: a rotation stamped at the pre-removal epoch `N` **ties** with a stale
+secret minted at `N`, the tie falls to the secret bytes, and the rotation may
+simply **lose**. The guarantee degrades from "the rotation always wins" to a
+**silent coin flip**. C-61 is therefore no longer a precondition of one property
+but of two — C-60 sub-invariant 6 and C-62's closure of the stale-replay undo.
 
 Invariants: **#2** (the envelope is opaque to the DS and to push-gw either way —
 this is not a server-visible property but a client sequencing one), **#4** (a
 member without the current secret defers rather than downgrading; the rotation adds
 no fallback path), **#5** (the forward-unlinkability this ordering buys is the
 whole of C-60 sub-invariant 6).
+
+### C-62: The push-routing secret is totally ordered by its mint epoch, and only a strictly newer envelope may displace the stored one
+
+[ADR-0044](../adr/0044-push-routing-secret-recency.md). C-60 sub-invariant 4 gave
+the receive path an **authority** gate — it can ask *who sent this*. Until this
+entry there was **no ordering gate at all**: nothing anywhere could ask *is this
+newer than what I hold*, so a **retry** of the current secret and a **replay** of a
+superseded one were byte-indistinguishable to every client. That omission was
+structural rather than a bug in one client — all three decision cores took only
+authority inputs — and it makes a **silent, permanent rotation undo** reachable
+with no malice and no crash (`lakko-security` **F-A**, **G-36 residual 9**, which
+this entry is intended to close and, as shipped, **does not yet** — see the end of
+this entry): a device
+holding a stale secret in an un-settled `pending` row re-broadcasts it after
+somebody else has rotated, every member's gate sees an authorised sender and
+accepts, and the group migrates **back** onto the routing id an evicted member
+still derives. With no further membership shrink there is no further rotation, so
+the state does not self-heal.
+
+This entry is pinned separately from C-60 for the same reason C-61 is: it is a
+distinct rule with a distinct failure mode, and C-60's authority gate is
+**unchanged** by it. Four sub-invariants.
+
+1. **The order is total, canonical, and defined exactly once.** Envelopes are
+   ordered on the pair `(mint_epoch, secret_bytes)` — the 8-byte big-endian epoch
+   first, then the 32 secret bytes compared lexicographically — and an incoming
+   envelope displaces a stored one only when **strictly greater**. The order lives
+   in `crates/lakko-contacts/src/push_routing.rs` as
+   `push_routing_secret_is_newer(incoming_epoch, incoming_secret, stored_epoch,
+   stored_secret)` (plus the `PushRoutingSecretEnvelope::supersedes` wrapper), and
+   **every client routes its accept/refuse decision through it over the FFI**
+   (`pushRoutingSecretIsNewer` on both uniffi and wasm); none re-implements the
+   comparison. That is deliberate: three clients each hand-rolling a comparison is
+   precisely the drift class that produced the finding this entry closes. Two
+   properties are load-bearing and pinned — **equal is NOT newer** (what keeps a
+   benign retry from reading as an update, and what makes the `accept-identical`
+   fast path safe), and **wrong-length secrets fail closed to `false`** (a
+   malformed incoming secret must never displace a stored one, and a corrupt
+   stored secret is better left in place than overwritten on a comparison against
+   a value that was never a secret). The function never panics. The **secret bytes**
+   are the tiebreak because they are the only discriminator both available to every
+   receiver by construction and **stable across relay** — a sender-derived tiebreak
+   (leaf index, role rank) would give the same bytes a different position depending
+   on who forwarded them, and a minter identity carried in the envelope is
+   self-asserted. The tiebreak is the **common path, not a corner case**: under
+   ADR-0043 option (b) one member removal produces **N+1 same-epoch mints** (owner
+   plus N admins), so epoch alone would leave them mutually incomparable.
+   Pinned by `is_newer_is_a_strict_total_order`,
+   `is_newer_matches_lexicographic_wire_bytes`,
+   `is_newer_rejects_a_wrong_length_secret`, `an_identical_pair_is_not_newer`,
+   `a_stale_rebroadcast_never_undoes_a_rotation`,
+   `convergence_is_arrival_order_independent`, and the
+   `push_routing_secret_decode` fuzz target, which asserts irreflexivity on
+   attacker-chosen bytes.
+
+2. **The mint epoch is durable state, and every re-broadcast replays it
+   verbatim.** `mint_epoch` is stamped **once, at mint time**, and then travels
+   with that secret for the secret's whole life. Only a mint reads
+   `Group::epoch()`. Every path that recomposes an envelope from an
+   already-stored secret — six such sites, two per client — **must** replay the
+   stored stamp, because re-stamping at send time would make a stale envelope
+   arrive **newer** than the live rotation and reproduce the finding with the
+   ordering gate fully in place and working as specified. This is therefore a
+   **store** property, not only a wire one: the epoch is persisted per
+   `(account, group)` on all three clients, alongside the secret and the
+   `distributed` flag in **one atomic write**, and the pair is read through a
+   single store call so it cannot tear against a concurrent receive. Legacy
+   unstamped rows read at **epoch 0**, the floor of the order, so any stamped mint
+   supersedes them. **Android additionally makes the rule impossible to break by
+   ACCIDENT**: `composeEnvelope` takes a sealed `MintStamp` whose `Fresh` and
+   `Replayed` subtypes have `internal` constructors with one producer each in
+   `src/main` (the port reading the live group epoch, and the stored row). The
+   claim is bounded — Kotlin `internal` is **module**-scoped and the gate, the
+   repository and the chat client share the `:app` module, and `StoredSecret`'s
+   constructor is public, so a wrong stamp remains *constructible*. What the
+   sealed type removes is the **silent** failure mode: a bare `ULong` cannot be
+   passed where a stamp is expected (a compile error), so getting it wrong
+   requires a differently-named, reviewer-visible call rather than an accidental
+   slip.
+
+3. **An incoming stamp is clamped against the receiver's own group epoch, before
+   authority is consulted.** An ordering rule with no upper bound hands an
+   authorised writer a **strictly worse capability than the one it removes**:
+   stamp `u64::MAX` and nothing can ever exceed it, so the group's routing id is
+   **frozen permanently** and no later owner rotation can win. That would escalate
+   **G-36 residual 3** from "a malicious admin can churn the routing id"
+   (self-repairing at the owner's next rotation) to "a malicious admin can freeze
+   it forever" (which does not) — trading a recoverable denial for an
+   unrecoverable one. The clamp refuses any envelope whose `mint_epoch` exceeds
+   the receiver's own current MLS group epoch, and is evaluated **before**
+   authority precisely so that **not even the owner** can freeze the group. It
+   never rejects an honest envelope, because
+   `stamp <= seal epoch <= receiver's epoch at dispatch`: the minter stamps at
+   mint time and the group epoch only advances afterwards, and a receiver applies
+   commits up to and including the one carrying the message before dispatching its
+   plaintext. A re-broadcast widens that gap but never inverts it. **This clamp is
+   the client's obligation, not the core's** — `lakko-contacts` treats
+   `mint_epoch` as opaque, never reading it as a time, never bounding it, never
+   feeding it to `derive_push_gid`; it owns the **order** and requires only that
+   one group's mints be non-decreasing. Sourcing the stamp from `Group::epoch()`
+   is the **client-side binding** that makes the clamp checkable at all, since an
+   MLS epoch is shared state every receiver independently observes. A free-running
+   counter could be bounded by nothing. Every client reads the epoch **after** its
+   serializing lock (iOS a provider closure, Android a suspending port, web inside
+   the queued run), so a rotation queued behind a predecessor stamps the epoch it
+   actually mints at rather than the one it was triggered at.
+
+4. **`accept-identical` must never move the stored stamp.** The identical-bytes
+   fast path is accepted from **anyone** and sits ahead of both the authority gate
+   and the clamp, which is correct — it is what keeps a retry, a relay, and the
+   post-add redistribute idempotent. It follows that the path may write **nothing**:
+   re-persisting the *incoming* epoch there is an **epoch-inflation channel that
+   reaches the exact freeze sub-invariant 3 prevents, by going around it**. A
+   **plain member** — who can never clear the authority gate, and whose envelope
+   would be clamped if it carried a future stamp — relays the group's **current**
+   secret bytes stamped `u64::MAX`; rule 1 matches on the bytes alone, so neither
+   gate runs, and every subsequent rotation *including the owner's* then loses the
+   recency comparison forever. This was a **live defect in the first
+   implementation**, uncovered by the web verdict tests, and is fixed on all three
+   clients by preserving the **stored** stamp on that path, each with a named
+   regression test that additionally proves a later owner rotation still lands.
+   Generalised: **a rule that short-circuits a gate must not write any state that
+   gate protects.**
+
+**What this buys — and the precondition that is NOT yet met.** The four
+sub-invariants above are **built and armed on all three clients** (`936d849`,
+`014e84e`), and the primitive is correct. **They do not yet deliver their intended
+closure, and this entry must not be read as though they do.**
+
+The `lakko-security` review of the landed arc returned **REQUEST CHANGES** and
+**reproduced the defect by execution** on web: two envelopes driven concurrently
+the way `Chat.tsx` actually drives them produced verdicts
+`['accept-admin-rotate', 'accept-identical']` and a final stored secret of `0xEE`
+at epoch 10 — the **stale** one. The cause is **G-36 residual 10** (HIGH, open):
+the receive gate is a **read-modify-write** with suspension points between the read
+and the write, and **no client serializes it per `(account, group)`** — web
+dispatches it `void`-prefixed and fire-and-forget from a batch loop, Android
+launches it per envelope on `pushScope` (its `inflight` and `rotatingLocks` mutexes
+guard `ensure` and `rotate`, not receive), and iOS spawns a detached `Task` where
+`@MainActor` serializes execution but not across `await`. Two routing envelopes
+from one poll batch therefore both decide against the **same pre-batch snapshot**.
+
+**The gate is bypassed, not defeated** — an important distinction for triage, and
+the reason this entry stands as written rather than being withdrawn. Sub-invariant
+4 is the vehicle: `accept-identical` deliberately short-circuits both the clamp and
+the order, which is correct for a benign retry and which sub-invariant 4 correctly
+stopped from moving the stored epoch — but nothing stops it being **reached on a
+stale snapshot**, where the incoming bytes match a secret the device has already
+superseded, and rewriting it. Sub-invariant 4's hardening does not help there,
+because the losing gate files the *stored* epoch it read, which is the stale one.
+
+Consequently: **G-36 residual 9 is NOT closed**, and residual 7's
+concurrent-rotator core is **NOT closed** — the N+1 same-epoch mints from one
+removal arrive in one batch and all compare against one snapshot, so the survivor
+is scheduling order. Stated exactly: **sub-invariant 1's arrival-order independence
+is a property of the pure order function, not yet of the path that calls it.** A
+per-`(account, group)` serializing lock spanning the gate's read and write is in
+flight on all three clients; this entry's closure claims become true when it lands.
+
+Even then, two things stay out of scope: the order **does not repair a device
+already holding a stale value** (it stops a stale value spreading; it pushes
+nothing), and it has no bearing on residual 7's **F-D stale-role window**, which is
+an authority refusal. Residuals 1 / 3 / 4 / 5 / 8 are untouched.
+
+**One transition-window caveat on sub-invariant 2.** A legacy unstamped row reads
+`mint_epoch = 0` on all three platforms — the floor, so any stamped mint supersedes
+it, which is the right direction. But during the flag day **two different pre-v2
+secrets both sit at 0**, so a current-versus-superseded pair among them falls to
+the byte tiebreak rather than to recency — the same failure this entry exists to
+prevent, once, at roughly even odds for that pair. Bounded on both sides: confined
+to the transition window, and self-healing at the next rotation, which follows a
+Remove commit and is therefore always stamped strictly above 0.
+
+**Enforcement and shape.** The wire carrier is the v2 envelope (C-60
+sub-invariant 2), a hard flag day with no dual-accept, since a v1 envelope carries
+no `mint_epoch` and therefore has **no position in this order** — admitting one
+would re-open the finding for exactly the envelopes a stale device sends. The
+receive gate's rule order on every client is: identical -> **reject-future** ->
+authority (unchanged) -> no-stored -> **is-newer** -> **reject-stale**. Both new
+refusals **drop** the envelope entirely; neither downgrades anything. Web and
+Android name every verdict individually (9 members each); iOS keeps a coarser
+5-case enum, collapsing the authority accepts and refusals and carrying the
+distinctions as diagnostic tags, and maps an unreadable own epoch to
+`.rejectFuture` where the other two use `reject-unverifiable` — different labels,
+identical fail-closed effect.
+
+Invariants: **#2** (the `mint_epoch` rides inside the same E2EE MLS
+application-message plaintext; the DS sees ciphertext, push-gw sees only the
+derived 32-byte id and is **byte-identical unchanged**), **#3** (no
+`crates/lakko-mls` edit — the clients read `Group::epoch()`, an accessor that
+already existed on both FFI surfaces), **#4** (the fail-closed surface **widens**:
+reject-future, reject-stale, and both cross-version refusals all drop or defer,
+never downgrade; the codec stays bounded and exact-length), **#5** (unchanged
+posture — this restores the ADR-0043 forward-unlinkability in the cases the
+finding was silently revoking it, and does not touch the co-membership cluster).
 
 ## Exporter labels (call-side)
 

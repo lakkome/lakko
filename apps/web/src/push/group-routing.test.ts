@@ -2806,6 +2806,338 @@ describe("C-61 — publish the Remove commit, THEN rotate", () => {
   });
 });
 
+describe("the receive gate is SERIALISED per (account, group)", () => {
+  // `receivePushRoutingSecretGated` is a read-modify-write with `await`
+  // suspension points between the read and the write, and its only production
+  // caller (`Chat.tsx`'s poll-batch loop) is fire-and-forget inside a loop
+  // that never awaits. So two envelopes in ONE batch are launched in the same
+  // synchronous turn, both suspend before either continues, and both complete
+  // their `getGroupRoutingRecord` read of the PRE-BATCH row before either
+  // persists. Which one survives is then decided by microtask scheduling.
+  //
+  // That restores F-A — the finding ADR-0044 exists to close — with no malice
+  // and no crash, because `accept-identical` short-circuits BOTH the future
+  // clamp and the order by design: a second gate that still sees the
+  // pre-batch row finds the stale bytes IDENTICAL to what it read, so it
+  // re-persists them one microtask behind the rotation.
+  //
+  // Every test here therefore issues its calls WITHOUT awaiting between them.
+  // Awaiting is precisely what the sequential F-A tests above do, and it is
+  // why they passed while the defect was live.
+  const ACCT = "acctSerial";
+  const GRP = "grpSerialB64";
+  const GROUP_ID = new Uint8Array([0x5e, 0x21, 0xa1]);
+  // As in the F-A block: the STALE secret sorts STRICTLY HIGHER, so only the
+  // epoch can refuse it — a gate that fell back to bytes would pick it.
+  const S_OLD = new Uint8Array(32).fill(0xee);
+  const S1 = new Uint8Array(32).fill(0x11);
+
+  it("the literal F-A batch order converges on the ROTATION, not the stale replay", async () => {
+    // A device holds S_OLD@10 and polls the batch [rotation S1@11, stale
+    // S_OLD@10]. Unserialised, gate B reads the same pre-batch row as gate A,
+    // finds its own bytes identical to it, and re-persists S_OLD behind A —
+    // leaving the device on the superseded secret, i.e. the very id the
+    // evicted member still derives and is still subscribed to.
+    seedStoredSecret(ACCT, GRP, S_OLD, 10n);
+    const gidOld = toHex(wasm.derivePushGid(S_OLD));
+    const gidLive = toHex(wasm.derivePushGid(S1));
+    h.routes.set(gidOld, { accountId: ACCT, groupIdB64: GRP });
+    const group = mockRoleGroup(GROUP_ID, OWNER_PK, { epoch: 11n });
+
+    // Launched in ONE synchronous turn, exactly as the poll-batch loop does.
+    const rotation = receivePushRoutingSecretGated(
+      ACCT,
+      group,
+      GRP,
+      ADMIN_LEAF,
+      S1,
+      11n,
+    );
+    const staleReplay = receivePushRoutingSecretGated(
+      ACCT,
+      group,
+      GRP,
+      OWNER_LEAF,
+      S_OLD,
+      10n,
+    );
+    const [rotationVerdict, replayVerdict] = await Promise.all([
+      rotation,
+      staleReplay,
+    ]);
+
+    expect(rotationVerdict).toBe("accept-admin-rotate");
+    // The load-bearing assertion. Unserialised this is `accept-identical` —
+    // the replay never even reaches the ordering comparison, because it is
+    // judged against the row the rotation had not yet written.
+    expect(replayVerdict).toBe("reject-stale");
+
+    // The device ends on S1 ...
+    expect(Array.from(h.secrets.get(`${ACCT}\0${GRP}`) as Uint8Array)).toEqual(
+      Array.from(S1),
+    );
+    expect(h.mintEpochs.get(`${ACCT}\0${GRP}`)).toBe(11n);
+    // ... gid(S1) is live ...
+    expect(h.routes.has(gidLive)).toBe(true);
+    // ... and gid(S_OLD) is retired: torn down exactly once, by the rotation,
+    // and never re-armed by the replay.
+    await vi.waitFor(() => expect(unsubscribeGroup).toHaveBeenCalledTimes(1));
+    expect(toHex(unsubscribeGroup.mock.calls[0]![1])).toBe(gidOld);
+    expect(h.routes.has(gidOld)).toBe(false);
+    // Exactly one write: the refused replay must persist nothing at all.
+    expect(vi.mocked(putGroupRouting)).toHaveBeenCalledTimes(1);
+  });
+
+  it("the same batch delivered in the REVERSE order converges identically", async () => {
+    // Arrival order must not decide the outcome — that is the whole point of
+    // a total order. Here the stale replay is launched FIRST, so it is
+    // legitimately `accept-identical` (it matches the row it is judged
+    // against, which is genuinely still S_OLD), and the rotation that follows
+    // must still win.
+    seedStoredSecret(ACCT, GRP, S_OLD, 10n);
+    const group = mockRoleGroup(GROUP_ID, OWNER_PK, { epoch: 11n });
+
+    const staleReplay = receivePushRoutingSecretGated(
+      ACCT,
+      group,
+      GRP,
+      OWNER_LEAF,
+      S_OLD,
+      10n,
+    );
+    const rotation = receivePushRoutingSecretGated(
+      ACCT,
+      group,
+      GRP,
+      ADMIN_LEAF,
+      S1,
+      11n,
+    );
+    expect(await Promise.all([staleReplay, rotation])).toEqual([
+      "accept-identical",
+      "accept-admin-rotate",
+    ]);
+
+    expect(Array.from(h.secrets.get(`${ACCT}\0${GRP}`) as Uint8Array)).toEqual(
+      Array.from(S1),
+    );
+    expect(h.mintEpochs.get(`${ACCT}\0${GRP}`)).toBe(11n);
+  });
+
+  it("N concurrent SAME-EPOCH rotations converge on the total-order winner", async () => {
+    // G-36 residual 7's shape: under ADR-0043 option (b) ONE removal yields
+    // N+1 same-epoch rotations, which typically arrive in a single poll
+    // batch. Unserialised, all N+1 gates compare against one snapshot and the
+    // survivor is whichever write happens to land last — scheduling order.
+    // Serialised, each is judged against its predecessor's committed result,
+    // so the canonical `(mintEpoch, secretBytes)` order decides: at an exact
+    // epoch tie the HIGHEST-sorting bytes win, whatever order they arrive in.
+    const stored = new Uint8Array(32).fill(0x01);
+    seedStoredSecret(ACCT, GRP, stored, 10n);
+    const group = mockRoleGroup(GROUP_ID, OWNER_PK, { epoch: 11n });
+
+    // Delivered DESCENDING, so the winner arrives FIRST and every later
+    // envelope must be refused. A last-write-wins implementation would end on
+    // the lowest-sorting secret instead.
+    const mints = [0xd0, 0xc0, 0xb0, 0xa0].map((b) =>
+      new Uint8Array(32).fill(b),
+    );
+    const verdicts = await Promise.all(
+      mints.map((secret) =>
+        receivePushRoutingSecretGated(
+          ACCT,
+          group,
+          GRP,
+          ADMIN_LEAF,
+          secret,
+          11n,
+        ),
+      ),
+    );
+
+    // The first supersedes the stored secret; the rest lose the byte tiebreak.
+    expect(verdicts).toEqual([
+      "accept-admin-rotate",
+      "reject-stale",
+      "reject-stale",
+      "reject-stale",
+    ]);
+    expect(Array.from(h.secrets.get(`${ACCT}\0${GRP}`) as Uint8Array)).toEqual(
+      Array.from(mints[0]!),
+    );
+    expect(vi.mocked(putGroupRouting)).toHaveBeenCalledTimes(1);
+  });
+
+  it("the winner is the same whichever order the N same-epoch mints arrive in", async () => {
+    // The converse of the previous case: delivered ASCENDING, every envelope
+    // legitimately supersedes its predecessor and the highest-sorting one
+    // still ends up stored. Both orders agreeing is what "total order" means
+    // operationally.
+    const stored = new Uint8Array(32).fill(0x01);
+    seedStoredSecret(ACCT, GRP, stored, 10n);
+    const group = mockRoleGroup(GROUP_ID, OWNER_PK, { epoch: 11n });
+
+    const mints = [0xa0, 0xb0, 0xc0, 0xd0].map((b) =>
+      new Uint8Array(32).fill(b),
+    );
+    const verdicts = await Promise.all(
+      mints.map((secret) =>
+        receivePushRoutingSecretGated(
+          ACCT,
+          group,
+          GRP,
+          ADMIN_LEAF,
+          secret,
+          11n,
+        ),
+      ),
+    );
+
+    expect(verdicts).toEqual([
+      "accept-admin-rotate",
+      "accept-admin-rotate",
+      "accept-admin-rotate",
+      "accept-admin-rotate",
+    ]);
+    // Same winner as the descending delivery above.
+    expect(Array.from(h.secrets.get(`${ACCT}\0${GRP}`) as Uint8Array)).toEqual(
+      Array.from(new Uint8Array(32).fill(0xd0)),
+    );
+  });
+
+  it("a DIFFERENT group is not blocked by an in-flight receive (the lock is per-row)", async () => {
+    // The lock must not serialise the whole app: two groups' envelopes in one
+    // poll pass are independent rows and must proceed concurrently.
+    const OTHER = "grpSerialOther";
+    seedStoredSecret(ACCT, GRP, S_OLD, 10n);
+    seedStoredSecret(ACCT, OTHER, S_OLD, 10n);
+    const group = mockRoleGroup(GROUP_ID, OWNER_PK, { epoch: 11n });
+
+    const [a, b] = await Promise.all([
+      receivePushRoutingSecretGated(ACCT, group, GRP, ADMIN_LEAF, S1, 11n),
+      receivePushRoutingSecretGated(ACCT, group, OTHER, ADMIN_LEAF, S1, 11n),
+    ]);
+    expect([a, b]).toEqual(["accept-admin-rotate", "accept-admin-rotate"]);
+    expect(Array.from(h.secrets.get(`${ACCT}\0${GRP}`) as Uint8Array)).toEqual(
+      Array.from(S1),
+    );
+    expect(
+      Array.from(h.secrets.get(`${ACCT}\0${OTHER}`) as Uint8Array),
+    ).toEqual(Array.from(S1));
+  });
+
+  it("a receive queued behind a THROWING one still runs (failures are not contagious)", async () => {
+    // The gate itself never throws, but it awaits the store, so a rejected
+    // predecessor must not poison the queue — the same property the rotation
+    // lock already pins.
+    seedStoredSecret(ACCT, GRP, S_OLD, 10n);
+    const group = mockRoleGroup(GROUP_ID, OWNER_PK, { epoch: 11n });
+
+    vi.mocked(putGroupRouting).mockRejectedValueOnce(new Error("idb down"));
+    const first = receivePushRoutingSecretGated(
+      ACCT,
+      group,
+      GRP,
+      ADMIN_LEAF,
+      S1,
+      11n,
+    );
+    // Same epoch (the clamp ceiling), higher-sorting bytes — so it is
+    // strictly newer than whatever the first run left behind, either way.
+    const second = receivePushRoutingSecretGated(
+      ACCT,
+      group,
+      GRP,
+      OWNER_LEAF,
+      new Uint8Array(32).fill(0x22),
+      11n,
+    );
+    // The first swallows its persist failure (best-effort — it must never
+    // throw out of the poll loop) and still reports its verdict; the second
+    // runs to completion regardless.
+    expect(await Promise.all([first, second])).toEqual([
+      "accept-admin-rotate",
+      "accept-owner",
+    ]);
+    expect(
+      Array.from(h.secrets.get(`${ACCT}\0${GRP}`) as Uint8Array),
+    ).toEqual(Array.from(new Uint8Array(32).fill(0x22)));
+  });
+});
+
+describe("the routing-row lock spans receive AND rotate (F-E)", () => {
+  const ACCT = "acctFE";
+  const GROUP_ID = new Uint8Array([0xfe, 0x01]);
+  const GRP_B64 = base64Encode(GROUP_ID);
+  const HELD = new Uint8Array(32).fill(0x33);
+
+  it("a peer envelope arriving mid-rotation is ordered AFTER it, not against a stale row", async () => {
+    // F-E: rotation and receive both read-modify-write the same row. Holding
+    // two independent locks would let a peer envelope be judged against the
+    // PRE-rotation secret and leave an intermediate orphan gid. One lock per
+    // row means the receive reads the rotation's committed output.
+    seedStoredSecret(ACCT, GRP_B64, HELD, 10n);
+    h.distributed.set(`${ACCT}\0${GRP_B64}`, true);
+    const group = mockRoleGroup(GROUP_ID, OWNER_PK, { epoch: 11n });
+
+    // Park the rotation inside its broadcast — the window a peer envelope
+    // lands in.
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const sent: Uint8Array[] = [];
+    const broadcast = async (bytes: Uint8Array): Promise<void> => {
+      sent.push(bytes);
+      if (sent.length === 1) await gate;
+    };
+
+    // BOTH launched in ONE synchronous turn — the interleave that matters.
+    // Waiting for the rotation to reach its broadcast first would be no test
+    // at all: the rotation persists BEFORE it broadcasts, so by then the row
+    // is already fresh and even an unlocked receive reads the right value.
+    // Launched together, an unlocked receive reads the PRE-rotation row,
+    // finds the peer's bytes identical to it, and re-persists them over the
+    // rotation's output.
+    const rotation = rotatePushRoutingSecret(ACCT, group, "owner", broadcast);
+    // A peer's envelope carrying the secret the rotation is REPLACING.
+    const receive = receivePushRoutingSecretGated(
+      ACCT,
+      group,
+      GRP_B64,
+      ADMIN_LEAF,
+      HELD,
+      10n,
+    );
+    let receiveSettled = false;
+    void receive.then(() => {
+      receiveSettled = true;
+    });
+
+    await flushMicrotasks();
+    expect(sent.length).toBe(1); // rotation parked inside its broadcast
+    // Sharing ONE lock per row is what holds the receive back here: the
+    // rotation still owns the row while it is on the wire.
+    expect(receiveSettled).toBe(false);
+
+    release();
+
+    expect(await rotation).toBe("rotated");
+    // Judged against the rotation's OUTPUT: the peer's bytes are no longer
+    // what this device holds, and they are older, so they are refused rather
+    // than re-applied over the fresh secret.
+    expect(await receive).toBe("reject-stale");
+
+    const rotated = decodeSecret(sent[0]!);
+    expect(Array.from(h.secrets.get(`${ACCT}\0${GRP_B64}`) as Uint8Array)).toEqual(
+      Array.from(rotated),
+    );
+    // Exactly one live route row — no intermediate orphan.
+    expect(h.routes.size).toBe(1);
+    expect(h.routes.has(toHex(wasm.derivePushGid(rotated)))).toBe(true);
+  });
+});
+
 // base64 of the group_id — recomputed the same way `base64Encode` (real,
 // used by the orchestration) does, to assert the reverse-map entry.
 function base64OfGroupId(groupId: Uint8Array): string {

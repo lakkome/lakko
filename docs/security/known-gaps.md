@@ -3184,25 +3184,64 @@ it ever built, it would be **lighter** than ADR-0043 prescribed: the new secret 
 already durable by then, so only the *old gid* needs recording — an "old gids
 awaiting retirement" list.) All three paths are accepted on the same reasoning.
 
-#### Residual 6 — the post-Remove-epoch ordering (C-61) is enforced structurally, with no test (new, ADR-0043)
+#### Residual 6 — the post-Remove-epoch ordering (C-61) was enforced structurally, with no test — **CLOSED** (2026-08-14, [ADR-0044](../adr/0044-push-routing-secret-recency.md))
 
 The whole of residual 2's closure depends on the rotation broadcast being emitted
 **strictly after** the Remove commit, so that the envelope is sealed at the
 post-remove epoch and RFC 9420 forward secrecy denies it to the evicted leaf. That
-rule is pinned as **C-61**. It is currently enforced **structurally only** — by
-call-site sequencing (an awaited publish, or a lock block that closes) on each
-client — and **no test pins it on any client**; the sibling
-read-old-before-overwrite rule *is* test-pinned.
+rule is pinned as **C-61**. As ADR-0043 shipped it was enforced **structurally
+only** — by call-site sequencing (an awaited publish, or a lock block that closes)
+on each client — with **no test on any client**; only the sibling
+read-old-before-overwrite rule was test-pinned. ADR-0043 itself states the
+ordering "must be asserted in a test"; that requirement was unmet.
+(`lakko-security` **F3**, LOW — the review reached the same finding
+independently.)
 
-This is exactly the property a refactor can silently break: hoisting the rotation
-above the publish, or making the publish non-blocking, would pass every existing
-test while restoring the leak, and the failure is **invisible at runtime** — the
-evicted member simply keeps receiving wakes, as it did before ADR-0043. ADR-0043
-itself states the ordering "must be asserted in a test"; **that requirement is
-unmet**. A regression test on each client is the fix. (`lakko-security` **F3**,
-LOW — the review reached the same finding independently.)
+**The dependency sharpened before it was closed, which is why the test stopped
+being optional.** Under ADR-0043 alone, a C-61 regression cost the rotation's
+**forward secrecy**: the envelope would be sealed at the pre-removal epoch and the
+evicted member could open it. Under **ADR-0044** it costs that **and inverts the
+recency comparison** — a rotation stamped at the pre-removal epoch `N` **ties**
+with the stale `S_old` minted at `N`, so the tie falls to the 32 secret bytes and
+the rotation may simply **lose to the stale secret**. The guarantee degrades from
+"the rotation always wins" to **a coin flip**, silently. ADR-0044 therefore
+converts C-61 from a property protecting one guarantee into a **precondition of
+two**, and landed the regression tests in the same arc rather than deferring them.
 
-#### Residual 7 — concurrent rotators can strand a device on a superseded secret (new, ADR-0043; `lakko-security` F2, MEDIUM)
+**CLOSED by `014e84e`** (web's landed in `936d849`). What that means concretely:
+
+- **One named seam per client**, so the two steps cannot be reordered
+  independently — e.g. iOS
+  `PushGroupRouting.publishRemoveThenRotate(publishRemove:rotate:onRotationStarted:)`,
+  whose sole production call site is `ChatRepository.removeMemberFromGroup`.
+- **The assertion is on the emitted envelope's `mint_epoch` stamp, not on call
+  order** — a strictly stronger check, since it fails on any path that reaches the
+  broadcast with a pre-removal epoch, however the reordering happened.
+- **A permanent inverted-order companion on each client** that runs the swap and
+  asserts the consequence: web `the INVERTED order would stamp the pre-removal
+  epoch and lose the guarantee`; iOS
+  `testTheInvertedOrderStampsThePreRemovalEpochAndTheRotationLoses`; Android
+  `` `C-61 - the INVERTED order stamps PRE-removal and the rotation LOSES` ``
+  (which additionally asserts the *gate* agrees, resolving the stale replay as
+  `ACCEPT_OWNER` over the rotation — F-A reproduced under the swap).
+- **On both natives the discrimination was proven by running the swap, not
+  asserted**: iOS temporarily added an inverted copy and recorded three failures;
+  Android replaced the seam with rotate-then-advance and recorded the stamp
+  assertion failing 11 vs 10. Both probes were reverted.
+- Counts: **six** C-61 tests on web, **five** on iOS, **six** on Android.
+
+**The fixture is load-bearing, and its first cut was latently flaky.** A test that
+exists to prove the rotation *loses* under the swap must make it lose with
+certainty, and at an epoch tie the winner is the bytewise-greater secret. The web
+fixture landed in `936d849` filled the stale secret with `0xEE`, so a freshly
+minted **random** rotation secret sorts higher roughly once in fourteen runs and
+the rotation would have **won** — passing a test written to watch it lose. All
+three now use `0xFF`, the bytewise maximum, so the rotation loses
+deterministically. Recorded because the failure mode generalises: a
+discrimination test whose fixture does not force the outcome is a test that
+sometimes proves nothing, silently.
+
+#### Residual 7 — concurrent rotators can strand a device on a superseded secret (ADR-0043; `lakko-security` F2, MEDIUM) — **STILL OPEN** (attempted by [ADR-0044](../adr/0044-push-routing-secret-recency.md); blocked on residual 10)
 
 A rotator applies **its own** mint at **local** time, not at its own position in
 the DS journal. So a device that publishes its rotation at journal id `p` and then
@@ -3218,9 +3257,47 @@ or routes under a gid nobody notifies, self-healing only at the next rotation.
 Foreground polling delivers messages throughout, so this is a **wake-delivery
 defect, not message loss**.
 
-**Recorded, not fixed.** The **web-only stale-role sub-case is fixed** — that is
-true for the case it names (the `ownRole()` signal holding a pre-poll value; web now
-reads the role off the live group via `readOwnRoleNow`).
+**What ADR-0044 ATTEMPTED, and why it does not close this yet.** The root cause
+above is *mutual incomparability*: the N+1 authorised mints had no order between
+them, so which one a device ended on was decided by arrival order and devices
+**partitioned**. ADR-0044's total order on `(mint_epoch, secret_bytes)` is
+designed to remove exactly that — the N+1 mints from one removal share an epoch
+(no intervening commit), so the 32-byte tiebreak decides deterministically,
+identically for every participant, and independently of arrival order. **This is
+the load-bearing reason the tiebreak is not a corner case:** epoch alone would
+leave the N+1 mints incomparable.
+
+**But the closure does not follow, for the reason recorded as residual 10.** The
+N+1 same-epoch rotations typically arrive in **one poll batch**, and the receive
+gate is an unserialized read-modify-write dispatched fire-and-forget per envelope
+— so all N+1 gates compare against a **single pre-batch snapshot** and the
+survivor is decided by **scheduling order**. Stated exactly: **the total order's
+arrival-order independence holds for the pure function, but not for the path that
+calls it.** It becomes a property of the device's resulting state only once the
+gate consuming it is serialized. The per-`(account, group)` lock in flight for
+residual 10 is the same fix.
+
+**Three further things survive even after that lock lands.**
+
+1. **The F-D stale-role window, untouched and orthogonal** (below). A demoted
+   rotator's envelope is refused on **authority**, not on recency, so an ordering
+   predicate has no bearing on it whatsoever.
+2. **An ordering gate stops a stale value SPREADING; it does not repair an
+   already-stale holder.** The order pushes nothing. A device that ends on a loser
+   converges only when an authorised newer envelope actually reaches it — in the
+   normal case the winner still sitting in the journal ahead of its cursor, but
+   **not** if it has already polled past that position (or the 30-day journal
+   prune has taken it). A self-healing reply-with-my-newer-one was considered and
+   **deferred**: it needs a storm guard, since N members each answering one stale
+   broadcast is an N-fold journal amplification.
+3. **The N+1 rotations themselves still happen.** The order governs the *final
+   state*; it does not reduce the number of mints, the transient subscribe /
+   unsubscribe churn they cause, or the orphan-gid exposure of the residual-5 /
+   F-E class.
+
+**The web-only stale-role sub-case remains fixed** — that is true for the case it
+names (the `ownRole()` signal holding a pre-poll value; web now reads the role off
+the live group via `readOwnRoleNow`).
 
 **A narrower stale-role window survives on ALL THREE, and is narrowed rather than
 eliminated** (`lakko-security` **F-D**). Every client captures the role **before**
@@ -3247,11 +3324,12 @@ established, leaving the device briefly subscribed to **neither** the old gid no
 the new one. A wake arriving in that window is not delivered; the message itself is
 unaffected and arrives on the next poll. Recorded as a follow-up, not fixed.
 
-#### Residual 9 — a stale `pending` re-broadcast can silently UNDO a rotation, permanently (new, ADR-0043 re-review; `lakko-security` F-A)
+#### Residual 9 — a stale `pending` re-broadcast can silently UNDO a rotation, permanently (ADR-0043 re-review; `lakko-security` F-A) — **STILL OPEN** (attempted by [ADR-0044](../adr/0044-push-routing-secret-recency.md); blocked on residual 10)
 
 The one residual on this list whose consequence is **confidentiality rather than
 wake delivery**, and it needs **no malice and no crash** — only a failed broadcast
-followed by someone else's rotation.
+followed by someone else's rotation. The mechanics below are kept as the
+historical record; the status of the attempted fix is at the end of this entry.
 
 1. An owner/admin's post-add `redistributeSecretToGroup` **broadcast fails**. The
    failure path marks the row `pending` (`markGroupRoutingPending`), so that device
@@ -3303,7 +3381,7 @@ scenario (a device stranded on a superseded secret misses wakes). This one is no
 delivery defect at all: its consequence is the **confidentiality** property C-60
 sub-invariant 6 and C-61 exist to protect.
 
-**Fix direction — recorded as a follow-up, deliberately NOT built here:**
+**Fix direction — recorded as a follow-up, deliberately NOT built in ADR-0043:**
 
 1. **The general fix** — carry a **monotone counter or the minting epoch inside the
    62-byte distribution envelope** and refuse a non-increasing value on receive.
@@ -3316,6 +3394,181 @@ sub-invariant 6 and C-61 exist to protect.
 2. **The narrow fix** — clear or skip the `pending` re-broadcast once a
    **different** secret has been accepted. Purely client-side, no wire change, but
    it patches this path rather than the missing predicate.
+
+**ATTEMPTED, NOT CLOSED — [ADR-0044](../adr/0044-push-routing-secret-recency.md)
+built fix direction 1, the general one** (`936d849` core + FFI + web, `014e84e`
+iOS + Android), and the `lakko-security` review of that arc returned **REQUEST
+CHANGES**: it **reproduced this residual by execution** on web, driving two
+envelopes concurrently the way `Chat.tsx` actually drives them and observing
+verdicts `['accept-admin-rotate', 'accept-identical']` with a final stored secret
+of `0xEE` **at epoch 10** — the stale one. **F-A does not close as shipped.** The
+reason is **residual 10**, not a fault in the primitive: the ordering gate is
+correct and armed, but the receive path is an unserialized read-modify-write
+dispatched fire-and-forget per envelope, so the gate is handed a **stale
+snapshot** and is **bypassed, not defeated**. The vehicle is `accept-identical`,
+which deliberately short-circuits **both** the future clamp and the total order —
+correct for a benign retry, and ADR-0044 correctly stopped that path from moving
+the stored epoch, but **nothing stops it being reached on a stale snapshot** and
+rewriting a superseded secret. A per-`(account, group)` serializing lock spanning
+the read and the write is **in flight on all three clients**; this entry closes
+when that lands and is verified.
+
+What the arc **did** build, and what will stand once the lock lands:
+
+- **The envelope went v2, a hard flag day** —
+  `domain(29, unchanged) ‖ version(1)=0x02 ‖ mint_epoch(8, BE u64) ‖ secret(32)`,
+  **70 bytes**. The 29 domain bytes are the `incoming_envelope` dispatch prefix and
+  are frozen forever, so the in-payload version byte moved instead. **No
+  dual-accept**: a retired v1 envelope is refused with `UnknownVersion`, because a
+  v1 envelope carries **no `mint_epoch` and therefore has no position in the
+  order** — admitting one would re-open this exact residual for precisely the
+  envelopes a stale device sends. A mixed-version fleet fails closed to **defer**
+  in both directions, never to the leaky raw `group_id`, so invariant #4 held
+  through the flag day.
+- **The gate gained the missing predicate.** Envelopes are ordered on the pair
+  `(mint_epoch, secret_bytes)` — epoch first, then the 32 secret bytes
+  lexicographically, **strictly greater wins, equal is not newer**. The order is
+  defined **once**, in `crates/lakko-contacts` (`push_routing_secret_is_newer`),
+  and consumed by all three clients over the FFI (`pushRoutingSecretIsNewer`);
+  none re-implements it, because three clients each hand-rolling a comparison is
+  exactly the drift class that produced this finding.
+- **Why this specific scenario is MEANT to fail — and why it does not yet.**
+  `S_old` was minted at some epoch `E_old` no later than the pre-removal epoch;
+  the rotation to `S1` is broadcast **strictly after** the Remove commit
+  (**C-61**, now test-pinned — see residual 6), so it is stamped
+  `E_rot >= E_remove > E_old`. The re-broadcast of `S_old` is therefore **strictly
+  less** in the order, and a member holding `S1` **that evaluates the gate against
+  its true current state** refuses it as `reject-stale`: no persist, no subscribe,
+  no teardown of `gid(S1)`. That reasoning is sound and will hold once the receive
+  path is serialized. It does **not** hold today, because a member processing both
+  envelopes from one poll batch evaluates the second against a **pre-batch
+  snapshot** in which it still holds `S_old` — so the comparison the argument
+  depends on is never actually made (residual 10).
+- **The stamp is persisted and re-emitted verbatim.** All six re-broadcast sites
+  recompose from the *stored* secret, so a site that re-stamped the *current* epoch
+  at send time would make the stale envelope arrive **newer** than the live
+  rotation and reproduce this residual with the ordering gate fully in place. Only
+  a mint reads `Group::epoch()`. Android makes this impossible to break BY ACCIDENT:
+  `composeEnvelope` takes a sealed `MintStamp` whose `Fresh` / `Replayed`
+  subtypes have `internal` constructors with one producer each in `src/main`.
+  The claim is bounded and should not be read as stronger — Kotlin `internal` is
+  **module**-scoped and the gate, the repository and the chat client share the
+  `:app` module, and `StoredSecret`'s constructor is public, so a wrong stamp is
+  still *constructible*. What it removes is the **silent** failure mode: a bare
+  `ULong` cannot be passed where a stamp is expected, so the mistake now takes a
+  differently-named, reviewer-visible call.
+- **A future clamp guards the new capability the ordering created.** Without it an
+  authorised writer could stamp `u64::MAX` and **freeze** the group's routing id
+  permanently, escalating **residual 3** from admin-can-churn (self-repairing at
+  the owner's next rotation) to admin-can-freeze (which does not). The clamp
+  bounds an incoming stamp against the receiver's own group epoch and is evaluated
+  **before** authority, so not even the owner can freeze the group; it never
+  rejects an honest envelope, since `stamp <= seal epoch <= receiver's epoch at
+  dispatch`.
+- **A related defect was found and fixed during implementation.** `accept-identical`
+  short-circuits **both** the authority gate and the clamp, so re-persisting the
+  *incoming* epoch on that path let a **plain member** relay the group's current
+  secret bytes stamped `u64::MAX`, inflate the stored stamp, and refuse every later
+  rotation including the owner's — reaching the very freeze the clamp prevents,
+  **around it**. All three clients now preserve the **stored** stamp on that path,
+  each with a named regression test that also proves a later owner rotation still
+  lands. The general rule: **a rule that short-circuits a gate must not write any
+  state that gate protects.**
+- **Fix direction 2 turned out to be already structural** on all three clients and
+  is **pinned rather than rebuilt**: every store writes the secret, the
+  `distributed` flag and the stamp in **one atomic write**, so accepting a
+  different secret replaces the bytes and clears the pending marker together. It
+  remains **complementary, not superseded** — it removes the trigger, ADR-0044
+  removes the effect.
+- **Accepted narrowing.** A total order and unconditional owner-priority cannot
+  both hold: the owner still wins whenever it mints at a later epoch (the normal
+  case), but **at an exact epoch tie the bytes decide and the owner can lose to an
+  admin**. The property owner-priority existed to provide — arrival-order
+  independence — is preserved by a strictly stronger mechanism, and both tied
+  values are authorised post-removal mints equally unknown to the evicted member.
+- **Not closed by this:** the order stops a stale value **spreading**; it does not
+  repair a device already holding one (see residual 7).
+
+#### Residual 10 — the receive gate is a read-modify-write that is NOT serialized on ANY client, so the ordering gate is BYPASSED and F-A does not close (new, ADR-0044 review; HIGH, blocking)
+
+**OPEN, blocking.** Found by the `lakko-security` review of the landed ADR-0044
+arc — which returned **REQUEST CHANGES** and **reproduced the defect by
+execution** on web, driving two envelopes concurrently the way `Chat.tsx` actually
+drives them and observing verdicts `['accept-admin-rotate', 'accept-identical']`
+with a final stored secret of `0xEE` **at epoch 10**, the stale one — and
+confirmed independently on all three clients. It is recorded at **HIGH** because
+its consequence is the same **confidentiality** property residual 9 is about, not
+wake delivery.
+
+**This residual is the reason residuals 9 and 7 remain open.** ADR-0044 built a
+correct ordering primitive and armed the gate with it; this entry is why that gate
+never gets to run against the truth. The distinction that matters for triage: the
+gate is **bypassed, not defeated**. Nothing here says the order is wrong.
+
+**The shape.** The receive gate is a **read-modify-write**: it reads the stored
+`(secret, mint_epoch)` pair, computes a verdict against it, then persists. There
+are **suspension points between the read and the write** on every client, and
+**no client holds a per-`(account, group)` lock across the sequence**:
+
+- **web** — `receivePushRoutingSecretGated`
+  (`apps/web/src/push/group-routing.ts`) takes no lock, and its sole caller in
+  `Chat.tsx` invokes it **`void`-prefixed, fire-and-forget**, inside a batch loop
+  that never awaits it. Every routing envelope in one poll batch therefore starts
+  before any of them finishes.
+- **Android** — `receiveGated` (`GroupPushRouting.kt:812`) takes no lock. The
+  `inflight` `Mutex` guards **`ensure`** (the mint path) and `rotatingLocks`
+  guards **`rotate`**; neither covers receive. `ChatRepository.kt:1900` dispatches
+  the gate **per envelope** via `pushScope.launch`.
+- **iOS** — `receivePushRoutingSecret` (`ChatRepository.swift:1542`) is
+  non-`async` and spawns a **detached `Task`**. `@MainActor` serializes
+  *execution*, but **not across `await`**, so two gate bodies interleave at their
+  suspension points exactly as on the other two.
+
+**Why it matters: F-A (residual 9) survives ADR-0044 unchanged, with no
+adversary, in the exact journal order F-A describes.** A device holding
+`S_OLD@10` polls a batch containing `[rotation S1@11, stale S_OLD@10]`:
+
+1. Gate **A** reads the pre-batch snapshot `(S_OLD, 10)`, ranks `S1@11` strictly
+   greater, accepts, persists `(S1, 11)`, and retires `gid(S_OLD)`.
+2. Gate **B** reads **the same pre-batch snapshot** `(S_OLD, 10)` — A's write has
+   not landed, or landed after B's read — finds its incoming bytes
+   **byte-identical** to it, and resolves `accept-identical`, which **by design**
+   short-circuits both the clamp and the order.
+3. B persists one turn behind A. The device ends on `S_OLD` — the **pre-removal**
+   secret, the routing id the evicted member still derives and is still subscribed
+   to.
+
+Note what this does *not* depend on: no malice, no crash, no forged envelope, and
+**not** a defect in the `accept-identical` rule, which is correct given a
+serialized gate. Note also that the ADR-0044 § 5 hardening does not save it — B
+files the *stored* epoch it read, which is the stale `10`, so the write is
+`S_OLD@10` over A's `S1@11`. The whole verdict was computed against a snapshot
+that was already obsolete.
+
+**It also blocks the closure ADR-0044 intended for residual 7.** Under ADR-0043 option
+(b) one removal yields **N+1 same-epoch rotations**, which typically arrive in
+**one poll batch**. All N+1 gates then compare against a single pre-batch snapshot
+and the survivor is decided by **scheduling order** — not by the total order.
+ADR-0044's arrival-order independence is therefore a property of the *order
+function*, which is genuinely total and correct, but it only becomes a property of
+the *device's resulting state* once the gate that consumes it is serialized.
+
+**It is NOT covered by the existing residual 5 / `lakko-security` F-E.** That
+residual is **rotate-vs-receive** interleaving and is explicitly bounded by "every
+candidate id in that interleaving is post-removal", which is what makes it inert
+and merely orphan-producing. Here the interleaving is **receive-vs-receive** and
+the survivor is the **pre-removal** secret, so that bound does not apply and the
+outcome is not inert.
+
+**Fix direction — a per-`(account, group)` serializing lock on the receive path**,
+so a gate's read, decision and persist are atomic with respect to another gate on
+the same row. All three clients already have the machinery: Android's
+`ConcurrentHashMap<String, Mutex>` keyed on `lockKey(accountIdB64, groupIdHex)`,
+web's per-group promise chain, iOS's serializing predecessor task. Taking the
+**same** lock the rotate path takes would additionally close **F-E / residual 5's
+rotation-vs-receive interleaving**, since rotate and receive would then exclude
+each other rather than merely each excluding themselves. **A fix is being built on
+all three clients; this entry flips to CLOSED when it lands.**
 
 #### Two loose ends found during the arc
 
@@ -3348,17 +3601,44 @@ admin-seed to admin-churn by the ratified option (b); the `lakko-security` pass
 ADR-0043 declares mandatory for (b) **was run and returned APPROVE-WITH-NOTES, no
 CRITICAL/HIGH**, its one blocking MEDIUM (F1, the coalescing rotation lock) fixed.
 **Residual 4 is unchanged** and gains a second clause (such groups now also never
-rotate). **Residuals 5-9 are new** — the orphaned old gid (reachable by a transient
+rotate). **Residuals 5-9 were added by ADR-0043. ADR-0044 then closed exactly one
+of them — residual 6 — attempted 9 and 7, and its review added residual 10, which
+is what blocks both attempts.**
+
+**Residual 6 is CLOSED** ([ADR-0044](../adr/0044-push-routing-secret-recency.md),
+`936d849` / `014e84e`) — C-61 now has a regression test on all three clients, each
+asserting on the emitted envelope's stamp and each carrying a permanent
+inverted-order companion, with the discrimination **proven by running the swap** on
+both natives; ADR-0044 also **sharpened** what a C-61 regression costs, from the
+rotation's forward secrecy alone to that **plus an inverted recency comparison**
+that turns "the rotation always wins" into a silent coin flip.
+
+**Residual 9 remains OPEN.** ADR-0044 built the general fix its own entry
+prescribed — a v2 envelope carrying a `mint_epoch`, a canonical
+`(mint_epoch, secret_bytes)` total order defined once in `crates/lakko-contacts`
+and consumed over both FFI surfaces, a persist-and-replay-verbatim rule, and a
+future clamp evaluated ahead of authority — and the `lakko-security` review of the
+landed arc nonetheless **reproduced the defect by execution**, returning **REQUEST
+CHANGES**. The primitive is correct; the receive path that consumes it is an
+**unserialized read-modify-write dispatched fire-and-forget per envelope**, so the
+gate decides against a **stale snapshot** and is **bypassed, not defeated**
+(**residual 10**). **Residual 7 is likewise NOT core-closed**, for the same cause:
+the N+1 same-epoch rotations from one removal arrive in one batch and all compare
+against one snapshot, so the winner is scheduling order — the total order's
+arrival-order independence holds for the **pure function** but not for the **path
+that calls it**. Its **F-D stale-role window** is untouched regardless (an
+authority refusal, on which recency has no bearing), an ordering gate **does not
+repair an already-stale holder**, and the N+1 rotations and their churn still
+happen.
+
+Still open, then: **residual 5** (the orphaned old gid — reachable by a transient
 store-read failure or a rotation/receive interleaving, not only a crash; accepted,
-inert, deliberately not fixed), the untested C-61 ordering that residual 2's closure
-depends on (F3), concurrent rotators stranding a device on a superseded secret (F2,
-web sub-case fixed, with a narrower stale-role window surviving on all three per
-F-D), the web teardown-before-subscribe window (F4), and — **the one whose
-consequence is confidentiality rather than wake delivery** — a stale `pending`
-re-broadcast silently and **permanently** undoing a rotation (F-A), rooted in the
-receive gate having **no recency or monotonicity notion at all**. Residual 9 fails
-**to** the pre-ADR-0043 status quo, never below it, which is why it is recorded
-rather than blocking. The `lakko-security` pass on option
+inert, deliberately not fixed), **residual 7** (blocked on 10, plus its F-D
+remainder), **residual 8** (the web teardown-before-subscribe window, F4),
+**residual 9** (blocked on 10), and **residual 10** itself (HIGH, blocking; a
+per-`(account, group)` serializing lock spanning the gate's read and write is in
+flight on all three clients, and would additionally close the rotate-vs-receive
+half of residual 5). The `lakko-security` pass on option
 (b) **is done — APPROVE-WITH-NOTES, no CRITICAL/HIGH, no invariant #2/#3/#4 break
 on the live path** — with its one blocking MEDIUM (F1, the coalescing rotation
 lock) fixed on web + iOS by adopting Android's serializing lock.

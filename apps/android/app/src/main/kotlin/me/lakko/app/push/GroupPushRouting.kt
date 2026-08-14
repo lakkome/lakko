@@ -126,11 +126,11 @@ import uniffi.lakko_ffi_uniffi.pushRoutingSecretIsNewer as ffiPushRoutingSecretI
  *
  * ## Concurrency
  *
- * Provisioning can be triggered from two places in the same session
- * — the legacy-sweep at bootstrap and the create / join path. A
- * per-`(account, group)` in-flight [Mutex] serialises them so the
- * random secret is minted exactly once (a second concurrent mint
- * would overwrite + double-broadcast a DIFFERENT secret).
+ * Every entry point that reads the routing row and then writes it back
+ * — [receiveGated], [ensure], [rotate], [redistribute] — runs under ONE
+ * per-`(account, group)` **serializing** lock ([routingLocks]). Both
+ * halves of that sentence are load-bearing and both were once wrong; see
+ * that field's own doc for the two findings.
  *
  * The pure orchestration operates over the [PushRoutingPorts] seam
  * (mirroring the ADR-0041 `PushDecryptDeps` split) so it is
@@ -659,7 +659,22 @@ public object GroupPushRouting {
         }
         if (!authorised.accepts) return authorised
         // (4) Nothing stored to order against — the seed path.
-        if (stored == null) return authorised
+        //
+        // The order gate is skipped here (there is nothing to compare
+        // against), and it is the order gate that elsewhere fails a
+        // wrong-length secret closed. So the length is checked directly:
+        // without it an accepting verdict is REPORTED for a secret that
+        // then throws inside `derivePushGid`, leaving verdict and effect
+        // disagreeing — nothing persisted, but the caller told "accepted".
+        // Unreachable today (the FFI decode yields exactly 32 bytes) and
+        // fail-closed either way.
+        if (stored == null) {
+            return if (incomingSecret.size == PushRoutingSecretStore.SECRET_LENGTH) {
+                authorised
+            } else {
+                ReceiveVerdict.REJECT_UNVERIFIABLE
+            }
+        }
         // (5) ADR-0044 — the order decides WHICH authorised write
         // survives. This is the step that refuses the F-A stale replay.
         return if (
@@ -671,9 +686,94 @@ public object GroupPushRouting {
         }
     }
 
-    /** Per-`(account, group)` in-flight mint lock. Keyed so two
-     *  accounts (or two groups) never contend on one another. */
-    private val inflight = ConcurrentHashMap<String, Mutex>()
+    /**
+     * The ONE per-`(account, group)` **serializing** [Mutex] that guards
+     * the whole read-decide-write of a group's routing row. Every path
+     * that reads the row and then writes it back takes it: [receiveGated],
+     * [ensure], [rotate] and [redistribute]. Keyed so two accounts (or two
+     * groups) never contend on one another.
+     *
+     * ## Why ONE lock and not one per path
+     *
+     * There used to be two — a mint lock over [ensure] and a rotation lock
+     * over [rotate] — and NONE over [receiveGated]. Both gaps were real,
+     * and the second one restored the very finding ADR-0044 exists to
+     * close.
+     *
+     * **The receive gap (the HIGH).** [receiveGated] is a read-modify-write
+     * with the store read at the top and the persist several calls down,
+     * and its production caller dispatches it per ENVELOPE, fire-and-forget
+     * on a multi-threaded scope. Two routing envelopes in one poll batch
+     * therefore ran as two genuinely parallel coroutines, and both could
+     * complete their read of the PRE-batch row before either persisted.
+     * The survivor was then decided by scheduling rather than by the
+     * ADR-0044 total order — which is F-A again, with no malice and no
+     * crash. A device holding `S_OLD@10` polling `[rotation S1@11, stale
+     * S_OLD@10]`: the first gate reads `(S_OLD,10)`, accepts the rotation
+     * and persists `(S1,11)`, retiring `gid(S_OLD)`; the second gate,
+     * reading that same pre-batch snapshot, sees its own incoming bytes as
+     * BYTE-IDENTICAL and takes [ReceiveVerdict.ACCEPT_IDENTICAL] — which by
+     * design short-circuits both the clamp and the order — and re-persists
+     * `S_OLD` one turn behind. The device ends on the superseded secret:
+     * the id the evicted member still derives and is still subscribed to.
+     * It also undercut G-36 residual 7, since under ADR-0043 option (b) one
+     * removal yields N+1 same-epoch rotations that typically arrive in ONE
+     * batch — all N+1 gates comparing against a single snapshot.
+     *
+     * **Why a per-path lock would not have been enough.** Confining the
+     * dispatcher, or giving [receiveGated] a third independent lock, closes
+     * the receive-vs-receive window and leaves the rotate-vs-receive one
+     * open — the recorded ADR-0043 **F-E** residual. [rotate]'s own
+     * read-modify-write straddles a REAL suspension: it reads `oldSecret`,
+     * then awaits [PushRoutingPorts.freshMintStamp] (in production a hop
+     * through `ChatRepository`'s own group lock), and only then persists. A
+     * receive that persists `S1` inside that window is overwritten by the
+     * rotation's `S2`, and the rotation then retires `gid(S_OLD)` — the id
+     * it captured before the wait — instead of `gid(S1)`, stranding `S1`'s
+     * subscription live and un-retirable. Sharing ONE lock across receive
+     * and rotate is what closes it, so F-E goes with the HIGH.
+     *
+     * ## Serializing, never coalescing
+     *
+     * A second caller **waits and then runs in full against the first's
+     * committed result**; it is never folded into the one already running.
+     * That is not a stylistic preference — coalescing is what
+     * `lakko-security` finding **F1** flagged on the sibling clients, where
+     * a second, DISTINCT removal folded into an in-flight rotation and
+     * handed the second evictee the new secret. The same reasoning applies
+     * to a fold on the receive side: two envelopes are two different
+     * decisions, and only the second one's re-read can see the first one's
+     * write.
+     *
+     * ## Lock order — this lock, then the caller's group lock, never back
+     *
+     * [ensure] / [rotate] / [redistribute] reach `ChatRepository.groupsLock`
+     * from INSIDE this one (via [PushRoutingPorts.freshMintStamp] and
+     * [PushRoutingPorts.broadcast]); [receiveGated] never touches it at all,
+     * so merging receive in adds no new edge. The reverse edge does not
+     * exist: every production entry point is reached either from a
+     * fire-and-forget launch (whose body holds no group lock) or after that
+     * lock has been released, so nothing ever waits on this lock while
+     * holding the group one. And no locked entry point calls another, so a
+     * non-reentrant [Mutex] cannot self-deadlock here.
+     *
+     * ## Module requirement for anything awaited under this lock
+     *
+     * [Mutex] is not reentrant, so **no helper invoked from inside a locked
+     * body may itself take this lock** — directly or through a
+     * [PushRoutingPorts] implementation. That covers the internal helpers
+     * ([receive], [subscribeOrDefer], [retireOldPushGid], `broadcastAndMark`),
+     * which are deliberately lock-free and must stay so, and it is a
+     * standing constraint on the production ports: an implementation whose
+     * `broadcast` or `freshMintStamp` re-entered a routing entry point would
+     * deadlock instantly rather than degrade. The one lock a locked body may
+     * await is the caller's own group lock, in that direction only.
+     */
+    private val routingLocks = ConcurrentHashMap<String, Mutex>()
+
+    /** The serializing [routingLocks] entry for one `(account, group)`. */
+    private fun routingLock(accountIdB64: String, groupIdHex: String): Mutex =
+        routingLocks.getOrPut(lockKey(accountIdB64, groupIdHex)) { Mutex() }
 
     /**
      * Cheap length + first-byte pre-filter mirroring the web
@@ -803,13 +903,30 @@ public object GroupPushRouting {
      * property of the row encoding (which could change) rather than of
      * this function.
      *
+     * ## The lock — the read and the write are ONE critical section
+     *
+     * The whole read-decide-write runs under the shared serializing
+     * [routingLocks] entry for `(account, group)`. Acquiring it any later
+     * — after the [PushRoutingPorts.getRecord] below, say — would fix
+     * nothing: the defect is precisely that two envelopes from ONE poll
+     * batch both decided against the same PRE-batch snapshot, so the read
+     * is the half that has to be inside. It is the SAME lock [rotate]
+     * takes, which is what additionally closes the ADR-0043 **F-E**
+     * rotate-vs-receive interleave. See [routingLocks].
+     *
+     * @param accountIdB64 the account whose row this is — the lock key,
+     *   alongside [groupIdHex].
      * @param mintEpoch ADR-0044 — the stamp the incoming envelope carried.
      * @param ownGroupEpoch ADR-0044 — this device's OWN current group
      *   epoch (the clamp ceiling), read by the caller off the live
-     *   `Group`. `null` fails closed.
+     *   `Group`. `null` fails closed. Read at DISPATCH time, before any
+     *   queue wait, which is correct and not merely tolerable: the ceiling
+     *   and the stamp it bounds are captured from the same envelope's
+     *   decrypt, so queueing moves both or neither.
      * @return the verdict, so the caller can log a refusal by NAME.
      */
     public suspend fun receiveGated(
+        accountIdB64: String,
         groupIdHex: String,
         secret: ByteArray,
         mintEpoch: ULong,
@@ -817,9 +934,11 @@ public object GroupPushRouting {
         owner: OwnerLookup,
         ownGroupEpoch: ULong?,
         ports: PushRoutingPorts,
-    ): ReceiveVerdict {
+    ): ReceiveVerdict = routingLock(accountIdB64, groupIdHex).withLock {
         // ONE read for the pair — a torn (secret, epoch) read could rank a
-        // superseded secret at a live epoch.
+        // superseded secret at a live epoch. INSIDE the lock: a read taken
+        // outside it is a snapshot a concurrent receive or rotation may
+        // already have superseded, which is the whole defect.
         val read: Result<StoredSecret?> = runCatching { ports.getRecord(groupIdHex) }
         val stored = read.getOrNull()
         val verdict = decideAcceptReceivedSecret(
@@ -868,7 +987,7 @@ public object GroupPushRouting {
                 // reported so the caller logs the same thing either way.
             }
         }
-        return verdict
+        verdict
     }
 
     /**
@@ -895,9 +1014,11 @@ public object GroupPushRouting {
      *     prior receive), else defer.
      *
      * The single funnel for BOTH the create / join path AND the
-     * bootstrap legacy-sweep. A per-`(account, group)` in-flight lock
-     * coalesces concurrent callers so the random secret is minted
-     * exactly once.
+     * bootstrap legacy-sweep. The shared per-`(account, group)`
+     * serializing [routingLocks] entry keeps concurrent callers from
+     * minting the random secret twice — and, since it is the same lock
+     * [receiveGated] and [rotate] take, a provisioning pass also never
+     * reads a row another path is halfway through rewriting.
      */
     public suspend fun ensure(
         accountIdB64: String,
@@ -905,8 +1026,7 @@ public object GroupPushRouting {
         isOwner: Boolean,
         ports: PushRoutingPorts,
     ) {
-        val mutex = inflight.getOrPut(lockKey(accountIdB64, groupIdHex)) { Mutex() }
-        mutex.withLock {
+        routingLock(accountIdB64, groupIdHex).withLock {
             // The rank check no longer short-circuits ahead of the store:
             // a NON-owner can hold a pending row (its own post-add-member
             // `redistribute` failed and rewound it), and that row is only
@@ -1068,19 +1188,40 @@ public object GroupPushRouting {
      * not stamp the post-add epoch: the secret did not change, only its
      * audience did, and re-stamping would let a routine add-member
      * out-rank a rotation minted at a higher epoch.
+     *
+     * ## Why this takes the shared lock too
+     *
+     * It is the fourth read-then-write of the routing row: it READS the
+     * record and then WRITES that row's `distributed` flag. Left unlocked
+     * it can read `S_OLD`, have a rotation to `S1` land underneath it —
+     * one whose own broadcast FAILED, so the row is deliberately pending —
+     * then send `S_OLD` and flag the `S1` row **distributed**. Every peer
+     * refuses the stale bytes ([ReceiveVerdict.REJECT_STALE], so nothing
+     * spreads), but the local flag now lies: `S1` was never on the wire and
+     * [EnsureAction.REBROADCAST] — the only mechanism that would have
+     * re-sent it — is disarmed, so the rest of the group is left on the
+     * superseded secret with no repair path. Serializing it against
+     * [rotate] removes the window: the record read and the flag write see
+     * one consistent row.
+     *
+     * @param accountIdB64 the account whose row this is — the lock key,
+     *   alongside [groupIdHex].
      */
     public suspend fun redistribute(
+        accountIdB64: String,
         groupIdHex: String,
         ports: PushRoutingPorts,
     ) {
-        val record = ports.getRecord(groupIdHex) ?: return
-        try {
-            ports.broadcast(ports.composeEnvelope(record.replayStamp, record.secret))
-        } catch (e: Throwable) {
-            runCatching { ports.markPending(groupIdHex) }
-            throw e
+        routingLock(accountIdB64, groupIdHex).withLock {
+            val record = ports.getRecord(groupIdHex) ?: return
+            try {
+                ports.broadcast(ports.composeEnvelope(record.replayStamp, record.secret))
+            } catch (e: Throwable) {
+                runCatching { ports.markPending(groupIdHex) }
+                throw e
+            }
+            ports.markDistributed(groupIdHex)
         }
-        ports.markDistributed(groupIdHex)
     }
 
     // -----------------------------------------------------------------
@@ -1269,9 +1410,10 @@ public object GroupPushRouting {
     }
 
     /**
-     * Per-`(account, group)` ROTATION lock — a **serializing** [Mutex],
-     * separate from the [inflight] mint lock. (The web `rotating` promise
-     * chain and the iOS `rotating` task chain are the same shape.)
+     * ADR-0043 — re-mint the group's `push_routing_secret`, redistribute
+     * it, and retire the superseded `push_gid`.
+     *
+     * ## Why rotation must SERIALIZE (and share the lock)
      *
      * Two triggers can observe a removal (this device's own
      * `removeMemberFromGroup` and a concurrent poll-loop diff). Running
@@ -1298,12 +1440,15 @@ public object GroupPushRouting {
      * rotation's output, so every intermediate id is retired in turn, each
      * eviction is followed by a seal at a strictly later epoch, and both
      * callers observe a real rotation.
-     */
-    private val rotatingLocks = ConcurrentHashMap<String, Mutex>()
-
-    /**
-     * ADR-0043 — re-mint the group's `push_routing_secret`, redistribute
-     * it, and retire the superseded `push_gid`.
+     *
+     * The lock is the SHARED [routingLocks] entry rather than a
+     * rotation-private one, and that is what closes the ADR-0043 **F-E**
+     * residual: a rotation's read-modify-write straddles a real suspension
+     * (read `oldSecret` → await [PushRoutingPorts.freshMintStamp] → persist),
+     * so a [receiveGated] landing inside that window used to have its write
+     * overwritten and its `push_gid` left subscribed but un-retirable.
+     *
+     * ## C-61 — publish the Remove commit FIRST
      *
      * **The caller MUST have already published the Remove commit** —
      * C-61, and under ADR-0044 it carries TWO guarantees, not one.
@@ -1366,8 +1511,7 @@ public object GroupPushRouting {
         if (ownRole != RotationRole.OWNER && ownRole != RotationRole.ADMIN) {
             return RotationOutcome.SKIP_NOT_AUTHORIZED
         }
-        val mutex = rotatingLocks.getOrPut(lockKey(accountIdB64, groupIdHex)) { Mutex() }
-        return mutex.withLock {
+        return routingLock(accountIdB64, groupIdHex).withLock {
             // (1)+(2) — the OLD secret, read BEFORE anything overwrites it.
             // An unreadable row cannot be rotated: the old id could never be
             // named, so a rotation would strand it subscribed forever.

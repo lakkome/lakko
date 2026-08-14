@@ -2639,6 +2639,281 @@ final class PushGroupRoutingTests: XCTestCase {
             "a refused envelope subscribes to nothing")
     }
 
+    // MARK: - concurrent receives: the regression fence for a future `await`
+
+    /// **A FENCE, not a bug reproduction — and the distinction is the point.**
+    ///
+    /// The audited hazard is a stale read across a concurrent write: two
+    /// routing envelopes arrive in ONE poll batch, and
+    /// `ChatRepository.receivePushRoutingSecret` spawns a detached `Task` per
+    /// envelope, so both gates are in flight at once. If the read-decide-write
+    /// span could suspend, both would classify against the SAME pre-batch row:
+    /// the rotation would be applied and then the stale envelope — byte-
+    /// identical to that pre-batch row — would be waved through as
+    /// `acceptIdentical`, which short-circuits BOTH the clamp and the order by
+    /// design, re-persisting the superseded secret one turn behind. The device
+    /// would end on the id the evicted member still derives and is still
+    /// subscribed to: F-A (G-36 residual 9) restored, with no malice and no
+    /// crash.
+    ///
+    /// **On iOS today that interleaving is unreachable, and this test passes
+    /// with or without the serializing lock.** The whole span from the
+    /// `getRecord` read to the persist is synchronous — `PushRoutingStore` is
+    /// `UserDefaults` + CryptoKit with no async I/O, `Group`'s roster / role /
+    /// epoch reads are synchronous FFI, and `PushGroupRouting` is `@MainActor`,
+    /// which yields only at a suspension point. Both dispatch orders therefore
+    /// converge correctly on their own: rotation-first, the stale envelope
+    /// reads the freshly written pair and is refused `.rejectStale`;
+    /// stale-first, it is an identical no-op that leaves the stamp alone and
+    /// the rotation then supersedes it.
+    ///
+    /// So this test's value is entirely prospective: it is what catches the
+    /// FIRST `await` introduced into that span — an async Keychain read, the
+    /// store moving into the App Group container, `derivePushGid` gaining an
+    /// async FFI hop, or the store becoming an `actor`. Every other
+    /// `receiveSecret` call in this suite is sequentially awaited and would
+    /// keep passing through such a change.
+    ///
+    /// The stale envelope is sent by the OWNER — the highest authority — so
+    /// nothing but the ORDER can be doing the refusing.
+    func testConcurrentReceivesInTheFaBatchOrderConvergeOnTheRotation() async throws {
+        let store = makeStore()
+        let spy = SubscribeSpy()
+        let unsub = UnsubscribeSpy()
+        let routing = makeRouting(store: store, spy: spy, unsubscribeSpy: unsub)
+        let (group, groupIdHex, ownerLeaf, adminLeaf, _) = try makeGroupWithAdmin(
+            owner: try makeIdentity(0xC1), admin: try makeIdentity(0xC2),
+            member: try makeIdentity(0xC3))
+        // The fixture must sit above the rotation stamp, or the CLAMP — not the
+        // order — would be doing the refusing and the test would prove nothing.
+        XCTAssertGreaterThanOrEqual(liveEpoch(group), 2)
+
+        // The device holds the PRE-rotation secret, minted at epoch 1.
+        let sOld = try XCTUnwrap(PushGroupRouting.mintSecret())
+        try seedSettled(
+            store: store, accountIdB64: "acct", groupIdHex: groupIdHex,
+            secret: sOld, mintEpoch: 1)
+        let gidOld = try XCTUnwrap(PushGroupRouting.derivePushGid(secret: sOld))
+
+        // The rotation an admin sealed at the POST-removal epoch 2.
+        let s1 = try XCTUnwrap(PushGroupRouting.mintSecret())
+        let gid1 = try XCTUnwrap(PushGroupRouting.derivePushGid(secret: s1))
+
+        // ONE poll batch, TWO envelopes, dispatched WITHOUT awaiting the first
+        // — the literal shape `receivePushRoutingSecret` produces.
+        let rotation = Task { @MainActor in
+            await routing.receiveSecret(
+                accountIdB64: "acct", groupIdHex: groupIdHex, secret: s1,
+                mintEpoch: 2, group: group, senderLeaf: adminLeaf)
+        }
+        let stale = Task { @MainActor in
+            await routing.receiveSecret(
+                accountIdB64: "acct", groupIdHex: groupIdHex, secret: sOld,
+                mintEpoch: 1, group: group, senderLeaf: ownerLeaf)
+        }
+        await rotation.value
+        await stale.value
+
+        // The device ends on the ROTATION, whichever order the two ran in.
+        XCTAssertEqual(
+            store.getSecret(accountIdB64: "acct", groupIdHex: groupIdHex), s1,
+            "the batch must converge on the rotation, never on the secret it superseded")
+        XCTAssertEqual(
+            store.getRecord(accountIdB64: "acct", groupIdHex: groupIdHex)?.mintEpoch, 2,
+            "nor roll the stamp backwards")
+
+        // gid(S1) is LIVE: subscribed, indexed, never retired.
+        XCTAssertEqual(
+            spy.targets.last, gid1,
+            "the last subscription must be the rotation's id")
+        XCTAssertNotNil(store.lookupRoute(pushGidHex: PushGroupRouting.hex(gid1)))
+        XCTAssertFalse(
+            unsub.targets.contains(gid1),
+            "retiring the LIVE gid is the whole of F-A — it migrates the group back onto "
+                + "the id the evicted member still derives")
+
+        // gid(S_OLD) is RETIRED: unsubscribed and de-indexed.
+        XCTAssertTrue(
+            unsub.targets.contains(gidOld), "the superseded gid must be torn down")
+        XCTAssertNil(
+            store.lookupRoute(pushGidHex: PushGroupRouting.hex(gidOld)),
+            "and its reverse-index row dropped")
+    }
+
+    /// The companion fence for **G-36 residual 7**: under ADR-0043 option (b)
+    /// one removal yields N+1 rotations, and they are typically minted at the
+    /// SAME post-removal epoch and land in one poll batch.
+    ///
+    /// The survivor must be decided by the canonical `(mintEpoch, secretBytes)`
+    /// order — the audited core's `pushRoutingSecretIsNewer` — and NOT by which
+    /// dispatched task happened to run first. Since every candidate ties on the
+    /// epoch, the winner is the lexicographic maximum of the secret bytes, and
+    /// applying them in ANY order converges there: a candidate below the
+    /// running maximum is refused `.rejectStale`, one above supersedes it.
+    ///
+    /// Same honesty caveat as the test above — on iOS the span cannot currently
+    /// interleave, so this passes with or without the lock; it fences the
+    /// future `await`.
+    func testConcurrentSameEpochReceivesConvergeOnTheTotalOrderWinner() async throws {
+        let store = makeStore()
+        let spy = SubscribeSpy()
+        let unsub = UnsubscribeSpy()
+        let routing = makeRouting(store: store, spy: spy, unsubscribeSpy: unsub)
+        let (group, groupIdHex, ownerLeaf, adminLeaf, _) = try makeGroupWithAdmin(
+            owner: try makeIdentity(0xD1), admin: try makeIdentity(0xD2),
+            member: try makeIdentity(0xD3))
+        XCTAssertGreaterThanOrEqual(liveEpoch(group), 2)
+
+        let seed = try XCTUnwrap(PushGroupRouting.mintSecret())
+        try seedSettled(
+            store: store, accountIdB64: "acct", groupIdHex: groupIdHex,
+            secret: seed, mintEpoch: 1)
+
+        // Four same-epoch rotations, exactly the N+1 shape option (b) produces.
+        var candidates: [Data] = []
+        for _ in 0..<4 { candidates.append(try XCTUnwrap(PushGroupRouting.mintSecret())) }
+        let rotationEpoch: UInt64 = 2
+
+        // The winner the ORDER picks, computed through the audited core rather
+        // than re-derived here — the same rule the gate itself routes through.
+        var expected = try XCTUnwrap(candidates.first)
+        for candidate in candidates.dropFirst()
+        where PushGroupRouting.isNewer(
+            incomingEpoch: rotationEpoch, incomingSecret: candidate,
+            storedEpoch: rotationEpoch, storedSecret: expected) {
+            expected = candidate
+        }
+        let expectedGid = try XCTUnwrap(PushGroupRouting.derivePushGid(secret: expected))
+
+        // Dispatched all at once, none awaited until every one is in flight.
+        var tasks: [Task<Void, Never>] = []
+        for (index, candidate) in candidates.enumerated() {
+            // Alternate the authorised sender so the run is not accidentally a
+            // single-writer sequence.
+            let leaf = index.isMultiple(of: 2) ? adminLeaf : ownerLeaf
+            tasks.append(Task { @MainActor in
+                await routing.receiveSecret(
+                    accountIdB64: "acct", groupIdHex: groupIdHex, secret: candidate,
+                    mintEpoch: rotationEpoch, group: group, senderLeaf: leaf)
+            })
+        }
+        for task in tasks { await task.value }
+
+        XCTAssertEqual(
+            store.getSecret(accountIdB64: "acct", groupIdHex: groupIdHex), expected,
+            "the survivor is the canonical `(mintEpoch, secretBytes)` maximum, not "
+                + "whichever task the scheduler ran last")
+        XCTAssertEqual(
+            store.getRecord(accountIdB64: "acct", groupIdHex: groupIdHex)?.mintEpoch,
+            rotationEpoch)
+        XCTAssertNotNil(store.lookupRoute(pushGidHex: PushGroupRouting.hex(expectedGid)))
+        XCTAssertFalse(
+            unsub.targets.contains(expectedGid),
+            "the surviving id must never be retired")
+        // Every id this device actually armed and then moved off must have been
+        // retired, so no rotation leaves an orphan push-gw row behind.
+        for armed in spy.targets where armed != expectedGid {
+            XCTAssertTrue(
+                unsub.targets.contains(armed),
+                "an intermediate id was subscribed but never retired — an orphan row")
+        }
+    }
+
+    /// **The one concurrency test here that genuinely discriminates on iOS
+    /// today** — the other two fence a future `await`, this one fences a real
+    /// interleave the lock closes now.
+    ///
+    /// A rotation is not synchronous: it persists its new secret and then
+    /// spends a network round-trip in `broadcastAndSettle`, and two more in
+    /// subscribe / retire. A peer's routing envelope arriving inside that
+    /// window has a genuine suspension point to slip through, so this is the
+    /// rotate-vs-receive interleaving (`lakko-security` F-E) rather than the
+    /// receive-vs-receive one the batch test covers.
+    ///
+    /// Without a lock spanning both paths the receive is applied MID-rotation:
+    /// it retires the gid the rotation minted but had not yet armed, and the
+    /// rotation then resumes to find its own `markDistributed(matching:)`
+    /// no-op against a row that moved underneath it. With the shared chain the
+    /// receive simply waits, then classifies against the rotation's committed
+    /// output — so every id this device arms is one it later retires.
+    ///
+    /// The load-bearing assertion is the MID-PARK one: while the rotation is
+    /// on the wire the stored row must still be the rotation's.
+    func testAnInboundSecretCannotBeAppliedMidRotation() async throws {
+        let store = makeStore()
+        let spy = SubscribeSpy()
+        let unsub = UnsubscribeSpy()
+        let routing = makeRouting(store: store, spy: spy, unsubscribeSpy: unsub)
+        let recorder = BroadcastRecorder()
+        // Parks the rotation inside its broadcast — the exact window the
+        // rotation spends on the wire.
+        let gate = Gate()
+        let (group, groupIdHex, ownerLeaf, _, _) = try makeGroupWithAdmin(
+            owner: try makeIdentity(0xE1), admin: try makeIdentity(0xE2),
+            member: try makeIdentity(0xE3))
+        // The peer envelope is stamped 3, so it must strictly out-rank the
+        // rotation's 2 rather than tie and fall to the random byte compare.
+        XCTAssertGreaterThanOrEqual(liveEpoch(group), 3)
+
+        let old = try XCTUnwrap(PushGroupRouting.mintSecret())
+        try seedSettled(
+            store: store, accountIdB64: "acct", groupIdHex: groupIdHex,
+            secret: old, mintEpoch: 1)
+        let oldGid = try XCTUnwrap(PushGroupRouting.derivePushGid(secret: old))
+
+        let rotation = Task { @MainActor in
+            await routing.rotateSecret(
+                accountIdB64: "acct", groupIdHex: groupIdHex, ownRole: .owner,
+                mintEpoch: { 2 },
+                broadcast: { bytes in
+                    recorder.record(bytes)
+                    await gate.wait()
+                })
+        }
+        try await gate.awaitFirstWaiter()
+        let rotated = try XCTUnwrap(
+            PushGroupRouting.tryDecodeSecretEnvelope(
+                try XCTUnwrap(recorder.envelopes.first))?.secret)
+        let rotatedGid = try XCTUnwrap(PushGroupRouting.derivePushGid(secret: rotated))
+
+        // A peer's envelope lands while the rotation is still on the wire.
+        let peer = try XCTUnwrap(PushGroupRouting.mintSecret())
+        let peerGid = try XCTUnwrap(PushGroupRouting.derivePushGid(secret: peer))
+        let receive = Task { @MainActor in
+            await routing.receiveSecret(
+                accountIdB64: "acct", groupIdHex: groupIdHex, secret: peer,
+                mintEpoch: 3, group: group, senderLeaf: ownerLeaf)
+        }
+        await Self.settle()
+
+        // THE DISCRIMINATING ASSERTION. Behind the shared lock the receive has
+        // not touched the row; without it the peer secret is already stored and
+        // the rotation is about to finish against a row that moved underneath.
+        XCTAssertEqual(
+            store.getSecret(accountIdB64: "acct", groupIdHex: groupIdHex), rotated,
+            "an inbound secret must not be applied while a rotation is in flight")
+        XCTAssertFalse(
+            unsub.targets.contains(rotatedGid),
+            "nor retire the id the in-flight rotation just minted")
+
+        gate.open()
+        _ = await rotation.value
+        await receive.value
+
+        // Serialized, so the receive read the rotation's OUTPUT as its stored
+        // value and superseded it cleanly.
+        XCTAssertEqual(
+            store.getSecret(accountIdB64: "acct", groupIdHex: groupIdHex), peer,
+            "the peer envelope still wins on the order once it gets its turn")
+        XCTAssertEqual(spy.targets, [rotatedGid, peerGid])
+        XCTAssertEqual(unsub.targets, [oldGid, rotatedGid])
+        // No orphan: every id armed was later retired, except the live one.
+        for armed in spy.targets where armed != peerGid {
+            XCTAssertTrue(unsub.targets.contains(armed))
+        }
+        XCTAssertNotNil(store.lookupRoute(pushGidHex: PushGroupRouting.hex(peerGid)))
+    }
+
     // MARK: - the stamp: minted fresh once, replayed verbatim thereafter
 
     /// The owner's MINT is the only path that reads the group's epoch — and it

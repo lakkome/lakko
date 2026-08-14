@@ -1878,6 +1878,13 @@ public class ChatRepository(
         mintEpoch: ULong,
         senderLeaf: UInt?,
     ) {
+        // The lock key, alongside the group: `receiveGated` serializes its
+        // whole read-decide-write per `(account, group)`. Without it two
+        // envelopes from ONE poll batch — this sink fires per event, and
+        // each launch lands on the multi-threaded [pushScope] — both decide
+        // against the same pre-batch row and the survivor is chosen by
+        // scheduling rather than by the ADR-0044 total order.
+        val accountIdB64 = currentAccountIdB64.get() ?: return
         val groupIdHex = try {
             DsClient.pseudonymHex(group.groupId())
         } catch (_: Throwable) {
@@ -1900,6 +1907,7 @@ public class ChatRepository(
         pushScope.launch {
             try {
                 val verdict = GroupPushRouting.receiveGated(
+                    accountIdB64 = accountIdB64,
                     groupIdHex = groupIdHex,
                     secret = secret,
                     mintEpoch = mintEpoch,
@@ -2087,9 +2095,11 @@ public class ChatRepository(
     private fun redistributePushRoutingBestEffort(groupIdHex: String) {
         val identity = canonicalIdentity.get() ?: return
         val record = groups[groupIdHex] ?: return
+        val accountIdB64 = currentAccountIdB64.get() ?: return
         pushScope.launch {
             try {
                 GroupPushRouting.redistribute(
+                    accountIdB64,
                     groupIdHex,
                     pushRoutingPorts(record.group, identity),
                 )

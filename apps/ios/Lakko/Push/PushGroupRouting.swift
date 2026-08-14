@@ -117,20 +117,33 @@ import Security
 ///
 /// ## Concurrency
 ///
-/// Provisioning can be triggered from two places in the same session — the
-/// legacy-sweep on bootstrap and the chat view's onAppear. A per-group
-/// in-flight lock (plus the synchronous mint→persist, which flips
-/// ``PushRoutingStore/hasSecret(accountIdB64:groupIdHex:)`` true before the
-/// first `await`) coalesces them so the random secret is minted exactly
-/// once (a second concurrent mint would overwrite + double-broadcast a
-/// DIFFERENT secret).
+/// EVERY path that READ-MODIFY-WRITEs a group's routing row — receive,
+/// rotate, provision, redistribute — runs inside one per-`(account, group)`
+/// **serializing** chain (``withRoutingLock(accountIdB64:groupIdHex:_:)``).
+/// One lock rather than four, because the four paths race each OTHER, not
+/// merely themselves: a rotation parked in its broadcast and an inbound peer
+/// secret both hold a snapshot of the same row, and interleaving them can
+/// leave an intermediate `push_gid` armed but never retired.
 ///
-/// ROTATION uses the other shape — a per-group **serializing** chain
-/// (``rotateSecret(accountIdB64:groupIdHex:ownRole:broadcast:)``), not a
-/// coalescing one. Provisioning may coalesce because a second trigger wants
-/// the identical outcome ("this group has a secret"); rotations may not,
-/// because two triggers can be answering two DIFFERENT removals and the
-/// second one still needs a seal of its own.
+/// A second trigger **queues and then runs in full**; it is never folded
+/// into the section already running. Coalescing is correct only when both
+/// triggers want the identical outcome, and silently wrong when they answer
+/// two different events — see
+/// ``rotateSecret(accountIdB64:groupIdHex:ownRole:mintEpoch:broadcast:)``
+/// for the case where a fold voids the whole ADR for one member.
+///
+/// **Provisioning keeps its own additional guard, and it is a different
+/// question.** The chain answers "may this section observe a half-applied
+/// row"; the ``inflight`` set answers "should this redundant trigger run at
+/// all" — a concurrent legacy-sweep and chat-view onAppear want the identical
+/// outcome ("this group has a secret"), so the second is dropped outright
+/// rather than queued behind the first and made to re-do it.
+///
+/// Sections hold the lock across their network round-trips (the E2EE journal
+/// broadcast, the push-gw subscribe / unsubscribe), so an inbound envelope
+/// for a group with a rotation in flight waits for it. That is the intended
+/// semantics, not a cost to be trimmed: those are exactly the two writers
+/// that must not interleave.
 ///
 /// `@MainActor` so the owner-role check + the E2EE `broadcast` (which runs
 /// `Group.createApplicationMessage` in ``ChatRepository``) stay on the same
@@ -179,36 +192,97 @@ public final class PushGroupRouting {
     /// + onAppear for the same group mint the random secret exactly once.
     private var inflight: Set<String> = []
 
-    /// Per-group ROTATION chain tail (ADR-0043) — a **serializing** lock, the
-    /// Swift counterpart of the Android `ConcurrentHashMap<String, Mutex>`.
+    /// Per-`(account, group)` chain tail — the **serializing** lock every
+    /// read-modify-write of a routing row runs inside. The Swift counterpart
+    /// of the Android `ConcurrentHashMap<String, Mutex>`.
     ///
-    /// Two triggers can observe a removal (this device's own
-    /// `removeMemberFromGroup` and a concurrent poll-loop diff). Running them
-    /// concurrently is the damaging case: both would read the SAME old secret,
-    /// both mint, the second persist wins — leaving the first new `push_gid`
-    /// subscribed and indexed but never notified again, i.e. exactly the
-    /// orphan this ADR exists to prevent.
+    /// The value is the tail `Task` the next caller chains behind; it is
+    /// type-erased to `Void` so ONE queue can hold sections that return
+    /// different things (a receive returns nothing, a rotation returns a
+    /// ``PushRotationOutcome``).
     ///
-    /// **A second trigger therefore WAITS and then rotates again; it is never
-    /// folded into the rotation already running.** Coalescing is only correct
-    /// when both triggers observe the SAME removal, and it is silently wrong
-    /// when they observe DIFFERENT ones: a rotation seals its envelope at the
-    /// epoch it starts in, then spends three network round-trips (broadcast,
-    /// subscribe, unsubscribe) in flight. A removal committed inside that
-    /// window would be folded into a rotation whose envelope the *new* evictee
-    /// was still a member of — so it opens the envelope, learns the current
-    /// secret, keeps a live subscription, and nothing ever rotates again (the
-    /// removing device's own poll baseline is already post-removal, so no
-    /// shrink is ever seen). The single load-bearing property of the ADR would
-    /// be void for that member. Serializing rules it out: the second rotation
-    /// runs in full, reading the first rotation's output as its old secret, so
-    /// every intermediate id is retired and every caller observes a real
-    /// rotation.
+    /// **A second caller WAITS and then runs in full; it is never folded into
+    /// the section already running.** Coalescing is only correct when both
+    /// callers want the same outcome, and it is silently wrong when they
+    /// answer different events. The sharpest case is rotation: two triggers
+    /// can observe two DIFFERENT removals (this device's own
+    /// `removeMemberFromGroup` and a concurrent poll-loop diff). A rotation
+    /// seals its envelope at the epoch it starts in, then spends three network
+    /// round-trips (broadcast, subscribe, unsubscribe) in flight. A removal
+    /// committed inside that window and folded into the running rotation would
+    /// be answered by an envelope the *new* evictee was still a member of — so
+    /// it opens the envelope, learns the current secret, keeps a live
+    /// subscription, and nothing ever rotates again (the removing device's own
+    /// poll baseline is already post-removal, so no shrink is ever seen). The
+    /// single load-bearing property of ADR-0043 would be void for that member.
+    /// Serializing rules it out: the successor runs in full, reading the
+    /// predecessor's output as its own input, so every intermediate id is
+    /// retired and every caller observes a real result.
     ///
-    /// The tail `Task` is what the next caller chains behind. It is cleared
-    /// only by the caller that is still the tail when its own rotation
-    /// finishes, so a queued successor is never evicted from the chain.
-    private var rotating: [String: Task<PushRotationOutcome, Never>] = [:]
+    /// The tail is cleared only by the caller that is STILL the tail when its
+    /// own section finishes, so a queued successor is never evicted from the
+    /// chain (which would let the caller after it start beside it).
+    private var routingChain: [String: Task<Void, Never>] = [:]
+
+    /// The per-`(account, group)` lock key. `accountIdB64` is base64 and
+    /// `groupIdHex` is hex, so neither can contain the separator — a NUL
+    /// written as an ESCAPE, never a literal, so the file stays text to
+    /// `grep` and `git diff` (the ADR-0042 `lakko-security` MEDIUM-3 class).
+    private static func lockKey(accountIdB64: String, groupIdHex: String) -> String {
+        accountIdB64 + "\u{0}" + groupIdHex
+    }
+
+    /// Run `body` as the sole holder of a group's routing row.
+    ///
+    /// Serializing, not coalescing: `body` always runs, after everything
+    /// already queued for that `(account, group)` has finished, and observes
+    /// their writes. That is what lets a section read the row and then write
+    /// it without a concurrent section having moved it in between.
+    ///
+    /// - Note: `body` must not itself call a locked entry point
+    ///   (``receiveSecret(accountIdB64:groupIdHex:secret:mintEpoch:group:senderLeaf:)``,
+    ///   ``rotateSecret(accountIdB64:groupIdHex:ownRole:mintEpoch:broadcast:)``,
+    ///   ``ensureProvisioned(accountIdB64:groupIdHex:group:identity:broadcast:)``,
+    ///   ``redistribute(accountIdB64:groupIdHex:broadcast:)``) — the chain is
+    ///   not reentrant, so that would deadlock. The leaf helpers the sections
+    ///   DO call — ``persistSecret(accountIdB64:groupIdHex:secret:distributed:mintEpoch:)``,
+    ///   ``subscribeUnderPushGidBestEffort(accountIdB64:groupIdHex:)``,
+    ///   ``retireOldPushGid(oldSecret:)``, ``pushGid(accountIdB64:groupIdHex:)``
+    ///   — are deliberately lock-FREE for exactly this reason, and must stay
+    ///   that way. The injected `subscribe` / `unsubscribe` seams and the
+    ///   `broadcast` closure reach `PushClient` and `ChatClient` respectively,
+    ///   neither of which calls back into this type (`ChatClient`'s only
+    ///   reference is the `nonisolated static` ``tryDecodeSecretEnvelope(_:)``
+    ///   classifier, which touches no state).
+    private func withRoutingLock<T>(
+        accountIdB64: String,
+        groupIdHex: String,
+        _ body: @escaping @MainActor () async -> T
+    ) async -> T {
+        let key = Self.lockKey(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        // Read the tail and replace it with NO `await` in between: `@MainActor`
+        // cannot interleave another caller across a straight-line region, so
+        // two callers can never observe the SAME predecessor and run beside
+        // each other.
+        let predecessor = routingChain[key]
+        let run = Task { @MainActor () -> T in
+            // Wait for everything already queued for this group. `Never`-
+            // failing and best-effort throughout, so this can neither throw
+            // nor hang on a predecessor's failure.
+            _ = await predecessor?.value
+            return await body()
+        }
+        // The erased tail: completes exactly when `run` does, so a successor
+        // chaining on it waits for this section's writes to land.
+        let tail = Task { @MainActor in _ = await run.value }
+        routingChain[key] = tail
+        let outcome = await run.value
+        // Tail-guarded release — a successor that queued behind this section is
+        // the tail now, and dropping it would reopen the race for the caller
+        // after it.
+        if routingChain[key] == tail { routingChain.removeValue(forKey: key) }
+        return outcome
+    }
 
     /// `nonisolated` so the initializer is callable as a default argument
     /// from a nonisolated context (``ChatRepository/init``); it only assigns
@@ -505,6 +579,56 @@ public final class PushGroupRouting {
     /// refusals return before the persist AND before the teardown, so a stale
     /// replay can never retire the live routing id.
     public func receiveSecret(
+        accountIdB64: String,
+        groupIdHex: String,
+        secret: Data,
+        mintEpoch: UInt64,
+        group: Group,
+        senderLeaf: UInt32?
+    ) async {
+        await withRoutingLock(accountIdB64: accountIdB64, groupIdHex: groupIdHex) {
+            [weak self] in
+            guard let self else { return }
+            await self.applyReceivedSecret(
+                accountIdB64: accountIdB64, groupIdHex: groupIdHex, secret: secret,
+                mintEpoch: mintEpoch, group: group, senderLeaf: senderLeaf)
+        }
+    }
+
+    /// Body of ``receiveSecret(accountIdB64:groupIdHex:secret:mintEpoch:group:senderLeaf:)``,
+    /// past the serializing chain lock. Runs alone for its group.
+    ///
+    /// ## The read-decide-write span MUST NOT gain a suspension point
+    ///
+    /// From the `getRecord` below through the `persistSecret` further down is
+    /// one critical section, and it is currently atomic for TWO independent
+    /// reasons — the chain lock this runs inside, and the fact that every
+    /// callee in the span is synchronous (``PushRoutingStore`` is
+    /// `UserDefaults` + CryptoKit with no async I/O; the `Group` roster / role
+    /// / epoch reads are synchronous FFI; `@MainActor` yields only at a
+    /// suspension point). **The belt is the lock; the braces are the
+    /// synchrony.** Keep both. An `await` introduced into this span — an async
+    /// Keychain read, the store moving into the App Group container,
+    /// `derivePushGid` gaining an async FFI hop, the store becoming an `actor`
+    /// — would put the correctness entirely on the lock, so if the lock is
+    /// ever refactored the two changes must be reviewed together.
+    ///
+    /// The hazard is a **stale read across a concurrent write**, which is NOT
+    /// the torn-read hazard the "ONE read for the pair" note below covers. A
+    /// torn read pairs a superseded secret with a live epoch out of ONE row;
+    /// a stale read is a whole, self-consistent row that another gate has
+    /// already replaced. `ChatRepository.receivePushRoutingSecret` spawns a
+    /// detached `Task` per envelope, so one poll batch puts several gates in
+    /// flight: if this span suspended, both would classify against the same
+    /// pre-batch row, the rotation would be applied, and the stale envelope —
+    /// byte-identical to that pre-batch row — would then be waved through as
+    /// ``SecretVerdict/acceptIdentical``, which short-circuits BOTH the clamp
+    /// and the order by design. The superseded secret would be re-persisted
+    /// one turn behind the rotation and the device would end on the id the
+    /// evicted member still derives: F-A (G-36 residual 9) restored, with no
+    /// malice and no crash. Satisfying the torn-read note does not prevent
+    /// that; only holding the row across the whole span does.
+    private func applyReceivedSecret(
         accountIdB64: String,
         groupIdHex: String,
         secret: Data,
@@ -952,16 +1076,26 @@ public final class PushGroupRouting {
     public func redistribute(
         accountIdB64: String,
         groupIdHex: String,
-        broadcast: (Data) async throws -> Void
+        broadcast: @escaping (Data) async throws -> Void
     ) async {
-        guard let record = store.getRecord(
-            accountIdB64: accountIdB64, groupIdHex: groupIdHex) else {
-            return
+        // Serialized with receive / rotate / provision: this reads the pair,
+        // then spends a network round-trip in `broadcastAndSettle` before
+        // writing the `distributed` flag back. The `matching:` guard already
+        // stops that write from describing a secret that changed underneath,
+        // but holding the row keeps the re-broadcast from racing a rotation
+        // into re-sending a secret the group has just moved past.
+        await withRoutingLock(accountIdB64: accountIdB64, groupIdHex: groupIdHex) {
+            [weak self] in
+            guard let self,
+                  let record = self.store.getRecord(
+                    accountIdB64: accountIdB64, groupIdHex: groupIdHex) else {
+                return
+            }
+            await self.broadcastAndSettle(
+                secret: record.secret, mintEpoch: record.mintEpoch,
+                accountIdB64: accountIdB64, groupIdHex: groupIdHex,
+                what: "redistribute", broadcast: broadcast)
         }
-        await broadcastAndSettle(
-            secret: record.secret, mintEpoch: record.mintEpoch,
-            accountIdB64: accountIdB64, groupIdHex: groupIdHex,
-            what: "redistribute", broadcast: broadcast)
     }
 
     /// Compose + broadcast a secret's distribution envelope, then durably
@@ -1096,13 +1230,42 @@ public final class PushGroupRouting {
         groupIdHex: String,
         group: Group,
         identity: Identity,
-        broadcast: (Data) async throws -> Void
+        broadcast: @escaping (Data) async throws -> Void
     ) async {
-        let lockKey = accountIdB64 + "\u{0}" + groupIdHex
+        let lockKey = Self.lockKey(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        // The COALESCING guard, which answers a different question from the
+        // serializing chain below: not "may this section see a half-applied
+        // row" but "should this redundant trigger run at all". A concurrent
+        // legacy-sweep and chat-view onAppear want the identical outcome, so
+        // the second is dropped rather than queued behind the first and made
+        // to re-do it. Held across the chain wait, which cannot deadlock: a
+        // caller that sees the flag returns immediately instead of blocking,
+        // and no section inside the chain calls back in here.
         if inflight.contains(lockKey) { return }
         inflight.insert(lockKey)
         defer { inflight.remove(lockKey) }
 
+        await withRoutingLock(accountIdB64: accountIdB64, groupIdHex: groupIdHex) {
+            [weak self] in
+            guard let self else { return }
+            await self.performEnsureProvisioned(
+                accountIdB64: accountIdB64, groupIdHex: groupIdHex,
+                group: group, identity: identity, broadcast: broadcast)
+        }
+    }
+
+    /// Body of ``ensureProvisioned(accountIdB64:groupIdHex:group:identity:broadcast:)``,
+    /// past the coalescing guard + the serializing chain lock. Runs alone for
+    /// its group, so the `hasSecret` / `getRecord` reads below cannot be
+    /// invalidated by a concurrent receive or rotation before the mint /
+    /// re-broadcast decision they drive is acted on.
+    private func performEnsureProvisioned(
+        accountIdB64: String,
+        groupIdHex: String,
+        group: Group,
+        identity: Identity,
+        broadcast: (Data) async throws -> Void
+    ) async {
         // ADR-0022 role: `.owner`. `nil` = open / legacy group with no role
         // table — nobody mints (avoids divergence), matching the ADR-0042
         // open-question decision to keep un-owned legacy groups on deferred
@@ -1396,7 +1559,6 @@ public final class PushGroupRouting {
         broadcast: @escaping (Data) async throws -> Void
     ) async -> PushRotationOutcome {
         guard ownRole == .owner || ownRole == .admin else { return .skipNotAuthorized }
-        let lockKey = accountIdB64 + "\u{0}" + groupIdHex
         // SERIALIZE: a second trigger for the same group QUEUES behind the
         // in-flight rotation and then runs its own, in full. Running them
         // concurrently would have both mint off the same old secret and strand
@@ -1406,26 +1568,15 @@ public final class PushGroupRouting {
         // that avoids both: the successor reads this rotation's output as its
         // own old secret.
         //
-        // Read + replace the tail synchronously — `@MainActor` with no `await`
-        // between them, so two callers can never both see the same predecessor.
-        let predecessor = rotating[lockKey]
-        let task = Task { @MainActor [weak self] () -> PushRotationOutcome in
-            // Wait for everything already queued for this group. `Never`-failing
-            // and best-effort throughout, so this can neither throw nor hang on
-            // a predecessor's failure.
-            _ = await predecessor?.value
+        // The chain is shared with the receive / provision / redistribute
+        // paths, so a peer's routing envelope cannot land mid-rotation either.
+        return await withRoutingLock(accountIdB64: accountIdB64, groupIdHex: groupIdHex) {
+            [weak self] () -> PushRotationOutcome in
             guard let self else { return .skipNoSecret }
             return await self.performRotation(
                 accountIdB64: accountIdB64, groupIdHex: groupIdHex,
                 mintEpoch: mintEpoch, broadcast: broadcast)
         }
-        rotating[lockKey] = task
-        let outcome = await task.value
-        // Only the CURRENT tail clears the slot: a successor that queued behind
-        // this rotation is the tail now, and dropping it would let the next
-        // caller start concurrently with it — reopening the race.
-        if rotating[lockKey] == task { rotating.removeValue(forKey: lockKey) }
-        return outcome
     }
 
     /// Body of ``rotateSecret(accountIdB64:groupIdHex:ownRole:broadcast:)``,
