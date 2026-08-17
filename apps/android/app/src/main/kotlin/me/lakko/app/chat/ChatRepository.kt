@@ -2122,7 +2122,31 @@ public class ChatRepository(
         val identity = canonicalIdentity.get() ?: return
         val record = groups[groupIdHex] ?: return
 
-        groupsLock.withLock {
+        // G-37 — the DS long poll (30 s on the live chat screen) used to be
+        // awaited INSIDE `groupsLock`, which is one mutex for the whole
+        // repository. An open chat screen therefore held the global lock
+        // near-continuously and every send / edit / reaction / membership commit
+        // on every group queued behind it.
+        //
+        // A timeout would be the wrong fix here — it would sever a long poll that
+        // is behaving exactly as designed. Instead the network fetch (which
+        // touches no MLS state) runs OUTSIDE the lock and only the apply + cursor
+        // advance run inside it, guarded by a per-group in-flight latch and a
+        // cursor-moved check. See [runSplitPoll] for the full ordering.
+        runSplitPoll(
+            inFlight = record.pollInFlight,
+            lock = groupsLock,
+            readCursor = { record.cursor },
+            fetch = { after ->
+                chatClient.fetchGroupJournal(
+                    // The record caches the group id, so the network half does
+                    // not read the `Group` handle at all.
+                    groupId = record.groupId,
+                    after = after,
+                    waitSecs = waitSecs,
+                )
+            },
+        ) { after, raw ->
             // ADR-0043 — baseline for the membership diff, captured BEFORE
             // this batch applies any commit. A Commit carries no membership
             // delta out of the poll loop, so a removal committed by SOMEONE
@@ -2131,12 +2155,16 @@ public class ChatRepository(
             // applied locally before this poll, so the baseline is already
             // post-removal); those rotate directly in
             // [removeMemberFromGroup].
+            //
+            // G-37 — still captured INSIDE the lock, immediately before the
+            // apply. Hoisting it out to where the fetch now runs would race the
+            // shrink diff against any commit landing in the fetch window.
             val membersBeforePoll = memberSignatureKeysOrNull(record.group)
-            val result = chatClient.pollMessages(
+            val result = chatClient.applyFetchedMessages(
                 identity = identity,
                 group = record.group,
-                after = record.cursor,
-                waitSecs = waitSecs,
+                raw = raw,
+                after = after,
             )
             record.applyPollResult(
                 result,
@@ -2755,6 +2783,17 @@ private class GroupRecord(
     @Volatile
     var cursor: Long = 0
         private set
+
+    /**
+     * G-37 — per-group poll latch. Now that the DS fetch runs OUTSIDE
+     * `groupsLock`, two concurrent `pollGroup` calls for the same group could
+     * otherwise both fetch from the same cursor and then apply overlapping
+     * batches. The loser of this CAS skips entirely (it does not even fetch);
+     * the winner clears it in a `finally`, so a failed / cancelled fetch never
+     * wedges the group. See [runSplitPoll].
+     */
+    val pollInFlight: java.util.concurrent.atomic.AtomicBoolean =
+        java.util.concurrent.atomic.AtomicBoolean(false)
 
     fun appendOutgoing(
         text: String,

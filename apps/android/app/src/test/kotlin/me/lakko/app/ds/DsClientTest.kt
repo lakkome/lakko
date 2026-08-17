@@ -5,6 +5,9 @@ package me.lakko.app.ds
 
 import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.respond
+import io.ktor.client.plugins.HttpRequestTimeoutException
+import io.ktor.client.plugins.HttpTimeoutCapability
+import io.ktor.client.plugins.HttpTimeoutConfig
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
@@ -12,6 +15,7 @@ import io.ktor.http.content.OutgoingContent
 import io.ktor.http.headersOf
 import java.io.IOException
 import java.util.Base64
+import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -329,5 +333,136 @@ class DsClientTest {
                 }
             }
         }
+    }
+
+    // ===================================================================
+    // G-37 — explicit request timeouts
+    //
+    // Before this, nothing installed `HttpTimeout`: the client had only
+    // `ContentNegotiation` over an empty `OkHttp.create {}`, so the effective
+    // bound was whatever the engine inherited — unknown. Every DS publish runs
+    // inside `ChatRepository`'s single repository-wide `groupsLock`, so an
+    // unbounded publish is an unbounded hold of a lock every other group's send
+    // queues behind.
+    //
+    // The timeout VALUES are asserted here off the per-request capability rather
+    // than by waiting for one to fire — a firing test would have to burn the real
+    // 15 s / 40 s budget in wall-clock time (Ktor's timeout machinery runs on the
+    // engine's dispatcher, not the virtual-time test scheduler). What the plugin
+    // does once a budget elapses is Ktor's own well-tested behaviour; what is
+    // ours — and what these pin — is (a) that a budget is configured at all,
+    // (b) that it is the intended value, (c) that a long poll gets a WIDER one so
+    // it is not severed by design, and (d) that the resulting exception is routed
+    // to `DsNetworkError` rather than mistaken for cancellation.
+    // ===================================================================
+
+    /** Capture the effective per-request timeout config the client attached. */
+    private fun timeoutCapturingClient(
+        onCapture: (HttpTimeoutConfig?) -> Unit,
+    ): DsClient {
+        val engine = MockEngine { request ->
+            onCapture(request.getCapabilityOrNull(HttpTimeoutCapability))
+            respond(
+                content = """{"messages":[],"has_more":false}""",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+        return DsClient(baseUrl = "http://test.invalid", engine = engine)
+    }
+
+    @Test
+    fun `G-37 — a non-long-poll fetch carries the default 15s request budget`() = runTest {
+        var captured: HttpTimeoutConfig? = null
+        timeoutCapturingClient { captured = it }.use { client ->
+            client.fetchGroup(ByteArray(32) { 1 }, after = 4)
+        }
+        assertEquals("a wait=0 fetch is bounded at the default", 15_000L, captured?.requestTimeoutMillis)
+        assertEquals(10_000L, captured?.connectTimeoutMillis)
+    }
+
+    @Test
+    fun `G-37 — a publish carries the default 15s request budget`() = runTest {
+        var captured: HttpTimeoutConfig? = null
+        val engine = MockEngine { request ->
+            captured = request.getCapabilityOrNull(HttpTimeoutCapability)
+            respond(
+                content = """{"id":1,"created_at":"2026-01-01T00:00:00Z"}""",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+        DsClient(baseUrl = "http://test.invalid", engine = engine).use { client ->
+            client.publishGroup(ByteArray(32) { 2 }, byteArrayOf(9))
+        }
+        assertEquals(
+            "every publish — all of which run under groupsLock — is bounded",
+            15_000L,
+            captured?.requestTimeoutMillis,
+        )
+    }
+
+    @Test
+    fun `G-37 — a long-poll fetch widens BOTH request and socket budgets to waitSecs plus 10`() =
+        runTest {
+            var captured: HttpTimeoutConfig? = null
+            timeoutCapturingClient { captured = it }.use { client ->
+                client.fetchGroup(ByteArray(32) { 3 }, after = 0, waitSecs = 30)
+            }
+            // Mirrors iOS `DsClient.swift` (`timeoutInterval = waitSecs + 10`).
+            assertEquals(
+                "a 30s long poll must NOT be severed by the 15s default",
+                40_000L,
+                captured?.requestTimeoutMillis,
+            )
+            assertEquals(
+                "a long poll is an idle socket by definition — the socket budget " +
+                    "must widen too or it fires first",
+                40_000L,
+                captured?.socketTimeoutMillis,
+            )
+        }
+
+    @Test
+    fun `G-37 — a request timeout surfaces as DsNetworkError, not as cancellation`() {
+        // Ktor's HttpRequestTimeoutException extends java.io.IOException (verified
+        // against ktor-client-core 3.0.1), so it takes the generic branch and is
+        // wrapped — which is what lets `ChatClient.sendMessage`'s narrow
+        // `catch (e: DsNetworkError)` convert it into a `ChatError` instead of
+        // letting a raw throwable escape past callers that expect one.
+        val engine = MockEngine {
+            throw HttpRequestTimeoutException("http://test.invalid", 15_000L)
+        }
+        val thrown = assertThrows(DsNetworkError::class.java) {
+            runTest {
+                DsClient(baseUrl = "http://test.invalid", engine = engine).use { client ->
+                    client.publishGroup(ByteArray(32) { 4 }, byteArrayOf(1))
+                }
+            }
+        }
+        assertTrue(
+            "the timeout must be preserved as the cause",
+            thrown.cause is HttpRequestTimeoutException,
+        )
+    }
+
+    @Test
+    fun `G-37 — a genuine cancellation propagates verbatim and is NOT relabelled`() {
+        // Structured concurrency: a cancelled send is not a failed send. Before
+        // this, `catch (cause: Throwable)` swallowed CancellationException into a
+        // DsNetworkError, which callers surface to the user as a failed send.
+        val engine = MockEngine { throw CancellationException("scope cancelled") }
+        val thrown = assertThrows(CancellationException::class.java) {
+            runTest {
+                DsClient(baseUrl = "http://test.invalid", engine = engine).use { client ->
+                    client.publishGroup(ByteArray(32) { 5 }, byteArrayOf(1))
+                }
+            }
+        }
+        // `assertThrows(CancellationException::class)` above already proves it was
+        // not re-labelled (DsNetworkError is not a CancellationException). Pin the
+        // message too, so it is the ORIGINAL cancellation propagating verbatim and
+        // not a fresh one manufactured somewhere in the catch chain.
+        assertEquals("scope cancelled", thrown.message)
     }
 }

@@ -8,7 +8,9 @@ import io.ktor.client.call.body
 import io.ktor.client.engine.HttpClientEngine
 import io.ktor.client.engine.okhttp.OkHttp
 import me.lakko.app.transport.AntiCensorshipEngine
+import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
+import io.ktor.client.plugins.timeout
 import io.ktor.client.request.HttpRequestBuilder
 import io.ktor.client.request.get
 import io.ktor.client.request.parameter
@@ -20,6 +22,7 @@ import io.ktor.http.ContentType
 import io.ktor.http.contentType
 import io.ktor.http.isSuccess
 import io.ktor.serialization.kotlinx.json.json
+import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import me.lakko.app.auth.base64Decode
@@ -81,10 +84,12 @@ public class DsClient(
     private val client: HttpClient = if (engine != null) {
         HttpClient(engine) {
             install(ContentNegotiation) { json(json) }
+            installTimeouts()
         }
     } else {
         HttpClient(AntiCensorshipEngine(OkHttp.create {})) {
             install(ContentNegotiation) { json(json) }
+            installTimeouts()
         }
     }
 
@@ -162,6 +167,19 @@ public class DsClient(
                 contentType(ContentType.Application.OctetStream)
                 setBody(payload)
             }
+        } catch (cancellation: CancellationException) {
+            // G-37 — structured concurrency: a genuine cancellation is NOT a
+            // network failure and must propagate verbatim, never be re-labelled
+            // as [DsNetworkError] (which callers convert into a `ChatError` and
+            // surface to the user as a failed send).
+            //
+            // This is also what keeps the new timeout unambiguous. Ktor's
+            // [io.ktor.client.plugins.HttpRequestTimeoutException] extends
+            // `java.io.IOException`, NOT `CancellationException` — so a timeout
+            // falls through to the branch below and becomes a [DsNetworkError],
+            // while a real cancellation takes this branch. The two can never be
+            // confused for one another.
+            throw cancellation
         } catch (cause: Throwable) {
             throw DsNetworkError(endpoint, cause)
         }
@@ -240,6 +258,10 @@ public class DsClient(
             client.get(url) {
                 configureFetchParams(after = after, limit = limit, waitSecs = waitSecs)
             }
+        } catch (cancellation: CancellationException) {
+            // G-37 — see [doPublish]: cancellation propagates verbatim; a Ktor
+            // request timeout is an `IOException` and falls through below.
+            throw cancellation
         } catch (cause: Throwable) {
             throw DsNetworkError(endpoint, cause)
         }
@@ -271,6 +293,23 @@ public class DsClient(
         if (after != null) parameter("after", after.toString())
         if (limit != null) parameter("limit", limit.toString())
         if (waitSecs != null) parameter("wait", waitSecs.toString())
+
+        // G-37 — a long-poll fetch DELIBERATELY holds the connection open for
+        // `waitSecs`, so the flat [DEFAULT_REQUEST_TIMEOUT_MS] would sever it by
+        // design. Widen this ONE request to the long-poll budget plus slack for
+        // the round-trip and the server's own `MAX_WAIT_SECS` clamp. Same shape
+        // as iOS (`DsClient.swift` — `timeoutInterval = waitSecs + 10`).
+        //
+        // `socketTimeoutMillis` has to move too: a long poll is by definition an
+        // idle socket until the server has something to say, so leaving it at the
+        // default would fire first and defeat the widened request budget.
+        if (waitSecs != null && waitSecs > 0) {
+            val budgetMs = (waitSecs.toLong() + LONG_POLL_MARGIN_SECS) * MILLIS_PER_SEC
+            timeout {
+                requestTimeoutMillis = budgetMs
+                socketTimeoutMillis = budgetMs
+            }
+        }
     }
 
     public companion object {
@@ -300,6 +339,47 @@ public class DsClient(
         }
 
         private const val HEX: String = "0123456789abcdef"
+
+        /**
+         * G-37 — the default per-request budget for every DS call that is NOT a
+         * long poll (every publish, and a `wait=0` catch-up fetch).
+         *
+         * Before this, nothing configured a timeout at all: the client installed
+         * only `ContentNegotiation` over an empty `OkHttp.create {}`, so the
+         * effective bound was whatever the engine happened to inherit — unknown,
+         * and unbounded as far as this code could tell. Every `publishGroup` /
+         * `publishMailbox` call site in `ChatRepository` runs inside the single
+         * repository-wide `groupsLock`, so an unbounded publish is an unbounded
+         * hold of a lock that every other group's send and commit queues behind.
+         */
+        private const val DEFAULT_REQUEST_TIMEOUT_MS: Long = 15_000
+
+        /** Connection-establishment budget (separate from the request budget —
+         *  a dead host should fail fast rather than burn the whole request
+         *  budget on a TCP handshake that will never complete). */
+        private const val CONNECT_TIMEOUT_MS: Long = 10_000
+
+        /** Slack added to a long-poll `waitSecs` budget so the round-trip and the
+         *  server's own `MAX_WAIT_SECS` clamp can complete without the client
+         *  timing out first. Mirrors iOS (`waitSecs + 10`). */
+        private const val LONG_POLL_MARGIN_SECS: Long = 10
+
+        private const val MILLIS_PER_SEC: Long = 1_000
+
+        /**
+         * Install the explicit request/connect/socket bounds on a client config.
+         *
+         * Applied to BOTH the production engine and a caller-supplied test engine
+         * so a `MockEngine`-backed test exercises the same timeout behaviour the
+         * real client has — otherwise the bound would be untestable on the host.
+         */
+        private fun io.ktor.client.HttpClientConfig<*>.installTimeouts() {
+            install(HttpTimeout) {
+                requestTimeoutMillis = DEFAULT_REQUEST_TIMEOUT_MS
+                connectTimeoutMillis = CONNECT_TIMEOUT_MS
+                socketTimeoutMillis = DEFAULT_REQUEST_TIMEOUT_MS
+            }
+        }
     }
 }
 

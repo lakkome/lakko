@@ -9,6 +9,7 @@ import me.lakko.app.ds.DsClient
 import me.lakko.app.ds.DsClientArgError
 import me.lakko.app.ds.DsHttpError
 import me.lakko.app.ds.DsNetworkError
+import me.lakko.app.ds.FetchResult
 import me.lakko.app.push.GroupPushRouting
 import uniffi.lakko_ffi_uniffi.AttachmentRef
 import uniffi.lakko_ffi_uniffi.FfiException
@@ -245,8 +246,33 @@ public class ChatClient(
         } catch (e: FfiException) {
             throw ChatError("group.groupId unavailable", e)
         }
+        val raw = fetchGroupJournal(groupId, after = after, waitSecs = waitSecs)
+        return applyFetchedMessages(identity, group, raw, after = after)
+    }
 
-        val raw = try {
+    /**
+     * G-37 — the NETWORK half of [pollMessages], split out so the caller can run
+     * it OUTSIDE the repository-wide `groupsLock`.
+     *
+     * This touches no MLS state whatsoever: it is a plain `GET` against the DS
+     * journal, and the `groupId` is a value the caller already holds (the
+     * `GroupRecord` caches it), so not even the `Group` handle is read here.
+     *
+     * That matters because [waitSecs] is a DELIBERATE long poll — 30 s on the
+     * live chat screen — and the previous shape awaited it while holding the one
+     * global lock, so every send / edit / reaction / membership commit on EVERY
+     * group queued behind an open chat screen's idle connection.
+     *
+     * The MLS half is [applyFetchedMessages], which the caller runs under the
+     * lock. See `ChatRepository.pollGroup` for the composition + the guards that
+     * keep the two halves consistent.
+     */
+    public suspend fun fetchGroupJournal(
+        groupId: ByteArray,
+        after: Long = 0,
+        waitSecs: Int = 0,
+    ): FetchResult {
+        return try {
             ds.fetchGroup(groupId, after = after, waitSecs = waitSecs)
         } catch (e: DsClientArgError) {
             throw ChatError("DS fetch failed", e)
@@ -255,7 +281,26 @@ public class ChatClient(
         } catch (e: DsNetworkError) {
             throw ChatError("DS fetch failed", e)
         }
+    }
 
+    /**
+     * G-37 — the MLS half of [pollMessages]: apply an already-fetched batch.
+     *
+     * DELIBERATELY NOT `suspend`. Every statement below mutates OpenMLS provider
+     * state through the shared `Group` handle and must run under the caller's
+     * `groupsLock`; making it non-suspending is a structural guarantee that no
+     * network wait can ever be reintroduced into this critical section (a
+     * suspending call simply would not compile here).
+     *
+     * [after] is the cursor the batch was fetched with, and seeds the returned
+     * cursor so an empty batch does not rewind it.
+     */
+    public fun applyFetchedMessages(
+        identity: Identity,
+        group: Group,
+        raw: FetchResult,
+        after: Long = 0,
+    ): PollMessagesResult {
         val events = mutableListOf<IncomingChatEvent>()
         var cursor = after
         for (message in raw.messages) {
