@@ -389,6 +389,82 @@ private func routedAccount(
     )
 }
 
+// MARK: - Service-envelope filter
+
+/// The exact byte length of a v2 push-routing-secret distribution envelope
+/// (ADR-0044): `domain(29) || version(1) || mint_epoch(8, BE) || secret(32)`.
+private let pushRoutingEnvelopeLen = 70
+
+/// First byte of the frozen 29-byte domain separator
+/// `lakko/push-routing-secret/v1\0` — an ASCII `l`. Frozen forever (it is the
+/// `incoming_envelope` dispatch prefix), so it is the one byte of this wire
+/// format safe to peek at outside the codec.
+private let pushRoutingEnvelopeFirstByte: UInt8 = 0x6C
+
+/// `true` when the bytes look like a prost-encoded `CallSignalingPayload`
+/// (ADR-0009 call signaling).
+///
+/// Verbatim mirror of the foreground `ChatClient.looksLikeCallSignaling`: the
+/// proto's first wire tag is one of `0x52` / `0x5A` / `0x62` / `0x6A`
+/// (`CallSignalingPayload.body` oneof fields 10..13), while a chat envelope
+/// starts with `{` (`0x7B`) — no overlap.
+///
+/// This is the FULL authority for the call-signaling kind on both paths (there
+/// is no prost decoder on the NSE's slim surface, and the foreground uses none
+/// here either). It shares the foreground's known characteristic: a LEGACY
+/// pre-1.19 plain-UTF-8 body whose first character happens to be `R` / `Z` /
+/// `b` / `j` is classified as call signaling. Keeping the two paths byte-for-byte
+/// identical is worth more than "improving" one of them — a divergence would
+/// mean the notification and the timeline disagree about what arrived.
+public func nseLooksLikeCallSignaling(_ bytes: Data) -> Bool {
+    guard let first = bytes.first else { return false }
+    return first == 0x52 || first == 0x5A || first == 0x62 || first == 0x6A
+}
+
+/// Cheap PRE-FILTER for an ADR-0042 / ADR-0044 push-routing-secret envelope:
+/// the fixed v2 length plus the first domain byte.
+///
+/// Mirror of the foreground `PushGroupRouting.tryDecodeSecretEnvelope` peek. It
+/// is deliberately NOT authoritative — it exists only to keep an FFI call off
+/// the hot path for every ordinary chat message. The verdict comes from the
+/// Rust codec (`decodePushRoutingSecret`), whose domain + version + exact-length
+/// gate is the single definition of this wire format; a Swift-side domain match
+/// would silently drift on the next version bump, which is precisely the failure
+/// class ADR-0044 exists to document. The two constants above are pinned by a
+/// Rust golden test (`golden_pins_the_swift_prefilter_shape`) so a wire change
+/// fails CI rather than silently widening this filter's blind spot.
+public func nseLooksLikePushRoutingSecret(_ bytes: Data) -> Bool {
+    bytes.count == pushRoutingEnvelopeLen && bytes.first == pushRoutingEnvelopeFirstByte
+}
+
+/// `true` when an already-DECRYPTED MLS application body is an in-group SERVICE
+/// envelope that must NEVER be rendered as a notification.
+///
+/// Service envelopes ride the SAME group journal as chat. `parseBodyEnvelope`
+/// has a deliberate legacy fallback that degrades non-JSON bytes to a `Chat`
+/// body via `from_utf8_lossy` (pre-1.19 wire compatibility), so without this
+/// filter a service envelope surfaces as a notification containing its domain
+/// string plus raw binary. The foreground receive loop
+/// (`ChatClient.toEvent`) has always filtered these; this is the background
+/// half of the same gate, in the same ORDER (call signaling first, then push
+/// routing) so the two paths cannot disagree.
+///
+/// `decodesAsPushRoutingSecret` is injected rather than called directly so this
+/// function stays FFI-free and compiles into the unit-test target; the NSE
+/// passes the slim FFI's `decodePushRoutingSecret`.
+///
+/// Returning `true` makes the caller drop the row, and the extraction loop then
+/// falls back naturally to the newest REAL chat message (or, with none, to the
+/// handler's generic "New message" banner).
+public func nseIsServiceEnvelope(
+    _ bytes: Data,
+    decodesAsPushRoutingSecret: (Data) -> Bool
+) -> Bool {
+    if nseLooksLikeCallSignaling(bytes) { return true }
+    if nseLooksLikePushRoutingSecret(bytes), decodesAsPushRoutingSecret(bytes) { return true }
+    return false
+}
+
 /// Decode a lowercase-hex string into bytes. `nil` on any malformed input
 /// (odd length, non-hex char). Kept local so the pure core stays FFI-free /
 /// deps-file-free (the test target compiles only this file).

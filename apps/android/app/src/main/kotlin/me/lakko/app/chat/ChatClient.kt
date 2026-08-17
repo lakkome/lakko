@@ -303,8 +303,16 @@ public class ChatClient(
  *  `CallSignalingPayload` proto. Returns `true` when the
  *  first byte matches one of the oneof body tags
  *  (0x52/0x5A/0x62/0x6A for fields 10..13). Chat envelopes
- *  start with `{` (0x7B); sets don't overlap. */
-private fun looksLikeCallSignaling(bytes: ByteArray): Boolean {
+ *  start with `{` (0x7B); sets don't overlap.
+ *
+ *  `internal` rather than `private` ONLY so the background
+ *  push-preview path can reuse this exact sniff instead of
+ *  duplicating the tag set — see
+ *  `me.lakko.app.push.isServiceEnvelope`. The proto oneof tags
+ *  must have exactly one definition; a second copy would drift
+ *  silently the next time a field number moves. Behaviour here is
+ *  unchanged. */
+internal fun looksLikeCallSignaling(bytes: ByteArray): Boolean {
     if (bytes.isEmpty()) return false
     val first = bytes[0].toInt() and 0xFF
     return first == 0x52 || first == 0x5A || first == 0x62 || first == 0x6A

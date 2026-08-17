@@ -174,6 +174,17 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
         // Proposal / ExternalJoinProposal advances state (in the THROWAWAY
         // provider only) but has no body to show.
         guard case let .application(data, _) = processed else { return nil }
+        // SERVICE-ENVELOPE FILTER — the background half of the gate the
+        // foreground `ChatClient.toEvent` has always run, in the same order.
+        // Call-signaling proto bytes and ADR-0042/0044 push-routing-secret
+        // envelopes ride the SAME group journal as chat; without this,
+        // `parseBodyEnvelope`'s deliberate legacy UTF-8 fallback degrades them
+        // to a `.chat` body and the NSE renders a notification full of a domain
+        // string plus raw binary. Returning nil drops the row, so the caller's
+        // loop falls back to the newest REAL message (or the generic banner).
+        if nseIsServiceEnvelope(data, decodesAsPushRoutingSecret: Self.decodesAsPushRoutingSecret) {
+            return nil
+        }
         let body = parseBodyEnvelope(bytes: data)
         let kind: NseProcessedKind
         switch body.kind {
@@ -189,6 +200,23 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
             text: body.text,
             attachmentCount: body.attachments.count
         )
+    }
+
+    /// The AUTHORITATIVE half of the push-routing-secret filter: the slim FFI's
+    /// `decodePushRoutingSecret` (ADR-0042 v2, per ADR-0044), whose domain +
+    /// version + exact-length gate is the ONE definition of that wire format.
+    /// A throw means "not this envelope" — the common case for every chat
+    /// message — so the caller falls through to the normal chat parse.
+    ///
+    /// Deliberately routed through the Rust codec rather than a Swift-side
+    /// domain-prefix match: a hardcoded prefix silently drifts on the next
+    /// envelope version bump.
+    ///
+    /// READ-ONLY: a pure decode. It decodes the secret bytes but NOTHING here
+    /// persists, derives a `push_gid`, or subscribes — that is the foreground
+    /// app's job on its own durable path. The NSE only needs the yes/no.
+    private static func decodesAsPushRoutingSecret(_ bytes: Data) -> Bool {
+        (try? decodePushRoutingSecret(plaintext: bytes)) != nil
     }
 
     /// LOAD-BEARING: this does NOT persist — no `snapshotStorage()` /

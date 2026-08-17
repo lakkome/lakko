@@ -15,6 +15,7 @@ import uniffi.lakko_ffi_uniffi.Group
 import uniffi.lakko_ffi_uniffi.Identity
 import uniffi.lakko_ffi_uniffi.MessageBodyKind
 import uniffi.lakko_ffi_uniffi.ProcessedMessage
+import uniffi.lakko_ffi_uniffi.decodePushRoutingSecret
 import uniffi.lakko_ffi_uniffi.loadGroup
 import uniffi.lakko_ffi_uniffi.parseBodyEnvelope
 
@@ -190,6 +191,17 @@ private class RealThrowawayGroup(
         // Commit / Proposal / ExternalJoinProposal advances state (in
         // the THROWAWAY provider only) but has no body to show.
         val app = processed as? ProcessedMessage.Application ?: return null
+        // A SERVICE envelope (ADR-0042/0044 push-routing-secret, or a
+        // call-signaling proto) is machine-to-machine traffic with no
+        // user-visible body. It MUST be rejected before
+        // `parseBodyEnvelope`, whose deliberate legacy fallback would
+        // otherwise degrade the raw bytes to `Chat` via a lossy UTF-8
+        // decode and render the domain string plus binary as a
+        // notification. Returning `null` here lets the caller's loop
+        // fall back to the newest REAL chat message (and, when there is
+        // none, to the generic "New message" banner). Same filter the
+        // foreground `ChatClient` dispatch uses.
+        if (isServiceEnvelope(app.data, ::decodesAsRoutingSecret)) return null
         val body = try {
             parseBodyEnvelope(app.data)
         } catch (_: Throwable) {
@@ -228,6 +240,23 @@ private class RealThrowawayGroup(
         }
     }
 }
+
+/**
+ * The AUTHORITATIVE push-routing-secret check ([isServiceEnvelope]'s
+ * injected second step) — the native, fail-closed
+ * `decodePushRoutingSecret`. `true` only when the bytes really are a
+ * current-version envelope; a wrong domain, a bad length, or a retired
+ * v1 envelope throws and yields `false`, so the payload falls through to
+ * the normal chat parse. Lives here (not in the pure filter) because it
+ * is the one part that needs the UniFFI `.so`.
+ */
+private fun decodesAsRoutingSecret(bytes: ByteArray): Boolean =
+    try {
+        decodePushRoutingSecret(bytes)
+        true
+    } catch (_: Throwable) {
+        false
+    }
 
 /** Decode a lowercase hex string into bytes. Returns `null` on any
  *  malformed input (odd length, non-hex chars). */

@@ -19,19 +19,30 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 workspace = true
 
 # ADR-0041 Phase 2 — the SLIM decrypt-only FFI. The dependency set is the
-# load-bearing point of this crate: it pulls ONLY the two crates the iOS NSE
+# load-bearing point of this crate: it pulls ONLY the three crates the iOS NSE
 # background-decrypt path needs — `lakko-mls` (restore-throwaway-group /
-# process-incoming-verifying-roles / Identity::from_seed) and
-# `lakko-attachments` (parse-body-envelope) — plus their transitive
-# `lakko-crypto` / `lakko-proto` / openmls. It deliberately does NOT depend on
-# `lakko-transport` (tokio + REALITY/MASQUE/Shadowsocks), `lakko-calls`,
-# `lakko-channels`, `lakko-sfu-proto`, or `lakko-call-jwt` — none of which the
-# decrypt path touches, and all of which bloat the ~30 MB NSE budget. Keep this
-# list minimal; adding a dep here re-inflates the framework the NSE links.
+# process-incoming-verifying-roles / Identity::from_seed),
+# `lakko-attachments` (parse-body-envelope) and `lakko-contacts`
+# (decode-push-routing-secret, the service-envelope filter) — plus their
+# transitive `lakko-crypto` / `lakko-proto` / openmls. It deliberately does NOT
+# depend on `lakko-transport` (tokio + REALITY/MASQUE/Shadowsocks),
+# `lakko-calls`, `lakko-channels`, `lakko-sfu-proto`, or `lakko-call-jwt` —
+# none of which the decrypt path touches, and all of which bloat the ~30 MB NSE
+# budget. Keep this list minimal; adding a dep here re-inflates the framework
+# the NSE links.
+#
+# `lakko-contacts` was measured before it was added: its own dependency set is
+# just `thiserror` (already here) + `lakko-crypto` (already here transitively
+# via `lakko-mls`), so a `cargo tree --target aarch64-apple-ios --edges normal`
+# set difference shows it adding exactly FIVE crates — `lakko-contacts`,
+# `tracing`, `tracing-core`, `tracing-attributes`, `pin-project-lite`. No
+# tokio, no TLS, no async runtime, no transport. Re-run that measurement before
+# adding anything else here.
 [dependencies]
 thiserror.workspace = true
 lakko-mls.workspace = true
 lakko-attachments.workspace = true
+lakko-contacts.workspace = true
 
 # `build` powers the `uniffi::setup_scaffolding!()` proc-macro; `cli` enables
 # `uniffi::uniffi_bindgen_main()` in `src/bin/uniffi-bindgen.rs` so

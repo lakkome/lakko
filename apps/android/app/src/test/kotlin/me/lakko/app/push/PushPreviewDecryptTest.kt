@@ -489,4 +489,185 @@ class PushPreviewDecryptTest {
         // advance would imply).
         assertEquals(1, deps.dsFetchCount)
     }
+
+    // -----------------------------------------------------------------
+    // SERVICE-ENVELOPE FILTER (isServiceEnvelope)
+    //
+    // Not every Application message is chat. The ADR-0042/0044
+    // push-routing-secret envelope and the call-signaling proto are
+    // machine-to-machine. `parse_body`'s deliberate legacy fallback
+    // (`String::from_utf8_lossy`, kept for pre-1.19 plain-UTF-8 wire
+    // compat) degrades BOTH to `Chat`, so without a filter the
+    // background handler rendered the domain string plus raw binary as
+    // a notification body.
+    //
+    // The fakes below stand in for the two native pieces:
+    //   * [fakeRoutingSecretDecode] mimics the FFI
+    //     `decodePushRoutingSecret` (domain + length + version gate),
+    //   * [lossyChatDecode] mimics `parse_body`'s fallback, so a payload
+    //     that clears the filter surfaces as chat text EXACTLY as the
+    //     real parser would. That is what makes these tests
+    //     discriminate: delete the `isServiceEnvelope` call and the
+    //     envelope bytes become the preview.
+    // -----------------------------------------------------------------
+
+    /** `lakko/push-routing-secret/v1\0` — 29 bytes. The trailing NUL is
+     *  APPENDED PROGRAMMATICALLY, never written into this source file:
+     *  a raw NUL makes git treat the file as binary and silently drops
+     *  it from `grep -r` (the ADR-0042 MEDIUM-3 / ADR-0043 F5 class). */
+    private val routingDomain: ByteArray =
+        "lakko/push-routing-secret/v1".toByteArray(Charsets.US_ASCII) +
+            byteArrayOf(0)
+
+    /** A well-formed v2 routing-secret envelope:
+     *  `domain(29) || version(1)=0x02 || mint_epoch(8) || secret(32)`. */
+    private fun routingSecretEnvelope(version: Int = 0x02): ByteArray {
+        val out = ByteArray(GroupPushRouting.ENVELOPE_LEN)
+        routingDomain.copyInto(out, 0)
+        out[29] = version.toByte()
+        // mint_epoch stays 0; fill the 32-byte secret with a marker.
+        for (i in 38 until out.size) out[i] = 0xAB.toByte()
+        return out
+    }
+
+    /** A `CallSignalingPayload` proto: first byte is one of the oneof
+     *  body tags (fields 10..13). */
+    private fun callSignalingPayload(tag: Int = 0x52): ByteArray =
+        byteArrayOf(tag.toByte(), 0x04, 0x01, 0x02, 0x03, 0x04)
+
+    /** Stand-in for the native `decodePushRoutingSecret`: accepts only a
+     *  genuine current-version envelope, exactly like the fail-closed
+     *  FFI (wrong domain / wrong version / wrong length -> reject). */
+    private fun fakeRoutingSecretDecode(bytes: ByteArray): Boolean =
+        bytes.size == GroupPushRouting.ENVELOPE_LEN &&
+            bytes.copyOfRange(0, routingDomain.size).contentEquals(routingDomain) &&
+            bytes[29].toInt() == 0x02
+
+    /** Stand-in for the real per-row extractor: the production filter,
+     *  then `parse_body`'s lossy-UTF-8 legacy fallback. */
+    private val lossyChatDecode: (ByteArray) -> ProcessedRow? = { payload ->
+        if (isServiceEnvelope(payload, ::fakeRoutingSecretDecode)) {
+            null
+        } else {
+            chat(String(payload, Charsets.UTF_8))
+        }
+    }
+
+    private fun rowOf(id: Long, payload: ByteArray) = FetchedRow(id, payload)
+
+    private fun textRow(id: Long, text: String) =
+        FetchedRow(id, text.toByteArray(Charsets.UTF_8))
+
+    @Test
+    fun `isServiceEnvelope classifies both service kinds and passes real chat`() {
+        // 1. The ADR-0042/0044 routing-secret envelope.
+        assertTrue(isServiceEnvelope(routingSecretEnvelope(), ::fakeRoutingSecretDecode))
+        // 2. Call signaling — every oneof body tag (fields 10..13).
+        for (tag in listOf(0x52, 0x5A, 0x62, 0x6A)) {
+            assertTrue(
+                "tag 0x${tag.toString(16)} must classify as service",
+                isServiceEnvelope(callSignalingPayload(tag), ::fakeRoutingSecretDecode),
+            )
+        }
+        // A real chat envelope starts with `{` (0x7B) — never a service
+        // envelope, and it must not pay for the throwing codec.
+        assertFalse(
+            isServiceEnvelope(
+                """{"v":"1.0","text":"hi"}""".toByteArray(Charsets.UTF_8),
+                ::fakeRoutingSecretDecode,
+            ),
+        )
+        assertFalse(isServiceEnvelope(ByteArray(0), ::fakeRoutingSecretDecode))
+    }
+
+    @Test
+    fun `isServiceEnvelope defers to the codec, not the cheap peek`() {
+        // A 70-byte legacy plaintext starting with 'l' CLEARS the cheap
+        // length + first-byte pre-filter. Only the authoritative decode
+        // separates it from a real envelope, so a peek-only filter would
+        // silently swallow this genuine message.
+        val legacy = "let's meet at the usual place tomorrow".padEnd(70, '.')
+        val bytes = legacy.toByteArray(Charsets.US_ASCII)
+        assertEquals(GroupPushRouting.ENVELOPE_LEN, bytes.size)
+        assertTrue(GroupPushRouting.looksLikeSecretEnvelope(bytes)) // peek says yes...
+        assertFalse(isServiceEnvelope(bytes, ::fakeRoutingSecretDecode)) // ...codec says no
+
+        // A retired v1 / wrong-version envelope is likewise refused and
+        // falls through to the chat parse (fail-closed, never a
+        // downgrade).
+        assertFalse(isServiceEnvelope(routingSecretEnvelope(version = 0x01), ::fakeRoutingSecretDecode))
+    }
+
+    @Test
+    fun `a routing-secret envelope alone yields no preview`() = runTest {
+        val group = FakeThrowawayGroup(decode = lossyChatDecode)
+        val deps = FakeDeps(
+            okAccount(),
+            group = group,
+            rows = listOf(rowOf(10, routingSecretEnvelope())),
+        )
+        // Pre-fix this returned a preview whose body was the domain
+        // string plus binary.
+        assertNull(decryptPushPreview(PushWake(groupHex, 11), deps))
+        assertTrue(group.closed)
+    }
+
+    @Test
+    fun `a call-signaling payload alone yields no preview`() = runTest {
+        val group = FakeThrowawayGroup(decode = lossyChatDecode)
+        val deps = FakeDeps(
+            okAccount(),
+            group = group,
+            rows = listOf(rowOf(10, callSignalingPayload())),
+        )
+        assertNull(decryptPushPreview(PushWake(groupHex, 11), deps))
+        assertTrue(group.closed)
+    }
+
+    @Test
+    fun `a service envelope before a chat message still previews the chat`() = runTest {
+        // Non-suppression guard: the filter must reject ONLY the
+        // envelope, never the real message that follows it.
+        val group = FakeThrowawayGroup(decode = lossyChatDecode)
+        val deps = FakeDeps(
+            okAccount(),
+            group = group,
+            rows = listOf(
+                rowOf(10, routingSecretEnvelope()),
+                textRow(11, "hello there"),
+            ),
+        )
+        assertEquals("hello there", decryptPushPreview(PushWake(groupHex, 12), deps)?.body)
+    }
+
+    @Test
+    fun `a service envelope after a chat message falls back to the chat`() = runTest {
+        // The loop keeps the LAST previewable row, so a trailing service
+        // envelope is exactly the case that used to overwrite a real
+        // message with garbage.
+        val group = FakeThrowawayGroup(decode = lossyChatDecode)
+        val deps = FakeDeps(
+            okAccount(),
+            group = group,
+            rows = listOf(
+                textRow(10, "hello there"),
+                rowOf(11, routingSecretEnvelope()),
+            ),
+        )
+        assertEquals("hello there", decryptPushPreview(PushWake(groupHex, 12), deps)?.body)
+    }
+
+    @Test
+    fun `a trailing call-signaling payload falls back to the chat`() = runTest {
+        val group = FakeThrowawayGroup(decode = lossyChatDecode)
+        val deps = FakeDeps(
+            okAccount(),
+            group = group,
+            rows = listOf(
+                textRow(10, "hello there"),
+                rowOf(11, callSignalingPayload()),
+            ),
+        )
+        assertEquals("hello there", decryptPushPreview(PushWake(groupHex, 12), deps)?.body)
+    }
 }

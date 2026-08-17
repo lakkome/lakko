@@ -95,6 +95,12 @@ const PREVIEW_MAX_CHARS = 140;
  * @property {{ fromSeed: (seed: Uint8Array) => any }} Identity
  * @property {{ load: (identity: any, groupId: Uint8Array) => any }} Group
  * @property {(bytes: Uint8Array) => any} parseBodyEnvelope
+ * @property {(bytes: Uint8Array) => any} [decodePushRoutingSecret]
+ *   ADR-0042 / ADR-0044 — the fail-closed push-routing-secret envelope
+ *   codec. THROWS when the bytes are not that envelope. Used only to
+ *   classify a service envelope out of the preview path (never to act on
+ *   the secret — the SW writes no routing state). Optional so an older
+ *   deps object still loads; the cheap byte peek then decides alone.
  */
 
 /**
@@ -311,6 +317,97 @@ export async function decryptPushPreview(wake, deps) {
 }
 
 /**
+ * Total length (bytes) of an ADR-0044 push-routing-secret distribution
+ * envelope: a 29-byte domain separator + 1 version byte + the 8-byte
+ * big-endian `mint_epoch` + the 32-byte secret. Mirrors
+ * `PUSH_ROUTING_ENVELOPE_LEN` in `src/push/group-routing.ts` (which this
+ * file cannot import — see the header note on why it lives in `public/`).
+ * Only a cheap pre-filter; the wasm codec is the authoritative gate.
+ */
+const PUSH_ROUTING_ENVELOPE_LEN = 70;
+
+/**
+ * First byte of that envelope's domain separator (`'l'` of
+ * `"lakko/push-routing-secret/v1\0"`). A chat envelope is JSON and starts
+ * with `{` (0x7B), so the sets cannot overlap.
+ */
+const PUSH_ROUTING_ENVELOPE_FIRST_BYTE = 0x6c;
+
+/**
+ * Cheap discriminator: are these bytes a prost-encoded
+ * `CallSignalingPayload`? Mirrors `looksLikeCallSignaling` in
+ * `src/chat/client.ts`. `true` when the first byte matches one of the
+ * `body` oneof field tags:
+ *
+ *   field 10 (offer)     → tag = (10 << 3) | 2 = 0x52
+ *   field 11 (answer)    → tag = (11 << 3) | 2 = 0x5A
+ *   field 12 (candidate) → tag = (12 << 3) | 2 = 0x62
+ *   field 13 (end)       → tag = (13 << 3) | 2 = 0x6A
+ *
+ * Chat envelopes are JSON and start with `{` (0x7B) — no overlap.
+ *
+ * @param {Uint8Array} bytes
+ * @returns {boolean}
+ */
+function looksLikeCallSignaling(bytes) {
+  if (bytes.length === 0) return false;
+  const first = bytes[0];
+  return first === 0x52 || first === 0x5a || first === 0x62 || first === 0x6a;
+}
+
+/**
+ * Is this Application plaintext a SERVICE envelope rather than a
+ * user-visible message?
+ *
+ * Load-bearing: `parseBodyEnvelope` degrades non-JSON bytes to a `chat`
+ * body via `String::from_utf8_lossy` (a deliberate pre-1.19 wire-compat
+ * fallback in `lakko-attachments`), so WITHOUT this filter a service
+ * envelope surfaces as a notification containing its domain string plus
+ * raw binary. The foreground (`src/chat/client.ts`) already sniffs both
+ * kinds before its chat parse; this is the background mirror of that
+ * same two-step peek, in the same order.
+ *
+ * Classification ONLY — no writes, no cursor advance (C-59 / ADR-0041).
+ *
+ * @param {DecryptWasm} wasm
+ * @param {Uint8Array} bytes
+ * @returns {boolean}
+ */
+function isServiceEnvelope(wasm, bytes) {
+  // 1. Call signaling (prost `CallSignalingPayload`) — a pure byte check.
+  if (looksLikeCallSignaling(bytes)) return true;
+
+  // 2. Push-routing secret (ADR-0042 / ADR-0044). The cheap length +
+  //    first-byte peek runs FIRST so a real chat message never pays for
+  //    the throwing codec call.
+  if (
+    bytes.length !== PUSH_ROUTING_ENVELOPE_LEN ||
+    bytes[0] !== PUSH_ROUTING_ENVELOPE_FIRST_BYTE
+  ) {
+    return false;
+  }
+  //    The wasm codec is the authoritative fail-closed gate (domain +
+  //    version + exact-length; a retired v1 envelope is refused here too
+  //    — ADR-0044 is a hard flag day). It THROWS on a non-envelope, so a
+  //    throw means "not this kind" and the caller parses normally.
+  if (typeof wasm.decodePushRoutingSecret !== "function") {
+    // No codec available to confirm. The peek is already exact (a
+    // 70-byte plaintext starting with `l`, which a JSON chat envelope
+    // can never be), so suppress: a generic notification is strictly
+    // better than rendering the envelope's binary as text.
+    return true;
+  }
+  let decoded;
+  try {
+    decoded = wasm.decodePushRoutingSecret(bytes);
+  } catch {
+    return false;
+  }
+  freeQuietly(decoded);
+  return true;
+}
+
+/**
  * Extract a user-visible preview string from a processed MLS message,
  * or `null` for anything that is not a renderable chat/edit body.
  *
@@ -328,6 +425,11 @@ function previewFromProcessed(wasm, processed) {
   ) {
     return null;
   }
+  // A service envelope is not a message — returning null lets the
+  // caller's loop keep an OLDER real chat row as the preview, and the
+  // SW's generic fallback covers the case where there is none. Same
+  // shape as the delete / reaction / typing / read-receipt skips below.
+  if (isServiceEnvelope(wasm, processed.applicationData)) return null;
   let parsed;
   try {
     parsed = wasm.parseBodyEnvelope(processed.applicationData);

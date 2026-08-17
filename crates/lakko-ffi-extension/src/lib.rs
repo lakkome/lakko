@@ -24,6 +24,11 @@
 //!   through the audited ADR-0022 role-verifying path.
 //! - [`attachments::parse_body_envelope`] — classify the decrypted application
 //!   body (ADR-0023/0024) into a [`attachments::ParsedBody`].
+//! - [`push_routing::decode_push_routing_secret`] — recognise an ADR-0042 /
+//!   ADR-0044 push-routing-secret SERVICE envelope so the NSE filters it out
+//!   instead of rendering it. Service envelopes ride the same group journal as
+//!   chat, and `parse_body_envelope`'s deliberate legacy fallback would
+//!   otherwise degrade one to a `Chat` body full of raw binary.
 //!
 //! There is deliberately **no compose / send / call / channel / transport
 //! surface**: the NSE only reads and decrypts, then discards. It NEVER writes
@@ -41,6 +46,7 @@ use std::sync::{Arc, Mutex};
 use lakko_mls::{Group as MlsGroup, Identity as MlsIdentity, Incoming as MlsIncoming};
 
 pub mod attachments;
+pub mod push_routing;
 
 uniffi::setup_scaffolding!();
 
@@ -82,6 +88,16 @@ pub enum FfiError {
     /// Unsupported or unexpected wire message.
     #[error("unsupported: {0}")]
     Unsupported(String),
+
+    /// Contacts-layer envelope error — surfaced by
+    /// [`push_routing::decode_push_routing_secret`] when a plaintext is NOT a
+    /// push-routing-secret envelope. On the NSE filter path this is the
+    /// EXPECTED, common outcome (every chat message lands here), not a fault:
+    /// the caller reads it as "not a service envelope" and falls through to the
+    /// normal chat parse. Same variant name as `lakko-ffi-uniffi`'s `FfiError`
+    /// so the two frameworks present one error shape to Swift.
+    #[error("contacts error: {0}")]
+    Contacts(String),
 
     /// Lock contention / poisoned mutex on the shared [`Group`] state.
     #[error("internal lock error")]

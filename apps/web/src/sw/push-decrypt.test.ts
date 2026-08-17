@@ -48,11 +48,60 @@ function msg(id: number, parsed: unknown, opts: { throwOnProcess?: boolean } = {
   };
 }
 
+/** Build a DS message carrying RAW (non-JSON) application bytes — the
+ *  shape every service envelope has on the wire. */
+function rawMsg(id: number, payload: Uint8Array) {
+  return { id, payload, createdAt: new Date(id * 1000).toISOString() };
+}
+
+// --- Service-envelope fixtures -------------------------------------------
+// Both ride the group journal as MLS Application messages, and neither is
+// a user-visible message.
+
+/** `lakko_contacts::push_routing::PUSH_ROUTING_SECRET_ENVELOPE_DOMAIN_V1`
+ *  — `b"lakko/push-routing-secret/v1\x00"`, 29 bytes. The trailing NUL is
+ *  appended programmatically so this source file stays NUL-free. */
+const PUSH_ROUTING_DOMAIN = (() => {
+  const ascii = new TextEncoder().encode("lakko/push-routing-secret/v1");
+  const out = new Uint8Array(ascii.length + 1);
+  out.set(ascii, 0);
+  out[ascii.length] = 0x00;
+  return out;
+})();
+
+/** ADR-0044 v2 envelope: domain(29) || version(1)=0x02 || mint_epoch(8 BE)
+ *  || secret(32) = 70 bytes. First byte is `l` (0x6c). */
+function routingSecretEnvelope(mintEpoch = 7, secretFill = 0xab): Uint8Array {
+  const out = new Uint8Array(70);
+  out.set(PUSH_ROUTING_DOMAIN, 0);
+  out[29] = 0x02;
+  // 8-byte big-endian mint_epoch at offset 30.
+  new DataView(out.buffer).setBigUint64(30, BigInt(mintEpoch), false);
+  out.fill(secretFill, 38);
+  return out;
+}
+
+/** A prost-encoded `CallSignalingPayload`. The first byte is the `body`
+ *  oneof field tag — 0x52 (offer) / 0x5A / 0x62 / 0x6A. */
+function callSignalingPayload(tag = 0x52): Uint8Array {
+  return new Uint8Array([tag, 0x08, 0x01, 0x12, 0x02, 0x68, 0x69]);
+}
+
 /**
  * Mock wasm core. `processIncomingVerifyingRoles` throws when the
  * payload marker is "THROW", else surfaces it as an Application frame
- * whose `applicationData` is the payload. `parseBodyEnvelope` JSON-
- * decodes that payload into a flat `ParsedBody`-shaped object.
+ * whose `applicationData` is the payload.
+ *
+ * `parseBodyEnvelope` models the REAL `lakko_attachments::parse_body`
+ * (crates/lakko-attachments/src/lib.rs:634-646), including its deliberate
+ * pre-1.19 wire-compat fallback: a body that is NOT valid JSON degrades to
+ * `Chat { text: String::from_utf8_lossy(bytes) }` rather than erroring.
+ * Modelling that faithfully is what makes the service-envelope tests
+ * DISCRIMINATE — a mock that simply threw on non-JSON would mask the very
+ * defect (a service envelope rendered as a garbage notification body).
+ *
+ * `decodePushRoutingSecret` models the fail-closed wasm codec: it THROWS
+ * unless the bytes are exactly the ADR-0044 v2 envelope.
  */
 function mockWasm() {
   const freeSpy = vi.fn();
@@ -75,8 +124,27 @@ function mockWasm() {
       }),
     },
     parseBodyEnvelope: (bytes: Uint8Array) => {
-      const parsed = JSON.parse(new TextDecoder().decode(bytes)) as Record<string, unknown>;
-      return { ...parsed, free: freeSpy };
+      const text = new TextDecoder().decode(bytes);
+      try {
+        const parsed = JSON.parse(text) as Record<string, unknown>;
+        return { ...parsed, free: freeSpy };
+      } catch {
+        // The legacy UTF-8 fallback — exactly what surfaces a service
+        // envelope as a "chat" body of domain string + binary garbage.
+        return { kind: "chat", text, attachmentCount: 0, free: freeSpy };
+      }
+    },
+    decodePushRoutingSecret: (bytes: Uint8Array) => {
+      if (bytes.length !== 70) throw new Error("BadLength");
+      for (let i = 0; i < PUSH_ROUTING_DOMAIN.length; i++) {
+        if (bytes[i] !== PUSH_ROUTING_DOMAIN[i]) throw new Error("WrongDomain");
+      }
+      if (bytes[29] !== 0x02) throw new Error("UnknownVersion");
+      return {
+        secret: bytes.slice(38),
+        mintEpoch: new DataView(bytes.buffer, bytes.byteOffset).getBigUint64(30, false),
+        free: freeSpy,
+      };
     },
   };
 }
@@ -270,6 +338,88 @@ describe("decryptPushPreview — fail-closed / null fallbacks", () => {
     const { deps, saveSnapshot, saveMessageLog, advanceCursor } = baseDeps({
       dsFetchGroup: vi.fn(async () => ({
         messages: [msg(42, {}, { throwOnProcess: true })],
+      })),
+    });
+    await decryptPushPreview(wake(), deps);
+    expect(saveSnapshot).not.toHaveBeenCalled();
+    expect(saveMessageLog).not.toHaveBeenCalled();
+    expect(advanceCursor).not.toHaveBeenCalled();
+  });
+});
+
+describe("decryptPushPreview — service envelopes are never previewed", () => {
+  // `parse_body` degrades non-JSON bytes to a `chat` body via
+  // `from_utf8_lossy`, so without the filter each of these renders a
+  // notification containing its domain string plus raw binary.
+
+  it("returns null for a lone push-routing-secret envelope (ADR-0042/0044)", async () => {
+    const { deps } = baseDeps({
+      dsFetchGroup: vi.fn(async () => ({
+        messages: [rawMsg(42, routingSecretEnvelope())],
+      })),
+    });
+    expect(await decryptPushPreview(wake(), deps)).toBeNull();
+  });
+
+  it("returns null for a lone call-signaling payload", async () => {
+    for (const tag of [0x52, 0x5a, 0x62, 0x6a]) {
+      const { deps } = baseDeps({
+        dsFetchGroup: vi.fn(async () => ({
+          messages: [rawMsg(42, callSignalingPayload(tag))],
+        })),
+      });
+      expect(await decryptPushPreview(wake(), deps)).toBeNull();
+    }
+  });
+
+  it("previews the chat message when a service envelope precedes it", async () => {
+    const { deps } = baseDeps({
+      dsFetchGroup: vi.fn(async () => ({
+        messages: [
+          rawMsg(40, routingSecretEnvelope()),
+          rawMsg(41, callSignalingPayload()),
+          msg(42, { kind: "chat", text: "real message", attachmentCount: 0 }),
+        ],
+      })),
+    });
+    const out = await decryptPushPreview(wake({ pointer: 42 }), deps);
+    expect(out?.body).toBe("real message");
+  });
+
+  it("falls back to the older chat message when a service envelope is NEWEST", async () => {
+    // The load-bearing ordering: the envelope is the newest row, so
+    // before the fix it OVERWROTE the real preview with its garbage.
+    const { deps } = baseDeps({
+      dsFetchGroup: vi.fn(async () => ({
+        messages: [
+          msg(40, { kind: "chat", text: "real message", attachmentCount: 0 }),
+          rawMsg(41, callSignalingPayload()),
+          rawMsg(42, routingSecretEnvelope()),
+        ],
+      })),
+    });
+    const out = await decryptPushPreview(wake({ pointer: 42 }), deps);
+    expect(out?.body).toBe("real message");
+  });
+
+  it("still previews a 70-byte `l`-prefixed body the codec REFUSES", async () => {
+    // The cheap peek matches but the authoritative codec rejects (bad
+    // version), so this is a genuine message — same verdict the
+    // foreground reaches. Proves the peek alone does not suppress.
+    const notAnEnvelope = routingSecretEnvelope();
+    notAnEnvelope[29] = 0x01; // retired v1 version byte
+    const { deps } = baseDeps({
+      dsFetchGroup: vi.fn(async () => ({ messages: [rawMsg(42, notAnEnvelope)] })),
+    });
+    const out = await decryptPushPreview(wake(), deps);
+    expect(out?.body).not.toBeNull();
+    expect(out?.body).toContain("lakko/push-routing-secret");
+  });
+
+  it("classifies without ever persisting (C-59 read-only discipline)", async () => {
+    const { deps, saveSnapshot, saveMessageLog, advanceCursor } = baseDeps({
+      dsFetchGroup: vi.fn(async () => ({
+        messages: [rawMsg(42, routingSecretEnvelope())],
       })),
     });
     await decryptPushPreview(wake(), deps);
