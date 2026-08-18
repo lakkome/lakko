@@ -27,9 +27,10 @@ import LakkoCore
 /// mutate it at literally the same instant. That is NOT the same as
 /// serialization: `@MainActor` isolation is released at every
 /// `await`, so two `async` callers interleave freely at their
-/// suspension points. The four group-membership create-commit paths
-/// therefore run inside an explicit per-group serializing chain —
-/// see ``withCommitLock(groupIdHex:_:)``.
+/// suspension points. The four group-membership create-commit paths,
+/// and the APPLY half of the poll (G-38), therefore run inside an
+/// explicit per-group serializing chain — see
+/// ``withCommitLock(groupIdHex:_:)``.
 ///
 /// **Snapshot persistence** (1.14f5) runs after every
 /// state-mutating call via ``IdentitySnapshotStore``. Failures
@@ -107,9 +108,11 @@ public final class ChatRepository: ObservableObject {
     private var groups: [String: GroupRecord] = [:]
 
     /// ADR-0040 (G-35) — per-group chain tail: the **serializing** lock the
-    /// four group-membership create-commit paths run inside. Swift counterpart
-    /// of the Android `ChatRepository` groups mutex, but keyed per group so two
-    /// different conversations never block each other.
+    /// four group-membership create-commit paths run inside, joined by the
+    /// poll's apply half in G-38. Swift counterpart of the Android
+    /// `ChatRepository` per-group mutex — the same lock its `runSplitPoll`
+    /// takes — keyed per group so two different conversations never block each
+    /// other.
     ///
     /// The value is the tail `Task` the next caller chains behind, type-erased
     /// to `Void` so one queue can hold sections returning different things.
@@ -1856,25 +1859,130 @@ public final class ChatRepository: ObservableObject {
 
     /// Pull new messages from one group's journal + apply them to
     /// the in-memory timeline.
+    ///
+    /// ## G-38 — split poll: fetch outside the lock, apply inside it
+    ///
+    /// The poll APPLIES incoming commits (`processIncomingVerifyingRoles`
+    /// mutates the shared OpenMLS provider through the same `Group` handle a
+    /// membership commit is mid-operation on), so it is not a read-only
+    /// observer and must not run beside a local commit. `@MainActor` isolation
+    /// does not provide that on its own: a commit holds its create-through-
+    /// publish region across `await dsClient.publishGroup`, and isolation is
+    /// RELEASED at that suspension — a fully synchronous apply then lands
+    /// squarely inside the window where the group has eager-merged N -> N+1 but
+    /// the commit is not yet on the wire.
+    ///
+    /// So the apply takes the SAME per-group chain the four commit paths take
+    /// (``withCommitLock(groupIdHex:_:)``), and only the apply:
+    ///
+    ///   1. Sweep the outbox (once per group per session) — OUTSIDE the lock,
+    ///      unchanged, and deliberately so: it publishes commits itself, and the
+    ///      chain is not reentrant.
+    ///   2. Read the cursor and FETCH with it — OUTSIDE the lock. `waitSecs` is
+    ///      a deliberate 30 s long poll on the live chat screen; taking the
+    ///      lock across it would stall every send and membership commit on this
+    ///      group behind an idle connection, which is G-37's own defect at a
+    ///      per-group blast radius.
+    ///   3. Take the lock, then RE-READ the record and the cursor. A predecessor
+    ///      may have replaced the record
+    ///      (``resetGroupToDurableSnapshot(groupIdHex:)``) or advanced the
+    ///      cursor while this poll was parked on the network. A moved cursor
+    ///      means the batch in hand starts at a row already consumed, so it is
+    ///      DROPPED without applying and without touching the cursor — applying
+    ///      it would re-feed consumed rows to OpenMLS and let the stale batch's
+    ///      end cursor wind the record's cursor BACKWARD.
+    ///   4. Apply + advance the cursor, atomically, in one non-suspending
+    ///      region.
+    ///
+    /// ## No in-flight guard, unlike Android
+    ///
+    /// Android's `runSplitPoll` additionally claims a per-group in-flight flag
+    /// and returns `SKIPPED_IN_FLIGHT` to the loser. iOS has never had one and
+    /// deliberately still does not: the two poll sources here are a 30 s long
+    /// poll (`ChatViewModel.pollOnceLongPoll`) and the user's manual refresh
+    /// (`onRefreshClicked`), so a guard would make pressing Refresh a silent
+    /// no-op for up to 30 s. It is only an optimisation — it saves a redundant
+    /// fetch, it does not provide correctness. Correctness comes from the
+    /// cursor-moved guard in ``applyFetchedBatch(groupIdHex:after:raw:)``: two
+    /// overlapping polls both fetch, the first to reach the lock applies, and
+    /// the other finds the cursor moved and drops its batch whole.
+    ///
+    /// ## Honest scope
+    ///
+    /// This closes the LOCAL interleave — this device's own poll against this
+    /// device's own commit. A poll applying a REMOTE commit while a local one is
+    /// in flight to the DS is a genuine MLS epoch fork that no client-side lock
+    /// can address (it needs a DS-side epoch gate or proposal-based commits);
+    /// that is G-38 residual 1 and is deliberately untouched here.
     public func pollGroup(
         groupIdHex: String,
         waitSecs: Int = 0
     ) async throws {
-        guard let identity = canonicalIdentity else { return }
+        guard canonicalIdentity != nil else { return }
         guard let record = groups[groupIdHex] else { return }
         // ADR-0040 (G-35) — sweep the durable pending-commit outbox ONCE per
         // group per session, BEFORE the first poll. Re-publishing a crashed
         // mid-window commit re-arms the own-echo filter for the re-published
-        // commit's messageId, so the `pollMessages` below drops it instead of
-        // feeding it to `processIncoming` (which would raise
-        // `CannotDecryptOwnMessage`). The guard-insert is synchronous + on the
-        // main actor, so the sweep runs at most once even under overlapping poll
-        // tasks; an interleaving poll's own-commit re-fetch is still a benign
-        // drop-and-continue in `ChatClient.pollMessages`.
+        // commit's messageId, so the apply below drops it instead of feeding it
+        // to `processIncoming` (which would raise `CannotDecryptOwnMessage`).
+        // The guard-insert is synchronous + on the main actor, so the sweep runs
+        // at most once even under overlapping poll tasks; an interleaving poll's
+        // own-commit re-fetch is still a benign drop-and-continue in
+        // `ChatClient.applyFetchedMessages`.
+        //
+        // G-38 — deliberately OUTSIDE the commit lock. The sweep publishes
+        // commits of its own, and ``withCommitLock(groupIdHex:_:)`` is not
+        // reentrant, so running it inside would deadlock against the apply's
+        // own acquisition below.
         if !sweptGroupsThisSession.contains(groupIdHex) {
             sweptGroupsThisSession.insert(groupIdHex)
             await sweepPendingCommits(record: record)
         }
+        // G-38 step 2 — the NETWORK half, outside the lock. Both values are read
+        // here and re-validated under the lock; `groupId` is the record's cached
+        // copy, so the fetch reads no `Group` handle at all.
+        let after = record.cursor
+        let groupId = record.groupId
+        let raw = try await chatClient.fetchGroupJournal(
+            groupId: groupId,
+            after: after,
+            waitSecs: waitSecs
+        )
+        // G-38 steps 3+4 — the MLS half, inside the per-group commit chain.
+        try await withCommitLock(groupIdHex: groupIdHex) { [self] in
+            applyFetchedBatch(groupIdHex: groupIdHex, after: after, raw: raw)
+        }
+    }
+
+    /// G-38 — the locked half of ``pollGroup(groupIdHex:waitSecs:)``.
+    ///
+    /// Runs ONLY under ``withCommitLock(groupIdHex:_:)``, and is
+    /// **non-suspending by construction**: every call it makes is synchronous
+    /// (`ChatClient.applyFetchedMessages` is deliberately not `async`, and both
+    /// push-routing follow-ups only SPAWN a detached `Task` and return). That
+    /// makes the whole batch — the membership baseline, the MLS apply, the
+    /// cursor advance and the snapshot — one atomic `@MainActor` region, so no
+    /// other commit can observe it half-applied and no network wait can be
+    /// reintroduced into it without a compile error.
+    ///
+    /// Re-reads `canonicalIdentity` and `groups` rather than trusting anything
+    /// captured before the wait — a predecessor's persist-abort calls
+    /// ``resetGroupToDurableSnapshot(groupIdHex:)``, which REPLACES the
+    /// `GroupRecord` and can evict it entirely.
+    private func applyFetchedBatch(
+        groupIdHex: String,
+        after: Int64,
+        raw: FetchResult
+    ) {
+        guard let identity = canonicalIdentity else { return }
+        guard let record = groups[groupIdHex] else { return }
+        // G-38 — the cursor-moved guard. Another poll of this group applied a
+        // batch while this one was parked on the network, so the rows in hand
+        // start behind the live cursor. Drop them WITHOUT applying and WITHOUT
+        // touching the cursor; the next poll re-fetches from where the record
+        // actually is. Applying anyway would re-feed consumed rows to OpenMLS
+        // and, worse, wind the cursor BACKWARD to this stale batch's end.
+        guard record.cursor == after else { return }
         // ADR-0043 — baseline for the membership diff, captured BEFORE the
         // poll applies any commit. A Commit carries no membership delta out
         // of the poll loop, so a removal committed by SOMEONE ELSE is
@@ -1882,12 +1990,16 @@ public final class ChatRepository: ObservableObject {
         // device's OWN removals never show up here (they were applied
         // locally before this poll, so the baseline is already
         // post-removal); those rotate directly in `removeMemberFromGroup`.
+        //
+        // G-38 — still captured INSIDE the lock, immediately before the apply.
+        // Hoisting it out to where the fetch now runs would race the shrink diff
+        // against any commit landing in the fetch window.
         let membersBeforePoll = PushGroupRouting.memberSignatureKeys(group: record.group)
-        let result = try await chatClient.pollMessages(
+        let result = chatClient.applyFetchedMessages(
             identity: identity,
             group: record.group,
-            after: record.cursor,
-            waitSecs: waitSecs
+            raw: raw,
+            after: after
         )
         record.applyPollResult(
             result,
@@ -1900,6 +2012,9 @@ public final class ChatRepository: ObservableObject {
             pushRoutingSecretSink: { [weak self] secret, mintEpoch, senderLeaf in
                 // ADR-0042 — owner-gate, then persist the secret + subscribe
                 // under `push_gid`. ADR-0044 — plus the recency order.
+                // Fire-and-forget (it only spawns a `Task`), so the routing
+                // chain it eventually takes is never awaited while the commit
+                // chain is held — the two locks are never nested.
                 self?.receivePushRoutingSecret(
                     groupIdHex: groupIdHex, secret: secret, mintEpoch: mintEpoch,
                     senderLeaf: senderLeaf)
@@ -1913,6 +2028,7 @@ public final class ChatRepository: ObservableObject {
         // evicted member still holds this group's push_routing_secret and
         // push-gw is still waking it. Driven off an ACTUAL before/after
         // member-set comparison, never off a "a poll happened" tick.
+        // Fire-and-forget, same non-nesting argument as the sink above.
         rotatePushRoutingSecretIfMembershipShrank(
             groupIdHex: groupIdHex, previousMemberKeys: membersBeforePoll)
     }
@@ -1988,7 +2104,16 @@ public final class ChatRepository: ObservableObject {
 
     // MARK: - ADR-0040 (G-35) per-group commit serialization
 
-    /// Run `body` as the sole in-flight membership commit for one group.
+    /// Run `body` as the sole in-flight MLS-mutating section for one group.
+    ///
+    /// Five sections take this chain: the four group-membership create-commit
+    /// paths, and — since G-38 — the APPLY half of
+    /// ``pollGroup(groupIdHex:waitSecs:)`` (``applyFetchedBatch(groupIdHex:after:raw:)``).
+    /// The poll belongs here because it is not a read-only observer: it feeds
+    /// incoming commits to `processIncomingVerifyingRoles`, which mutates the
+    /// shared OpenMLS provider through the very `Group` handle an in-flight
+    /// commit is mid-operation on. Only the poll's apply is inside; its DS fetch
+    /// stays outside (see ``pollGroup(groupIdHex:waitSecs:)``).
     ///
     /// ## Why actor isolation is not enough
     ///
@@ -2035,6 +2160,17 @@ public final class ChatRepository: ObservableObject {
     /// ADR-0043 rotation half of ``removeMemberFromGroup(groupIdHex:leafIndex:)``
     /// is deliberately left OUTSIDE this lock (it publishes an application
     /// message, not a commit), so the two chains are never nested at all.
+    ///
+    /// G-38 re-audit, for the poll section: ``applyFetchedBatch(groupIdHex:after:raw:)``
+    /// is NON-SUSPENDING, so it cannot await anything at all, let alone this
+    /// lock. Its two follow-ups that do eventually take the ADR-0044 routing
+    /// chain — ``receivePushRoutingSecret(groupIdHex:secret:mintEpoch:senderLeaf:)``
+    /// and ``rotatePushRoutingSecretIfMembershipShrank(groupIdHex:previousMemberKeys:)``
+    /// — only SPAWN a `Task` and return, so neither is awaited under this lock.
+    /// The two entry points on the poll path that DO publish are both outside
+    /// it: the DS fetch (by design, so a 30 s long poll blocks nothing) and
+    /// ``sweepPendingCommits(record:)``, which re-publishes commits and would
+    /// deadlock against the apply's acquisition if it were moved inside.
     ///
     /// ## Why the publish is not bounded by a timeout
     ///

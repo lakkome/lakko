@@ -66,6 +66,9 @@
  * next mutation will retry the persist naturally.
  */
 import { DsClient } from "../ds/client";
+import type { FetchResult } from "../ds/client";
+import { base64Encode } from "../auth/account-id";
+import { withGroupMlsLock } from "../mls/group-lock";
 import { PushClient } from "../push/client";
 import { loadWasm } from "../wasm";
 import type {
@@ -234,11 +237,39 @@ export type IncomingChatEvent =
       createdAt: string;
     };
 
+/**
+ * The caller's journal cursor, as a read/write pair rather than a plain number.
+ *
+ * `pollMessages` must re-read it and advance it INSIDE the per-group MLS lock
+ * (see the method docs), which it cannot do through a return value — by the time
+ * the caller writes `result.cursor` the lock is already released and a queued
+ * poll has re-read the stale position. Handing the accessors in is the only
+ * shape that keeps the ratchet and the journal position moving together.
+ */
+export interface PollCursorRef {
+  /** The group's current cursor. Called once under the lock, and compared with
+   *  the `after` the fetch actually used. */
+  read(): number;
+  /** Advance the cursor. Called under the lock, only on the applied path. */
+  advance(to: number): void;
+}
+
+/** What one `pollMessages` attempt did. */
+export type PollOutcome =
+  /** The batch was fetched and applied under the lock. */
+  | "applied"
+  /** The cursor moved between the fetch and the lock, so the batch in hand was
+   *  stale. Dropped WITHOUT applying and WITHOUT touching the cursor; the next
+   *  poll re-fetches from the current position. Only ever returned when a
+   *  `PollCursorRef` was supplied. */
+  | "cursor-moved";
+
 /** Result of `pollMessages`. */
 export interface PollMessagesResult {
   events: IncomingChatEvent[];
   cursor: number;
   hasMore: boolean;
+  outcome: PollOutcome;
 }
 
 /** Programmer error caught before any network call. */
@@ -598,21 +629,90 @@ export class ChatClient {
    * end if any rows were processed (each `processIncoming`
    * mutates provider storage — application messages drain
    * keys, commits replace state, proposals queue).
+   *
+   * ## G-38 residual 1 (local sub-case) — the apply is SERIALIZED
+   *
+   * `processIncomingVerifyingRoles` mutates the same in-memory provider the
+   * four `ContactsClient` create-commit regions eagerly merge into, so a poll
+   * applying a batch while a local commit is parked in its publish is the
+   * ADR-0040 interleave with the ADR-0040 outcome. The apply therefore runs
+   * under the SAME per-group `withGroupMlsLock` those regions take — one lock,
+   * one resource. Android closed this first; `chat/SplitPoll.kt`'s
+   * `runSplitPoll` documents the identical split step by step.
+   *
+   * The FETCH stays OUTSIDE the lock. It touches no MLS state, and parking a DS
+   * round-trip behind a commit publish is G-37's own defect at a per-group blast
+   * radius. Web's poll uses `waitSecs = 0` today, so there is no long poll to
+   * protect — the split is kept anyway, for the same reason Android keeps it:
+   * the moment a long poll is turned on, a lock that spanned the fetch would
+   * stall every send on the group for its full duration.
+   *
+   * ## The cursor moves INSIDE the lock, or not at all
+   *
+   * The DS journal position and the MLS ratchet advance together or they
+   * desynchronise, so `cursor.advance` is called in the same region as the
+   * apply. Leaving it to the caller (which is what `setCursor(result.cursor)`
+   * in `routes/Chat.tsx` used to do) is not equivalent and was in fact broken:
+   * the caller's write lands a microtask AFTER the lock is released, so a second
+   * poll queued behind the first re-reads the OLD cursor, decides its batch is
+   * fresh, and re-feeds already-consumed rows to OpenMLS.
+   *
+   * `cursor.read` is therefore called TWICE — once to produce `after` (by the
+   * caller, before the fetch) and again under the lock. If the two disagree the
+   * batch in hand starts at a row someone else has already consumed, so it is
+   * DROPPED whole: no apply, no cursor write, `outcome: "cursor-moved"`. Applying
+   * it anyway would re-feed consumed rows and, worse, let the stale batch's end
+   * id wind the cursor BACKWARD. The next poll re-fetches from the current
+   * position.
+   *
+   * `cursor` is optional so a caller that owns the position itself (tests,
+   * one-shot callers) keeps the previous contract: no re-read gate, no advance,
+   * and `result.cursor` to apply by hand.
    */
   async pollMessages(
     identity: IdentitySecrets | null,
     group: WasmGroup,
     after: number,
     waitSecs = 0,
+    cursorRef?: PollCursorRef,
   ): Promise<PollMessagesResult> {
     const myIdentity = await this.resolveIdentity(identity);
 
     const groupId: Uint8Array = group.groupId;
+    // The FETCH — deliberately outside the lock.
     let raw;
     try {
       raw = await this.ds.fetchGroup(groupId, { after, waitSecs });
     } catch (err) {
       throw new ChatError("DS fetch failed", err);
+    }
+
+    // The APPLY + the cursor advance — inside the lock, atomic together.
+    return withGroupMlsLock(base64Encode(groupId), async () =>
+      this.applyPolledBatch(myIdentity, group, after, raw, cursorRef),
+    );
+  }
+
+  /** The serialized half of {@link pollMessages}: everything that touches MLS
+   *  state or the journal cursor. Runs under `withGroupMlsLock`; never call it
+   *  directly. */
+  private async applyPolledBatch(
+    myIdentity: WasmIdentity,
+    group: WasmGroup,
+    after: number,
+    raw: FetchResult,
+    cursorRef: PollCursorRef | undefined,
+  ): Promise<PollMessagesResult> {
+    // Re-read under the lock: did someone else consume past `after` while we
+    // were parked on the network? Then this batch is stale — drop it whole.
+    if (cursorRef !== undefined) {
+      const current = cursorRef.read();
+      if (current !== after) {
+        // `cursor` reports the CURRENT position, never `after`, so even a caller
+        // that ignores `outcome` and blindly writes it back cannot wind
+        // backward.
+        return { events: [], cursor: current, hasMore: false, outcome: "cursor-moved" };
+      }
     }
 
     const events: IncomingChatEvent[] = [];
@@ -660,7 +760,9 @@ export class ChatClient {
       await this.persistBestEffort();
     }
 
-    return { events, cursor, hasMore: raw.hasMore };
+    // Still inside the lock: the ratchet and the journal position move together.
+    cursorRef?.advance(cursor);
+    return { events, cursor, hasMore: raw.hasMore, outcome: "applied" };
   }
 }
 

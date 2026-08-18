@@ -40,6 +40,8 @@
 import type { Wasm } from "../wasm";
 import { loadWasm } from "../wasm";
 import { DsClient } from "../ds/client";
+import { base64Encode } from "../auth/account-id";
+import { withGroupMlsLock } from "../mls/group-lock";
 import {
   fetchEpoch,
   listSubscribers,
@@ -93,24 +95,40 @@ export async function createCoPublisherLink(
  *  commits) via the role-gated path. Surfaces external-join proposals into the
  *  PublisherGroup's retained pending set. Non-MLS entries (Welcome rendezvous)
  *  and our own already-applied commits throw on `processIncomingVerifyingRoles`
- *  and are skipped. Returns the number of pending requests after the poll. */
+ *  and are skipped. Returns the number of pending requests after the poll.
+ *
+ *  G-38 residual 3 — `CoPublishersPanel` drives this from a 5 s `setInterval`
+ *  CONCURRENTLY with its own `approveCoPublisher`, which eagerly merges an Add
+ *  into the same PublisherGroup. That is the ADR-0040 interleave on a
+ *  PublisherGroup instead of a chat group, so the apply half takes the SAME
+ *  per-group `withGroupMlsLock` the approve does. The fetch stays outside it
+ *  (it touches no MLS state), mirroring `ChatClient.pollMessages`.
+ *
+ *  No cursor gate here, unlike the chat poll: this fetch is unconditionally
+ *  `after: 0`, so it re-reads the whole journal every tick and holds no position
+ *  that a concurrent poll could wind backward. Rows already merged simply throw
+ *  and are skipped, which is the pre-existing (and still correct) behaviour. */
 export async function pollCoPublisherJournal(
   ds: DsClient,
   identity: Identity,
   publisherGroup: PublisherGroup,
 ): Promise<number> {
   const groupId = publisherGroup.groupId();
+  // The FETCH — deliberately outside the lock.
   const raw = await ds.fetchGroup(groupId, { after: 0, waitSecs: 0 });
-  for (const m of raw.messages) {
-    try {
-      publisherGroup.processIncomingVerifyingRoles(identity, m.payload);
-    } catch {
-      // Non-MLS entry (a Welcome rendezvous) or a commit we have already
-      // merged (epoch mismatch) — skip, the FIFO journal lets the next poll
-      // catch up on any genuinely-new commit.
+  // The APPLY — inside it.
+  return withGroupMlsLock(base64Encode(groupId), async () => {
+    for (const m of raw.messages) {
+      try {
+        publisherGroup.processIncomingVerifyingRoles(identity, m.payload);
+      } catch {
+        // Non-MLS entry (a Welcome rendezvous) or a commit we have already
+        // merged (epoch mismatch) — skip, the FIFO journal lets the next poll
+        // catch up on any genuinely-new commit.
+      }
     }
-  }
-  return pendingCoPublishers(publisherGroup).length;
+    return pendingCoPublishers(publisherGroup).length;
+  });
 }
 
 /** The pending co-publisher external-join requests — each a 32-byte joiner leaf
@@ -139,11 +157,18 @@ export async function approveCoPublisher(
 ): Promise<void> {
   const wasm = await loadWasm();
   const groupId = publisherGroup.groupId();
-  const added = publisherGroup.approveExternalJoin(identity, proposalRef);
-  await ds.publishGroup(groupId, added.commit);
-  const rendezvous = wasm.wrapWelcomeRendezvous(proposalRef, added.welcome);
-  await ds.publishGroup(groupId, rendezvous);
-  await resealSubscribers(publisherGroup, identity, channelIdHex, apiBase);
+  // G-38 residual 3 — SERIALIZED per group against the 5 s interval poll above.
+  // `approveExternalJoin` eagerly merges the Add into the shared provider, so
+  // it must not run while a poll is mid-apply on the same group; and the reseal
+  // is inside the region because it reads the POST-approve `channelSeed`, which
+  // another applied commit would move under it.
+  await withGroupMlsLock(base64Encode(groupId), async () => {
+    const added = publisherGroup.approveExternalJoin(identity, proposalRef);
+    await ds.publishGroup(groupId, added.commit);
+    const rendezvous = wasm.wrapWelcomeRendezvous(proposalRef, added.welcome);
+    await ds.publishGroup(groupId, rendezvous);
+    await resealSubscribers(publisherGroup, identity, channelIdHex, apiBase);
+  });
 }
 
 /** Reject a pending co-publisher — local drop, no commit, no epoch advance. */
@@ -303,16 +328,6 @@ function hexNibble(code: number): number {
   if (code >= 97 && code <= 102) return 10 + code - 97;
   if (code >= 65 && code <= 70) return 10 + code - 65;
   return -1;
-}
-
-function base64Encode(bytes: Uint8Array): string {
-  let s = "";
-  for (let i = 0; i < bytes.length; ++i) {
-    const b = bytes[i];
-    if (b === undefined) continue;
-    s += String.fromCharCode(b);
-  }
-  return btoa(s);
 }
 
 function bytesToBase64Url(bytes: Uint8Array): string {

@@ -1520,7 +1520,21 @@ function ChatView(props: {
         props.requireIdentity(),
         props.entry.group,
         cursor(),
+        0,
+        // G-38 — the poll's apply half runs under the same per-group MLS lock
+        // the commit paths take, so the cursor read-modify-write has to run in
+        // there with it. Handing the accessors in is what lets `ChatClient`
+        // re-read the position under the lock (was this batch consumed while we
+        // were on the network?) and advance it in the same region as the apply.
+        // Writing `result.cursor` back out here would land a microtask AFTER
+        // the lock released, which is exactly the window a queued poll used to
+        // re-read and re-feed already-consumed rows through.
+        { read: () => cursor(), advance: (to) => setCursor(to) },
       );
+      // The batch was stale (another poll consumed past our `after` while we
+      // were parked on the fetch). Nothing was applied and the cursor was not
+      // touched — drop it. The poll that DID apply owns rendering those rows.
+      if (result.outcome === "cursor-moved") return;
       // De-dup: the same DS message id can come back across
       // refreshes after a reset; outgoing rows we sent in
       // this session also surface here on a second refresh
@@ -1649,7 +1663,7 @@ function ChatView(props: {
       if (watermarksChanged) {
         setReadWatermarks(watermarks);
       }
-      setCursor(result.cursor);
+      // NB: no `setCursor` here — `pollMessages` advanced it under the lock.
       // 1.18g — mirror the post-poll member count so the
       // header re-renders after an incoming commit advances
       // the local group state (someone else added / removed a

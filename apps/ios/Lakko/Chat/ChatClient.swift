@@ -263,6 +263,12 @@ public final class ChatClient {
     /// Bad frames / wrong epochs / malformed wire are silently
     /// dropped — the cursor still advances so we don't re-process.
     /// Same posture as the contacts inbox poll.
+    ///
+    /// G-38 — the composition of the two halves below. The production caller
+    /// (``ChatRepository/pollGroup(groupIdHex:waitSecs:)``) drives them
+    /// SEPARATELY so the network half runs outside the per-group commit lock
+    /// and only the MLS half runs inside it; this convenience form is what a
+    /// caller with no lock to respect uses.
     public func pollMessages(
         identity: Identity,
         group: Group,
@@ -278,10 +284,43 @@ public final class ChatClient {
                 underlying: error
             )
         }
+        let raw = try await fetchGroupJournal(
+            groupId: groupId,
+            after: after,
+            waitSecs: waitSecs
+        )
+        return applyFetchedMessages(
+            identity: identity,
+            group: group,
+            raw: raw,
+            after: after
+        )
+    }
 
-        let raw: FetchResult
+    /// G-38 — the NETWORK half of
+    /// ``pollMessages(identity:group:after:waitSecs:)``, split out so the caller
+    /// can run it OUTSIDE the per-group commit lock.
+    ///
+    /// Touches no MLS state whatsoever: a plain `GET` against the DS journal
+    /// keyed by a `groupId` the caller already holds (the `GroupRecord` caches
+    /// it), so not even the `Group` handle is read here.
+    ///
+    /// That separation is the whole point. `waitSecs` is a DELIBERATE long poll
+    /// — 30 s on the live chat screen — and serializing it behind a membership
+    /// commit's publish would recreate G-37 at a per-group blast radius: every
+    /// send and commit on the group would queue behind an idle connection.
+    ///
+    /// The MLS half is ``applyFetchedMessages(identity:group:raw:after:)``,
+    /// which the caller runs under the lock. See
+    /// ``ChatRepository/pollGroup(groupIdHex:waitSecs:)`` for the composition
+    /// and the guards that keep the two halves consistent.
+    public func fetchGroupJournal(
+        groupId: Data,
+        after: Int64 = 0,
+        waitSecs: Int = 0
+    ) async throws -> FetchResult {
         do {
-            raw = try await ds.fetchGroup(
+            return try await ds.fetchGroup(
                 groupId: groupId,
                 after: after,
                 waitSecs: waitSecs
@@ -289,7 +328,29 @@ public final class ChatClient {
         } catch {
             throw ChatError.wrapped("DS fetch failed", underlying: error)
         }
+    }
 
+    /// G-38 — the MLS half of
+    /// ``pollMessages(identity:group:after:waitSecs:)``: apply an
+    /// already-fetched batch.
+    ///
+    /// **DELIBERATELY NOT `async`.** Every statement below mutates OpenMLS
+    /// provider state through the shared `Group` handle and must run inside the
+    /// caller's per-group commit lock; being non-`async` is a STRUCTURAL
+    /// guarantee that no network wait can ever be reintroduced into this
+    /// critical section — a suspending call would simply not compile here. It
+    /// also means the whole apply is one straight-line `@MainActor` region on
+    /// the repository side, so it can never interleave with another
+    /// synchronous region.
+    ///
+    /// `after` is the cursor the batch was fetched with, and seeds the returned
+    /// cursor so an empty batch does not rewind it.
+    public func applyFetchedMessages(
+        identity: Identity,
+        group: Group,
+        raw: FetchResult,
+        after: Int64 = 0
+    ) -> PollMessagesResult {
         var events: [IncomingChatEvent] = []
         var cursor = after
         for message in raw.messages {

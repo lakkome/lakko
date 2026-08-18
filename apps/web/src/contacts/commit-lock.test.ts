@@ -5,6 +5,13 @@
  * ADR-0040 (G-35) — the per-group serializing lock over the four
  * `ContactsClient` create-commit -> publish regions.
  *
+ * The lock itself now lives in `src/mls/group-lock.ts`: G-38 brought the poll's
+ * apply half (`chat/client.ts`) and the co-publisher poll + approve
+ * (`channels/copublisher.ts`) under the SAME queue, and one resource must have
+ * exactly one lock. These tests still drive it through `ContactsClient`, which
+ * is the surface that matters here; `chat/poll-lock.test.ts` and
+ * `channels/copublisher-lock.test.ts` cover the two new callers.
+ *
  * The hazard: the `lakko-mls` create-commit paths **eagerly merge** epoch
  * N -> N+1 into the shared in-memory provider INSIDE the create call, before the
  * caller publishes anything. Two of those regions interleaved on one group both
@@ -30,7 +37,7 @@
  *
  * ## Which of these actually discriminate (measured, not assumed)
  *
- * Neutering `withGroupCommitLock` to a bare `return task()`:
+ * Neutering `withGroupMlsLock` to a bare `return task()`:
  *   - "a second commit on the SAME group does not create until the first has
  *     published" FAILS with `expected 7n to be 6n` — two eager merges ran while
  *     the first op was still parked in its publish. This is the defect itself;
@@ -281,7 +288,7 @@ describe("ADR-0040 — the commit region is serialized per group", () => {
  * table, recomputes the admin set and calls `setGroupRoles` with no `await`
  * between them, so the read-modify-write already completes inside one microtask
  * and the second toggle cannot observe a half-updated table however the two are
- * scheduled. Verified by execution: with `withGroupCommitLock` neutered to a
+ * scheduled. Verified by execution: with `withGroupMlsLock` neutered to a
  * pass-through, the two tests in the suite above fail and this one still passes.
  *
  * Its job is to fail the day someone inserts an `await` between the role-table

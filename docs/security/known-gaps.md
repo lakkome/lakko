@@ -3833,7 +3833,7 @@ which write survives, changed. What was lost was liveness on a shared lock, and 
 one path (ADR-0044's routing row, since insulated by `boundedOrNull`) liveness was
 what a confidentiality guarantee rested on.
 
-### G-38: Two membership commits could be in flight to the DS at once → inverted journal order → device-ahead — **serialized on web + iOS + Android (2026-08); the remote-commit epoch fork is UNFIXED on every platform**
+### G-38: Two membership commits could be in flight to the DS at once → inverted journal order → device-ahead — **serialized on web + iOS + Android and the local poll-vs-commit interleave closed on all three (2026-08); the remote-commit epoch fork is UNFIXED on every platform**
 
 **Get the mechanism right, because the obvious statement of it is wrong.** The hazard
 is **not** "two commits built on the same epoch". On all three clients the
@@ -3904,12 +3904,12 @@ nothing, since the eager merge is exactly what goes stale.
    serialization is powerless here by construction: the second committer is a
    different device. Closing it needs a **DS-side epoch gate** (reject a commit whose
    epoch is not `current + 1`) or **proposal-based commits** (members propose, one
-   designated committer commits). Note the sub-case that *is* platform-dependent: on
-   Android the poll apply takes the same per-group lock as the commits, so the purely
-   **local** poll-vs-commit interleave is closed there; on web and iOS the commit lock
-   covers only the four commit paths, and the poll apply
-   (`ChatClient.pollMessages` → `processIncomingVerifyingRoles`, which carries an
-   `await` mid-loop) is outside it.
+   designated committer commits). The sub-case that was platform-dependent is now
+   **closed on all three**: the poll apply takes the same per-group lock as the
+   commits, with the network fetch outside it and the MLS apply plus the cursor
+   advance inside, so the purely **local** poll-vs-commit interleave can no longer
+   occur. What remains here is only the genuinely remote case, where the second
+   committer is a different device and no client-side lock can help.
 2. **web two-tab is NOT fixable by a lock and was deliberately not patched.** Each tab
    holds an independent in-memory wasm provider, and the snapshot is written whole to
    a row keyed on `accountId` alone (`chat/mls-store.ts`). Tab B, even after acquiring
@@ -3917,13 +3917,17 @@ nothing, since the eager merge is exactly what goes stale.
    account are already broken independently of commits — two ordinary messages clobber
    each other the same way — so a cross-tab lock here would buy nothing and imply a
    safety that does not exist.
-3. **web `CoPublishersPanel` (`routes/Channels.tsx`) is unguarded.** A 5-second
+3. **web `CoPublishersPanel` (`routes/Channels.tsx`) — CLOSED (2026-08).** It was
+   unguarded: a 5-second
    `setInterval` calls `refreshPending()` → `pollCoPublisherJournal` →
    `processIncomingVerifyingRoles` **without consulting the panel's `busy()` signal**,
    so it runs concurrently with `approveCoPublisher` — which is itself an
    `approveExternalJoin` create-commit on the `PublisherGroup`. That path is not
-   covered by `withGroupCommitLock` (which lives in `contacts/client.ts` and guards
-   the four `ContactsClient` paths only).
+   covered by the commit lock, which at the time lived in `contacts/client.ts` and
+   guarded the four `ContactsClient` paths only. The lock has since been extracted to
+   `apps/web/src/mls/group-lock.ts` as `withGroupMlsLock` — one queue for one
+   resource, importable without dragging discovery and transparency-verify into the
+   chat bundle — and both the co-publisher poll and the approve path now take it.
 4. **The web lock is per-group but the durable unit underneath is per-account.**
    `persistSnapshotWithCommit` writes `Identity.snapshotStorage()` — the whole
    provider — and the F1 abort path calls `restoreStorage` on that whole provider, so
@@ -3953,6 +3957,7 @@ by this entry — see the Quick stats table in
 
 **Verified firsthand by the maintainer against the current tree:** Android
 `:app:compileDebugKotlin` BUILD SUCCESSFUL and `testDebugUnitTest --rerun-tasks` 515
-tests / 0 failures; web `tsc --noEmit` clean and vitest 574; iOS `xcodebuild` BUILD
-SUCCEEDED; `just spec-check` OK. The residuals above are **not** covered by those
+tests / 0 failures; web `tsc --noEmit` clean and vitest 583; iOS `xcodebuild` BUILD
+SUCCEEDED with LakkoTests 342/342 excluding the two dockerised-SFU cases;
+`just spec-check` OK. The residuals above are **not** covered by those
 gates — residual 1 in particular needs a live multi-device environment.
