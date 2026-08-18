@@ -252,6 +252,108 @@ not roster membership, is the boundary). The only remaining
 residual (deferred, not a gap in the protocol) is a live
 admin-approval e2e on a deployed environment.
 
+### G-35: MLS group-commit publish-before-persist → deterministic single-device epoch-desync brick — **CLOSED (2026-07, [ADR-0040](../adr/0040-durable-pending-commit-outbox.md) durable pending-commit outbox, S2–S5 landed on web + iOS + Android)**
+
+The G-34 T2 fix reordered the chat **send** path to
+`create → persist(durable, fail-closed) → publish`, and it explicitly named the
+residual it did not close (this entry above, `known-gaps.md` G-34 §T2): the four
+group-membership **commit** paths — add / remove / role-change / external-join
+approve — share the same publish-before-persist ordering, but with a **DISTINCT and
+worse** failure mode than a same-generation nonce reuse. This entry records that
+hazard and its accepted fix. Like G-33 / G-34, this is a **free-form audit record**
+— it adds **no** indexed C / I / T invariant (the index stood at **8 I + 58 C + 15 T**
+when this was written; the live counts live only in the gated Quick stats table in
+[`invariant-index.md`](./invariant-index.md)).
+
+**The hazard (deterministic, verified firsthand).** Each commit path runs
+`lakko-mls` create-commit, which **eagerly merges** epoch N → N+1 into the in-memory
+provider *inside* the create call (`crates/lakko-mls/src/group.rs`:
+`merge_pending_commit` at `:280` add, `:361` remove, `:392` role/GCE;
+`approve_external_join` `:498` delegates to `add_member` at `:516`), then the client
+publishes the commit (+ a `WelcomeRendezvous` for add / approve) to the DS, then
+persists the N+1 snapshot **best-effort** (failures swallowed — web
+`contacts/client.ts` `persistBestEffort` `:443`, iOS / Android
+`persistSnapshotBestEffort`). The OpenMLS provider is **in-memory**
+(`identity.rs:56`, "in-memory for Phase 0"), so the snapshot is the only durable
+epoch copy. A crash **or** a silent best-effort persist failure **between publish
+and persist** makes the commit C durable on the DS (peers advance to N+1) while the
+local snapshot rolls back to N. On restart the device does **not** self-heal: the
+in-memory own-published echo-suppression set is lost (web `chat/client.ts:248`
+`ownPublishedIds`, iOS `ChatClient.swift:57`, Android `ChatClient.kt:88`), so the
+poll loop re-fetches C and OpenMLS **unconditionally rejects processing one's own
+commit** (`own_leaf_index() == sender leaf` → `CannotDecryptOwnMessage`,
+`openmls-0.8.1/src/framing/validation.rs:111-112`). The device is **permanently
+stuck at epoch N** for that group — silent, no error surfaced, recoverable only by
+another admin re-adding it. **Blast radius: one device (the committer).** There is
+also a residual **2^-32** handshake-ratchet nonce-reuse surface if the bricked
+device issues a **second** commit at N (bounded by the MLS `reuse_guard`, RFC 9420
+§6.3.2) — secondary to the deterministic desync.
+
+**Why the naive fix is worse (the load-bearing point).** The G-34 T2 shape (a bare
+persist-before-publish reorder) works for **application messages** because a skipped
+ratchet generation is harmless (receivers tolerate gaps). A **commit cannot be
+skipped** — N → N+1 is a group-wide barrier — so a bare reorder here merely **flips**
+the desync to **device-AHEAD**: the device is durably at N+1 while C never reached
+the DS and C's bytes are unrecoverable from the merged snapshot, stranding the
+**WHOLE group** at N with no path forward — arguably worse than the single-device
+brick. The fix therefore needs **durability of the pending commit**, not an ordering
+change. (Contrast: the DeviceGroup pairing path already uses persist-before-publish,
+G-5 / G-7, and is safe there because the ahead-state self-heals via joiner-retry and
+the single-founder case has no other member — neither holds for a chat membership
+commit.)
+
+**The accepted fix — ADR-0040 Option A: a durable pending-commit outbox
+(client-only, no `lakko-mls` core / FFI change).** Keep the eager merge. Persist a
+per-`(account, group)` outbox entry holding the commit wire-bytes **and** the
+Welcome/rendezvous wire-bytes (the two-artifact coverage), marked un-acked,
+**together with** the N+1 snapshot in one atomic write **before any publish**
+(fail-closed — a failed write aborts the op with no publish, and the device rolls
+back cleanly to N); publish; mark acked; and on restart **re-publish** un-acked
+entries idempotently (peers at N+1 drop the duplicate as wrong-epoch; the committer
+re-arms its echo filter). This makes the device never durably ahead-without-publish
+nor behind-with-publish, so every crash-window outcome is either "clean N, no op" or
+"N+1 with a re-publishable commit." Alternatives rejected: **Option B** (defer the
+eager merge in the core until publish is confirmed — cleaner but touches the
+sacrosanct MLS core + FFI, deferred as a future refinement); the **bare reorder**
+(flips to the whole-group brick); and **do-nothing** (deterministic silent brick).
+Strengthens **invariant #4** (no group-epoch advance published without durable local
+recording of the commit); invariants #1 / #2 / #3 hold (the outbox stores opaque
+commit + Welcome artefacts; no `lakko-mls` state-machine change).
+
+**Status: CLOSED (2026-07).** ADR-0040 Option A landed end-to-end on all three
+clients. **Web (S2)** — `apps/web/src/chat/commit-outbox.ts` (a durable per-`(account,
+group)` store in the `lakko-mls` IndexedDB, bumped v1 → v2) + `mls-store.ts`
+`saveSnapshotWithCommitEntry` writing the outbox entry + N+1 snapshot in **one atomic
+`transaction([snapshots, commit-outbox])`** (Open Question 1 resolved: a single
+cross-store IDB transaction, so "N+1 snapshot with no entry" is impossible and the
+sweep needs no torn-write reconciliation) + the four commit-path reorders in
+`contacts/client.ts` + `sweepPendingCommits` in `Chat.tsx onMount` before the first
+poll. **iOS (S3)** — `apps/ios/Lakko/Chat/CommitOutbox.swift` (one JSON file per
+in-flight commit under Application Support, backup-excluded) + `ChatRepository`
+entry-first-then-snapshot + the `planSweep` torn-write discard + a once-per-session
+sweep at the top of `pollGroup`. **Android (S4)** — `apps/android/.../chat/CommitOutbox.kt`
+(file-per-entry under `noBackupFilesDir`) + `runCrashSafeCommit` + the `reconcileVerdict`
+torn-write discard + `sweepPendingCommits` at group-open. Open Question 1 (step-2
+atomicity) resolved per-platform: web = one atomic IDB transaction; iOS / Android =
+entry-first-then-snapshot with a restart-sweep **discard** of any un-acked entry whose
+durably-restored `Group.epoch()` did not reach the entry's `target_epoch` (a torn
+write whose commit was never published → drop the orphan, stay at N clean). Open
+Question 2 (orphan `messageId`) resolved via the **already-present** receive-loop
+benign-drop of a re-fetched own commit (`CannotDecryptOwnMessage`: web
+`chat/client.ts` catch-and-continue; iOS `ChatClient.swift:247` catch-all; Android
+`ChatClient.kt:277` `FfiException` catch) rather than recording the `messageId` in the
+durable write — the sweep additionally re-arms the echo filter for the re-published id.
+The two-artifact add / approve paths carry both the commit and the Welcome (add →
+mailbox) / rendezvous (approve → group journal); the sweep re-publishes each to its
+destination and echo-re-arms only the group-journal artefacts. No `lakko-mls` core /
+FFI change (invariant #3 untouched); no indexed invariant added. Verified firsthand:
+web `tsc` clean + vitest 338 (15 new) + vite build; iOS `xcodebuild` build + test 12/12;
+Android `:app:compileDebugKotlin` + `CommitOutboxTest` 10/10. Residual: a live
+crash-injection / power-loss e2e on a deployed multi-device environment (a runtime
+gate, like G-26) — the reorder + torn-write + sweep are proven by the per-platform
+unit suites. Option B (defer the eager merge in the MLS core until publish is
+confirmed) stays deferred as a future refinement.
+
 ## Multi-device
 
 ### G-4: AccountIdentity rotation on password change has no KT-log supersession proof yet — **proof + chain verifier + FFI landed (sprints 1-3)**
@@ -1409,545 +1511,6 @@ discipline (an engineering invariant, not a crypto gap). Residual: the
 same G-26 live deployed-SFU RTP interop proof that governs every SFrame
 stack.
 
-## Out-of-protocol
-
-### G-14: Hostile-OS / hostile-browser threats
-
-No app-level integrity attestation. We rely on the
-platform's standard sandbox + the user's awareness. Phase 5
-adds App Attest / Play Integrity / WebAuthn-attestation to
-the signup / login round-trip.
-
-### G-15: Side-channel + physical attacks
-
-Out of scope for this audit pass. Mitigated by relying on
-the platform's constant-time crypto primitives (`subtle`
-crate, OpenMLS's vetted implementations). No hand-rolled
-crypto in the codebase — the `lakko-crypto` crate is
-plumbing only.
-
-### G-16: Quantum adversaries
-
-MLS suites pin classical curves today. PQ migration
-follows the WG.
-
-### G-26: RFC 9605 §4.3 SFrame wire header + framed pipeline + cross-platform AAD; §4.3-conformant, only live deployed-SFU RTP interop pending
-
-**Update (2026-07) — the §4.3 rewrite landed; the header is now RFC 9605 §4.3
-wire-compatible.** An earlier revision of `SframeHeader::encode` used a
-Lakko-custom first-byte layout (`R | LEN | X | KID` with an always-trailing CTR)
-that a 2026-06-30 finding (`lakko-security` APPROVE-WITH-NOTES, verified against
-the RFC + its Appendix C.1 vectors) showed was NOT RFC 9605 §4.3. The maintainer
-took the §4.3 rewrite: `encode`/`decode` now pack the config byte as the §4.3
-`X | KKK | Y | CCC` with inline `KID<=7` / `CTR<=7`, **proven byte-for-byte
-against RFC 9605 Appendix C.1's published vectors**
-(`header.rs::rfc_9605_appendix_c1_header_vectors`), so `(kid=0, ctr=0)` is now
-the single byte `00` exactly as the RFC specifies. Because the header IS the
-AEAD AAD (ADR-0013) and it is now spec-conformant, a Lakko frame is
-interoperable with any other RFC 9605 implementation (mlspp, Cisco libsframe, a
-browser-native SFrame transform) that shares the key + nonce derivation —
-external-stack interop is no longer broken by design. The golden vector was
-re-pinned + re-verified firsthand across all six stacks (Rust core, the
-`lakko-sframe-native` C ABI, the C++ bridge, web wasm, plus the iOS/Android
-golden pins run in CI). The change carried no cryptographic risk (encode +
-decode flip together; the nonce derives from the counter, not the header
-layout). Everything below about cross-RUNTIME byte interop remains true — the
-same golden vector, now in the §4.3 encoding. The one residual is a live
-cross-platform / external-stack RTP round-trip over a DEPLOYED SFU (a
-verification gate, not a design gap).
-
-**Status (2026-06-02):** the framed pipeline + cross-platform AAD landed; the
-Lakko-internal cross-runtime interop is proven (golden vector); the live
-deployed-SFU RTP smoke is the only deploy-gated residual. Progress since
-the 2026-05-25 entry:
-
-1. **Wire serializer.**
-   [`crates/lakko-calls/src/header.rs`](../../crates/lakko-calls/src/header.rs)
-   ships `SframeHeader::encode` / `SframeHeader::decode`
-   (RFC 9605 §4.3: config byte `X | KKK | Y | CCC` + inline
-   `KID<=7` / `CTR<=7`; round trip + pinned wire layouts +
-   truncation handling + bit-packing first-byte invariants +
-   the RFC 9605 Appendix C.1 published-vector conformance
-   test). See the Update above.
-2. **Framed seal/open pipeline — DONE.**
-   [`lakko_calls::sframe`](../../crates/lakko-calls/src/sframe.rs)
-   now exposes `ParticipantKey::seal_framed` (peeks the
-   counter, builds the header, seals with the header as
-   AEAD AAD, returns `header || ciphertext`) and
-   `open_framed` (decodes the header, binds the EXACT
-   on-wire header bytes as AAD, checks `kid == sender_leaf`,
-   opens). 7 property tests added on top of the prior
-   suite. The SFU reads the KID off the wire to route by
-   participant without touching the ciphertext.
-3. **Cross-platform AAD contract — [ADR-0013](../adr/0013-sframe-cross-platform-aad.md).**
-   The AEAD AAD is the SFrame wire header (KID + CTR), NOT
-   any host RTP `additional_data`. This is the property
-   that lets a frame sealed on one platform open on
-   another: the host metadata is not reconstructible
-   across stacks, so it cannot be in the authenticated set.
-4. **All three client surfaces consume the framed path.**
-   The flat C ABI (`lakko-sframe-native`:
-   `lakko_sframe_seal_framed` / `_open_framed`), UniFFI
-   (`ParticipantKey.seal_framed` / `open_framed`), and
-   wasm-bindgen (`sealFramed` / `openFramed`) all expose
-   it. The native libwebrtc C++ bridge
-   (`apps/shared/sframe-bridge`) calls `seal_framed` /
-   `open_framed` directly (host `additional_data`
-   intentionally unbound); its 8-assertion host test
-   (`just test-sframe-bridge`) proves both that a
-   mismatched host AAD does NOT fail decryption and that a
-   tampered header DOES. The browser side is the
-   `RTCRtpScriptTransform` worker
-   (`apps/web/src/calls/sframe-transform.ts` +
-   `sframe-transform-worker.ts`) calling `sealFramed` /
-   `openFramed` inside a module worker.
-
-**What is still open — live cross-platform RTP verification.**
-The byte-level interop is asserted by construction (the
-header is platform-independent; native + web call the same
-`lakko-calls` core through the same framed API) and by the
-native host test. What has NOT been observed firsthand is a
-real media frame sealed on one platform (e.g. a Chrome
-`RTCRtpScriptTransform` sender) decrypting on another (e.g.
-an iOS / Android libwebrtc receiver) over a live SFU
-forwarding path. That requires two real endpoints plus the
-SFU in the middle and cannot be done in a headless build
-environment.
-
-**Narrowed (2026-06-12).** The "does an SFrame frame survive
-the live SFU at all?" question is now answered firsthand in a
-headless test:
-[`sframe_sealed_frame_round_trips_through_the_live_sfu`](../../services/sfu/tests/synthetic_client_e2e.rs)
-seals a frame with the real `lakko_calls::sframe`
-`seal_framed`, pushes it through the production
-`spawn_media_task` over a real `str0m` ICE + DTLS handshake +
-the cross-fanout renegotiation, and the subscriber
-`open_framed`s the forwarded bytes back to the exact
-plaintext — so the RFC 9605 §4.3 header (the AAD) and the
-ciphertext provably survive the SFU forward intact, and the
-SFU stays SFrame-opaque (`lakko-calls` is a **dev-only** dep
-of `services/sfu`; the production binary never links it,
-preserving C-39).
-
-**Effectively closed (2026-06-12) — cross-runtime byte interop
-proven by golden vector.** The cross-*runtime* leg no longer
-rests on "by construction": a single canonical SFrame wire —
-sealing `(seed=[0x42;32], leaf=3, plaintext="lakko sframe
-golden vector v1")` on a fresh `ParticipantKey` (counter 0) —
-is now pinned and asserted on ALL FOUR stacks, each of which
-both SEALS to the identical bytes and OPENS them back to the
-plaintext: the Rust core
-([`sframe.rs::golden_vector_*`](../../crates/lakko-calls/src/sframe.rs)),
-the wasm/web `RTCRtpScriptTransform` stack
-([`sframe-golden.test.ts`](../../apps/web/src/calls/sframe-golden.test.ts),
-vitest), the iOS UniFFI stack
-([`SFrameGoldenTests.swift`](../../apps/ios/LakkoTests/SFrameGoldenTests.swift)),
-and the Android UniFFI stack
-([`SframeGoldenTest.kt`](../../apps/android/app/src/androidTest/kotlin/me/lakko/app/calls/SframeGoldenTest.kt)).
-The Rust, web, and iOS golden tests were verified firsthand
-(iOS live on a simulator); the Android instrumented test
-compiles and runs in CI (`g3-4-mobile.yml` →
-`connectedDebugAndroidTest`); the Rust + web tests gate every
-CI run (`cargo test --workspace` + vitest). Because every stack
-produces and consumes the byte-identical wire, a frame sealed
-on any stack opens on any other — the cross-runtime interop is
-now a *proven equality*, not an assumption. Composed with the
-live-SFU verbatim-forwarding test above, the
-sealed-on-web → relayed-by-SFU → opened-on-native path is
-established by correctness: the SFU forwards the wire
-unchanged, and that exact wire is what every native stack
-opens.
-
-**Composition now observed in one headless test (2026-06-15).**
-The "two already-proven facts" no longer need to be composed
-mentally: [`golden_vector_round_trips_through_the_live_sfu`](../../services/sfu/tests/synthetic_client_e2e.rs)
-seals the EXACT canonical golden vector (`seed=[0x42;32]`,
-`leaf=3`, `"lakko sframe golden vector v1"`), asserts the sealed
-wire equals the byte-pinned `GOLDEN_WIRE_HEX` that the Rust /
-web / iOS / Android golden tests all pin, pushes THOSE bytes
-through the production `spawn_media_task` over a real `str0m`
-ICE + DTLS + cross-fanout renegotiation, and the subscriber
-`open_framed`s the forwarded bytes back to the golden plaintext.
-So the bytes a real web / iOS / Android client emits ARE the
-bytes observed to cross the live SFU intact — the composition is
-a single firsthand-verified fact, not a mental join. Verified
-firsthand (`cargo test -p lakko-svc-sfu --test
-synthetic_client_e2e` → 5 passed) and gates every CI run.
-
-**Native C ABI golden pin added (2026-06-17).** The flat
-`lakko-sframe-native` `extern "C"` surface — the path the iOS
-Obj-C++ shim + Android JNI module actually call before handing
-bytes to libwebrtc's `FrameEncryptorInterface` /
-`FrameDecryptorInterface` — is now itself pinned to the canonical
-golden in
-[`crates/lakko-sframe-native/tests/golden_cross_stack.rs`](../../crates/lakko-sframe-native/tests/golden_cross_stack.rs):
-`lakko_sframe_seal_framed` over the golden seed / leaf / plaintext
-produces the EXACT `GOLDEN_WIRE_HEX`, and `lakko_sframe_open_framed`
-recovers the golden plaintext from that wire. Previously the C ABI
-was only opacity-tested with arbitrary per-test seeds
-(`sfu_opacity_e2e.rs`); the cross-stack golden was pinned on the
-core + web/wasm + iOS/Android UniFFI surfaces but NOT on the C ABI
-the native media shims wrap. This closes that last in-codebase
-coverage gap — core, web (wasm), UniFFI, the native C ABI, and the
-live `str0m` SFU round-trip now ALL agree on the one canonical wire.
-Verified firsthand (`cargo test -p lakko-sframe-native --test
-golden_cross_stack` → 3 passed).
-
-The C++ bridge ONE LAYER up is now golden-pinned too: a
-`test_cross_stack_golden_vector` assertion in
-[`apps/shared/sframe-bridge/test_bridge.cc`](../../apps/shared/sframe-bridge/test_bridge.cc)
-drives the actual `LakkoFrameEncryptor::Encrypt` /
-`LakkoFrameDecryptor::Decrypt` (the concrete `webrtc::FrameEncryptorInterface`
-/ `FrameDecryptorInterface` impls the iOS Obj-C++ shim + Android JNI module
-wrap before handing bytes to libwebrtc) over the golden vector — `Encrypt`
-produces the EXACT `GOLDEN_WIRE_HEX` (even with a non-empty host
-`additional_data`, re-proving ADR-0013 host-AAD-independence) and `Decrypt`
-recovers the golden plaintext. Verified firsthand (`just test-sframe-bridge`
-→ 9 assertions pass). So every layer of the native media stack — the C ABI,
-the C++ bridge, and the webrtc-interface impls — is proven byte-identical to
-web / iOS-Android-UniFFI / the core, all the way down to the libwebrtc handoff.
-
-The only residual is a single monolithic real-Chrome ⊕
-real-native ⊕ deployed-SFU smoke run — redundant for
-correctness (it would only re-observe the same composition with
-real codec pipelines), and a deploy/CI-execution concern, not a
-development one. The web multi-party session that drives the
-worker (`apps/web/src/calls/sfu-call-session.ts` — composes
-the `lakko-sfu-v1` signaling client + the call-admission JWT
-+ one `RTCPeerConnection` to the SFU + `attachSenderSFrame` /
-`attachReceiverSFrame` on every track + SFU-initiated
-renegotiation) is now wired into the chat UI: a group chat
-(>2 members) routes the call button through
-`createSfuCallUi`, which drives the shared call-UI store
-roster, plays remote audio, and renders per-tile remote
-video, while 1×1 chats stay on the P2P path. The MSID
-stream-id → source-peer correlation the video tiles need is
-pinned by construction — the SFU sets the downstream MSID
-stream-id to the source peer id (`add_media(..,
-Some(source_peer.to_string()), ..)` in
-`services/sfu/src/media.rs`), and that string is the same
-`PeerId` the signaling roster carries, so
-`ev.streams[0].id` maps straight onto the roster tile. The
-**native** iOS + Android clients are now wired to the same
-extent (SFU multi-party arc, complete): `SfuSignalingClient`
-(WS + typed `lakko_sfu_proto` frames) + `SfuCallSession`
-(one `RTCPeerConnection`/`PeerConnection` to the SFU,
-`armSFrameEncryptors` on every local sender before the offer,
-`armSFrameDecryptor` on every remote receiver, SFU-initiated
-renegotiation) + the `SfuCallUi` adapter driving the shared
-`CallUiState` + the chat-header trigger/presentation. Both
-publish SFrame-sealed video when the call is started with the
-video-call button (the local camera is captured, the video
-track added before `armSFrameEncryptors` + the offer, so the
-video sender is sealed alongside audio). All three platforms
-therefore reach the SFU through the identical framed
-`seal_framed` / `open_framed` core. What remains is only the
-live cross-platform RTP verification above (a real frame
-round-tripping web↔native through a deployed SFU) — a
-verification step, not a missing mechanism.
-
-**Why this isn't a security gap today.** The keying math +
-the AAD set + the wire layout are all RFC 9605 conformant
-and shared across platforms by construction. The residual
-item is a verification step (does a live cross-stack frame
-round-trip?), not a missing mechanism. The fail-closed
-posture holds throughout: a frame that fails to
-parse / authenticate is dropped, never forwarded as
-plaintext (invariant #4), on every surface.
-
-## Dependency advisories
-
-The `cargo audit` baseline (RustSec advisory DB) surfaces
-two open vulnerabilities + three unmaintained-crate
-warnings in the workspace's transitive dependency tree.
-None are in code we control; remediation depends on
-upstream releases. Each entry below lists severity,
-reachability analysis, and the upstream tracker the fix
-is gated on.
-
-### G-23: `libcrux-chacha20poly1305 0.0.7` — RUSTSEC-2026-0124 (HIGH 8.2) — **CLOSED (fixed)**
-
-> Potential Panic on Overlong Ciphertext Buffer.
-> Upgrade to >= 0.0.8.
-
-Vulnerable as a transitive dep:
-`libcrux-chacha20poly1305 0.0.7 → libcrux-aead 0.0.7 →
-hpke-rs-libcrux 0.6.1 → hpke-rs 0.6.1 →
-openmls_rust_crypto 0.5.1 → lakko-mls` (HPKE seal/open inside
-OpenMLS).
-
-**Fix — a Cargo.toml-only vendored fork of `hpke-rs-libcrux`.**
-The published `hpke-rs-libcrux 0.6.1` hard-pins
-`libcrux-aead ^0.0.7` (which transitively pins the vulnerable
-`libcrux-chacha20poly1305 0.0.7`), and a `[patch.crates-io]`
-cannot relax a semver requirement. So we vendor `hpke-rs-libcrux`
-under `crates/vendor/hpke-rs-libcrux` and patch it in via the root
-`[patch.crates-io]`. The delta is **two version bumps in its
-`Cargo.toml` only** — `libcrux-aead 0.0.7 → 0.0.8` (which pulls
-the fixed `libcrux-chacha20poly1305 0.0.8`) and its own
-`libcrux-traits 0.0.6 → 0.0.7` so the AEAD trait it imports
-matches what `libcrux-aead 0.0.8` implements. **The `src/` is
-byte-identical to upstream 0.6.1** (verified) — zero crypto-code
-changes.
-
-The earlier worry about an "irreconcilable `libcrux-traits`
-0.0.6-vs-0.0.7 conflict" was wrong: `hpke-rs-libcrux` uses
-`libcrux-traits` only for the AEAD trait, so `libcrux-ecdh` /
-`libcrux-hkdf` staying on `libcrux-traits 0.0.6` while the AEAD
-path uses `0.0.7` is fine — Cargo carries both versions and no
-trait type crosses the boundary. The fix **compiles + the full
-workspace checks clean + all `lakko-mls` tests pass**, and
-`cargo audit` now reports the libcrux advisory gone (only the
-accepted-risk `rsa` G-24 remains).
-
-Regression-guarded by the existing `cargo audit` / `cargo deny`
-CI gate: if the bump were reverted, `libcrux-chacha20poly1305
-0.0.7` would return and the advisory check would fail.
-
-(The vulnerable path was, in any case, not demonstrably reachable
-— every byte reaching `libcrux-chacha20poly1305::decrypt` first
-passes OpenMLS's length-bounded `MlsMessageIn` parser + the
-HPKE-RS length checks, and the attacker-facing ingest is gated by
-a rate limit + PoW + Privacy Pass — so this was a low-risk DoS at
-worst even before the fix.)
-
-### G-24: `rsa 0.9.10` — RUSTSEC-2023-0071 (MEDIUM 5.9) — Marvin Attack — **CLOSED (Jun 2026)**
-
-**Closed by dropping rsa, not accepting it.** Bumped `sqlx` 0.8 → 0.9
-(released, `rust-version` 1.94 ≤ our pinned 1.95) across all 7 services and
-omitted the now-feature-gated `rsa` feature (`sqlx-mysql/rsa`), so the crate is
-no longer in the dependency tree at all — `cargo tree -i rsa` is empty and
-`cargo deny check` passes with **no ignore** for RUSTSEC-2023-0071 (the
-`deny.toml` entry was removed). The only 0.9 breaking change for our usage was
-the SQL-injection guard (`SqlSafeStr`): the 4 audited dynamic-SQL sites in
-`services/ds/src/journal.rs` (table/column from a fixed `Queue` enum, never user
-input) now wrap the string in `sqlx::AssertSqlSafe`. Workspace `cargo check` +
-`cargo deny` + the `ds` tests are green. The original analysis below is retained
-for history.
-
----
-
-> Potential key recovery through timing sidechannels.
-> No fixed upgrade is available.
-
-Transitive dependency: `rsa 0.9.10 → sqlx-mysql 0.8.6 →
-sqlx → all `services/*`.
-
-**Why this is structural, not negligence.** The `rsa`
-crate is the only pure-Rust RSA implementation that
-compiles on every target sqlx supports; the Marvin-attack
-mitigation requires constant-time arithmetic that the
-crate maintainers explicitly call out as "we will not
-land this in the current codebase." The upstream
-position is "use a different RSA library if you need
-side-channel resistance" — `sqlx-mysql` would have to
-swap implementations, which it has not.
-
-**Reachability.** `rsa` is reached **only** via MySQL
-native-auth handshake when the server's
-`mysql_native_password` authentication method requires
-RSA-OAEP padding to encrypt the client password (server-
-side `caching_sha2_password` cache miss path). Lakko
-configures MariaDB with `caching_sha2_password` ONLY,
-and the warm-cache hit path uses SHA-2 without RSA. The
-RSA path is reached only on first-time connect from a
-client whose password hasn't been cached server-side.
-**The application never sees user passwords directly**:
-authentication runs OPAQUE-PAKE (`services/auth`), which
-the database connection layer is downstream of — the
-MySQL connection password is the **service's** own DB
-password (configured in `/etc/lakko/lakko.env`), not a
-user's. A successful timing attack on this RSA exchange
-would leak the service's MySQL connection password to an
-attacker who already has network access to MySQL itself
-— at which point the attacker has direct DB access and
-the RSA leak is the wrong attack to spend a Marvin
-side-channel on.
-
-**Mitigation**: production MariaDB binds only to the
-internal loopback / VPC interface; only the Lakko
-services reach it. An attacker who can mount a timing
-side-channel on this internal hop has already broken
-the perimeter.
-
-**Status**: accepted risk pending upstream `sqlx-mysql`
-swapping to a constant-time RSA crate (no tracker —
-upstream position is "no fix coming"). Re-audit if MySQL
-auth surface changes.
-
-**Corrected + re-verified (Jun 2026).** An earlier note here
-claimed this was "not fixable upstream" — that was wrong (it
-parroted a stale `deny.toml` comment). The real status:
-- `cargo update --dry-run` shows 0 **semver-compatible** updates
-  — `rsa` 0.9.10 + `sqlx` 0.8.6 are the latest 0.x releases —
-  but that only covers in-range bumps.
-- On `sqlx-mysql` **0.8.x** the `rsa` crate cannot be removed:
-  `optional = true` in the manifest, yet `connection/auth.rs`
-  does `use rsa::{…}` UNCONDITIONALLY (no `#[cfg(feature="rsa")]`),
-  so dropping the feature is a compile error.
-- **`sqlx` 0.9.0 is released** (the stale comment said sqlx was
-  still "waiting on rsa 0.10.0") and **feature-gates rsa**
-  (`sqlx-mysql/rsa = [dep:rand, dep:rsa]`). The advisory itself
-  has `patched = []` — no fixed rsa exists — so the fix is to
-  **drop** rsa, not upgrade it: bump 0.8 → 0.9 and omit the `rsa`
-  feature, and the crate leaves the tree entirely (our MariaDB is
-  localhost-only over a Unix socket / TLS, so the
-  caching_sha2_password RSA path is never exercised).
-- **Status: a real, concrete fix exists (sqlx 0.9 + no rsa
-  feature) — deferred only because the 0.8 → 0.9 bump is a
-  breaking, multi-service migration.** Documented accept in
-  `deny.toml` stands in the meantime; residual is near-zero per
-  the reachability analysis above.
-
-### G-25: Unmaintained-crate + advisory warnings — **all CLOSED (2026-07): the three unmaintained warnings + two 2026 transitive advisories (anyhow, crossbeam-epoch); `cargo deny check advisories` is clean**
-
-The `cargo audit` baseline flagged three unmaintained-crate
-advisories. None are vulnerabilities — the maintainers wound
-down support, but the code works. Two were transitive through
-`uniffi 0.28.x` and **closed** by the `uniffi 0.28 → 0.31` bump
-(the same "major upstream bump drops the dep" remediation that
-closed G-24's `rsa` via sqlx 0.9). The third (`instant`) reaches
-us only on the wasm target via `openmls`'s `js` feature and is a
-non-CVE unmaintained advisory. It has a **self-serviceable fix
-that does not wait on openmls** — a `[patch.crates-io]` shim
-re-exporting the maintained `web-time` in place of
-`fluvio-wasm-timer` (detailed in the `instant` bullet below) —
-but the maintainer deferred it (2026-07) as supply-chain surgery
-disproportionate to a cosmetic-audit win; the accept posture
-stands until a clean `cargo audit` is required.
-
-- **`bincode 1.3.3`** (RUSTSEC-2025-0141) — **CLOSED
-  (Jun 2026).** Was under `uniffi_macros 0.28.3 →
-  uniffi 0.28.3` (build-time macro-output serialisation).
-  `uniffi_macros 0.31.2` no longer depends on `bincode`
-  (verified: `uniffi_macros@0.28.3` declared `bincode ^1.3
-  kind=normal`; `@0.31.2` declares neither). After bumping
-  `crates/lakko-ffi-uniffi` to `uniffi = "0.31"`,
-  `cargo update -p uniffi` reported `Removing bincode v1.3.3`
-  and `cargo tree -i bincode` is now empty.
-
-- **`paste 1.0.15`** (RUSTSEC-2024-0436) — **CLOSED
-  (Jun 2026).** Was under `uniffi_core 0.28.3` +
-  `uniffi_bindgen 0.28.3` (compile-time macro helper).
-  Both dropped `paste` at 0.31.2 (replaced by the maintained
-  `pastey` fork). `cargo update -p uniffi` reported
-  `Removing paste v1.0.15` and `cargo tree -i paste` is now
-  empty.
-
-- **`instant 0.1.13`** (RUSTSEC-2024-0384) — **CLOSED
-  (2026-07) via a `web-time` shim.** Was under
-  `parking_lot_core 0.8.6 → parking_lot 0.11.2 →
-  fluvio-wasm-timer 0.2.5 → openmls 0.8.1`. A wasm-only
-  timer abstraction (an **unmaintained** advisory, not a
-  CVE). The self-serviceable fix documented below was
-  **applied**: a vendored `crates/vendor/fluvio-wasm-timer`
-  shim (`pub use web_time::{SystemTime, UNIX_EPOCH};`, AGPL,
-  excluded from the workspace) wired in via `[patch.crates-io]`
-  REPLACES the real crate, so `instant` leaves the graph
-  entirely — `cargo tree -i instant --target all` reports "did
-  not match any packages" and `cargo deny check advisories` no
-  longer lists it. openmls builds + tests green against the shim
-  on host + wasm (the wasm build is the one that actually uses
-  the shim's `SystemTime` / `UNIX_EPOCH`).
-
-  **What functionality pulls it (verified 2026-07 against
-  the openmls 0.8.1 source):** `fluvio-wasm-timer` is an
-  optional openmls dependency gated behind openmls' `js`
-  feature, which Lakko enables in
-  [`crates/lakko-ffi-wasm/Cargo.toml`](../../crates/lakko-ffi-wasm/Cargo.toml)
-  (`openmls = { features = ["js"] }`). The `js` feature also
-  carries `getrandom/wasm_js` — mandatory (no RNG, hence no
-  MLS, on wasm without it) — so the feature itself cannot be
-  dropped. openmls `use`s the timer in exactly one place,
-  `src/key_packages/lifetime.rs`, under
-  `#[cfg(target_arch = "wasm32")]`, to read `SystemTime::now()`
-  for **KeyPackage lifetime (expiry) validation** — checking
-  a KeyPackage's `not_before` / `not_after` window when a
-  member is added or a group is joined on the web client. On
-  wasm `std::time::SystemTime::now()` panics (no OS clock), so
-  openmls substitutes `fluvio-wasm-timer`'s `SystemTime`
-  (backed by JS `Date.now()`). The functionality is genuine
-  and security-relevant (an expired KeyPackage must be
-  rejected), so the code path cannot simply be removed.
-
-  **A self-serviceable fix exists (deferred, not blocked on
-  openmls):** openmls consumes only `fluvio_wasm_timer::{SystemTime,
-  UNIX_EPOCH}`, and the maintained replacement `web-time`
-  exposes the same std-compatible surface. A `[patch.crates-io]`
-  entry pointing `fluvio-wasm-timer` at a tiny vendored shim
-  crate whose body is `pub use web_time::{SystemTime, UNIX_EPOCH};`
-  would satisfy openmls with **zero openmls source change** and
-  drop `instant` from the graph entirely (`cargo tree -i instant`
-  empty, incl. under wasm) — the same vendored-patch idiom Lakko
-  already uses for `webauthn-rs-core` and `hpke-rs-libcrux`, and
-  a net supply-chain improvement (an unmaintained crate replaced
-  by a maintained one). **Applied 2026-07** (the maintainer called
-  for the clean-audit posture): the shim landed exactly as described
-  and `instant` is gone. **Two 2026 transitive advisories surfaced in
-  the same audit run and were fixed by patch bumps** (unrelated to the
-  shim — the RustSec DB had published them since the prior audit):
-  `anyhow 1.0.102 → 1.0.103` (RUSTSEC-2026-0190, an `Error::downcast_mut`
-  unsoundness) and `crossbeam-epoch 0.9.18 → 0.9.20` (RUSTSEC-2026-0204,
-  an invalid-pointer-deref in a `fmt::Pointer` impl, via `rayon`), both
-  `cargo update -p` lock bumps with no source change. `cargo deny check
-  advisories` now reports **`advisories ok`**.
-
-  The alternative upstream fix — openmls' planned 0.9 (which
-  swaps `fluvio-wasm-timer` for `web-time` itself) — is
-  unreleased and its timeline / scope are not guaranteed; when it
-  does land, the bump is an MLS-core change requiring an ADR +
-  property tests regardless. The shim above does **not** wait on
-  it.
-
-**The uniffi 0.28 → 0.31 bump cost zero source changes** —
-`lakko-ffi-uniffi` uses proc-macro mode (`setup_scaffolding!`)
-with a crate-local bindgen (`uniffi_bindgen_main()`), so the
-runtime and generator move in lock-step. Verified end-to-end
-firsthand (2026-06-23): `cargo build -p lakko-ffi-uniffi` +
-`cargo test -p lakko-ffi-uniffi` (158 passed) + `cargo clippy`
-clean; `just regen-bindings` (Swift + Kotlin) succeeds; the iOS
-client (`xcodebuild` BUILD SUCCEEDED after `just build-ios`) and
-the Android client (`:app:compileDebugKotlin` BUILD SUCCESSFUL)
-both compile against the uniffi-0.31-generated bindings with no
-hand-written-code changes; `just audit` reports `advisories ok`.
-
-**Status**: bincode + paste closed; instant accepted upstream
-debt (wasm-only, openmls-pinned). CI warns (not fails) on
-unmaintained-crate advisories so they remain visible without
-blocking releases.
-
-**Cumulative posture** (updated 2026-06-23): zero
-vulnerabilities in Lakko-authored code. The transitive-dep
-advisories have since been remediated as the upstream chain
-caught up — `rsa` (RUSTSEC-2023-0071, G-24) closed by sqlx
-0.9, `libcrux-chacha20poly1305` (RUSTSEC-2026-0124, G-23)
-closed by the vendored hpke-rs-libcrux fork, and `bincode` +
-`paste` (G-25) closed by the uniffi 0.31 bump. The only
-remaining unmaintained-crate warning is `instant`
-(RUSTSEC-2024-0384, G-25) — wasm-only, pending an openmls
-release that drops `fluvio-wasm-timer`. The `cargo audit`
-baseline below is captured as of `2026-05-28` (re-run delta
-vs `2026-05-27`: **zero change** — same 2 vulnerabilities,
-same 3 unmaintained warnings, no new findings, no advisories
-resolved upstream at that time. Post-G5-6-wireup
-confirmation: the
-`hpke 0.13` + `rand_core 0.9` deps added by ADR-0012
-brought in their pure-Rust RustCrypto dependencies
-[`x25519-dalek`, `aes-gcm`, `chacha20poly1305`,
-`hkdf`, `hmac`, `sha2`] without introducing any new
-advisory) and is re-run on every CI build; new
-findings either get a G-entry of their own or are
-remediated as the upstream chain catches up.
-
-`cargo deny check` is the second tier of the supply-
-chain gate (licence allowlist, advisory deduplication,
-unmaintained-crate policy on top of `cargo audit`). The
-binary is not currently installed on this dev host; the
-`just audit` recipe invokes it during CI runs. A follow-
-up sprint stands up `cargo deny` locally on the
-maintainer's box so the audit pack can mirror its CI
-output here.
-
 ### G-27: Channel PublisherGroup — **CLOSED** — all three platforms wired (G4-2-mls-publisher + G-27 iOS / Android slice) + persistence + rotation landed (G4-2-mls-persistence)
 
 [`apps/web/src/channels/composer.ts::freshPublisherKeys`](../../apps/web/src/channels/composer.ts)
@@ -2332,6 +1895,254 @@ seed delivery from each platform's CallSession into
 the freshly-created `ParticipantKey`.
 + replication via DeviceGroup are wired).
 
+## Out-of-protocol
+
+### G-14: Hostile-OS / hostile-browser threats
+
+No app-level integrity attestation. We rely on the
+platform's standard sandbox + the user's awareness. Phase 5
+adds App Attest / Play Integrity / WebAuthn-attestation to
+the signup / login round-trip.
+
+### G-15: Side-channel + physical attacks
+
+Out of scope for this audit pass. Mitigated by relying on
+the platform's constant-time crypto primitives (`subtle`
+crate, OpenMLS's vetted implementations). No hand-rolled
+crypto in the codebase — the `lakko-crypto` crate is
+plumbing only.
+
+### G-16: Quantum adversaries
+
+MLS suites pin classical curves today. PQ migration
+follows the WG.
+
+### G-26: RFC 9605 §4.3 SFrame wire header + framed pipeline + cross-platform AAD; §4.3-conformant, only live deployed-SFU RTP interop pending
+
+**Update (2026-07) — the §4.3 rewrite landed; the header is now RFC 9605 §4.3
+wire-compatible.** An earlier revision of `SframeHeader::encode` used a
+Lakko-custom first-byte layout (`R | LEN | X | KID` with an always-trailing CTR)
+that a 2026-06-30 finding (`lakko-security` APPROVE-WITH-NOTES, verified against
+the RFC + its Appendix C.1 vectors) showed was NOT RFC 9605 §4.3. The maintainer
+took the §4.3 rewrite: `encode`/`decode` now pack the config byte as the §4.3
+`X | KKK | Y | CCC` with inline `KID<=7` / `CTR<=7`, **proven byte-for-byte
+against RFC 9605 Appendix C.1's published vectors**
+(`header.rs::rfc_9605_appendix_c1_header_vectors`), so `(kid=0, ctr=0)` is now
+the single byte `00` exactly as the RFC specifies. Because the header IS the
+AEAD AAD (ADR-0013) and it is now spec-conformant, a Lakko frame is
+interoperable with any other RFC 9605 implementation (mlspp, Cisco libsframe, a
+browser-native SFrame transform) that shares the key + nonce derivation —
+external-stack interop is no longer broken by design. The golden vector was
+re-pinned + re-verified firsthand across all six stacks (Rust core, the
+`lakko-sframe-native` C ABI, the C++ bridge, web wasm, plus the iOS/Android
+golden pins run in CI). The change carried no cryptographic risk (encode +
+decode flip together; the nonce derives from the counter, not the header
+layout). Everything below about cross-RUNTIME byte interop remains true — the
+same golden vector, now in the §4.3 encoding. The one residual is a live
+cross-platform / external-stack RTP round-trip over a DEPLOYED SFU (a
+verification gate, not a design gap).
+
+**Status (2026-06-02):** the framed pipeline + cross-platform AAD landed; the
+Lakko-internal cross-runtime interop is proven (golden vector); the live
+deployed-SFU RTP smoke is the only deploy-gated residual. Progress since
+the 2026-05-25 entry:
+
+1. **Wire serializer.**
+   [`crates/lakko-calls/src/header.rs`](../../crates/lakko-calls/src/header.rs)
+   ships `SframeHeader::encode` / `SframeHeader::decode`
+   (RFC 9605 §4.3: config byte `X | KKK | Y | CCC` + inline
+   `KID<=7` / `CTR<=7`; round trip + pinned wire layouts +
+   truncation handling + bit-packing first-byte invariants +
+   the RFC 9605 Appendix C.1 published-vector conformance
+   test). See the Update above.
+2. **Framed seal/open pipeline — DONE.**
+   [`lakko_calls::sframe`](../../crates/lakko-calls/src/sframe.rs)
+   now exposes `ParticipantKey::seal_framed` (peeks the
+   counter, builds the header, seals with the header as
+   AEAD AAD, returns `header || ciphertext`) and
+   `open_framed` (decodes the header, binds the EXACT
+   on-wire header bytes as AAD, checks `kid == sender_leaf`,
+   opens). 7 property tests added on top of the prior
+   suite. The SFU reads the KID off the wire to route by
+   participant without touching the ciphertext.
+3. **Cross-platform AAD contract — [ADR-0013](../adr/0013-sframe-cross-platform-aad.md).**
+   The AEAD AAD is the SFrame wire header (KID + CTR), NOT
+   any host RTP `additional_data`. This is the property
+   that lets a frame sealed on one platform open on
+   another: the host metadata is not reconstructible
+   across stacks, so it cannot be in the authenticated set.
+4. **All three client surfaces consume the framed path.**
+   The flat C ABI (`lakko-sframe-native`:
+   `lakko_sframe_seal_framed` / `_open_framed`), UniFFI
+   (`ParticipantKey.seal_framed` / `open_framed`), and
+   wasm-bindgen (`sealFramed` / `openFramed`) all expose
+   it. The native libwebrtc C++ bridge
+   (`apps/shared/sframe-bridge`) calls `seal_framed` /
+   `open_framed` directly (host `additional_data`
+   intentionally unbound); its 8-assertion host test
+   (`just test-sframe-bridge`) proves both that a
+   mismatched host AAD does NOT fail decryption and that a
+   tampered header DOES. The browser side is the
+   `RTCRtpScriptTransform` worker
+   (`apps/web/src/calls/sframe-transform.ts` +
+   `sframe-transform-worker.ts`) calling `sealFramed` /
+   `openFramed` inside a module worker.
+
+**What is still open — live cross-platform RTP verification.**
+The byte-level interop is asserted by construction (the
+header is platform-independent; native + web call the same
+`lakko-calls` core through the same framed API) and by the
+native host test. What has NOT been observed firsthand is a
+real media frame sealed on one platform (e.g. a Chrome
+`RTCRtpScriptTransform` sender) decrypting on another (e.g.
+an iOS / Android libwebrtc receiver) over a live SFU
+forwarding path. That requires two real endpoints plus the
+SFU in the middle and cannot be done in a headless build
+environment.
+
+**Narrowed (2026-06-12).** The "does an SFrame frame survive
+the live SFU at all?" question is now answered firsthand in a
+headless test:
+[`sframe_sealed_frame_round_trips_through_the_live_sfu`](../../services/sfu/tests/synthetic_client_e2e.rs)
+seals a frame with the real `lakko_calls::sframe`
+`seal_framed`, pushes it through the production
+`spawn_media_task` over a real `str0m` ICE + DTLS handshake +
+the cross-fanout renegotiation, and the subscriber
+`open_framed`s the forwarded bytes back to the exact
+plaintext — so the RFC 9605 §4.3 header (the AAD) and the
+ciphertext provably survive the SFU forward intact, and the
+SFU stays SFrame-opaque (`lakko-calls` is a **dev-only** dep
+of `services/sfu`; the production binary never links it,
+preserving C-39).
+
+**Effectively closed (2026-06-12) — cross-runtime byte interop
+proven by golden vector.** The cross-*runtime* leg no longer
+rests on "by construction": a single canonical SFrame wire —
+sealing `(seed=[0x42;32], leaf=3, plaintext="lakko sframe
+golden vector v1")` on a fresh `ParticipantKey` (counter 0) —
+is now pinned and asserted on ALL FOUR stacks, each of which
+both SEALS to the identical bytes and OPENS them back to the
+plaintext: the Rust core
+([`sframe.rs::golden_vector_*`](../../crates/lakko-calls/src/sframe.rs)),
+the wasm/web `RTCRtpScriptTransform` stack
+([`sframe-golden.test.ts`](../../apps/web/src/calls/sframe-golden.test.ts),
+vitest), the iOS UniFFI stack
+([`SFrameGoldenTests.swift`](../../apps/ios/LakkoTests/SFrameGoldenTests.swift)),
+and the Android UniFFI stack
+([`SframeGoldenTest.kt`](../../apps/android/app/src/androidTest/kotlin/me/lakko/app/calls/SframeGoldenTest.kt)).
+The Rust, web, and iOS golden tests were verified firsthand
+(iOS live on a simulator); the Android instrumented test
+compiles and runs in CI (`g3-4-mobile.yml` →
+`connectedDebugAndroidTest`); the Rust + web tests gate every
+CI run (`cargo test --workspace` + vitest). Because every stack
+produces and consumes the byte-identical wire, a frame sealed
+on any stack opens on any other — the cross-runtime interop is
+now a *proven equality*, not an assumption. Composed with the
+live-SFU verbatim-forwarding test above, the
+sealed-on-web → relayed-by-SFU → opened-on-native path is
+established by correctness: the SFU forwards the wire
+unchanged, and that exact wire is what every native stack
+opens.
+
+**Composition now observed in one headless test (2026-06-15).**
+The "two already-proven facts" no longer need to be composed
+mentally: [`golden_vector_round_trips_through_the_live_sfu`](../../services/sfu/tests/synthetic_client_e2e.rs)
+seals the EXACT canonical golden vector (`seed=[0x42;32]`,
+`leaf=3`, `"lakko sframe golden vector v1"`), asserts the sealed
+wire equals the byte-pinned `GOLDEN_WIRE_HEX` that the Rust /
+web / iOS / Android golden tests all pin, pushes THOSE bytes
+through the production `spawn_media_task` over a real `str0m`
+ICE + DTLS + cross-fanout renegotiation, and the subscriber
+`open_framed`s the forwarded bytes back to the golden plaintext.
+So the bytes a real web / iOS / Android client emits ARE the
+bytes observed to cross the live SFU intact — the composition is
+a single firsthand-verified fact, not a mental join. Verified
+firsthand (`cargo test -p lakko-svc-sfu --test
+synthetic_client_e2e` → 5 passed) and gates every CI run.
+
+**Native C ABI golden pin added (2026-06-17).** The flat
+`lakko-sframe-native` `extern "C"` surface — the path the iOS
+Obj-C++ shim + Android JNI module actually call before handing
+bytes to libwebrtc's `FrameEncryptorInterface` /
+`FrameDecryptorInterface` — is now itself pinned to the canonical
+golden in
+[`crates/lakko-sframe-native/tests/golden_cross_stack.rs`](../../crates/lakko-sframe-native/tests/golden_cross_stack.rs):
+`lakko_sframe_seal_framed` over the golden seed / leaf / plaintext
+produces the EXACT `GOLDEN_WIRE_HEX`, and `lakko_sframe_open_framed`
+recovers the golden plaintext from that wire. Previously the C ABI
+was only opacity-tested with arbitrary per-test seeds
+(`sfu_opacity_e2e.rs`); the cross-stack golden was pinned on the
+core + web/wasm + iOS/Android UniFFI surfaces but NOT on the C ABI
+the native media shims wrap. This closes that last in-codebase
+coverage gap — core, web (wasm), UniFFI, the native C ABI, and the
+live `str0m` SFU round-trip now ALL agree on the one canonical wire.
+Verified firsthand (`cargo test -p lakko-sframe-native --test
+golden_cross_stack` → 3 passed).
+
+The C++ bridge ONE LAYER up is now golden-pinned too: a
+`test_cross_stack_golden_vector` assertion in
+[`apps/shared/sframe-bridge/test_bridge.cc`](../../apps/shared/sframe-bridge/test_bridge.cc)
+drives the actual `LakkoFrameEncryptor::Encrypt` /
+`LakkoFrameDecryptor::Decrypt` (the concrete `webrtc::FrameEncryptorInterface`
+/ `FrameDecryptorInterface` impls the iOS Obj-C++ shim + Android JNI module
+wrap before handing bytes to libwebrtc) over the golden vector — `Encrypt`
+produces the EXACT `GOLDEN_WIRE_HEX` (even with a non-empty host
+`additional_data`, re-proving ADR-0013 host-AAD-independence) and `Decrypt`
+recovers the golden plaintext. Verified firsthand (`just test-sframe-bridge`
+→ 9 assertions pass). So every layer of the native media stack — the C ABI,
+the C++ bridge, and the webrtc-interface impls — is proven byte-identical to
+web / iOS-Android-UniFFI / the core, all the way down to the libwebrtc handoff.
+
+The only residual is a single monolithic real-Chrome ⊕
+real-native ⊕ deployed-SFU smoke run — redundant for
+correctness (it would only re-observe the same composition with
+real codec pipelines), and a deploy/CI-execution concern, not a
+development one. The web multi-party session that drives the
+worker (`apps/web/src/calls/sfu-call-session.ts` — composes
+the `lakko-sfu-v1` signaling client + the call-admission JWT
++ one `RTCPeerConnection` to the SFU + `attachSenderSFrame` /
+`attachReceiverSFrame` on every track + SFU-initiated
+renegotiation) is now wired into the chat UI: a group chat
+(>2 members) routes the call button through
+`createSfuCallUi`, which drives the shared call-UI store
+roster, plays remote audio, and renders per-tile remote
+video, while 1×1 chats stay on the P2P path. The MSID
+stream-id → source-peer correlation the video tiles need is
+pinned by construction — the SFU sets the downstream MSID
+stream-id to the source peer id (`add_media(..,
+Some(source_peer.to_string()), ..)` in
+`services/sfu/src/media.rs`), and that string is the same
+`PeerId` the signaling roster carries, so
+`ev.streams[0].id` maps straight onto the roster tile. The
+**native** iOS + Android clients are now wired to the same
+extent (SFU multi-party arc, complete): `SfuSignalingClient`
+(WS + typed `lakko_sfu_proto` frames) + `SfuCallSession`
+(one `RTCPeerConnection`/`PeerConnection` to the SFU,
+`armSFrameEncryptors` on every local sender before the offer,
+`armSFrameDecryptor` on every remote receiver, SFU-initiated
+renegotiation) + the `SfuCallUi` adapter driving the shared
+`CallUiState` + the chat-header trigger/presentation. Both
+publish SFrame-sealed video when the call is started with the
+video-call button (the local camera is captured, the video
+track added before `armSFrameEncryptors` + the offer, so the
+video sender is sealed alongside audio). All three platforms
+therefore reach the SFU through the identical framed
+`seal_framed` / `open_framed` core. What remains is only the
+live cross-platform RTP verification above (a real frame
+round-tripping web↔native through a deployed SFU) — a
+verification step, not a missing mechanism.
+
+**Why this isn't a security gap today.** The keying math +
+the AAD set + the wire layout are all RFC 9605 conformant
+and shared across platforms by construction. The residual
+item is a verification step (does a live cross-stack frame
+round-trip?), not a missing mechanism. The fail-closed
+posture holds throughout: a frame that fails to
+parse / authenticate is dropped, never forwarded as
+plaintext (invariant #4), on every surface.
+
+## Maintenance + reconciliation
+
 ### G-29: in-code completion markers swept + reconciled; residual genuinely-open items
 
 **Reconciliation pass (2026-06-09).** The codebase's in-code "TODO / not yet
@@ -2479,6 +2290,8 @@ breaks):**
   zero-init was dropped (like the labelled `MEDIA_FRAMES_DROPPED_TOTAL`, it
   first appears once traffic flows). `cargo test -p lakko-sfu-proto`
   (21 passed) + `-p lakko-svc-sfu` green; clippy `-D warnings` clean.
+
+## Key transparency
 
 ### G-30: KT-log (S1-S3) deployed-verifier scope + append-binding trust + equivocation residual — **#2 closed (ADR-0019) + genesis squatting PREVENTED (ADR-0036, flag-gated), #1 closed (ADR-0020)**
 
@@ -2670,6 +2483,8 @@ genesis** proof that PREVENTS it, additive to (never replacing) the self-sig.
   collusion stays out of scope (a compromised attest signing key already co-signs
   the root — the same trust tier). See ADR-0036.
 
+## Client release / update
+
 ### G-32: Update-notice suppress/replay residual (ADR-0038) — **ACCEPTED (LOW), 2026-07**
 
 ADR-0038 adds a signed "update available" notice: the client fetches a **global**,
@@ -2705,6 +2520,8 @@ table in [`invariant-index.md`](./invariant-index.md), which is the only place t
 are maintained). A future tightening (a persisted highest-`latest_release`-seen floor, or a re-enabled
 generous freshness window) is a clean addition if the residual is ever judged worth
 closing. See ADR-0038 § "Freshness model + residual".
+
+## AEAD (key, nonce)-reuse audit
 
 ### G-33: Channel publish-counter not persisted → AEAD nonce reuse across relaunch — **CLOSED (2026-07)**
 
@@ -2843,107 +2660,7 @@ KID, not the ADR-0035 composite `(leaf << 8) | stream`; touches no key / nonce �
 cosmetic / routing for pre-sealed bytes — and has **no production caller**, test-only) now
 notes the keyed media path must use `seal_framed` / `open_framed`.
 
-### G-35: MLS group-commit publish-before-persist → deterministic single-device epoch-desync brick — **CLOSED (2026-07, [ADR-0040](../adr/0040-durable-pending-commit-outbox.md) durable pending-commit outbox, S2–S5 landed on web + iOS + Android)**
-
-The G-34 T2 fix reordered the chat **send** path to
-`create → persist(durable, fail-closed) → publish`, and it explicitly named the
-residual it did not close (this entry above, `known-gaps.md` G-34 §T2): the four
-group-membership **commit** paths — add / remove / role-change / external-join
-approve — share the same publish-before-persist ordering, but with a **DISTINCT and
-worse** failure mode than a same-generation nonce reuse. This entry records that
-hazard and its accepted fix. Like G-33 / G-34, this is a **free-form audit record**
-— it adds **no** indexed C / I / T invariant (the index stood at **8 I + 58 C + 15 T**
-when this was written; the live counts live only in the gated Quick stats table in
-[`invariant-index.md`](./invariant-index.md)).
-
-**The hazard (deterministic, verified firsthand).** Each commit path runs
-`lakko-mls` create-commit, which **eagerly merges** epoch N → N+1 into the in-memory
-provider *inside* the create call (`crates/lakko-mls/src/group.rs`:
-`merge_pending_commit` at `:280` add, `:361` remove, `:392` role/GCE;
-`approve_external_join` `:498` delegates to `add_member` at `:516`), then the client
-publishes the commit (+ a `WelcomeRendezvous` for add / approve) to the DS, then
-persists the N+1 snapshot **best-effort** (failures swallowed — web
-`contacts/client.ts` `persistBestEffort` `:443`, iOS / Android
-`persistSnapshotBestEffort`). The OpenMLS provider is **in-memory**
-(`identity.rs:56`, "in-memory for Phase 0"), so the snapshot is the only durable
-epoch copy. A crash **or** a silent best-effort persist failure **between publish
-and persist** makes the commit C durable on the DS (peers advance to N+1) while the
-local snapshot rolls back to N. On restart the device does **not** self-heal: the
-in-memory own-published echo-suppression set is lost (web `chat/client.ts:248`
-`ownPublishedIds`, iOS `ChatClient.swift:57`, Android `ChatClient.kt:88`), so the
-poll loop re-fetches C and OpenMLS **unconditionally rejects processing one's own
-commit** (`own_leaf_index() == sender leaf` → `CannotDecryptOwnMessage`,
-`openmls-0.8.1/src/framing/validation.rs:111-112`). The device is **permanently
-stuck at epoch N** for that group — silent, no error surfaced, recoverable only by
-another admin re-adding it. **Blast radius: one device (the committer).** There is
-also a residual **2^-32** handshake-ratchet nonce-reuse surface if the bricked
-device issues a **second** commit at N (bounded by the MLS `reuse_guard`, RFC 9420
-§6.3.2) — secondary to the deterministic desync.
-
-**Why the naive fix is worse (the load-bearing point).** The G-34 T2 shape (a bare
-persist-before-publish reorder) works for **application messages** because a skipped
-ratchet generation is harmless (receivers tolerate gaps). A **commit cannot be
-skipped** — N → N+1 is a group-wide barrier — so a bare reorder here merely **flips**
-the desync to **device-AHEAD**: the device is durably at N+1 while C never reached
-the DS and C's bytes are unrecoverable from the merged snapshot, stranding the
-**WHOLE group** at N with no path forward — arguably worse than the single-device
-brick. The fix therefore needs **durability of the pending commit**, not an ordering
-change. (Contrast: the DeviceGroup pairing path already uses persist-before-publish,
-G-5 / G-7, and is safe there because the ahead-state self-heals via joiner-retry and
-the single-founder case has no other member — neither holds for a chat membership
-commit.)
-
-**The accepted fix — ADR-0040 Option A: a durable pending-commit outbox
-(client-only, no `lakko-mls` core / FFI change).** Keep the eager merge. Persist a
-per-`(account, group)` outbox entry holding the commit wire-bytes **and** the
-Welcome/rendezvous wire-bytes (the two-artifact coverage), marked un-acked,
-**together with** the N+1 snapshot in one atomic write **before any publish**
-(fail-closed — a failed write aborts the op with no publish, and the device rolls
-back cleanly to N); publish; mark acked; and on restart **re-publish** un-acked
-entries idempotently (peers at N+1 drop the duplicate as wrong-epoch; the committer
-re-arms its echo filter). This makes the device never durably ahead-without-publish
-nor behind-with-publish, so every crash-window outcome is either "clean N, no op" or
-"N+1 with a re-publishable commit." Alternatives rejected: **Option B** (defer the
-eager merge in the core until publish is confirmed — cleaner but touches the
-sacrosanct MLS core + FFI, deferred as a future refinement); the **bare reorder**
-(flips to the whole-group brick); and **do-nothing** (deterministic silent brick).
-Strengthens **invariant #4** (no group-epoch advance published without durable local
-recording of the commit); invariants #1 / #2 / #3 hold (the outbox stores opaque
-commit + Welcome artefacts; no `lakko-mls` state-machine change).
-
-**Status: CLOSED (2026-07).** ADR-0040 Option A landed end-to-end on all three
-clients. **Web (S2)** — `apps/web/src/chat/commit-outbox.ts` (a durable per-`(account,
-group)` store in the `lakko-mls` IndexedDB, bumped v1 → v2) + `mls-store.ts`
-`saveSnapshotWithCommitEntry` writing the outbox entry + N+1 snapshot in **one atomic
-`transaction([snapshots, commit-outbox])`** (Open Question 1 resolved: a single
-cross-store IDB transaction, so "N+1 snapshot with no entry" is impossible and the
-sweep needs no torn-write reconciliation) + the four commit-path reorders in
-`contacts/client.ts` + `sweepPendingCommits` in `Chat.tsx onMount` before the first
-poll. **iOS (S3)** — `apps/ios/Lakko/Chat/CommitOutbox.swift` (one JSON file per
-in-flight commit under Application Support, backup-excluded) + `ChatRepository`
-entry-first-then-snapshot + the `planSweep` torn-write discard + a once-per-session
-sweep at the top of `pollGroup`. **Android (S4)** — `apps/android/.../chat/CommitOutbox.kt`
-(file-per-entry under `noBackupFilesDir`) + `runCrashSafeCommit` + the `reconcileVerdict`
-torn-write discard + `sweepPendingCommits` at group-open. Open Question 1 (step-2
-atomicity) resolved per-platform: web = one atomic IDB transaction; iOS / Android =
-entry-first-then-snapshot with a restart-sweep **discard** of any un-acked entry whose
-durably-restored `Group.epoch()` did not reach the entry's `target_epoch` (a torn
-write whose commit was never published → drop the orphan, stay at N clean). Open
-Question 2 (orphan `messageId`) resolved via the **already-present** receive-loop
-benign-drop of a re-fetched own commit (`CannotDecryptOwnMessage`: web
-`chat/client.ts` catch-and-continue; iOS `ChatClient.swift:247` catch-all; Android
-`ChatClient.kt:277` `FfiException` catch) rather than recording the `messageId` in the
-durable write — the sweep additionally re-arms the echo filter for the re-published id.
-The two-artifact add / approve paths carry both the commit and the Welcome (add →
-mailbox) / rendezvous (approve → group journal); the sweep re-publishes each to its
-destination and echo-re-arms only the group-journal artefacts. No `lakko-mls` core /
-FFI change (invariant #3 untouched); no indexed invariant added. Verified firsthand:
-web `tsc` clean + vitest 338 (15 new) + vite build; iOS `xcodebuild` build + test 12/12;
-Android `:app:compileDebugKotlin` + `CommitOutboxTest` 10/10. Residual: a live
-crash-injection / power-loss e2e on a deployed multi-device environment (a runtime
-gate, like G-26) — the reorder + torn-write + sweep are proven by the per-platform
-unit suites. Option B (defer the eager merge in the MLS core until publish is
-confirmed) stays deferred as a future refinement.
+## Push routing
 
 ### G-36: Push routing under an opaque `push_gid` — the co-membership cluster and the surviving delivery-side residuals ([ADR-0042](../adr/0042-push-opaque-group-routing-id.md) + [ADR-0043](../adr/0043-push-routing-secret-rotation-on-removal.md), 2026-08)
 
@@ -3699,6 +3416,299 @@ sender), #5 is **improved but not fully satisfied** — the server no longer
 materialises a *DS-linkable* social graph, and the cluster is no longer
 *forward*-linkable across a removal by the evicted party, but an opaque
 co-membership cluster is still materialised and still re-linkable by intersection.
+
+## Dependency advisories
+
+The `cargo audit` baseline (RustSec advisory DB) surfaces
+two open vulnerabilities + three unmaintained-crate
+warnings in the workspace's transitive dependency tree.
+None are in code we control; remediation depends on
+upstream releases. Each entry below lists severity,
+reachability analysis, and the upstream tracker the fix
+is gated on.
+
+### G-23: `libcrux-chacha20poly1305 0.0.7` — RUSTSEC-2026-0124 (HIGH 8.2) — **CLOSED (fixed)**
+
+> Potential Panic on Overlong Ciphertext Buffer.
+> Upgrade to >= 0.0.8.
+
+Vulnerable as a transitive dep:
+`libcrux-chacha20poly1305 0.0.7 → libcrux-aead 0.0.7 →
+hpke-rs-libcrux 0.6.1 → hpke-rs 0.6.1 →
+openmls_rust_crypto 0.5.1 → lakko-mls` (HPKE seal/open inside
+OpenMLS).
+
+**Fix — a Cargo.toml-only vendored fork of `hpke-rs-libcrux`.**
+The published `hpke-rs-libcrux 0.6.1` hard-pins
+`libcrux-aead ^0.0.7` (which transitively pins the vulnerable
+`libcrux-chacha20poly1305 0.0.7`), and a `[patch.crates-io]`
+cannot relax a semver requirement. So we vendor `hpke-rs-libcrux`
+under `crates/vendor/hpke-rs-libcrux` and patch it in via the root
+`[patch.crates-io]`. The delta is **two version bumps in its
+`Cargo.toml` only** — `libcrux-aead 0.0.7 → 0.0.8` (which pulls
+the fixed `libcrux-chacha20poly1305 0.0.8`) and its own
+`libcrux-traits 0.0.6 → 0.0.7` so the AEAD trait it imports
+matches what `libcrux-aead 0.0.8` implements. **The `src/` is
+byte-identical to upstream 0.6.1** (verified) — zero crypto-code
+changes.
+
+The earlier worry about an "irreconcilable `libcrux-traits`
+0.0.6-vs-0.0.7 conflict" was wrong: `hpke-rs-libcrux` uses
+`libcrux-traits` only for the AEAD trait, so `libcrux-ecdh` /
+`libcrux-hkdf` staying on `libcrux-traits 0.0.6` while the AEAD
+path uses `0.0.7` is fine — Cargo carries both versions and no
+trait type crosses the boundary. The fix **compiles + the full
+workspace checks clean + all `lakko-mls` tests pass**, and
+`cargo audit` now reports the libcrux advisory gone (only the
+accepted-risk `rsa` G-24 remains).
+
+Regression-guarded by the existing `cargo audit` / `cargo deny`
+CI gate: if the bump were reverted, `libcrux-chacha20poly1305
+0.0.7` would return and the advisory check would fail.
+
+(The vulnerable path was, in any case, not demonstrably reachable
+— every byte reaching `libcrux-chacha20poly1305::decrypt` first
+passes OpenMLS's length-bounded `MlsMessageIn` parser + the
+HPKE-RS length checks, and the attacker-facing ingest is gated by
+a rate limit + PoW + Privacy Pass — so this was a low-risk DoS at
+worst even before the fix.)
+
+### G-24: `rsa 0.9.10` — RUSTSEC-2023-0071 (MEDIUM 5.9) — Marvin Attack — **CLOSED (Jun 2026)**
+
+**Closed by dropping rsa, not accepting it.** Bumped `sqlx` 0.8 → 0.9
+(released, `rust-version` 1.94 ≤ our pinned 1.95) across all 7 services and
+omitted the now-feature-gated `rsa` feature (`sqlx-mysql/rsa`), so the crate is
+no longer in the dependency tree at all — `cargo tree -i rsa` is empty and
+`cargo deny check` passes with **no ignore** for RUSTSEC-2023-0071 (the
+`deny.toml` entry was removed). The only 0.9 breaking change for our usage was
+the SQL-injection guard (`SqlSafeStr`): the 4 audited dynamic-SQL sites in
+`services/ds/src/journal.rs` (table/column from a fixed `Queue` enum, never user
+input) now wrap the string in `sqlx::AssertSqlSafe`. Workspace `cargo check` +
+`cargo deny` + the `ds` tests are green. The original analysis below is retained
+for history.
+
+---
+
+> Potential key recovery through timing sidechannels.
+> No fixed upgrade is available.
+
+Transitive dependency: `rsa 0.9.10 → sqlx-mysql 0.8.6 →
+sqlx → all `services/*`.
+
+**Why this is structural, not negligence.** The `rsa`
+crate is the only pure-Rust RSA implementation that
+compiles on every target sqlx supports; the Marvin-attack
+mitigation requires constant-time arithmetic that the
+crate maintainers explicitly call out as "we will not
+land this in the current codebase." The upstream
+position is "use a different RSA library if you need
+side-channel resistance" — `sqlx-mysql` would have to
+swap implementations, which it has not.
+
+**Reachability.** `rsa` is reached **only** via MySQL
+native-auth handshake when the server's
+`mysql_native_password` authentication method requires
+RSA-OAEP padding to encrypt the client password (server-
+side `caching_sha2_password` cache miss path). Lakko
+configures MariaDB with `caching_sha2_password` ONLY,
+and the warm-cache hit path uses SHA-2 without RSA. The
+RSA path is reached only on first-time connect from a
+client whose password hasn't been cached server-side.
+**The application never sees user passwords directly**:
+authentication runs OPAQUE-PAKE (`services/auth`), which
+the database connection layer is downstream of — the
+MySQL connection password is the **service's** own DB
+password (configured in `/etc/lakko/lakko.env`), not a
+user's. A successful timing attack on this RSA exchange
+would leak the service's MySQL connection password to an
+attacker who already has network access to MySQL itself
+— at which point the attacker has direct DB access and
+the RSA leak is the wrong attack to spend a Marvin
+side-channel on.
+
+**Mitigation**: production MariaDB binds only to the
+internal loopback / VPC interface; only the Lakko
+services reach it. An attacker who can mount a timing
+side-channel on this internal hop has already broken
+the perimeter.
+
+**Status**: accepted risk pending upstream `sqlx-mysql`
+swapping to a constant-time RSA crate (no tracker —
+upstream position is "no fix coming"). Re-audit if MySQL
+auth surface changes.
+
+**Corrected + re-verified (Jun 2026).** An earlier note here
+claimed this was "not fixable upstream" — that was wrong (it
+parroted a stale `deny.toml` comment). The real status:
+- `cargo update --dry-run` shows 0 **semver-compatible** updates
+  — `rsa` 0.9.10 + `sqlx` 0.8.6 are the latest 0.x releases —
+  but that only covers in-range bumps.
+- On `sqlx-mysql` **0.8.x** the `rsa` crate cannot be removed:
+  `optional = true` in the manifest, yet `connection/auth.rs`
+  does `use rsa::{…}` UNCONDITIONALLY (no `#[cfg(feature="rsa")]`),
+  so dropping the feature is a compile error.
+- **`sqlx` 0.9.0 is released** (the stale comment said sqlx was
+  still "waiting on rsa 0.10.0") and **feature-gates rsa**
+  (`sqlx-mysql/rsa = [dep:rand, dep:rsa]`). The advisory itself
+  has `patched = []` — no fixed rsa exists — so the fix is to
+  **drop** rsa, not upgrade it: bump 0.8 → 0.9 and omit the `rsa`
+  feature, and the crate leaves the tree entirely (our MariaDB is
+  localhost-only over a Unix socket / TLS, so the
+  caching_sha2_password RSA path is never exercised).
+- **Status: a real, concrete fix exists (sqlx 0.9 + no rsa
+  feature) — deferred only because the 0.8 → 0.9 bump is a
+  breaking, multi-service migration.** Documented accept in
+  `deny.toml` stands in the meantime; residual is near-zero per
+  the reachability analysis above.
+
+### G-25: Unmaintained-crate + advisory warnings — **all CLOSED (2026-07): the three unmaintained warnings + two 2026 transitive advisories (anyhow, crossbeam-epoch); `cargo deny check advisories` is clean**
+
+The `cargo audit` baseline flagged three unmaintained-crate
+advisories. None are vulnerabilities — the maintainers wound
+down support, but the code works. Two were transitive through
+`uniffi 0.28.x` and **closed** by the `uniffi 0.28 → 0.31` bump
+(the same "major upstream bump drops the dep" remediation that
+closed G-24's `rsa` via sqlx 0.9). The third (`instant`) reaches
+us only on the wasm target via `openmls`'s `js` feature and is a
+non-CVE unmaintained advisory. It has a **self-serviceable fix
+that does not wait on openmls** — a `[patch.crates-io]` shim
+re-exporting the maintained `web-time` in place of
+`fluvio-wasm-timer` (detailed in the `instant` bullet below) —
+but the maintainer deferred it (2026-07) as supply-chain surgery
+disproportionate to a cosmetic-audit win; the accept posture
+stands until a clean `cargo audit` is required.
+
+- **`bincode 1.3.3`** (RUSTSEC-2025-0141) — **CLOSED
+  (Jun 2026).** Was under `uniffi_macros 0.28.3 →
+  uniffi 0.28.3` (build-time macro-output serialisation).
+  `uniffi_macros 0.31.2` no longer depends on `bincode`
+  (verified: `uniffi_macros@0.28.3` declared `bincode ^1.3
+  kind=normal`; `@0.31.2` declares neither). After bumping
+  `crates/lakko-ffi-uniffi` to `uniffi = "0.31"`,
+  `cargo update -p uniffi` reported `Removing bincode v1.3.3`
+  and `cargo tree -i bincode` is now empty.
+
+- **`paste 1.0.15`** (RUSTSEC-2024-0436) — **CLOSED
+  (Jun 2026).** Was under `uniffi_core 0.28.3` +
+  `uniffi_bindgen 0.28.3` (compile-time macro helper).
+  Both dropped `paste` at 0.31.2 (replaced by the maintained
+  `pastey` fork). `cargo update -p uniffi` reported
+  `Removing paste v1.0.15` and `cargo tree -i paste` is now
+  empty.
+
+- **`instant 0.1.13`** (RUSTSEC-2024-0384) — **CLOSED
+  (2026-07) via a `web-time` shim.** Was under
+  `parking_lot_core 0.8.6 → parking_lot 0.11.2 →
+  fluvio-wasm-timer 0.2.5 → openmls 0.8.1`. A wasm-only
+  timer abstraction (an **unmaintained** advisory, not a
+  CVE). The self-serviceable fix documented below was
+  **applied**: a vendored `crates/vendor/fluvio-wasm-timer`
+  shim (`pub use web_time::{SystemTime, UNIX_EPOCH};`, AGPL,
+  excluded from the workspace) wired in via `[patch.crates-io]`
+  REPLACES the real crate, so `instant` leaves the graph
+  entirely — `cargo tree -i instant --target all` reports "did
+  not match any packages" and `cargo deny check advisories` no
+  longer lists it. openmls builds + tests green against the shim
+  on host + wasm (the wasm build is the one that actually uses
+  the shim's `SystemTime` / `UNIX_EPOCH`).
+
+  **What functionality pulls it (verified 2026-07 against
+  the openmls 0.8.1 source):** `fluvio-wasm-timer` is an
+  optional openmls dependency gated behind openmls' `js`
+  feature, which Lakko enables in
+  [`crates/lakko-ffi-wasm/Cargo.toml`](../../crates/lakko-ffi-wasm/Cargo.toml)
+  (`openmls = { features = ["js"] }`). The `js` feature also
+  carries `getrandom/wasm_js` — mandatory (no RNG, hence no
+  MLS, on wasm without it) — so the feature itself cannot be
+  dropped. openmls `use`s the timer in exactly one place,
+  `src/key_packages/lifetime.rs`, under
+  `#[cfg(target_arch = "wasm32")]`, to read `SystemTime::now()`
+  for **KeyPackage lifetime (expiry) validation** — checking
+  a KeyPackage's `not_before` / `not_after` window when a
+  member is added or a group is joined on the web client. On
+  wasm `std::time::SystemTime::now()` panics (no OS clock), so
+  openmls substitutes `fluvio-wasm-timer`'s `SystemTime`
+  (backed by JS `Date.now()`). The functionality is genuine
+  and security-relevant (an expired KeyPackage must be
+  rejected), so the code path cannot simply be removed.
+
+  **A self-serviceable fix exists (deferred, not blocked on
+  openmls):** openmls consumes only `fluvio_wasm_timer::{SystemTime,
+  UNIX_EPOCH}`, and the maintained replacement `web-time`
+  exposes the same std-compatible surface. A `[patch.crates-io]`
+  entry pointing `fluvio-wasm-timer` at a tiny vendored shim
+  crate whose body is `pub use web_time::{SystemTime, UNIX_EPOCH};`
+  would satisfy openmls with **zero openmls source change** and
+  drop `instant` from the graph entirely (`cargo tree -i instant`
+  empty, incl. under wasm) — the same vendored-patch idiom Lakko
+  already uses for `webauthn-rs-core` and `hpke-rs-libcrux`, and
+  a net supply-chain improvement (an unmaintained crate replaced
+  by a maintained one). **Applied 2026-07** (the maintainer called
+  for the clean-audit posture): the shim landed exactly as described
+  and `instant` is gone. **Two 2026 transitive advisories surfaced in
+  the same audit run and were fixed by patch bumps** (unrelated to the
+  shim — the RustSec DB had published them since the prior audit):
+  `anyhow 1.0.102 → 1.0.103` (RUSTSEC-2026-0190, an `Error::downcast_mut`
+  unsoundness) and `crossbeam-epoch 0.9.18 → 0.9.20` (RUSTSEC-2026-0204,
+  an invalid-pointer-deref in a `fmt::Pointer` impl, via `rayon`), both
+  `cargo update -p` lock bumps with no source change. `cargo deny check
+  advisories` now reports **`advisories ok`**.
+
+  The alternative upstream fix — openmls' planned 0.9 (which
+  swaps `fluvio-wasm-timer` for `web-time` itself) — is
+  unreleased and its timeline / scope are not guaranteed; when it
+  does land, the bump is an MLS-core change requiring an ADR +
+  property tests regardless. The shim above does **not** wait on
+  it.
+
+**The uniffi 0.28 → 0.31 bump cost zero source changes** —
+`lakko-ffi-uniffi` uses proc-macro mode (`setup_scaffolding!`)
+with a crate-local bindgen (`uniffi_bindgen_main()`), so the
+runtime and generator move in lock-step. Verified end-to-end
+firsthand (2026-06-23): `cargo build -p lakko-ffi-uniffi` +
+`cargo test -p lakko-ffi-uniffi` (158 passed) + `cargo clippy`
+clean; `just regen-bindings` (Swift + Kotlin) succeeds; the iOS
+client (`xcodebuild` BUILD SUCCEEDED after `just build-ios`) and
+the Android client (`:app:compileDebugKotlin` BUILD SUCCESSFUL)
+both compile against the uniffi-0.31-generated bindings with no
+hand-written-code changes; `just audit` reports `advisories ok`.
+
+**Status**: bincode + paste closed; instant accepted upstream
+debt (wasm-only, openmls-pinned). CI warns (not fails) on
+unmaintained-crate advisories so they remain visible without
+blocking releases.
+
+**Cumulative posture** (updated 2026-06-23): zero
+vulnerabilities in Lakko-authored code. The transitive-dep
+advisories have since been remediated as the upstream chain
+caught up — `rsa` (RUSTSEC-2023-0071, G-24) closed by sqlx
+0.9, `libcrux-chacha20poly1305` (RUSTSEC-2026-0124, G-23)
+closed by the vendored hpke-rs-libcrux fork, and `bincode` +
+`paste` (G-25) closed by the uniffi 0.31 bump. The only
+remaining unmaintained-crate warning is `instant`
+(RUSTSEC-2024-0384, G-25) — wasm-only, pending an openmls
+release that drops `fluvio-wasm-timer`. The `cargo audit`
+baseline below is captured as of `2026-05-28` (re-run delta
+vs `2026-05-27`: **zero change** — same 2 vulnerabilities,
+same 3 unmaintained warnings, no new findings, no advisories
+resolved upstream at that time. Post-G5-6-wireup
+confirmation: the
+`hpke 0.13` + `rand_core 0.9` deps added by ADR-0012
+brought in their pure-Rust RustCrypto dependencies
+[`x25519-dalek`, `aes-gcm`, `chacha20poly1305`,
+`hkdf`, `hmac`, `sha2`] without introducing any new
+advisory) and is re-run on every CI build; new
+findings either get a G-entry of their own or are
+remediated as the upstream chain catches up.
+
+`cargo deny check` is the second tier of the supply-
+chain gate (licence allowlist, advisory deduplication,
+unmaintained-crate policy on top of `cargo audit`). The
+binary is not currently installed on this dev host; the
+`just audit` recipe invokes it during CI runs. A follow-
+up sprint stands up `cargo deny` locally on the
+maintainer's box so the audit pack can mirror its CI
+output here.
 
 ## Client concurrency
 
