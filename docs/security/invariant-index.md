@@ -15,34 +15,56 @@ section that describes it.
 | **I-** | 8   | I-1..I-8   | [`mls-state-machine.md`](./mls-state-machine.md) |
 | **C-** | 62  | C-1..C-62  | [`calls.md`](./calls.md) |
 | **T-** | 15  | T-1..T-15  | [`transport.md`](./transport.md) |
-| **G-** | 37  | G-1..G-37 | [`known-gaps.md`](./known-gaps.md) — open / deferred |
-| Total invariants  | 84  | (I + C + T) | live properties |
+| **G-** | 38  | G-1..G-38 | [`known-gaps.md`](./known-gaps.md) — open / deferred |
+| Total invariants  | 85  | (I + C + T) | live properties |
 | Total open gaps   | 13  | (G)         | tracked + scoped |
 
 **Note on the `G-` counts.** These two rows had drifted badly and were corrected
 on 2026-08-14: they claimed `G-1..G-27` with 27 open, while
 [`known-gaps.md`](./known-gaps.md) had carried `### G-` headings up to **G-36**
 for some time — G-29..G-36 were minted by later arcs and never reflected here.
-**37** is the count of `### G-N` headings (G-37 minted by the ADR-0044 arc);
-**13** is the count of those whose heading is *not* marked `CLOSED` (G-1, G-2,
-G-4, G-14, G-15, G-16, G-20, G-26, G-29, G-30, G-32, G-36, G-37). Read the open
-count as a mechanical marker tally, not an adjudication: several entries are
-**partially** closed (G-30's finding-1 and finding-2 are addressed by ADR-0039 /
-ADR-0036 while a residual remains; G-36 carries a per-residual status, currently
-residuals 1 / 3 / 4 / 5 / 7 / 8 / 10 carrying open material with 2, 6 and 9
-closed and 5 / 7 / 10 partially so), so the honest reading is "13 entries still
-carry open material". Unlike the I / C / T classes, the `G-` class is **not**
-covered by `just audit-index-check` — the gate only reconciles `### I-` /
-`### C-` / `### T-` headers against this page — which is precisely why this row
-was free to drift.
+**38** is the count of `### G-N` headings (G-37 minted by the ADR-0044 arc, G-38
+by the client commit-serialization arc); **13** is the count of those whose
+heading is *not* marked `CLOSED` (G-1, G-2, G-4, G-14, G-15, G-16, G-20, G-26,
+G-29, G-30, G-32, G-36, G-38). That total is **13 both before and after the
+2026-08 concurrency pass by coincidence, not by standing still** — G-37 closed
+and G-38 was minted in the same pass. Read the open count as a mechanical marker
+tally, not an adjudication: several entries are **partially** closed (G-30's
+finding-1 and finding-2 are addressed by ADR-0039 / ADR-0036 while a residual
+remains; G-36 carries a per-residual status, currently residuals 1 / 3 / 4 / 5 /
+7 / 8 / 10 carrying open material with 2, 6 and 9 closed and 5 / 7 / 10 partially
+so; G-37 is closed *on Android* with a stated cross-group residual, and G-38
+counts as open on the strength of one residual — the remote-commit epoch fork —
+while its own serialization fix landed on all three clients), so the honest
+reading is "13 entries still carry open material".
 
-**A second, still-uncorrected `G-` drift, recorded rather than silently left.**
-The per-category `## Known gaps` tables further down this page are a **partial
-legacy listing**: they carry rows only up to G-27 plus G-31, so **G-28, G-29,
-G-30, G-32, G-33, G-34, G-35** have no row at all. The ADR-0044 reconcile added a
-**Push routing** section for the two gaps in its own scope (G-36, G-37) rather
-than backfilling eight unrelated arcs' entries, which would have meant summarising
-work it did not review. Backfilling the rest is a standing follow-up.
+**The `G-` class is now gated — and what is deliberately left ungated.** Both
+drifts above were possible because [`tools/audit-index-check`](../../tools/audit-index-check)
+reconciled only the `I-` / `C-` / `T-` classes. It now covers `G-` as well: every
+`### G-N:` heading in [`known-gaps.md`](./known-gaps.md) must have a row on this
+page and every row must have a heading, **and the count + range in the `G-` row
+above are derived from the source and compared**, so a hand-written total cannot
+drift again. The per-category tables below were **back-filled in the same pass**:
+they had carried rows only up to G-27 plus G-31 and the ADR-0044 Push-routing
+pair, leaving **G-28, G-29, G-30, G-32, G-33, G-34, G-35** with no row at all.
+The **`Total open gaps` row is deliberately NOT gated, and the reason is concrete
+rather than a matter of taste.** Reproducing that number mechanically works only
+by testing each heading for a case-sensitive literal `CLOSED`, and the result
+matches the documented figure **by coincidence of wording** in at least two
+places: **G-30** is counted open only because its heading happens to spell the
+word lowercase ("#2 closed … #1 closed"), and **G-6** is counted closed while its
+own heading says the aspiration is "still open". Both classifications are
+defensible on the merits and neither is what the grep is actually measuring. A
+gate built on that would enforce heading phrasing, not truth — and would push a
+future editor to re-word a heading to satisfy a script. Presence, numbering,
+count and range are mechanical facts; status is a human adjudication. Keep that
+one row in sync by hand, and re-derive it with:
+
+```sh
+grep -E '^### G-[0-9]+:' docs/security/known-gaps.md | grep -vc CLOSED
+```
+
+reading the output as a starting point to adjudicate, never as the answer.
 
 ## MLS state machine invariants (I-1..I-8)
 
@@ -257,7 +279,7 @@ Source: [`transport.md`](./transport.md). Anti-censorship
 | T-14 | WebTransport client uses cert-hash pinning (SHA-256 of full DER cert, W3C `serverCertificateHashes` mode) + u32-BE length-prefixed framing with MAX_FRAME_BYTES enforcement |
 | T-15 | MASQUE config + CONNECT-UDP request (RFC 9298 §3) + HTTP Datagram payload codec (RFC 9297 §3) are spec-aligned and length-bounded; CONNECT-UDP Context ID 0 pinned, others refused |
 
-## Known gaps (G-1..G-37 in `known-gaps.md`; this listing is partial — see the note under Quick stats)
+## Known gaps (G-1..G-38 in `known-gaps.md`)
 
 Source: [`known-gaps.md`](./known-gaps.md). Items the
 maintainer knows are not audit-ready yet; reviewers
@@ -270,6 +292,7 @@ should not re-discover them.
 | G-1 | Channel two-tier flow (>50k subscribers) — **CLOSED** by Phase 4 backend + FFI (C-40..C-44) |
 | G-2 | MLS-2 / quantum-hybrid suites pinned for later |
 | G-3 | External-join proposals not wired into a UI surface |
+| G-35 | MLS group-commit publish-before-persist → deterministic single-device epoch-desync brick — **CLOSED (2026-07, [ADR-0040](../adr/0040-durable-pending-commit-outbox.md))**. The four membership-commit paths (add / remove / role-change / external-join approve) eagerly merge epoch N → N+1 into the **in-memory** OpenMLS provider inside the create call, then publish, then persist the N+1 snapshot **best-effort**; a crash or a silently-failed persist between publish and persist left the commit durable on the DS while the local snapshot rolled back to N, and on restart the lost echo-suppression set let the poll loop re-fetch the device's own commit, which OpenMLS unconditionally rejects (`CannotDecryptOwnMessage`) — a **silent, deterministic, single-device** membership brick. The naive persist-before-publish reorder is **worse** (a commit is a group-wide barrier that cannot be skipped, so it flips the desync to device-AHEAD and strands the whole group), so the fix is **durability of the pending commit**: a per-`(account, group)` outbox holding the commit **and** Welcome / rendezvous bytes, written with the N+1 snapshot **before any publish**, fail-closed, re-published idempotently on restart. Landed on web + iOS + Android. Strengthens invariant #4; no `lakko-mls` change (invariant #3 untouched). Residual: a live crash-injection / power-loss multi-device e2e |
 
 ### Multi-device
 
@@ -321,14 +344,46 @@ should not re-discover them.
 | G-22 | Per-joiner dedup for call invites lands with multi-use orchestration — **CLOSED** by C-33/C-35 |
 | G-26 | SFrame wire frame header (**RFC 9605 §4.3-conformant** — the §4.3 rewrite landed 2026-07: config byte `X\|K\|Y\|C` + inline `KID<=7` / `CTR<=7`, proven byte-for-byte against RFC 9605 Appendix C.1's published vectors (`header.rs::rfc_9605_appendix_c1_header_vectors`); the golden vector was re-pinned across all six stacks. External interop is now possible; only a live cross-platform / external-stack RTP round-trip over a deployed SFU remains) — serializer + framed pipeline + cross-platform AAD **landed** (C-38 / C-55, ADR-0013); SFrame sealed end-to-end on all three SFU clients. **Interop effectively closed:** the cross-runtime byte interop is now a *proven equality* via a golden vector pinned + asserted (seal AND open) on all four stacks — Rust core / wasm-web / iOS-UniFFI / Android-UniFFI (`sframe.rs::golden_vector_*`, `sframe-golden.test.ts`, `SFrameGoldenTests.swift`, `SframeGoldenTest.kt`; Rust+web+iOS verified firsthand, Android in `g3-4-mobile.yml` CI), and now ALSO on the two NATIVE-stack layers the platform shims wrap: the flat C ABI (`crates/lakko-sframe-native/tests/golden_cross_stack.rs` — `extern "C"` `seal_framed`/`open_framed`) and the C++ bridge (`apps/shared/sframe-bridge/test_bridge.cc` `test_cross_stack_golden_vector` — the `LakkoFrameEncryptor`/`LakkoFrameDecryptor` webrtc-interface impls), both pinned to the same `GOLDEN_WIRE_HEX`, so every native-stack layer is byte-identical to web/core down to the libwebrtc handoff. The live-SFU verbatim forward is proven by `sframe_sealed_frame_round_trips_through_the_live_sfu`. Composed, the sealed-on-web → SFU-relay → opened-on-native path holds by correctness. Residual: a single monolithic real-Chrome ⊕ real-native ⊕ deployed-SFU smoke — redundant for correctness, a deploy/CI-execution concern |
 | G-27 | Channel PublisherGroup — **CLOSED** — web + iOS + Android all derive the channel seed from a real, persisted `PublisherGroup` (G4-2-mls-publisher + G4-2-mls-persistence); the `newChannelSeedForTest` demo path is gone; the co-publisher-approve path reseals subscribers via the atomic `/rotate` fanout; the **scheduled** `RotationCron` module ships on all three but is not yet wired to run (a G-1 residual — corrected 2026-07 from an earlier "rotation wired via RotationCron on all three" overstatement); co-publisher reuse landed (ADR-0028 OQ3) |
+| G-28 | SFrame on-device wiring — **CLOSED (May 2026)** by the G3-sframe-native arc (N-1..N-6): the Rust SFrame algorithm is plumbed end-to-end through libwebrtc's `FrameEncryptorInterface` / `FrameDecryptorInterface` on iOS + Android via the flat C ABI (`crates/lakko-sframe-native`) → sha256-pinned M125 C++ headers → the shared `sframe-bridge` C++ subclasses → the iOS Obj-C++ shim / the Android JNI Gradle module. Invariant #4 (no fallback to non-E2EE) is enforced at five layers including a boot-time `setFrameEncryptor` / `setFrameDecryptor` selector probe that refuses to start a call when negative — documented as C-45..C-50; the host-side close-out (`N-{4,5}-validate`) is C-53 |
 | G-31 | Cross-stream SFrame AEAD nonce reuse — multiple streams from one leaf shared a `(key, nonce_salt)` and their independent counters collided (HIGH for SFU group video) — **CLOSED (2026-07, [ADR-0035](../adr/0035-sframe-per-stream-kid-key.md))** by per-`(leaf, stream)` key derivation via the header KID `= (sender_leaf << 8) \| stream_index`, which fully covers the multi-video (camera + screen-share) case that [ADR-0034](../adr/0034-sframe-per-media-stream-key.md)'s per-media-type first attempt did NOT (superseded); landed + cross-stack-verified on all six SFrame stacks against one canonical golden; strengthens C-5 |
+
+### Key transparency
+
+| ID   | Title |
+|---|---|
+| G-30 | KT-log deployed-verifier scope + append-binding trust + equivocation residual — the three residuals recorded when the log shipped (S1-S3), **two since addressed**. **Finding 1 (operator split-view / equivocation): CLOSED** for the single-witness model by [ADR-0020](../adr/0020-witness-cosigning.md) witness co-signing (C-57) — the deployed verifier was the single-client inclusion path, not the chain verifier, so a malicious operator could sign two divergent valid roots and show one to each victim, undetectably; a witness now co-signs only after a Merkle consistency proof, and [ADR-0039](../adr/0039-kt-log-witness-quorum.md) generalises the gate to K-of-N. **Finding 2 (append-binding trust): CLOSED** by [ADR-0019](../adr/0019-client-authorised-log-leaf.md) client-authorised leaves (C-56) — anyone holding the append secret could previously write a leaf binding any account-key to any pubkey; **genesis squatting is now PREVENTED, not merely detected**, by [ADR-0036](../adr/0036-auth-attested-genesis.md)'s auth-attested genesis, whose append gate is **default-OFF pending the deploy rollout**. **Finding 3 (mismatch / absent posture is surface-not-block, only `rollback` hard-blocks): UNCHANGED** — adjudicated correct for now because the fail-closed ADR-0016 supersession gate is the primary trust and runs first, and discovery's append is best-effort fail-open so a legitimate rotation produces a transient mismatch; the stated condition to flip it is moving the append onto discovery's transactional critical path plus a bounded staleness SLA. Residuals: the ADR-0036 flag flip + a live cross-service e2e, and operator + K **colluding** witnesses — closed in practice only under **independent** witness operation, a deploy/ops property rather than code |
+
+### AEAD (key, nonce)-reuse audit
+
+| ID   | Title |
+|---|---|
+| G-33 | Channel publish-counter not persisted → AEAD nonce reuse across relaunch — **CLOSED (2026-07)**. `lakko-channels` derives each post's key + nonce from `(content_seed, channel_id, epoch_id, sender_pubkey, message_counter)`, and the seed + `epoch_id` are stable across a relaunch, so the counter was the only unique input — yet all three clients held it **in memory only**, restarting at 0 on every relaunch, so a relaunched publisher re-issued an identical `(key, nonce)` on new plaintexts within the epoch (ChaCha20 keystream reuse + Poly1305 forgery, against the zero-trust server and the subscribers who hold the ciphertext). Fixed by persisting the counter at rest as a **forever-monotone floor** (web `localStorage`, iOS Keychain, Android `EncryptedSharedPreferences`), write-through before returning so a crash can only skip a counter, never re-issue one; no reset on epoch rotation and `removeChannel` **keeps** the floor, since a re-add re-derives the same seed + epoch. Touches C-40..C-42; invariant #7 on native. Residuals: `reset()` drops the persisted counters (safe only paired with a full device wipe — flagged so it is never wired to a soft logout), and a multi-device publisher keeps independent counters |
+| G-34 | System-wide AEAD (key, nonce)-reuse audit — the sweep G-33 triggered across calls / SFrame, backup / crypto / recovery, MLS / DeviceGroup / pairing, and transport / push / attachments. **T1 CLOSED**: Shadowsocks-2022 restarted the per-direction AEAD nonce at 0 for the body stream, reusing the counters already consumed by the sealed handshake prelude — HIGH **within the obfuscation layer only** (the inner traffic stays MLS-E2EE, so invariant #2 holds and no message plaintext was exposed), fixed by continuing the counter past the prelude. **S1 / S2 HARDENED** (defence-in-depth, no live bug): `rekey` / `rotate_call_key` now no-op on an unchanged seed so a future caller cannot silently reset a counter under an unchanged key. **V1 + V2 VERIFIED FALSE ALARMS**, recorded so they are not re-discovered. **T2 CLOSED** — the residual first noted here proved **REAL and CRITICAL**: the chat send path published the generation-N ciphertext **before** persisting the N+1 sender-ratchet snapshot, and the persist was best-effort, so a crash re-consumed generation N — an identical `(key, nonce)` on a different plaintext in the **real E2EE message layer**. Fixed by reordering every ratchet-advancing send to `create → persist(durable, awaited, fail-closed) → publish` on all three clients (a crash now merely skips a generation, which receivers tolerate); strengthens invariant #4. Rest of the crypto surface **clean**; two latent footguns doc-hardened. The commit-path residual it named became **G-35** |
+
+### Client release / update
+
+| ID   | Title |
+|---|---|
+| G-32 | Update-notice suppress/replay residual ([ADR-0038](../adr/0038-update-available-notice.md)) — **ACCEPTED (LOW), 2026-07**. The signed `ReleaseManifest` is an **anti-forgery** control: a malicious serving tier or MITM cannot forge a higher `latest_release` / `min_supported_release` (a phishing nudge or manufactured urgency) without the offline publisher key. The same adversary **can** suppress the notice (strip the file → 404 → no banner) or replay a genuine-but-old manifest; both are LOW because they keep the user on a version they **already run** — no confidentiality or integrity break — and the client's own fail action on an unverifiable manifest is *also* to show no banner, so a suppressor gains nothing stripping the file would not. Freshness is **DISABLED in v1** (`max_staleness = i64::MAX`), so a replayed old manifest is not rejected as stale — deliberate, given the fail-action is silence. An **availability / anti-phishing** posture, **not** an E2EE control: its fail-safe is *fail toward no nag*, distinct from invariant #4's fail-closed-refuse. Takes no indexed C-number |
+
+### Maintenance + reconciliation
+
+| ID   | Title |
+|---|---|
+| G-29 | In-code completion markers swept + reconciled (2026-06-09) — a four-area sweep (Rust crates + services, web, iOS, Android) found that the large majority of the codebase's "TODO / not yet wired / for now / lands in X / deferred" annotations described work that had **already landed**, and corrected ~45 of them; this entry exists to record what genuinely remained after the sweep, so a reader does not re-derive the stale picture. Most of what it listed has since been closed in place and is annotated as such in the entry (the channel **subscriber** secret moved to hardware-backed storage on both natives — iOS Keychain with a legacy-plaintext scrub, Android `EncryptedSharedPreferences`, invariant #7; cross-device recover-via-discovery wired on all three with a shared `resolveRecoverAccount` helper; the PoW challenge logic de-duplicated into `lakko-pow-server`; SFU signaling frame metrics labelled by direction + kind). Items the entry still records as open: the iOS + Android accepted-contacts list is **in-memory only** (rebuilt by re-polling the stranger inbox from cursor 0 on launch, so the backup restore-merge of contacts is an optimisation rather than a correctness gap — the MLS whole-storage snapshot **is** restored on recover), and an APNs `content-available` silent-push wake for *immediate* iOS contact-inbox surfacing, which needs the push gateway to emit a silent push on inbox arrival (the opportunistic `BGAppRefreshTask` is wired). Cross-references, not new gaps: TOFU pending the deployed transparency service (G-4), external-stack SFrame RTP interop (G-26), and the DS having no auth/PoW |
 
 ### Push routing
 
 | ID   | Title |
 |---|---|
 | G-36 | Push routing under an opaque `push_gid` ([ADR-0042](../adr/0042-push-opaque-group-routing-id.md) / [ADR-0043](../adr/0043-push-routing-secret-rotation-on-removal.md) / [ADR-0044](../adr/0044-push-routing-secret-recency.md)) — the **co-membership cluster** and the surviving delivery-side residuals. Per-residual status: **2 CLOSED** (rotation on removal + live per-group unsubscribe), **6 CLOSED** (C-61 test-pinned on all three clients), **9 CLOSED** for the single process context (the recency order **plus** the serializing gate — C-62 sub-invariants 1-5), **7's concurrent-rotator core CLOSED** on the same fix, **5's rotate-vs-receive (F-E) path CLOSED** because the lock is shared; **10 RE-SCOPED** from "no client serializes the receive gate" (HIGH, blocking) to the cross-context remainder — web degrades to same-tab-only serialization without `navigator.locks`, and the native ADR-0041 / C-59 cross-process boundary was not examined; **1 / 3 / 4 / 8** untouched, and **1 is the substantive privacy limit** (an opaque co-membership cluster is still materialised and still re-linkable by token-set intersection; closing it needs per-device-blinded ids) |
-| G-37 | Android `ChatRepository.groupsLock` is held across **unbounded** DS network I/O (`publishGroup` at `:619` / `:719` / `:863` / `:1024` / `:1030`, `publishMailbox` at `:326` / `:725`, and the commit-outbox republish lambdas at `:2563-2565`), so a stalled DS request wedges the shared lock indefinitely. Surfaced by the ADR-0044 lock-bounding work: the push path reached it via `freshMintStamp() -> groupsLock` and is now insulated (`boundedOrNull` at both sites that await it under the routing lock), but **every other `groupsLock` caller still inherits it** and the chat path still has it. Availability, except on the one path where liveness was carrying a confidentiality guarantee. The equivalent question has **not been asked** of the iOS and web chat repositories |
+
+### Client concurrency
+
+| ID   | Title |
+|---|---|
+| G-37 | The Android chat repository held ONE repository-wide lock across a deliberate 30-second DS long poll — **CLOSED on Android (2026-08)**. Filed as a resilience hazard ("a hung request wedges the lock"); it was the **steady state** — `groupsLock` was one mutex per repository, and `pollGroup` awaited the long poll inside it under an unbounded loop, so an open chat screen stalled every send / edit / reaction / membership commit on **every** group. Fixed by (1) **restructuring** the poll rather than bounding it (network half / MLS half, the MLS half deliberately non-`suspend` so a wait cannot be reintroduced without failing to compile; a cursor that moved during the fetch drops the batch instead of re-feeding consumed rows and winding the cursor backward), (2) bounding DS I/O at the **transport** (`DsClient` / Ktor `HttpTimeout` → `IOException`, NOT `withTimeout`, whose `CancellationException` would be swallowed by the persist-catch inside `runCrashSafeCommit` and silently converted into an ADR-0040 commit rollback), and (3) narrowing to **two tiers** — a per-group mutex plus a global `providerLock`. The third step's correction is the load-bearing part: a straight per-group swap would have **broken ADR-0040**, because one OpenMLS provider serves every group, `snapshotStorage` can capture another group **torn**, and `restoreStorage` rolls back **every** group. The concurrency comes from lifting the network out of the provider region, not from removing the global lock. `pollAllGroups` now polls concurrently, bounded at 3 (OkHttp's `maxRequestsPerHost` default is 5). Residual: cross-group operations still serialise on the provider region (local CPU + one snapshot write) — a consequence of whole-provider persistence granularity, which only an MLS-core / FFI change (invariant #3) would remove |
+| G-38 | Two membership commits could be **in flight to the DS at once** → inverted journal order → device-ahead — **serialized on web + iOS + Android (2026-08); the remote-commit epoch fork is UNFIXED on every platform**. The hazard is **not** "two commits built on the same epoch" (no create region has a suspension point, so the second correctly reads N+1) — it is that the DS orders the journal by **arrival**, so an overlap can land commit(N+1 → N+2) before commit(N → N+1); peers drop the former as wrong-epoch, settle at N+1, and the committer sits at N+2. **The ADR-0040 outbox cannot recover it** — both publishes succeeded, both entries are acked, the restart sweep has nothing to re-publish. Fixed with a per-group **serializing** (never coalescing) lock spanning create-through-publish: Android's two-tier lock, iOS `withCommitLock` (a stored task chain modelled on `PushGroupRouting.routingChain`, because `@MainActor` releases isolation at the `await`), web `withGroupCommitLock` (module-level, since one canonical wasm `Identity` is shared by per-route client instances). Reachable in a single web tab (proven by execution — the shared `busy` flag has eight owners and a fire-and-forget `refresh()` clears it under a live commit) and on iOS (a code-structure argument — the view model holding `membershipBusy` is minted inline under `@ObservedObject`). Residuals: **the remote-commit fork needs a DS-side epoch gate or proposal-based commits and no lock addresses it**; web two-tab is not lock-fixable (independent wasm providers, snapshot keyed on `accountId` alone) and was deliberately not patched; web `CoPublishersPanel`'s 5 s interval poll is unguarded against its own approve; the web durable unit is per-account under a per-group key; and the lock spans an unbounded `fetch` on web / an implicit `URLSession` default on iOS. Strengthens invariant #4; no `lakko-mls` change (invariant #3 untouched) |
 
 ### Dependency advisories
 
@@ -340,7 +395,7 @@ should not re-discover them.
 
 ## How to add a new invariant
 
-Adding a new invariant means **all four** of the steps
+Adding a new invariant means **all five** of the steps
 below — drift between this index and the source files is
 the audit-grep failure mode this page exists to prevent.
 
@@ -359,19 +414,33 @@ the audit-grep failure mode this page exists to prevent.
    the row's removal would break grep + historical
    commit-message links).
 
+**Adding or renumbering a `G-` gap takes two extra edits**,
+both on this page, because the `G-` class alone is gated on
+its totals: update the **count and range** in the `G-` row
+of the Quick stats table — `just audit-index-check` derives
+both from `known-gaps.md` and **fails** on a mismatch — and
+adjudicate the **`Total open gaps`** row by hand, which the
+gate deliberately does not check (see the note under Quick
+stats for why).
+
 ## Counter sanity checks
 
-If `wc -l docs/security/{calls,transport,mls-state-machine}.md`
+If `wc -l docs/security/{calls,transport,mls-state-machine,known-gaps}.md`
 goes up significantly without this index changing, an
 invariant landed without being indexed. **CI gates on
 this** via [`tools/audit-index-check`](../../tools/audit-index-check)
 — a bash script that diffs the `### {class}-{n}:` headers
-in the three source files against the per-class tables on
+in the four source files against the per-class tables on
 this page. Both directions are checked: a new invariant
 in the source must have a matching index row, and a stale
 index row whose source-file header is gone is also a fail.
-Wired into `just ci` as the final docs gate. Run locally
-via `just audit-index-check`.
+The `G-` class additionally has its **total and range in
+the "Quick stats" table checked against the source**, so a
+hand-written count cannot drift; the `Total open gaps` row
+is deliberately excluded, because a gap's status is an
+adjudication rather than a mechanical fact (see the note
+under Quick stats). Wired into `just ci` as the final docs
+gate. Run locally via `just audit-index-check`.
 
 ## Cross-links
 

@@ -152,7 +152,33 @@ public class ChatClient(
         group: Group,
         plaintext: ByteArray,
         persistRatchet: suspend () -> Unit,
-    ): SendMessageResult {
+    ): SendMessageResult =
+        publishPreparedSend(prepareSend(identity, group, plaintext, persistRatchet))
+
+    /**
+     * G-37 — the PROVIDER half of [sendMessage], split out so the caller can
+     * release the repository's global provider lock before the DS publish.
+     *
+     * Everything here touches the shared OpenMLS provider: the ratchet advance
+     * (`createApplicationMessage`, N -> N+1) and the durable snapshot of the
+     * resulting state. The network half is [publishPreparedSend].
+     *
+     * The persist-before-publish ordering is UNCHANGED and still fail-closed —
+     * it is simply expressed by the split itself: [persistRatchet] runs here, and
+     * the publish cannot run until this function has returned normally. A throw
+     * (empty plaintext, MLS failure, persist failure) means no [PreparedSend]
+     * exists, so there is nothing to publish and the gen-N ciphertext never
+     * leaves the device.
+     *
+     * DELIBERATELY the only place the ratchet advances: a caller that wants the
+     * publish outside the provider lock MUST come through here first.
+     */
+    public suspend fun prepareSend(
+        identity: Identity,
+        group: Group,
+        plaintext: ByteArray,
+        persistRatchet: suspend () -> Unit,
+    ): PreparedSend {
         if (plaintext.isEmpty()) {
             throw ChatClientArgError("plaintext must be non-empty")
         }
@@ -190,8 +216,20 @@ public class ChatClient(
             )
         }
 
+        return PreparedSend(groupId = groupId, wireBytes = wireBytes)
+    }
+
+    /**
+     * G-37 — the NETWORK half of [sendMessage]: publish an already-prepared,
+     * already-persisted ciphertext.
+     *
+     * Touches no MLS state at all — [PreparedSend] carries plain bytes, so this
+     * runs OUTSIDE the repository's global provider lock and a 15 s DS publish no
+     * longer blocks every other group's MLS work.
+     */
+    public suspend fun publishPreparedSend(prepared: PreparedSend): SendMessageResult {
         val publish = try {
-            ds.publishGroup(groupId, wireBytes)
+            ds.publishGroup(prepared.groupId, prepared.wireBytes)
         } catch (e: DsClientArgError) {
             throw ChatError("DS publish failed", e)
         } catch (e: DsHttpError) {
@@ -252,7 +290,7 @@ public class ChatClient(
 
     /**
      * G-37 — the NETWORK half of [pollMessages], split out so the caller can run
-     * it OUTSIDE the repository-wide `groupsLock`.
+     * it OUTSIDE the repository's locks.
      *
      * This touches no MLS state whatsoever: it is a plain `GET` against the DS
      * journal, and the `groupId` is a value the caller already holds (the
@@ -288,7 +326,7 @@ public class ChatClient(
      *
      * DELIBERATELY NOT `suspend`. Every statement below mutates OpenMLS provider
      * state through the shared `Group` handle and must run under the caller's
-     * `groupsLock`; making it non-suspending is a structural guarantee that no
+     * provider lock; making it non-suspending is a structural guarantee that no
      * network wait can ever be reintroduced into this critical section (a
      * suspending call simply would not compile here).
      *
@@ -533,6 +571,22 @@ private fun toEvent(
 // =============================================================================
 // Result types
 // =============================================================================
+
+/**
+ * G-37 — a sealed, already-persisted application message awaiting only its DS
+ * publish. The hand-off between [ChatClient.prepareSend] (provider work, runs
+ * under the repository's global provider lock) and
+ * [ChatClient.publishPreparedSend] (network, runs outside it).
+ *
+ * Holds plain bytes only — no `Group`, no `Identity`, no provider handle — which
+ * is exactly what makes it safe to carry across the lock release.
+ */
+public class PreparedSend internal constructor(
+    /** Raw MLS group id the ciphertext is addressed to. */
+    internal val groupId: ByteArray,
+    /** The gen-N application-message wire bytes, already sealed. */
+    internal val wireBytes: ByteArray,
+)
 
 /** Result of [ChatClient.sendMessage]. */
 public data class SendMessageResult(

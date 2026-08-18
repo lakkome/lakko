@@ -42,6 +42,7 @@
  * case.
  */
 import { loadWasm } from "../wasm";
+import type { Wasm } from "../wasm";
 import { DiscoveryClient } from "../discovery/client";
 import { base64Decode, base64Encode, base64UrlDecodeNoPad } from "../auth/account-id";
 import {
@@ -426,6 +427,126 @@ function readProofExpiresAtSecs(proofBytes: Uint8Array): number {
 function newOutboxEntryId(): string {
   const b = crypto.getRandomValues(new Uint8Array(16));
   return Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * In-flight commit region per group, keyed on the base64 `group_id`.
+ *
+ * MODULE-level, not an instance field, and that is load-bearing: a
+ * `ContactsClient` is constructed per route component (`routes/Chat.tsx`,
+ * `routes/Contacts.tsx`, `routes/Invite.tsx`, `routes/JoinGroup.tsx` each call
+ * `new ContactsClient(...)`) while they all drive the SAME canonical wasm
+ * `Identity` through `identityProvider`. An instance field would therefore
+ * serialize nothing that matters. Mirrors `routingRowQueue` in
+ * `push/group-routing.ts`.
+ */
+const groupCommitQueue = new Map<string, Promise<unknown>>();
+
+/**
+ * Run `task` with exclusive access to a group's create-commit -> publish region.
+ *
+ * ## Why a lock at all
+ *
+ * ADR-0040 (G-35): the `lakko-mls` create-commit paths (`addMember` /
+ * `removeMember` / `setGroupRoles` / `approveExternalJoin`) **eagerly merge**
+ * epoch N -> N+1 into the shared in-memory provider INSIDE the create call,
+ * before the caller has published anything. Two of those regions interleaved on
+ * one group therefore both build on N: the first publishes commit(N -> N+1), the
+ * second publishes commit(N+1 -> N+2) that peers — still at N when it lands, or
+ * having only just adopted N+1 — drop as wrong-epoch. The committing device is
+ * then durably ahead of a group that never adopted its last commit, which is the
+ * "device-ahead" shape ADR-0040 exists to prevent. The outbox sweep cannot
+ * repair it: the entry was acked, so there is nothing to re-publish.
+ *
+ * The UI `busy` signal in `routes/Chat.tsx` is NOT that guard. It is one shared
+ * boolean with several independent owners, and `refresh()` (which sets it and
+ * clears it in its own `finally`) is launched fire-and-forget — `void refresh()`
+ * — at the tail of each commit handler, so it routinely outlives the handler
+ * that started it and clears the flag out from under an unrelated commit still
+ * in flight. See `commit-lock.test.ts`, which reproduces exactly that.
+ *
+ * ## SERIALIZING, never coalescing
+ *
+ * A second caller **queues and then runs in full** against the first's committed
+ * result. It is NOT folded into the in-flight run. Coalescing here would silently
+ * drop a distinct membership change — that was `lakko-security` **F1** in the
+ * ADR-0043 review, and the same reasoning applies verbatim: two clicks are two
+ * intended commits, and dropping one is a membership change the operator
+ * believes happened.
+ *
+ * ## The lock must span the CREATE, not just the publish
+ *
+ * Acquiring it after the create would fix nothing — the eager merge is exactly
+ * what goes stale. Each caller's `task` therefore contains the create-commit
+ * itself, so the commit is built on the epoch its predecessor actually
+ * published. For `setMemberAdmin` the region additionally starts before the role
+ * table is read, for the same reason ADR-0044 C-62 pins for the push-routing
+ * row: a decision taken against a snapshot the predecessor has since replaced is
+ * no decision at all.
+ *
+ * ## Ordering, failure isolation, release
+ *
+ *   - the predecessor is captured and the queue entry replaced **synchronously**,
+ *     so runs execute in call order;
+ *   - a predecessor's rejection is swallowed HERE so it never becomes contagious
+ *     — its own caller still observes it, and the queued commit is still a real
+ *     user-intended membership change regardless of why the previous one failed;
+ *   - release is TAIL-GUARDED: the entry is dropped only if it is still this
+ *     run's promise, so a later task that already replaced it keeps its place.
+ *     The `.catch()` before `.finally()` keeps this bookkeeping chain from
+ *     surfacing an unhandled rejection (the caller still sees the real one).
+ *
+ * This adds NO rollback of its own. Every failure path inside `task` behaves
+ * exactly as it did before — in particular the ADR-0040 F1 reset stays where it
+ * is, and a publish failure still does NOT reset (the durable entry is
+ * re-published by `sweepPendingCommits`).
+ *
+ * ## Deadlock
+ *
+ * Nothing awaited inside a region takes this lock or any other: `loadWasm()` is
+ * a module-cached promise, `persistCommitOrThrow` / `resetGroupAfterPersistAbort`
+ * reach `ChatApi` (device key + IndexedDB + `restoreStorage`), and the publishes
+ * are plain HTTP. No region re-enters another, so the lock is never held
+ * recursively and there is no lock-ordering hazard.
+ *
+ * ## Per-group, and what that does NOT cover
+ *
+ * Two different groups never block each other. Note though that the durable unit
+ * underneath is NOT per-group: `ChatApi.persistSnapshotWithCommit` writes
+ * `Identity.snapshotStorage()` — the WHOLE provider — to a row keyed on
+ * `accountId`, and the F1 abort path calls `restoreStorage` on that whole
+ * provider. Concurrent commits on two DIFFERENT groups would therefore still
+ * interact through that shared snapshot. That is not reachable today (only
+ * `ChatView` commits on an existing group, and the router mounts one at a time),
+ * which is why the key stays per-group; it is recorded here because the moment a
+ * second commit-capable view can be mounted the key must widen to the account.
+ */
+function withGroupCommitLock<T>(
+  groupIdB64: string,
+  task: () => Promise<T>,
+): Promise<T> {
+  const previous = groupCommitQueue.get(groupIdB64);
+
+  const run = (async (): Promise<T> => {
+    if (previous !== undefined) {
+      try {
+        await previous;
+      } catch {
+        /* the predecessor's own caller owns that failure */
+      }
+    }
+    return task();
+  })();
+
+  groupCommitQueue.set(groupIdB64, run);
+  void run
+    .catch(() => undefined)
+    .finally(() => {
+      if (groupCommitQueue.get(groupIdB64) === run) {
+        groupCommitQueue.delete(groupIdB64);
+      }
+    });
+  return run;
 }
 
 export class ContactsClient {
@@ -1735,6 +1856,29 @@ export class ContactsClient {
     //    queues the Welcome state for the recipient.
     const myIdentity = await this.resolveIdentity(identity);
 
+    // SERIALIZED per group (`withGroupCommitLock`) from here to the ack. The
+    // create-commit at step 3 eager-merges N -> N+1, so it MUST be inside: a
+    // concurrent commit region that created its own commit against the same N
+    // would publish on an epoch peers never reach. The KeyPackage fetch above
+    // stays outside — it touches no MLS state and would only lengthen the hold.
+    return withGroupCommitLock(base64Encode(group.groupId), async () =>
+      this.addMemberToGroupLocked(
+        myIdentity,
+        group,
+        keyPackageBytes,
+        recipientSignaturePubkey,
+      ),
+    );
+  }
+
+  /** The serialized body of {@link addMemberToGroup} — see that method for the
+   *  step numbering. Runs under `withGroupCommitLock`; never call it directly. */
+  private async addMemberToGroupLocked(
+    myIdentity: WasmIdentity,
+    group: WasmGroup,
+    keyPackageBytes: Uint8Array,
+    recipientSignaturePubkey: Uint8Array,
+  ): Promise<{ commitMessageId: number; welcomeMessageId: number }> {
     // 3. Drive the MLS add. Returns `{ commit, welcome }` — the
     //    commit is the wire bytes existing members process to
     //    advance their tree; the welcome is what the new member
@@ -1853,6 +1997,20 @@ export class ContactsClient {
   ): Promise<{ commitMessageId: number }> {
     const myIdentity = await this.resolveIdentity(identity);
 
+    // SERIALIZED per group — the create-commit below eager-merges N -> N+1, so
+    // it must run against the epoch the predecessor region actually published.
+    return withGroupCommitLock(base64Encode(group.groupId), async () =>
+      this.removeMemberFromGroupLocked(myIdentity, group, leafIndex),
+    );
+  }
+
+  /** The serialized body of {@link removeMemberFromGroup}. Runs under
+   *  `withGroupCommitLock`; never call it directly. */
+  private async removeMemberFromGroupLocked(
+    myIdentity: WasmIdentity,
+    group: WasmGroup,
+    leafIndex: number,
+  ): Promise<{ commitMessageId: number }> {
     let commitBytes: Uint8Array;
     try {
       commitBytes = group.removeMember(myIdentity, leafIndex);
@@ -1914,6 +2072,33 @@ export class ContactsClient {
   ): Promise<{ commitMessageId: number }> {
     const myIdentity = await this.resolveIdentity(identity);
 
+    // SERIALIZED per group. Unlike the other three, this region deliberately
+    // begins BEFORE the role-table read below rather than merely before the
+    // create, because the read is what would go stale.
+    //
+    // Honest scope: that placement fixes nothing TODAY. The read, the admin-set
+    // recomputation and `setGroupRoles` currently run with no `await` between
+    // them, so the read-modify-write already completes in one microtask and a
+    // concurrent toggle cannot observe a half-updated table. The boundary is
+    // placed here so that stays true — insert one `await` between the read and
+    // the create (an async role lookup, a confirmation prompt) and without this
+    // the second toggle would recompute from the pre-existing table and publish
+    // one that silently erases the first's change, which is the read-modify-write
+    // shape ADR-0044 pins as C-62 sub-invariant 5. Costs nothing, so it is not
+    // worth leaving to a future reader to rediscover.
+    return withGroupCommitLock(base64Encode(group.groupId), async () =>
+      this.setMemberAdminLocked(myIdentity, group, memberSigPubkey, makeAdmin),
+    );
+  }
+
+  /** The serialized body of {@link setMemberAdmin} — including the role-table
+   *  read. Runs under `withGroupCommitLock`; never call it directly. */
+  private async setMemberAdminLocked(
+    myIdentity: WasmIdentity,
+    group: WasmGroup,
+    memberSigPubkey: Uint8Array,
+    makeAdmin: boolean,
+  ): Promise<{ commitMessageId: number }> {
     const owner = group.roleTableOwner();
     if (owner === undefined) {
       throw ContactsError.wrap(new Error("group has no role table"));
@@ -2000,6 +2185,21 @@ export class ContactsClient {
     const wasm = await loadWasm();
     const myIdentity = await this.resolveIdentity(identity);
 
+    // SERIALIZED per group — `approveExternalJoin` reuses the audited
+    // `add_member` and eager-merges N -> N+1 like the other three.
+    return withGroupCommitLock(base64Encode(group.groupId), async () =>
+      this.approveExternalJoinLocked(wasm, myIdentity, group, proposalRef),
+    );
+  }
+
+  /** The serialized body of {@link approveExternalJoin}. Runs under
+   *  `withGroupCommitLock`; never call it directly. */
+  private async approveExternalJoinLocked(
+    wasm: Wasm,
+    myIdentity: WasmIdentity,
+    group: WasmGroup,
+    proposalRef: Uint8Array,
+  ): Promise<{ commitMessageId: number; welcomeMessageId: number }> {
     let added;
     try {
       added = group.approveExternalJoin(myIdentity, proposalRef);

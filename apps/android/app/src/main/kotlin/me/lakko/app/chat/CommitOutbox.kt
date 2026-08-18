@@ -207,6 +207,36 @@ internal suspend fun <R> runCrashSafeCommit(
     publish: suspend () -> R,
     onPersistAbort: () -> Unit = {},
 ): R {
+    prepareCrashSafeCommit(
+        persistEntryOrThrow = persistEntryOrThrow,
+        persistSnapshotOrThrow = persistSnapshotOrThrow,
+        onPersistAbort = onPersistAbort,
+    )
+    // 3. only now is it safe to advance the group on the wire.
+    return publish()
+}
+
+/**
+ * G-37 — the DURABLE-WRITE half of [runCrashSafeCommit], split out so the caller
+ * can release the repository's global provider lock before the DS publish.
+ *
+ * Returning normally is the signal that BOTH durable writes landed and the commit
+ * is now safe to put on the wire; throwing means the op aborted with `publish`
+ * provably un-run. The ADR-0040 §2 ordering is therefore UNCHANGED and still
+ * expressed structurally — the publish simply cannot happen until this has
+ * returned.
+ *
+ * DELIBERATELY NOT `suspend`. Both durable writes are synchronous, and every one
+ * of its callers runs it inside the repository's provider critical section; a
+ * non-suspending signature is a structural guarantee that no network wait can be
+ * reintroduced between the eager merge and the durable record (a suspending call
+ * would simply not compile here). Same device as [ChatClient.applyFetchedMessages].
+ */
+internal fun prepareCrashSafeCommit(
+    persistEntryOrThrow: () -> Unit,
+    persistSnapshotOrThrow: () -> Unit,
+    onPersistAbort: () -> Unit = {},
+) {
     try {
         // 1. durable outbox entry (commit + second-artifact bytes, un-acked).
         persistEntryOrThrow()
@@ -229,8 +259,6 @@ internal suspend fun <R> runCrashSafeCommit(
         }
         throw persistFailure
     }
-    // 3. only now is it safe to advance the group on the wire.
-    return publish()
 }
 
 /**

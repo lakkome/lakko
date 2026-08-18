@@ -23,11 +23,13 @@ import LakkoCore
 /// **Holds a per-group `Group` handle map** keyed by hex group id.
 /// The Group instances carry MLS ratchet state; dropping them
 /// mid-session would force a re-bootstrap from the snapshot. The
-/// map is mutated under an actor-style serial DispatchQueue so a
-/// `sendMessage` and a parallel `pollAllGroups` don't race against
-/// one another's `ChatClient` calls (the underlying OpenMLS storage
-/// isn't internally synchronised for concurrent writes against the
-/// same group).
+/// map itself is `@MainActor`-isolated, so no two callers ever
+/// mutate it at literally the same instant. That is NOT the same as
+/// serialization: `@MainActor` isolation is released at every
+/// `await`, so two `async` callers interleave freely at their
+/// suspension points. The four group-membership create-commit paths
+/// therefore run inside an explicit per-group serializing chain —
+/// see ``withCommitLock(groupIdHex:_:)``.
 ///
 /// **Snapshot persistence** (1.14f5) runs after every
 /// state-mutating call via ``IdentitySnapshotStore``. Failures
@@ -92,10 +94,36 @@ public final class ChatRepository: ObservableObject {
     private var currentAccountIdB64: String?
 
     /// Map of hex group id → live ``Group`` handle + per-thread
-    /// timeline / cursor. Mutated only on `@MainActor`; reads from
-    /// the main actor are lock-free, MLS-mutation calls hop into
-    /// `Task.detached` for the off-actor work.
+    /// timeline / cursor. Read + mutated only on `@MainActor`, and every
+    /// UniFFI `Group` call is synchronous, so an individual access is never
+    /// torn. Membership commits additionally serialize on
+    /// ``withCommitLock(groupIdHex:_:)`` because their hazard spans an
+    /// `await`, which `@MainActor` does not cover.
+    ///
+    /// A record is REPLACED (not mutated) by
+    /// ``resetGroupToDurableSnapshot(groupIdHex:)``, so any code that waits
+    /// on an `await` must re-read this map afterwards rather than hold the
+    /// `GroupRecord` it captured before the wait.
     private var groups: [String: GroupRecord] = [:]
+
+    /// ADR-0040 (G-35) — per-group chain tail: the **serializing** lock the
+    /// four group-membership create-commit paths run inside. Swift counterpart
+    /// of the Android `ChatRepository` groups mutex, but keyed per group so two
+    /// different conversations never block each other.
+    ///
+    /// The value is the tail `Task` the next caller chains behind, type-erased
+    /// to `Void` so one queue can hold sections returning different things.
+    /// Same construction as ``PushGroupRouting`` `routingChain` (ADR-0044
+    /// C-62), for the same reason: a read-decide-write that spans an `await`
+    /// needs a lock, not actor isolation.
+    ///
+    /// **Serializing, not coalescing.** A successor WAITS and then runs in
+    /// full against freshly-read state; it is never folded into the section
+    /// already running. Folding was ADR-0043 finding F1 on the push path, and
+    /// here it would be worse than useless — two membership operations answer
+    /// two DIFFERENT intents (add Alice, remove Bob), so a fold would silently
+    /// drop one.
+    private var commitChain: [String: Task<Void, Never>] = [:]
 
     /// ADR-0040 (G-35) — hex group ids already swept this session, so the
     /// pending-commit outbox sweep runs at most once per group per session (on
@@ -278,6 +306,12 @@ public final class ChatRepository: ObservableObject {
         // ADR-0040 (G-35) — a new session must re-sweep the outbox for every
         // group on its first poll.
         sweptGroupsThisSession.removeAll()
+        // `commitChain` is deliberately NOT cleared. Dropping a tail does not
+        // stop the section behind it — it only makes the next caller start
+        // BESIDE that section, which is the race the chain exists to close.
+        // Queued sections re-read `canonicalIdentity` / `groups` (now empty)
+        // and fail their own guards, and the tail-guarded release in
+        // ``withCommitLock(groupIdHex:_:)`` drains the map on its own.
     }
 
     // MARK: - Group operations
@@ -634,6 +668,26 @@ public final class ChatRepository: ObservableObject {
         memberSignaturePubkey: Data,
         makeAdmin: Bool
     ) async throws -> Int64 {
+        // ADR-0040 (G-35) — serialize the whole eager-merge-through-publish
+        // region against every other membership commit on this group.
+        try await withCommitLock(groupIdHex: groupIdHex) { [self] in
+            try await setMemberAdminLocked(
+                groupIdHex: groupIdHex,
+                memberSignaturePubkey: memberSignaturePubkey,
+                makeAdmin: makeAdmin
+            )
+        }
+    }
+
+    /// The ``setMemberAdmin(groupIdHex:memberSignaturePubkey:makeAdmin:)``
+    /// critical section. Runs only under ``withCommitLock(groupIdHex:_:)`` and
+    /// re-reads `canonicalIdentity` + `groups` itself — a predecessor may have
+    /// replaced or evicted the record while this section was queued.
+    private func setMemberAdminLocked(
+        groupIdHex: String,
+        memberSignaturePubkey: Data,
+        makeAdmin: Bool
+    ) async throws -> Int64 {
         guard let identity = canonicalIdentity else {
             throw ChatError.argument("ChatRepository not bootstrapped — call bootstrap() first")
         }
@@ -715,16 +769,51 @@ public final class ChatRepository: ObservableObject {
         recipientAccountId: Data,
         recipientSignaturePubkey: Data
     ) async throws -> Int64 {
+        // Fast-fail pre-checks, kept OUTSIDE the lock so an obviously-invalid
+        // call reports the same error it always did without queueing. They are
+        // re-run inside the locked section against fresh state — these two are
+        // an early exit, not the authority.
+        guard canonicalIdentity != nil else {
+            throw ChatError.argument("ChatRepository not bootstrapped — call bootstrap() first")
+        }
+        guard groups[groupIdHex] != nil else {
+            throw ChatError.argument("no live Group handle for \(groupIdHex)")
+        }
+        // The KeyPackage fetch touches NO MLS state, so it is deliberately
+        // taken before the lock: it is a third-party network round-trip, and
+        // holding a group's commit chain across it would stall unrelated
+        // membership work on that group for its whole duration.
+        guard let keyPackageBytes = try await discovery.fetchKeyPackage(
+            accountId: recipientAccountId
+        ) else {
+            throw ChatError.argument("recipient has no KeyPackage uploaded yet")
+        }
+
+        // ADR-0040 (G-35) — serialize the whole eager-merge-through-publish
+        // region against every other membership commit on this group.
+        return try await withCommitLock(groupIdHex: groupIdHex) { [self] in
+            try await addMemberToGroupLocked(
+                groupIdHex: groupIdHex,
+                recipientSignaturePubkey: recipientSignaturePubkey,
+                keyPackageBytes: keyPackageBytes
+            )
+        }
+    }
+
+    /// The ``addMemberToGroup(groupIdHex:recipientAccountId:recipientSignaturePubkey:)``
+    /// critical section. Runs only under ``withCommitLock(groupIdHex:_:)`` and
+    /// re-reads `canonicalIdentity` + `groups` itself — a predecessor may have
+    /// replaced or evicted the record while this section was queued.
+    private func addMemberToGroupLocked(
+        groupIdHex: String,
+        recipientSignaturePubkey: Data,
+        keyPackageBytes: Data
+    ) async throws -> Int64 {
         guard let identity = canonicalIdentity else {
             throw ChatError.argument("ChatRepository not bootstrapped — call bootstrap() first")
         }
         guard let record = groups[groupIdHex] else {
             throw ChatError.argument("no live Group handle for \(groupIdHex)")
-        }
-        guard let keyPackageBytes = try await discovery.fetchKeyPackage(
-            accountId: recipientAccountId
-        ) else {
-            throw ChatError.argument("recipient has no KeyPackage uploaded yet")
         }
 
         let addResult: AddMember
@@ -842,10 +931,12 @@ public final class ChatRepository: ObservableObject {
         groupIdHex: String,
         leafIndex: UInt32
     ) async throws -> Int64 {
-        guard let identity = canonicalIdentity else {
+        // Fast-fail pre-checks; the locked section re-runs them against fresh
+        // state.
+        guard canonicalIdentity != nil else {
             throw ChatError.argument("ChatRepository not bootstrapped — call bootstrap() first")
         }
-        guard let record = groups[groupIdHex] else {
+        guard groups[groupIdHex] != nil else {
             throw ChatError.argument("no live Group handle for \(groupIdHex)")
         }
         // ADR-0043 C-61 / ADR-0044 — the Remove commit is published FIRST and
@@ -857,13 +948,21 @@ public final class ChatRepository: ObservableObject {
         // STAMPED at that epoch, so it strictly out-ranks the secret the
         // evicted member still holds instead of merely tying with it).
         return try await PushGroupRouting.publishRemoveThenRotate(
+            // ADR-0040 (G-35) — ONLY the commit half takes the commit chain.
+            // The rotation below publishes an application message, not a
+            // commit, and already runs under the ADR-0044 routing chain; keeping
+            // it outside means the two chains are never nested, so they cannot
+            // deadlock against one another. C-61 ordering is unaffected — it is
+            // enforced by `publishRemoveThenRotate` sequencing the two halves,
+            // and the commit half still completes in full before the rotation
+            // is started.
             publishRemove: {
-                try await self.publishRemoveCommit(
-                    groupIdHex: groupIdHex,
-                    leafIndex: leafIndex,
-                    identity: identity,
-                    record: record
-                )
+                try await self.withCommitLock(groupIdHex: groupIdHex) {
+                    try await self.publishRemoveCommit(
+                        groupIdHex: groupIdHex,
+                        leafIndex: leafIndex
+                    )
+                }
             },
             // Resolved INSIDE the closure, so this device's ADR-0022 role is
             // read after the removal landed — the same moment the previous
@@ -880,12 +979,21 @@ public final class ChatRepository: ObservableObject {
     /// Apply + persist + publish a Remove commit. The `publishRemove` half of
     /// C-61: everything that must have COMPLETED before a rotation may start.
     /// Returns the commit's DS message id.
+    ///
+    /// Runs only under ``withCommitLock(groupIdHex:_:)`` and re-reads
+    /// `canonicalIdentity` + `groups` itself — a predecessor may have replaced
+    /// or evicted the record while this section was queued, so neither may be
+    /// captured by the caller before the wait.
     private func publishRemoveCommit(
         groupIdHex: String,
-        leafIndex: UInt32,
-        identity: Identity,
-        record: GroupRecord
+        leafIndex: UInt32
     ) async throws -> Int64 {
+        guard let identity = canonicalIdentity else {
+            throw ChatError.argument("ChatRepository not bootstrapped — call bootstrap() first")
+        }
+        guard let record = groups[groupIdHex] else {
+            throw ChatError.argument("no live Group handle for \(groupIdHex)")
+        }
         let commitBytes: Data
         do {
             commitBytes = try record.group.removeMember(
@@ -985,6 +1093,24 @@ public final class ChatRepository: ObservableObject {
     /// Welcome. Existing members skip the rendezvous entry (it is not an MLS
     /// message, so their receive loop drops it). Returns the commit's DS id.
     public func approveExternalJoin(
+        groupIdHex: String,
+        proposalRef: Data
+    ) async throws -> Int64 {
+        // ADR-0040 (G-35) — serialize the whole eager-merge-through-publish
+        // region against every other membership commit on this group.
+        try await withCommitLock(groupIdHex: groupIdHex) { [self] in
+            try await approveExternalJoinLocked(
+                groupIdHex: groupIdHex,
+                proposalRef: proposalRef
+            )
+        }
+    }
+
+    /// The ``approveExternalJoin(groupIdHex:proposalRef:)`` critical section.
+    /// Runs only under ``withCommitLock(groupIdHex:_:)`` and re-reads
+    /// `canonicalIdentity` + `groups` itself — a predecessor may have replaced
+    /// or evicted the record while this section was queued.
+    private func approveExternalJoinLocked(
         groupIdHex: String,
         proposalRef: Data
     ) async throws -> Int64 {
@@ -1858,6 +1984,97 @@ public final class ChatRepository: ObservableObject {
             accountIdB64: accountIdB64,
             blob: blob
         )
+    }
+
+    // MARK: - ADR-0040 (G-35) per-group commit serialization
+
+    /// Run `body` as the sole in-flight membership commit for one group.
+    ///
+    /// ## Why actor isolation is not enough
+    ///
+    /// Every create-commit entry point in `lakko-mls` (`setGroupRoles` /
+    /// `addMemberFromWire` / `removeMember` / `approveExternalJoin`)
+    /// EAGER-MERGES epoch N -> N+1 into the shared in-memory OpenMLS provider
+    /// *inside* the create call, before the commit has been published. The
+    /// region from that merge to the completed publish is therefore a critical
+    /// section: a second commit started inside it reads the group at N+1 and
+    /// publishes commit(N+1 -> N+2) alongside a still-in-flight
+    /// commit(N -> N+1). The DS assigns journal order by arrival, not by which
+    /// call started first, so the two can land inverted — peers at N drop the
+    /// N+1 commit as wrong-epoch, apply the N one, and settle at N+1 while this
+    /// device sits at N+2. That is precisely the "device-ahead" outcome
+    /// ADR-0040 exists to prevent, and the pending-commit outbox does NOT
+    /// recover it: both publishes succeeded, so both entries are acked and the
+    /// restart sweep has nothing to re-publish.
+    ///
+    /// `ChatRepository` is `@MainActor`, which makes each individual statement
+    /// atomic but releases isolation at every `await` — and the region above
+    /// contains one (`dsClient.publishGroup`). Actor isolation prevents data
+    /// races; it does not prevent reentrancy. This chain does.
+    ///
+    /// ## Contract for `body`
+    ///
+    /// `body` runs AFTER an unbounded wait, so it must RE-READ
+    /// ``canonicalIdentity`` and ``groups`` rather than close over values
+    /// captured before the wait: a predecessor that aborted its persist calls
+    /// ``resetGroupToDurableSnapshot(groupIdHex:)``, which REPLACES the
+    /// `GroupRecord` (and can evict it entirely). Every `…Locked` method below
+    /// re-derives both from `self` for exactly this reason.
+    ///
+    /// ## Deadlock audit
+    ///
+    /// The chain is not reentrant, so `body` must not call another
+    /// commit-locked entry point. It does not: the locked sections reach only
+    /// `Group` (synchronous UniFFI), ``persistCommitEntryThenSnapshotOrThrow(_:)``,
+    /// ``resetGroupToDurableSnapshot(groupIdHex:)``, ``ackCommitBestEffort(entryId:commitMessageId:secondMessageId:)``,
+    /// `DsClient.publishGroup` / `publishMailbox`, and
+    /// `ChatClient.markOwnPublishedCommit` — none of which call back in.
+    /// ``redistributePushRoutingSecret(groupIdHex:)`` is reached from the add
+    /// path but only SPAWNS a detached `Task` and returns, so the routing lock
+    /// it eventually takes is never awaited while this one is held. The
+    /// ADR-0043 rotation half of ``removeMemberFromGroup(groupIdHex:leafIndex:)``
+    /// is deliberately left OUTSIDE this lock (it publishes an application
+    /// message, not a commit), so the two chains are never nested at all.
+    ///
+    /// ## Why the publish is not bounded by a timeout
+    ///
+    /// The ADR-0044 review required bounding network I/O taken under the
+    /// push-routing lock, because there the work queued behind a wedged row is
+    /// a rotation that must proceed. Here the inverse holds: the work queued
+    /// behind is another COMMIT, and releasing the lock while a publish's fate
+    /// is unknown re-opens the exact device-ahead hazard the lock closes. The
+    /// publish is bounded anyway by `URLSession`'s own request timeout, which
+    /// surfaces as a thrown publish failure with the outbox entry left un-acked
+    /// — the state the restart sweep is built to recover.
+    private func withCommitLock<T>(
+        groupIdHex: String,
+        _ body: @escaping @MainActor () async throws -> T
+    ) async throws -> T {
+        // Read the tail and replace it with NO `await` in between: `@MainActor`
+        // cannot interleave another caller across a straight-line region, so two
+        // callers can never observe the SAME predecessor and run beside each
+        // other.
+        let predecessor = commitChain[groupIdHex]
+        let run = Task { @MainActor () async throws -> T in
+            // Wait for everything already queued for this group. A predecessor
+            // that threw must not block its successor, hence the discarded
+            // result on a `Never`-failing erased tail.
+            _ = await predecessor?.value
+            return try await body()
+        }
+        // The erased tail completes exactly when `run` does, so a successor
+        // chaining on it observes this section's writes.
+        let tail = Task { @MainActor in _ = try? await run.value }
+        commitChain[groupIdHex] = tail
+        // Tail-guarded release — a successor that queued behind this section is
+        // the tail now, and dropping it would let the caller after it start
+        // beside it. Runs on both the success and the throw path.
+        defer {
+            if commitChain[groupIdHex] == tail {
+                commitChain.removeValue(forKey: groupIdHex)
+            }
+        }
+        return try await run.value
     }
 
     // MARK: - ADR-0040 (G-35) durable pending-commit outbox

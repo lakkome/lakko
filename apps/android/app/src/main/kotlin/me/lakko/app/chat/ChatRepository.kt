@@ -39,6 +39,31 @@ import uniffi.lakko_ffi_uniffi.Identity
 import uniffi.lakko_ffi_uniffi.loadGroup
 
 /**
+ * G-37 — how many groups [ChatRepository.pollAllGroups] polls at once.
+ *
+ * The bound is NOT arbitrary and NOT about CPU. Every DS long poll goes to the
+ * SAME host, and Ktor's OkHttp engine dispatches through `Call.enqueue`
+ * (verified by decompiling `ktor-client-okhttp-jvm-3.0.1`: `OkUtilsKt.execute`
+ * constructs an `OkHttpCallback` and invokes `Call.enqueue`), so OkHttp's
+ * `Dispatcher.maxRequestsPerHost` applies. That default is 5 (verified by
+ * decompiling `okhttp-4.12.0`'s no-arg `Dispatcher()`: `maxRequests = 64`,
+ * `maxRequestsPerHost = 5`).
+ *
+ * So the per-host slots are a genuinely scarce SHARED resource: fill all five
+ * with 30 s idle long polls and every other request to the DS — including the
+ * user's next send — sits in OkHttp's `readyAsyncCalls` queue until one of them
+ * returns. Fanning out unbounded would trade a lock-contention problem for a
+ * connection-starvation one, which is strictly worse: it would delay sends with
+ * no lock involved at all, so no amount of lock narrowing could fix it.
+ *
+ * Three leaves at least two slots free at all times — one for the open chat
+ * screen's own continuous long poll (which runs concurrently with a chat-list
+ * poll) and one for an interactive publish — while still collapsing the
+ * worst-case chat-list latency from `waitSecs * N` to `waitSecs * ceil(N / 3)`.
+ */
+private const val POLL_ALL_CONCURRENCY: Int = 3
+
+/**
  * In-memory + on-disk state holder for the user's MLS chats.
  *
  * **Owns the canonical [Identity]** for the current session —
@@ -137,21 +162,100 @@ public class ChatRepository(
 
     /**
      * Map of hex group id → live [Group] handle. Mutated under
-     * [groupsLock] for the same-group operations; reads can be
+     * [groupLock] for the same-group operations; reads can be
      * lock-free via the snapshot returned by `Collections.unmodifiableMap`.
+     *
+     * NOTE: it is a `synchronizedMap`, so every ITERATION must hold the map's
+     * own monitor (`synchronized(groups) { … }`). Single-key get/put are
+     * already atomic. Before G-37 sprint 2 the repository-wide mutex made
+     * unsynchronised iteration accidentally safe; per-group locking removes
+     * that accident, so the iterations are explicit now.
      */
     private val groups: MutableMap<String, GroupRecord> =
         Collections.synchronizedMap(mutableMapOf())
 
     /**
-     * Coroutine mutex for serialising MLS state mutations on a
-     * single group. Coarse-grained: one mutex per repository,
-     * not per group. Phase-1 chat volume doesn't justify the
-     * per-group fine-grained map; if a future chat fan-out
-     * ever pushes back on this, swap in a
-     * `ConcurrentHashMap<String, Mutex>`.
+     * G-37 — PER-GROUP coroutine mutexes for serialising operations on ONE
+     * group, replacing the single repository-wide mutex whose own doc comment
+     * anticipated exactly this ("swap in a `ConcurrentHashMap<String, Mutex>`").
+     *
+     * ## What the per-group lock guarantees
+     *
+     * For two operations on the SAME group it preserves the pre-existing
+     * ordering EXACTLY: the whole operation — create-commit, durable record,
+     * AND the DS publish — runs inside it, so commit A is on the wire before
+     * commit B is even CREATED. That ordering is load-bearing: a commit built
+     * on an epoch peers have not reached is the "device ahead" strand ADR-0040
+     * exists to prevent.
+     *
+     * Across DIFFERENT groups that ordering has no meaning, so they no longer
+     * queue behind each other's network I/O — which is the whole point.
+     *
+     * `getOrPut` on a `ConcurrentHashMap` selects the `ConcurrentMap` overload
+     * (backed by `putIfAbsent`), so racing callers converge on ONE `Mutex` per
+     * key. Same primitive + same reasoning as
+     * [me.lakko.app.push.GroupPushRouting]'s per-`(account, group)` routing lock.
+     *
+     * Entries are never evicted: one `Mutex` per group the session has touched
+     * is bounded by the group count and cleared with the rest of the state in
+     * [wipeInMemoryState].
+     *
+     * Lives in [GroupLocks] rather than as a bare map field so the per-group
+     * property it provides can be driven by a host test — see `SplitPoll.kt`.
      */
-    private val groupsLock = Mutex()
+    private val groupLocks: GroupLocks = GroupLocks()
+
+    /** The [groupLocks] entry for [groupIdHex], creating it on first use. */
+    private fun groupLock(groupIdHex: String): Mutex = groupLocks.forGroup(groupIdHex)
+
+    /**
+     * G-37 — the GLOBAL mutex guarding the ONE shared OpenMLS provider.
+     *
+     * ## Why a per-group lock is not sufficient on its own
+     *
+     * Every group's MLS state lives in a SINGLE `OpenMlsRustCrypto` provider
+     * owned by the canonical [Identity], and the FFI offers no per-group
+     * persistence: [Identity.snapshotStorage] serialises the WHOLE provider and
+     * [Identity.restoreStorage] replaces the WHOLE provider (there is one
+     * snapshot blob per ACCOUNT, not per group). So two provider-wide hazards
+     * survive any amount of per-group locking:
+     *
+     *  - `snapshotStorage` takes a single read lock over the provider's storage
+     *    map, while one logical MLS operation performs SEVERAL separate writes
+     *    into it. A snapshot taken by group A part-way through group B's
+     *    multi-write operation would capture B TORN, and that torn blob is what
+     *    a later restore / restart would load.
+     *  - worse, `restoreStorage` — the ADR-0040 F1 abort path
+     *    ([resetGroupToDurableSnapshotOrThrow]) — replaces every group's state
+     *    at once. Running it while another group sits at an un-persisted N+1
+     *    would ROLL THAT GROUP BACK, re-opening the exact nonce-reuse /
+     *    device-behind window ADR-0040 closes.
+     *
+     * Both were impossible before only because ONE mutex covered every group.
+     * This lock keeps them impossible: every provider-touching region takes it,
+     * so a whole-provider snapshot / restore can never overlap another group's
+     * MLS work, and every other group is provably OUTSIDE its provider region
+     * (hence in-memory == durable) whenever a restore runs.
+     *
+     * ## Where the concurrency comes from
+     *
+     * The network is deliberately NOT inside this lock. Each path splits into a
+     * provider half and a network half — [ChatClient.prepareSend] /
+     * [ChatClient.publishPreparedSend], [prepareCrashSafeCommit] / publish,
+     * [ChatClient.fetchGroupJournal] / [ChatClient.applyFetchedMessages] — so
+     * what different groups now serialise on is local CPU plus one snapshot
+     * write, never a 15 s DS publish or a 30 s long poll.
+     *
+     * ## Lock ordering
+     *
+     * ALWAYS [groupLock] first, [providerLock] second. Never the reverse, and
+     * never two [groupLock]s at once. Push-routing work is always LAUNCHED onto
+     * [pushScope] rather than awaited under a group lock, so
+     * `GroupPushRouting`'s own routing lock stays strictly OUTSIDE this one
+     * (routing -> provider), exactly as it was against the old repository-wide
+     * mutex.
+     */
+    private val providerLock = Mutex()
 
     private val mutableState: MutableStateFlow<ChatRepositoryState> =
         MutableStateFlow(ChatRepositoryState())
@@ -307,7 +411,10 @@ public class ChatRepository(
                 IllegalStateException("fetchKeyPackage returned null"),
             )
 
-        return groupsLock.withLock {
+        // G-37 — the group does not exist yet, so NO other operation can be
+        // targeting it and there is no per-group lock to take until its id
+        // exists. Only the shared provider needs guarding here.
+        val created = providerLock.withLock {
             val group = Group.create(identity)
             val addResult = try {
                 group.addMemberFromWire(identity, keyPackageBytes)
@@ -322,24 +429,54 @@ public class ChatRepository(
                 uniffi.lakko_ffi_uniffi.IdentityPseudonym
                     .fromIdentity(recipientSignaturePubkey)
                     .use { it.asBytes() }
-            try {
-                dsClient.publishMailbox(recipientPseudonym, welcomeEnvelope)
-            } catch (e: Throwable) {
-                throw ChatError("DS publishMailbox (Welcome) failed", e)
-            }
-
-            val groupId = group.groupId()
-            val groupIdHex = DsClient.pseudonymHex(groupId)
-            groups[groupIdHex] = GroupRecord(group = group, groupId = groupId)
-            persistKnownGroupBestEffort(groupIdHex)
-            persistSnapshotBestEffort()
-            publishThreadList()
-            // ADR-0042 — the founder is the OWNER: mint the push-routing
-            // secret + distribute it + subscribe under the derived push_gid.
-            ensurePushRoutingBestEffort(group, identity)
-            groupIdHex
+            CreatedGroup(
+                group = group,
+                groupId = group.groupId(),
+                recipientPseudonym = recipientPseudonym,
+                welcomeEnvelope = welcomeEnvelope,
+            )
         }
+
+        // G-37 — the DS mailbox publish runs OUTSIDE the provider lock. Its
+        // position relative to the registration + persist below is unchanged: a
+        // publish failure still throws before the group is registered or
+        // persisted, exactly as when one mutex covered the whole block.
+        try {
+            dsClient.publishMailbox(created.recipientPseudonym, created.welcomeEnvelope)
+        } catch (e: Throwable) {
+            throw ChatError("DS publishMailbox (Welcome) failed", e)
+        }
+
+        val groupIdHex = DsClient.pseudonymHex(created.groupId)
+        groupLock(groupIdHex).withLock {
+            providerLock.withLock {
+                groups[groupIdHex] =
+                    GroupRecord(group = created.group, groupId = created.groupId)
+                persistKnownGroupBestEffort(groupIdHex)
+                persistSnapshotBestEffort()
+                // ADR-0042 — the founder is the OWNER: mint the push-routing
+                // secret + distribute it + subscribe under the derived push_gid.
+                // G-37 — kept INSIDE the provider critical section because it
+                // reads `group.ownRole` / `group.groupId` synchronously, exactly
+                // as it did under the old repository-wide mutex. The actual
+                // routing work is LAUNCHED onto `pushScope`, so this nests no
+                // locks: the launched body takes the routing lock and only then
+                // the provider lock, never while this one is held.
+                ensurePushRoutingBestEffort(created.group, identity)
+            }
+            publishThreadList()
+        }
+        return groupIdHex
     }
+
+    /** G-37 — carries a freshly-created group across the provider-lock release
+     *  so the Welcome mailbox publish can run outside it. */
+    private class CreatedGroup(
+        val group: Group,
+        val groupId: ByteArray,
+        val recipientPseudonym: ByteArray,
+        val welcomeEnvelope: ByteArray,
+    )
 
     /**
      * Join an MLS group from a `Welcome` blob (received via
@@ -356,7 +493,11 @@ public class ChatRepository(
             ?: throw IllegalStateException(
                 "ChatRepository not bootstrapped — call bootstrap() first",
             )
-        return groupsLock.withLock {
+        // G-37 — provider-only (no DS call in this path), and the group id is
+        // not known until the join has run, so the provider lock alone covers
+        // it. Nothing else can be operating on a group this device is only now
+        // learning about.
+        val groupIdHex = providerLock.withLock {
             val group = try {
                 Group.joinFromWelcome(welcomeBytes, identity)
             } catch (e: FfiException) {
@@ -367,14 +508,18 @@ public class ChatRepository(
             groups[groupIdHex] = GroupRecord(group = group, groupId = groupId)
             persistKnownGroupBestEffort(groupIdHex)
             persistSnapshotBestEffort()
-            publishThreadList()
             // ADR-0042 — a joiner is not the owner: `ensure` defers the
             // subscription (never under group_id) until the owner's
             // distribution envelope arrives on the journal, unless this
             // device already holds the secret (e.g. a prior receive).
+            // G-37 — kept INSIDE the provider critical section: it reads
+            // `group.ownRole` / `group.groupId` synchronously and only LAUNCHES
+            // the routing work, so no locks nest here.
             ensurePushRoutingBestEffort(group, identity)
             groupIdHex
         }
+        publishThreadList()
+        return groupIdHex
     }
 
     /**
@@ -440,7 +585,8 @@ public class ChatRepository(
             android.util.Log.w("ChatRepository", "deriveCallKey: not bootstrapped")
             return null
         }
-        return groupsLock.withLock {
+        // G-37 — pure provider reads (MLS exporter + own leaf), no network.
+        return providerLock.withLock {
             val record = groups[groupIdHex]
             if (record == null) {
                 android.util.Log.w("ChatRepository", "deriveCallKey: no group $groupIdHex")
@@ -469,7 +615,7 @@ public class ChatRepository(
      * or has no handle for that group. The chat-call trigger routes a
      * chat with >2 members through the multi-party SFU path and a
      * 2-member chat through the 1x1 P2P [me.lakko.app.calls.CallSession].
-     * Reads are lock-free under [groupsLock] semantics (a concurrent
+     * Reads are lock-free under [groupLock] semantics (a concurrent
      * commit only ever grows / shrinks the count by one, which is fine
      * for a >2 routing decision).
      */
@@ -557,64 +703,73 @@ public class ChatRepository(
             ?: throw IllegalStateException(
                 "ChatRepository not bootstrapped — call bootstrap() first",
             )
-        return groupsLock.withLock {
-            val record = groups[groupIdHex]
-                ?: throw ChatError(
-                    "no live Group handle for $groupIdHex",
-                    IllegalStateException("missing group record"),
+        // G-37 — per-group lock spans the WHOLE op (create-commit, durable
+        // record, publish), so two role changes on the SAME group still
+        // serialise exactly as before. The provider lock covers only the
+        // provider-touching prefix; the publish runs outside it.
+        return groupLock(groupIdHex).withLock {
+            val publishStep = providerLock.withLock {
+                val record = groups[groupIdHex]
+                    ?: throw ChatError(
+                        "no live Group handle for $groupIdHex",
+                        IllegalStateException("missing group record"),
+                    )
+                val table = try {
+                    record.group.groupRoles()
+                } catch (e: Throwable) {
+                    null
+                } ?: throw ChatError(
+                    "group has no role table",
+                    IllegalStateException("no role table"),
                 )
-            val table = try {
-                record.group.groupRoles()
-            } catch (e: Throwable) {
-                null
-            } ?: throw ChatError(
-                "group has no role table",
-                IllegalStateException("no role table"),
-            )
-            val admins = table.admins
-                .filterNot { it.contentEquals(memberSignaturePubkey) }
-                .toMutableList()
-            if (makeAdmin) {
-                admins.add(memberSignaturePubkey)
-            }
-            val commitBytes = try {
-                record.group.setGroupRoles(identity, table.owner, admins)
-            } catch (e: FfiException) {
-                throw ChatError("setGroupRoles failed", e)
-            }
-            // ADR-0040 (G-35) — durable pending-commit outbox: persist the entry
-            // (commit only; a role change has no Welcome) THEN the N+1 snapshot,
-            // BOTH fail-closed, BEFORE any publish. A throw aborts the op (no
-            // publish); the restart sweep reconciles the crash window. See
-            // [sweepPendingCommits].
-            //
-            // ADR-0040 F1 residual (lakko-security) — reset-guard the pre-persist
-            // entry build: `requireAccountId` / `group.epoch()` can throw AFTER the
-            // eager merge (N -> N+1) and BEFORE runCrashSafeCommit, which would else
-            // strand the in-memory group at the un-published N+1. No outbox entry
-            // exists yet -> reset the group DIRECTLY. See [withPrePersistReset].
-            val entry = withPrePersistReset(
-                reset = { resetGroupToDurableSnapshotOrThrow(groupIdHex) },
-            ) {
-                PendingCommitEntry(
-                    id = newOutboxEntryId(),
-                    accountId = requireAccountId(),
-                    groupId = outboxB64(record.groupId),
-                    targetEpoch = record.group.epoch().toString(),
-                    commitB64 = outboxB64(commitBytes),
+                val admins = table.admins
+                    .filterNot { it.contentEquals(memberSignaturePubkey) }
+                    .toMutableList()
+                if (makeAdmin) {
+                    admins.add(memberSignaturePubkey)
+                }
+                val commitBytes = try {
+                    record.group.setGroupRoles(identity, table.owner, admins)
+                } catch (e: FfiException) {
+                    throw ChatError("setGroupRoles failed", e)
+                }
+                // ADR-0040 (G-35) — durable pending-commit outbox: persist the entry
+                // (commit only; a role change has no Welcome) THEN the N+1 snapshot,
+                // BOTH fail-closed, BEFORE any publish. A throw aborts the op (no
+                // publish); the restart sweep reconciles the crash window. See
+                // [sweepPendingCommits].
+                //
+                // ADR-0040 F1 residual (lakko-security) — reset-guard the pre-persist
+                // entry build: `requireAccountId` / `group.epoch()` can throw AFTER the
+                // eager merge (N -> N+1) and BEFORE runCrashSafeCommit, which would else
+                // strand the in-memory group at the un-published N+1. No outbox entry
+                // exists yet -> reset the group DIRECTLY. See [withPrePersistReset].
+                val entry = withPrePersistReset(
+                    reset = { resetGroupToDurableSnapshotOrThrow(groupIdHex) },
+                ) {
+                    PendingCommitEntry(
+                        id = newOutboxEntryId(),
+                        accountId = requireAccountId(),
+                        groupId = outboxB64(record.groupId),
+                        targetEpoch = record.group.epoch().toString(),
+                        commitB64 = outboxB64(commitBytes),
+                    )
+                }
+                prepareCrashSafeCommit(
+                    persistEntryOrThrow = { CommitOutboxStore.putEntry(applicationContext, entry) },
+                    persistSnapshotOrThrow = { persistSnapshotDurableOrThrow() },
+                    // ADR-0040 F1 (lakko-security) — on a fail-closed persist-abort,
+                    // reset the eager-merged in-memory group (N+1) back to the durable
+                    // snapshot (N) so a subsequent same-session commit builds on N, not
+                    // the unpublished N+1. Fires ONLY on the persist-abort, never on a
+                    // publish failure (that commit is durably recorded — the sweep
+                    // re-publishes it). See [onCommitPersistAbort].
+                    onPersistAbort = { onCommitPersistAbort(groupIdHex, entry.id) },
                 )
-            }
-            runCrashSafeCommit(
-                persistEntryOrThrow = { CommitOutboxStore.putEntry(applicationContext, entry) },
-                persistSnapshotOrThrow = { persistSnapshotDurableOrThrow() },
-                // ADR-0040 F1 (lakko-security) — on a fail-closed persist-abort,
-                // reset the eager-merged in-memory group (N+1) back to the durable
-                // snapshot (N) so a subsequent same-session commit builds on N, not
-                // the unpublished N+1. Fires ONLY on the persist-abort, never on a
-                // publish failure (that commit is durably recorded — the sweep
-                // re-publishes it). See [onCommitPersistAbort].
-                onPersistAbort = { onCommitPersistAbort(groupIdHex, entry.id) },
-                publish = {
+                // Returning normally means BOTH durable writes landed, so the
+                // commit is now safe to put on the wire — the ADR-0040 §2 ordering,
+                // unchanged, just expressed across the lock release.
+                suspend {
                     val commitPublish = try {
                         dsClient.publishGroup(record.groupId, commitBytes)
                     } catch (e: Throwable) {
@@ -624,8 +779,9 @@ public class ChatRepository(
                     ackCommitBestEffort(entry.id, commitPublish.id, null)
                     publishThreadList()
                     commitPublish.id
-                },
-            )
+                }
+            }
+            publishStep()
         }
     }
 
@@ -654,66 +810,75 @@ public class ChatRepository(
                 "recipient has no KeyPackage uploaded yet",
                 IllegalStateException("fetchKeyPackage returned null"),
             )
-        val addedCommitId = groupsLock.withLock {
-            val record = groups[groupIdHex]
-                ?: throw ChatError(
-                    "no live Group handle for $groupIdHex",
-                    IllegalStateException("missing group record"),
+        // G-37 — per-group lock spans the WHOLE op (create-commit, durable
+        // record, both publishes), so two membership commits on the SAME group
+        // still serialise exactly as before: A is on the wire before B is even
+        // created. The provider lock covers only the provider-touching prefix.
+        val addedCommitId = groupLock(groupIdHex).withLock {
+            val publishStep = providerLock.withLock {
+                val record = groups[groupIdHex]
+                    ?: throw ChatError(
+                        "no live Group handle for $groupIdHex",
+                        IllegalStateException("missing group record"),
+                    )
+                // 1. create-commit — eager-merges epoch N -> N+1 in the in-memory provider.
+                val addResult = try {
+                    record.group.addMemberFromWire(identity, keyPackageBytes)
+                } catch (e: FfiException) {
+                    throw ChatError("addMemberFromWire failed", e)
+                }
+                // Compute the second artifact (Welcome) + its mailbox destination
+                // UP-FRONT so the outbox entry holds the EXACT bytes the restart
+                // sweep will re-publish (no drift). The Welcome ships to the new
+                // member's stranger inbox, addressed by their pubkey pseudonym.
+                //
+                // 2. ADR-0040 (G-35) — durable pending-commit outbox: persist the
+                //    entry (commit + Welcome, BOTH artifacts) THEN the N+1 snapshot,
+                //    BOTH fail-closed, BEFORE any publish. A throw aborts the op (no
+                //    publish); the restart sweep re-publishes both. See [sweepPendingCommits].
+                //
+                // ADR-0040 F1 residual (lakko-security) — reset-guard the WHOLE
+                // pre-persist region (second-artifact compute + entry build): any throw
+                // here (wrapEnvelope / IdentityPseudonym.fromIdentity / requireAccountId
+                // / group.epoch()) runs AFTER the eager merge (N -> N+1) and BEFORE
+                // runCrashSafeCommit, and would else strand the in-memory group at the
+                // un-published N+1. No outbox entry exists yet -> reset the group
+                // DIRECTLY. See [withPrePersistReset].
+                val (welcomeEnvelope, recipientPseudonym, entry) = withPrePersistReset(
+                    reset = { resetGroupToDurableSnapshotOrThrow(groupIdHex) },
+                ) {
+                    val welcomeEnvelope = wrapEnvelope(KIND_WELCOME, addResult.welcome)
+                    val recipientPseudonym =
+                        uniffi.lakko_ffi_uniffi.IdentityPseudonym
+                            .fromIdentity(recipientSignaturePubkey)
+                            .use { it.asBytes() }
+                    val entry = PendingCommitEntry(
+                        id = newOutboxEntryId(),
+                        accountId = requireAccountId(),
+                        groupId = outboxB64(record.groupId),
+                        targetEpoch = record.group.epoch().toString(),
+                        commitB64 = outboxB64(addResult.commit),
+                        secondArtifactB64 = outboxB64(welcomeEnvelope),
+                        secondArtifactKind = SecondArtifactKind.WELCOME,
+                        secondArtifactMailboxB64 = outboxB64(recipientPseudonym),
+                    )
+                    Triple(welcomeEnvelope, recipientPseudonym, entry)
+                }
+                prepareCrashSafeCommit(
+                    persistEntryOrThrow = { CommitOutboxStore.putEntry(applicationContext, entry) },
+                    persistSnapshotOrThrow = { persistSnapshotDurableOrThrow() },
+                    // ADR-0040 F1 (lakko-security) — on a fail-closed persist-abort,
+                    // reset the eager-merged in-memory group (N+1) back to the durable
+                    // snapshot (N) so a subsequent same-session commit builds on N, not
+                    // the unpublished N+1. Fires ONLY on the persist-abort, never on a
+                    // publish failure (that commit is durably recorded — the sweep
+                    // re-publishes it). See [onCommitPersistAbort].
+                    onPersistAbort = { onCommitPersistAbort(groupIdHex, entry.id) },
                 )
-            // 1. create-commit — eager-merges epoch N -> N+1 in the in-memory provider.
-            val addResult = try {
-                record.group.addMemberFromWire(identity, keyPackageBytes)
-            } catch (e: FfiException) {
-                throw ChatError("addMemberFromWire failed", e)
-            }
-            // Compute the second artifact (Welcome) + its mailbox destination
-            // UP-FRONT so the outbox entry holds the EXACT bytes the restart
-            // sweep will re-publish (no drift). The Welcome ships to the new
-            // member's stranger inbox, addressed by their pubkey pseudonym.
-            //
-            // 2. ADR-0040 (G-35) — durable pending-commit outbox: persist the
-            //    entry (commit + Welcome, BOTH artifacts) THEN the N+1 snapshot,
-            //    BOTH fail-closed, BEFORE any publish. A throw aborts the op (no
-            //    publish); the restart sweep re-publishes both. See [sweepPendingCommits].
-            //
-            // ADR-0040 F1 residual (lakko-security) — reset-guard the WHOLE
-            // pre-persist region (second-artifact compute + entry build): any throw
-            // here (wrapEnvelope / IdentityPseudonym.fromIdentity / requireAccountId
-            // / group.epoch()) runs AFTER the eager merge (N -> N+1) and BEFORE
-            // runCrashSafeCommit, and would else strand the in-memory group at the
-            // un-published N+1. No outbox entry exists yet -> reset the group
-            // DIRECTLY. See [withPrePersistReset].
-            val (welcomeEnvelope, recipientPseudonym, entry) = withPrePersistReset(
-                reset = { resetGroupToDurableSnapshotOrThrow(groupIdHex) },
-            ) {
-                val welcomeEnvelope = wrapEnvelope(KIND_WELCOME, addResult.welcome)
-                val recipientPseudonym =
-                    uniffi.lakko_ffi_uniffi.IdentityPseudonym
-                        .fromIdentity(recipientSignaturePubkey)
-                        .use { it.asBytes() }
-                val entry = PendingCommitEntry(
-                    id = newOutboxEntryId(),
-                    accountId = requireAccountId(),
-                    groupId = outboxB64(record.groupId),
-                    targetEpoch = record.group.epoch().toString(),
-                    commitB64 = outboxB64(addResult.commit),
-                    secondArtifactB64 = outboxB64(welcomeEnvelope),
-                    secondArtifactKind = SecondArtifactKind.WELCOME,
-                    secondArtifactMailboxB64 = outboxB64(recipientPseudonym),
-                )
-                Triple(welcomeEnvelope, recipientPseudonym, entry)
-            }
-            runCrashSafeCommit(
-                persistEntryOrThrow = { CommitOutboxStore.putEntry(applicationContext, entry) },
-                persistSnapshotOrThrow = { persistSnapshotDurableOrThrow() },
-                // ADR-0040 F1 (lakko-security) — on a fail-closed persist-abort,
-                // reset the eager-merged in-memory group (N+1) back to the durable
-                // snapshot (N) so a subsequent same-session commit builds on N, not
-                // the unpublished N+1. Fires ONLY on the persist-abort, never on a
-                // publish failure (that commit is durably recorded — the sweep
-                // re-publishes it). See [onCommitPersistAbort].
-                onPersistAbort = { onCommitPersistAbort(groupIdHex, entry.id) },
-                publish = {
+                // Returning normally means BOTH durable writes landed, so the
+                // commit is now safe to put on the wire — the ADR-0040 §2 ordering,
+                // unchanged, just expressed across the lock release.
+                suspend {
                     // 3. publish artifact 1 (commit) then artifact 2 (Welcome).
                     val commitPublish = try {
                         dsClient.publishGroup(record.groupId, addResult.commit)
@@ -730,8 +895,9 @@ public class ChatRepository(
                     ackCommitBestEffort(entry.id, commitPublish.id, welcomePublish.id)
                     publishThreadList()
                     commitPublish.id
-                },
-            )
+                }
+            }
+            publishStep()
         }
         // ADR-0042 — re-broadcast the CURRENT push-routing secret so the
         // newly-added member learns it on their next poll (no-op if this
@@ -816,49 +982,59 @@ public class ChatRepository(
         identity: Identity,
         leafIndex: UInt,
     ): Long =
-        groupsLock.withLock {
-            val record = groups[groupIdHex]
-                ?: throw ChatError(
-                    "no live Group handle for $groupIdHex",
-                    IllegalStateException("missing group record"),
+        // G-37 — per-group lock spans the WHOLE op; the provider lock covers
+        // only the provider-touching prefix, so the publish is outside it.
+        groupLock(groupIdHex).withLock {
+            val publishStep = providerLock.withLock {
+                val record = groups[groupIdHex]
+                    ?: throw ChatError(
+                        "no live Group handle for $groupIdHex",
+                        IllegalStateException("missing group record"),
+                    )
+                val commitBytes = try {
+                    record.group.removeMember(identity, leafIndex)
+                } catch (e: FfiException) {
+                    throw ChatError("removeMember failed", e)
+                }
+                // ADR-0040 (G-35) — durable pending-commit outbox: persist the entry
+                // (commit only; a remove has no Welcome) THEN the N+1 snapshot, BOTH
+                // fail-closed, BEFORE the publish. A throw aborts the op (no publish);
+                // the restart sweep reconciles the crash window. See [sweepPendingCommits].
+                //
+                // ADR-0040 F1 residual (lakko-security) — reset-guard the pre-persist
+                // entry build: `requireAccountId` / `group.epoch()` can throw AFTER the
+                // eager merge (N -> N+1) and BEFORE runCrashSafeCommit, which would else
+                // strand the in-memory group at the un-published N+1. No outbox entry
+                // exists yet -> reset the group DIRECTLY. See [withPrePersistReset].
+                val entry = withPrePersistReset(
+                    reset = { resetGroupToDurableSnapshotOrThrow(groupIdHex) },
+                ) {
+                    PendingCommitEntry(
+                        id = newOutboxEntryId(),
+                        accountId = requireAccountId(),
+                        groupId = outboxB64(record.groupId),
+                        targetEpoch = record.group.epoch().toString(),
+                        commitB64 = outboxB64(commitBytes),
+                    )
+                }
+                prepareCrashSafeCommit(
+                    persistEntryOrThrow = { CommitOutboxStore.putEntry(applicationContext, entry) },
+                    persistSnapshotOrThrow = { persistSnapshotDurableOrThrow() },
+                    // ADR-0040 F1 (lakko-security) — on a fail-closed persist-abort,
+                    // reset the eager-merged in-memory group (N+1) back to the durable
+                    // snapshot (N) so a subsequent same-session commit builds on N, not
+                    // the unpublished N+1. Fires ONLY on the persist-abort, never on a
+                    // publish failure (that commit is durably recorded — the sweep
+                    // re-publishes it). See [onCommitPersistAbort].
+                    onPersistAbort = { onCommitPersistAbort(groupIdHex, entry.id) },
                 )
-            val commitBytes = try {
-                record.group.removeMember(identity, leafIndex)
-            } catch (e: FfiException) {
-                throw ChatError("removeMember failed", e)
-            }
-            // ADR-0040 (G-35) — durable pending-commit outbox: persist the entry
-            // (commit only; a remove has no Welcome) THEN the N+1 snapshot, BOTH
-            // fail-closed, BEFORE the publish. A throw aborts the op (no publish);
-            // the restart sweep reconciles the crash window. See [sweepPendingCommits].
-            //
-            // ADR-0040 F1 residual (lakko-security) — reset-guard the pre-persist
-            // entry build: `requireAccountId` / `group.epoch()` can throw AFTER the
-            // eager merge (N -> N+1) and BEFORE runCrashSafeCommit, which would else
-            // strand the in-memory group at the un-published N+1. No outbox entry
-            // exists yet -> reset the group DIRECTLY. See [withPrePersistReset].
-            val entry = withPrePersistReset(
-                reset = { resetGroupToDurableSnapshotOrThrow(groupIdHex) },
-            ) {
-                PendingCommitEntry(
-                    id = newOutboxEntryId(),
-                    accountId = requireAccountId(),
-                    groupId = outboxB64(record.groupId),
-                    targetEpoch = record.group.epoch().toString(),
-                    commitB64 = outboxB64(commitBytes),
-                )
-            }
-            runCrashSafeCommit(
-                persistEntryOrThrow = { CommitOutboxStore.putEntry(applicationContext, entry) },
-                persistSnapshotOrThrow = { persistSnapshotDurableOrThrow() },
-                // ADR-0040 F1 (lakko-security) — on a fail-closed persist-abort,
-                // reset the eager-merged in-memory group (N+1) back to the durable
-                // snapshot (N) so a subsequent same-session commit builds on N, not
-                // the unpublished N+1. Fires ONLY on the persist-abort, never on a
-                // publish failure (that commit is durably recorded — the sweep
-                // re-publishes it). See [onCommitPersistAbort].
-                onPersistAbort = { onCommitPersistAbort(groupIdHex, entry.id) },
-                publish = {
+                // Returning normally means BOTH durable writes landed, so the
+                // commit is now safe to put on the wire — the ADR-0040 §2 ordering,
+                // unchanged, just expressed across the lock release. C-61 is
+                // untouched: the rotation is started by
+                // [GroupPushRouting.publishRemoveThenRotate] only after THIS
+                // function returns, i.e. still strictly after the publish.
+                suspend {
                     val commitPublish = try {
                         dsClient.publishGroup(record.groupId, commitBytes)
                     } catch (e: Throwable) {
@@ -868,8 +1044,9 @@ public class ChatRepository(
                     ackCommitBestEffort(entry.id, commitPublish.id, null)
                     publishThreadList()
                     commitPublish.id
-                },
-            )
+                }
+            }
+            publishStep()
         }
 
     /**
@@ -960,64 +1137,71 @@ public class ChatRepository(
             ?: throw IllegalStateException(
                 "ChatRepository not bootstrapped — call bootstrap() first",
             )
-        return groupsLock.withLock {
-            val record = groups[groupIdHex]
-                ?: throw ChatError(
-                    "no live Group handle for $groupIdHex",
-                    IllegalStateException("missing group record"),
-                )
-            // 1. create-commit — reuses the audited add path, eager-merges N -> N+1.
-            val addResult = try {
-                record.group.approveExternalJoin(identity, proposalRef)
-            } catch (e: FfiException) {
-                throw ChatError("approveExternalJoin failed", e)
-            }
-            // Compute the second artifact (the rendezvous) UP-FRONT so the outbox
-            // entry can hold both artifacts (two-artifact coverage). The
-            // rendezvous rides the SAME group journal as the commit.
-            //
-            // 2. ADR-0040 (G-35) — durable pending-commit outbox: persist the
-            //    entry (commit + rendezvous, BOTH artifacts) THEN the N+1
-            //    snapshot, BOTH fail-closed, BEFORE any publish. A throw aborts
-            //    the op (no publish); the restart sweep re-publishes both. See
-            //    [sweepPendingCommits].
-            //
-            // ADR-0040 F1 residual (lakko-security) — reset-guard the WHOLE
-            // pre-persist region (wrapWelcomeRendezvous + entry build): any throw
-            // here runs AFTER the eager merge (N -> N+1) and BEFORE
-            // runCrashSafeCommit, and would else strand the in-memory group at the
-            // un-published N+1. No outbox entry exists yet -> reset the group
-            // DIRECTLY. See [withPrePersistReset].
-            val (rendezvous, entry) = withPrePersistReset(
-                reset = { resetGroupToDurableSnapshotOrThrow(groupIdHex) },
-            ) {
-                val rendezvous = try {
-                    uniffi.lakko_ffi_uniffi.wrapWelcomeRendezvous(proposalRef, addResult.welcome)
+        // G-37 — per-group lock spans the WHOLE op; the provider lock covers
+        // only the provider-touching prefix, so both publishes run outside it.
+        return groupLock(groupIdHex).withLock {
+            val publishStep = providerLock.withLock {
+                val record = groups[groupIdHex]
+                    ?: throw ChatError(
+                        "no live Group handle for $groupIdHex",
+                        IllegalStateException("missing group record"),
+                    )
+                // 1. create-commit — reuses the audited add path, eager-merges N -> N+1.
+                val addResult = try {
+                    record.group.approveExternalJoin(identity, proposalRef)
                 } catch (e: FfiException) {
-                    throw ChatError("wrapWelcomeRendezvous failed", e)
+                    throw ChatError("approveExternalJoin failed", e)
                 }
-                val entry = PendingCommitEntry(
-                    id = newOutboxEntryId(),
-                    accountId = requireAccountId(),
-                    groupId = outboxB64(record.groupId),
-                    targetEpoch = record.group.epoch().toString(),
-                    commitB64 = outboxB64(addResult.commit),
-                    secondArtifactB64 = outboxB64(rendezvous),
-                    secondArtifactKind = SecondArtifactKind.RENDEZVOUS,
+                // Compute the second artifact (the rendezvous) UP-FRONT so the outbox
+                // entry can hold both artifacts (two-artifact coverage). The
+                // rendezvous rides the SAME group journal as the commit.
+                //
+                // 2. ADR-0040 (G-35) — durable pending-commit outbox: persist the
+                //    entry (commit + rendezvous, BOTH artifacts) THEN the N+1
+                //    snapshot, BOTH fail-closed, BEFORE any publish. A throw aborts
+                //    the op (no publish); the restart sweep re-publishes both. See
+                //    [sweepPendingCommits].
+                //
+                // ADR-0040 F1 residual (lakko-security) — reset-guard the WHOLE
+                // pre-persist region (wrapWelcomeRendezvous + entry build): any throw
+                // here runs AFTER the eager merge (N -> N+1) and BEFORE
+                // runCrashSafeCommit, and would else strand the in-memory group at the
+                // un-published N+1. No outbox entry exists yet -> reset the group
+                // DIRECTLY. See [withPrePersistReset].
+                val (rendezvous, entry) = withPrePersistReset(
+                    reset = { resetGroupToDurableSnapshotOrThrow(groupIdHex) },
+                ) {
+                    val rendezvous = try {
+                        uniffi.lakko_ffi_uniffi.wrapWelcomeRendezvous(proposalRef, addResult.welcome)
+                    } catch (e: FfiException) {
+                        throw ChatError("wrapWelcomeRendezvous failed", e)
+                    }
+                    val entry = PendingCommitEntry(
+                        id = newOutboxEntryId(),
+                        accountId = requireAccountId(),
+                        groupId = outboxB64(record.groupId),
+                        targetEpoch = record.group.epoch().toString(),
+                        commitB64 = outboxB64(addResult.commit),
+                        secondArtifactB64 = outboxB64(rendezvous),
+                        secondArtifactKind = SecondArtifactKind.RENDEZVOUS,
+                    )
+                    Pair(rendezvous, entry)
+                }
+                prepareCrashSafeCommit(
+                    persistEntryOrThrow = { CommitOutboxStore.putEntry(applicationContext, entry) },
+                    persistSnapshotOrThrow = { persistSnapshotDurableOrThrow() },
+                    // ADR-0040 F1 (lakko-security) — on a fail-closed persist-abort,
+                    // reset the eager-merged in-memory group (N+1) back to the durable
+                    // snapshot (N) so a subsequent same-session commit builds on N, not
+                    // the unpublished N+1. Fires ONLY on the persist-abort, never on a
+                    // publish failure (that commit is durably recorded — the sweep
+                    // re-publishes it). See [onCommitPersistAbort].
+                    onPersistAbort = { onCommitPersistAbort(groupIdHex, entry.id) },
                 )
-                Pair(rendezvous, entry)
-            }
-            runCrashSafeCommit(
-                persistEntryOrThrow = { CommitOutboxStore.putEntry(applicationContext, entry) },
-                persistSnapshotOrThrow = { persistSnapshotDurableOrThrow() },
-                // ADR-0040 F1 (lakko-security) — on a fail-closed persist-abort,
-                // reset the eager-merged in-memory group (N+1) back to the durable
-                // snapshot (N) so a subsequent same-session commit builds on N, not
-                // the unpublished N+1. Fires ONLY on the persist-abort, never on a
-                // publish failure (that commit is durably recorded — the sweep
-                // re-publishes it). See [onCommitPersistAbort].
-                onPersistAbort = { onCommitPersistAbort(groupIdHex, entry.id) },
-                publish = {
+                // Returning normally means BOTH durable writes landed, so the
+                // commit is now safe to put on the wire — the ADR-0040 §2 ordering,
+                // unchanged, just expressed across the lock release.
+                suspend {
                     // 3. publish artifact 1 (commit) so every existing member
                     //    admits the joiner, then artifact 2 (the rendezvous).
                     val commitPublish = try {
@@ -1035,8 +1219,9 @@ public class ChatRepository(
                     ackCommitBestEffort(entry.id, commitPublish.id, rendezvousPublish.id)
                     publishThreadList()
                     commitPublish.id
-                },
-            )
+                }
+            }
+            publishStep()
         }
     }
 
@@ -1049,18 +1234,21 @@ public class ChatRepository(
         groupIdHex: String,
         proposalRef: ByteArray,
     ) {
-        groupsLock.withLock {
-            val record = groups[groupIdHex]
-                ?: throw ChatError(
-                    "no live Group handle for $groupIdHex",
-                    IllegalStateException("missing group record"),
-                )
-            try {
-                record.group.rejectExternalJoin(proposalRef)
-            } catch (e: FfiException) {
-                throw ChatError("rejectExternalJoin failed", e)
+        // G-37 — local-only (no DS call): provider work start to finish.
+        groupLock(groupIdHex).withLock {
+            providerLock.withLock {
+                val record = groups[groupIdHex]
+                    ?: throw ChatError(
+                        "no live Group handle for $groupIdHex",
+                        IllegalStateException("missing group record"),
+                    )
+                try {
+                    record.group.rejectExternalJoin(proposalRef)
+                } catch (e: FfiException) {
+                    throw ChatError("rejectExternalJoin failed", e)
+                }
+                persistSnapshotBestEffort()
             }
-            persistSnapshotBestEffort()
         }
     }
 
@@ -1320,20 +1508,28 @@ public class ChatRepository(
                 "no live Group handle for $groupIdHex",
                 IllegalStateException("unknown group"),
             )
-        groupsLock.withLock {
+        groupLock(groupIdHex).withLock {
             // SECURITY (nonce-reuse-on-crash) — persist the
             // advanced (N+1) ratchet DURABLY before the DS
             // publish; a persist failure aborts the send inside
-            // `chatClient.sendMessage` so no gen-N ciphertext
+            // `chatClient.prepareSend` so no gen-N ciphertext
             // leaves the device. This path appends no local
             // bubble, so there is no after-publish message-log
             // persist to run.
-            chatClient.sendMessage(
-                identity = identity,
-                group = record.group,
-                plaintext = plaintextBytes,
-                persistRatchet = { persistSnapshotDurableOrThrow() },
-            )
+            //
+            // G-37 — the ratchet advance + durable persist run under the
+            // provider lock; the DS publish runs outside it. The ordering is
+            // unchanged: `prepareSend` must return before there is anything to
+            // publish.
+            val prepared = providerLock.withLock {
+                chatClient.prepareSend(
+                    identity = identity,
+                    group = record.group,
+                    plaintext = plaintextBytes,
+                    persistRatchet = { persistSnapshotDurableOrThrow() },
+                )
+            }
+            chatClient.publishPreparedSend(prepared)
         }
     }
 
@@ -1350,7 +1546,7 @@ public class ChatRepository(
                 IllegalStateException("unknown group"),
             )
 
-        groupsLock.withLock {
+        groupLock(groupIdHex).withLock {
             // 1.19c4: build the JSON envelope before
             // encrypting. `composeEnvelopeBytes` routes through
             // the UniFFI `composeEnvelope` free function;
@@ -1369,27 +1565,35 @@ public class ChatRepository(
             // SECURITY (nonce-reuse-on-crash) — the (N+1) ratchet
             // is persisted DURABLY, fail-closed, BEFORE the DS
             // publish via `persistRatchet`; a persist failure
-            // throws out of `chatClient.sendMessage` (before any
+            // throws out of `chatClient.prepareSend` (before any
             // publish), surfacing to the ViewModel as a failed
             // send. The AFTER-publish persist below is the
             // best-effort plaintext message log only (it needs
             // the DS messageId that only exists post-publish) —
             // the security-critical ratchet snapshot already
             // landed durably above.
-            val result = chatClient.sendMessage(
-                identity = identity,
-                group = record.group,
-                plaintext = envelopeBytes,
-                persistRatchet = { persistSnapshotDurableOrThrow() },
-            )
-            // ADR-0023 — stamp our own leaf as the author so a
-            // later edit/delete op of this row (ours or a peer's
-            // attempt) is gated against the real author.
-            val ownLeaf = try {
-                record.group.ownLeafIndex()
-            } catch (_: Throwable) {
-                null
+            //
+            // G-37 — `ownLeafIndex` is read in the SAME provider critical
+            // section as the ratchet advance, so the author stamp cannot be
+            // taken across another group's commit.
+            val (prepared, ownLeaf) = providerLock.withLock {
+                val prepared = chatClient.prepareSend(
+                    identity = identity,
+                    group = record.group,
+                    plaintext = envelopeBytes,
+                    persistRatchet = { persistSnapshotDurableOrThrow() },
+                )
+                // ADR-0023 — stamp our own leaf as the author so a
+                // later edit/delete op of this row (ours or a peer's
+                // attempt) is gated against the real author.
+                val ownLeaf = try {
+                    record.group.ownLeafIndex()
+                } catch (_: Throwable) {
+                    null
+                }
+                prepared to ownLeaf
             }
+            val result = chatClient.publishPreparedSend(prepared)
             record.appendOutgoing(
                 text = plaintext,
                 attachments = attachments,
@@ -1439,24 +1643,29 @@ public class ChatRepository(
                 "no live Group handle for $groupIdHex",
                 IllegalStateException("unknown group"),
             )
-        groupsLock.withLock {
+        groupLock(groupIdHex).withLock {
             val envelopeBytes = uniffi.lakko_ffi_uniffi.composeEditEnvelope(
                 target = targetMessageId,
                 newText = newText,
             )
             // SECURITY (nonce-reuse-on-crash) — persist the (N+1)
             // ratchet durably, fail-closed, BEFORE publish.
-            chatClient.sendMessage(
-                identity = identity,
-                group = record.group,
-                plaintext = envelopeBytes,
-                persistRatchet = { persistSnapshotDurableOrThrow() },
-            )
-            val ownLeaf = try {
-                record.group.ownLeafIndex()
-            } catch (_: Throwable) {
-                null
+            // G-37 — provider work under the provider lock, publish outside it.
+            val (prepared, ownLeaf) = providerLock.withLock {
+                val prepared = chatClient.prepareSend(
+                    identity = identity,
+                    group = record.group,
+                    plaintext = envelopeBytes,
+                    persistRatchet = { persistSnapshotDurableOrThrow() },
+                )
+                val ownLeaf = try {
+                    record.group.ownLeafIndex()
+                } catch (_: Throwable) {
+                    null
+                }
+                prepared to ownLeaf
             }
+            chatClient.publishPreparedSend(prepared)
             record.applyOwnOp(
                 op = MessageOp.Edit,
                 target = targetMessageId,
@@ -1486,23 +1695,28 @@ public class ChatRepository(
                 "no live Group handle for $groupIdHex",
                 IllegalStateException("unknown group"),
             )
-        groupsLock.withLock {
+        groupLock(groupIdHex).withLock {
             val envelopeBytes = uniffi.lakko_ffi_uniffi.composeDeleteEnvelope(
                 target = targetMessageId,
             )
             // SECURITY (nonce-reuse-on-crash) — persist the (N+1)
             // ratchet durably, fail-closed, BEFORE publish.
-            chatClient.sendMessage(
-                identity = identity,
-                group = record.group,
-                plaintext = envelopeBytes,
-                persistRatchet = { persistSnapshotDurableOrThrow() },
-            )
-            val ownLeaf = try {
-                record.group.ownLeafIndex()
-            } catch (_: Throwable) {
-                null
+            // G-37 — provider work under the provider lock, publish outside it.
+            val (prepared, ownLeaf) = providerLock.withLock {
+                val prepared = chatClient.prepareSend(
+                    identity = identity,
+                    group = record.group,
+                    plaintext = envelopeBytes,
+                    persistRatchet = { persistSnapshotDurableOrThrow() },
+                )
+                val ownLeaf = try {
+                    record.group.ownLeafIndex()
+                } catch (_: Throwable) {
+                    null
+                }
+                prepared to ownLeaf
             }
+            chatClient.publishPreparedSend(prepared)
             record.applyOwnOp(
                 op = MessageOp.Delete,
                 target = targetMessageId,
@@ -1536,24 +1750,29 @@ public class ChatRepository(
                 "no live Group handle for $groupIdHex",
                 IllegalStateException("unknown group"),
             )
-        groupsLock.withLock {
+        groupLock(groupIdHex).withLock {
             val envelopeBytes = uniffi.lakko_ffi_uniffi.composeReactionEnvelope(
                 target = targetMessageId,
                 emoji = emoji,
             )
             // SECURITY (nonce-reuse-on-crash) — persist the (N+1)
             // ratchet durably, fail-closed, BEFORE publish.
-            chatClient.sendMessage(
-                identity = identity,
-                group = record.group,
-                plaintext = envelopeBytes,
-                persistRatchet = { persistSnapshotDurableOrThrow() },
-            )
-            val ownLeaf = try {
-                record.group.ownLeafIndex()
-            } catch (_: Throwable) {
-                null
+            // G-37 — provider work under the provider lock, publish outside it.
+            val (prepared, ownLeaf) = providerLock.withLock {
+                val prepared = chatClient.prepareSend(
+                    identity = identity,
+                    group = record.group,
+                    plaintext = envelopeBytes,
+                    persistRatchet = { persistSnapshotDurableOrThrow() },
+                )
+                val ownLeaf = try {
+                    record.group.ownLeafIndex()
+                } catch (_: Throwable) {
+                    null
+                }
+                prepared to ownLeaf
             }
+            chatClient.publishPreparedSend(prepared)
             record.applyOwnOp(
                 op = MessageOp.Reaction,
                 target = targetMessageId,
@@ -1587,7 +1806,7 @@ public class ChatRepository(
             val envelopeBytes = uniffi.lakko_ffi_uniffi.composeTypingEnvelope(
                 isTyping = isTyping,
             )
-            groupsLock.withLock {
+            groupLock(groupIdHex).withLock {
                 // SECURITY (nonce-reuse-on-crash) — a typing tick
                 // still advances the MLS sender ratchet, so
                 // persist the (N+1) state durably, fail-closed,
@@ -1595,12 +1814,16 @@ public class ChatRepository(
                 // publish (no gen-N ciphertext on the wire) and is
                 // swallowed below — a dropped typing tick is
                 // invisible (the receiver auto-expires anyway).
-                chatClient.sendMessage(
-                    identity = identity,
-                    group = record.group,
-                    plaintext = envelopeBytes,
-                    persistRatchet = { persistSnapshotDurableOrThrow() },
-                )
+                // G-37 — provider work under the provider lock, publish outside.
+                val prepared = providerLock.withLock {
+                    chatClient.prepareSend(
+                        identity = identity,
+                        group = record.group,
+                        plaintext = envelopeBytes,
+                        persistRatchet = { persistSnapshotDurableOrThrow() },
+                    )
+                }
+                chatClient.publishPreparedSend(prepared)
             }
         } catch (cause: Throwable) {
             android.util.Log.w("ChatRepository", "sendTyping failed", cause)
@@ -1625,7 +1848,7 @@ public class ChatRepository(
             val envelopeBytes = uniffi.lakko_ffi_uniffi.composeReadReceiptEnvelope(
                 upTo = upTo,
             )
-            groupsLock.withLock {
+            groupLock(groupIdHex).withLock {
                 // SECURITY (nonce-reuse-on-crash) — a read-receipt
                 // still advances the MLS sender ratchet, so
                 // persist the (N+1) state durably, fail-closed,
@@ -1633,12 +1856,16 @@ public class ChatRepository(
                 // publish (no gen-N ciphertext on the wire) and is
                 // swallowed below — the next watermark advance
                 // re-publishes.
-                chatClient.sendMessage(
-                    identity = identity,
-                    group = record.group,
-                    plaintext = envelopeBytes,
-                    persistRatchet = { persistSnapshotDurableOrThrow() },
-                )
+                // G-37 — provider work under the provider lock, publish outside.
+                val prepared = providerLock.withLock {
+                    chatClient.prepareSend(
+                        identity = identity,
+                        group = record.group,
+                        plaintext = envelopeBytes,
+                        persistRatchet = { persistSnapshotDurableOrThrow() },
+                    )
+                }
+                chatClient.publishPreparedSend(prepared)
             }
         } catch (cause: Throwable) {
             android.util.Log.w("ChatRepository", "sendReadReceipt failed", cause)
@@ -1724,7 +1951,7 @@ public class ChatRepository(
      * ADR-0042 — build the production [PushRoutingPorts] for [group]: the FFI
      * derivation / compose + the encrypted secret store + the plaintext
      * reverse index + the push-gw subscribe + the journal broadcast (a
-     * persist-before-publish control application message under [groupsLock]).
+     * persist-before-publish control application message under [providerLock]).
      */
     private fun pushRoutingPorts(group: Group, identity: Identity): PushRoutingPorts =
         NativePushRoutingPorts(
@@ -1734,7 +1961,7 @@ public class ChatRepository(
             subscribeFn = { pushGid -> subscribePushGidBestEffort(pushGid) },
             unsubscribeFn = { pushGid -> unsubscribePushGidBestEffort(pushGid) },
             broadcastFn = { envelope -> broadcastControlToGroup(identity, group, envelope) },
-            // ADR-0044 — the MINT stamp source. Read under [groupsLock]
+            // ADR-0044 — the MINT stamp source. Read under [providerLock]
             // (the `Group` handle is not safe to touch off it, the same
             // discipline `broadcastControlToGroup` follows) and read
             // LAZILY, per call: `GroupPushRouting.rotate` invokes this
@@ -1743,14 +1970,21 @@ public class ChatRepository(
             // it actually mints at rather than the one it was triggered
             // at. A read failure yields `null`, which fails the mint
             // closed rather than stamping a guess.
+            // G-37 — the provider lock (not a per-group lock): this runs INSIDE
+            // `GroupPushRouting`'s routing lock, and the discipline that keeps
+            // the two deadlock-free is that push work only ever nests
+            // routing -> provider, never the reverse (every repository-side
+            // push call is LAUNCHED onto `pushScope`). Taking a per-group lock
+            // here would add a routing -> group edge and make the routing
+            // lock's bounded hold wait on a 15 s send publish.
             groupEpochFn = {
-                groupsLock.withLock { runCatching { group.epoch() }.getOrNull() }
+                providerLock.withLock { runCatching { group.epoch() }.getOrNull() }
             },
         )
 
     /**
      * ADR-0042 — post a control application message (the push-routing-secret
-     * distribution envelope) to [group]'s journal under [groupsLock], reusing
+     * distribution envelope) to [group]'s journal under [providerLock], reusing
      * the audited persist-before-publish, fail-closed send primitive
      * ([ChatClient.sendMessage]): the sender ratchet advance is durably
      * persisted before the ciphertext reaches the DS, and the DS id is marked
@@ -1762,14 +1996,19 @@ public class ChatRepository(
         group: Group,
         envelope: ByteArray,
     ) {
-        groupsLock.withLock {
-            chatClient.sendMessage(
+        // G-37 — provider lock only, for the same reason as `groupEpochFn`:
+        // this runs inside `GroupPushRouting`'s routing lock, so it must not
+        // introduce a routing -> group lock edge. The ratchet advance + durable
+        // persist stay atomic; only the DS publish moves outside.
+        val prepared = providerLock.withLock {
+            chatClient.prepareSend(
                 identity = identity,
                 group = group,
                 plaintext = envelope,
                 persistRatchet = { persistSnapshotDurableOrThrow() },
             )
         }
+        chatClient.publishPreparedSend(prepared)
     }
 
     /**
@@ -1811,7 +2050,7 @@ public class ChatRepository(
      * compares like with like). Distinguishes "no role table" (a legacy / open
      * group — the gate stays open) from "could not read" (fail closed), which
      * [GroupPushRouting.decideAcceptReceivedSecret] treats differently. Must be
-     * called on the [groupsLock] critical path (the `Group` handle is not safe
+     * called on the [providerLock] critical path (the `Group` handle is not safe
      * to touch off it).
      */
     private fun roleTableOwner(group: Group): GroupPushRouting.OwnerLookup =
@@ -1833,7 +2072,7 @@ public class ChatRepository(
      * resolved (an external sender with no leaf, a leaf absent from the current
      * epoch's roster, or an FFI throw). `null` never matches an owner key, so
      * an unresolved sender is refused by the gate. Must be called on the
-     * [groupsLock] critical path.
+     * [providerLock] critical path.
      */
     private fun signatureKeyForLeaf(group: Group, leafIndex: UInt?): ByteArray? {
         if (leafIndex == null) return null
@@ -1866,7 +2105,7 @@ public class ChatRepository(
      * post-add-member `redistribute` idempotent for existing members.
      *
      * The two `Group` reads happen SYNCHRONOUSLY here — this runs inside the
-     * poll loop's [groupsLock] critical section (via `applyPollResult`), the
+     * poll loop's [providerLock] critical section (via `applyPollResult`), the
      * same discipline as the `group.groupId()` read below and as
      * [ensurePushRoutingBestEffort]'s `ownRole` read. Only the store read and
      * the network subscribe are deferred to [pushScope].
@@ -1895,7 +2134,7 @@ public class ChatRepository(
         // ADR-0044 — this device's OWN current epoch: the clamp ceiling the
         // gate bounds the incoming stamp against. Read SYNCHRONOUSLY here,
         // alongside the role table and the roster, because this runs inside
-        // the poll loop's [groupsLock] critical section. `null` (a torn
+        // the poll loop's [providerLock] critical section. `null` (a torn
         // read) fails the gate CLOSED — with no ceiling a stamp cannot be
         // bounded at all.
         val ownGroupEpoch = try {
@@ -1971,7 +2210,7 @@ public class ChatRepository(
      *
      * Returns `null` when the snapshot cannot be read (a torn group), which
      * [GroupPushRouting.membershipRotationDecision] treats as "unknown",
-     * never as "everybody left". Must be called on the [groupsLock] critical
+     * never as "everybody left". Must be called on the [providerLock] critical
      * path (the `Group` handle is not safe to touch off it).
      */
     private fun memberSignatureKeysOrNull(group: Group): List<String>? =
@@ -1990,7 +2229,7 @@ public class ChatRepository(
      *
      * Read SYNCHRONOUSLY by the caller (never on [pushScope]), the same
      * discipline [ensurePushRoutingBestEffort]'s `ownRole` read follows: on
-     * the poll path that lands inside the [groupsLock] critical section; on
+     * the poll path that lands inside the [providerLock] critical section; on
      * the own-remove path it runs immediately after the lock is released,
      * exactly where [redistributePushRoutingBestEffort] reads its own group
      * record after an add.
@@ -2025,7 +2264,7 @@ public class ChatRepository(
      * can reorder.
      *
      * The ADR-0022 role is read INSIDE the closure — i.e. after the
-     * removal has landed — under [groupsLock], the same discipline
+     * removal has landed — under [providerLock], the same discipline
      * `broadcastControlToGroup` follows. Owner-or-admin gated inside
      * [GroupPushRouting.rotate], which also no-ops when this device holds
      * no secret, so rotation never becomes a second mint path.
@@ -2037,7 +2276,10 @@ public class ChatRepository(
         val record = groups[groupIdHex] ?: return null
         val accountIdB64 = currentAccountIdB64.get() ?: return null
         return {
-            val role = groupsLock.withLock { rotationRole(record.group, identity) }
+            // G-37 — provider lock only (a pure role-table read), released
+            // before `rotate` takes the routing lock, so no routing -> group
+            // edge is created. Same reasoning as `groupEpochFn`.
+            val role = providerLock.withLock { rotationRole(record.group, identity) }
             GroupPushRouting.rotate(
                 accountIdB64 = accountIdB64,
                 groupIdHex = groupIdHex,
@@ -2123,19 +2365,25 @@ public class ChatRepository(
         val record = groups[groupIdHex] ?: return
 
         // G-37 — the DS long poll (30 s on the live chat screen) used to be
-        // awaited INSIDE `groupsLock`, which is one mutex for the whole
-        // repository. An open chat screen therefore held the global lock
-        // near-continuously and every send / edit / reaction / membership commit
-        // on every group queued behind it.
+        // awaited INSIDE the single repository-wide mutex. An open chat screen
+        // therefore held that lock near-continuously and every send / edit /
+        // reaction / membership commit on every group queued behind it.
         //
         // A timeout would be the wrong fix here — it would sever a long poll that
         // is behaving exactly as designed. Instead the network fetch (which
-        // touches no MLS state) runs OUTSIDE the lock and only the apply + cursor
-        // advance run inside it, guarded by a per-group in-flight latch and a
-        // cursor-moved check. See [runSplitPoll] for the full ordering.
+        // touches no MLS state) runs OUTSIDE both locks and only the apply +
+        // cursor advance run inside them, guarded by a per-group in-flight latch
+        // and a cursor-moved check. See [runSplitPoll] for the full ordering.
+        //
+        // The per-group lock guards this group's cursor + timeline record
+        // (against a concurrent send on the same group); the provider lock
+        // guards the shared OpenMLS provider (against every OTHER group's MLS
+        // work). Deliberately NOT held across the fetch, so a 30 s long poll
+        // still blocks neither.
         runSplitPoll(
             inFlight = record.pollInFlight,
-            lock = groupsLock,
+            lock = groupLock(groupIdHex),
+            providerLock = providerLock,
             readCursor = { record.cursor },
             fetch = { after ->
                 chatClient.fetchGroupJournal(
@@ -2213,30 +2461,38 @@ public class ChatRepository(
         }
     }
 
-    /** Pull new messages for every active group. Best-effort:
-     *  per-group failures are logged-and-swallowed so one bad
-     *  apple doesn't block the others.
+    /**
+     * Pull new messages for every active group. Best-effort: per-group failures
+     * are logged-and-swallowed so one bad apple doesn't block the others.
      *
-     *  @param waitSecs same semantics as [pollGroup]; passed
-     *    through to each per-group call. With 30s long-poll +
-     *    sequential per-group iteration the worst-case latency
-     *    to see a new message in any group is `30 * N` seconds
-     *    where N is the group count — which is fine for the
-     *    1×1 chat surface (one group per peer), and the
-     *    refactor to parallel polling lands when group counts
-     *    actually push back. */
+     * G-37 — CONCURRENT, bounded by [POLL_ALL_CONCURRENCY]. This used to iterate
+     * serially, so with a 30 s long poll the worst-case latency to see a new
+     * message in ANY group was `waitSecs * N`. Now the N long polls overlap and
+     * the bound is `waitSecs * ceil(N / POLL_ALL_CONCURRENCY)`. This only became
+     * safe once the DS fetch moved outside the locks and the locks became
+     * per-group — concurrent polls of DIFFERENT groups now contend only for the
+     * short provider critical section of their applies, and the per-group
+     * in-flight latch keeps a chat-screen poll and a list poll of the SAME group
+     * from overlapping (the loser returns immediately without fetching).
+     *
+     * `supervisorScope` + a per-leg `try/catch` is what preserves the
+     * best-effort contract: one group's failure must not cancel its siblings.
+     * A plain `coroutineScope` would propagate the first failure and cancel the
+     * rest, which is strictly worse than the serial loop it replaces.
+     *
+     * @param waitSecs same semantics as [pollGroup]; passed through to each
+     *   per-group call.
+     */
     public suspend fun pollAllGroups(waitSecs: Int = 0) {
-        val identity = canonicalIdentity.get() ?: return
-        // Snapshot the keys outside the lock — pollGroup
-        // re-acquires it per group.
+        canonicalIdentity.get() ?: return
+        // Snapshot the keys under the map's own monitor — `groups` is a
+        // `synchronizedMap`, whose iterators are NOT self-synchronising.
         val groupIds = synchronized(groups) { groups.keys.toList() }
-        for (groupIdHex in groupIds) {
-            try {
-                pollGroup(groupIdHex, waitSecs = waitSecs)
-            } catch (_: Throwable) {
-                // Best-effort: 1.15d7 will wire a tracing-
-                // equivalent sink for these.
-            }
+        runPollAllGroups(
+            groupIds = groupIds,
+            concurrency = POLL_ALL_CONCURRENCY,
+        ) { groupIdHex ->
+            pollGroup(groupIdHex, waitSecs = waitSecs)
         }
     }
 
@@ -2329,6 +2585,13 @@ public class ChatRepository(
             for (rec in groups.values) rec.group.close()
             groups.clear()
         }
+        // G-37 — drop the per-group mutexes alongside the records they guard,
+        // so an account switch does not carry a previous session's lock map.
+        // Safe here: `wipeInMemoryState` runs on the bootstrap / logout path,
+        // where there is no in-flight chat operation to strand — and a caller
+        // that somehow still held one would simply hold the last reference to
+        // an orphaned Mutex, never a lock a NEW operation could also acquire.
+        groupLocks.clear()
         // Close the previous identity handle (releases the
         // Rust-side Arc + provider storage); the next
         // bootstrap builds a fresh one.
@@ -2517,7 +2780,7 @@ public class ChatRepository(
      * not happen" for an existing committed group, which always has a durable
      * snapshot.
      *
-     * Runs under [groupsLock] (every commit call site holds it), so the provider
+     * Runs under [providerLock] (every commit call site holds it), so the provider
      * restore + handle swap are serialised against all other MLS ops.
      */
     private fun resetGroupToDurableSnapshotOrThrow(groupIdHex: String) {
@@ -2579,9 +2842,15 @@ public class ChatRepository(
             return
         }
         if (entries.isEmpty()) return
-        groupsLock.withLock {
+        // G-37 — the per-group lock spans the whole sweep, so a re-publish
+        // cannot interleave with a fresh commit or a poll apply on the SAME
+        // group (the echo re-arm must land before the next poll sees the
+        // re-published commit). The epoch read is the only provider touch here;
+        // the re-publishes themselves are network + outbox-store work, so they
+        // stay outside the provider lock.
+        groupLock(groupIdHex).withLock {
             val currentEpoch = try {
-                record.group.epoch()
+                providerLock.withLock { record.group.epoch() }
             } catch (_: Throwable) {
                 return@withLock
             }
@@ -2612,13 +2881,22 @@ public class ChatRepository(
     private fun persistMessageLogBestEffort() {
         val accountIdB64 = currentAccountIdB64.get() ?: return
         val slots = mutableMapOf<String, PersistedGroup>()
-        for ((hex, record) in groups) {
-            slots[hex] = PersistedGroup(
-                cursor = record.cursor,
-                messages = record.snapshot().map {
-                    PersistedMessage.Companion.from(it)
-                },
-            )
+        // G-37 — `groups` is a `synchronizedMap`, whose iterators are NOT
+        // self-synchronising: iterating it while another coroutine registers a
+        // group can throw ConcurrentModificationException. The old
+        // repository-wide mutex made this accidentally safe (every writer held
+        // it); per-group locking removes that accident, so the map's own
+        // monitor is taken explicitly — matching what `pollAllGroups` and
+        // `publishThreadList` already do.
+        synchronized(groups) {
+            for ((hex, record) in groups) {
+                slots[hex] = PersistedGroup(
+                    cursor = record.cursor,
+                    messages = record.snapshot().map {
+                        PersistedMessage.Companion.from(it)
+                    },
+                )
+            }
         }
         MessageLogStore.putLog(
             context = applicationContext,
@@ -2786,7 +3064,7 @@ private class GroupRecord(
 
     /**
      * G-37 — per-group poll latch. Now that the DS fetch runs OUTSIDE
-     * `groupsLock`, two concurrent `pollGroup` calls for the same group could
+     * the provider lock, two concurrent `pollGroup` calls for the same group could
      * otherwise both fetch from the same cursor and then apply overlapping
      * batches. The loser of this CAS skips entirely (it does not even fetch);
      * the winner clears it in a `finally`, so a failed / cancelled fetch never

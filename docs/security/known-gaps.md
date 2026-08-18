@@ -2699,8 +2699,10 @@ fail-closed-refuse-the-connection — it touches no message-path or key-material
 invariant. Invariant #1 holds trivially (the manifest is global — no `account_id`, no
 per-user field); invariant #2 holds (a public Ed25519-signed static artifact nginx
 serves opaquely, no key material). Because it adds no E2EE / MLS / call invariant, it
-takes **no indexed C-number** — the invariant index stays at 8 I + 58 C + 15 T. A
-future tightening (a persisted highest-`latest_release`-seen floor, or a re-enabled
+takes **no indexed C-number**, so the invariant index is unchanged by it (it stood at
+8 I + 58 C + 15 T when this was written; the live counts are in the gated Quick stats
+table in [`invariant-index.md`](./invariant-index.md), which is the only place they
+are maintained). A future tightening (a persisted highest-`latest_release`-seen floor, or a re-enabled
 generous freshness window) is a clean addition if the residual is ever judged worth
 closing. See ADR-0038 § "Freshness model + residual".
 
@@ -2759,8 +2761,10 @@ calls / SFrame, backup / crypto / recovery, MLS / DeviceGroup / pairing, and
 transport / push / attachments. The class is: a fixed AEAD key paired with a
 non-unique nonce (a fixed / persisted / reset-to-zero counter, salt, or IV) on distinct
 plaintexts, which yields keystream reuse (`P_a XOR P_b = C_a XOR C_b`) + Poly1305 forgery.
-Outcomes below; the invariant index is unchanged (this is a free-form audit-record entry,
-adds no indexed C/I/T invariant — still **8 I + 58 C + 15 T**).
+Outcomes below; the invariant index is unchanged by this entry (a free-form audit
+record, adding no indexed C/I/T invariant — it stood at **8 I + 58 C + 15 T** when
+this was written; the live counts live only in the gated Quick stats table in
+[`invariant-index.md`](./invariant-index.md)).
 
 **T1 — CLOSED (this pass).** Shadowsocks-2022 reused the AEAD counter between the
 handshake **prelude** and the **body** stream: both began the per-direction AEAD nonce at
@@ -2848,7 +2852,9 @@ group-membership **commit** paths — add / remove / role-change / external-join
 approve — share the same publish-before-persist ordering, but with a **DISTINCT and
 worse** failure mode than a same-generation nonce reuse. This entry records that
 hazard and its accepted fix. Like G-33 / G-34, this is a **free-form audit record**
-— it adds **no** indexed C / I / T invariant (still **8 I + 58 C + 15 T**).
+— it adds **no** indexed C / I / T invariant (the index stood at **8 I + 58 C + 15 T**
+when this was written; the live counts live only in the gated Quick stats table in
+[`invariant-index.md`](./invariant-index.md)).
 
 **The hazard (deterministic, verified firsthand).** Each commit path runs
 `lakko-mls` create-commit, which **eagerly merges** epoch N → N+1 into the in-memory
@@ -2931,7 +2937,7 @@ durable write — the sweep additionally re-arms the echo filter for the re-publ
 The two-artifact add / approve paths carry both the commit and the Welcome (add →
 mailbox) / rendezvous (approve → group journal); the sweep re-publishes each to its
 destination and echo-re-arms only the group-journal artefacts. No `lakko-mls` core /
-FFI change (invariant #3 untouched); still **8 I + 58 C + 15 T**. Verified firsthand:
+FFI change (invariant #3 untouched); no indexed invariant added. Verified firsthand:
 web `tsc` clean + vitest 338 (15 new) + vite build; iOS `xcodebuild` build + test 12/12;
 Android `:app:compileDebugKotlin` + `CommitOutboxTest` 10/10. Residual: a live
 crash-injection / power-loss e2e on a deployed multi-device environment (a runtime
@@ -2946,8 +2952,10 @@ FFI + web + iOS + Android; `lakko-security` **APPROVE-WITH-NOTES**, no
 CRITICAL/HIGH) and is recorded as **C-60**. This entry is the honest inventory of
 what it did **not** close. Like G-33 / G-34 / G-35 this is a **free-form audit
 record** — it adds **no** indexed C / I / T invariant of its own (C-60 is ADR-0042's
-positive property and **C-61** is ADR-0043's; the counts move to
-**8 I + 61 C + 15 T** because of those two, not because of this gap).
+positive property and **C-61** is ADR-0043's; the counts moved to
+**8 I + 61 C + 15 T** because of those two, not because of this gap, and have moved
+again since — the live figures are in the gated Quick stats table in
+[`invariant-index.md`](./invariant-index.md)).
 
 **Update (2026-08-11) — [ADR-0043](../adr/0043-push-routing-secret-rotation-on-removal.md)
 landed on all three clients (`935250a` web, `a6ed544` iOS + Android), rotating the
@@ -3692,69 +3700,259 @@ materialises a *DS-linkable* social graph, and the cluster is no longer
 *forward*-linkable across a removal by the evicted party, but an opaque
 co-membership cluster is still materialised and still re-linkable by intersection.
 
-### G-37: Android `ChatRepository.groupsLock` is held across unbounded DS network I/O — **OPEN** (surfaced by the ADR-0044 lock-bounding work, 2026-08-14; a chat-path hazard, not a push one)
+## Client concurrency
 
-**Scope note first, because this entry is easy to file in the wrong place.** This
-is **not** a G-36 residual. It surfaced during the ADR-0044 arc only because the
-push path happened to reach it, and the push path is now insulated from it; what
-remains is a **chat-path** hazard that any other `groupsLock` caller inherits.
-Recorded as its own gap for that reason.
+Chat-client locking + ordering gaps. Both entries below concern the CLIENT side of
+the MLS commit / poll paths, not a server or a dependency.
 
-**The shape.** `ChatRepository.groupsLock` (`Mutex`,
-`apps/android/app/src/main/kotlin/me/lakko/app/chat/ChatRepository.kt:154`) is a
-single process-wide lock guarding same-group operations. Several critical sections
-`await` a Delivery-Service publish **while holding it**, and **none of those calls
-is bounded** — verified firsthand in the working tree:
+**Filing note.** Everything from G-27 to G-36 still sits under the preceding
+`## Dependency advisories` heading, which describes none of them — a structural
+drift from a run of arcs that appended entries without opening a section. Only
+this section was opened; re-filing the rest is a standing cleanup, deliberately
+not folded into this pass because it would move a lot of unrelated prose. The
+reviewer-facing categorisation in
+[`invariant-index.md`](./invariant-index.md) is correct for all of them.
 
-- `dsClient.publishGroup` at **`:619`** (role change), **`:719`** (add-member
-  commit), **`:863`** (remove-member commit), and **`:1024` / `:1030`**
-  (external-join approve commit + Welcome rendezvous);
-- `dsClient.publishMailbox` at **`:326`** and **`:725`** (the Welcome on the
-  invite / add paths);
-- the commit-outbox sweep's republish lambdas at **`:2563-2565`**, invoked under
-  the same lock.
+### G-37: The Android chat repository held ONE repository-wide lock across a deliberate 30-second DS long poll — **CLOSED on Android (2026-08); residuals recorded below**
 
-(The external-join proposal publishes at `:1263` / `:1276` are **not** under
-`groupsLock` and are not part of this.)
+**The original framing of this entry was wrong, and the correction is the point.**
+It was filed (2026-08-14, out of the ADR-0044 lock-bounding work) as a *resilience*
+hazard: "a hung DS request wedges the shared lock indefinitely". The code was worse
+than that — it was the **steady state**, no hang required. `ChatRepository.groupsLock`
+was one `Mutex` per **repository**, not per group (its own doc comment said so and
+even named the fix), and `pollGroup` awaited a **deliberate 30-second DS long poll
+while holding it**, driven by an unbounded `while (isActive)` loop on the open chat
+screen. So while any chat screen was open, that single global lock was held
+near-continuously and every send, edit, reaction and membership commit **on every
+group** queued behind it. The chat-list screen then polled groups serially, making
+the worst case `waitSecs * N`.
 
-A hung or stalled DS request in any of those sections therefore holds `groupsLock`
-for as long as the socket stalls, and **every** other same-group operation queues
-behind it — indefinitely, with no error surfaced anywhere.
+**The fix is in two parts, and neither is "add a timeout".**
 
-**Why it was found here.** ADR-0044's routing-row lock reads the group's MLS epoch
-through `PushRoutingPorts.freshMintStamp()`, which in production hops through
-`groupsLock`. That produced the chain
+**1. The poll is restructured, not bounded.** A timeout here would sever a long poll
+that is behaving exactly as designed. `pollMessages` was split into a network half
+(`ChatClient.fetchGroupJournal`) and an MLS half (`ChatClient.applyFetchedMessages`),
+the latter deliberately **not `suspend`** — a structural guarantee that a network
+wait cannot be reintroduced into the critical section, because a suspending call
+would not compile there. The fetch runs outside the locks; the apply and the cursor
+advance run inside, atomic with respect to each other. The cursor is read before the
+fetch and re-read under the lock: if it moved, the batch is **dropped unapplied**
+(`SplitPollOutcome.SKIPPED_CURSOR_MOVED`), because applying it would re-feed already
+consumed rows to OpenMLS and — worse — let the stale batch's end cursor move the
+record's cursor **backward**. A per-group in-flight latch stops two polls of one
+group overlapping, released in a `finally` so a failed or cancelled fetch never
+wedges polling. See `apps/android/app/src/main/kotlin/me/lakko/app/chat/SplitPoll.kt`
+and its host tests.
 
-```
-routing-row lock -> freshMintStamp() -> groupsLock -> a hung DS publish
-```
+**2. DS I/O is bounded at the TRANSPORT, not with `withTimeout` — and that choice is
+load-bearing, not tidiness.** A `withTimeout` wrapped around a commit site would put
+a `TimeoutCancellationException` **inside** `runCrashSafeCommit`, where the
+persist-catch would swallow it and fire `resetGroupToDurableSnapshotOrThrow` —
+silently converting a network timeout into a commit rollback, i.e. manufacturing the
+device-behind outcome [ADR-0040](../adr/0040-durable-pending-commit-outbox.md) exists
+to prevent. Bounding `DsClient` instead means no such exception is ever constructed:
+Ktor's `HttpTimeout` throws `HttpRequestTimeoutException`, which extends
+`java.io.IOException`, so it lands in the existing `DsNetworkError` path and reaches
+callers as `ChatError`. Nothing configured a timeout before, so the effective budget
+was inherited and unknown; it is now explicit (15 s request + socket), and a
+long-poll fetch widens **both** request and socket to `waitSecs + 10` — the socket
+deadline has to move too, since a long poll is an idle socket by definition.
 
-which wedges the **routing row** exactly as an unbounded broadcast would, one hop
-removed — and a wedged routing row is not merely an availability problem: it is
-the row that never applies a peer's rotation, so the device keeps notifying an id
-an evicted member still derives (the F-A consequence, reached through
-availability). **The push path is now insulated**: `GroupPushRouting.boundedOrNull`
-bounds `freshMintStamp()` at **both** sites that await it under the routing lock —
-`rotate` and `ensure`'s MINT branch — collapsing an expiry into the same `null` an
-unreadable epoch already produces, i.e. fail-closed to no mint and nothing sent.
+**Then the lock itself was narrowed to two tiers — and THIS correction is the part
+worth reading.** The obvious fix is the one the old doc comment suggested: swap the
+single mutex for a `ConcurrentHashMap<String, Mutex>` keyed per group. **A straight
+per-group swap would have broken ADR-0040.** One OpenMLS provider serves *every*
+group, and the FFI offers no per-group persistence:
 
-**What is NOT fixed.** The bound is on the push side of the boundary only. Any
-other caller of `groupsLock` — every chat send, membership change, poll-apply and
-outbox sweep — still inherits the unbounded hold, and the chat path still has it.
-Removing `boundedOrNull` would silently re-open the push wedge, which is why that
-helper carries the reasoning in its own doc comment rather than only here.
+- `Identity.snapshotStorage()` serialises the **whole** provider under a single read
+  lock, while one logical MLS operation performs several separate writes into it
+  (`MemoryStorage` takes its lock per write). A snapshot taken by group A part-way
+  through group B's multi-write operation captures **B torn**, and that torn blob is
+  what a later restore or restart loads.
+- `Identity.restoreStorage()` — the ADR-0040 F1 abort path,
+  `resetGroupToDurableSnapshotOrThrow` — replaces **every** group's state at once.
+  Running it while another group sits at an un-persisted N+1 would **roll that group
+  back**, re-opening the exact device-behind window ADR-0040 closes.
 
-**Fix direction (unbuilt).** Bound the DS publishes taken under `groupsLock`, the
-way the routing path now bounds its own network calls — per **call**, not per
-section, so an expiry lands in each call's existing failure handler rather than
-inventing a half-applied shape. The Android push path is the worked example:
-`bounded` / `NETWORK_CALL_TIMEOUT_MS` in
-`apps/android/app/src/main/kotlin/me/lakko/app/push/GroupPushRouting.kt`. The same
-question has **not been asked** of the iOS and web chat repositories; assume it
-applies until checked.
+Both were impossible before only because ONE mutex covered every group — an
+accidental safety the narrowing would have removed. So the shape is **two tiers**: a
+per-group `Mutex` (outer, spanning the whole operation including the publish, so
+same-group ordering is byte-for-byte what it was) plus a **global `providerLock`**
+(inner, held only over provider-touching regions). Ordering is always per-group
+first, provider second, never the reverse, and never two per-group locks at once.
 
-**Severity: availability, with the ADR-0044 caveat above.** No confidentiality or
-integrity property is weakened by the lock being held — nothing about who may
-write, or which write survives, changes. What is lost is liveness on a shared lock,
-and on one specific path liveness is what a confidentiality guarantee was resting
-on.
+**Where the concurrency actually comes from is the lifting, not the narrowing.** Each
+path now splits into a provider half and a network half — `ChatClient.prepareSend` /
+`publishPreparedSend`, `prepareCrashSafeCommit` / publish, `fetchGroupJournal` /
+`applyFetchedMessages` — so what different groups serialise on is local CPU plus one
+snapshot write, never a 15 s DS publish or a 30 s long poll. The ADR-0040 §2 ordering
+survives the split **structurally**: `prepareCrashSafeCommit` returning normally IS
+the signal that both durable writes landed, and the publish is a separate call that
+cannot run until it has returned, so a throw still means the publish is provably
+un-run.
+
+**`pollAllGroups` is now concurrent, bounded at 3.** The bound is not about CPU. Every
+DS long poll goes to the same host and Ktor's OkHttp engine dispatches through
+`Call.enqueue`, so OkHttp's `Dispatcher.maxRequestsPerHost` applies — default 5.
+Filling all five slots with idle long polls would queue the user's next send behind
+them in `readyAsyncCalls`, trading lock contention for connection starvation, which
+no amount of lock narrowing could then fix. Three leaves at least two slots free (the
+open chat screen's own continuous long poll, and one interactive publish) while
+collapsing chat-list latency from `waitSecs * N` to `waitSecs * ceil(N / 3)`. The
+fan-out is a `supervisorScope` with a per-leg `try/catch` — a plain `coroutineScope`
+would propagate the first child failure and cancel its siblings, which is strictly
+worse than the serial loop it replaces; `CancellationException` is re-thrown so a
+cancelled poll stays cancelled.
+
+**Residual, stated honestly.** Cross-group operations are **not** fully independent.
+They still serialise on the provider region — local CPU plus one snapshot write — and
+that is a direct consequence of the FFI's whole-provider persistence granularity, not
+of the locking. What is now **outside** it is everything slow: the 15 s publish and
+the 30 s long poll. Making groups genuinely independent would need per-group
+persistence in `lakko-mls` / the FFI, which is an MLS-core change (invariant #3) and
+is not attempted here.
+
+**Two side-effects of removing the accidental global lock, recorded because they were
+easy to miss.** `groups` is a `Collections.synchronizedMap`, whose *iterators* are not
+self-synchronising; the repository-wide mutex made unsynchronised iteration
+accidentally safe, so `persistMessageLogBestEffort` (and the group-id snapshot in
+`pollAllGroups`) now take the map's own monitor explicitly. And the per-group mutex
+map is cleared in `wipeInMemoryState` alongside the records it guards, so an account
+switch does not carry a previous session's locks.
+
+**The question this entry left open for the other two clients has been answered, and
+the answer lives in G-38 below.** The original text said the same question had *not*
+been asked of the iOS and web chat
+repositories. It has now: they had the **opposite** exposure — no serialization at
+all — and the residual "lock held across an unbounded network call" survives there in
+a much smaller, per-group form, recorded under G-38 rather than duplicated here.
+
+**Severity, unchanged in kind:** availability. No confidentiality or integrity
+property was ever weakened by the lock being held — nothing about who may write, or
+which write survives, changed. What was lost was liveness on a shared lock, and on
+one path (ADR-0044's routing row, since insulated by `boundedOrNull`) liveness was
+what a confidentiality guarantee rested on.
+
+### G-38: Two membership commits could be in flight to the DS at once → inverted journal order → device-ahead — **serialized on web + iOS + Android (2026-08); the remote-commit epoch fork is UNFIXED on every platform**
+
+**Get the mechanism right, because the obvious statement of it is wrong.** The hazard
+is **not** "two commits built on the same epoch". On all three clients the
+create-commit region has no suspension point, so a second operation correctly reads
+N+1 after the first has eager-merged. The hazard is that **both commits end up in
+flight to the DS simultaneously**, and the DS assigns journal order by **arrival**,
+not by which call started first. Land them inverted and peers still at N drop the
+N+1 → N+2 commit as wrong-epoch, apply the N → N+1 one, and settle at N+1 while the
+committing device sits at N+2 — the **device-ahead** outcome
+[ADR-0040](../adr/0040-durable-pending-commit-outbox.md) exists to prevent.
+
+**The pending-commit outbox cannot recover it.** Both publishes *succeeded*, so both
+entries are acked and the restart sweep has nothing to re-publish. ADR-0040's
+durability machinery is aimed at the crash window between publish and persist; this
+is a different route to the same end state, and it walks straight past it.
+
+**Fixed by a per-group serializing lock spanning create-through-publish**, on all
+three clients:
+
+- **Android** — the two-tier shape described in G-37: the per-group `Mutex` spans the
+  whole operation, so commit A is on the wire before commit B is even created.
+- **iOS** — `ChatRepository.withCommitLock(groupIdHex:)`, a stored per-group task
+  chain modelled on `PushGroupRouting.routingChain` (ADR-0044 C-62), for the same
+  reason: a read-decide-write that spans an `await` needs a lock, not actor
+  isolation. `@MainActor` makes each statement atomic but releases isolation at every
+  suspension, and the region contains one (`dsClient.publishGroup`).
+- **web** — `withGroupCommitLock` in `apps/web/src/contacts/client.ts`, a
+  module-level per-group queue. Module-level is load-bearing: a `ContactsClient` is
+  constructed per route component while they all drive the same canonical wasm
+  `Identity`, so an instance field would serialise nothing that matters.
+
+All three are **serializing, never coalescing** — a successor waits and then runs in
+full against freshly-read state. Folding was `lakko-security` F1 in the ADR-0043
+review; here it would be worse, because two membership operations answer two
+*different* intents (add Alice, remove Bob) and a fold would silently drop one. The
+lock spans the **create**, not just the publish — acquiring it afterwards would fix
+nothing, since the eager merge is exactly what goes stale.
+
+**Reachability, per platform, as established.**
+
+- **web — reachable in a single tab, proven by execution.** The `busy` signal in
+  `routes/Chat.tsx` is one shared boolean with **eight** independent owners
+  (`refresh`, `onAddMember`, `onRemoveMember`, `onToggleAdmin`, `onApproveJoin`,
+  `onRejectJoin`, `onCreateInviteLink`, `onRevokeInviteLink`), and `refresh()` is
+  launched fire-and-forget (`void refresh()`) at the tail of each commit handler, so
+  it routinely outlives the handler that started it and clears the flag out from
+  under an unrelated commit still in flight. `commit-lock.test.ts` reproduces that
+  ownership pattern directly rather than asserting it in prose, and the suite's own
+  header records which cases **discriminate**: neutering the lock to a pass-through
+  fails the same-group ordering test with `expected 7n to be 6n` (two eager merges
+  during one publish), and re-keying it to a single global name times out the
+  different-groups test.
+- **iOS — reachable; a code-structure argument, not an observed run.** A latch does
+  exist (`ChatViewModel.membershipBusy`) but the view model is constructed **inline**
+  in the SwiftUI body (`LakkoApp.swift`) and held by `@ObservedObject`, so a body
+  re-evaluation mints a fresh instance with the latch cleared. The repository methods
+  are also `public` and carry no invariant of their own.
+- **Android — not reachable before the change**: the repository-wide mutex already
+  prevented it, and the G-37 narrowing preserves the same-group guarantee by design.
+
+**Residuals — read residual 2 first, it is the largest unfixed item here.**
+
+1. **The remote-commit fork. UNFIXED on every platform; no lock addresses it.** A poll
+   applying a **remote** commit while a local one is mid-publish is a genuine MLS
+   commit race: the peer built its commit against epoch N independently, so whichever
+   commit loses the DS journal ordering is rejected by everyone who applied the
+   winner — while its own author has already eager-merged it locally. Local
+   serialization is powerless here by construction: the second committer is a
+   different device. Closing it needs a **DS-side epoch gate** (reject a commit whose
+   epoch is not `current + 1`) or **proposal-based commits** (members propose, one
+   designated committer commits). Note the sub-case that *is* platform-dependent: on
+   Android the poll apply takes the same per-group lock as the commits, so the purely
+   **local** poll-vs-commit interleave is closed there; on web and iOS the commit lock
+   covers only the four commit paths, and the poll apply
+   (`ChatClient.pollMessages` → `processIncomingVerifyingRoles`, which carries an
+   `await` mid-loop) is outside it.
+2. **web two-tab is NOT fixable by a lock and was deliberately not patched.** Each tab
+   holds an independent in-memory wasm provider, and the snapshot is written whole to
+   a row keyed on `accountId` alone (`chat/mls-store.ts`). Tab B, even after acquiring
+   a cross-tab lock, still builds on a stale epoch and clobbers tab A. Two tabs on one
+   account are already broken independently of commits — two ordinary messages clobber
+   each other the same way — so a cross-tab lock here would buy nothing and imply a
+   safety that does not exist.
+3. **web `CoPublishersPanel` (`routes/Channels.tsx`) is unguarded.** A 5-second
+   `setInterval` calls `refreshPending()` → `pollCoPublisherJournal` →
+   `processIncomingVerifyingRoles` **without consulting the panel's `busy()` signal**,
+   so it runs concurrently with `approveCoPublisher` — which is itself an
+   `approveExternalJoin` create-commit on the `PublisherGroup`. That path is not
+   covered by `withGroupCommitLock` (which lives in `contacts/client.ts` and guards
+   the four `ContactsClient` paths only).
+4. **The web lock is per-group but the durable unit underneath is per-account.**
+   `persistSnapshotWithCommit` writes `Identity.snapshotStorage()` — the whole
+   provider — and the F1 abort path calls `restoreStorage` on that whole provider, so
+   concurrent commits on two *different* groups would interact through the shared
+   snapshot. Not reachable today (only the chat view commits on an existing group, and
+   the router mounts one at a time), which is why the key stays per-group; the moment
+   a second commit-capable view can be mounted the key must widen to the account. This
+   is the same whole-provider granularity G-37's residual names on Android.
+5. **The lock is held across an unbounded network call on web.** `DsClient.publishGroup`
+   is a bare `fetch()` with no `AbortSignal`, so a stalled DS publish wedges **that
+   group's** commit chain for as long as the browser keeps the request alive. iOS
+   relies on `URLSession`'s implicit default request timeout rather than an explicit
+   budget (only the long-poll fetch sets `timeoutInterval`). This is G-37's class
+   reappearing at a much smaller blast radius — per group, not per repository — and it
+   is a deliberate trade on iOS and web: releasing the lock while a publish's fate is
+   unknown re-opens exactly the hazard the lock closes, so the bound belongs on the
+   call, not on the section. Android's transport-level budget (G-37 part 2) is the
+   worked example.
+
+**Invariants.** No `lakko-mls` change on any client — orchestration over the audited
+create-commit and publish paths, so invariant #3 is untouched. Invariant #4 is
+**strengthened**: no group-epoch advance reaches the DS while another advance on the
+same group is still in flight. Invariants #1 / #2 are unaffected (the lock changes
+ordering, not what the server sees). No indexed `C-` / `I-` / `T-` invariant is added
+by this entry — see the Quick stats table in
+[`invariant-index.md`](./invariant-index.md) for the current counts.
+
+**Verified firsthand by the maintainer against the current tree:** Android
+`:app:compileDebugKotlin` BUILD SUCCESSFUL and `testDebugUnitTest --rerun-tasks` 515
+tests / 0 failures; web `tsc --noEmit` clean and vitest 574; iOS `xcodebuild` BUILD
+SUCCEEDED; `just spec-check` OK. The residuals above are **not** covered by those
+gates — residual 1 in particular needs a live multi-device environment.

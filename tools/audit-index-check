@@ -5,11 +5,12 @@
 # audit-index-check — drift gate between source-file headers
 # and docs/security/invariant-index.md.
 #
-# The audit pack pins three numbered invariant classes:
+# The audit pack pins four numbered classes:
 #
 #   I-N  -> docs/security/mls-state-machine.md  (### I-N:)
 #   C-N  -> docs/security/calls.md              (### C-N:)
 #   T-N  -> docs/security/transport.md          (### T-N:)
+#   G-N  -> docs/security/known-gaps.md         (### G-N:)
 #
 # docs/security/invariant-index.md aggregates them into one
 # reviewer-friendly cheat sheet. The "how to add a new
@@ -24,6 +25,27 @@
 # failure mode is exactly the kind of drift this script
 # catches.
 #
+# The G- class was added after a proven drift: the index's
+# quick-stats row claimed `G-1..G-27` with 27 open while
+# known-gaps.md had carried `### G-` headings up to G-36 for
+# some time, and no gate existed to catch it. The same pass
+# found seven G- entries with no per-category row at all.
+# So the G- class gets BOTH reconciliations the I/C/T
+# classes get, PLUS a check that the hand-written total and
+# range in the "Quick stats" table match the source.
+#
+# DELIBERATELY OUT OF SCOPE: the "Total open gaps" row.
+# Unlike an invariant, a gap has a STATUS (open / CLOSED /
+# partially closed), and several entries are only partially
+# closed — G-30's finding-1 and finding-2 are addressed
+# while a residual remains; G-36 carries a per-residual
+# status. Mechanising that number would mean encoding "is
+# this really closed" into a grep, which would gate a human
+# adjudication on an accident of heading wording rather than
+# on a fact. Presence, numbering and totals are mechanically
+# checkable; status is not, and is left to the prose note on
+# the index page.
+#
 # Portable across macOS bash 3.2 (no `declare -A`) and
 # Linux bash 4+.
 
@@ -37,13 +59,14 @@ source_for_class() {
         I) echo "$ROOT/docs/security/mls-state-machine.md" ;;
         C) echo "$ROOT/docs/security/calls.md" ;;
         T) echo "$ROOT/docs/security/transport.md" ;;
+        G) echo "$ROOT/docs/security/known-gaps.md" ;;
         *) echo "audit-index-check: unknown class $1" >&2; exit 2 ;;
     esac
 }
 
 fail=0
 
-for class in I C T; do
+for class in I C T G; do
     src=$(source_for_class "$class")
 
     # IDs that the source file claims via `### CLASS-N: ...`
@@ -58,9 +81,13 @@ for class in I C T; do
         | sed -E "s/\| (${class}-[0-9]+) *\|/\1/" \
         | sort -u)
 
+    # `invariants` for I / C / T; the G- class pins gaps, not
+    # live properties, so the message names them as such.
+    if [ "$class" = G ]; then noun=gaps; else noun=invariants; fi
+
     missing_in_index=$(comm -23 <(printf '%s\n' "$src_ids") <(printf '%s\n' "$idx_ids"))
     if [ -n "$missing_in_index" ]; then
-        echo "drift: ${class}-class invariants present in source but missing from invariant-index.md:"
+        echo "drift: ${class}-class ${noun} present in source but missing from invariant-index.md:"
         echo "$missing_in_index" | sed 's/^/    /'
         fail=1
     fi
@@ -73,11 +100,57 @@ for class in I C T; do
     fi
 done
 
+# --- G-class quick-stats reconciliation -----------------------
+#
+# The "Quick stats" table hand-writes the G- total and range:
+#
+#   | **G-** | 37 | G-1..G-37 | [`known-gaps.md`](...) |
+#
+# Both are mechanically derivable from the source headings, so
+# gate them — a hand-written total drifting from the source is
+# the exact defect this class was added for. The "Total open
+# gaps" row is NOT gated (see the header comment: status is an
+# adjudication, not a mechanical fact).
+
+g_nums=$(grep -oE "^### G-[0-9]+:" "$(source_for_class G)" \
+    | sed -E "s/^### G-([0-9]+):.*/\1/" \
+    | sort -n -u)
+
+if [ -z "$g_nums" ]; then
+    echo "drift: no '### G-N:' headings found in known-gaps.md — the G- source shape changed"
+    fail=1
+else
+    g_count=$(printf '%s\n' "$g_nums" | wc -l | tr -d ' ')
+    g_range="G-$(printf '%s\n' "$g_nums" | head -n 1)..G-$(printf '%s\n' "$g_nums" | tail -n 1)"
+
+    stats_row=$(grep -E '^\| *\*\*G-\*\* *\|' "$INDEX" | head -n 1)
+    stats_count=$(printf '%s\n' "$stats_row" \
+        | sed -nE 's/^\| *\*\*G-\*\* *\| *([0-9]+) *\|.*/\1/p')
+    stats_range=$(printf '%s\n' "$stats_row" \
+        | sed -nE 's/^\| *\*\*G-\*\* *\| *[0-9]+ *\| *(G-[0-9]+\.\.G-[0-9]+) *\|.*/\1/p')
+
+    if [ -z "$stats_count" ] || [ -z "$stats_range" ]; then
+        echo "drift: the invariant-index.md 'Quick stats' G- row is missing or unparseable"
+        echo "    expected a row shaped: | **G-** | ${g_count} | ${g_range} | ... |"
+        fail=1
+    else
+        if [ "$stats_count" != "$g_count" ]; then
+            echo "drift: invariant-index.md 'Quick stats' claims ${stats_count} G- gaps; known-gaps.md has ${g_count} '### G-N:' headings"
+            fail=1
+        fi
+        if [ "$stats_range" != "$g_range" ]; then
+            echo "drift: invariant-index.md 'Quick stats' claims range ${stats_range}; known-gaps.md spans ${g_range}"
+            fail=1
+        fi
+    fi
+fi
+
 if [ "$fail" -eq 0 ]; then
     i_n=$(grep -c "^### I-" "$(source_for_class I)")
     c_n=$(grep -c "^### C-" "$(source_for_class C)")
     t_n=$(grep -c "^### T-" "$(source_for_class T)")
-    echo "audit-index-check: clean (${i_n} I + ${c_n} C + ${t_n} T invariants pinned in both source and index)"
+    g_n=$(grep -c "^### G-" "$(source_for_class G)")
+    echo "audit-index-check: clean (${i_n} I + ${c_n} C + ${t_n} T invariants + ${g_n} G gaps pinned in both source and index)"
 fi
 
 exit "$fail"

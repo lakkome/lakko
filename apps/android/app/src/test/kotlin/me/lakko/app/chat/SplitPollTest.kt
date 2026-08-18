@@ -19,7 +19,7 @@ import org.junit.Test
 
 /**
  * G-37 — host-side tests for [runSplitPoll], the split-poll ordering that keeps
- * a 30-second DS long poll out of the repository-wide `groupsLock`.
+ * a 30-second DS long poll out of the repository's locks.
  *
  * `ChatRepository` itself needs an Android `Context` and live FFI handles, so the
  * ordering it performs is extracted into [runSplitPoll] — a pure orchestration
@@ -64,6 +64,7 @@ class SplitPollTest {
             runSplitPoll(
                 inFlight = AtomicBoolean(false),
                 lock = lock,
+                providerLock = Mutex(),
                 readCursor = { 0L },
                 fetch = {
                     fetchStarted.complete(Unit)
@@ -76,7 +77,7 @@ class SplitPollTest {
         assertTrue("the fetch must have started", fetchStarted.isCompleted)
 
         // The lock is FREE while the long poll is parked on the network.
-        assertTrue("groupsLock must be free during the fetch", lock.tryLock())
+        assertTrue("the per-group lock must be free during the fetch", lock.tryLock())
         lock.unlock()
 
         // And a genuinely concurrent send completes without waiting for it.
@@ -115,7 +116,7 @@ class SplitPollTest {
 
             // This is exactly the G-37 defect: the global lock is held for the
             // whole 30-second long poll.
-            assertFalse("the pre-fix shape holds groupsLock across the fetch", lock.tryLock())
+            assertFalse("the pre-fix shape holds the lock across the fetch", lock.tryLock())
 
             val send = launch { lock.withLock { concurrentSendCompleted = true } }
             advanceUntilIdle()
@@ -148,6 +149,7 @@ class SplitPollTest {
             val outcome = runSplitPoll(
                 inFlight = AtomicBoolean(false),
                 lock = lock,
+                providerLock = Mutex(),
                 readCursor = { cursor },
                 fetch = { after -> "batch@$after" },
                 apply = { after, fetched ->
@@ -160,7 +162,7 @@ class SplitPollTest {
             )
 
             assertEquals(SplitPollOutcome.APPLIED, outcome)
-            assertTrue("the apply must run while groupsLock is held", lockHeldDuringApply)
+            assertTrue("the apply must run while the per-group lock is held", lockHeldDuringApply)
             assertEquals("the apply sees the pre-fetch cursor", 7L, appliedAfter)
             assertEquals("the apply receives the fetched batch", "batch@7", appliedBatch)
             assertEquals("the cursor advanced inside the same lock", 11L, cursor)
@@ -180,6 +182,7 @@ class SplitPollTest {
         val outcome = runSplitPoll(
             inFlight = AtomicBoolean(false),
             lock = lock,
+            providerLock = Mutex(),
             readCursor = { cursor },
             fetch = {
                 // somebody else advanced the journal cursor while we were on the
@@ -212,6 +215,7 @@ class SplitPollTest {
             runSplitPoll(
                 inFlight = inFlight,
                 lock = lock,
+                providerLock = Mutex(),
                 readCursor = { 0L },
                 fetch = {
                     fetchCalls++
@@ -227,6 +231,7 @@ class SplitPollTest {
         val second = runSplitPoll(
             inFlight = inFlight,
             lock = lock,
+            providerLock = Mutex(),
             readCursor = { 0L },
             fetch = { fetchCalls++ },
             apply = { _, _ -> applyCalls++ },
@@ -251,6 +256,7 @@ class SplitPollTest {
             runSplitPoll(
                 inFlight = inFlight,
                 lock = Mutex(),
+                providerLock = Mutex(),
                 readCursor = { 0L },
                 fetch = { throw IOException("DS unreachable") },
                 apply = { _: Long, _: Unit -> },
@@ -266,6 +272,7 @@ class SplitPollTest {
         val outcome = runSplitPoll(
             inFlight = inFlight,
             lock = Mutex(),
+            providerLock = Mutex(),
             readCursor = { 0L },
             fetch = { },
             apply = { _, _ -> applied = true },
