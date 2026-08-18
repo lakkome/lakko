@@ -148,6 +148,10 @@ public enum ChannelsComposer {
             )
             seedBytes = try group.channelSeed(identity: identity)
         } catch let FfiError.Group(msg) {
+            // Retired v1 state refuses here and cannot be repaired.
+            if msg.contains(LegacyChannelV1.rustRefusalMarker) {
+                throw LegacyChannelError(kind: .channel)
+            }
             throw ChannelsComposerError.ffi(msg)
         } catch let FfiError.Channels(msg) {
             throw ChannelsComposerError.ffi(msg)

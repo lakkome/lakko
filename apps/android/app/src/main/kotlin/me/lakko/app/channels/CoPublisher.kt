@@ -75,7 +75,13 @@ public object CoPublisher {
     public fun openPublisherGroup(identity: Identity, channelIdHex: String): PublisherGroup {
         val channelId = hexToBytes(channelIdHex)
             ?: throw CoPublisherException.BadChannelId(channelIdHex)
-        return publisherGroupOpenOrCreate(identity, channelId)
+        return try {
+            publisherGroupOpenOrCreate(identity, channelId)
+        } catch (e: Throwable) {
+            // A channel minted under the retired v1 derivation refuses here and
+            // cannot be repaired — surface the readable copy, not the raw string.
+            throw LegacyChannelV1.mapOpenError(e)
+        }
     }
 
     /** Mint a co-publisher invite link over the PublisherGroup's MLS `group_id`.
@@ -187,7 +193,14 @@ public object CoPublisher {
             cap.close()
         }
         val channelIdBytes = channelIdFromPublisherGroupId(groupId)
-            ?: throw CoPublisherException.NotAChannelGroup
+            ?: throw if (LegacyChannelV1.isLegacyV1PublisherGroupId(groupId)) {
+                // A link minted under the retired v1 derivation — distinct from
+                // a `/g/` link that simply targets a chat group, and it needs
+                // its own copy.
+                LegacyChannelException(LegacyChannelKind.INVITE_LINK)
+            } else {
+                CoPublisherException.NotAChannelGroup
+            }
         val channelIdHex = ChannelsComposer.bytesToHex(channelIdBytes)
         // Read the current epoch from the journal head (public framing; a
         // non-member can do this). Empty / unreachable journal => epoch 0.

@@ -435,6 +435,8 @@ struct NewChannelScreen: View {
             ))
             state.setKeys(channelId: id, keys: keys)
             dismiss()
+        } catch let err as LegacyChannelError {
+            errorMessage = err.message
         } catch let err as ChannelsApiError {
             errorMessage = "Server rejected: \(err.code) — \(err.detail)"
         } catch let err as ChannelsComposerError {
@@ -1445,7 +1447,9 @@ struct CoPublishersPanelView: View {
             identity = id
             publisherGroup = pg
         } catch {
-            self.error = "Could not open the channel group: \(error.localizedDescription)"
+            self.error = LegacyChannelV1.describe(error) {
+                "Could not open the channel group: \($0.localizedDescription)"
+            }
             return
         }
         startPollLoop()
@@ -1643,6 +1647,8 @@ struct JoinCoPublisherScreen: View {
             ))
             state.setKeys(channelId: request.channelIdHex, keys: keys)
             dismiss()
+        } catch let err as LegacyChannelError {
+            errorMessage = err.message
         } catch {
             errorMessage = "Co-publish failed: \(error.localizedDescription)"
         }
@@ -1777,8 +1783,9 @@ final class RotationPanelModel: ObservableObject {
                 cron = makeCron(identity: id, publisherGroup: pg)
                 ready = true
             } catch {
-                self.error =
-                    "Could not open the channel group: \(error.localizedDescription)"
+                self.error = LegacyChannelV1.describe(error) {
+                    "Could not open the channel group: \($0.localizedDescription)"
+                }
                 return
             }
         }

@@ -54,6 +54,11 @@ import {
   freshPublisherKeys,
   type ChannelPublisherKeys,
 } from "./composer";
+import {
+  LegacyChannelError,
+  isLegacyV1PublisherGroupId,
+  rethrowAsLegacyChannel,
+} from "./legacy-v1";
 
 type Identity = InstanceType<Wasm["Identity"]>;
 type PublisherGroup = InstanceType<Wasm["PublisherGroup"]>;
@@ -72,7 +77,13 @@ export async function openPublisherGroup(
   if (channelId === null) {
     throw new Error(`channel id hex is not valid: ${channelIdHex}`);
   }
-  return wasm.PublisherGroup.openOrCreate(identity, channelId);
+  try {
+    return wasm.PublisherGroup.openOrCreate(identity, channelId);
+  } catch (err) {
+    // A channel minted under the retired v1 derivation refuses here and cannot
+    // be repaired — surface the readable copy instead of the raw Rust string.
+    rethrowAsLegacyChannel(err);
+  }
 }
 
 /** Mint a co-publisher invite link over the PublisherGroup's MLS `group_id`. A
@@ -209,6 +220,10 @@ export async function requestToCoPublish(
   }
   const channelIdBytes = wasm.channelIdFromPublisherGroupId(groupId);
   if (channelIdBytes === undefined) {
+    // Two distinct reasons the id does not resolve, and they need different
+    // copy: a link minted under the retired v1 derivation (recognisable by its
+    // 41-byte shape) versus a `/g/` link that simply targets a chat group.
+    if (isLegacyV1PublisherGroupId(groupId)) throw new LegacyChannelError("invite-link");
     throw new Error("co-publisher link does not target a channel PublisherGroup");
   }
   const channelIdHex = bytesToHex(channelIdBytes);

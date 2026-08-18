@@ -178,6 +178,10 @@ public object ChannelsComposer {
                 publisher.close()
             }
         } catch (e: FfiException.Group) {
+            // Retired v1 state refuses here and cannot be repaired.
+            if (LegacyChannelV1.isLegacyRefusalText(e.message)) {
+                throw LegacyChannelException(LegacyChannelKind.CHANNEL)
+            }
             throw ChannelsComposerException.Ffi(e.message ?: "PublisherGroup open_or_create failed")
         } catch (e: FfiException.Channels) {
             throw ChannelsComposerException.Ffi(e.message ?: "PublisherGroup exporter failed")

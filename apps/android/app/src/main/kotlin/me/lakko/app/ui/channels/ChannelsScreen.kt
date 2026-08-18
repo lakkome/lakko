@@ -70,6 +70,8 @@ import me.lakko.app.channels.ChannelsClient
 import me.lakko.app.channels.ChannelsComposer
 import me.lakko.app.channels.ChannelsComposerException
 import me.lakko.app.channels.ChannelsUiState
+import me.lakko.app.channels.LegacyChannelException
+import me.lakko.app.channels.LegacyChannelV1
 import me.lakko.app.channels.CoPublisher
 import me.lakko.app.channels.PostView
 import me.lakko.app.channels.RotationCron
@@ -552,6 +554,8 @@ private fun NewChannelScreen(
                             )
                             state.setKeys(id, keys)
                             onCreated(id)
+                        } catch (e: LegacyChannelException) {
+                            error = e.message
                         } catch (e: ChannelsApiException) {
                             error = "Server rejected: ${e.code} — ${e.detail}"
                         } catch (e: ChannelsComposerException) {
@@ -711,7 +715,9 @@ private fun ChannelDetailScreen(
                         pubIdentity = id
                         pubGroup = pg
                     } catch (e: Throwable) {
-                        pubOpenError = "Could not open the channel group: ${e.message}"
+                        pubOpenError = LegacyChannelV1.describe(e) {
+                            "Could not open the channel group: ${it.message}"
+                        }
                     }
                 }
 
@@ -1964,6 +1970,8 @@ private fun JoinCoPublisherScreen(
                             )
                             state.setKeys(request.channelIdHex, resolved)
                             onJoined(request.channelIdHex)
+                        } catch (e: LegacyChannelException) {
+                            error = e.message
                         } catch (e: Throwable) {
                             error = "Co-publish failed: ${e.message}"
                         } finally {

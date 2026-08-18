@@ -73,6 +73,7 @@ import {
   rejectCoPublisher,
   requestToCoPublish,
 } from "../channels/copublisher";
+import { LegacyChannelError, channelErrorMessage } from "../channels/legacy-v1";
 import {
   runRotationOnce,
   startRotationCron,
@@ -487,7 +488,9 @@ const NewChannel: Component = () => {
       channelsActions.setKeys(id, keys);
       navigate(paths.channel(id));
     } catch (err) {
-      if (apiError.is(err)) {
+      if (err instanceof LegacyChannelError) {
+        setError(err.message);
+      } else if (apiError.is(err)) {
         setError(`Server rejected: ${err.code} — ${err.detail}`);
       } else {
         setError(`Network error: ${String(err)}`);
@@ -548,7 +551,11 @@ const NewChannel: Component = () => {
         identity.free();
       }
     } catch (err) {
-      setCoError(`Co-publish failed: ${String(err)}`);
+      setCoError(
+        err instanceof LegacyChannelError
+          ? err.message
+          : `Co-publish failed: ${String(err)}`,
+      );
     } finally {
       setCoBusy(false);
       setCoStatus(null);
@@ -1149,7 +1156,12 @@ const PublisherToolsPanel: Component<{ readonly channelIdHex: string }> = (
         setIdentity(id);
         setGroup(pg);
       } catch (err) {
-        setOpenError(`Could not open the channel group: ${String(err)}`);
+        setOpenError(
+          channelErrorMessage(
+            err,
+            (e) => `Could not open the channel group: ${String(e)}`,
+          ),
+        );
       }
     })();
   });

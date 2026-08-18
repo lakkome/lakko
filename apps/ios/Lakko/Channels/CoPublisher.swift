@@ -39,7 +39,13 @@ public enum CoPublisher {
         guard let channelId = Self.hexToData(channelIdHex) else {
             throw CoPublisherError.badChannelId(channelIdHex)
         }
-        return try publisherGroupOpenOrCreate(identity: identity, channelId: channelId)
+        do {
+            return try publisherGroupOpenOrCreate(identity: identity, channelId: channelId)
+        } catch {
+            // A channel minted under the retired v1 derivation refuses here and
+            // cannot be repaired — surface the readable copy, not the raw string.
+            throw LegacyChannelV1.mapOpenError(error)
+        }
     }
 
     /// Mint a co-publisher invite link over the PublisherGroup's MLS `group_id`.
@@ -164,6 +170,12 @@ public enum CoPublisher {
         let cap = try GroupInviteCapability.decodeAndVerify(wire: wire)
         let groupId = cap.groupId()
         guard let channelIdBytes = channelIdFromPublisherGroupId(groupId: groupId) else {
+            // Two distinct reasons the id does not resolve, needing different
+            // copy: a link minted under the retired v1 derivation (recognisable
+            // by its 41-byte shape) versus a `/g/` link targeting a chat group.
+            if LegacyChannelV1.isLegacyV1PublisherGroupId(groupId) {
+                throw LegacyChannelError(kind: .inviteLink)
+            }
             throw CoPublisherError.notAChannelGroup
         }
         let channelIdHex = ChannelsComposer.bytesToHex(channelIdBytes)

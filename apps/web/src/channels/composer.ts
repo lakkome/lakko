@@ -16,6 +16,7 @@
  */
 
 import { loadWasm, type Wasm } from "../wasm";
+import { rethrowAsLegacyChannel } from "./legacy-v1";
 
 /** wasm-bindgen-generated Identity handle. Re-exported
  *  here as a type-only alias so caller signatures stay
@@ -137,7 +138,13 @@ export async function freshPublisherKeys(
   // load-or-create dance in `crates/lakko-mls`; the seed
   // is stable across page reloads for the same identity +
   // channel id.
-  const publisher = wasm.PublisherGroup.openOrCreate(identity, channelId);
+  let publisher;
+  try {
+    publisher = wasm.PublisherGroup.openOrCreate(identity, channelId);
+  } catch (err) {
+    // Retired v1 state refuses here and cannot be repaired.
+    rethrowAsLegacyChannel(err);
+  }
   let seed: Uint8Array;
   try {
     seed = publisher.channelSeed(identity);
