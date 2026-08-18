@@ -3,11 +3,19 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 SPDX-FileCopyrightText: 2026 Lakko Contributors
 -->
 
-# ADR-0045: Closing the remote-commit epoch fork — client-side loser rollback, weighed against a DS epoch gate and proposal-based commits (G-38 residual 1)
+# ADR-0045: Closing the remote-commit epoch fork — proposal-based commits with a designated committer (G-38 residual 1)
 
-- **Status:** **Proposed.** No code. This ADR is the recon + the decision
-  framing; the maintainer picks the option and implementation follows the pick.
-- **Date:** 2026-08-18
+- **Status:** **Proposed.** No code. **The maintainer has chosen Option B —
+  proposal-based commits.** This ADR was originally written as a recon that
+  recommended Option C (client-side loser rollback); that recommendation has been
+  **overturned by the maintainer** and this revision records the choice, states
+  the reasoning that moved it, and settles the five design questions the recon
+  left open. The recon of every option is kept intact below, because its value is
+  the record of *why* the rejected options are rejected. Status stays **Proposed**
+  until the maintainer accepts the settled design; the maintainer accepts, not the
+  ADR.
+- **Date:** 2026-08-18 (recon) · revised the same day to record the Option-B pick
+  and settle its design.
 - **Context:** Phase 3 — group-membership commits / MLS epoch integrity. Closes
   **G-38 residual 1**, the largest unfixed item on the client-concurrency list
   and the only one on it that **no client-side lock can address by
@@ -283,10 +291,30 @@ anything but a different flavour of stuck.
 
 **So Option A is not an alternative to Option C. It is additional cost on top of
 it, buying an earlier and slightly cleaner verdict.** That reframing is the single
-most useful output of this recon, and it is what the recommendation rests on.
+most useful output of this recon, and it is what the *original* recommendation
+rested on.
 
-Option B is the exception: by making only one device commit, it removes the race
-rather than repairing its loser, so it genuinely does not need the rollback.
+Option B is the near-exception, and the first draft of this ADR **overstated it**.
+It said B "removes the race rather than repairing its loser, so it genuinely does
+not need the rollback." That is wrong, and it contradicts B's own cost item 2 four
+paragraphs later. **Corrected:** B removes the race in the steady state — one
+committer, so there is nobody to race — but it does not remove it during a
+committer handoff, where two devices can both act. What B changes, and this is the
+real result, is **which artifact loses**:
+
+> Under today's design and under Option C, the artifact that loses a race is a
+> **Commit**, and losing it forks the loser off the group — expensive,
+> silent, and needing a durable epoch-N snapshot plus an intent replay to repair.
+> Under Option B the artifact that loses is a **Proposal**, and losing it costs
+> **nothing**: a proposal is not epoch-advancing, so its author is not forked, has
+> no rollback to perform, and re-proposes against the new epoch as a plain retry.
+
+B therefore still needs a loser-repair path, but only for the committer, only
+during handoff, and only its cheap half — see
+[§ The Option B design, settled](#the-option-b-design-settled), decision 2. The
+framing that survives is the sentence above: **B moves the retry from the
+expensive artifact to the cheap one.** That is the whole of its advantage, and it
+is enough.
 
 ---
 
@@ -385,7 +413,14 @@ migration, new per-group lock on the publish path, a new 409 the clients must
 handle), plus the full Option C machinery on all three clients. Plus a new
 availability attack surface. `lakko-security` mandatory.
 
-### Option B — proposal-based commits
+### Option B — proposal-based commits — **CHOSEN**
+
+> **This is the option the maintainer picked.** The recon below is kept as
+> written, including the cost list that argued against it, because a future
+> reader should see what the objections were and how they were answered. Two of
+> them turned out to be smaller than stated (cost 1 and the ADR-0027 note) and
+> one turned out to be larger (cost 2, the liveness single point). All five are
+> resolved in [§ The Option B design, settled](#the-option-b-design-settled).
 
 **Mechanism.** Members do not commit. A member emits an MLS **Proposal**
 (`Add` / `Remove` / `GroupContextExtensions`); a single **designated committer**
@@ -436,6 +471,22 @@ server change, no new attack surface. It is the correct-by-construction answer.
    ADR-0027 already hit the neighbouring edge and chose to avoid it: it rejected
    `commit_to_pending_proposals` in favour of the single-target `add_member`
    precisely because commit-all does not let the approver target one joiner.
+
+   > **Correction, found while settling the design.** ADR-0027's stated reason no
+   > longer holds, and the "commits everything pending" premise of this whole cost
+   > item is only true of the *convenience wrapper*. `commit_to_pending_proposals`
+   > is a thin shim over the `CommitBuilder` that hardcodes the filter to
+   > `|_| true` (`openmls-0.8.1/src/group/mls_group/processing.rs:246-253`), and
+   > the builder's own entry point is
+   > `CommitBuilder::build(rand, crypto, signer, f: impl FnMut(&QueuedProposal) -> bool)`
+   > (`commit_builder.rs:420-428`) — openmls's documented hook for exactly this,
+   > *"a function that lets the caller filter the proposals that are considered
+   > for inclusion … a way for the application to enforce custom policies in the
+   > creation of commits"* (`:430-433`). So the committer-side sweep gate is a
+   > closure over an API openmls already publishes, **not** an openmls fork and
+   > **not** a new commit path. This makes cost item 1 materially smaller than
+   > stated, and it means the ADR-0027 approve path and the member-proposal path
+   > can converge on one mechanism rather than staying separate.
 
 2. **It introduces a liveness single point.** No committer online, no membership
    change. `elect_committer` mitigates this, but ADR-0032 recorded the residual
@@ -572,7 +623,13 @@ already be an improvement over this, and Option C is not a large change.
 
 ---
 
-## Decision (recommended — the maintainer decides)
+## The recon's original recommendation — **overturned, kept for the record**
+
+> The recon recommended **Option C**. The maintainer chose **Option B**. This
+> section is preserved verbatim because reasons 1-4 are the case against Option A
+> and remain in force; reasons 5 and 6 are the case for C over B and are the ones
+> the maintainer's correction answers. See
+> [§ Why the choice moved to Option B](#why-the-choice-moved-to-option-b).
 
 **Recommend Option C, plus Option C′ as a companion. Do not build Option A. Keep
 Option B on file as the eventual correct-by-construction shape.**
@@ -624,6 +681,522 @@ land it" shape B generalises.
 
 ---
 
+## Why the choice moved to Option B
+
+The recon's case for C was proportionality: *"not proportionate to this hazard
+today."* **Proportionality is a frequency claim.** The ADR was careful enough to
+refuse to invent a frequency, and then leaned on one anyway — that is the flaw in
+its own reasoning, and it is worth naming plainly rather than quietly fixing.
+
+The maintainer's correction supplies what the recon left out, and it is about
+**scale**:
+
+1. **The recon reasons about one device forking from one group.** In a large group
+   with many admins, concurrent membership changes are not an exceptional event —
+   they are the ordinary moderation load. Every round of concurrency produces
+   **one winner and N-1 broken devices**, not one. The hazard's cost is linear in
+   the number of admins acting, and the recon priced it as if it were constant.
+
+2. **Option C's convergence degrades in exactly the same variable.** C converges
+   in as many rounds as there were concurrent committers, and every loser detects
+   its loss at the same moment (the winner's commit is one journal row, fetched by
+   everyone on the same poll) and therefore retries at the same moment — so they
+   **collide again**. C needs randomised backoff and jitter to converge at all
+   beyond two committers. The recon's sprint list does not mention backoff, and its
+   own honest-limitations list says only that the retry budget "bounds the
+   livelock; it does not eliminate it." At two admins that is a footnote. At ten it
+   is the design.
+
+3. **"Retry" is the wrong verb for the commonest trigger.** The recon's own list of
+   correlated triggers is a list of *multi-admin* situations, and the second entry
+   is the sharpest: two admins approving the **same** pending join, which ADR-0027's
+   members panel shows to every owner and admin simultaneously and which ADR-0028's
+   invite-link flow is designed to produce. When that race resolves, **the loser has
+   nothing to redo — the person is already a member.** Replaying the intent would
+   add them twice. So C does not merely need a retry; it needs an **"is my intent
+   already satisfied?" idempotency predicate, written per intent type** — add,
+   remove, role change, approve — each with its own definition of satisfied, each
+   evaluated after a whole-provider rollback and replay. That is a materially bigger
+   and more delicate piece of work than "retry the intent", and the recon does not
+   cost it.
+
+**What flips the decision is that the hazard's frequency scales with (admins ×
+churn) while Option C's convergence degrades in the same variable.** A repair whose
+cost grows with the same term as the fault it repairs is the wrong shape. Option B
+does not resolve the collision repeatedly and more expensively as the group grows —
+it removes the collision.
+
+And the structural reason B is the right target, restated from
+[§ The load-bearing framing](#the-load-bearing-framing): **B moves the retry from
+the expensive artifact to the cheap one.** A proposal that loses its race is not a
+fork and needs no repair — its author re-proposes against the new epoch, with no
+rollback, no retained snapshot, no replay, and no idempotency predicate, because
+re-proposing an already-satisfied intent is caught by the ordinary
+"is this member already in the group" check the UI does anyway.
+
+---
+
+## Decision
+
+**Build Option B: proposal-based commits with a designated committer.** Members
+emit MLS Proposals; exactly one elected owner-or-admin sweeps them into a single
+Commit. Option A (a DS-side epoch gate) is **not built**, for the reasons the recon
+gives and which the choice of B does not disturb. Option C is **not built as a
+standalone option**, but **one component of it survives and is required** — the
+bounded committer rollback of decision 2 below. Option C′ (re-read the journal head
+before committing) is **absorbed into B** as the committer's stand-down rule, not
+shipped as a separate companion.
+
+Scope: **conversation groups** (`lakko_mls::Group`). Explicitly **not** DeviceGroups,
+**not** call groups, and **not** channel `PublisherGroup`s — see
+[§ What Option B does not fix](#what-option-b-does-not-fix), which states why for
+each and what the residual is.
+
+---
+
+## The Option B design, settled
+
+The recon named B's blockers and left them open. This section resolves each, with
+a recommendation, grounded in the code as it stands.
+
+### Decision 1 — who commits
+
+**Recommendation: the ADR-0022 role table decides. `elect_committer` does not
+transfer; its *shape* does.**
+
+The committer is the **owner**; if the owner is not acting, the acting committer is
+the **first admin in the role table's existing canonical order**. Both the
+authorised set and the ordering are already there:
+`RoleTable` (`crates/lakko-mls/src/group_roles.rs`) holds one owner plus an admin
+set that `RoleTable::new` **sorts ascending and deduplicates**, and the whole table
+lives in the authenticated `0xFF02` GroupContext extension — so every member holds
+the identical bytes and derives the identical order with no election protocol, no
+election message, and nothing new on the wire. **Rank 0 is the owner; rank k is the
+k-th admin in the table's own order.**
+
+**Why not `lakko_calls::link_invite::elect_committer`
+(`crates/lakko-calls/src/link_invite.rs:230`) directly.** Two reasons, both
+disqualifying:
+
+- **It needs a presence oracle that chat does not have.** Its input is
+  `CommitterCandidate { leaf_index, is_owner, is_present }`, and `is_present` means
+  *connected to the SFU room* — a live, shared, server-observed signal that exists
+  only because a call has a server-mediated room. A chat group has no equivalent:
+  `lakko-presence` is a dependency of `crates/lakko-ffi-wasm` and of nothing else,
+  so there is no presence signal for a conversation group to read. Decision 2 is
+  the answer to what replaces it.
+- **It keys on leaf index, and leaf indices renumber.** ADR-0022 keyed the role
+  table on the Ed25519 signature public key *specifically* because OpenMLS reuses a
+  vacated leaf for the next Add. A committer identity that can silently change
+  ownership on every membership change is precisely the wrong stability property
+  for the one role that must not be ambiguous.
+
+**What transfers is the discipline**, and it is the valuable part: a **pure, total
+function of state every member already holds**, owner-first, deterministic
+tiebreak, recomputed on every change, requiring no negotiation and therefore unable
+to split-brain on the *identity* question. Recommendation: a new pure function
+beside the table it reads — `lakko_mls::group_roles::committer_rank(table, pubkey)
+-> Option<u32>` — returning a rank over signature **public keys**, never leaf
+indices, `None` for a plain member.
+
+**With several admins:** all of them are authorised, exactly one is acting. Rank
+orders them; decision 2 says how the rank is consumed. Note what this does *not*
+do — **it does not widen the authorisation surface**. The committer set is exactly
+the ADR-0022 set that may commit today. B **narrows** who commits (from "any
+owner/admin, unilaterally" to "one elected owner/admin") while leaving who *may*
+commit untouched. That is worth stating because the recon's cost item 1 described B
+as relocating the authorisation surface; for the *commit* it does not relocate it
+at all. What relocates is the check on the **proposals inside** the commit, which
+is decision 3.
+
+### Decision 2 — liveness
+
+This is the decision that determines whether B is usable, and the recon is right
+that a designated committer introduces a single point. The answer has two halves:
+make the duty per-batch rather than a standing office, and repair the narrow
+residual rather than pretend it is closed.
+
+**Recommendation: the committer is a per-batch duty, not an office.**
+
+There is no committer election event, no handover protocol, and no committer state
+to hand over. The rule each candidate evaluates, independently, on every poll:
+
+> I am rank k. If there is an authorised, un-swept proposal in this group whose
+> **DS row age exceeds `activation_delay(k)`**, and no commit has landed since it,
+> then I sweep every authorised pending proposal into one commit.
+
+`activation_delay(0) = 0` — **the owner acts immediately**, so in the overwhelmingly
+common case (owner online) there is no added latency at all and no timeout is ever
+consulted. `activation_delay(k) = owner_grace + (k-1) * step` for `k >= 1`.
+
+**How a client knows the committer is absent: it does not, and it must not try.**
+Absence is not observable on a zero-trust journal — there is no presence signal, and
+inventing one is the wrong move. A heartbeat published to the journal was considered
+and is **rejected**: it would put a periodic per-group activity artifact on the DS
+for every group at all times (pressure on invariant #5, for a signal the DS holds
+nothing like today), and it would still need the same timeout to interpret its
+*absence* — it changes what you wait for, not that you wait. **What is observed is
+inaction, not absence:** a proposal has been sitting in the journal, and no commit
+covering it has landed. That is the only honest signal available, and it is the
+correct one, because it is also the only thing the user cares about.
+
+**The age is measured against the DS's clock, not the proposer's.** Every fetched
+journal row carries a server-assigned `created_at TIMESTAMP(3)`
+(`services/ds/migrations/0001_init.sql`; returned on `FetchedMessage`,
+`services/ds/src/journal.rs`), and every member reads the identical value on the
+identical row. This removes the proposer's clock from the measurement entirely.
+What remains is each evaluator's own offset from the DS clock — a real residual,
+and the reason the stagger must dominate it.
+
+**What stops two devices both concluding they are the committer — three layers,
+and an honest fourth:**
+
+1. **Deterministic rank, from authenticated shared state.** There is nothing to
+   agree on: the role table is in the GroupContext, so every member computes the
+   same ranking from the same bytes. No two devices can disagree about *who* rank k
+   is. (The one exception is two devices holding the *same* signature key — see
+   [§ What Option B does not fix](#what-option-b-does-not-fix), item 6.)
+2. **Staggered activation.** Rank k+1 does not act until rank k has had a full
+   `step` to act. For two candidates to collide, rank k's publish must still be in
+   flight through the whole of rank k+1's step.
+3. **Stand-down on observation.** Immediately before creating the commit, re-read
+   the journal head; if any commit has landed at the current epoch, abandon and
+   re-evaluate. This is Option C′, and under B it is not a companion mitigation but
+   a **required step of the algorithm** — it is what makes the stagger effective
+   rather than merely probable, and it costs one fetch on a path that only executes
+   when the owner is already absent.
+4. **The residual is repaired, not prevented.** If two candidates do collide, one
+   forks — the hazard this ADR exists to close, in a much narrower window. So the
+   acting committer **retains its pre-commit epoch-N snapshot across the
+   publish→verdict window and rolls back if it lost**: Option C's steps 1, 3 and 5,
+   on one device, on the non-owner path only.
+
+**The rollback that B needs is materially smaller than Option C's**, and this is
+the reason B is affordable at all:
+
+- **No intent replay, therefore no idempotency predicate.** The committer's intent
+  is "sweep whatever is pending". After rolling back and replaying the winner's
+  commit, it simply re-evaluates the rule — and the winner's commit almost always
+  swept the same proposals, so there is nothing left to do. The per-intent
+  "is my intent already satisfied?" problem that
+  [§ Why the choice moved to Option B](#why-the-choice-moved-to-option-b) item 3
+  raises against C **does not arise**, because the proposals themselves are the
+  durable record of intent and the winner consumed them.
+- **No add-path KeyPackage question.** See the correction in
+  [§ Open questions](#open-questions) — the discovery KeyPackage directory is
+  non-consuming today, and under B the fetch happens once at *propose* time
+  regardless.
+- **No approve-path stale-proposal question.** The external-join proposal is not
+  held in a Lakko-side in-memory queue under B; it is a stored MLS proposal like
+  any other (decision 4).
+
+**Constant tuning is deliberately not pinned here, and must not be guessed.**
+The named constraints: `step` must exceed a DS publish round-trip by a comfortable
+margin *plus* the expected client-to-DS clock offset; `owner_grace` must exceed the
+group's normal poll cadence so an owner that is merely between polls is never
+treated as inactive — and that cadence is not uniform today (Android's `pollGroup`
+awaits a deliberate 30 s long poll; the channel co-publisher loops poll on a 5 s
+interval). Pick them from a measurement, in the sprint, not from this ADR.
+
+**The one case with no answer: no owner and no admins online.** Membership changes
+stall until one returns. This is a real new failure mode B introduces and it is
+stated as such in [§ What Option B does not fix](#what-option-b-does-not-fix). It
+also promotes ADR-0022's deferred **ownership transfer** follow-up from a nicety to
+a load-bearing dependency.
+
+### Decision 3 — the proposal-authorisation gate (the invariant #3 piece)
+
+**This is a change to the audited MLS state machine.** It requires this ADR,
+property tests, and — per the repo's own rule for `lakko-mls` after Phase 2 — an
+external crypto audit. It is the single riskiest part of B and the part where a
+subtle miss silently re-opens ADR-0022's threat model.
+
+**The hazard, precisely.** Today `process_incoming_verifying_roles`
+(`crates/lakko-mls/src/group.rs`) does this with a proposal:
+
+```rust
+ProcessedMessageContent::ProposalMessage(_) => Ok(Incoming::Proposal),
+```
+
+The proposal is discarded, unexamined and un-role-checked. That is safe **only**
+because Lakko stores no member proposals — verified: no call to
+`store_pending_proposal`, `pending_proposals`, `commit_to_pending_proposals`,
+`propose_add_member` or `propose_remove_member` exists anywhere in `crates/` or
+`services/`, and all three clients classify a bare `Proposal` into a content-less
+system row and act on nothing. A proposal that is never stored can never be swept.
+**Option B stores them, and that safety evaporates the moment it does.**
+
+**Recommendation: three layers, and be explicit about which one is the security
+boundary.**
+
+1. **Receipt gate (hygiene, not the boundary).** In
+   `process_incoming_verifying_roles`, replace the discard with an inspection.
+   `ProcessedMessageContent::ProposalMessage(Box<QueuedProposal>)` carries
+   `QueuedProposal::sender()` and `::proposal()`
+   (`openmls-0.8.1/src/group/mls_group/proposal_store.rs:169,187`), so the sender
+   leaf resolves through `self.members()` to a signature key and through the
+   pre-merge `RoleTable` to a role, exactly as `authorise_role_commit` already
+   resolves the committer. Store it only if authorised; **drop it otherwise**. Two
+   supporting facts make this the right layer to drop at: `ProposalStore::remove`
+   is `pub(crate)` in openmls, so there is **no public single-proposal eviction** —
+   once stored, a proposal can only be cleared with `clear_pending_proposals`,
+   which clears *everything* — and openmls empties the store on every merged commit
+   (`staged_commit.rs:549-552`), so no bespoke GC is needed for the ones that are
+   legitimately stored.
+2. **Sweep filter (the committer's own hygiene).** The committer must not use
+   `commit_to_pending_proposals`. It must use `CommitBuilder::build(rand, crypto,
+   signer, f)` with a real `f` that re-runs the authorisation against the
+   **pre-merge** role table, so a proposal stored while its sender was an admin and
+   swept after that sender was demoted is excluded. This is ADR-0022's Finding 2
+   rule — judge against the table you inherit — applied to proposals.
+3. **Peer-verified commit gate (this is the boundary).** Extend
+   `authorise_role_commit` so that it authorises **each proposal's own sender**,
+   not only the committer. This is the layer that matters, because **the committer
+   is not trusted** — a malicious committer simply would not run layers 1 and 2.
+   The inputs already exist: `StagedCommit::queued_proposals()`
+   (`staged_commit.rs:650`) yields `QueuedProposal`s, and the per-kind wrappers
+   `QueuedAddProposal::sender()` / `QueuedRemoveProposal::sender()`
+   (`proposal_store.rs:743,762`) give the originating sender for by-reference
+   proposals. `QueuedProposal::proposal_or_ref_type()` (`:183`) distinguishes a
+   by-reference proposal (judge the **proposer**) from a by-value one (judge the
+   **committer**, which is today's behaviour and must stay). Every existing rule —
+   add needs owner/admin, remove needs owner/admin, the owner is unremovable, a
+   role-table change is owner-only — moves from "the committer's role" to "the
+   role of whoever authored this proposal", with the by-value case unchanged.
+
+**This layering is ADR-0022's own, reused rather than invented:** the local check is
+a courtesy that keeps the store clean and gives the user a fast local error; the
+**receive-side refuse-to-merge is the security boundary**, and it is fail-closed
+(invariant #4) exactly as it is today.
+
+**Two consequences of decision 3 that are easy to miss.**
+
+- **The `Sender::NewMemberProposal` arm must never be swept implicitly.** An
+  external-join Add arrives with sender `NewMemberProposal` — a non-member, so the
+  role table cannot resolve it, so a role-based filter that only checks "is this
+  sender an owner or admin" would *drop* it, and a filter that passes anything it
+  cannot classify would **auto-admit any stranger holding a `/g/` link**, silently
+  bypassing ADR-0027's entire approval gate. Neither default is acceptable, so it
+  needs its own explicit arm — decision 4.
+- **`Proposal::SelfRemove` becomes reachable for the first time, and ADR-0022 said
+  so in advance.** ADR-0022 dropped the gate's self-Remove branch as unreachable
+  because OpenMLS's `CannotRemoveSelf` forbids a member from committing the removal
+  of its own leaf, and recorded the condition under which that stops holding:
+  *"If a future sprint makes 'leaving' a controlled action, the gate MUST add
+  SelfRemove detection"* (ADR-0022, post-code Finding 1). `authorise_role_commit`'s
+  own doc-comment names the mechanism: *"a member leaves by … a self-remove
+  proposal an admin commits."* **Option B is that sprint.** It unblocks member
+  self-leave — a feature the product does not have today — and simultaneously
+  re-opens the branch ADR-0022 deleted. Detecting removals only via
+  `staged.remove_proposals()` will not see a `SelfRemove` (proposal type `0x000a`).
+
+**Property tests this needs** (in `crates/lakko-mls/tests/group_admin_roles.rs`,
+extending the existing seven, and following the ADR-0044 discipline that a neutered
+gate must fail a *named* test):
+
+- `member_proposal_from_a_plain_member_is_not_stored`
+- `member_proposal_from_an_admin_is_stored`
+- `sweep_excludes_a_stored_proposal_whose_sender_was_since_demoted`
+- `sweep_never_implicitly_includes_an_external_join_add` — the ADR-0027 bypass;
+  the most important test in the list
+- `peer_refuses_a_commit_carrying_a_proposal_from_an_unauthorised_sender` — the
+  boundary; must be written against a committer that deliberately skips layers 1
+  and 2
+- `peer_accepts_a_commit_carrying_only_authorised_proposals`
+- `a_by_value_proposal_is_still_judged_against_the_committer`
+- `owner_removal_is_refused_even_when_proposed_by_an_admin`
+- `role_table_change_proposal_is_owner_only`
+- `self_remove_proposal_is_authorised_only_for_its_own_sender`
+
+No new fuzz target: the wire parser is unchanged (`mls_message` already covers the
+framing), and the gate is logic over already-parsed structures. The
+`role_table_decode` target stands as-is.
+
+### Decision 4 — external joins already work this way
+
+**How much of B already exists there: the propose-and-approve *shape*, but none of
+the mechanism.** ADR-0027 has a non-member propose and an admin approve, which is
+structurally B. Underneath, it shares nothing B can reuse:
+
+- The proposal is **not** in the openmls proposal store. `retain_external_join`
+  (`crates/lakko-mls/src/group.rs:496`) copies the `KeyPackage` out and pushes a
+  `PendingExternalJoin` onto a **Lakko-side in-memory `Vec`**, capped and deduped by
+  signature key.
+- The approve **does not commit the referenced proposal**. `approve_external_join`
+  removes the entry and calls `add_member(identity, pending.key_package)` — a fresh
+  **by-value** Add. The joiner's actual proposal is never committed by anyone.
+- ADR-0027's recorded reason for this was that `commit_to_pending_proposals` sweeps
+  everything and cannot target one joiner. **That reason no longer holds** —
+  `CommitBuilder::build`'s filter closure targets precisely.
+
+**Recommendation: subsume, but stage it — and keep the external-join arm explicitly
+separate inside the gate.**
+
+- **Subsume the storage and the sweep.** Store the external-join proposal in the
+  openmls proposal store like any other, and let the committer's `CommitBuilder`
+  sweep it. This retires the parallel `pending_external_joins` `Vec`, the epoch-bound
+  in-memory retention the recon flagged as a problem for Option C's retry, and the
+  by-value re-add.
+- **Do not subsume the authorisation.** An external-join Add is authorised by an
+  **explicit admin decision**, never by the sender's role (it has none — it is a
+  non-member). So the sweep filter has two arms: *member proposals*, admitted by
+  role; *external-join proposals*, admitted only if an admin has explicitly marked
+  that one approved. **The default for an unmarked external-join proposal is
+  exclude.** `approve_external_join` becomes "mark this proposal for the next
+  sweep" rather than "add this member now", and `reject_external_join` becomes
+  "drop it" as it already is.
+- **Stage it second.** Land the member-proposal path first and migrate the
+  external-join path in a following sprint, keeping `approveExternalJoin` /
+  `rejectExternalJoin` / `pendingExternalJoins` as FFI names so the three clients'
+  approve buttons are not rewritten in the same sprint as the core change. Both FFI
+  surfaces already expose all three on `Group` **and** on `PublisherGroup`
+  (`crates/lakko-ffi-uniffi/src/lib.rs`), and the members-panel Approve/Reject
+  sections on all three clients call them directly.
+- **The convergence is a real simplification, not just tidiness.** After it, there
+  is exactly one place a membership change enters a group and exactly one gate over
+  it, instead of two paths with two retention mechanisms and two authorisation
+  stories.
+
+### Decision 5 — what the user sees
+
+**Naming the states only. The screens are `ux-ui`'s call, and per the repo's
+UX-first rule that work comes before the core sprints, not after.**
+
+The change is real: "Remove Bob" stops being an immediate local effect and becomes
+a request whose effect lands when the committer sweeps. The states a proposing
+member's membership action can be in:
+
+- **proposed** — published, not yet swept. The interval is normally one commit
+  round-trip with the owner online, so this state is usually momentary; it must be
+  designed anyway, because it is not momentary when the owner is not there.
+- **applied** — the sweeping commit landed and was accepted. Terminal.
+- **superseded** — the epoch advanced without this proposal (it missed the sweep,
+  or the group moved for another reason). Auto re-proposed; the user should not
+  have to know. Worth surfacing only if it repeats.
+- **refused** — the proposer's role changed between proposing and the sweep, so the
+  gate excluded it. Terminal, and it needs a real message, because this is the one
+  outcome the user cannot fix by waiting.
+- **waiting for an admin** — no candidate has acted yet and the owner grace has not
+  elapsed. The honest label is about the *group*, not about a named person's
+  presence; the client cannot know who is online and must not imply that it does.
+- **stalled — no admin available** — every rank's activation delay has elapsed and
+  nothing landed. The genuinely new user-visible state B introduces, and the one
+  that most needs wording that does not blame the user.
+
+Plus one committer-side surface: **"N changes waiting to apply"**. Recommendation:
+the sweep is **automatic**, not a button — a manual "apply changes" affordance would
+turn an availability property into a chore and would make the stalled state more
+likely, not less. The pending list itself already has a home on all three clients:
+the ADR-0027 members-panel pending-join section (`MembersSheet` on iOS and Android,
+the inline `aria-label="Members"` panel in `apps/web/src/routes/Chat.tsx`), whose
+Approve/Reject shape generalises to pending proposals with no new navigation.
+
+---
+
+## No migration, and no compatibility path
+
+**Lakko has no production deployment and no users.** There is nothing in the field
+to be compatible with, no stored group to migrate, and no mixed-version fleet to
+survive. **Option B is a flag day**, exactly as ADR-0044's `push_routing_secret` v2
+bump was and for the same reason.
+
+Stated plainly so that nobody builds one: **do not implement a dual path.** No
+"legacy direct-commit fallback for groups without a committer", no version
+negotiation, no capability advertisement for proposal-based membership, no
+"accept a direct membership commit if the sender is an admin" compatibility arm.
+Every one of those would be a second, ungated route into the group's membership —
+which is to say, an exact reconstruction of the hazard this ADR closes, kept alive
+under a name that sounds prudent.
+
+The one genuine compatibility question is internal and answered above: a group with
+**no role table** (legacy / pre-ADR-0022) is *open* under today's gate. Under B such
+a group has no owner, therefore no rank 0, therefore no committer. Recommendation:
+**a group with no role table keeps direct commits**, unchanged, because there is
+nothing for B to elect and no gate for it to enforce — and then observe that
+`Group::create` has seeded a role table since ADR-0022, so this is a path no
+freshly created group can reach.
+
+---
+
+## What Option B does not fix
+
+The recon was honest about Option C's limits; B's deserve the same treatment.
+
+1. **The race is narrowed to the committer handoff, not eliminated.** Two
+   candidates whose activation windows overlap within one publish round-trip can
+   both commit and one forks. This is why decision 2 keeps a bounded rollback. **B
+   is not correct-by-construction; it is correct in the steady state and repaired
+   at the edge.**
+2. **Membership can stall.** Owner offline and no admins, or an abandoned owner
+   with no admins ever appointed, means no membership change until someone returns.
+   B trades a silent fork for a visible stall — the right trade, and still a new
+   failure mode that did not exist before. It makes ADR-0022's deferred **ownership
+   transfer** follow-up load-bearing.
+3. **A new authority shift: the committer can selectively censor.** An elected
+   committer that sweeps some proposals and drops others is not detectable except by
+   each proposer noticing its own proposal never landed. Today an admin acts
+   unilaterally and cannot be filtered by a peer. Bounded by the fact that any other
+   admin becomes the acting committer once the delays elapse — so a committer that
+   stops committing entirely loses the duty — but **partial** censorship by an
+   otherwise-active committer is not bounded by anything in this design. Named, not
+   solved.
+4. **Proposals go stale too.** ValSem003 rejects *any* non-Application message at
+   the wrong epoch, not only Commits, so a proposal that misses the sweep must be
+   re-proposed. This is cheap — the whole point — but it is a client state machine,
+   not a no-op, and a stale proposal litters the journal for its 30-day TTL the way
+   the recon says a dead commit does under C.
+5. **`self_update` / `PublisherGroup::rotate` is a fifth epoch-advancing path B
+   does not cover.** `rotate` (`crates/lakko-mls/src/publisher_group.rs:455`) is
+   FFI-exposed on both surfaces and advances the epoch via `self_update`. Two
+   ADR-0028 OQ3 co-publishers rotating concurrently reproduce this ADR's hazard on a
+   `PublisherGroup`, and B — scoped to conversation-group membership — does not
+   touch it.
+6. **The web two-tab case is not fixed and cannot be by this design.** G-38
+   residual 2 records that two tabs on one account each hold an independent wasm
+   provider and clobber each other through an `accountId`-keyed snapshot row. Under
+   B both tabs derive the **same** signature key and therefore the **same rank**, so
+   the deterministic ordering cannot separate them. ADR-0044's cross-tab Web Lock
+   remains the only mitigation, and it is secure-context-only.
+7. **DeviceGroups and call groups are out of scope, for different reasons.** A
+   DeviceGroup has no ADR-0022 role table (it carries the ADR-0015 removal policy
+   instead) and its members are one user's own devices, so it has neither the
+   authorisation input B needs nor the multi-admin concurrency shape B targets. A
+   **call** group carries a role table but ADR-0022's post-code Finding 2 requires
+   clients to route call-group receives through the **open** `process_incoming`, not
+   the verifying gate — so call groups keep ADR-0032's presence-based
+   `elect_committer` and are untouched. The two election functions coexist by
+   design; neither subsumes the other.
+8. **It does not make an already-forked device converge.** Nothing in B repairs a
+   device that forked before B shipped. With no deployment that is vacuous today,
+   and it stops being vacuous the moment there is one.
+
+---
+
+## Blast radius, per sprint
+
+| Sprint | Surface | What changes |
+|---|---|---|
+| **S0 — UX** | none (design) | The six states of decision 5 plus the committer-side pending surface. `ux-ui` first per the repo rule. |
+| **S1 — core: the gate** | `crates/lakko-mls` (**invariant #3**) | `process_incoming_verifying_roles` proposal arm: inspect + role-check + `store_pending_proposal` or drop. `authorise_role_commit` extended from committer-only to per-proposal-sender, with the by-value arm preserved and a `SelfRemove` arm added. New `Incoming` shape for a stored-vs-dropped proposal. Ten property tests. **External crypto review.** |
+| **S2 — core: the committer** | `crates/lakko-mls` | `committer_rank` in `group_roles.rs`; a `sweep_pending_proposals` entry point over `CommitBuilder::build` with the two-arm filter; `propose_add` / `propose_remove` / `propose_role_change` wrappers over the openmls `propose_*` calls. |
+| **S3 — FFI** | `lakko-ffi-uniffi`, `lakko-ffi-wasm` | Add the propose + sweep + rank + pending-proposal-list surface beside the existing `add_member_from_wire` / `remove_member` / `set_group_roles` / `approve_external_join`. Both surfaces, in lock-step. Regenerate bindings, rebuild `LakkoCore.xcframework` and the Android `.so`. |
+| **S4 — web reference** | `apps/web/src` | `contacts/client.ts`: the four `…Locked` methods become propose-and-publish; a new sweep path. `mls/group-lock.ts` `withGroupMlsLock` still spans it. `chat/client.ts` `applyPolledBatch` / `toEvent`: the `Proposal` result stops being a content-less system row. `chat/commit-outbox.ts` + `chat/mls-store.ts` `saveSnapshotWithCommitEntry`: the retained epoch-N snapshot for the committer path. `routes/Chat.tsx` members panel: the new states. |
+| **S5 — iOS mirror** | `apps/ios/Lakko` | `ChatRepository.swift` (`withCommitLock`, `persistCommitEntryThenSnapshotOrThrow`), `ChatClient.swift` (`applyFetchedMessages` / `toEvent`), `CommitOutbox.swift`, `UI/Chat/MembersSheet` + `ChatViewModel`. |
+| **S6 — Android mirror** | `apps/android/.../app` | `ChatRepository.kt` under the two-tier `groupLock` + `providerLock`, `ChatClient.kt`, `CommitOutbox.kt` (`prepareCrashSafeCommit`), `ui/chat/MembersSheet` + `ChatViewModel`. |
+| **S7 — external-join convergence** | core + FFI + 3 clients | Decision 4: retire `pending_external_joins`, keep the FFI names. |
+| **S8 — docs** | `docs/` | Flip this ADR's status; reconcile `known-gaps.md` G-38 residual 1 and `invariant-index.md`; CLAUDE.md ADR-table row + `lakko-mls` module-map row. |
+
+**The outbox/lock layer is the least symmetric surface and will cost the most per
+platform.** Web has `withGroupMlsLock` plus an atomic IndexedDB transaction and no
+single create+persist+publish wrapper; iOS has `withCommitLock` (a `@MainActor`
+task chain) plus an ordered, non-atomic two-step persist; Android has the two-tier
+`groupLock` + `providerLock` with `prepareCrashSafeCommit` inside the provider lock
+and the publish outside it. Any change to the commit sequence has to be expressed
+three different ways — budget for that rather than assuming the web reference
+translates.
+
+---
+
 ## Alternatives rejected
 
 - **Option A, a DS-side epoch gate.** Rejected on the freeze primitive (§ Option
@@ -633,13 +1206,40 @@ land it" shape B generalises.
   turns on (can the DS read a commit's epoch pre-decrypt?) has a clear **yes**, and
   a future reader should not have to re-derive that the answer being *yes* is not
   what makes the option viable.
-- **Option B, proposal-based commits.** Rejected **for now** on proportionality:
-  an invariant-#3 change plus a new proposal-sender authorisation gate plus a
-  liveness single point plus a three-client UX change, against a hazard Option C
-  repairs client-side. Explicitly **kept on file** as the correct-by-construction
-  shape.
+- ~~**Option B, proposal-based commits.** Rejected **for now** on
+  proportionality.~~ **This rejection is withdrawn. Option B is the chosen
+  option** — see [§ Decision](#decision). The struck reasoning rested on a
+  proportionality judgement that is a frequency claim the recon had already, and
+  correctly, declined to make; [§ Why the choice moved to Option
+  B](#why-the-choice-moved-to-option-b) supplies the scale argument that answers
+  it.
+- **Option C, client-side loser rollback and bounded retry.** Rejected **as a
+  standalone option**: it repairs a fault whose frequency scales with (admins ×
+  churn) using a mechanism whose convergence degrades in the same variable, and
+  its retry needs a per-intent "already satisfied?" predicate that the recon
+  identified no need for and therefore did not cost. **Not discarded** — its
+  retained-epoch-N-snapshot rollback survives as a required component of Option B,
+  scoped to the acting committer on the non-owner path (decision 2), where it
+  needs neither the intent replay nor the idempotency predicate.
+- **Option C′ as a separate shipped companion.** Withdrawn as a standalone: under
+  B the journal-head re-read is **promoted** from an optional narrowing to a
+  required step of the committer's stand-down rule (decision 2, layer 3). The
+  recon's warning still stands and now applies to B's stagger: a window-narrowing
+  measure must never be described as a fix.
 - **Option D, do nothing.** Rejected on the silent-plus-permanent-plus-no-
   diagnostic shape, independent of frequency.
+- **A compatibility path / dual commit mode for Option B.** Rejected outright —
+  there is no deployment and no user to be compatible with, and a legacy
+  direct-commit fallback would be a second ungated route into group membership,
+  which is the hazard rebuilt under a prudent-sounding name. See
+  [§ No migration, and no compatibility path](#no-migration-and-no-compatibility-path).
+- **A committer heartbeat / liveness ping on the journal, as Option B's absence
+  signal.** Rejected: it materialises a periodic per-group activity artifact on the
+  zero-trust DS for every group at all times (pressure on invariant #5 for a signal
+  the DS has no analogue of today), and it still needs a timeout to interpret its
+  own absence — it changes what you wait for, not that you wait. B infers
+  **inaction** from the journal instead, which is both cheaper and closer to what
+  the user actually cares about.
 - **Authenticating DS publishes as a prerequisite for Option A.** Rejected as an
   enabler here: the natural authenticator is group membership, which is exactly
   what the zero-trust DS must not learn (invariant #5). Any membership-blind
