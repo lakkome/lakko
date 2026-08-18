@@ -31,6 +31,36 @@ use crate::error::{Error, Result};
 use crate::group_roles::{Role, RoleTable, ROLE_EXTENSION_TYPE};
 use crate::identity::Identity;
 
+/// Byte length of a Lakko-minted MLS group id.
+///
+/// **This value is load-bearing beyond MLS.** A conversation group's
+/// `group_id` is the routing key for the Delivery Service journal
+/// (`POST /ds/group/{group_id_hex}`), and the DS pins the same width in
+/// `services/ds/src/journal.rs`:
+///
+/// ```text
+/// const PSEUDONYM_LEN: usize = 32;
+/// const HEX_LEN: usize = PSEUDONYM_LEN * 2;
+/// ```
+///
+/// `decode_pseudonym` rejects anything other than `HEX_LEN` lowercase hex
+/// chars with a 400, and no client applies any padding or derivation between
+/// [`Group::group_id`] and that path — the raw bytes are hex-encoded as-is.
+/// So a group id of any other width cannot be published at all.
+///
+/// The two constants cannot be tied by a compile-time assertion: `services/ds`
+/// deliberately depends on no `lakko-*` crate (it is the opaque zero-trust
+/// relay and never parses MLS — invariant #2), and making it depend on
+/// `lakko-mls` would pull the entire OpenMLS stack into the server for the
+/// sake of one integer. The coupling is instead pinned by
+/// `group_id_length_is_stable_across_constructors`, which asserts this width
+/// against a locally restated copy of the DS constant, so a change on either
+/// side fails a test rather than silently 400-ing every publish.
+///
+/// OpenMLS's own `GroupId::random` mints **16** bytes, which is why
+/// [`Group::create`] does not use it.
+pub const GROUP_ID_LEN: usize = 32;
+
 /// Max external-join proposals retained per group awaiting an owner/admin
 /// decision (ADR-0027). A proposal arriving past this cap is surfaced but not
 /// retained — anti-spam, since a non-member can post these.
@@ -167,24 +197,63 @@ impl Group {
             .with_group_context_extensions(exts)
             .build();
 
-        let inner = MlsGroup::new(
+        // Mint the group id ourselves rather than letting OpenMLS pick one:
+        // `MlsGroup::new` falls through to `GroupId::random`, which is only
+        // **16** bytes (openmls-0.8.1 `group/mod.rs`, via `builder.rs`
+        // `.unwrap_or_else(|| GroupId::random(provider.rand()))`). The group
+        // id is the DS journal routing key and the DS requires exactly
+        // `GROUP_ID_LEN` — see that constant for the full coupling.
+        //
+        // Randomness goes through `lakko_crypto::random` per that module's
+        // policy ("all randomness ... MUST come through this module").
+        let mut group_id = [0u8; GROUP_ID_LEN];
+        lakko_crypto::random::fill(&mut group_id);
+
+        Self::create_inner(identity, &cfg, &group_id, "create")
+    }
+
+    /// Shared tail of [`Group::create`] and [`Group::create_with_id`]: build
+    /// the `MlsGroup` at an explicit `group_id`.
+    ///
+    /// Both constructors route through OpenMLS's `new_with_group_id` — they
+    /// differ only in the config they pass (`create` seeds the ADR-0022 role
+    /// table; `create_with_id` deliberately does not) and in where the id
+    /// comes from. Keeping the construction call in one place means the id
+    /// width cannot drift between them again.
+    fn create_inner(
+        identity: &Identity,
+        cfg: &MlsGroupCreateConfig,
+        group_id: &[u8],
+        ctx: &str,
+    ) -> Result<Self> {
+        use openmls::group::GroupId;
+
+        let inner = MlsGroup::new_with_group_id(
             &identity.provider,
             &identity.signature_keys,
-            &cfg,
+            cfg,
+            GroupId::from_slice(group_id),
             identity.credential.clone(),
         )
-        .map_err(|e| Error::Group(format!("create: {e:?}")))?;
+        .map_err(|e| Error::Group(format!("{ctx}: {e:?}")))?;
 
         Ok(Self::from_mls_group(inner))
     }
 
     /// Create a new MLS group with a **caller-supplied** group id.
     ///
-    /// Lakko's default `Group::create` lets OpenMLS pick a random
-    /// 32-byte group id at creation time. That is the right shape
-    /// for 1×1 chats / multi-party calls / DeviceGroup where the
-    /// group is uniquely identified by a server-side opaque
-    /// pseudonym.
+    /// Lakko's default [`Group::create`] mints a random
+    /// [`GROUP_ID_LEN`]-byte group id at creation time. That is the
+    /// right shape for 1×1 chats / multi-party calls / DeviceGroup
+    /// where the group is uniquely identified by a server-side
+    /// opaque pseudonym.
+    ///
+    /// **Note on width:** the id supplied here is used verbatim, so a
+    /// caller that routes the resulting group through the DS journal
+    /// must supply exactly [`GROUP_ID_LEN`] bytes. `PublisherGroup`
+    /// supplies a longer, deterministic id (a domain prefix plus the
+    /// channel id) and is addressed by `channel_id` on the channels
+    /// service rather than by `group_id` on the DS.
     ///
     /// For **PublisherGroup** (G4-2-mls-persistence, ADR-0010
     /// Tier-1) the publisher needs to round-trip the same group
@@ -200,24 +269,12 @@ impl Group {
     /// Same shape as [`Group::create`]: [`Error::Group`] on any
     /// OpenMLS-side failure.
     pub fn create_with_id(identity: &Identity, group_id: &[u8]) -> Result<Self> {
-        use openmls::group::GroupId;
-
         let cfg = MlsGroupCreateConfig::builder()
             .ciphersuite(identity.ciphersuite())
             .use_ratchet_tree_extension(true)
             .build();
 
-        let id = GroupId::from_slice(group_id);
-        let inner = MlsGroup::new_with_group_id(
-            &identity.provider,
-            &identity.signature_keys,
-            &cfg,
-            id,
-            identity.credential.clone(),
-        )
-        .map_err(|e| Error::Group(format!("create_with_id: {e:?}")))?;
-
-        Ok(Self::from_mls_group(inner))
+        Self::create_inner(identity, &cfg, group_id, "create_with_id")
     }
 
     /// Join an existing group from a Welcome message.

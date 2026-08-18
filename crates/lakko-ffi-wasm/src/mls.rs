@@ -691,9 +691,12 @@ impl Group {
 
     /// MLS `group_id` (RFC 9420 §6.2). Used by `apps/web` as
     /// the routing key for `POST /ds/group/{group_id_hex}`. The
-    /// bytes are opaque — typically 32 random bytes chosen by
-    /// OpenMLS at create-time. Identical for every member of
-    /// the group at every epoch.
+    /// bytes are opaque — 32 random bytes minted by
+    /// `Group::create` (`lakko_mls::GROUP_ID_LEN`), which is the
+    /// width the DS requires of that path segment. Note this is
+    /// *not* OpenMLS's own default: `GroupId::random` is 16
+    /// bytes, so `Group::create` mints the id itself. Identical
+    /// for every member of the group at every epoch.
     #[wasm_bindgen(getter, js_name = groupId)]
     pub fn group_id(&self) -> Result<Vec<u8>, JsError> {
         let g = self
