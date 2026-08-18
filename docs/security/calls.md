@@ -2329,12 +2329,51 @@ final `delete`. Same posture as upstream
    `channel_id`:
 
    ```
-   group_id = b"lakko/publisher-group/v1/" || channel_id   // 25 + 16 = 41 bytes
+   group_id = b"lakko/pubgrp/v2/" || channel_id   // 16 + 16 = 32 bytes
    ```
 
    The domain-separation prefix prevents byte-shape
    confusion with any other channel-id-derived value
    (the exporter label, the subscriber-envelope AAD).
+
+   **The 32-byte total is load-bearing, not incidental.**
+   A PublisherGroup id is a Delivery Service journal
+   routing key on the ADR-0028 OQ3 co-publisher path
+   (`apps/{web,ios,android}` all hand it to
+   `fetchGroup` / `publishGroup` verbatim), and
+   `services/ds` accepts exactly `PSEUDONYM_LEN = 32`.
+   The retired v1 prefix `b"lakko/publisher-group/v1/"`
+   made the id 41 bytes → 82 hex chars → a flat 400 from
+   `decode_pseudonym`, so the co-publisher flow could
+   never have worked. v2 narrows the prefix to the 16
+   bytes left over after the channel id, which reaches
+   the DS width while keeping the derivation both
+   deterministic AND invertible — `channel_id_from_group_id`
+   still recovers the channel id from a `/g/` ticket that
+   conveys only the `group_id`. Deriving the id by
+   hashing the channel id would have hit the same width
+   and destroyed that inverse. Pinned by
+   `crates/lakko-mls/tests/group_id_width.rs`
+   (`publisher_group_id_matches_the_ds_width`,
+   `publisher_group_id_round_trips_through_channel_id`,
+   `publisher_group_id_hex_matches_the_ds_path_length`).
+
+   The prefix width is `GROUP_ID_LEN - CHANNEL_ID_LEN`
+   and the literal is typed `&[u8; …]`, so a later edit
+   that widens it is a compile error rather than a silent
+   re-break.
+
+   **No migration exists, by construction.** An MLS
+   `group_id` is a `GroupContext` field fed into the key
+   schedule and bound by every commit's confirmation tag,
+   so a group persisted under the v1 id cannot be re-keyed
+   to the v2 id — it is a different group. `PublisherGroup::
+   load` / `create` therefore *detect* v1 state and refuse
+   loudly, rather than returning `Ok(None)` and letting
+   `open_or_create` mint a fresh epoch-0 group that would
+   silently swap the channel's content-key seed under
+   subscribers still holding the old one. The v1 state is
+   left intact.
    `PublisherGroup::open_or_create(identity, channel_id)`
    resolves to the same persisted group across process
    restarts — `MlsGroup::load(provider.storage(),

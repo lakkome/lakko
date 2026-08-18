@@ -1582,7 +1582,15 @@ sub-sprints:
   and `MlsGroup::load`. Deterministic group id
   derivation: `prefix("lakko/publisher-group/v1/") ||
   channel_id`. 8 unit tests pin the load-or-create
-  idempotence invariant.
+  idempotence invariant. **Superseded (Aug 2026):** that
+  41-byte shape could never be published — a
+  PublisherGroup id is a DS journal routing key on the
+  ADR-0028 OQ3 co-publisher path and `services/ds`
+  accepts exactly 32 bytes. The prefix is now the 16-byte
+  `b"lakko/pubgrp/v2/"`, keeping the derivation
+  deterministic and invertible at the DS width; v1 state
+  is detected and refused rather than silently re-minted.
+  See C-52 in `calls.md`.
 - **Step 2 (FFI)** — UniFFI + wasm-bindgen
   `PublisherGroup` wrappers in `lakko-ffi-uniffi` +
   `lakko-ffi-wasm`. `publisher_group_load` /

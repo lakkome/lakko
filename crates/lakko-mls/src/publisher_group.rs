@@ -32,8 +32,16 @@
 //! [`PublisherGroup`] is a thin wrapper around [`Group`] that:
 //!
 //! * Derives a **deterministic** MLS group id from the
-//!   16-byte channel id (`prefix("lakko/channel/v1") || channel_id`).
-//!   That gives [`Group::load`] something stable to look up.
+//!   16-byte channel id (`b"lakko/pubgrp/v2/" || channel_id`,
+//!   [`GROUP_ID_LEN`] bytes exactly — see
+//!   [`PUBLISHER_GROUP_ID_PREFIX`] for why the width is
+//!   load-bearing). That gives [`Group::load`] something
+//!   stable to look up, and [`channel_id_from_group_id`]
+//!   inverts it for the ADR-0028 OQ3 co-publisher joiner.
+//!   The channel id therefore rides the group id in the
+//!   clear; that was true of v1 too and is not a new
+//!   disclosure — the same channel id is the addressing key
+//!   on `services/channels`.
 //! * Exposes [`PublisherGroup::open_or_create`] — the
 //!   load-or-create dance every composer needs. Reuses the
 //!   already-persisted state when it exists; otherwise
@@ -87,7 +95,7 @@
 //! → the channel seed survives.
 
 use crate::error::{Error, Result};
-use crate::group::Group;
+use crate::group::{Group, GROUP_ID_LEN};
 use crate::identity::Identity;
 
 /// MLS-exporter domain-separation label for channel content
@@ -133,25 +141,106 @@ impl ChannelId {
     }
 }
 
-/// Domain-separation prefix for the deterministic
-/// PublisherGroup MLS group id. Pinned at v1 — a future
-/// schema bump would land as `"lakko/publisher-group/v2"`
-/// and force a parallel migration.
-const PUBLISHER_GROUP_ID_PREFIX: &[u8] = b"lakko/publisher-group/v1/";
+/// Width of the domain-separation prefix on a PublisherGroup MLS group id.
+///
+/// **Derived, never chosen.** The id is `prefix || channel_id` and must come
+/// out at exactly [`GROUP_ID_LEN`], because a PublisherGroup id is a Delivery
+/// Service journal routing key (see [`PUBLISHER_GROUP_ID_PREFIX`]). So the
+/// prefix width is whatever is left over, and the subtraction underflows at
+/// const-eval — a compile error — if [`CHANNEL_ID_LEN`] ever exceeds
+/// [`GROUP_ID_LEN`].
+const PUBLISHER_GROUP_ID_PREFIX_LEN: usize = GROUP_ID_LEN - CHANNEL_ID_LEN;
+
+/// Domain-separation prefix for the deterministic PublisherGroup MLS group id.
+///
+/// **v2 — the width is load-bearing.** The v1 prefix was
+/// `b"lakko/publisher-group/v1/"` (25 bytes), making the id 41 bytes. That
+/// could never be published: a PublisherGroup id reaches the DS journal on the
+/// ADR-0028 OQ3 co-publisher path (`apps/web/src/channels/copublisher.ts`,
+/// `apps/ios/Lakko/Channels/CoPublisher.swift`,
+/// `apps/android/.../channels/CoPublisher.kt` all hand it to
+/// `fetchGroup` / `publishGroup` verbatim), and `services/ds` accepts exactly
+/// `PSEUDONYM_LEN = 32` bytes — 41 becomes 82 hex chars and `decode_pseudonym`
+/// answers 400. v2 narrows the prefix to [`PUBLISHER_GROUP_ID_PREFIX_LEN`] so
+/// the id lands on [`GROUP_ID_LEN`] exactly.
+///
+/// The type is `&[u8; PUBLISHER_GROUP_ID_PREFIX_LEN]`, not `&[u8]`, on purpose:
+/// a literal of any other length does not coerce, so a later edit that reaches
+/// for a longer label fails to compile instead of silently re-breaking the DS
+/// width.
+///
+/// **Why an ASCII literal rather than a truncated hash.** The prefix's whole
+/// job is that bytes minted for this role cannot be mistaken for bytes minted
+/// for another, and against every other id in the tree — a random 32-byte
+/// [`crate::Group::create`] id, a `BLAKE3`-derived `DeviceGroup` id — a fixed
+/// 16-byte tag collides with probability 2^-128 whether it is ASCII or a hash
+/// digest. A digest would buy no separation strength and would cost the one
+/// property that is actually useful here: the prefix is visible in a DS access
+/// log and in any hex dump of a journal key, so a readable label makes a
+/// mis-routed id self-identifying during debugging. Opacity would also buy no
+/// privacy — the constant is in AGPL source, so anyone can recognise it either
+/// way, and the trailing 16 bytes are the channel id in the clear regardless
+/// (unchanged from v1; see the module docs).
+const PUBLISHER_GROUP_ID_PREFIX: &[u8; PUBLISHER_GROUP_ID_PREFIX_LEN] = b"lakko/pubgrp/v2/";
+
+/// The retired v1 prefix. Kept for exactly one purpose: letting
+/// [`PublisherGroup::load`] *recognise* state persisted under the old
+/// derivation so the caller gets a loud error instead of a silent fresh mint.
+/// Nothing else may use it — it is not a fallback lookup path (see
+/// [`PublisherGroup::load`] for why re-keying is impossible).
+const PUBLISHER_GROUP_ID_PREFIX_V1: &[u8] = b"lakko/publisher-group/v1/";
 
 /// Build the deterministic MLS group id for `channel_id`.
-/// Shape: `b"lakko/publisher-group/v1/" || channel_id`.
+/// Shape: `b"lakko/pubgrp/v2/" || channel_id`, exactly [`GROUP_ID_LEN`] bytes.
 ///
 /// The prefix domain-separates this byte string from any
 /// other channel-id-derived value (the channel-exporter
 /// label, the subscriber-envelope AAD, etc.) so a future
 /// confusion attack cannot reinterpret bytes minted in one
 /// role as a valid input to another.
-fn publisher_group_id_bytes(channel_id: &ChannelId) -> Vec<u8> {
-    let mut id = Vec::with_capacity(PUBLISHER_GROUP_ID_PREFIX.len() + CHANNEL_ID_LEN);
-    id.extend_from_slice(PUBLISHER_GROUP_ID_PREFIX);
+fn publisher_group_id_bytes(channel_id: &ChannelId) -> [u8; GROUP_ID_LEN] {
+    let mut id = [0u8; GROUP_ID_LEN];
+    id[..PUBLISHER_GROUP_ID_PREFIX_LEN].copy_from_slice(PUBLISHER_GROUP_ID_PREFIX);
+    id[PUBLISHER_GROUP_ID_PREFIX_LEN..].copy_from_slice(channel_id.as_bytes());
+    id
+}
+
+/// The v1 id `channel_id` *would* have been persisted under. Used only by
+/// [`refuse_if_legacy_v1_present`].
+fn publisher_group_id_bytes_v1(channel_id: &ChannelId) -> Vec<u8> {
+    let mut id = Vec::with_capacity(PUBLISHER_GROUP_ID_PREFIX_V1.len() + CHANNEL_ID_LEN);
+    id.extend_from_slice(PUBLISHER_GROUP_ID_PREFIX_V1);
     id.extend_from_slice(channel_id.as_bytes());
     id
+}
+
+/// Refuse to proceed when this channel has MLS state persisted under the
+/// retired v1 derivation. See [`PublisherGroup::load`] for why the state cannot
+/// be migrated in place and why a silent fresh mint is the worse outcome.
+///
+/// One extra storage read, only on a v2 miss — i.e. once per channel, on the
+/// path that is about to mint. `open_or_create` pays for it twice on a genuine
+/// first mint (once via `load`'s miss, once via `create`); that is a single
+/// additional key lookup against an empty result and is not worth threading a
+/// "already checked" flag through the two public constructors to avoid.
+///
+/// # Errors
+///
+/// [`Error::Group`] when v1 state is present; propagates [`Group::load`]
+/// failures otherwise.
+fn refuse_if_legacy_v1_present(identity: &Identity, channel_id: &ChannelId) -> Result<()> {
+    let v1 = publisher_group_id_bytes_v1(channel_id);
+    if Group::load(identity, &v1)?.is_some() {
+        return Err(Error::Group(
+            "legacy v1 PublisherGroup state present for this channel: the v1 \
+             group id was 41 bytes, which the Delivery Service rejects, and an \
+             MLS group id is bound into the GroupContext so it cannot be \
+             re-keyed to the 32-byte v2 id. The v1 state is left intact; this \
+             channel needs a migration or a fresh channel."
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Recover the [`ChannelId`] from a PublisherGroup `group_id` — the inverse of
@@ -159,17 +248,26 @@ fn publisher_group_id_bytes(channel_id: &ChannelId) -> Vec<u8> {
 /// publisher-group prefix followed by exactly a [`CHANNEL_ID_LEN`]-byte channel
 /// id.
 ///
+/// Narrowing the prefix to reach [`GROUP_ID_LEN`] deliberately preserves this
+/// inverse: the channel id is still carried verbatim in the trailing bytes, so
+/// nothing has to convey it out of band. Deriving the id by hashing the channel
+/// id would have hit the same width and destroyed it.
+///
 /// ADR-0028 OQ3: a co-publisher learns a PublisherGroup's `group_id` from a
 /// `/g/` ticket (the capability conveys only the `group_id`), so after the
 /// external join completes it uses this to recover the channel id and
 /// reconstruct the [`PublisherGroup`] / derive the channel content-key seed.
+///
+/// v1 ids are **not** accepted: they are a different width, so they fail the
+/// length check. That is intended — a v1 id cannot be published to the DS at
+/// all, so a co-publisher can never legitimately hold one.
 #[must_use]
 pub fn channel_id_from_group_id(group_id: &[u8]) -> Option<ChannelId> {
-    let prefix = PUBLISHER_GROUP_ID_PREFIX;
-    if group_id.len() != prefix.len() + CHANNEL_ID_LEN || &group_id[..prefix.len()] != prefix {
+    let prefix: &[u8] = PUBLISHER_GROUP_ID_PREFIX;
+    if group_id.len() != GROUP_ID_LEN || &group_id[..PUBLISHER_GROUP_ID_PREFIX_LEN] != prefix {
         return None;
     }
-    ChannelId::try_from_slice(&group_id[prefix.len()..]).ok()
+    ChannelId::try_from_slice(&group_id[PUBLISHER_GROUP_ID_PREFIX_LEN..]).ok()
 }
 
 /// Persistent MLS-group wrapper for one Lakko channel's
@@ -186,18 +284,39 @@ impl PublisherGroup {
     /// then call [`PublisherGroup::create`] (or use the
     /// load-or-create convenience [`PublisherGroup::open_or_create`]).
     ///
+    /// ## Legacy v1 state
+    ///
+    /// A group persisted under the retired 41-byte v1 derivation is **not**
+    /// migrated, and cannot be: an MLS `group_id` is a field of the
+    /// `GroupContext` (openmls-0.8.1 `group/group_context.rs:46`), which is
+    /// serialised into the key schedule (`schedule/mod.rs` `add_context`) and
+    /// bound by every commit's confirmation tag. There is no `set_group_id` and
+    /// there could not be one — renaming a group would change every epoch
+    /// secret it has ever derived. A v1 PublisherGroup's identity *is* its
+    /// 41-byte id; a 32-byte id is a different MLS group.
+    ///
+    /// So this method refuses rather than pretending. Returning `Ok(None)`
+    /// would send [`PublisherGroup::open_or_create`] on to mint a fresh group
+    /// at epoch 0 under the v2 id — silently swapping the channel's content-key
+    /// seed while every subscriber still holds an envelope carrying the old
+    /// one, so posts published before the next rotation fan-out would fail AEAD
+    /// on arrival. Failing loudly leaves the v1 state untouched in storage for
+    /// any future migration tool, and leaves the channel readable.
+    ///
     /// # Errors
     ///
-    /// Propagates [`Group::load`] errors.
+    /// Propagates [`Group::load`] errors, and returns [`Error::Group`] when no
+    /// v2 group exists but v1 state for this channel does.
     pub fn load(identity: &Identity, channel_id: &ChannelId) -> Result<Option<Self>> {
         let id = publisher_group_id_bytes(channel_id);
-        match Group::load(identity, &id)? {
-            Some(inner) => Ok(Some(Self {
+        if let Some(inner) = Group::load(identity, &id)? {
+            return Ok(Some(Self {
                 inner,
                 channel_id: *channel_id,
-            })),
-            None => Ok(None),
+            }));
         }
+        refuse_if_legacy_v1_present(identity, channel_id)?;
+        Ok(None)
     }
 
     /// Create a fresh PublisherGroup for `channel_id` with
@@ -206,11 +325,17 @@ impl PublisherGroup {
     /// side effect of [`Group::create_with_id`]. Subsequent
     /// [`PublisherGroup::load`] calls find it.
     ///
+    /// Refuses if legacy v1 state exists for this channel, for the reason given
+    /// on [`PublisherGroup::load`]. `create` carries the check independently
+    /// because it is reachable directly from both FFI surfaces, not only
+    /// through [`PublisherGroup::open_or_create`].
+    ///
     /// # Errors
     ///
     /// Returns [`Error::Group`] on any OpenMLS-side failure
-    /// (e.g. ciphersuite mismatch).
+    /// (e.g. ciphersuite mismatch), or when v1 state for this channel exists.
     pub fn create(identity: &Identity, channel_id: &ChannelId) -> Result<Self> {
+        refuse_if_legacy_v1_present(identity, channel_id)?;
         let id = publisher_group_id_bytes(channel_id);
         let inner = Group::create_with_id(identity, &id)?;
         Ok(Self {
@@ -364,6 +489,15 @@ mod tests {
         ChannelId([0xAB; CHANNEL_ID_LEN])
     }
 
+    /// `PublisherGroup` is not `Debug`, so `expect_err` is unavailable.
+    /// Renders the error of a call that MUST have failed.
+    fn refusal_text<T>(res: Result<T>) -> String {
+        match res {
+            Ok(_) => panic!("expected a refusal, got Ok"),
+            Err(e) => e.to_string(),
+        }
+    }
+
     #[test]
     fn channel_id_round_trip() {
         let bytes = [0x42u8; CHANNEL_ID_LEN];
@@ -384,7 +518,30 @@ mod tests {
         let id2 = publisher_group_id_bytes(&cid);
         assert_eq!(id1, id2);
         assert!(id1.starts_with(PUBLISHER_GROUP_ID_PREFIX));
-        assert_eq!(id1.len(), PUBLISHER_GROUP_ID_PREFIX.len() + CHANNEL_ID_LEN);
+        assert_eq!(id1.len(), PUBLISHER_GROUP_ID_PREFIX_LEN + CHANNEL_ID_LEN);
+        assert_eq!(id1.len(), GROUP_ID_LEN);
+    }
+
+    /// The prefix width is not free to choose — it is exactly what is left of
+    /// [`GROUP_ID_LEN`] after the channel id. Pinning the literal's own length
+    /// here means a hand-edit that widens it fails a test as well as failing to
+    /// compile.
+    #[test]
+    fn prefix_width_is_exactly_the_ds_leftover() {
+        assert_eq!(
+            PUBLISHER_GROUP_ID_PREFIX.len(),
+            PUBLISHER_GROUP_ID_PREFIX_LEN
+        );
+        assert_eq!(
+            PUBLISHER_GROUP_ID_PREFIX_LEN + CHANNEL_ID_LEN,
+            GROUP_ID_LEN,
+            "prefix + channel id must land on the DS-accepted group-id width"
+        );
+        // v1 is retired: it did not, which is the whole reason for the bump.
+        assert_ne!(
+            PUBLISHER_GROUP_ID_PREFIX_V1.len() + CHANNEL_ID_LEN,
+            GROUP_ID_LEN
+        );
     }
 
     #[test]
@@ -674,8 +831,104 @@ mod tests {
         assert_eq!(channel_id_from_group_id(&gid[..gid.len() - 1]), None);
         assert_eq!(channel_id_from_group_id(&[]), None);
         // Right length, wrong prefix — a chat group_id must not decode.
-        let mut wrong_prefix = gid.clone();
+        let mut wrong_prefix = gid;
         wrong_prefix[0] ^= 0xFF;
         assert_eq!(channel_id_from_group_id(&wrong_prefix), None);
+        // A retired v1 id must not decode either: it is the wrong width, and a
+        // co-publisher can never legitimately hold one (the DS refuses it).
+        assert_eq!(
+            channel_id_from_group_id(&publisher_group_id_bytes_v1(&cid)),
+            None
+        );
+    }
+
+    /// The inverse must survive the width narrowing for EVERY channel id, not
+    /// just a hand-picked one — that round-trip is the property the v2 prefix
+    /// was chosen to preserve (hashing the channel id to 32 bytes would have
+    /// hit the same width and destroyed it).
+    #[test]
+    fn channel_id_round_trips_through_the_group_id_for_every_byte_pattern() {
+        for byte in 0u8..=255 {
+            let cid = ChannelId([byte; CHANNEL_ID_LEN]);
+            let gid = publisher_group_id_bytes(&cid);
+            assert_eq!(gid.len(), GROUP_ID_LEN, "id width at fill byte {byte}");
+            assert_eq!(
+                channel_id_from_group_id(&gid),
+                Some(cid),
+                "inverse lost at fill byte {byte}"
+            );
+        }
+        // Also a non-uniform id, so a "all bytes equal" derivation bug cannot
+        // hide behind the sweep above.
+        let mixed = ChannelId([
+            0x00, 0x01, 0x7F, 0x80, 0xFF, 0x2F, 0x6C, 0x61, 0x6B, 0x6B, 0x6F, 0xAA, 0x55, 0x10,
+            0xEE, 0x99,
+        ]);
+        assert_eq!(
+            channel_id_from_group_id(&publisher_group_id_bytes(&mixed)),
+            Some(mixed)
+        );
+    }
+
+    /// Legacy v1 state must produce a loud refusal, never a silent fresh mint.
+    ///
+    /// Constructed the only way it can be: mint a group directly under the v1
+    /// id via the generic `Group::create_with_id`, which is exactly what the
+    /// retired `PublisherGroup::create` did.
+    #[test]
+    fn legacy_v1_state_refuses_instead_of_minting_a_fresh_group() {
+        let identity = test_identity();
+        let cid = ChannelId([0x3Cu8; CHANNEL_ID_LEN]);
+
+        // Nothing persisted yet: both constructors are clear to run.
+        assert!(PublisherGroup::load(&identity, &cid)
+            .expect("clean load")
+            .is_none());
+
+        // Simulate a channel that was minted before the v2 width fix.
+        let _legacy =
+            Group::create_with_id(&identity, &publisher_group_id_bytes_v1(&cid)).expect("v1 group");
+
+        let load_err = refusal_text(PublisherGroup::load(&identity, &cid));
+        assert!(
+            load_err.contains("legacy v1 PublisherGroup state"),
+            "unexpected error: {load_err}"
+        );
+
+        // open_or_create must NOT fall through to a fresh mint. Silently
+        // minting would swap the channel's content-key seed under every
+        // subscriber that still holds an envelope for the old one.
+        assert!(
+            refusal_text(PublisherGroup::open_or_create(&identity, &cid))
+                .contains("legacy v1 PublisherGroup state")
+        );
+
+        // And the direct constructor, reachable from both FFI surfaces.
+        assert!(refusal_text(PublisherGroup::create(&identity, &cid))
+            .contains("legacy v1 PublisherGroup state"));
+
+        // The v1 state is left intact for a future migration tool.
+        assert!(
+            Group::load(&identity, &publisher_group_id_bytes_v1(&cid))
+                .expect("v1 load")
+                .is_some(),
+            "the refusal must not destroy the legacy state"
+        );
+    }
+
+    /// The legacy probe must be scoped to the SAME channel — an unrelated
+    /// channel's v1 state must not block a fresh v2 mint.
+    #[test]
+    fn legacy_probe_is_per_channel() {
+        let identity = test_identity();
+        let legacy_cid = ChannelId([0x11u8; CHANNEL_ID_LEN]);
+        let fresh_cid = ChannelId([0x22u8; CHANNEL_ID_LEN]);
+
+        let _legacy = Group::create_with_id(&identity, &publisher_group_id_bytes_v1(&legacy_cid))
+            .expect("v1 group");
+
+        let pg = PublisherGroup::open_or_create(&identity, &fresh_cid).expect("unrelated channel");
+        assert_eq!(pg.group_id().len(), GROUP_ID_LEN);
+        assert!(PublisherGroup::create(&identity, &legacy_cid).is_err());
     }
 }

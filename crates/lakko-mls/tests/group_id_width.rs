@@ -19,15 +19,19 @@
 //! These tests pin the width for every constructor, so a regression on either
 //! side of the boundary fails here instead of silently 400-ing at runtime.
 //!
-//! Scope note: `Group::create` is fixed. `PublisherGroup` has the *same* class
-//! of break (41-byte id, also DS-routed via the ADR-0028 OQ3 co-publisher
-//! flow) and is deliberately **left unfixed** — see
-//! [`publisher_group_id_does_not_fit_the_ds_width_unfixed`] for why it is a
-//! protocol decision rather than a width change.
+//! `PublisherGroup` had the *same* class of break — a 41-byte id, also
+//! DS-routed, via the ADR-0028 OQ3 co-publisher flow — and is fixed too, by
+//! narrowing its domain prefix from 25 bytes to 16 so `prefix || channel_id`
+//! lands on 32. That kept the derivation deterministic AND invertible; see
+//! [`publisher_group_id_matches_the_ds_width`] and
+//! [`publisher_group_id_round_trips_through_channel_id`].
 
 use std::fmt::Write as _;
 
-use lakko_mls::{AccountId, ChannelId, DeviceGroup, Group, Identity, PublisherGroup, GROUP_ID_LEN};
+use lakko_mls::{
+    channel_id_from_group_id, AccountId, ChannelId, DeviceGroup, Group, Identity, PublisherGroup,
+    GROUP_ID_LEN,
+};
 
 /// Local restatement of `services/ds/src/journal.rs`:
 ///
@@ -159,50 +163,111 @@ fn device_group_id_matches_the_ds_width() {
     assert_eq!(dg.group_id().len(), DS_PSEUDONYM_LEN);
 }
 
-/// `PublisherGroup` mints a **41-byte** id: the domain prefix
-/// `lakko/publisher-group/v1/` (25 bytes) plus a 16-byte channel id. That is
-/// deliberate — the id must be *deterministic* so `PublisherGroup::load` can
-/// find the persisted group by `channel_id` across restarts, and
-/// `channel_id_from_group_id` inverts it so an ADR-0028 OQ3 co-publisher can
-/// recover the channel id from a `/g/` capability.
+/// `PublisherGroup` ids are DS-routed and must match the DS width.
 ///
-/// **This width is a SECOND, UNFIXED break of the same DS coupling.** Unlike
-/// the `Group::create` defect this file's other tests pin, it is *not* fixed
-/// here. The ADR-0028 OQ3 co-publisher flow passes this id straight to the DS
-/// journal on all three clients — verified at
+/// This was the *second* break of the same coupling, and it is the one that
+/// actually reached a live route. The ADR-0028 OQ3 co-publisher flow passes
+/// this id straight to the DS journal on all three clients — verified at
 /// `apps/web/src/channels/copublisher.ts` (`ds.fetchGroup(groupId, …)` /
 /// `ds.publishGroup(groupId, …)`), `apps/ios/Lakko/Channels/CoPublisher.swift`,
-/// and `apps/android/.../channels/CoPublisher.kt` — so 41 bytes becomes 82 hex
-/// chars and the DS answers 400 on both the poll and the publish.
+/// and `apps/android/.../channels/CoPublisher.kt`. Under the retired v1
+/// derivation the id was 41 bytes (a 25-byte prefix plus the 16-byte channel
+/// id), so it became 82 hex chars and the DS answered 400 on both the poll and
+/// the publish.
 ///
-/// It is left unfixed because it is not a width change: it is a protocol
-/// change needing its own decision. Any 32-byte id would have to stay
-/// deterministic from the channel id, and hashing it to 32 bytes destroys
-/// `channel_id_from_group_id`'s invertibility (the joiner would need the
-/// channel id conveyed some other way), while also orphaning every persisted
-/// PublisherGroup keyed under the current derivation.
-///
-/// This test therefore pins the *current* width so the discrepancy is stated
-/// in code rather than rediscovered as a production 400, and so that whoever
-/// changes the derivation is forced to update this assertion deliberately.
+/// The id is *deterministic* from the channel id so `PublisherGroup::load` can
+/// find the persisted group across restarts, and it must stay invertible so an
+/// ADR-0028 OQ3 co-publisher can recover the channel id from a `/g/`
+/// capability that conveys only the `group_id`. Narrowing the domain prefix to
+/// 16 bytes reaches the DS width while keeping both — see
+/// `publisher_group_id_round_trips_through_channel_id`.
 #[test]
-fn publisher_group_id_does_not_fit_the_ds_width_unfixed() {
+fn publisher_group_id_matches_the_ds_width() {
     let identity = Identity::generate("alice").expect("identity");
     let channel = ChannelId::try_from_slice(&[9u8; 16]).expect("channel id");
     let pg = PublisherGroup::create(&identity, &channel).expect("publisher group");
 
-    let len = pg.group_id().len();
     assert_eq!(
-        len, 41,
-        "publisher group id = 25-byte prefix + 16-byte channel id"
+        pg.group_id().len(),
+        DS_PSEUDONYM_LEN,
+        "PublisherGroup ids are DS-routed by the ADR-0028 OQ3 co-publisher \
+         flow on all three clients, so they must be exactly \
+         {DS_PSEUDONYM_LEN} bytes. The retired v1 derivation produced 41, \
+         which decode_pseudonym answers 400 on."
     );
-    assert_ne!(
-        len, DS_PSEUDONYM_LEN,
-        "PublisherGroup ids do NOT fit the DS width. This is the known-unfixed \
-         second break: the ADR-0028 OQ3 co-publisher flow routes this id \
-         through the DS journal on all three clients, so it 400s today. If \
-         this assertion ever fails, the derivation was changed — verify \
-         channel_id_from_group_id and PublisherGroup::load still work, then \
-         retire this test."
+    assert_eq!(
+        pg.group_id().len(),
+        GROUP_ID_LEN,
+        "a PublisherGroup id must be the same width as every other Lakko \
+         group id — it travels the same DS route"
+    );
+}
+
+/// The width fix must not cost the inverse. A co-publisher joining from a
+/// `/g/` ticket has only the `group_id`; `channel_id_from_group_id` is how it
+/// recovers the channel id, so the trailing bytes must remain the channel id
+/// verbatim. Deriving the id by hashing the channel id would also have hit 32
+/// bytes and would have broken exactly this.
+#[test]
+fn publisher_group_id_round_trips_through_channel_id() {
+    let identity = Identity::generate("alice").expect("identity");
+
+    for fill in [0x00u8, 0x01, 0x5C, 0x9A, 0xFF] {
+        let channel = ChannelId::try_from_slice(&[fill; 16]).expect("channel id");
+        let pg = PublisherGroup::create(&identity, &channel).expect("publisher group");
+        let gid = pg.group_id();
+
+        assert_eq!(gid.len(), DS_PSEUDONYM_LEN, "width at fill {fill:#04x}");
+        assert_eq!(
+            channel_id_from_group_id(&gid),
+            Some(channel),
+            "a co-publisher must be able to recover the channel id from the \
+             group id alone (fill {fill:#04x})"
+        );
+    }
+
+    // A chat group id is 32 bytes too, so the length check alone no longer
+    // discriminates — the prefix must. A random id decoding as a channel would
+    // let a `/g/` chat ticket be mistaken for a co-publisher ticket.
+    let chat = Group::create(&identity).expect("chat group");
+    assert_eq!(chat.group_id().len(), DS_PSEUDONYM_LEN);
+    assert_eq!(
+        channel_id_from_group_id(&chat.group_id()),
+        None,
+        "a chat group id must not decode as a PublisherGroup id"
+    );
+
+    // Same for a DeviceGroup id, which is also 32 bytes.
+    let account: AccountId = [7u8; 16];
+    assert_eq!(
+        channel_id_from_group_id(&DeviceGroup::group_id_for(&account)),
+        None,
+        "a DeviceGroup id must not decode as a PublisherGroup id"
+    );
+}
+
+/// The hex form of a PublisherGroup id — what actually goes on the wire at
+/// `POST /ds/group/{hex}` on the co-publisher path — must match the DS's
+/// `HEX_LEN`. This is the assertion closest to the observed 400.
+#[test]
+fn publisher_group_id_hex_matches_the_ds_path_length() {
+    let identity = Identity::generate("alice").expect("identity");
+    let channel = ChannelId::try_from_slice(&[9u8; 16]).expect("channel id");
+    let pg = PublisherGroup::create(&identity, &channel).expect("publisher group");
+
+    let id = pg.group_id();
+    let hex = id
+        .iter()
+        .fold(String::with_capacity(id.len() * 2), |mut acc, b| {
+            write!(acc, "{b:02x}").expect("writing to a String cannot fail");
+            acc
+        });
+
+    assert_eq!(
+        hex.len(),
+        DS_PSEUDONYM_LEN * 2,
+        "the co-publisher DS path segment must be exactly {} lowercase hex \
+         chars; 82 is what the v1 derivation produced and what the DS refused",
+        DS_PSEUDONYM_LEN * 2
     );
 }
