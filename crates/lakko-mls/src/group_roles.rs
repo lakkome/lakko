@@ -53,12 +53,44 @@ const HEADER_LEN: usize = OWNER_END + 2;
 /// A member's role in a group that has opted into the ADR-0022 role policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Role {
-    /// The group creator. Exactly one; cannot be removed or demoted by others;
-    /// the only role that may change the role table.
+    /// The group creator, or whoever they handed the slot on to
+    /// ([`RoleTable::with_owner_transferred`]). Exactly one; cannot be removed
+    /// or demoted by anyone, including itself; the only role that may change
+    /// the role table.
     Owner,
     /// Appointed by the owner. May add / remove non-owner members.
     Admin,
     /// May not add or remove anyone (may still leave — a self-Remove).
+    Member,
+}
+
+/// What becomes of the **outgoing** owner when ownership is transferred
+/// ([`RoleTable::with_owner_transferred`], [`crate::Group::transfer_ownership`]).
+///
+/// Stated rather than assumed, because either silent default is wrong in one
+/// direction: silently keeping admin leaves an unwanted administrator behind in
+/// a group the outgoing owner meant to hand over and walk away from, and
+/// silently dropping to plain member strips them, in one irreversible commit, of
+/// every power they had in a group they created.
+///
+/// [`OutgoingOwner::Admin`] is the default, and the variant a client should
+/// pre-select. Not because it preserves a way back — it does not, and that has
+/// to be said plainly: a role change is owner-only, so **a transfer cannot be
+/// undone by the person who made it**, whatever they keep. It is the default
+/// because it is the recoverable side of an unrecoverable action. Keeping admin
+/// leaves the group with one more member who can add, remove and sweep at
+/// exactly the moment its leadership is changing hands — which is when
+/// ADR-0045's "no owner and no admins online" stall is most likely and most
+/// expensive — and the outgoing owner can shed it at any time by asking the new
+/// owner to demote them, which is one ordinary role change. The reverse mistake
+/// cannot be corrected without the new owner's cooperation either, and costs the
+/// group its administrability in the meantime.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OutgoingOwner {
+    /// Keep the outgoing owner in the admin set. The recommended default.
+    #[default]
+    Admin,
+    /// Demote the outgoing owner to a plain member.
     Member,
 }
 
@@ -95,6 +127,38 @@ impl RoleTable {
             owner,
             admins: Vec::new(),
         }
+    }
+
+    /// The same table with the owner slot moved to `new_owner`, and the
+    /// outgoing owner placed per `outgoing` (ADR-0022's deferred
+    /// ownership-transfer follow-up).
+    ///
+    /// Pure, total and **membership-blind**: a role table names keys, not group
+    /// members, so it cannot tell whether `new_owner` is in the group. That
+    /// question is the whole safety of a transfer — an owner outside the group
+    /// is a group nobody can ever administer again, because a role change is
+    /// owner-only — and it is answered where the roster is visible:
+    /// [`crate::Group::transfer_ownership`] refuses it when authoring, and every
+    /// peer's commit gate refuses it on receipt (fail-closed, invariant #4).
+    ///
+    /// Transfer to the current owner is the identity function for both variants
+    /// of `outgoing`, because [`RoleTable::new`] strips the owner key from the
+    /// admin set — so the operation is total rather than producing a table that
+    /// names one key twice.
+    #[must_use]
+    pub fn with_owner_transferred(
+        &self,
+        new_owner: [u8; PUBKEY_LEN],
+        outgoing: OutgoingOwner,
+    ) -> Self {
+        let mut admins = self.admins.clone();
+        if outgoing == OutgoingOwner::Admin {
+            admins.push(self.owner);
+        }
+        // `new` re-canonicalises: it strips `new_owner` from the admin set (a
+        // promoted admin must not remain listed as one) and re-sorts, so the
+        // encoded bytes stay deterministic for every member.
+        Self::new(new_owner, admins)
     }
 
     /// The owner's signature public key.
@@ -267,6 +331,71 @@ mod tests {
         let t = RoleTable::new(pk(5), vec![pk(2), pk(2), pk(5), pk(1)]);
         // pk(5) (owner) stripped, pk(2) deduped, sorted
         assert_eq!(t.admins(), &[pk(1), pk(2)]);
+    }
+
+    #[test]
+    fn transfer_moves_the_owner_slot_and_keeps_the_outgoing_owner_as_admin() {
+        let t = RoleTable::new(pk(9), vec![pk(1), pk(2)]);
+        let after = t.with_owner_transferred(pk(1), OutgoingOwner::Admin);
+        assert_eq!(after.owner(), &pk(1), "the named member is now the owner");
+        assert_eq!(
+            after.admins(),
+            &[pk(2), pk(9)],
+            "the promoted admin leaves the admin set; the outgoing owner joins it",
+        );
+        assert_eq!(after.role_of(&pk(1)), Role::Owner);
+        assert_eq!(after.role_of(&pk(9)), Role::Admin);
+        assert_eq!(after.role_of(&pk(2)), Role::Admin);
+    }
+
+    #[test]
+    fn transfer_can_drop_the_outgoing_owner_to_a_plain_member() {
+        let t = RoleTable::new(pk(9), vec![pk(1), pk(2)]);
+        let after = t.with_owner_transferred(pk(1), OutgoingOwner::Member);
+        assert_eq!(after.owner(), &pk(1));
+        assert_eq!(after.admins(), &[pk(2)]);
+        assert_eq!(
+            after.role_of(&pk(9)),
+            Role::Member,
+            "the outgoing owner keeps nothing",
+        );
+    }
+
+    #[test]
+    fn transfer_to_a_plain_member_promotes_only_them() {
+        let t = RoleTable::new(pk(9), vec![pk(2)]);
+        let after = t.with_owner_transferred(pk(7), OutgoingOwner::Admin);
+        assert_eq!(after.owner(), &pk(7));
+        assert_eq!(after.admins(), &[pk(2), pk(9)]);
+    }
+
+    #[test]
+    fn transfer_to_the_current_owner_is_the_identity_for_both_variants() {
+        // Total rather than producing a table that names one key twice.
+        let t = RoleTable::new(pk(9), vec![pk(1), pk(2)]);
+        assert_eq!(t.with_owner_transferred(pk(9), OutgoingOwner::Admin), t);
+        assert_eq!(t.with_owner_transferred(pk(9), OutgoingOwner::Member), t);
+    }
+
+    #[test]
+    fn a_transferred_table_round_trips_through_the_codec() {
+        // The transfer is only real once it is in the authenticated
+        // GroupContext, so the canonical encoding has to survive it.
+        let t = RoleTable::new(pk(9), vec![pk(1), pk(2)]);
+        let after = t.with_owner_transferred(pk(1), OutgoingOwner::Admin);
+        let back = RoleTable::decode(&after.encode()).expect("decode");
+        assert_eq!(back, after);
+        assert_eq!(
+            committer_rank(&back, &pk(1)),
+            Some(0),
+            "the new owner leads"
+        );
+        assert_eq!(committer_rank(&back, &pk(9)), Some(2), "pk(2) sorts first");
+    }
+
+    #[test]
+    fn outgoing_owner_defaults_to_admin() {
+        assert_eq!(OutgoingOwner::default(), OutgoingOwner::Admin);
     }
 
     #[test]

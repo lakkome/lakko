@@ -15,7 +15,16 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
   until the maintainer accepts the settled design; the maintainer accepts, not the
   ADR.
 - **Date:** 2026-08-18 (recon) · revised the same day to record the Option-B pick
-  and settle its design.
+  and settle its design · **2026-08-19: decision 2 (liveness) rewritten** to the
+  model the maintainer chose — active admin devices elect the committer, the next
+  candidate takes over when it is not acting, and a request waits indefinitely if
+  none of them is running. That rewrite deletes the retry cap, the terminal
+  *stalled* state and the `owner_grace` constant, and it **corrects a factual error
+  in the previous revision**, which asserted that a conversation group has no
+  presence signal. It has two (ADR-0024 typing and read receipts) and
+  `lakko-presence` is a live exported surface; what is genuinely missing is a
+  *continuous* beacon, which is a narrower and more tractable gap. Decision 1,
+  decision 3, decision 4 and the whole recon are unchanged.
 - **Context:** Phase 3 — group-membership commits / MLS epoch integrity. Closes
   **G-38 residual 1**, the largest unfixed item on the client-concurrency list
   and the only one on it that **no client-side lock can address by
@@ -775,16 +784,18 @@ election message, and nothing new on the wire. **Rank 0 is the owner; rank k is 
 k-th admin in the table's own order.**
 
 **Why not `lakko_calls::link_invite::elect_committer`
-(`crates/lakko-calls/src/link_invite.rs:230`) directly.** Two reasons, both
-disqualifying:
+(`crates/lakko-calls/src/link_invite.rs:230`) directly.** Two reasons, and only the
+second is disqualifying on its own:
 
-- **It needs a presence oracle that chat does not have.** Its input is
+- **Its presence input has no chat equivalent *as it stands*.** Its input is
   `CommitterCandidate { leaf_index, is_owner, is_present }`, and `is_present` means
   *connected to the SFU room* — a live, shared, server-observed signal that exists
-  only because a call has a server-mediated room. A chat group has no equivalent:
-  `lakko-presence` is a dependency of `crates/lakko-ffi-wasm` and of nothing else,
-  so there is no presence signal for a conversation group to read. Decision 2 is
-  the answer to what replaces it.
+  only because a call has a server-mediated room, which a conversation group does
+  not have. **This is a missing input, not a missing capability**, and the
+  distinction matters: the chat path does carry presence signals today (ADR-0024
+  typing and read receipts), and `lakko-presence` is a live exported surface —
+  decision 2 sets out precisely what is there, what is genuinely absent, and what
+  it would take to supply this input.
 - **It keys on leaf index, and leaf indices renumber.** ADR-0022 keyed the role
   table on the Ed25519 signature public key *specifically* because OpenMLS reuses a
   vacated leaf for the next Add. A committer identity that can silently change
@@ -811,98 +822,220 @@ is decision 3.
 
 ### Decision 2 — liveness
 
-This is the decision that determines whether B is usable, and the recon is right
-that a designated committer introduces a single point. The answer has two halves:
-make the duty per-batch rather than a standing office, and repair the narrow
-residual rather than pretend it is closed.
+**Recommendation: the active admin devices elect the committer, it sweeps the
+group's pending changes, the next candidate takes over when it is not acting, and
+if none of them is running the request simply waits.** A membership request is
+never abandoned, never expires and never fails for want of a committer.
 
-**Recommendation: the committer is a per-batch duty, not an office.**
+> **This replaces an earlier revision of this decision, and the replaced design's
+> failure modes are the reason this one is simpler.** That revision gave the wait a
+> deadline: a per-rank activation delay built from two constants (`owner_grace`,
+> then a per-rank `step`), a bounded retry budget for a request that kept missing
+> sweeps, and a terminal *stalled — no admin available* state once every rank's
+> delay had elapsed with nothing landing. Each was an unmeasured number standing
+> between a user and a change they were already authorised to make, and the
+> terminal state was the worst of them: from inside a client, *the budget ran out*
+> and *the admins are asleep* are the same observation, so the design converted a
+> wait whose end it could not see into a failure it asserted was final. It had no
+> basis for that assertion. **Two of the three numbers go with it** — the retry cap
+> and the stall threshold, and with the threshold goes the whole *stalled* state.
+> Whether the third goes too is the open design question below.
 
-There is no committer election event, no handover protocol, and no committer state
-to hand over. The rule each candidate evaluates, independently, on every poll:
+**The rule, in the form that does not depend on any constant.** Each candidate
+evaluates it independently, on every poll, over state it already holds:
 
-> I am rank k. If there is an authorised, un-swept proposal in this group whose
-> **DS row age exceeds `activation_delay(k)`**, and no commit has landed since it,
-> then I sweep every authorised pending proposal into one commit.
+> I am an authorised candidate. If this group holds an authorised, un-swept
+> proposal, and no commit has landed since it, and **I am the lowest-ranked
+> candidate currently known to be active**, then I sweep every authorised pending
+> proposal into one commit.
 
-`activation_delay(0) = 0` — **the owner acts immediately**, so in the overwhelmingly
-common case (owner online) there is no added latency at all and no timeout is ever
-consulted. `activation_delay(k) = owner_grace + (k-1) * step` for `k >= 1`.
+Rank comes from decision 1 and is unchanged: `committer_rank(table, pubkey)`, a
+pure total function of the ADR-0022 role table, which lives in the authenticated
+`0xFF02` GroupContext extension. Every member derives the identical ranking from
+identical bytes — there is no election message, no handover protocol, no committer
+state and nothing new on the wire, which is exactly why the election cannot
+split-brain on the question of *who* rank k is. Rank 0 is the owner, so with the
+owner running the app it sweeps immediately and nothing else is ever consulted.
 
-**How a client knows the committer is absent: it does not, and it must not try.**
-Absence is not observable on a zero-trust journal — there is no presence signal, and
-inventing one is the wrong move. A heartbeat published to the journal was considered
-and is **rejected**: it would put a periodic per-group activity artifact on the DS
-for every group at all times (pressure on invariant #5, for a signal the DS holds
-nothing like today), and it would still need the same timeout to interpret its
-*absence* — it changes what you wait for, not that you wait. **What is observed is
-inaction, not absence:** a proposal has been sitting in the journal, and no commit
-covering it has landed. That is the only honest signal available, and it is the
-correct one, because it is also the only thing the user cares about.
+Everything that follows is about the one clause that is not free: **currently known
+to be active.**
 
-**The age is measured against the DS's clock, not the proposer's.** Every fetched
+#### What presence the chat path actually has, stated correctly
+
+An earlier draft of this section claimed a conversation group has no presence
+signal. **That is wrong, and correcting it changes the design rather than the
+wording.** The chat path carries two live presence signals today, both shipped on
+all three clients:
+
+- **ADR-0024 typing indicators** — a real per-`(group, sender_leaf)` ephemeral
+  signal riding the group journal, with a ~6 s expiry, a ~4 s send throttle and a
+  stale-ignore re-sync guard (`apps/web/src/chat/presence-ops.ts` — `foldTyping`,
+  `activeTypers`, `pruneTyping` — driven by `apps/web/src/routes/Chat.tsx`, with
+  the iOS and Android twins in each platform's `ChatClient` / `ChatRepository` /
+  `ChatViewModel`).
+- **ADR-0024 read receipts** — monotone per-leaf `read_up_to` watermarks in the
+  same module (`foldReadWatermark`, `isReadByEveryOther`).
+
+And `crates/lakko-presence` (blinded per-conversation presence tokens) is a real
+crate with a **live exported FFI surface**: `crates/lakko-ffi-wasm/src/lib.rs:114`
+re-exports `PresenceToken`, `PresenceTracker`, `derive_token` and `current_epoch`.
+Two qualifications keep that honest — nothing under `apps/web/src` calls it, so the
+**chat** path does not consume it; and it is exposed on **wasm only**, with no
+UniFFI counterpart, so the natives would need that surface added.
+
+**The genuine gap is narrower and sharper than "no presence".** Every signal above
+is **positive-only and event-driven**: typing fires only while someone composes, a
+read receipt only when they read. So *observing* a signal proves a member is
+online, while *observing none* proves nothing at all — and an admin sitting idle
+with the group open, which is precisely the candidate the sweep wants, emits
+nothing. The missing thing is not presence infrastructure; it is a **continuous,
+unconditional liveness beacon**.
+
+#### The design question this leaves, stated as a trade and not decided here
+
+**Variant 1 — a candidate heartbeat, and the maintainer's model becomes literal.**
+Each owner/admin device publishes a small periodic liveness signal for the group
+while the app is foregrounded. Then "active admin devices elect the committer" is
+implementable as written: each candidate computes the active set from beacons seen
+within a freshness window, and the lowest-ranked active candidate sweeps. **The
+stagger, and its constant, disappear entirely** — nobody waits a turn, because the
+set is known rather than inferred. It is not built, but it is **well-precedented
+rather than blocked**: typing indicators are the working proof that a throttled
+ephemeral per-group journal signal with an expiry window functions, and
+`lakko-presence` exists for exactly this shape.
+
+**The cost, recorded because it is why this is a decision and not an obvious yes.**
+ADR-0024 flags its own mechanism as an anti-pattern in its Consequences: typing
+signals are journal rows, permanent until the 30-day prune, *"mitigated by
+throttling + tiny payload"*. A heartbeat is the same shape but **continuous rather
+than event-driven**, so it multiplies exactly the cost ADR-0024 already accepted
+grudgingly — every candidate, in every group, for as long as the app is open. And
+it publishes something typing does not: a **continuous record of each candidate's
+activity schedule**, visible to every member of the group and retained for the TTL.
+Typing leaks that you were composing; a beacon leaks when you have the app open,
+always. Naming that is this ADR's job; choosing it is the maintainer's.
+
+**Variant 2 — no heartbeat, and the takeover is staggered.** Absent a beacon, a
+device cannot *choose* the next committer; it can only *become* one. The honest
+translation of "if the committer is offline, the next one is simply chosen" into
+something implementable is then:
+
+> the next candidate waits its turn and sweeps if nobody else has.
+
+That turn is the surviving constant. It is **not** a timeout on the user's request —
+the request has no timeout and nothing about it is judged when the interval
+elapses — it is purely the stagger between candidates, and **without it every admin
+sweeps at once, which is the concurrent-commit race this ADR exists to remove,
+reproduced by its own fix.** What is observed is **inaction, not absence**: a
+proposal has been sitting in the journal and no commit covering it has landed. That
+is the only signal available without a beacon, and it is the one the user cares
+about either way.
+
+**Recommendation: build variant 1, and keep variant 2 as the fallback rather than
+the design** — a group in which no candidate has beaconed recently (older clients,
+a fresh install, a beacon the maintainer decides not to ship) must still make
+progress, and staggered takeover is what makes it do so. Note the two are the same
+rule with different inputs: variant 1 knows the active set, variant 2 infers a
+prefix of it by waiting.
+
+**In either variant, measure — do not guess.** If the stagger ships, its value must
+exceed a DS publish round-trip by a comfortable margin *plus* the expected
+client-to-DS clock offset, and must exceed the group's normal poll cadence so a
+candidate merely between polls is never jumped by the one behind it. That cadence is
+not uniform today — Android's `pollGroup` awaits a deliberate 30 s long poll while
+the channel co-publisher loops poll on a 5 s interval — which is itself an argument
+for measuring. **This is also where the replaced `owner_grace` went:** its stated
+constraint was exactly this one, and it applies identically to every gap in the
+order, so the two were never independent numbers. A heartbeat's freshness window is
+the same measurement problem in a better place: it bounds a *positive* observation
+rather than licensing an inference from silence.
+
+**The age is measured against the DS's clock, never the proposer's.** Every fetched
 journal row carries a server-assigned `created_at TIMESTAMP(3)`
-(`services/ds/migrations/0001_init.sql`; returned on `FetchedMessage`,
+(`services/ds/migrations/0001_init.sql`, returned on `FetchedMessage` in
 `services/ds/src/journal.rs`), and every member reads the identical value on the
-identical row. This removes the proposer's clock from the measurement entirely.
-What remains is each evaluator's own offset from the DS clock — a real residual,
-and the reason the stagger must dominate it.
+identical row, which removes the proposer's clock from the measurement entirely.
+What remains is each evaluator's own offset from the DS clock — a real residual, and
+in variant 2 the reason the stagger must dominate it.
 
-**What stops two devices both concluding they are the committer — three layers,
-and an honest fourth:**
+#### What stops two devices both sweeping — and why a heartbeat does not close it
 
 1. **Deterministic rank, from authenticated shared state.** There is nothing to
-   agree on: the role table is in the GroupContext, so every member computes the
-   same ranking from the same bytes. No two devices can disagree about *who* rank k
-   is. (The one exception is two devices holding the *same* signature key — see
-   [§ What Option B does not fix](#what-option-b-does-not-fix), item 6.)
-2. **Staggered activation.** Rank k+1 does not act until rank k has had a full
-   `step` to act. For two candidates to collide, rank k's publish must still be in
-   flight through the whole of rank k+1's step.
+   agree on about *who* rank k is (decision 1). The one exception is two devices
+   holding the *same* signature key — see
+   [§ What Option B does not fix](#what-option-b-does-not-fix), item 6.
+2. **A bounded active set** — the beacon freshness window in variant 1, the stagger
+   in variant 2. **Neither is exact, and this is the load-bearing caveat:** a
+   heartbeat makes the election's *input* approximate, not certain. Each candidate
+   computes over its own view of who has beaconed recently, those views differ with
+   poll timing, and a beacon is stale by up to one interval — so two candidates can
+   still both conclude they are the lowest-ranked active one. **A heartbeat removes
+   the wait; it does not remove the race.** Anyone reading variant 1 as
+   correct-by-construction has mis-read it.
 3. **Stand-down on observation.** Immediately before creating the commit, re-read
    the journal head; if any commit has landed at the current epoch, abandon and
    re-evaluate. This is Option C′, and under B it is not a companion mitigation but
-   a **required step of the algorithm** — it is what makes the stagger effective
-   rather than merely probable, and it costs one fetch on a path that only executes
-   when the owner is already absent.
+   a **required step of the algorithm** in both variants — it is what makes the
+   election effective rather than merely probable, and it costs one fetch on a path
+   that only runs when the owner is not the one acting.
 4. **The residual is repaired, not prevented.** If two candidates do collide, one
    forks — the hazard this ADR exists to close, in a much narrower window. So the
    acting committer **retains its pre-commit epoch-N snapshot across the
    publish→verdict window and rolls back if it lost**: Option C's steps 1, 3 and 5,
-   on one device, on the non-owner path only.
+   on one device, on the non-owner path only. Required in both variants.
 
-**The rollback that B needs is materially smaller than Option C's**, and this is
-the reason B is affordable at all:
+**That rollback is materially smaller than Option C's, and it needs no budget** —
+which is why deleting the retry cap costs nothing:
 
 - **No intent replay, therefore no idempotency predicate.** The committer's intent
   is "sweep whatever is pending". After rolling back and replaying the winner's
-  commit, it simply re-evaluates the rule — and the winner's commit almost always
-  swept the same proposals, so there is nothing left to do. The per-intent
-  "is my intent already satisfied?" problem that
+  commit it simply re-evaluates the rule — and the winner's commit almost always
+  swept the same proposals, so there is nothing left to do. The per-intent "is my
+  intent already satisfied?" problem that
   [§ Why the choice moved to Option B](#why-the-choice-moved-to-option-b) item 3
   raises against C **does not arise**, because the proposals themselves are the
-  durable record of intent and the winner consumed them.
-- **No add-path KeyPackage question.** See the correction in
-  [§ Open questions](#open-questions) — the discovery KeyPackage directory is
-  non-consuming today, and under B the fetch happens once at *propose* time
-  regardless.
+  durable record of intent and the winner consumed them. A retry budget would be
+  bounding a loop that does not exist.
+- **No add-path KeyPackage question.** See [§ Open questions](#open-questions) — the
+  discovery KeyPackage directory is non-consuming today, and under B the fetch
+  happens once at *propose* time regardless.
 - **No approve-path stale-proposal question.** The external-join proposal is not
-  held in a Lakko-side in-memory queue under B; it is a stored MLS proposal like
-  any other (decision 4).
+  held in a Lakko-side in-memory queue under B; it is a stored MLS proposal like any
+  other (decision 4).
 
-**Constant tuning is deliberately not pinned here, and must not be guessed.**
-The named constraints: `step` must exceed a DS publish round-trip by a comfortable
-margin *plus* the expected client-to-DS clock offset; `owner_grace` must exceed the
-group's normal poll cadence so an owner that is merely between polls is never
-treated as inactive — and that cadence is not uniform today (Android's `pollGroup`
-awaits a deliberate 30 s long poll; the channel co-publisher loops poll on a 5 s
-interval). Pick them from a measurement, in the sprint, not from this ADR.
+#### Every candidate offline: the request waits
 
-**The one case with no answer: no owner and no admins online.** Membership changes
-stall until one returns. This is a real new failure mode B introduces and it is
-stated as such in [§ What Option B does not fix](#what-option-b-does-not-fix). It
-also promotes ADR-0022's deferred **ownership transfer** follow-up from a nicety to
-a load-bearing dependency.
+**This is the designed behaviour, not a failure state.** Nothing is running, so
+nothing sweeps, and the request stays in every member's proposal store until a
+candidate next opens the app. Nothing expires it, nothing counts against it, and no
+client asserts anything about why. The user-visible state is *waiting for an
+admin* — **one** state, not two, because no client can distinguish a two-minute wait
+from a two-day one except by a threshold it would have to invent.
+
+**A backgrounded candidate cannot sweep, and under this model that is benign.** The
+ADR-0041 background decrypt is read-only-throwaway by construction — no persistent
+provider handle, zero write transactions, and no `snapshot_storage` on the slim
+`lakko-ffi-extension` surface at all (C-59) — so it **cannot commit**. A sweep
+happens only while a candidate has the app in the foreground and polling, which
+makes waiting reachable more often than "their phone is on" would suggest. (It also
+bounds variant 1: a heartbeat can only be emitted from the foreground, so the beacon
+correctly reports *able to sweep*, not merely *device awake* — which is the property
+the election actually needs.) This is worth recording because under the replaced
+design it was a real problem: a wait that outran the activation delays became a
+terminal *stalled* state and one that outran the retry budget became a terminal
+failure, both assertions the client had no basis for. With no deadline and no budget
+the only consequence is a longer wait — which is what the maintainer's model says
+should happen.
+
+**Ownership transfer is being built.** The replaced design listed ADR-0022's
+deferred ownership transfer as a follow-up that B promoted from a nicety to
+load-bearing. The maintainer has since chosen to **build it** rather than ship the
+owner dead-end it would otherwise leave: the core refuses an owner `Leave` /
+self-`Remove` fail-closed (`crates/lakko-mls/src/group_proposals.rs` — *"the group
+owner cannot leave"*), and `set_group_roles` is owner-only, so an ownerless group
+could never appoint another admin and an owner is therefore bound permanently to
+every group they create. A core sprint for it is running now; its API is not
+described here because this ADR does not yet know it.
 
 ### Decision 3 — the proposal-authorisation gate (the invariant #3 piece)
 
@@ -1076,17 +1209,20 @@ member's membership action can be in:
 - **refused** — the proposer's role changed between proposing and the sweep, so the
   gate excluded it. Terminal, and it needs a real message, because this is the one
   outcome the user cannot fix by waiting.
-- **waiting for an admin** — no candidate has acted yet and the owner grace has not
-  elapsed. The honest label is about the *group*, not about a named person's
-  presence; the client cannot know who is online and must not imply that it does.
-- **stalled — no admin available** — every rank's activation delay has elapsed and
-  nothing landed. The genuinely new user-visible state B introduces, and the one
-  that most needs wording that does not blame the user.
+- **waiting for an admin** — no candidate has swept it yet. **One state, not two.**
+  The revised decision 2 has no deadline, so there is no threshold at which waiting
+  becomes a distinct *stalled* state and no terminal failure for a request that has
+  simply not been picked up; the request waits until a candidate runs the app. The
+  honest label is about the *group*, not about a named person's presence — even
+  under decision 2's variant 1, a candidate beacon licenses "someone is active", not
+  "this person is online", and the client must not imply the stronger claim. This is
+  the genuinely new user-visible state B introduces, and the one that most needs
+  wording that does not blame the user.
 
 Plus one committer-side surface: **"N changes waiting to apply"**. Recommendation:
 the sweep is **automatic**, not a button — a manual "apply changes" affordance would
-turn an availability property into a chore and would make the stalled state more
-likely, not less. The pending list itself already has a home on all three clients:
+turn an availability property into a chore and would make waiting more likely, not
+less. The pending list itself already has a home on all three clients:
 the ADR-0027 members-panel pending-join section (`MembersSheet` on iOS and Android,
 the inline `aria-label="Members"` panel in `apps/web/src/routes/Chat.tsx`), whose
 Approve/Reject shape generalises to pending proposals with no new navigation.
@@ -1123,21 +1259,27 @@ freshly created group can reach.
 The recon was honest about Option C's limits; B's deserve the same treatment.
 
 1. **The race is narrowed to the committer handoff, not eliminated.** Two
-   candidates whose activation windows overlap within one publish round-trip can
-   both commit and one forks. This is why decision 2 keeps a bounded rollback. **B
-   is not correct-by-construction; it is correct in the steady state and repaired
-   at the edge.**
-2. **Membership can stall.** Owner offline and no admins, or an abandoned owner
-   with no admins ever appointed, means no membership change until someone returns.
-   B trades a silent fork for a visible stall — the right trade, and still a new
-   failure mode that did not exist before. It makes ADR-0022's deferred **ownership
-   transfer** follow-up load-bearing.
+   candidates that both conclude they are the acting one within a publish
+   round-trip can both commit, and one forks. Neither of decision 2's variants
+   closes this: a stagger can be outrun by a slow publish, and a heartbeat only
+   makes the active set *approximate* — each candidate computes over its own view,
+   and those views differ. This is why decision 2 keeps the stand-down re-read and
+   a bounded rollback in both. **B is not correct-by-construction; it is correct in
+   the steady state and repaired at the edge.**
+2. **Membership can wait indefinitely.** Owner offline and no admins, or an
+   abandoned owner with no admins ever appointed, means no membership change until
+   someone returns. B trades a silent fork for a **visible, honest wait** — the
+   right trade, and still a new behaviour that did not exist before. It is a wait
+   and not a failure: the revised decision 2 has no deadline and no retry budget, so
+   nothing expires and nothing is declared unachievable. The maintainer has chosen
+   to **build** ADR-0022's deferred **ownership transfer** rather than leave the
+   owner dead-end this exposes; a core sprint for it is running.
 3. **A new authority shift: the committer can selectively censor.** An elected
    committer that sweeps some proposals and drops others is not detectable except by
    each proposer noticing its own proposal never landed. Today an admin acts
-   unilaterally and cannot be filtered by a peer. Bounded by the fact that any other
-   admin becomes the acting committer once the delays elapse — so a committer that
-   stops committing entirely loses the duty — but **partial** censorship by an
+   unilaterally and cannot be filtered by a peer. Bounded by the fact that another
+   candidate becomes the acting committer once this one stops acting — so a
+   committer that sweeps *nothing* loses the duty — but **partial** censorship by an
    otherwise-active committer is not bounded by anything in this design. Named, not
    solved.
 4. **Proposals go stale too.** ValSem003 rejects *any* non-Application message at
@@ -1176,7 +1318,7 @@ The recon was honest about Option C's limits; B's deserve the same treatment.
 
 | Sprint | Surface | What changes |
 |---|---|---|
-| **S0 — UX** | none (design) | The six states of decision 5 plus the committer-side pending surface. `ux-ui` first per the repo rule. |
+| **S0 — UX** | none (design) | The five states of decision 5 plus the committer-side pending surface. `ux-ui` first per the repo rule. Landed as [`docs/ux/proposal-based-membership.md`](../ux/proposal-based-membership.md), out of order — after S1+S2 rather than before them. |
 | **S1 — core: the gate** | `crates/lakko-mls` (**invariant #3**) | `process_incoming_verifying_roles` proposal arm: inspect + role-check + `store_pending_proposal` or drop. `authorise_role_commit` extended from committer-only to per-proposal-sender, with the by-value arm preserved and a `SelfRemove` arm added. New `Incoming` shape for a stored-vs-dropped proposal. Ten property tests. **External crypto review.** |
 | **S2 — core: the committer** | `crates/lakko-mls` | `committer_rank` in `group_roles.rs`; a `sweep_pending_proposals` entry point over `CommitBuilder::build` with the two-arm filter; `propose_add` / `propose_remove` / `propose_role_change` wrappers over the openmls `propose_*` calls. |
 | **S3 — FFI** | `lakko-ffi-uniffi`, `lakko-ffi-wasm` | Add the propose + sweep + rank + pending-proposal-list surface beside the existing `add_member_from_wire` / `remove_member` / `set_group_roles` / `approve_external_join`. Both surfaces, in lock-step. Regenerate bindings, rebuild `LakkoCore.xcframework` and the Android `.so`. |
@@ -1185,6 +1327,15 @@ The recon was honest about Option C's limits; B's deserve the same treatment.
 | **S6 — Android mirror** | `apps/android/.../app` | `ChatRepository.kt` under the two-tier `groupLock` + `providerLock`, `ChatClient.kt`, `CommitOutbox.kt` (`prepareCrashSafeCommit`), `ui/chat/MembersSheet` + `ChatViewModel`. |
 | **S7 — external-join convergence** | core + FFI + 3 clients | Decision 4: retire `pending_external_joins`, keep the FFI names. |
 | **S8 — docs** | `docs/` | Flip this ADR's status; reconcile `known-gaps.md` G-38 residual 1 and `invariant-index.md`; CLAUDE.md ADR-table row + `lakko-mls` module-map row. |
+
+**The table does not yet scope decision 2's variant 1.** A candidate heartbeat is a
+new ephemeral in-group signal — an envelope kind in `lakko-contacts`, both FFI
+surfaces (`lakko-presence` is exposed on **wasm only** today, with no UniFFI
+counterpart), and a beacon-plus-freshness fold on each of the three clients beside
+the existing ADR-0024 typing fold. It is a sprint of its own, sequenced before or
+alongside S4, and it is not costed here because the maintainer has not yet chosen
+between the two variants. **Variant 2 needs no new sprint** — the stagger is
+client orchestration inside S4–S6.
 
 **The outbox/lock layer is the least symmetric surface and will cost the most per
 platform.** Web has `withGroupMlsLock` plus an atomic IndexedDB transaction and no
@@ -1333,6 +1484,21 @@ boundary. None of the three is a "no review needed" change.
 
 ## Open questions
 
+- **Decision 2's variant choice — a candidate heartbeat, or a staggered takeover?**
+  **The live one, and the maintainer's.** Variant 1 makes "active admin devices
+  elect the committer" literal and removes the last timing constant, at the cost of
+  multiplying an anti-pattern ADR-0024 already accepted grudgingly (continuous
+  journal rows, retained to the 30-day prune) and of publishing each candidate's
+  activity schedule to the whole group. Variant 2 needs no new signal but keeps one
+  unmeasured stagger interval. Recommendation in decision 2: build variant 1, keep
+  variant 2 as the fallback. **Neither is decided here.**
+- **~~The retry budget and its user-visible exhaustion state.~~ Answered — there is
+  no retry budget.** The revised decision 2 removes both the cap and the terminal
+  failure it produced: a request waits indefinitely rather than exhausting a budget,
+  and the committer's own rollback needs no budget because it replays no intent
+  (the proposals are the durable record of intent, and the winning commit consumed
+  them). Recorded here rather than deleted because the UX spec was written against
+  the budget and had to be reconciled to its removal.
 - **The add-path retry and KeyPackage consumption.** `add_member` consumes one of
   the joiner's published KeyPackages. Does a discarded commit release it, must the
   retry re-fetch from discovery, and what happens when the joiner has none left?
@@ -1344,8 +1510,6 @@ boundary. None of the three is a "no review needed" change.
   automatically once the joiner re-proposes, or does it surface as
   "request expired, ask them to try again"? A UX question as much as a mechanism
   one — route through `ux-ui`.
-- **The retry budget and its user-visible exhaustion state.** How many, with what
-  backoff, and what exactly the user sees. Route through `ux-ui`.
 - **Whether Option C generalises to the DeviceGroup and the channel
   PublisherGroup.** The DeviceGroup's commits go to the same journal wrapped in the
   ADR-0015 envelope, and ADR-0028 OQ3's co-publisher approve is a `PublisherGroup`
@@ -1410,6 +1574,19 @@ boundary. None of the three is a "no review needed" change.
 - **[ADR-0028](0028-group-join-ticket.md)** — `epoch_of_message` as the joiner's
   pre-decrypt epoch read, and the `/g/` capability that conveys the raw `group_id`
   to a non-member.
+- **[ADR-0024](0024-typing-read-receipts.md)** — the chat path's existing ephemeral
+  presence signals (typing + read receipts) that decision 2's variant 1 would
+  extend, and its own Consequences entry naming journal-resident typing rows,
+  retained to the 30-day prune, as an acknowledged anti-pattern *"mitigated by
+  throttling + tiny payload"* — the cost a continuous heartbeat multiplies.
+- `apps/web/src/chat/presence-ops.ts` — `foldTyping` / `activeTypers` /
+  `pruneTyping` / `foldReadWatermark` / `isReadByEveryOther`, the working
+  throttle-plus-expiry-window fold a candidate beacon would sit beside; driven by
+  `apps/web/src/routes/Chat.tsx`, with iOS and Android twins.
+- `crates/lakko-ffi-wasm/src/lib.rs:114` — `lakko-presence` re-exported
+  (`PresenceToken`, `PresenceTracker`, `derive_token`, `current_epoch`): a live
+  surface, **wasm only** (no UniFFI counterpart) and with no caller under
+  `apps/web/src`, so it is exposed but unconsumed by the chat path.
 - **[ADR-0032](0032-multi-joiner-call-links.md)** — `elect_committer`
   (`crates/lakko-calls/src/link_invite.rs:230`), the designated-committer
   precedent Option B would reuse, and its recorded weak-authentication residual.

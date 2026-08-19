@@ -14,8 +14,19 @@ section shape). `docs/adr/` holds decisions, `docs/security/` holds invariants a
 neither is edited here.
 
 > **This spec was written after the core, not before it.** That is the debt, and §11
-> records precisely what it cost: six places where the built core contradicts or omits
+> records precisely what it cost: eight places where the built core contradicts or omits
 > what [ADR-0045] decision 5 assumed the UI would have.
+
+> **Revised 2026-08-19 against [ADR-0045]'s rewritten decision 2 (liveness).** The ADR now
+> gives a waiting request **no deadline**: the committer duty passes to the next candidate
+> when the current one is not acting, and if no candidate is running the request simply
+> waits until one is. Three things this spec carried are therefore **deleted, not
+> re-tuned** — the `stalled` state and its never-defined `stallThreshold`, the
+> `MAX_ATTEMPTS` re-request cap, and the terminal `not applied` failure it produced — and
+> §12's open list drops from five items to a shorter one, with the owner dead-end answered
+> (ownership transfer is being built). Everything else stands unchanged: no optimistic
+> update, no `Cancel`, no pending affordance until the quiet window elapses, and a committer
+> view that is automatic and invisible.
 
 ---
 
@@ -46,7 +57,7 @@ admin to approve…`).
 
 ## 2. The one insight that shapes everything: the common case collapses
 
-`committer_rank` gives the **owner rank 0**, and `activation_delay(0) = 0`. So when the
+`committer_rank` gives the **owner rank 0**, and rank 0 never waits its turn. So when the
 owner is the one making the change — the overwhelmingly common case in a small group — the
 owner's own device is the acting committer and sweeps its own request immediately, with no
 round trip to anyone. The user experience is byte-for-byte today's: tap, done.
@@ -79,10 +90,11 @@ commit lands.** The same applies in reverse to `Add`: a person who has been requ
 a member and must not appear in the members list.
 
 **(b) Showing nothing at all is also dishonest, but only sometimes.** With the owner
-online the request lands before anyone could look. With the owner absent it can sit
-indefinitely — [ADR-0045] trades a silent fork for a **visible stall**, and a stall that is
-not visible is not a trade, it is the same silence in a new place. "Remove Bob" appearing to
-work while Bob is still there next time you open the panel is worse than any indicator.
+online the request lands before anyone could look. With every candidate absent it sits
+**indefinitely — by design, since [ADR-0045] decision 2 gives the wait no deadline** —
+and a wait that is not visible is not a trade against the silent fork, it is the same
+silence in a new place. "Remove Bob" appearing to work while Bob is still there next time
+you open the panel is worse than any indicator.
 
 **(c) Therefore: latent.** The state model always carries pending; the UI renders it only
 past the quiet window. Below the window the user sees the control's own in-progress state
@@ -105,12 +117,23 @@ Per-request state, keyed on a client-durable record (§9), not on the panel bein
 |---|---|---|
 | `sending` | the propose call / publish is in flight | control disabled + in-progress; nothing else |
 | `pending` | published, `age < QUIET_WINDOW` | nothing beyond the control's state |
-| `waiting` | `QUIET_WINDOW <= age <= stallThreshold` | row annotation + panel notice (§5) |
-| `stalled` | `age > stallThreshold` | row annotation + escalated panel notice (§5) |
+| `waiting` | published, `age >= QUIET_WINDOW` | row annotation + panel notice (§5) |
 | `applied` | after a commit, the intended effect is visible in `members()` / the role table | annotation clears, roster updates. Terminal |
 | `superseded` | after a commit, the effect is absent **and** the request is no longer in `pendingProposals()` | nothing — re-requested silently (§7) |
-| `not applied` | `superseded` reached `MAX_ATTEMPTS` | terminal notice + `Try again` (§7) |
-| `refused` | the propose call returned an error, on the first attempt or on an automatic retry | inline refusal copy. Terminal (§7) |
+| `refused` | the propose call returned an error, on the first attempt or on an automatic re-request | inline refusal copy. Terminal (§7) |
+
+**`waiting` has no upper bound, and that is deliberate.** An earlier revision of
+[ADR-0045] split it at a `stallThreshold` into a second, escalated `stalled` state and
+capped re-requests at a `MAX_ATTEMPTS` that terminated in a `not applied` failure. The
+revised decision 2 deletes both, and this spec follows: **a request waits until a
+candidate sweeps it, however long that takes.** The reason is that neither number was
+knowable from inside a client. *The threshold elapsed* and *every admin is asleep* are the
+same observation, so a `stalled` label asserted a diagnosis the client could not make; and
+*the budget ran out* is likewise indistinguishable from *nobody has opened the app yet*, so
+a terminal `not applied` told the user their change was unachievable when in fact it was
+merely unattended. **One waiting state, no deadline, no terminal failure for want of a
+committer.** The states that remain terminal — `applied` and `refused` — are the two the
+client can actually observe.
 
 `age` is measured against the **DS row timestamp**, never a local clock: the client already
 receives `created_at` on its own publish response and on every fetched row
@@ -142,7 +165,7 @@ The members panel gains one notice and one section. Nothing moves; nothing is re
 **Panel order (all three platforms):**
 
 1. **Pending notice** — new, top of the panel, above everything. Renders only when at
-   least one request is `waiting` or `stalled`.
+   least one request is `waiting`.
 2. `Join requests ({n})` — existing ADR-0027 section, unchanged, owner/admin only.
 3. **`Waiting to be added ({n})`** — new, owner/admin only, only when non-empty.
 4. Add-member form + invite link — existing, owner/admin only.
@@ -154,20 +177,22 @@ changes need none.
 
 ### 5.1 The pending notice (exact copy)
 
-Two lines. Line 1 is the count, line 2 is the liveness statement.
+Two lines. Line 1 is the count, line 2 is the liveness statement. **There is one line 2,
+not two** — the escalated variant went with the `stalled` state (§4).
 
 - Count, singular: `1 membership change is waiting to apply.`
 - Count, plural: `{n} membership changes are waiting to apply.`
 
-- Line 2, `waiting`:
-  `Membership changes are applied by the group owner or an admin. This usually happens right away.`
-- Line 2, `stalled`:
-  `No owner or admin has applied them yet. They will apply automatically when one does.`
+- Line 2:
+  `Membership changes are applied by the group owner or an admin. They will apply automatically when one does.`
 
-The stalled line states **inaction**, which is the only thing the client can observe. It
-names no person, claims no knowledge of who is online, and blames nobody — the client has
-no presence oracle and must not imply that it has one. This is the same discipline as the
-shipped `Request sent. Waiting for an admin to approve…`.
+That sentence is true at ten seconds and at ten days, which is exactly why it can be the
+only one: there is no moment at which the client learns something new to say. It states
+**inaction**, the only thing the client can observe — it names no person, claims no
+knowledge of who is online, and blames nobody. Even under [ADR-0045] decision 2's variant 1
+(a candidate heartbeat) that discipline holds: a beacon licenses "someone is active", never
+"this person is online", and no copy here may imply the stronger claim. This is the same
+discipline as the shipped `Request sent. Waiting for an admin to approve…`.
 
 ### 5.2 Row annotations (exact copy)
 
@@ -245,7 +270,7 @@ reason, and must never be reached in normal use.
 
 **Delayed refusal.** A request can be refused *after* the fact — the requester was demoted
 while the request was in flight, so peers dropped it and it never landed. The requester
-cannot observe that directly (§11.1); what happens is the automatic retry re-runs the local
+cannot observe that directly (§11.1); what happens is the automatic re-request re-runs the local
 authorisation and **now** fails. The user sees the same specific string, prefixed:
 
 > `Your earlier request was not applied. ` + the specific refusal above.
@@ -258,24 +283,28 @@ One string table, two entry points, no second vocabulary.
 
 ## 7. Failure and liveness states
 
-**Committer offline / nobody acting.** `waiting` → `stalled`, per §5.1. No action is
-offered because none exists: no cancel, no "remind an admin" (there is no channel for it),
-no notification. The request stays live and lands when any candidate next runs the app.
+**Nobody acting.** The request stays `waiting`, per §5.1, for as long as it takes. No
+action is offered because none exists: no cancel, no "remind an admin" (there is no channel
+for it), no notification, and — since [ADR-0045] decision 2 has no deadline — no escalation
+and no expiry. The request stays live and lands when any candidate next runs the app.
 
 **Superseded.** The epoch advanced without carrying the request — it missed the sweep, or
 the group moved for another reason. **Silent and automatic:** the client re-requests, and
 the user is told nothing. This is right because the user's intent is unchanged and the
-system is doing what they asked. Retry at most **twice** (three publishes total), then stop.
+system is doing what they asked. There is **no attempt cap**: a request that keeps getting
+superseded keeps being re-requested, and returns to plain `waiting` each time.
 
-**Retry exhausted.** The intent survived three commits without taking effect. This covers
-both bad luck and the case [ADR-0045] names honestly as unbounded — a committer that sweeps
-some requests and drops others. Copy:
-
-- `This change could not be applied. The group changed each time it was tried.`
-- Action: `Try again`
-
-It stops rather than looping because every retry is a journal row with a 30-day TTL, and an
-infinite silent retry against a filtering committer is litter plus battery for no progress.
+> **The one thing this leaves unhandled, named rather than papered over.** A cap existed
+> for a second reason as well as the timing one: it bounded the [ADR-0045] residual of a
+> **partially censoring committer** — one that sweeps some requests and silently drops
+> others — by eventually converting the loop into a visible `This change could not be
+> applied`. With the cap gone, that case now presents as an indefinite `waiting`, which is
+> honest (the client genuinely cannot distinguish it from an idle group) but offers the
+> user nothing at all. It also means a silent re-request loop is unbounded, and every
+> re-request is a journal row held to the DS's 30-day TTL. **Mitigation, not a fix:**
+> re-request only on an observed commit that superseded it (never on a timer), so the loop
+> is driven by group activity rather than by the clock and cannot spin against a quiet
+> group. Whether that is sufficient is §12.
 
 **Dropped by the authorisation gate.** Reachable only as the delayed refusal in §6. A peer
 that drops a request stores nothing and renders nothing — the drop is invisible on the
@@ -311,7 +340,7 @@ arrives on its own. The string is the fallback, not the expected path.)
 
 **The sweep is automatic. There is no `Apply changes` button.** Three reasons, in order:
 
-1. A manual apply turns an availability property into a chore and makes stalls *more*
+1. A manual apply turns an availability property into a chore and makes waiting *more*
    likely, not less — [ADR-0045]'s own argument, and it is correct.
 2. **It would misrepresent authority.** The committer is not approving anything. The
    authorisation already happened, at the proposal gate, against the requester's own role.
@@ -348,15 +377,20 @@ committer-specific signal the core exposes. So the count becomes the **shared** 
 
 **No notification, ever.** A push for "changes are waiting for you" would name an undeclinable
 duty, and would put per-group membership-activity timing in front of the push provider for a
-non-message event. If stalls prove common, the fix is ownership transfer and more admins, not
+non-message event. If long waits prove common, the fix is ownership transfer and more admins, not
 a nag.
 
 **A liveness fact the design must not hide from the maintainer:** the ADR-0041 background
 decrypt is read-only-throwaway by construction and cannot commit, so **a backgrounded
 candidate cannot sweep**. Sweeps happen only while a candidate has the app in foreground
-polling. Stalls are therefore more reachable than a naive reading of decision 2 suggests.
-This changes no copy — the stalled string already blames nobody — but it is why that string
-had to be blameless.
+polling, so waiting is more reachable than "their phone is on" suggests. **[ADR-0045] has
+since absorbed this fact and it is now benign:** with no deadline and no attempt cap, a
+longer wait is just a longer wait — it can no longer mature into a `stalled` label or into
+a terminal failure the client had no basis to assert. It changes no copy; it is why the
+waiting string had to be blameless in the first place, and it is why one blameless string
+is now sufficient (§5.1). It also bounds decision 2's variant 1: a heartbeat can only be
+emitted from the foreground, so it would correctly report *able to sweep* rather than
+merely *device awake*.
 
 ---
 
@@ -386,25 +420,30 @@ change and remain open.**
 5. `Incoming::Proposal` on the processed-message projection: `{ senderLeaf, kind, stored }`,
    so the receive loop can refresh the panel and can drop a `stored == false` record without
    rendering anything.
-6. **One shared definition of the activation delays** — e.g.
-   `membershipActivationDelayMs(rank)` and `membershipStallThresholdMs(adminCount)`. The
-   stall *label* and the sweep *trigger* must be computed from the same number or the UI
-   will say "stalled" while a device is still politely waiting. Three clients hand-copying
-   two constants is precisely the ADR-0044 drift shape.
+6. **One shared definition of whatever timing the chosen liveness variant needs.**
+   [ADR-0045] decision 2 leaves this open: **variant 1** (a candidate heartbeat) needs a
+   beacon interval and a freshness window; **variant 2** (staggered takeover) needs one
+   `step`. Either way the number belongs in **one** definition consumed over both FFI
+   surfaces, never hand-copied — three clients each carrying their own copy is precisely
+   the ADR-0044 drift shape. **What this item no longer asks for is a stall threshold:**
+   the UI has no timing-derived label left to keep in step with the sweep trigger, because
+   `waiting` is unbounded and never escalates (§4). Only the sweep *trigger* consumes the
+   constant now, which makes the drift risk smaller but not zero.
 
 **Client-durable state (per platform, not FFI).** A per-`(account, group)` pending-request
 record, sibling to ADR-0040's commit outbox and subject to the same discipline: written
-before the publish, surviving restart, purged on `applied` / `refused` / `not applied` and
-on `recover` / `forgetDevice`. Fields:
+before the publish, surviving restart, purged on `applied` / `refused` and on `recover` /
+`forgetDevice`. Fields:
 
-`{ requestId, kind, targetSignatureKey | addSignatureKey | proposedRoleTable, dsMessageId, dsCreatedAt, attempts }`
+`{ requestId, kind, targetSignatureKey | addSignatureKey | proposedRoleTable, dsMessageId, dsCreatedAt }`
 
-`dsCreatedAt` is what §4's `age` is measured against; `targetSignatureKey` is what §4's
-applied-test compares on; `attempts` is what §7 caps.
+`dsCreatedAt` is what §4's `age` is measured against, and `targetSignatureKey` is what §4's
+applied-test compares on. **There is no `attempts` field** — nothing counts re-requests any
+more (§7), so persisting a count would be dead state that invites someone to cap on it.
 
-**Timing constants** (§12 — must be measured, not guessed):
-`QUIET_WINDOW` (UI), `owner_grace` and `step` (protocol), `MAX_ATTEMPTS` (initial
-recommendation: 2 automatic retries).
+**Timing constants** (§12 — must be measured, not guessed): `QUIET_WINDOW` (UI) and the one
+protocol constant decision 2's chosen variant needs. `owner_grace`, `stallThreshold` and
+`MAX_ATTEMPTS` are all gone.
 
 ---
 
@@ -470,10 +509,16 @@ The cost of writing this after the core rather than before it.
 
 3. **The liveness half of decision 2 is not in the core.** There is no activation delay, no
    DS-row-age input and no stand-down re-read. `commit_pending_proposals` commits whenever
-   an owner/admin asks. Every timing state in decision 5 — `waiting for an admin`,
-   `stalled` — depends on client orchestration that does not exist and on constants nobody
-   has measured. **`stalled` is currently unimplementable**, because `stallThreshold` has no
-   definition anywhere.
+   an owner/admin asks, so the whole election — whichever variant is chosen — is client
+   orchestration that does not exist yet. **This finding was raised against the earlier
+   revision of decision 2 and the ADR has since acted on it.** The sharpest form of it was
+   that `stalled` was *unimplementable*, because `stallThreshold` had no definition
+   anywhere; the revised decision 2 **deleted the state rather than defining the
+   threshold**, which resolves that half outright (§4). What survives is the weaker,
+   permanent form: `waiting` still needs a sweep trigger to exist for it to ever end, and
+   the trigger still needs the one constant decision 2's chosen variant carries (§9.6).
+   That constant has not been measured either — but nothing the **UI** says now depends on
+   it, which is the difference.
 
 4. **Decision 5 omits leaving entirely, and the core just built it.** `ProposalKind::Leave`
    plus self-targeted `Remove` are authorised for any member, closing ADR-0022's deliberately
@@ -486,12 +531,18 @@ The cost of writing this after the core rather than before it.
    nearly invisible (role changes are owner-only and the owner is rank 0, so they sweep
    immediately), but a row-level annotation for it cannot be built without an FFI addition.
 
-6. **The owner cannot leave, and there is no way out.** The core refuses an owner
-   `Leave`/self-`Remove` fail-closed, with a sound justification (an ownerless group can
-   never appoint another admin, because `set_group_roles` is owner-only). Combined with
-   ADR-0022's still-deferred ownership transfer, **an owner is permanently bound to every
-   group they create.** [ADR-0045] lists ownership transfer as "load-bearing"; this is the
-   user-visible form of that, and §12 escalates it.
+6. **The owner cannot leave — and the maintainer has chosen to fix it rather than ship
+   it.** The core refuses an owner `Leave`/self-`Remove` fail-closed, with a sound
+   justification (an ownerless group can never appoint another admin, because
+   `set_group_roles` is owner-only). Combined with ADR-0022's deferred ownership transfer
+   that made **an owner permanently bound to every group they create.** [ADR-0045] listed
+   ownership transfer as "load-bearing"; **§12's escalation has been answered — ownership
+   transfer is being built, and a core sprint for it is running now.** This spec does not
+   design its UI: the core API does not exist yet, and designing a transfer flow against an
+   unknown surface would be the exact mistake §11 exists to record. **What follows for this
+   spec:** the `Leave group` control stays hidden for the owner (§6) until that lands, and
+   a follow-up UX pass owns the transfer flow, the ownerless-group question and whatever
+   `Leave group` becomes for an owner afterwards.
 
 7. **`N changes waiting to apply` is not committer-side data** (§8, deliberate departure).
 
@@ -503,19 +554,30 @@ The cost of writing this after the core rather than before it.
 
 ## 12. Open — needs the maintainer
 
-1. **The timing constants.** `owner_grace`, `step`, `QUIET_WINDOW`, `MAX_ATTEMPTS`. The ADR
-   says pick them from a measurement, and it is right; but `stalled` cannot ship without
-   `stallThreshold`, and `stallThreshold` is a function of `owner_grace` and `step`. Blocks
-   the `stalled` state, not the rest.
-2. **The owner dead end (§11.6).** Is "an owner can never leave a group they created"
-   acceptable to ship, or must ADR-0022's ownership transfer land alongside? This is a
-   product call, not a UX one.
-3. **Visibility (§10).** I recommend owner/admin only, plus your own request. The
+1. **The timing constants.** `QUIET_WINDOW` (UI) plus the one protocol constant
+   [ADR-0045] decision 2's chosen variant needs. The ADR says pick them from a measurement,
+   and it is right. **Nothing in this spec is blocked on either now** — the state that was
+   blocked (`stalled`) is gone, and `QUIET_WINDOW` only decides *when* an annotation
+   appears, not whether the spec is implementable. Down from four numbers to two.
+2. **Decision 2's liveness variant** — a candidate heartbeat, or a staggered takeover?
+   Mostly invisible in the UI, and this spec is written to hold either way, with one
+   exception worth flagging from the UX side: **a heartbeat publishes each candidate's
+   activity schedule to the whole group, continuously.** §10 already argues that the
+   pending set is a privacy surface; a beacon is a second, larger one, and it is *not*
+   role-gateable — every member would see it. It belongs on the maintainer's ledger for
+   that reason as much as for the journal-litter one [ADR-0045] names.
+3. **~~The owner dead end (§11.6).~~ Answered — ownership transfer is being built**, a core
+   sprint is running, and the flow is a follow-up UX pass once the API exists.
+4. **Visibility (§10).** I recommend owner/admin only, plus your own request. The
    counter-argument — that a member deserves to know a change is coming — is a values
    position, and it is the maintainer's.
-4. **`MAX_ATTEMPTS = 2` automatic retries.** Arbitrary within an order of magnitude. The
-   only hard constraint is that it must be finite.
-5. **Typed refusal reasons on the FFI (§9.1).** Prose-matching `Error::Group` strings across
+5. **The unbounded re-request loop (§7).** With `MAX_ATTEMPTS` gone, a request that keeps
+   being superseded is re-requested indefinitely and a partially-censoring committer now
+   presents as a permanent `waiting` with no user-side signal at all. Recommended
+   mitigation is in §7 (re-request only on an observed superseding commit, never on a
+   timer) — enough to bound journal litter and battery, **not** enough to make censorship
+   visible. Accept, or ask for a different treatment.
+6. **Typed refusal reasons on the FFI (§9.1).** Prose-matching `Error::Group` strings across
    three clients would work and would be wrong. Worth the small core change.
 
 ---
@@ -529,10 +591,10 @@ The cost of writing this after the core rather than before it.
   `"{member label}, waiting to be removed"`.
 - A disabled `Remove` on a pending row keeps its label and gains the disabled trait, so a
   screen-reader user hears *why* from the row annotation rather than losing the control.
-- The `Retry now` action in §7 is a real focusable button. `Try again` in §7 likewise.
-- **State is never colour-only.** `waiting` and `stalled` differ by *text*, not by hue; the
-  escalation is a different sentence, and the row annotation is identical in both. A
-  colour-blind or greyscale user loses nothing.
+- The `Retry now` action in §7 is a real focusable button.
+- **State is never colour-only.** With `stalled` gone there is no escalation left to
+  encode, so the point narrows: `waiting` is carried by the annotation's *text*, never by
+  hue and never by a lone icon. A colour-blind or greyscale user loses nothing.
 - Destructive confirms follow each platform's native dialog so the destructive role is
   announced.
 
@@ -560,20 +622,27 @@ divergences, and each is forced.
   page-level below the panel and should host the new notice at panel top instead.
 - **A refresh gap this spec depends on.** iOS re-reads `pendingJoins` on every poll while
   the panel is open (`sync(state:)`); Android refreshes only on panel-open and after an
-  action. The pending set must refresh on **every** poll on all three, or `waiting` will
-  not escalate to `stalled` in front of an open panel.
+  action. The pending set must refresh on **every** poll on all three — not to escalate a
+  state (there is nothing to escalate to any more) but because `waiting` **clears** on the
+  sweeping commit, and a panel that refreshes only on open would go on showing a request
+  that has already applied. That is §3's honesty rule in reverse, and it is the worse
+  direction to get wrong.
 
 ---
 
 ## 15. UX risks (flagged, not solved)
 
-- **The stall has no user-side remedy.** `stalled` tells the truth and offers nothing. That
-  is honest and it is also unsatisfying; the real remedies are ownership transfer and
-  appointing more admins, both outside this spec.
-- **Partial censorship reads as flakiness.** A committer that drops one requester's changes
-  produces `This change could not be applied` for that person and nothing anywhere else.
-  [ADR-0045] names this as bounded by nothing in the design; the UI inherits that and cannot
-  distinguish it from bad luck.
+- **The wait has no user-side remedy, and now no end state either.** The notice tells the
+  truth and offers nothing, indefinitely. That is honest and it is also unsatisfying; the
+  real remedies are ownership transfer (now being built) and appointing more admins, both
+  outside this spec. Removing `stalled` made this *more* true, not less — the earlier design
+  at least changed its sentence eventually, which felt like progress while conveying nothing
+  the client actually knew.
+- **Partial censorship is now indistinguishable from an idle group.** A committer that drops
+  one requester's changes used to surface, eventually, as `This change could not be applied`
+  for that person. With the attempt cap gone it surfaces as a permanent `waiting` and
+  nothing else. [ADR-0045] names this residual as bounded by nothing in the design; the UI
+  inherits it and has lost the one weak signal it had. Flagged in §12.5.
 - **The removal warning window (§10) is new and permanent.** No UI choice removes it.
 - **Two devices, one account** (G-38 residual 2) derive the same rank and cannot be
   separated by this design. Out of scope here, unchanged by anything above.

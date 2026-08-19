@@ -22,6 +22,13 @@
 //! [`crate::group_roles::committer_rank`] — turning the pending set into a
 //! single Commit via [`Group::commit_pending_proposals`]. The authorisation
 //! rule both shapes are judged by lives in [`crate::group_proposals`].
+//!
+//! Ownership moves with [`Group::transfer_ownership`] /
+//! [`Group::propose_ownership_transfer`] (ADR-0022's deferred follow-up), which
+//! are validated wrappers over the same role-table rewrite rather than a new
+//! commit kind. They are what makes leaving possible at all: an owner may not
+//! leave while owner, so without transfer a person was bound to every group they
+//! created.
 
 use openmls::extensions::{
     Extension, ExtensionType, Extensions, RequiredCapabilitiesExtension, UnknownExtension,
@@ -39,9 +46,10 @@ use zeroize::Zeroizing;
 
 use crate::error::{Error, Result};
 use crate::group_proposals::{
-    authorise, classify, pubkey_at_leaf, ProposalKind, ProposalRecord, Proposer,
+    authorise, classify, commit_effects, owner_survives, pubkey_at_leaf, ProposalKind,
+    ProposalRecord, Proposer,
 };
-use crate::group_roles::{Role, RoleTable, ROLE_EXTENSION_TYPE};
+use crate::group_roles::{OutgoingOwner, Role, RoleTable, ROLE_EXTENSION_TYPE};
 use crate::identity::Identity;
 
 /// Byte length of a Lakko-minted MLS group id.
@@ -802,6 +810,130 @@ impl Group {
         encode_message(&proposal)
     }
 
+    // ========================================================================
+    // Ownership transfer (ADR-0022's deferred follow-up)
+    //
+    // ADR-0022 fixed the owner at creation and deferred transfer; ADR-0045 then
+    // made the consequence permanent by refusing an owner `Leave` fail-closed,
+    // so a person was bound to every group they created. Transfer is the way
+    // out, and it is deliberately NOT a new commit type: it is the ordinary
+    // owner-only role-table rewrite with the owner slot moved, which means it
+    // rides the audited `set_group_roles` / `propose_group_roles` paths and is
+    // judged by the existing gate against the PRE-merge table — where the
+    // transferor is still the owner. Nothing about who may mint one changes.
+    //
+    // What is new is the safety the raw rewrite never had: a role table names
+    // 32-byte keys, so `set_group_roles` could always name an owner that no leaf
+    // holds, permanently un-administrable. `owner_survives` now refuses that on
+    // every peer, and the two methods below refuse it locally with a clear
+    // error before any MLS state is touched.
+    // ========================================================================
+
+    /// Validate an ownership transfer and produce the role table it installs.
+    ///
+    /// Runs entirely before any OpenMLS call, so every refusal here leaves the
+    /// group exactly as it was — no staged commit, no epoch advance, nothing to
+    /// roll back (ADR-0040).
+    fn plan_ownership_transfer(
+        &self,
+        identity: &Identity,
+        new_owner: &[u8],
+        outgoing: OutgoingOwner,
+    ) -> Result<RoleTable> {
+        let table = self.role_table_or_refuse("ownership transfer")?;
+        if !table.is_owner(identity.signature_public_key()) {
+            return Err(Error::Group(
+                "ownership transfer refused: this device is not the group owner".into(),
+            ));
+        }
+        let new_owner: [u8; 32] = new_owner.try_into().map_err(|_| {
+            Error::Group("ownership transfer refused: owner key is not 32 bytes".into())
+        })?;
+        if table.is_owner(&new_owner) {
+            return Err(Error::Group(
+                "ownership transfer refused: that member is already the owner".into(),
+            ));
+        }
+        // The rule the whole feature rests on. An owner outside the group can
+        // never be replaced (a role change is owner-only) and can never be
+        // removed (the owner's leaf is unremovable), so the group would be
+        // permanently un-administrable. Refused here for a clear error, and
+        // again by every peer's commit gate, which is where it is enforced.
+        if !self
+            .members()
+            .iter()
+            .any(|m| m.signature_public_key == new_owner)
+        {
+            return Err(Error::Group(
+                "ownership transfer refused: the named owner is not a member of this group".into(),
+            ));
+        }
+        Ok(table.with_owner_transferred(new_owner, outgoing))
+    }
+
+    /// Hand the group's owner slot to `new_owner`, as a direct commit
+    /// (ADR-0022's deferred ownership-transfer follow-up).
+    ///
+    /// `new_owner` is the member's Ed25519 signature public key — the same
+    /// stable handle [`MemberRecord::signature_public_key`] reports and the role
+    /// table keys on, never a leaf index. `outgoing` decides what becomes of
+    /// **this** device's own role; see [`OutgoingOwner`], whose default is
+    /// [`OutgoingOwner::Admin`].
+    ///
+    /// **Owner-only, and irreversible.** Only the owner may transfer, because a
+    /// role change is owner-only and transfer is a role change; anything weaker
+    /// would be a coup, since an admin able to transfer could name itself. And
+    /// once the commit lands the transferor has no way back: only the new owner
+    /// can rewrite the table. Nothing here recovers a *lost* owner either —
+    /// minting the commit needs the owner's key — which is ADR-0022's separate,
+    /// still-open admin-quorum recovery question.
+    ///
+    /// Transfer is what makes leaving possible: an owner may not leave while
+    /// owner, but the former owner is an ordinary member and may. The two are
+    /// separate commits by construction — see
+    /// [`crate::group_proposals::authorise`].
+    ///
+    /// Returns the wire-encoded commit to broadcast. Prefer
+    /// [`Group::propose_ownership_transfer`] in a group that has moved to the
+    /// ADR-0045 proposal path.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Group`] when the group carries no role table, when this device
+    /// is not the owner, when `new_owner` is already the owner or is not a
+    /// member of the group, or on any OpenMLS-side failure.
+    pub fn transfer_ownership(
+        &mut self,
+        identity: &Identity,
+        new_owner: &[u8],
+        outgoing: OutgoingOwner,
+    ) -> Result<Vec<u8>> {
+        let table = self.plan_ownership_transfer(identity, new_owner, outgoing)?;
+        self.set_group_roles(identity, &table)
+    }
+
+    /// Propose handing the group's owner slot to `new_owner` (ADR-0045) — the
+    /// proposal-path twin of [`Group::transfer_ownership`], with identical
+    /// authorisation and identical refusals.
+    ///
+    /// The proposal is judged, by this device and by every peer, against the
+    /// **pre-merge** table in which this device is still the owner, so it needs
+    /// no new rule: it is a [`ProposalKind::RoleChange`], which is owner-only.
+    /// Any owner-or-admin may sweep it, including the incoming owner.
+    ///
+    /// # Errors
+    ///
+    /// As [`Group::transfer_ownership`].
+    pub fn propose_ownership_transfer(
+        &mut self,
+        identity: &Identity,
+        new_owner: &[u8],
+        outgoing: OutgoingOwner,
+    ) -> Result<Vec<u8>> {
+        let table = self.plan_ownership_transfer(identity, new_owner, outgoing)?;
+        self.propose_group_roles(identity, &table)
+    }
+
     /// Every proposal currently in this device's pending set, in the order
     /// OpenMLS holds them (ADR-0045).
     ///
@@ -877,21 +1009,34 @@ impl Group {
         }
         let members = self.members();
 
-        // Nothing authorised pending => emit no commit at all. This is a
-        // prediction of what the filter below will keep, and it is used ONLY to
-        // decide emptiness; `swept` is read back off the staged commit
-        // afterwards so the caller is told what the commit really carried
-        // rather than what we expected it to.
-        let nothing_to_sweep = !self.inner.pending_proposals().any(|qp| {
-            let leaf = match qp.sender() {
-                Sender::Member(idx) => Some(idx.u32()),
-                _ => None,
-            };
-            let proposer = leaf.and_then(|leaf| {
-                pubkey_at_leaf(&members, leaf).map(|pubkey| Proposer { leaf, pubkey })
-            });
-            authorise(&table, &members, proposer, &classify(qp.proposal())).is_ok()
-        });
+        // Would the role change this sweep is about to carry leave the group
+        // with an owner who is not in it? Composing N intents into one commit is
+        // exactly how that becomes reachable — "hand the group to Charlie" and
+        // "remove Charlie" are each individually authorised — so the question is
+        // asked once, over the whole authorised set, and its answer excludes the
+        // role change rather than letting this device publish a commit every
+        // peer would refuse (`owner_survives`).
+        //
+        // Excluding a role change changes nobody's membership, so it cannot
+        // change the answer: one pass suffices, with no fixpoint to iterate.
+        let role_change_survives = owner_survives(
+            &commit_effects(
+                self.inner
+                    .pending_proposals()
+                    .filter(|qp| proposal_is_authorised(&table, &members, qp)),
+            ),
+            &members,
+        )
+        .is_ok();
+
+        // Nothing to sweep => emit no commit at all. This is a prediction of what
+        // the filter below will keep, and it is used ONLY to decide emptiness;
+        // `swept` is read back off the staged commit afterwards so the caller is
+        // told what the commit really carried rather than what we expected it to.
+        let nothing_to_sweep = !self
+            .inner
+            .pending_proposals()
+            .any(|qp| sweep_keeps(&table, &members, role_change_survives, qp));
         if nothing_to_sweep {
             return Ok(None);
         }
@@ -908,23 +1053,7 @@ impl Group {
                 identity.provider.rand(),
                 identity.provider.crypto(),
                 &identity.signature_keys,
-                |qp| {
-                    let leaf = match qp.sender() {
-                        Sender::Member(idx) => Some(idx.u32()),
-                        _ => None,
-                    };
-                    let proposer = leaf.and_then(|leaf| {
-                        pubkey_at_leaf(&filter_members, leaf)
-                            .map(|pubkey| Proposer { leaf, pubkey })
-                    });
-                    authorise(
-                        &filter_table,
-                        &filter_members,
-                        proposer,
-                        &classify(qp.proposal()),
-                    )
-                    .is_ok()
-                },
+                |qp| sweep_keeps(&filter_table, &filter_members, role_change_survives, qp),
             )
             .map_err(|e| Error::Group(format!("sweep build: {e:?}")))?
             .stage_commit(&identity.provider)
@@ -1404,6 +1533,46 @@ fn role_required_capabilities() -> Extension {
     ))
 }
 
+/// `true` when `qp` is authorised for the member that **authored** it, judged
+/// against `table` as it stands now.
+///
+/// Shared by the ADR-0045 sweep's emptiness prediction and its filter, so the
+/// two cannot answer the question differently — a disagreement there would mean
+/// emitting a commit that carries nothing, or skipping one that would have
+/// carried something.
+fn proposal_is_authorised(
+    table: &RoleTable,
+    members: &[MemberRecord],
+    qp: &QueuedProposal,
+) -> bool {
+    let leaf = match qp.sender() {
+        Sender::Member(idx) => Some(idx.u32()),
+        _ => None,
+    };
+    let proposer =
+        leaf.and_then(|leaf| pubkey_at_leaf(members, leaf).map(|pubkey| Proposer { leaf, pubkey }));
+    authorise(table, members, proposer, &classify(qp.proposal())).is_ok()
+}
+
+/// `true` when the ADR-0045 sweep should carry `qp`: authorised for its author,
+/// and — for a role change — not one that would leave the group with an owner
+/// outside it (`role_change_survives`, computed once over the whole authorised
+/// set by [`Group::commit_pending_proposals`]).
+///
+/// The second clause is an **exclusion, not a refusal**: a role change dropped
+/// here is simply not committed, its author re-proposes, and the rest of the
+/// sweep still lands. Refusing the whole sweep instead would let one bad role
+/// change block every unrelated membership change in the group.
+fn sweep_keeps(
+    table: &RoleTable,
+    members: &[MemberRecord],
+    role_change_survives: bool,
+    qp: &QueuedProposal,
+) -> bool {
+    proposal_is_authorised(table, members, qp)
+        && (role_change_survives || !matches!(classify(qp.proposal()), ProposalKind::RoleChange))
+}
+
 /// Enforce the ADR-0022 role policy on a staged commit BEFORE it is merged,
 /// against the **pre-merge** `table`. Returns `Err` (the commit must NOT be
 /// merged) when any proposal the commit carries is not authorised for its
@@ -1423,6 +1592,15 @@ fn role_required_capabilities() -> Extension {
 /// commit carrying no proposals at all (a bare `self_update` path) is
 /// authorised, as it was before.
 ///
+/// One further rule is applied to the commit **as a whole** rather than to any
+/// one proposal: [`crate::group_proposals::owner_survives`] refuses a commit
+/// that would leave the group with an owner who is not a member of it. It
+/// cannot be a per-proposal rule, because the two ways to reach that state are a
+/// role table naming a key no leaf holds (one proposal, but the roster is not
+/// visible to `authorise`) and a transfer riding alongside the new owner's
+/// removal (two individually-authorised proposals). It runs FIRST, so a commit
+/// that would brick the group is refused before anything else is considered.
+///
 /// Note on "leaving": OpenMLS `CannotRemoveSelf` forbids a member from
 /// *committing* the removal of its own leaf, so a committer is never inside its
 /// own commit's removed set. ADR-0045 makes leaving reachable the other way —
@@ -1434,6 +1612,11 @@ fn authorise_role_commit(
     members: &[MemberRecord],
     staged: &StagedCommit,
 ) -> Result<()> {
+    // The one rule that is about the commit rather than about any one proposal:
+    // whatever else this commit does, it must not leave the group with an owner
+    // who is not in it. See `owner_survives` for the two ways that happens and
+    // why neither is visible to a per-proposal check.
+    owner_survives(&commit_effects(staged.queued_proposals()), members)?;
     for qp in staged.queued_proposals() {
         // The proposal's own author: the sender OpenMLS recorded for it. A
         // by-value proposal carries the committer; a by-reference one carries

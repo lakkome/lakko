@@ -35,7 +35,7 @@ pub use group::{
     epoch_of_message, Group, Incoming, MemberAddition, MemberRecord, ProposalCommit, GROUP_ID_LEN,
 };
 pub use group_proposals::{ProposalKind, ProposalRecord};
-pub use group_roles::{committer_rank, Role, RoleTable};
+pub use group_roles::{committer_rank, OutgoingOwner, Role, RoleTable};
 pub use identity::Identity;
 pub use publisher_group::{
     channel_id_from_group_id, ChannelId, PublisherGroup, CHANNEL_EXPORTER_LABEL, CHANNEL_ID_LEN,

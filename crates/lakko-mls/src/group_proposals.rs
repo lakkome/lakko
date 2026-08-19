@@ -19,9 +19,9 @@
 //!
 //! # One rule, three call sites
 //!
-//! [`authorise`] is the whole rule and the only place it is written down. It is
-//! consumed at exactly three points in [`crate::group`], which is what keeps
-//! them from drifting apart:
+//! [`authorise`] is the whole per-proposal rule and the only place it is written
+//! down. It is consumed at exactly three points in [`crate::group`], which is
+//! what keeps them from drifting apart:
 //!
 //! 1. **The receipt gate** — [`crate::Group::process_incoming_verifying_roles`]
 //!    stores an incoming proposal only if `authorise` accepts it, and drops it
@@ -68,13 +68,26 @@
 //! and the by-value case is byte-for-byte the pre-ADR-0045 ADR-0022 rule, which
 //! is why every direct-commit path keeps behaving exactly as it did.
 //!
+//! # The one rule that is not per-proposal
+//!
+//! [`owner_survives`] judges a commit as a whole: it must not leave the group
+//! with an owner who is not a member of it. It cannot be folded into
+//! [`authorise`], because neither way of reaching that state is visible to a
+//! single-proposal check — a role table naming a key no leaf holds needs the
+//! roster, and a transfer riding alongside the new owner's removal is two
+//! individually-authorised proposals. It exists because ADR-0022's deferred
+//! ownership transfer landed, and it is what keeps that feature from being able
+//! to brick a group; see its own documentation for both cases in full.
+//!
 //! [ADR-0045]: ../../../docs/adr/0045-remote-commit-epoch-fork.md
 
+use openmls::framing::Sender;
+use openmls::group::QueuedProposal;
 use openmls::messages::proposals::Proposal;
 
 use crate::error::{Error, Result};
 use crate::group::MemberRecord;
-use crate::group_roles::RoleTable;
+use crate::group_roles::{RoleTable, ROLE_EXTENSION_TYPE};
 
 /// What a proposal asks the group to do, in Lakko terms.
 ///
@@ -197,7 +210,7 @@ fn leaf_is_owner(table: &RoleTable, members: &[MemberRecord], leaf: u32) -> bool
 /// | [`ProposalKind::Remove`] of the **owner's** leaf | nobody — the owner is unremovable |
 /// | [`ProposalKind::Remove`] of the **proposer's own** leaf | anyone (this is leaving) |
 /// | [`ProposalKind::Remove`] of any other leaf | owner or admin |
-/// | [`ProposalKind::Leave`] by the **owner** | nobody (see below) |
+/// | [`ProposalKind::Leave`] by the **owner** | nobody — transfer first (see below) |
 /// | [`ProposalKind::Leave`] by anyone else | anyone |
 /// | [`ProposalKind::Update`] | anyone (targets only the sender's own leaf) |
 /// | [`ProposalKind::RoleChange`] | the owner only |
@@ -213,16 +226,28 @@ fn leaf_is_owner(table: &RoleTable, members: &[MemberRecord], leaf: u32) -> bool
 ///   action must add the branch back. ADR-0045 is that sprint: a member may now
 ///   *propose* its own removal (either as `SelfRemove`, or as a plain `Remove`
 ///   naming its own leaf) for an admin to commit.
-/// * **The owner may not leave.** ADR-0045 does not settle this; it is decided
-///   here, fail-closed, for two reasons. First, consistency: ADR-0022's
-///   owner-unremovable rule is unconditional and has no self-exception, and a
-///   `SelfRemove` does **not** appear in `StagedCommit::remove_proposals()`
-///   (proposal type `0x000a`), so without an explicit refusal an owner-leaving
-///   commit would sail past the very check that exists to keep the owner in the
-///   group. Second, consequence: `set_group_roles` is owner-only, so an
-///   ownerless group can never appoint another admin again — a permanent
-///   degradation, where refusing is merely an inconvenience until ADR-0022's
-///   deferred ownership-transfer follow-up lands.
+/// * **The owner may not leave *while owner*.** ADR-0045 does not settle this;
+///   it is decided here, fail-closed, for two reasons. First, consistency:
+///   ADR-0022's owner-unremovable rule is unconditional and has no
+///   self-exception, and a `SelfRemove` does **not** appear in
+///   `StagedCommit::remove_proposals()` (proposal type `0x000a`), so without an
+///   explicit refusal an owner-leaving commit would sail past the very check
+///   that exists to keep the owner in the group. Second, consequence:
+///   `set_group_roles` is owner-only, so an ownerless group can never appoint
+///   another admin again — a permanent degradation.
+///
+///   This rule is **unchanged** by ownership transfer, and is the reason the
+///   invariant survives it: the way out is
+///   [`crate::Group::transfer_ownership`], after which the departing member is
+///   no longer the owner and this arm simply does not apply to them. There is
+///   no owner-leaves special case anywhere, and the group is never ownerless at
+///   any instant — the transfer commit installs an owner who is a member of the
+///   group it produces ([`owner_survives`]), and only then can the former owner
+///   leave. The two steps cannot even be fused into one commit, because both
+///   proposals are judged against the **pre-merge** table in which the
+///   transferor is still the owner, so the `Leave` half is refused. Two rounds
+///   is also the honest ordering: the transfer must be durable before its
+///   author departs.
 ///
 /// # Errors
 ///
@@ -285,6 +310,137 @@ pub(crate) fn authorise(
                 "proposal refused: unsupported proposal type".into(),
             ));
         },
+    }
+    Ok(())
+}
+
+/// What a set of proposals would do to the group's membership and to its role
+/// table, taken **together** as one commit.
+///
+/// Every other rule in this module judges one proposal in isolation, which is
+/// right for authorisation — who may ask for a thing does not depend on what
+/// else is being asked. [`owner_survives`] is the one rule that cannot be
+/// written that way, so it is given the whole commit's effect summary instead.
+///
+/// Owned rather than borrowed so a caller can compute it, drop the borrow on the
+/// proposal store, and still consult it — which is what
+/// [`crate::Group::commit_pending_proposals`] needs in order to decide its sweep
+/// filter before it takes `commit_builder()`.
+#[derive(Debug, Default)]
+pub(crate) struct CommitEffects {
+    /// The owner named by each role-table rewrite the commit carries. Normally
+    /// zero or one — RFC 9420 admits at most one `GroupContextExtensions`
+    /// proposal per commit — but the check is written for a list so a
+    /// hypothetical second one cannot slip past by being ignored.
+    proposed_owners: Vec<Vec<u8>>,
+    /// `true` when the commit rewrites the GroupContext but the result carries
+    /// no readable `0xFF02` role table. In a role-enabled group that means the
+    /// commit would **delete** the group's authority structure, silently
+    /// reverting it to the open/legacy shape where any member may add or
+    /// remove. Refused rather than reasoned about.
+    role_table_would_vanish: bool,
+    /// Leaves the commit removes — including the sender's own leaf for a
+    /// `SelfRemove`, which carries no target of its own.
+    removed_leaves: Vec<u32>,
+    /// Signature keys the commit adds.
+    added_keys: Vec<Vec<u8>>,
+}
+
+/// Summarise what `proposals` would do if committed together.
+pub(crate) fn commit_effects<'a>(
+    proposals: impl Iterator<Item = &'a QueuedProposal>,
+) -> CommitEffects {
+    let mut effects = CommitEffects::default();
+    for qp in proposals {
+        match classify(qp.proposal()) {
+            ProposalKind::Add { signature_key } => effects.added_keys.push(signature_key),
+            ProposalKind::Remove { target_leaf } => effects.removed_leaves.push(target_leaf),
+            ProposalKind::Leave => {
+                // `SelfRemove` names no target: the removed leaf is the sender's
+                // own. An unresolvable sender removes nobody.
+                if let Sender::Member(idx) = qp.sender() {
+                    effects.removed_leaves.push(idx.u32());
+                }
+            },
+            ProposalKind::RoleChange => {
+                // `classify` deliberately discards the payload (the public
+                // `ProposalKind` is an FFI-facing type and carries no table), so
+                // the one field this rule needs is read from the raw proposal.
+                match role_table_of(qp.proposal()) {
+                    Some(table) => effects.proposed_owners.push(table.owner().to_vec()),
+                    None => effects.role_table_would_vanish = true,
+                }
+            },
+            ProposalKind::Update | ProposalKind::Unsupported => {},
+        }
+    }
+    effects
+}
+
+/// The role table a `GroupContextExtensions` proposal would install, or `None`
+/// when it carries no readable `0xFF02` body.
+fn role_table_of(proposal: &Proposal) -> Option<RoleTable> {
+    let Proposal::GroupContextExtensions(gce) = proposal else {
+        return None;
+    };
+    let body = gce.extensions().unknown(ROLE_EXTENSION_TYPE)?;
+    RoleTable::decode(&body.0).ok()
+}
+
+/// **The group must never be left with an owner who is not in it.**
+///
+/// The rule the whole ownership-transfer feature rests on, and the only one that
+/// has to see a commit rather than a proposal. It is checked against the roster
+/// the commit *produces* — pre-merge members, minus everyone it removes, plus
+/// everyone it adds — because that is when the new table takes effect.
+///
+/// Two ways to reach an unowned group, both closed here:
+///
+/// * **Transfer to a non-member.** A role table names 32-byte keys, so nothing
+///   in the codec stops an owner naming a key that is in no leaf. Nobody could
+///   then ever change the table again, because a role change is owner-only, and
+///   no removal could repair it, because the owner's leaf is unremovable and
+///   there is no such leaf anyway. Permanent, and reachable today by an owner
+///   calling `set_group_roles` with a hand-built table — this check refuses that
+///   commit on **every** peer, so it is a strict improvement independent of
+///   whether anyone uses the named transfer API.
+/// * **Transfer to a member the same commit removes.** ADR-0045 composes N
+///   intents into one commit, so "hand the group to Charlie" and "remove
+///   Charlie" can ride together. Each is individually authorised — the owner may
+///   rewrite the table, an admin may remove a plain member — so no per-proposal
+///   rule can see it. The post-commit roster does.
+///
+/// A commit that rewrites the GroupContext without leaving a readable role table
+/// behind is refused for the same reason: it would delete the group's authority
+/// structure rather than change it.
+///
+/// # Errors
+///
+/// [`Error::Group`] when the commit would leave the group's owner outside it, or
+/// would erase the role table. A commit carrying no role change is always
+/// authorised by this rule.
+pub(crate) fn owner_survives(effects: &CommitEffects, members: &[MemberRecord]) -> Result<()> {
+    if effects.role_table_would_vanish {
+        return Err(Error::Group(
+            "commit refused: it would remove this group's role table".into(),
+        ));
+    }
+    if effects.proposed_owners.is_empty() {
+        return Ok(());
+    }
+    let survives = |key: &[u8]| {
+        let stays = members.iter().any(|m| {
+            m.signature_public_key == key && !effects.removed_leaves.contains(&m.leaf_index)
+        });
+        stays || effects.added_keys.iter().any(|k| k == key)
+    };
+    for owner in &effects.proposed_owners {
+        if !survives(owner) {
+            return Err(Error::Group(
+                "role-table change refused: the named owner would not be a member of the group"
+                    .into(),
+            ));
+        }
     }
     Ok(())
 }
