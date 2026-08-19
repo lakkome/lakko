@@ -24,6 +24,27 @@ fn mls_err(e: lakko_mls::Error) -> JsError {
     JsError::new(&format!("{e}"))
 }
 
+/// Build an [`MlsRoleTable`] from the flat key material the wasm surface
+/// carries, refusing anything that is not a whole number of 32-byte keys.
+///
+/// Shared by `Group.setGroupRoles` and `Group.proposeGroupRoles` so the two
+/// paths cannot drift on what they accept. Returns a plain message rather than
+/// a `JsError` because `JsError` can only be constructed on the wasm target —
+/// see the ADR-0045 core impl block on [`Group`].
+fn role_table_from_flat(owner: &[u8], admins_flat: &[u8]) -> Result<MlsRoleTable, &'static str> {
+    let owner: [u8; 32] = owner.try_into().map_err(|_| "owner key must be 32 bytes")?;
+    if admins_flat.len() % 32 != 0 {
+        return Err("admins must be a multiple of 32 bytes");
+    }
+    let mut admins = Vec::with_capacity(admins_flat.len() / 32);
+    for chunk in admins_flat.chunks_exact(32) {
+        let mut k = [0u8; 32];
+        k.copy_from_slice(chunk);
+        admins.push(k);
+    }
+    Ok(MlsRoleTable::new(owner, admins))
+}
+
 // ============================================================================
 // Identity
 // ============================================================================
@@ -274,6 +295,7 @@ pub struct ProcessedMessage {
     application_data: Option<Vec<u8>>,
     sender_leaf: Option<u32>,
     external_join_signature_key: Option<Vec<u8>>,
+    proposal: Option<ProposalRecord>,
 }
 
 impl ProcessedMessage {
@@ -285,6 +307,7 @@ impl ProcessedMessage {
             application_data: Some(data),
             sender_leaf,
             external_join_signature_key: None,
+            proposal: None,
         }
     }
 
@@ -296,6 +319,19 @@ impl ProcessedMessage {
             application_data: None,
             sender_leaf: None,
             external_join_signature_key: None,
+            proposal: None,
+        }
+    }
+
+    /// Construct an ADR-0045 proposal result carrying the full record — what
+    /// was proposed, by which leaf, and whether the receipt gate stored it.
+    fn from_proposal(record: lakko_mls::ProposalRecord) -> Self {
+        Self {
+            kind: ProcessedMessageKind::Proposal,
+            application_data: None,
+            sender_leaf: record.sender_leaf,
+            external_join_signature_key: None,
+            proposal: Some(record.into()),
         }
     }
 
@@ -307,6 +343,7 @@ impl ProcessedMessage {
             application_data: None,
             sender_leaf: None,
             external_join_signature_key: Some(joiner_signature_key),
+            proposal: None,
         }
     }
 }
@@ -347,6 +384,170 @@ impl ProcessedMessage {
     #[wasm_bindgen(getter, js_name = externalJoinSignatureKey)]
     pub fn external_join_signature_key(&self) -> Option<Vec<u8>> {
         self.external_join_signature_key.clone()
+    }
+
+    /// The ADR-0045 proposal record, present **iff** `kind === "Proposal"` and
+    /// `undefined` otherwise.
+    ///
+    /// Read `proposal.stored` before treating it as a pending request:
+    /// `false` means the receipt gate **refused** it and no sweep will ever
+    /// commit it. `senderLeaf` is also mirrored onto this `ProcessedMessage`
+    /// for a uniform "who sent this" read across kinds.
+    #[wasm_bindgen(getter)]
+    pub fn proposal(&self) -> Option<ProposalRecord> {
+        self.proposal.clone()
+    }
+}
+
+// ============================================================================
+// ADR-0045 proposal surface
+// ============================================================================
+
+/// One ADR-0045 proposal as the receive path saw it. wasm-bindgen mirror of
+/// UniFFI's `ProposalRecord` / [`lakko_mls::ProposalRecord`].
+///
+/// # Why a flat tagged class rather than a sum type
+///
+/// wasm-bindgen has no idiomatic story for Rust enums carrying data, so this
+/// follows the two shapes the repo already uses for exactly this problem:
+/// [`ProcessedMessage`] (a string `kind` discriminator plus per-variant
+/// optional getters) and `ParsedBody` in `attachments.rs`. The alternative
+/// precedent — `SfuServerFrame`, where the web reads fields off a TS type over
+/// a native `JSON.parse` — does not apply: those frames arrive as JSON on the
+/// wire already, whereas this record is produced by the core, so routing it
+/// through a JSON round-trip would invent a serialisation that nothing else
+/// needs.
+///
+/// # The payload fields are per-variant, never shared
+///
+/// `ParsedBody` reuses one `target` slot across `edit` / `delete` / `reaction`
+/// because every one of those means the same thing (a message id). The two
+/// payloads here do **not**: an `Add` carries a 32-byte signature key and a
+/// `Remove` carries a leaf index. They therefore get **separate, differently
+/// named** getters — [`Self::add_signature_key`] and
+/// [`Self::remove_target_leaf`] — each `undefined` outside its own variant, so
+/// a caller cannot read a `Remove`'s target as if it were an `Add`'s key.
+#[wasm_bindgen]
+#[derive(Clone)]
+pub struct ProposalRecord {
+    kind: &'static str,
+    sender_leaf: Option<u32>,
+    stored: bool,
+    add_signature_key: Option<Vec<u8>>,
+    remove_target_leaf: Option<u32>,
+}
+
+impl From<lakko_mls::ProposalRecord> for ProposalRecord {
+    fn from(r: lakko_mls::ProposalRecord) -> Self {
+        let (kind, add_signature_key, remove_target_leaf) = match r.kind {
+            lakko_mls::ProposalKind::Add { signature_key } => ("add", Some(signature_key), None),
+            lakko_mls::ProposalKind::Remove { target_leaf } => ("remove", None, Some(target_leaf)),
+            lakko_mls::ProposalKind::Leave => ("leave", None, None),
+            lakko_mls::ProposalKind::Update => ("update", None, None),
+            lakko_mls::ProposalKind::RoleChange => ("role-change", None, None),
+            lakko_mls::ProposalKind::Unsupported => ("unsupported", None, None),
+        };
+        Self {
+            kind,
+            sender_leaf: r.sender_leaf,
+            stored: r.stored,
+            add_signature_key,
+            remove_target_leaf,
+        }
+    }
+}
+
+#[wasm_bindgen]
+impl ProposalRecord {
+    /// Discriminator: `"add" | "remove" | "leave" | "update" | "role-change" |
+    /// "unsupported"`. Useful for `switch` / `case` in TypeScript.
+    ///
+    /// `"unsupported"` is a proposal type Lakko never emits; the core's
+    /// authorisation rule always refuses it (fail-closed, invariant #4), so it
+    /// always arrives with `stored === false`.
+    #[wasm_bindgen(getter)]
+    pub fn kind(&self) -> String {
+        self.kind.to_string()
+    }
+
+    /// The proposing member's leaf index, or `undefined` for a sender that is
+    /// not a resolvable group member (always unauthorised — fail-closed).
+    #[wasm_bindgen(getter, js_name = senderLeaf)]
+    pub fn sender_leaf(&self) -> Option<u32> {
+        self.sender_leaf
+    }
+
+    /// `true` when the proposal was authorised and retained in the pending set
+    /// so a later sweep can commit it; `false` when it was **dropped**.
+    ///
+    /// A dropped proposal is a **refusal**, not a failure to parse: a proposal
+    /// does not advance the epoch, so dropping it unstored *is* the refusal, and
+    /// the core reports it as data rather than throwing. Surface or log it
+    /// distinctly from a stored one — a stored proposal is a pending request
+    /// awaiting a sweep, a dropped one will never be committed.
+    #[wasm_bindgen(getter)]
+    pub fn stored(&self) -> bool {
+        self.stored
+    }
+
+    /// The prospective member's 32-byte Ed25519 signature public key, present
+    /// **iff** `kind === "add"` and `undefined` for every other kind.
+    #[wasm_bindgen(getter, js_name = addSignatureKey)]
+    pub fn add_signature_key(&self) -> Option<Vec<u8>> {
+        self.add_signature_key.clone()
+    }
+
+    /// The leaf index the proposal removes, present **iff** `kind ===
+    /// "remove"` and `undefined` for every other kind.
+    #[wasm_bindgen(getter, js_name = removeTargetLeaf)]
+    pub fn remove_target_leaf(&self) -> Option<u32> {
+        self.remove_target_leaf
+    }
+}
+
+/// Result of [`Group::commit_pending_proposals`] — the ADR-0045 sweep.
+/// wasm-bindgen mirror of UniFFI's `ProposalCommit`.
+///
+/// Mirrors [`AddMember`]'s shape so ADR-0040's durable pending-commit outbox
+/// wraps it unchanged, with two differences the proposal path forces: the
+/// Welcome is **optional** (a sweep that carried no `add` produces none), and
+/// `swept` names what the commit actually carried so the caller can mark those
+/// requests applied.
+#[wasm_bindgen]
+pub struct ProposalCommit {
+    commit_bytes: Vec<u8>,
+    welcome_bytes: Option<Vec<u8>>,
+    swept_records: Vec<ProposalRecord>,
+}
+
+#[wasm_bindgen]
+impl ProposalCommit {
+    /// Encoded MLS commit message — broadcast to all existing members.
+    #[wasm_bindgen(getter)]
+    pub fn commit(&self) -> Vec<u8> {
+        self.commit_bytes.clone()
+    }
+
+    /// Encoded MLS welcome message — delivered to the newly added members.
+    /// `undefined` unless the sweep carried at least one `add`.
+    #[wasm_bindgen(getter)]
+    pub fn welcome(&self) -> Option<Vec<u8>> {
+        self.welcome_bytes.clone()
+    }
+
+    /// The proposals this commit carried, in sweep order, as a flat array of
+    /// [`ProposalRecord`] instances (same convention as `Group.members()` —
+    /// wasm-bindgen cannot return a `Vec` of a custom struct through a getter,
+    /// so this is a method, not a property).
+    ///
+    /// Read back off the staged commit by the core, so it reports what the
+    /// commit really carries rather than what the caller predicted it would.
+    #[wasm_bindgen]
+    pub fn swept(&self) -> Vec<JsValue> {
+        self.swept_records
+            .iter()
+            .map(|r| JsValue::from(r.clone()))
+            .collect()
     }
 }
 
@@ -534,7 +735,7 @@ impl Group {
                 ProcessedMessage::application(bytes, sender_leaf)
             },
             MlsIncoming::Commit => ProcessedMessage::control(ProcessedMessageKind::Commit),
-            MlsIncoming::Proposal(_) => ProcessedMessage::control(ProcessedMessageKind::Proposal),
+            MlsIncoming::Proposal(record) => ProcessedMessage::from_proposal(record),
             MlsIncoming::ExternalJoinProposal {
                 joiner_signature_key,
             } => ProcessedMessage::external_join(joiner_signature_key),
@@ -590,24 +791,125 @@ impl Group {
         owner: &[u8],
         admins_flat: &[u8],
     ) -> Result<Vec<u8>, JsError> {
-        let owner: [u8; 32] = owner
-            .try_into()
-            .map_err(|_| JsError::new("owner key must be 32 bytes"))?;
-        if admins_flat.len() % 32 != 0 {
-            return Err(JsError::new("admins must be a multiple of 32 bytes"));
-        }
-        let mut admins = Vec::with_capacity(admins_flat.len() / 32);
-        for chunk in admins_flat.chunks_exact(32) {
-            let mut k = [0u8; 32];
-            k.copy_from_slice(chunk);
-            admins.push(k);
-        }
-        let table = MlsRoleTable::new(owner, admins);
+        let table = role_table_from_flat(owner, admins_flat).map_err(JsError::new)?;
         let mut g = self
             .inner
             .lock()
             .map_err(|_| JsError::new("internal lock poisoned"))?;
         g.set_group_roles(&identity.inner, &table).map_err(mls_err)
+    }
+
+    /// **Propose** adding a member from their published KeyPackage — the
+    /// ADR-0045 proposal-path twin of [`Self::add_member`].
+    ///
+    /// Returns the wire-encoded Proposal to publish to the group journal. The
+    /// epoch does **not** advance and there is no Welcome yet: the Welcome is
+    /// produced by whichever device sweeps this into a commit
+    /// ([`Self::commit_pending_proposals`]). Because a proposal is not
+    /// epoch-advancing, two members proposing concurrently compose instead of
+    /// forking the loser off the group.
+    ///
+    /// Role-gated locally to owner/admin, and re-gated by every peer's receipt
+    /// gate — a refused proposal is simply never stored.
+    #[wasm_bindgen(js_name = proposeAddMember)]
+    pub fn propose_add_member(
+        &self,
+        identity: &Identity,
+        key_package: &[u8],
+    ) -> Result<Vec<u8>, JsError> {
+        self.propose_add_member_core(identity, key_package)
+            .map_err(|m| JsError::new(&m))
+    }
+
+    /// **Propose** removing the member at `leaf_index` — the ADR-0045
+    /// proposal-path twin of [`Self::remove_member`].
+    ///
+    /// Naming **this device's own** leaf is how a member leaves and needs no
+    /// role; any other leaf needs owner or admin, and the owner's leaf is
+    /// refused for everyone. Returns the wire-encoded Proposal to publish; the
+    /// epoch does not advance.
+    #[wasm_bindgen(js_name = proposeRemoveMember)]
+    pub fn propose_remove_member(
+        &self,
+        identity: &Identity,
+        leaf_index: u32,
+    ) -> Result<Vec<u8>, JsError> {
+        self.propose_remove_member_core(identity, leaf_index)
+            .map_err(|m| JsError::new(&m))
+    }
+
+    /// **Propose** rewriting the ADR-0022 role table — the ADR-0045
+    /// proposal-path twin of [`Self::set_group_roles`]. Owner-only.
+    ///
+    /// `owner` is 32 bytes; `admins_flat` is the concatenation of 32-byte admin
+    /// keys. Returns the wire-encoded Proposal to publish; the epoch does not
+    /// advance.
+    #[wasm_bindgen(js_name = proposeGroupRoles)]
+    pub fn propose_group_roles(
+        &self,
+        identity: &Identity,
+        owner: &[u8],
+        admins_flat: &[u8],
+    ) -> Result<Vec<u8>, JsError> {
+        self.propose_group_roles_core(identity, owner, admins_flat)
+            .map_err(|m| JsError::new(&m))
+    }
+
+    /// Every ADR-0045 proposal currently in this device's pending set, in the
+    /// order OpenMLS holds them, as a flat array of [`ProposalRecord`]
+    /// instances (same convention as [`Self::members`] — wasm-bindgen cannot
+    /// return a `Vec` of a custom struct through a getter).
+    ///
+    /// This is the committer's "N changes waiting to apply" surface and the
+    /// proposer's "did my request land" surface. Every entry reports
+    /// `stored === true` by construction — the receipt gate admits nothing
+    /// else, and OpenMLS empties the whole store on every merged commit, so the
+    /// set is exactly what a sweep would consider.
+    #[wasm_bindgen(js_name = pendingProposals)]
+    pub fn pending_proposals(&self) -> Result<Vec<JsValue>, JsError> {
+        Ok(self
+            .pending_proposals_core()
+            .map_err(|m| JsError::new(&m))?
+            .into_iter()
+            .map(JsValue::from)
+            .collect())
+    }
+
+    /// This device's ADR-0045 committer rank: `0` for the owner, `k + 1` for
+    /// the `k`-th admin in the role table's canonical order, and
+    /// **`undefined`** for a plain member or a group with no role table.
+    ///
+    /// `undefined` and `0` are **not** the same thing and must never be
+    /// conflated: `0` is the owner, who acts as committer immediately, while
+    /// `undefined` means this device is not in the committer set at all and
+    /// must never sweep. Because `0` is falsy in JavaScript, `if (rank)` is
+    /// **wrong** in both directions — test `rank !== undefined` explicitly, and
+    /// never `??`-default the value.
+    #[wasm_bindgen(js_name = ownCommitterRank)]
+    pub fn own_committer_rank(&self, identity: &Identity) -> Result<Option<u32>, JsError> {
+        self.own_committer_rank_core(identity)
+            .map_err(|m| JsError::new(&m))
+    }
+
+    /// Sweep the authorised pending proposals into **one** Commit (ADR-0045) —
+    /// the committer half of the design.
+    ///
+    /// Returns `undefined` when nothing authorised is pending: deliberately not
+    /// an empty commit, which would advance the epoch (and race other
+    /// committers) for no effect. Otherwise the local state is already at the
+    /// new epoch when this returns, so the caller MUST durably record the
+    /// returned artifacts before publishing them (ADR-0040).
+    ///
+    /// Role-gated to owner/admin, and the sweep re-runs the ADR-0045
+    /// authorisation rule over every candidate, so this can never commit an
+    /// unauthorised proposal however the pending store was populated.
+    #[wasm_bindgen(js_name = commitPendingProposals)]
+    pub fn commit_pending_proposals(
+        &self,
+        identity: &Identity,
+    ) -> Result<Option<ProposalCommit>, JsError> {
+        self.commit_pending_proposals_core(identity)
+            .map_err(|m| JsError::new(&m))
     }
 
     /// Apply an incoming commit ENFORCING the ADR-0022 role policy — a commit
@@ -633,7 +935,7 @@ impl Group {
                 ProcessedMessage::application(bytes, sender_leaf)
             },
             MlsIncoming::Commit => ProcessedMessage::control(ProcessedMessageKind::Commit),
-            MlsIncoming::Proposal(_) => ProcessedMessage::control(ProcessedMessageKind::Proposal),
+            MlsIncoming::Proposal(record) => ProcessedMessage::from_proposal(record),
             MlsIncoming::ExternalJoinProposal {
                 joiner_signature_key,
             } => ProcessedMessage::external_join(joiner_signature_key),
@@ -732,6 +1034,96 @@ impl Group {
                 })
             })
             .collect())
+    }
+}
+
+/// Host-testable cores of the ADR-0045 proposal surface.
+///
+/// `JsValue` and `JsError` can only be constructed on the `wasm32` target, so
+/// every exported method above is unreachable from `cargo test`. Keeping the
+/// behaviour here — in plain Rust, erroring with a `String` that the wrapper
+/// turns into the identical `JsError` message — is what lets the host suite
+/// cover ADR-0045 end to end instead of only its happy path.
+impl Group {
+    /// Lock the inner group, reporting poisoning as a plain message.
+    fn locked(&self) -> Result<std::sync::MutexGuard<'_, MlsGroup>, String> {
+        self.inner
+            .lock()
+            .map_err(|_| "internal lock poisoned".to_string())
+    }
+
+    /// Core of [`Self::propose_add_member`].
+    fn propose_add_member_core(
+        &self,
+        identity: &Identity,
+        key_package: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        self.locked()?
+            .propose_add_member_from_wire(&identity.inner, key_package)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Core of [`Self::propose_remove_member`].
+    fn propose_remove_member_core(
+        &self,
+        identity: &Identity,
+        leaf_index: u32,
+    ) -> Result<Vec<u8>, String> {
+        self.locked()?
+            .propose_remove_member(&identity.inner, lakko_mls::LeafNodeIndex::new(leaf_index))
+            .map_err(|e| e.to_string())
+    }
+
+    /// Core of [`Self::propose_group_roles`].
+    fn propose_group_roles_core(
+        &self,
+        identity: &Identity,
+        owner: &[u8],
+        admins_flat: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let table = role_table_from_flat(owner, admins_flat).map_err(ToString::to_string)?;
+        self.locked()?
+            .propose_group_roles(&identity.inner, &table)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Core of [`Self::pending_proposals`].
+    fn pending_proposals_core(&self) -> Result<Vec<ProposalRecord>, String> {
+        Ok(self
+            .locked()?
+            .pending_proposals()
+            .into_iter()
+            .map(Into::into)
+            .collect())
+    }
+
+    /// Core of [`Self::own_committer_rank`].
+    fn own_committer_rank_core(&self, identity: &Identity) -> Result<Option<u32>, String> {
+        Ok(self.locked()?.own_committer_rank(&identity.inner))
+    }
+
+    /// Core of [`Self::commit_pending_proposals`].
+    fn commit_pending_proposals_core(
+        &self,
+        identity: &Identity,
+    ) -> Result<Option<ProposalCommit>, String> {
+        let Some(swept_commit) = self
+            .locked()?
+            .commit_pending_proposals(&identity.inner)
+            .map_err(|e| e.to_string())?
+        else {
+            return Ok(None);
+        };
+        let encode = |m: &_| group::encode_message(m).map_err(|e| e.to_string());
+        let welcome_bytes = match swept_commit.welcome.as_ref() {
+            Some(w) => Some(encode(w)?),
+            None => None,
+        };
+        Ok(Some(ProposalCommit {
+            commit_bytes: encode(&swept_commit.commit)?,
+            welcome_bytes,
+            swept_records: swept_commit.swept.into_iter().map(Into::into).collect(),
+        }))
     }
 }
 
@@ -890,7 +1282,7 @@ impl PublisherGroup {
                 ProcessedMessage::application(bytes, sender_leaf)
             },
             MlsIncoming::Commit => ProcessedMessage::control(ProcessedMessageKind::Commit),
-            MlsIncoming::Proposal(_) => ProcessedMessage::control(ProcessedMessageKind::Proposal),
+            MlsIncoming::Proposal(record) => ProcessedMessage::from_proposal(record),
             MlsIncoming::ExternalJoinProposal {
                 joiner_signature_key,
             } => ProcessedMessage::external_join(joiner_signature_key),
@@ -1302,9 +1694,7 @@ impl DeviceGroup {
                 ProcessedMessage::application(bytes, sender_leaf)
             },
             lakko_mls::Incoming::Commit => ProcessedMessage::control(ProcessedMessageKind::Commit),
-            lakko_mls::Incoming::Proposal(_) => {
-                ProcessedMessage::control(ProcessedMessageKind::Proposal)
-            },
+            lakko_mls::Incoming::Proposal(record) => ProcessedMessage::from_proposal(record),
             lakko_mls::Incoming::ExternalJoinProposal {
                 joiner_signature_key,
             } => ProcessedMessage::external_join(joiner_signature_key),
@@ -1381,9 +1771,7 @@ impl DeviceGroup {
                 ProcessedMessage::application(bytes, sender_leaf)
             },
             lakko_mls::Incoming::Commit => ProcessedMessage::control(ProcessedMessageKind::Commit),
-            lakko_mls::Incoming::Proposal(_) => {
-                ProcessedMessage::control(ProcessedMessageKind::Proposal)
-            },
+            lakko_mls::Incoming::Proposal(record) => ProcessedMessage::from_proposal(record),
             lakko_mls::Incoming::ExternalJoinProposal {
                 joiner_signature_key,
             } => ProcessedMessage::external_join(joiner_signature_key),
@@ -3230,6 +3618,224 @@ mod tests {
             .export_secret(&charlie, "lakko/test", b"ctx", 32)
             .expect("charlie export");
         assert_eq!(alice_export, charlie_export);
+    }
+
+    // ========================================================================
+    // ADR-0045 — proposal + sweep + rank surface
+    // ========================================================================
+
+    /// Set up `alice` (owner) + `bob` + `charlie` in one group.
+    fn adr0045_trio() -> ((Identity, Group), (Identity, Group), (Identity, Group)) {
+        let alice = Identity::new("alice").unwrap();
+        let bob = Identity::new("bob").unwrap();
+        let charlie = Identity::new("charlie").unwrap();
+
+        let alice_g = Group::new(&alice).unwrap();
+        let add_bob = alice_g
+            .add_member(&alice, &bob.create_key_package().unwrap())
+            .unwrap();
+        let bob_g = Group::join_from_welcome(&add_bob.welcome(), &bob).unwrap();
+
+        let add_charlie = alice_g
+            .add_member(&alice, &charlie.create_key_package().unwrap())
+            .unwrap();
+        assert_eq!(
+            bob_g
+                .process_incoming_verifying_roles(&bob, &add_charlie.commit())
+                .unwrap()
+                .kind(),
+            "Commit"
+        );
+        let charlie_g = Group::join_from_welcome(&add_charlie.welcome(), &charlie).unwrap();
+
+        ((alice, alice_g), (bob, bob_g), (charlie, charlie_g))
+    }
+
+    /// ADR-0045 end to end across the wasm-bindgen boundary: the owner
+    /// **proposes** an add (epoch unchanged), a peer receives it as a stored
+    /// `ProposalRecord`, the owner sweeps it into one commit, and the peer
+    /// merges.
+    #[test]
+    fn propose_then_sweep_round_trips_through_the_wasm_types() {
+        let ((alice, alice_g), (bob, bob_g), (charlie, charlie_g)) = adr0045_trio();
+        let dave = Identity::new("dave").unwrap();
+        let dave_key = key_package_signature_key(&dave.create_key_package().unwrap()).unwrap();
+
+        let epoch_before = alice_g.epoch().unwrap();
+        let proposal = alice_g
+            .propose_add_member_core(&alice, &dave.create_key_package().unwrap())
+            .unwrap();
+        assert_eq!(
+            alice_g.epoch().unwrap(),
+            epoch_before,
+            "a proposal must not advance the epoch",
+        );
+        assert_eq!(alice_g.pending_proposals_core().unwrap().len(), 1);
+
+        // Bob receives it through the role-verifying gate: authorised (the
+        // proposer is the owner) and therefore STORED.
+        let received = bob_g
+            .process_incoming_verifying_roles(&bob, &proposal)
+            .unwrap();
+        assert_eq!(received.kind(), "Proposal");
+        let record = received.proposal().expect("kind Proposal carries a record");
+        assert!(record.stored());
+        assert_eq!(record.kind(), "add");
+        assert_eq!(
+            record.sender_leaf(),
+            Some(alice_g.own_leaf_index().unwrap())
+        );
+        assert_eq!(record.add_signature_key(), Some(dave_key));
+        assert_eq!(bob_g.pending_proposals_core().unwrap().len(), 1);
+
+        // Charlie receives the SAME bytes through the OPEN path, which has no
+        // role table to judge against and so stores nothing — reporting the
+        // drop as data rather than as an error.
+        let charlie_saw = charlie_g.process_incoming(&charlie, &proposal).unwrap();
+        let dropped = charlie_saw.proposal().expect("record present");
+        assert!(
+            !dropped.stored(),
+            "the open receive path must report the proposal as dropped",
+        );
+        assert_eq!(dropped.kind(), "add");
+        assert!(charlie_g.pending_proposals_core().unwrap().is_empty());
+
+        // Alice sweeps.
+        let swept = alice_g
+            .commit_pending_proposals_core(&alice)
+            .unwrap()
+            .expect("a pending add must produce a commit");
+        assert_eq!(swept.swept_records.len(), 1);
+        let welcome = swept
+            .welcome_bytes
+            .clone()
+            .expect("an add sweep carries a welcome");
+        assert!(alice_g.epoch().unwrap() > epoch_before);
+
+        assert_eq!(
+            bob_g
+                .process_incoming_verifying_roles(&bob, &swept.commit_bytes)
+                .unwrap()
+                .kind(),
+            "Commit",
+        );
+        assert!(bob_g.pending_proposals_core().unwrap().is_empty());
+        let dave_g = Group::join_from_welcome(&welcome, &dave).unwrap();
+        assert_eq!(alice_g.member_count().unwrap(), 4);
+        assert_eq!(dave_g.member_count().unwrap(), 4);
+
+        // Nothing left to sweep => `undefined`, NOT an empty commit.
+        assert!(alice_g
+            .commit_pending_proposals_core(&alice)
+            .unwrap()
+            .is_none());
+    }
+
+    /// The wasm flattening puts each variant's payload behind its **own**
+    /// getter, so a `remove`'s target leaf can never be read as an `add`'s
+    /// signature key and vice versa. This is the property that replaces the
+    /// type-level discrimination UniFFI gets for free from its enum.
+    #[test]
+    fn add_and_remove_payload_getters_are_disjoint() {
+        let ((alice, alice_g), (bob, bob_g), _charlie) = adr0045_trio();
+        let dave = Identity::new("dave").unwrap();
+        let dave_key = key_package_signature_key(&dave.create_key_package().unwrap()).unwrap();
+
+        let add = alice_g
+            .propose_add_member_core(&alice, &dave.create_key_package().unwrap())
+            .unwrap();
+        let add_rec = bob_g
+            .process_incoming_verifying_roles(&bob, &add)
+            .unwrap()
+            .proposal()
+            .expect("record");
+        assert_eq!(add_rec.kind(), "add");
+        assert_eq!(add_rec.add_signature_key(), Some(dave_key));
+        assert_eq!(
+            add_rec.remove_target_leaf(),
+            None,
+            "an add must expose NO remove target",
+        );
+
+        // Bob proposes his OWN removal — leaving, which needs no role.
+        let bob_leaf = bob_g.own_leaf_index().unwrap();
+        let leave = bob_g.propose_remove_member_core(&bob, bob_leaf).unwrap();
+        let rm_rec = alice_g
+            .process_incoming_verifying_roles(&alice, &leave)
+            .unwrap()
+            .proposal()
+            .expect("record");
+        assert_eq!(rm_rec.kind(), "remove");
+        assert!(rm_rec.stored());
+        assert_eq!(rm_rec.remove_target_leaf(), Some(bob_leaf));
+        assert_eq!(
+            rm_rec.add_signature_key(),
+            None,
+            "a remove must expose NO add signature key",
+        );
+    }
+
+    /// The committer rank must distinguish "owner" (`Some(0)` / JS `0`) from
+    /// "not in the committer set" (`None` / JS `undefined`). Collapsing the
+    /// absent case into `0` would make every plain member believe it is the
+    /// owner and sweep.
+    #[test]
+    fn committer_rank_never_conflates_absent_with_rank_zero() {
+        let ((alice, alice_g), (bob, bob_g), (charlie, charlie_g)) = adr0045_trio();
+
+        assert_eq!(alice_g.own_committer_rank_core(&alice).unwrap(), Some(0));
+        assert_eq!(
+            bob_g.own_committer_rank_core(&bob).unwrap(),
+            None,
+            "a plain member has NO rank — not rank 0",
+        );
+
+        let promote = alice_g
+            .set_group_roles(
+                &alice,
+                &alice.signature_public_key(),
+                &bob.signature_public_key(),
+            )
+            .unwrap();
+        for (id, g) in [(&bob, &bob_g), (&charlie, &charlie_g)] {
+            assert_eq!(
+                g.process_incoming_verifying_roles(id, &promote)
+                    .unwrap()
+                    .kind(),
+                "Commit"
+            );
+        }
+        assert_eq!(alice_g.own_committer_rank_core(&alice).unwrap(), Some(0));
+        assert_eq!(bob_g.own_committer_rank_core(&bob).unwrap(), Some(1));
+        assert_eq!(
+            charlie_g.own_committer_rank_core(&charlie).unwrap(),
+            None,
+            "a plain member stays absent while an admin gains a rank",
+        );
+    }
+
+    /// A plain member's unauthorised proposal is refused **locally**, before
+    /// anything reaches the wire.
+    #[test]
+    fn a_plain_member_cannot_mint_an_unauthorised_proposal() {
+        let ((alice, alice_g), _bob, (charlie, charlie_g)) = adr0045_trio();
+        let dave = Identity::new("dave").unwrap();
+
+        assert!(charlie_g
+            .propose_add_member_core(&charlie, &dave.create_key_package().unwrap())
+            .is_err());
+        assert!(charlie_g
+            .propose_remove_member_core(&charlie, alice_g.own_leaf_index().unwrap())
+            .is_err());
+        assert!(charlie_g
+            .propose_group_roles_core(
+                &charlie,
+                &charlie.signature_public_key(),
+                &alice.signature_public_key(),
+            )
+            .is_err());
+        assert!(charlie_g.commit_pending_proposals_core(&charlie).is_err());
+        assert!(charlie_g.pending_proposals_core().unwrap().is_empty());
     }
 
     #[test]

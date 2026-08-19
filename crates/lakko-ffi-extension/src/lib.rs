@@ -137,6 +137,13 @@ pub enum ProcessedMessage {
     /// A commit was processed and merged. Group state advanced.
     Commit,
     /// A standalone proposal was processed (no state advance).
+    ///
+    /// Deliberately **data-less**, unlike `lakko-ffi-uniffi`'s ADR-0045
+    /// `Proposal { record }`. The NSE only asks "is this a chat message worth
+    /// previewing", and the answer for every proposal kind is no — it has no
+    /// membership UI to drive, cannot sweep (this crate exposes no commit
+    /// path), and must stay minimal to fit the ~30 MB extension budget. Adding
+    /// the record would import `ProposalKind` for a value nothing here reads.
     Proposal,
     /// A non-member's external-join proposal was processed + retained
     /// (ADR-0027). `joiner_signature_key` is the prospective joiner's leaf
@@ -221,6 +228,8 @@ impl Group {
                 sender_leaf,
             },
             MlsIncoming::Commit => ProcessedMessage::Commit,
+            // ADR-0045: the record is discarded on purpose — see
+            // `ProcessedMessage::Proposal`.
             MlsIncoming::Proposal(_) => ProcessedMessage::Proposal,
             MlsIncoming::ExternalJoinProposal {
                 joiner_signature_key,

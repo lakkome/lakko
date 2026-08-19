@@ -266,6 +266,104 @@ pub struct AddMember {
     pub welcome: Vec<u8>,
 }
 
+/// What an ADR-0045 proposal asks the group to do. FFI projection of
+/// [`lakko_mls::ProposalKind`].
+///
+/// A proposal type Lakko never emits classifies as
+/// [`ProposalKind::Unsupported`] and is always refused by the core's
+/// authorisation rule (fail-closed, invariant #4). Each data-carrying variant
+/// owns its payload, so a `Remove`'s target leaf can never be read as an
+/// `Add`'s signature key.
+#[derive(Debug, uniffi::Enum)]
+pub enum ProposalKind {
+    /// Add a prospective member, carrying their Ed25519 signature public key —
+    /// the stable identity handle the role table and the contact graph key on.
+    Add {
+        /// The prospective member's 32-byte Ed25519 signature public key.
+        signature_key: Vec<u8>,
+    },
+    /// Remove the member sitting at `target_leaf`.
+    Remove {
+        /// The leaf index the proposal removes.
+        target_leaf: u32,
+    },
+    /// The sender leaves the group (RFC 9420 `SelfRemove`) — structurally
+    /// targets the sender's own leaf and can name no other.
+    Leave,
+    /// The sender rotates its own leaf node. Confers no authority over anyone
+    /// else.
+    Update,
+    /// Rewrite the GroupContext extensions — in Lakko, the ADR-0022 role table.
+    RoleChange,
+    /// A proposal type Lakko never emits. Always refused.
+    Unsupported,
+}
+
+/// One ADR-0045 proposal as the receive path saw it. FFI projection of
+/// [`lakko_mls::ProposalRecord`].
+///
+/// `stored == false` is the wire-visible form of a **refusal**: a proposal does
+/// not advance the epoch, so dropping it unstored *is* the refusal, and the
+/// core reports it as data rather than as an error. A client renders or logs a
+/// dropped proposal differently from a stored one — a stored proposal is a
+/// pending request awaiting a sweep, a dropped one was refused by the
+/// authorisation gate and will never be committed.
+#[derive(Debug, uniffi::Record)]
+pub struct ProposalRecord {
+    /// The proposing member's leaf index, or `None` for a sender that is not a
+    /// resolvable group member (always unauthorised — fail-closed).
+    pub sender_leaf: Option<u32>,
+    /// What the proposal asks for.
+    pub kind: ProposalKind,
+    /// `true` when the proposal was authorised and retained in the pending set
+    /// so a later sweep can commit it; `false` when it was dropped.
+    pub stored: bool,
+}
+
+/// Result of [`Group::commit_pending_proposals`] — the ADR-0045 sweep. FFI
+/// projection of [`lakko_mls::ProposalCommit`].
+///
+/// Mirrors [`AddMember`]'s shape so ADR-0040's durable pending-commit outbox
+/// wraps it unchanged, with two differences the proposal path forces: the
+/// Welcome is **optional** (a sweep that carried no `Add` produces none), and
+/// `swept` names what the commit actually carried so the caller can mark those
+/// requests applied.
+#[derive(uniffi::Record)]
+pub struct ProposalCommit {
+    /// Encoded MLS commit message — broadcast to all existing members.
+    pub commit: Vec<u8>,
+    /// Encoded MLS welcome message — delivered to the newly added members,
+    /// present only when the sweep carried at least one `Add`.
+    pub welcome: Option<Vec<u8>>,
+    /// The proposals this commit carried, in sweep order. Read back off the
+    /// staged commit, so it reports what the commit really carries rather than
+    /// what the caller predicted it would.
+    pub swept: Vec<ProposalRecord>,
+}
+
+impl From<lakko_mls::ProposalKind> for ProposalKind {
+    fn from(k: lakko_mls::ProposalKind) -> Self {
+        match k {
+            lakko_mls::ProposalKind::Add { signature_key } => Self::Add { signature_key },
+            lakko_mls::ProposalKind::Remove { target_leaf } => Self::Remove { target_leaf },
+            lakko_mls::ProposalKind::Leave => Self::Leave,
+            lakko_mls::ProposalKind::Update => Self::Update,
+            lakko_mls::ProposalKind::RoleChange => Self::RoleChange,
+            lakko_mls::ProposalKind::Unsupported => Self::Unsupported,
+        }
+    }
+}
+
+impl From<lakko_mls::ProposalRecord> for ProposalRecord {
+    fn from(r: lakko_mls::ProposalRecord) -> Self {
+        Self {
+            sender_leaf: r.sender_leaf,
+            kind: r.kind.into(),
+            stored: r.stored,
+        }
+    }
+}
+
 /// FFI projection of [`lakko_mls::WelcomeRendezvous`] (ADR-0027 Phase 3, G-3) —
 /// the carrier that delivers an approved external joiner's Welcome through the
 /// group journal.
@@ -346,8 +444,18 @@ pub enum ProcessedMessage {
     },
     /// A commit was processed and merged. Group state advanced.
     Commit,
-    /// A standalone proposal was processed (no state advance).
-    Proposal,
+    /// A standalone ADR-0045 proposal was processed. **No state advance** — a
+    /// proposal is not epoch-advancing, which is the whole point: two members
+    /// proposing concurrently compose instead of forking the loser.
+    ///
+    /// `record` names the proposer's leaf, what was proposed, and whether the
+    /// ADR-0045 receipt gate retained it (`ProposalRecord::stored`). A dropped
+    /// record is a **refusal** the caller should surface or log distinctly from
+    /// a stored one — see [`ProposalRecord::stored`].
+    Proposal {
+        /// The proposal as the receive path saw it.
+        record: ProposalRecord,
+    },
     /// A non-member's external-join proposal was processed + retained (ADR-0027,
     /// G-3). `joiner_signature_key` is the handle for
     /// [`Group::approve_external_join`] / [`Group::reject_external_join`], and
@@ -667,6 +775,25 @@ pub struct RoleTable {
     pub admins: Vec<Vec<u8>>,
 }
 
+/// Build a [`MlsRoleTable`] from the raw key material the FFI carries,
+/// refusing any key that is not exactly 32 bytes.
+///
+/// Shared by [`Group::set_group_roles`] and [`Group::propose_group_roles`] so
+/// the two paths cannot drift on what they accept.
+fn role_table_from_parts(owner: Vec<u8>, admins: Vec<Vec<u8>>) -> Result<MlsRoleTable, FfiError> {
+    let owner: [u8; 32] = owner
+        .try_into()
+        .map_err(|_| FfiError::Codec("owner key must be 32 bytes".into()))?;
+    let mut admin_keys = Vec::with_capacity(admins.len());
+    for a in admins {
+        let k: [u8; 32] = a
+            .try_into()
+            .map_err(|_| FfiError::Codec("admin key must be 32 bytes".into()))?;
+        admin_keys.push(k);
+    }
+    Ok(MlsRoleTable::new(owner, admin_keys))
+}
+
 /// Lakko MLS conversation group.
 #[derive(uniffi::Object)]
 pub struct Group {
@@ -753,6 +880,119 @@ impl Group {
         Ok(g.pending_external_joins())
     }
 
+    /// **Propose** adding a member from their published KeyPackage (TLS wire
+    /// form) — the ADR-0045 proposal-path twin of
+    /// [`Self::add_member_from_wire`].
+    ///
+    /// Returns the wire-encoded Proposal to publish to the group journal. The
+    /// epoch does **not** advance and there is no Welcome yet: the Welcome is
+    /// produced by whichever device sweeps this into a commit
+    /// ([`Self::commit_pending_proposals`]). Because a proposal is not
+    /// epoch-advancing, two members proposing concurrently compose instead of
+    /// forking the loser off the group.
+    ///
+    /// Role-gated locally to owner/admin, and re-gated by every peer's receipt
+    /// gate — a refused proposal is simply never stored.
+    pub fn propose_add_member_from_wire(
+        &self,
+        identity: &Identity,
+        key_package: Vec<u8>,
+    ) -> Result<Vec<u8>, FfiError> {
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.propose_add_member_from_wire(&identity.inner, &key_package)?)
+    }
+
+    /// **Propose** removing the member at `leaf_index` — the ADR-0045
+    /// proposal-path twin of [`Self::remove_member`].
+    ///
+    /// Naming **this device's own** leaf is how a member leaves and needs no
+    /// role; any other leaf needs owner or admin, and the owner's leaf is
+    /// refused for everyone. Returns the wire-encoded Proposal to publish; the
+    /// epoch does not advance.
+    pub fn propose_remove_member(
+        &self,
+        identity: &Identity,
+        leaf_index: u32,
+    ) -> Result<Vec<u8>, FfiError> {
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.propose_remove_member(&identity.inner, lakko_mls::LeafNodeIndex::new(leaf_index))?)
+    }
+
+    /// **Propose** rewriting the group's ADR-0022 role table — the ADR-0045
+    /// proposal-path twin of [`Self::set_group_roles`]. Owner-only.
+    ///
+    /// `owner` and every `admins` entry must be a 32-byte Ed25519 signature
+    /// public key. Returns the wire-encoded Proposal to publish; the epoch does
+    /// not advance.
+    pub fn propose_group_roles(
+        &self,
+        identity: &Identity,
+        owner: Vec<u8>,
+        admins: Vec<Vec<u8>>,
+    ) -> Result<Vec<u8>, FfiError> {
+        let table = role_table_from_parts(owner, admins)?;
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.propose_group_roles(&identity.inner, &table)?)
+    }
+
+    /// Every ADR-0045 proposal currently in this device's pending set, in the
+    /// order OpenMLS holds them.
+    ///
+    /// This is the committer's "N changes waiting to apply" surface and the
+    /// proposer's "did my request land" surface. Every entry reports
+    /// `stored == true` by construction — the receipt gate admits nothing else,
+    /// and OpenMLS empties the whole store on every merged commit, so the set
+    /// is exactly what a sweep would consider.
+    pub fn pending_proposals(&self) -> Result<Vec<ProposalRecord>, FfiError> {
+        let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.pending_proposals().into_iter().map(Into::into).collect())
+    }
+
+    /// This device's ADR-0045 committer rank: `Some(0)` for the owner,
+    /// `Some(k + 1)` for the `k`-th admin in the role table's canonical order,
+    /// and **`None`** for a plain member or a group with no role table.
+    ///
+    /// `None` and `Some(0)` are **not** the same thing and must never be
+    /// conflated: `Some(0)` is the owner, who acts as committer immediately,
+    /// while `None` means this device is not in the committer set at all and
+    /// must never sweep. Test for absence explicitly (Swift `if let` /
+    /// Kotlin `?.let`) — never coerce the optional to a default.
+    pub fn own_committer_rank(&self, identity: &Identity) -> Result<Option<u32>, FfiError> {
+        let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.own_committer_rank(&identity.inner))
+    }
+
+    /// Sweep the authorised pending proposals into **one** Commit (ADR-0045) —
+    /// the committer half of the design.
+    ///
+    /// Returns `Ok(None)` when nothing authorised is pending: deliberately not
+    /// an empty commit, which would advance the epoch (and race other
+    /// committers) for no effect. Otherwise the local state is already at the
+    /// new epoch when this returns, so the caller MUST durably record the
+    /// returned artifacts before publishing them (ADR-0040).
+    ///
+    /// Role-gated to owner/admin, and the sweep re-runs the ADR-0045
+    /// authorisation rule over every candidate, so this can never commit an
+    /// unauthorised proposal however the pending store was populated.
+    pub fn commit_pending_proposals(
+        &self,
+        identity: &Identity,
+    ) -> Result<Option<ProposalCommit>, FfiError> {
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        let Some(swept_commit) = g.commit_pending_proposals(&identity.inner)? else {
+            return Ok(None);
+        };
+        let welcome = match swept_commit.welcome {
+            Some(w) => Some(group::encode_message(&w)?),
+            None => None,
+        };
+        Ok(Some(ProposalCommit {
+            commit: group::encode_message(&swept_commit.commit)?,
+            welcome,
+            swept: swept_commit.swept.into_iter().map(Into::into).collect(),
+        }))
+    }
+
     /// Encrypt an application payload for the current epoch.
     pub fn create_application_message(
         &self,
@@ -778,7 +1018,9 @@ impl Group {
                 sender_leaf,
             },
             MlsIncoming::Commit => ProcessedMessage::Commit,
-            MlsIncoming::Proposal(_) => ProcessedMessage::Proposal,
+            MlsIncoming::Proposal(record) => ProcessedMessage::Proposal {
+                record: record.into(),
+            },
             // ADR-0027 Phase 1: the core variant now carries the joiner's
             // signature key; the FFI surface is enriched in Phase 2. Match the
             // new shape and drop the field for now.
@@ -870,17 +1112,7 @@ impl Group {
         owner: Vec<u8>,
         admins: Vec<Vec<u8>>,
     ) -> Result<Vec<u8>, FfiError> {
-        let owner: [u8; 32] = owner
-            .try_into()
-            .map_err(|_| FfiError::Codec("owner key must be 32 bytes".into()))?;
-        let mut admin_keys = Vec::with_capacity(admins.len());
-        for a in admins {
-            let k: [u8; 32] = a
-                .try_into()
-                .map_err(|_| FfiError::Codec("admin key must be 32 bytes".into()))?;
-            admin_keys.push(k);
-        }
-        let table = MlsRoleTable::new(owner, admin_keys);
+        let table = role_table_from_parts(owner, admins)?;
         let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
         Ok(g.set_group_roles(&identity.inner, &table)?)
     }
@@ -905,7 +1137,9 @@ impl Group {
                 sender_leaf,
             },
             MlsIncoming::Commit => ProcessedMessage::Commit,
-            MlsIncoming::Proposal(_) => ProcessedMessage::Proposal,
+            MlsIncoming::Proposal(record) => ProcessedMessage::Proposal {
+                record: record.into(),
+            },
             // ADR-0027 Phase 1: the core variant now carries the joiner's
             // signature key; the FFI surface is enriched in Phase 2. Match the
             // new shape and drop the field for now.
@@ -1096,7 +1330,9 @@ impl PublisherGroup {
                 sender_leaf,
             },
             MlsIncoming::Commit => ProcessedMessage::Commit,
-            MlsIncoming::Proposal(_) => ProcessedMessage::Proposal,
+            MlsIncoming::Proposal(record) => ProcessedMessage::Proposal {
+                record: record.into(),
+            },
             MlsIncoming::ExternalJoinProposal {
                 joiner_signature_key,
             } => ProcessedMessage::ExternalJoinProposal {
@@ -1525,7 +1761,9 @@ impl DeviceGroup {
                 }
             },
             lakko_mls::Incoming::Commit => ProcessedMessage::Commit,
-            lakko_mls::Incoming::Proposal(_) => ProcessedMessage::Proposal,
+            lakko_mls::Incoming::Proposal(record) => ProcessedMessage::Proposal {
+                record: record.into(),
+            },
             // ADR-0027 Phase 1: drop the new joiner-key field (Phase 2 enriches).
             lakko_mls::Incoming::ExternalJoinProposal {
                 joiner_signature_key,
@@ -1588,7 +1826,9 @@ impl DeviceGroup {
                 }
             },
             lakko_mls::Incoming::Commit => ProcessedMessage::Commit,
-            lakko_mls::Incoming::Proposal(_) => ProcessedMessage::Proposal,
+            lakko_mls::Incoming::Proposal(record) => ProcessedMessage::Proposal {
+                record: record.into(),
+            },
             // ADR-0027 Phase 1: drop the new joiner-key field (Phase 2 enriches).
             lakko_mls::Incoming::ExternalJoinProposal {
                 joiner_signature_key,
@@ -2087,7 +2327,11 @@ impl core::fmt::Debug for ProcessedMessage {
         match self {
             Self::Application { data, .. } => write!(f, "Application {{ {} bytes }}", data.len()),
             Self::Commit => write!(f, "Commit"),
-            Self::Proposal => write!(f, "Proposal"),
+            Self::Proposal { record } => write!(
+                f,
+                "Proposal {{ sender_leaf: {:?}, kind: {:?}, stored: {} }}",
+                record.sender_leaf, record.kind, record.stored
+            ),
             Self::ExternalJoinProposal { .. } => write!(f, "ExternalJoinProposal"),
         }
     }
@@ -3532,6 +3776,253 @@ mod tests {
             .export_secret(&charlie, "lakko/test".into(), b"ctx".to_vec(), 32)
             .unwrap();
         assert_eq!(alice_export, charlie_export);
+    }
+
+    // ========================================================================
+    // ADR-0045 — proposal + sweep + rank surface
+    // ========================================================================
+
+    /// Set up `alice` (owner) + `bob` + `charlie` in one group, returning the
+    /// three identities and their three `Group` handles.
+    fn adr0045_trio() -> ((Identity, Group), (Identity, Group), (Identity, Group)) {
+        let alice = Identity::new("alice".into()).unwrap();
+        let bob = Identity::new("bob".into()).unwrap();
+        let charlie = Identity::new("charlie".into()).unwrap();
+
+        let alice_g = Group::create(&alice).unwrap();
+        let add_bob = alice_g
+            .add_member_from_wire(&alice, bob.create_key_package().unwrap())
+            .unwrap();
+        let bob_g = Group::join_from_welcome(add_bob.welcome, &bob).unwrap();
+
+        let add_charlie = alice_g
+            .add_member_from_wire(&alice, charlie.create_key_package().unwrap())
+            .unwrap();
+        assert!(matches!(
+            bob_g
+                .process_incoming_verifying_roles(&bob, add_charlie.commit)
+                .unwrap(),
+            ProcessedMessage::Commit
+        ));
+        let charlie_g = Group::join_from_welcome(add_charlie.welcome, &charlie).unwrap();
+
+        ((alice, alice_g), (bob, bob_g), (charlie, charlie_g))
+    }
+
+    /// ADR-0045 end to end across the UniFFI boundary: the owner **proposes**
+    /// an add (epoch unchanged), a peer receives it as a stored
+    /// `ProposalRecord`, the owner sweeps it into one commit, and the peer
+    /// merges. The whole point is that `proposeAddMemberFromWire` does not
+    /// advance the epoch — only `commitPendingProposals` does.
+    #[test]
+    fn propose_then_sweep_round_trips_through_the_ffi_types() {
+        let ((alice, alice_g), (bob, bob_g), (charlie, charlie_g)) = adr0045_trio();
+        let dave = Identity::new("dave".into()).unwrap();
+        let dave_key = {
+            let kp = dave.create_key_package().unwrap();
+            key_package_signature_key(kp.clone()).unwrap()
+        };
+
+        let epoch_before = alice_g.epoch().unwrap();
+        let proposal = alice_g
+            .propose_add_member_from_wire(&alice, dave.create_key_package().unwrap())
+            .unwrap();
+        assert_eq!(
+            alice_g.epoch().unwrap(),
+            epoch_before,
+            "a proposal must not advance the epoch",
+        );
+
+        // The proposer retains its own proposal so its own sweep can see it.
+        assert_eq!(alice_g.pending_proposals().unwrap().len(), 1);
+
+        // Bob receives it through the role-verifying gate: authorised (the
+        // proposer is the owner) and therefore STORED.
+        let received = bob_g
+            .process_incoming_verifying_roles(&bob, proposal.clone())
+            .unwrap();
+        let ProcessedMessage::Proposal { record } = received else {
+            panic!("expected a Proposal, got {received:?}");
+        };
+        assert!(record.stored, "an owner's add proposal must be stored");
+        assert_eq!(record.sender_leaf, Some(alice_g.own_leaf_index().unwrap()));
+        let ProposalKind::Add { signature_key } = &record.kind else {
+            panic!("expected Add, got {:?}", record.kind);
+        };
+        assert_eq!(signature_key, &dave_key);
+        assert_eq!(bob_g.pending_proposals().unwrap().len(), 1);
+        assert_eq!(bob_g.epoch().unwrap(), epoch_before);
+
+        // Charlie receives the SAME proposal bytes through the OPEN path. That
+        // path has no role table to judge against, so it stores nothing and
+        // reports the drop as data — the honest, reachable `stored == false`.
+        let charlie_saw = charlie_g.process_incoming(&charlie, proposal).unwrap();
+        let ProcessedMessage::Proposal { record: dropped } = charlie_saw else {
+            panic!("expected a Proposal");
+        };
+        assert!(
+            !dropped.stored,
+            "the open receive path must report the proposal as dropped",
+        );
+        assert!(
+            matches!(dropped.kind, ProposalKind::Add { .. }),
+            "a dropped proposal still reports what was asked for",
+        );
+        assert!(
+            charlie_g.pending_proposals().unwrap().is_empty(),
+            "a dropped proposal must not enter the pending set",
+        );
+
+        // Alice sweeps. One commit, one welcome, one swept record.
+        let swept = alice_g
+            .commit_pending_proposals(&alice)
+            .unwrap()
+            .expect("a pending add must produce a commit");
+        assert_eq!(swept.swept.len(), 1);
+        assert!(matches!(swept.swept[0].kind, ProposalKind::Add { .. }));
+        assert!(swept.swept[0].stored);
+        let welcome = swept
+            .welcome
+            .clone()
+            .expect("an add sweep carries a welcome");
+        assert!(
+            alice_g.epoch().unwrap() > epoch_before,
+            "the sweep advances"
+        );
+
+        assert!(matches!(
+            bob_g
+                .process_incoming_verifying_roles(&bob, swept.commit)
+                .unwrap(),
+            ProcessedMessage::Commit
+        ));
+        assert!(
+            bob_g.pending_proposals().unwrap().is_empty(),
+            "merging the commit empties the pending set",
+        );
+        let dave_g = Group::join_from_welcome(welcome, &dave).unwrap();
+        assert_eq!(alice_g.member_count().unwrap(), 4);
+        assert_eq!(bob_g.member_count().unwrap(), 4);
+        assert_eq!(dave_g.member_count().unwrap(), 4);
+
+        // Nothing left to sweep => no commit at all, NOT an empty one.
+        assert!(alice_g.commit_pending_proposals(&alice).unwrap().is_none());
+    }
+
+    /// The committer rank must distinguish "owner" (`Some(0)`) from "not in the
+    /// committer set" (`None`). Collapsing `None` into `0` would make every
+    /// plain member believe it is the owner and sweep.
+    #[test]
+    fn committer_rank_never_conflates_absent_with_rank_zero() {
+        let ((alice, alice_g), (bob, bob_g), (charlie, charlie_g)) = adr0045_trio();
+
+        assert_eq!(
+            alice_g.own_committer_rank(&alice).unwrap(),
+            Some(0),
+            "the owner is rank 0",
+        );
+        assert_eq!(
+            bob_g.own_committer_rank(&bob).unwrap(),
+            None,
+            "a plain member has NO rank — not rank 0",
+        );
+        assert_eq!(charlie_g.own_committer_rank(&charlie).unwrap(), None);
+
+        // Promote Bob to admin: he moves from None to Some(1), which is neither
+        // the owner's 0 nor his previous absence.
+        let owner_key = alice.signature_public_key();
+        let promote = alice_g
+            .set_group_roles(&alice, owner_key.clone(), vec![bob.signature_public_key()])
+            .unwrap();
+        for (id, g) in [(&bob, &bob_g), (&charlie, &charlie_g)] {
+            assert!(matches!(
+                g.process_incoming_verifying_roles(id, promote.clone())
+                    .unwrap(),
+                ProcessedMessage::Commit
+            ));
+        }
+        assert_eq!(alice_g.own_committer_rank(&alice).unwrap(), Some(0));
+        assert_eq!(bob_g.own_committer_rank(&bob).unwrap(), Some(1));
+        assert_eq!(
+            charlie_g.own_committer_rank(&charlie).unwrap(),
+            None,
+            "a plain member stays absent while an admin gains a rank",
+        );
+    }
+
+    /// A `Remove`'s target leaf and an `Add`'s signature key live in **separate
+    /// enum variants**, so no caller can read one as the other. This pins the
+    /// classification a client's UI branches on.
+    #[test]
+    fn add_and_remove_payloads_are_not_interchangeable() {
+        let ((alice, alice_g), (bob, bob_g), _charlie) = adr0045_trio();
+        let dave = Identity::new("dave".into()).unwrap();
+        let dave_key = key_package_signature_key(dave.create_key_package().unwrap()).unwrap();
+
+        let add = alice_g
+            .propose_add_member_from_wire(&alice, dave.create_key_package().unwrap())
+            .unwrap();
+        let ProcessedMessage::Proposal { record: add_rec } =
+            bob_g.process_incoming_verifying_roles(&bob, add).unwrap()
+        else {
+            panic!("expected a Proposal");
+        };
+        match &add_rec.kind {
+            ProposalKind::Add { signature_key } => assert_eq!(signature_key, &dave_key),
+            other => panic!("an Add must classify as Add, got {other:?}"),
+        }
+
+        // Bob proposes his OWN removal — leaving, which needs no role.
+        let bob_leaf = bob_g.own_leaf_index().unwrap();
+        let leave = bob_g.propose_remove_member(&bob, bob_leaf).unwrap();
+        let ProcessedMessage::Proposal { record: rm_rec } = alice_g
+            .process_incoming_verifying_roles(&alice, leave)
+            .unwrap()
+        else {
+            panic!("expected a Proposal");
+        };
+        assert!(rm_rec.stored, "a member may always propose its own removal");
+        match &rm_rec.kind {
+            ProposalKind::Remove { target_leaf } => assert_eq!(*target_leaf, bob_leaf),
+            other => panic!("a Remove must classify as Remove, got {other:?}"),
+        }
+    }
+
+    /// A plain member's unauthorised proposal is refused **locally**, before
+    /// anything reaches the wire — so a client never publishes a proposal every
+    /// peer would drop.
+    #[test]
+    fn a_plain_member_cannot_mint_an_unauthorised_proposal() {
+        let ((alice, alice_g), _bob, (charlie, charlie_g)) = adr0045_trio();
+        let dave = Identity::new("dave".into()).unwrap();
+
+        assert!(
+            charlie_g
+                .propose_add_member_from_wire(&charlie, dave.create_key_package().unwrap())
+                .is_err(),
+            "a plain member may not propose an Add",
+        );
+        assert!(
+            charlie_g
+                .propose_remove_member(&charlie, alice_g.own_leaf_index().unwrap())
+                .is_err(),
+            "nobody may propose removing the owner",
+        );
+        assert!(
+            charlie_g
+                .propose_group_roles(
+                    &charlie,
+                    charlie.signature_public_key(),
+                    vec![alice.signature_public_key()],
+                )
+                .is_err(),
+            "only the owner may propose a role-table rewrite",
+        );
+        assert!(
+            charlie_g.commit_pending_proposals(&charlie).is_err(),
+            "a plain member may not sweep",
+        );
+        assert!(charlie_g.pending_proposals().unwrap().is_empty());
     }
 
     /// `Identity::from_seed` is deterministic for the same input
