@@ -12,6 +12,16 @@
 //! - [`Group::create_application_message`] — encrypt application data
 //! - [`Group::process_incoming`] — decrypt / advance the state machine
 //! - [`Group::export_secret`] — derive a key for non-MLS uses (SFrame, etc.)
+//!
+//! Membership changes come in two shapes. The **direct-commit** shape
+//! ([`Group::add_member`], [`Group::remove_member`], [`Group::set_group_roles`],
+//! [`Group::approve_external_join`]) is the original one and is destined to go
+//! (ADR-0045). The **proposal** shape that replaces it is
+//! [`Group::propose_add_member`] / [`Group::propose_remove_member`] /
+//! [`Group::propose_group_roles`], with one designated owner-or-admin — see
+//! [`crate::group_roles::committer_rank`] — turning the pending set into a
+//! single Commit via [`Group::commit_pending_proposals`]. The authorisation
+//! rule both shapes are judged by lives in [`crate::group_proposals`].
 
 use openmls::extensions::{
     Extension, ExtensionType, Extensions, RequiredCapabilitiesExtension, UnknownExtension,
@@ -28,6 +38,9 @@ use tls_codec::{Deserialize as _, Serialize as _};
 use zeroize::Zeroizing;
 
 use crate::error::{Error, Result};
+use crate::group_proposals::{
+    authorise, classify, pubkey_at_leaf, ProposalKind, ProposalRecord, Proposer,
+};
 use crate::group_roles::{Role, RoleTable, ROLE_EXTENSION_TYPE};
 use crate::identity::Identity;
 
@@ -104,6 +117,23 @@ pub struct MemberAddition {
     pub welcome: MlsMessageOut,
 }
 
+/// Output of [`Group::commit_pending_proposals`] — the ADR-0045 sweep.
+///
+/// Mirrors [`MemberAddition`]'s shape so ADR-0040's durable pending-commit
+/// outbox wraps it unchanged, with two differences the proposal path forces:
+/// the Welcome is **optional** (a sweep that carried no Add produces none), and
+/// `swept` names what the commit actually carried so the caller can mark those
+/// requests applied.
+pub struct ProposalCommit {
+    /// Commit — distribute to all existing members.
+    pub commit: MlsMessageOut,
+    /// Welcome — distribute to the newly added members, when the sweep carried
+    /// at least one `Add`. ADR-0040's two-artifact outbox coverage applies.
+    pub welcome: Option<MlsMessageOut>,
+    /// The proposals this commit carried, in sweep order.
+    pub swept: Vec<ProposalRecord>,
+}
+
 /// One member's identity snapshot at the current epoch
 /// (Phase 1.18h). Returned by [`Group::members`].
 ///
@@ -144,8 +174,16 @@ pub enum Incoming {
     /// A commit was processed and merged into the group state. The local
     /// view advanced to a new epoch.
     Commit,
-    /// A standalone proposal was processed (no state advance).
-    Proposal,
+    /// A standalone member proposal was processed (ADR-0045). No state advance
+    /// — a proposal is not epoch-advancing, which is the whole point: two
+    /// members proposing concurrently compose instead of forking the loser.
+    ///
+    /// The record names the proposer's leaf, what was proposed, and whether the
+    /// ADR-0045 receipt gate retained it for a later sweep
+    /// ([`ProposalRecord::stored`]). `stored == false` is the visible form of a
+    /// refusal — see that field's documentation for why a refused proposal is
+    /// data rather than an error.
+    Proposal(ProposalRecord),
     /// A non-member's external join proposal was processed and (unless the
     /// per-group cap is hit) retained for an owner/admin decision (ADR-0027,
     /// G-3). `joiner_signature_key` is the prospective joiner's leaf signature
@@ -614,6 +652,317 @@ impl Group {
         encode_message(&commit)
     }
 
+    // ========================================================================
+    // ADR-0045 — proposal-based membership changes
+    //
+    // A member PROPOSES; one designated owner-or-admin SWEEPS the pending set
+    // into a single Commit. Because a proposal does not advance the epoch, two
+    // members acting concurrently produce two proposals that compose, instead
+    // of two commits framed at the same epoch of which one is rejected by
+    // everyone while its author has already merged it locally (G-38 residual 1).
+    //
+    // The four direct-commit paths above — `add_member`, `remove_member`,
+    // `set_group_roles`, `approve_external_join` — are DESTINED TO GO once the
+    // three clients have migrated onto this API (ADR-0045 sprints S4-S7). They
+    // are deliberately left in place and unchanged for now so the clients keep
+    // building; ADR-0045 forbids keeping them as a permanent fallback, because
+    // a second ungated route into group membership is the hazard rebuilt.
+    // ========================================================================
+
+    /// The role table this group enforces, or an error naming why a
+    /// proposal-based operation cannot run without one.
+    ///
+    /// A group with no `0xFF02` table (legacy / `create_with_id`, e.g. a
+    /// `PublisherGroup` or a call group) has no owner, therefore no committer,
+    /// therefore nothing to sweep a proposal — ADR-0045 leaves such a group on
+    /// direct commits rather than inventing a committer for it. Refusing here
+    /// keeps a proposal from being published into a group where nobody would
+    /// ever commit it.
+    fn role_table_or_refuse(&self, op: &str) -> Result<RoleTable> {
+        self.group_roles().ok_or_else(|| {
+            Error::Group(format!(
+                "{op} refused: this group carries no role table, so it has no committer"
+            ))
+        })
+    }
+
+    /// Run the ADR-0045 rule locally for something *this* device is about to
+    /// propose. A courtesy check that keeps our own store clean and gives the
+    /// user an immediate error; the enforcing copies are the peers' receipt gate
+    /// and commit gate, which do not trust us.
+    fn authorise_own_proposal(&self, identity: &Identity, kind: &ProposalKind) -> Result<()> {
+        let table = self.role_table_or_refuse("proposal")?;
+        let members = self.members();
+        let proposer = Proposer {
+            leaf: self.own_leaf_index().u32(),
+            pubkey: identity.signature_public_key(),
+        };
+        authorise(&table, &members, Some(proposer), kind)
+    }
+
+    /// Propose adding a member by their published [`KeyPackage`] (ADR-0045).
+    ///
+    /// Returns the wire-encoded Proposal to publish to the group journal. The
+    /// proposal is also retained in this device's own pending set, so a
+    /// committer running on this device sweeps it like any other. **The epoch
+    /// does not advance** — nothing to merge, nothing to roll back, and no
+    /// Welcome yet: the Welcome is produced by whichever device commits.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Group`] when the group has no role table, when this device's
+    /// role does not authorise an add, or on any OpenMLS-side failure.
+    pub fn propose_add_member(
+        &mut self,
+        identity: &Identity,
+        key_package: KeyPackage,
+    ) -> Result<Vec<u8>> {
+        let kind = ProposalKind::Add {
+            signature_key: key_package.leaf_node().signature_key().as_slice().to_vec(),
+        };
+        self.authorise_own_proposal(identity, &kind)?;
+        let (proposal, _proposal_ref) = self
+            .inner
+            .propose_add_member(&identity.provider, &identity.signature_keys, &key_package)
+            .map_err(|e| Error::Group(format!("propose_add_member: {e:?}")))?;
+        encode_message(&proposal)
+    }
+
+    /// Propose adding a member from a wire-format `KeyPackageIn` — the
+    /// proposal-path twin of [`Group::add_member_from_wire`].
+    ///
+    /// # Errors
+    ///
+    /// [`Error::KeyPackage`] for validation failures, otherwise as
+    /// [`Group::propose_add_member`].
+    pub fn propose_add_member_from_wire(
+        &mut self,
+        identity: &Identity,
+        key_package_bytes: &[u8],
+    ) -> Result<Vec<u8>> {
+        let kp_in = crate::key_package::deserialize(key_package_bytes)?;
+        let validated = kp_in
+            .validate(identity.provider.crypto(), ProtocolVersion::Mls10)
+            .map_err(|e| Error::KeyPackage(format!("validate: {e:?}")))?;
+        self.propose_add_member(identity, validated)
+    }
+
+    /// Propose removing the member at `leaf` (ADR-0045).
+    ///
+    /// Naming **your own** leaf is how a member leaves, and needs no role; any
+    /// other leaf needs owner or admin, and the owner's leaf is refused for
+    /// everyone. Returns the wire-encoded Proposal to publish.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Group`] when the group has no role table, when this device's
+    /// role does not authorise the removal, or on any OpenMLS-side failure.
+    pub fn propose_remove_member(
+        &mut self,
+        identity: &Identity,
+        leaf: LeafNodeIndex,
+    ) -> Result<Vec<u8>> {
+        let kind = ProposalKind::Remove {
+            target_leaf: leaf.u32(),
+        };
+        self.authorise_own_proposal(identity, &kind)?;
+        let (proposal, _proposal_ref) = self
+            .inner
+            .propose_remove_member(&identity.provider, &identity.signature_keys, leaf)
+            .map_err(|e| Error::Group(format!("propose_remove_member: {e:?}")))?;
+        encode_message(&proposal)
+    }
+
+    /// Propose rewriting the ADR-0022 role table (ADR-0045) — the proposal-path
+    /// twin of [`Group::set_group_roles`]. Owner-only, enforced locally here and
+    /// again by every peer's receipt gate and commit gate.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Group`] when the group has no role table, when this device is
+    /// not the owner, or on any OpenMLS-side failure.
+    pub fn propose_group_roles(
+        &mut self,
+        identity: &Identity,
+        roles: &RoleTable,
+    ) -> Result<Vec<u8>> {
+        self.authorise_own_proposal(identity, &ProposalKind::RoleChange)?;
+        // As in `set_group_roles`: a GroupContextExtensions proposal replaces
+        // the WHOLE extension set, so the required-capabilities declaration has
+        // to be re-stated alongside the new table.
+        let exts = Extensions::from_vec(vec![
+            role_required_capabilities(),
+            Extension::Unknown(ROLE_EXTENSION_TYPE, UnknownExtension(roles.encode())),
+        ])
+        .map_err(|e| Error::Group(format!("build role extensions: {e:?}")))?;
+        let (proposal, _proposal_ref) = self
+            .inner
+            .propose_group_context_extensions(&identity.provider, exts, &identity.signature_keys)
+            .map_err(|e| Error::Group(format!("propose_group_context_extensions: {e:?}")))?;
+        encode_message(&proposal)
+    }
+
+    /// Every proposal currently in this device's pending set, in the order
+    /// OpenMLS holds them (ADR-0045).
+    ///
+    /// This is the committer's "N changes waiting to apply" surface and the
+    /// proposer's "did my request land" surface. Every entry reports
+    /// `stored == true` by construction: the receipt gate admits nothing else,
+    /// and OpenMLS empties the whole store on every merged commit, so the set is
+    /// exactly what a sweep would consider.
+    #[must_use]
+    pub fn pending_proposals(&self) -> Vec<ProposalRecord> {
+        self.inner
+            .pending_proposals()
+            .map(|qp| ProposalRecord {
+                sender_leaf: match qp.sender() {
+                    Sender::Member(idx) => Some(idx.u32()),
+                    _ => None,
+                },
+                kind: classify(qp.proposal()),
+                stored: true,
+            })
+            .collect()
+    }
+
+    /// This device's ADR-0045 committer rank in the group: `0` for the owner,
+    /// `k+1` for the `k`-th admin, `None` for a plain member or a group with no
+    /// role table. See [`crate::group_roles::committer_rank`].
+    #[must_use]
+    pub fn own_committer_rank(&self, identity: &Identity) -> Option<u32> {
+        let table = self.group_roles()?;
+        crate::group_roles::committer_rank(&table, identity.signature_public_key())
+    }
+
+    /// Sweep the authorised pending proposals into **one** Commit (ADR-0045).
+    ///
+    /// This is the committer half of ADR-0045: the device that has decided it is
+    /// the acting committer turns everything pending into a single epoch
+    /// advance, so N concurrent membership intents cost one commit rather than N
+    /// racing ones. It keeps the eager-merge-then-publish shape of
+    /// [`Group::add_member`] / [`Group::remove_member`] so ADR-0040's durable
+    /// pending-commit outbox wraps it unchanged: the local state is at N+1 when
+    /// this returns, and the caller must durably record the returned artifacts
+    /// before publishing them.
+    ///
+    /// Returns `Ok(None)` when nothing authorised is pending — deliberately
+    /// **not** an empty commit, which would advance the epoch (and race other
+    /// committers) for no effect. [`ProposalCommit::swept`] is read back off the
+    /// staged commit, so it reports what the commit carries rather than what the
+    /// caller predicted it would. OpenMLS's own `commit_to_pending_proposals`
+    /// does emit one, which is one of two reasons it is not used here; the other
+    /// is that it hardcodes the proposal filter to `|_| true`.
+    ///
+    /// The sweep filter re-runs the ADR-0045 rule against the table as it stands
+    /// now. `CommitBuilder::build` requires a filter and the one ADR-0045
+    /// rejects is OpenMLS's own `|_| true`, so this is mandatory rather than
+    /// belt-and-braces; it is what makes this method unable to commit an
+    /// unauthorised proposal no matter which of the store's three writers put it
+    /// there. Excluded proposals are dropped by the merge (OpenMLS empties the
+    /// store on every merged commit), so their authors re-propose.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Group`] when the group has no role table, when this device's
+    /// role does not authorise it to commit, or on any OpenMLS-side failure.
+    pub fn commit_pending_proposals(
+        &mut self,
+        identity: &Identity,
+    ) -> Result<Option<ProposalCommit>> {
+        let table = self.role_table_or_refuse("sweep")?;
+        if !table.can_administer(identity.signature_public_key()) {
+            return Err(Error::Group(
+                "sweep refused: this device is not owner or admin".into(),
+            ));
+        }
+        let members = self.members();
+
+        // Nothing authorised pending => emit no commit at all. This is a
+        // prediction of what the filter below will keep, and it is used ONLY to
+        // decide emptiness; `swept` is read back off the staged commit
+        // afterwards so the caller is told what the commit really carried
+        // rather than what we expected it to.
+        let nothing_to_sweep = !self.inner.pending_proposals().any(|qp| {
+            let leaf = match qp.sender() {
+                Sender::Member(idx) => Some(idx.u32()),
+                _ => None,
+            };
+            let proposer = leaf.and_then(|leaf| {
+                pubkey_at_leaf(&members, leaf).map(|pubkey| Proposer { leaf, pubkey })
+            });
+            authorise(&table, &members, proposer, &classify(qp.proposal())).is_ok()
+        });
+        if nothing_to_sweep {
+            return Ok(None);
+        }
+
+        let filter_members = members;
+        let filter_table = table;
+        let bundle = self
+            .inner
+            .commit_builder()
+            .consume_proposal_store(true)
+            .load_psks(identity.provider.storage())
+            .map_err(|e| Error::Group(format!("sweep load_psks: {e:?}")))?
+            .build(
+                identity.provider.rand(),
+                identity.provider.crypto(),
+                &identity.signature_keys,
+                |qp| {
+                    let leaf = match qp.sender() {
+                        Sender::Member(idx) => Some(idx.u32()),
+                        _ => None,
+                    };
+                    let proposer = leaf.and_then(|leaf| {
+                        pubkey_at_leaf(&filter_members, leaf)
+                            .map(|pubkey| Proposer { leaf, pubkey })
+                    });
+                    authorise(
+                        &filter_table,
+                        &filter_members,
+                        proposer,
+                        &classify(qp.proposal()),
+                    )
+                    .is_ok()
+                },
+            )
+            .map_err(|e| Error::Group(format!("sweep build: {e:?}")))?
+            .stage_commit(&identity.provider)
+            .map_err(|e| Error::Group(format!("sweep stage_commit: {e:?}")))?;
+
+        // Read what the commit ACTUALLY carried off the staged commit, before
+        // merging clears it. Deriving this rather than predicting it means the
+        // report and the commit cannot disagree.
+        let swept: Vec<ProposalRecord> = self
+            .inner
+            .pending_commit()
+            .map(|staged| {
+                staged
+                    .queued_proposals()
+                    .map(|qp| ProposalRecord {
+                        sender_leaf: match qp.sender() {
+                            Sender::Member(idx) => Some(idx.u32()),
+                            _ => None,
+                        },
+                        kind: classify(qp.proposal()),
+                        stored: true,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let (commit, welcome, _group_info) = bundle.into_messages();
+        self.inner
+            .merge_pending_commit(&identity.provider)
+            .map_err(|e| Error::Group(format!("merge_pending_commit: {e:?}")))?;
+
+        Ok(Some(ProposalCommit {
+            commit,
+            welcome,
+            swept,
+        }))
+    }
+
     /// Apply an incoming conversation-group commit, **enforcing the ADR-0022
     /// role policy**. When the group carries a role table (every group created
     /// after ADR-0022 does, owner-bootstrap option A), a membership- or
@@ -626,16 +975,30 @@ impl Group {
     /// Finding 2 — a self-promoting commit is judged against the table it
     /// inherits, never the one it writes):
     ///
-    /// * add a member               -> committer is owner or admin
-    /// * remove a non-owner member  -> committer is owner or admin
-    /// * remove the owner           -> refused (the owner is unremovable)
-    /// * remove only your own leaf  -> always allowed (leaving)
-    /// * change the role table       -> committer is the owner only
+    /// Since [ADR-0045] the rule is applied per **proposal**, judged against the
+    /// role of whoever authored it — see [`crate::group_proposals::authorise`]
+    /// for the table. A commit's by-**value** proposals carry the committer as
+    /// their sender, so every direct-commit path keeps behaving exactly as it
+    /// did under ADR-0022; a by-**reference** proposal is judged against its
+    /// original proposer, which is what stops an honest committer's sweep from
+    /// blessing a plain member's injected Add.
+    ///
+    /// This method also carries ADR-0045's **receipt gate**: an incoming
+    /// standalone proposal is retained in the pending set only if the same rule
+    /// authorises its sender, and dropped otherwise, so the store this gate
+    /// later sweeps can never hold anything unauthorised. A group with no role
+    /// table stores nothing at all — it keeps direct commits, has no committer
+    /// to elect and no gate to enforce (ADR-0045, "No migration").
     ///
     /// # Errors
     ///
-    /// [`Error::Group`] when the committer's role does not authorise the commit
-    /// (left un-merged), plus the usual decode / process errors.
+    /// [`Error::Group`] when a proposal the commit carries is not authorised for
+    /// its author (the commit is left un-merged), plus the usual decode /
+    /// process errors. A refused standalone *proposal* is **not** an error — it
+    /// surfaces as [`Incoming::Proposal`] with `stored == false`, because
+    /// dropping it already is the refusal and no group state was touched.
+    ///
+    /// [ADR-0045]: ../../../docs/adr/0045-remote-commit-epoch-fork.md
     pub fn process_incoming_verifying_roles(
         &mut self,
         identity: &Identity,
@@ -668,24 +1031,74 @@ impl Group {
                 // an open (legacy) group, no enforcement.
                 if let Some(table) = self.group_roles() {
                     let members = self.members();
-                    let committer_pubkey: Option<Vec<u8>> = committer_leaf.and_then(|leaf| {
-                        members
-                            .iter()
-                            .find(|m| m.leaf_index == leaf)
-                            .map(|m| m.signature_public_key.clone())
-                    });
-                    authorise_role_commit(&table, &members, committer_pubkey.as_deref(), &staged)?;
+                    authorise_role_commit(&table, &members, &staged)?;
                 }
                 self.inner
                     .merge_staged_commit(&identity.provider, *staged)
                     .map_err(|e| Error::Group(format!("merge_staged_commit: {e:?}")))?;
                 Ok(Incoming::Commit)
             },
-            ProcessedMessageContent::ProposalMessage(_) => Ok(Incoming::Proposal),
+            ProcessedMessageContent::ProposalMessage(qp) => {
+                self.gate_incoming_proposal(identity, *qp)
+            },
             ProcessedMessageContent::ExternalJoinProposalMessage(qp) => {
                 self.retain_external_join(&qp)
             },
         }
+    }
+
+    /// ADR-0045 **receipt gate** — retain an incoming standalone proposal only
+    /// when the role table authorises its sender, and drop it otherwise.
+    ///
+    /// Gating here, rather than only filtering at sweep time, does more than
+    /// keep the store clean. A Commit carries a member proposal **by
+    /// reference**, and OpenMLS resolves that reference against the receiver's
+    /// own store — so a peer that dropped a proposal here cannot apply a commit
+    /// that carries it either, failing with `InvalidCommit(MissingProposal)`
+    /// before any Lakko gate runs. Dropping at receipt is therefore a boundary
+    /// in its own right, not merely hygiene. (It also has to be a drop rather
+    /// than a later eviction: `ProposalStore::remove` is `pub(crate)`, so
+    /// anything admitted can only be cleared wholesale.)
+    ///
+    /// A group with **no role table** stores nothing — see
+    /// [`Self::process_incoming_verifying_roles`].
+    fn gate_incoming_proposal(
+        &mut self,
+        identity: &Identity,
+        qp: QueuedProposal,
+    ) -> Result<Incoming> {
+        let sender_leaf = match qp.sender() {
+            Sender::Member(idx) => Some(idx.u32()),
+            _ => None,
+        };
+        let kind = classify(qp.proposal());
+        let refused = |kind: ProposalKind| {
+            Ok(Incoming::Proposal(ProposalRecord {
+                sender_leaf,
+                kind,
+                stored: false,
+            }))
+        };
+
+        let Some(table) = self.group_roles() else {
+            return refused(kind);
+        };
+        let members = self.members();
+        let proposer = sender_leaf.and_then(|leaf| {
+            pubkey_at_leaf(&members, leaf).map(|pubkey| Proposer { leaf, pubkey })
+        });
+        if authorise(&table, &members, proposer, &kind).is_err() {
+            return refused(kind);
+        }
+
+        self.inner
+            .store_pending_proposal(identity.provider.storage(), qp)
+            .map_err(|e| Error::Group(format!("store_pending_proposal: {e:?}")))?;
+        Ok(Incoming::Proposal(ProposalRecord {
+            sender_leaf,
+            kind,
+            stored: true,
+        }))
     }
 
     /// Encrypt an application payload for the current group epoch.
@@ -745,7 +1158,19 @@ impl Group {
                     .map_err(|e| Error::Group(format!("merge_staged_commit: {e:?}")))?;
                 Ok(Incoming::Commit)
             },
-            ProcessedMessageContent::ProposalMessage(_) => Ok(Incoming::Proposal),
+            // ADR-0045: this is the OPEN path (DeviceGroups, call groups, and
+            // any group with no role table). It has no role table to judge a
+            // proposer against, so it deliberately stores NOTHING — surfacing
+            // the proposal as data while leaving the pending set untouched.
+            // Storing here would be exactly the ungated store ADR-0045 exists
+            // to prevent.
+            ProcessedMessageContent::ProposalMessage(qp) => {
+                Ok(Incoming::Proposal(ProposalRecord {
+                    sender_leaf,
+                    kind: classify(qp.proposal()),
+                    stored: false,
+                }))
+            },
             ProcessedMessageContent::ExternalJoinProposalMessage(qp) => {
                 self.retain_external_join(&qp)
             },
@@ -822,7 +1247,19 @@ impl Group {
                     .map_err(|e| Error::Group(format!("merge_staged_commit: {e:?}")))?;
                 Ok(Incoming::Commit)
             },
-            ProcessedMessageContent::ProposalMessage(_) => Ok(Incoming::Proposal),
+            // ADR-0045: this is the OPEN path (DeviceGroups, call groups, and
+            // any group with no role table). It has no role table to judge a
+            // proposer against, so it deliberately stores NOTHING — surfacing
+            // the proposal as data while leaving the pending set untouched.
+            // Storing here would be exactly the ungated store ADR-0045 exists
+            // to prevent.
+            ProcessedMessageContent::ProposalMessage(qp) => {
+                Ok(Incoming::Proposal(ProposalRecord {
+                    sender_leaf,
+                    kind: classify(qp.proposal()),
+                    stored: false,
+                }))
+            },
             ProcessedMessageContent::ExternalJoinProposalMessage(qp) => {
                 self.retain_external_join(&qp)
             },
@@ -969,63 +1406,52 @@ fn role_required_capabilities() -> Extension {
 
 /// Enforce the ADR-0022 role policy on a staged commit BEFORE it is merged,
 /// against the **pre-merge** `table`. Returns `Err` (the commit must NOT be
-/// merged) when the committer's role does not authorise the commit's effect.
-/// `committer_pubkey` is the committer leaf's pre-merge signature key (`None`
-/// for an external / unresolved sender — treated as unauthorised).
+/// merged) when any proposal the commit carries is not authorised for its
+/// author.
 ///
-/// Note on "leaving": MLS (OpenMLS `CannotRemoveSelf`) forbids a member from
-/// committing the removal of their **own** leaf, so a committer is never inside
-/// their own commit's removed set — a self-Remove-by-self never reaches this
-/// gate. A member leaves by an admin/owner committing the removal (authorised
-/// here normally) or, as a follow-up, a self-remove proposal an admin commits.
+/// **This is the ADR-0045 security boundary.** The rule is applied per proposal
+/// rather than once per commit, because ADR-0045 lets a member's proposal be
+/// swept by someone else's commit: judging only the committer would let a plain
+/// member inject an `Add` that an honest owner's sweep then blesses. Each
+/// `QueuedProposal` is judged against **its own sender**, which is:
+///
+/// * for a by-**reference** proposal, the original proposer — the new check;
+/// * for a by-**value** proposal, the committer itself — byte-for-byte the
+///   pre-ADR-0045 behaviour, so every direct-commit path is unchanged.
+///
+/// The rule itself lives once, in [`crate::group_proposals::authorise`]. A
+/// commit carrying no proposals at all (a bare `self_update` path) is
+/// authorised, as it was before.
+///
+/// Note on "leaving": OpenMLS `CannotRemoveSelf` forbids a member from
+/// *committing* the removal of its own leaf, so a committer is never inside its
+/// own commit's removed set. ADR-0045 makes leaving reachable the other way —
+/// the member *proposes* it and an admin commits — which the shared rule
+/// handles for both `SelfRemove` and a plain `Remove` naming the proposer's own
+/// leaf.
 fn authorise_role_commit(
     table: &RoleTable,
     members: &[MemberRecord],
-    committer_pubkey: Option<&[u8]>,
     staged: &StagedCommit,
 ) -> Result<()> {
-    let has_add = staged.add_proposals().next().is_some();
-    let removed_leaves: Vec<LeafNodeIndex> = staged
-        .remove_proposals()
-        .map(|qrp| qrp.remove_proposal().removed())
-        .collect();
-    let removes_owner = removed_leaves.iter().any(|leaf| {
-        members
-            .iter()
-            .find(|m| m.leaf_index == leaf.u32())
-            .is_some_and(|m| table.is_owner(&m.signature_public_key))
-    });
-    let has_role_change = staged
-        .queued_proposals()
-        .any(|qp| matches!(qp.proposal(), Proposal::GroupContextExtensions(_)));
-
-    let committer_is_owner = committer_pubkey.is_some_and(|pk| table.is_owner(pk));
-    let committer_can_admin = committer_pubkey.is_some_and(|pk| table.can_administer(pk));
-
-    // A role-table change (GroupContextExtensions) is owner-only.
-    if has_role_change && !committer_is_owner {
-        return Err(Error::Group(
-            "role-table change refused: committer is not the owner".into(),
-        ));
+    for qp in staged.queued_proposals() {
+        // The proposal's own author: the sender OpenMLS recorded for it. A
+        // by-value proposal carries the committer; a by-reference one carries
+        // whoever broadcast it. Anything that is not a resolvable member leaf
+        // (an external sender, a leaf not in the pre-merge roster) yields no
+        // `Proposer`, and `authorise` refuses every kind in that case.
+        let author_leaf = match qp.sender() {
+            Sender::Member(idx) => Some(idx.u32()),
+            // An external sender (`NewMemberCommit` on an external commit,
+            // `External`, `NewMemberProposal`) resolves to no member leaf, so
+            // `authorise` refuses — which is what the pre-ADR-0045 gate did
+            // with an unresolvable committer too.
+            _ => None,
+        };
+        let author = author_leaf
+            .and_then(|leaf| pubkey_at_leaf(members, leaf).map(|pubkey| Proposer { leaf, pubkey }));
+        authorise(table, members, author, &classify(qp.proposal()))?;
     }
-    // The owner is unremovable, by anyone.
-    if removes_owner {
-        return Err(Error::Group(
-            "removal refused: the group owner cannot be removed".into(),
-        ));
-    }
-    // Any other removal, and any add, needs owner / admin.
-    if !removed_leaves.is_empty() && !committer_can_admin {
-        return Err(Error::Group(
-            "removal refused: committer is not owner or admin".into(),
-        ));
-    }
-    if has_add && !committer_can_admin {
-        return Err(Error::Group(
-            "add refused: committer is not owner or admin".into(),
-        ));
-    }
-
     Ok(())
 }
 
@@ -1068,6 +1494,382 @@ pub fn epoch_of_message(bytes: &[u8]) -> Option<u64> {
     let msg = MlsMessageIn::tls_deserialize(&mut slice).ok()?;
     let proto = msg.try_into_protocol_message().ok()?;
     Some(proto.epoch().as_u64())
+}
+
+// ============================================================================
+// ADR-0045 — the adversary half of the proposal gate's property tests.
+//
+// These live in the lib (not `tests/`) because a genuine test of the receipt
+// gate and the sweep filter needs an adversary that SKIPS them, and the crate
+// deliberately publishes no ungated store / commit-all entry point for one to
+// use. The `#[cfg(test)]` helpers below are that adversary: they are exactly
+// what a modified client would do — `propose_*` without the local check,
+// `store_pending_proposal` without the receipt gate, and `CommitBuilder::build`
+// with OpenMLS's own `|_| true` filter, which is what
+// `commit_to_pending_proposals` hardcodes.
+//
+// The structural reason a peer can never meet an unauthorised proposal from an
+// HONEST client is worth stating: the ADR-0022 role table lives in the
+// authenticated GroupContext, so two devices at the same epoch necessarily
+// agree on every role, and a proposal framed at any other epoch is refused by
+// ValSem003 before a gate is consulted. An unauthorised proposal at a matching
+// epoch therefore always means a modified client — which is exactly the
+// adversary modelled here.
+// ============================================================================
+
+#[cfg(test)]
+impl Group {
+    /// **Adversary.** Propose an Add with no local authorisation check.
+    fn ungated_propose_add(&mut self, identity: &Identity, kp: KeyPackage) -> Result<Vec<u8>> {
+        let (proposal, _r) = self
+            .inner
+            .propose_add_member(&identity.provider, &identity.signature_keys, &kp)
+            .map_err(|e| Error::Group(format!("ungated_propose_add: {e:?}")))?;
+        encode_message(&proposal)
+    }
+
+    /// **Adversary.** Store an incoming proposal with no receipt gate.
+    fn ungated_store(&mut self, identity: &Identity, bytes: &[u8]) -> Result<()> {
+        let mls_in = decode_message(bytes)?;
+        let protocol = mls_in
+            .try_into_protocol_message()
+            .map_err(|e| Error::Message(format!("not a protocol message: {e:?}")))?;
+        let processed = self
+            .inner
+            .process_message(&identity.provider, protocol)
+            .map_err(|e| Error::Message(format!("process_message: {e:?}")))?;
+        let ProcessedMessageContent::ProposalMessage(qp) = processed.into_content() else {
+            return Err(Error::Group("not a proposal".into()));
+        };
+        self.inner
+            .store_pending_proposal(identity.provider.storage(), *qp)
+            .map_err(|e| Error::Group(format!("ungated_store: {e:?}")))
+    }
+
+    /// **Adversary.** Sweep the whole pending store with no filter — OpenMLS's
+    /// `commit_to_pending_proposals` behaviour, which ADR-0045 rejects.
+    fn ungated_sweep(&mut self, identity: &Identity) -> Result<MlsMessageOut> {
+        let bundle = self
+            .inner
+            .commit_builder()
+            .consume_proposal_store(true)
+            .load_psks(identity.provider.storage())
+            .map_err(|e| Error::Group(format!("{e:?}")))?
+            .build(
+                identity.provider.rand(),
+                identity.provider.crypto(),
+                &identity.signature_keys,
+                |_| true,
+            )
+            .map_err(|e| Error::Group(format!("{e:?}")))?
+            .stage_commit(&identity.provider)
+            .map_err(|e| Error::Group(format!("{e:?}")))?;
+        let commit = bundle.into_commit();
+        self.inner
+            .merge_pending_commit(&identity.provider)
+            .map_err(|e| Error::Group(format!("merge_pending_commit: {e:?}")))?;
+        Ok(commit)
+    }
+}
+
+#[cfg(test)]
+mod proposal_gate_tests {
+    use super::*;
+    use crate::group_roles::RoleTable;
+    use crate::key_package;
+
+    fn wire(m: MlsMessageOut) -> Vec<u8> {
+        encode_message(&m).expect("encode")
+    }
+
+    fn kp(id: &Identity) -> KeyPackage {
+        let bytes =
+            key_package::serialize(&id.create_key_package().expect("kp")).expect("serialize");
+        key_package::deserialize(&bytes)
+            .expect("deserialize")
+            .validate(id.provider.crypto(), ProtocolVersion::Mls10)
+            .expect("validate")
+    }
+
+    fn kp_wire(id: &Identity) -> Vec<u8> {
+        key_package::serialize(&id.create_key_package().expect("kp")).expect("serialize kp")
+    }
+
+    fn pk32(id: &Identity) -> [u8; 32] {
+        id.signature_public_key().try_into().expect("32-byte key")
+    }
+
+    struct Scene {
+        alice: Identity,
+        bob: Identity,
+        charlie: Identity,
+        alice_g: Group,
+        bob_g: Group,
+        charlie_g: Group,
+    }
+
+    /// owner = alice, admin = bob, member = charlie.
+    fn scene(tag: u8) -> Scene {
+        let alice = Identity::from_seed(&[0x40 ^ tag; 64]).expect("alice");
+        let bob = Identity::from_seed(&[0x50 ^ tag; 64]).expect("bob");
+        let charlie = Identity::from_seed(&[0x60 ^ tag; 64]).expect("charlie");
+
+        let mut alice_g = Group::create(&alice).expect("create");
+        let add_bob = alice_g
+            .add_member_from_wire(&alice, &kp_wire(&bob))
+            .expect("add bob");
+        let mut bob_g = Group::join_from_welcome(&wire(add_bob.welcome), &bob).expect("bob joins");
+        let add_c = alice_g
+            .add_member_from_wire(&alice, &kp_wire(&charlie))
+            .expect("add charlie");
+        bob_g
+            .process_incoming_verifying_roles(&bob, &wire(add_c.commit))
+            .expect("bob applies");
+        let mut charlie_g =
+            Group::join_from_welcome(&wire(add_c.welcome), &charlie).expect("charlie joins");
+        let promote = alice_g
+            .set_group_roles(&alice, &RoleTable::new(pk32(&alice), vec![pk32(&bob)]))
+            .expect("promote bob");
+        bob_g
+            .process_incoming_verifying_roles(&bob, &promote)
+            .expect("bob applies promote");
+        charlie_g
+            .process_incoming_verifying_roles(&charlie, &promote)
+            .expect("charlie applies promote");
+
+        Scene {
+            alice,
+            bob,
+            charlie,
+            alice_g,
+            bob_g,
+            charlie_g,
+        }
+    }
+
+    /// Layer 1. A modified client's proposal reaches a peer at a matching
+    /// epoch; the receipt gate must drop it, unstored.
+    #[test]
+    fn receipt_gate_drops_a_plain_members_proposal() {
+        let mut s = scene(0x01);
+        let dave = Identity::from_seed(&[0x71u8; 64]).expect("dave");
+        let dave_key = dave.signature_public_key().to_vec();
+
+        let hostile = s
+            .charlie_g
+            .ungated_propose_add(&s.charlie, kp(&dave))
+            .expect("charlie proposes without its local check");
+
+        let incoming = s
+            .alice_g
+            .process_incoming_verifying_roles(&s.alice, &hostile)
+            .expect("alice processes it");
+        let Incoming::Proposal(record) = incoming else {
+            panic!("expected a proposal, got {incoming:?}");
+        };
+        assert!(
+            !record.stored,
+            "a plain member's Add proposal must NOT be stored",
+        );
+        assert_eq!(
+            record.kind,
+            ProposalKind::Add {
+                signature_key: dave_key
+            },
+            "the refusal must still describe what was refused",
+        );
+        assert!(s.alice_g.pending_proposals().is_empty());
+    }
+
+    /// Layer 2, in isolation. A proposal the store already holds but the table
+    /// does not authorise must be excluded by the sweep filter — proven by
+    /// planting it with the ungated store and then running the REAL sweep.
+    #[test]
+    fn sweep_filter_excludes_an_unauthorised_proposal_the_store_already_holds() {
+        let mut s = scene(0x02);
+        let dave = Identity::from_seed(&[0x72u8; 64]).expect("dave");
+
+        let hostile = s
+            .charlie_g
+            .ungated_propose_add(&s.charlie, kp(&dave))
+            .expect("charlie proposes ungated");
+        s.alice_g
+            .ungated_store(&s.alice, &hostile)
+            .expect("alice stores it ungated");
+        assert_eq!(
+            s.alice_g.pending_proposals().len(),
+            1,
+            "the store is primed with an unauthorised proposal",
+        );
+
+        // The real sweep finds nothing it may commit, so it emits no commit.
+        assert!(
+            s.alice_g
+                .commit_pending_proposals(&s.alice)
+                .expect("sweep")
+                .is_none(),
+            "the sweep filter must exclude the unauthorised proposal",
+        );
+        assert!(!s
+            .alice_g
+            .members()
+            .iter()
+            .any(|m| m.signature_public_key == dave.signature_public_key()));
+    }
+
+    /// Layer 3, in isolation — the peer-verified commit gate. A malicious
+    /// committer skips layers 1 and 2 entirely; a peer that ALSO happens to
+    /// hold the proposal (so OpenMLS can resolve the by-reference commit) must
+    /// still refuse to merge.
+    #[test]
+    fn peer_refuses_a_commit_carrying_a_proposal_from_an_unauthorised_sender() {
+        let mut s = scene(0x03);
+        let dave = Identity::from_seed(&[0x73u8; 64]).expect("dave");
+
+        let hostile = s
+            .charlie_g
+            .ungated_propose_add(&s.charlie, kp(&dave))
+            .expect("charlie proposes ungated");
+
+        // bob (admin) is the malicious committer: stores ungated, sweeps
+        // unfiltered — exactly `commit_to_pending_proposals`.
+        s.bob_g
+            .ungated_store(&s.bob, &hostile)
+            .expect("bob stores ungated");
+        let commit = s
+            .bob_g
+            .ungated_sweep(&s.bob)
+            .expect("bob sweeps unfiltered");
+
+        // alice ALSO holds the proposal (planted the same way), so the
+        // by-reference lookup succeeds and the commit gate is what decides.
+        s.alice_g
+            .ungated_store(&s.alice, &hostile)
+            .expect("alice stores ungated");
+        let epoch_before = s.alice_g.epoch();
+        assert!(
+            s.alice_g
+                .process_incoming_verifying_roles(&s.alice, &wire(commit))
+                .is_err(),
+            "the commit gate must refuse a commit carrying a plain member's Add",
+        );
+        assert_eq!(
+            s.alice_g.epoch(),
+            epoch_before,
+            "a refused commit must NOT advance the epoch",
+        );
+        assert!(!s
+            .alice_g
+            .members()
+            .iter()
+            .any(|m| m.signature_public_key == dave.signature_public_key()));
+    }
+
+    /// Layers 1 and 3 composed, which is the deployed shape: a peer whose
+    /// receipt gate dropped the proposal cannot even resolve the by-reference
+    /// commit, so OpenMLS refuses it before the gate is reached. Fail-closed
+    /// twice over, and the reason the receipt gate is not merely hygiene.
+    #[test]
+    fn a_peer_that_dropped_the_proposal_cannot_apply_a_commit_referencing_it() {
+        let mut s = scene(0x04);
+        let dave = Identity::from_seed(&[0x74u8; 64]).expect("dave");
+
+        let hostile = s
+            .charlie_g
+            .ungated_propose_add(&s.charlie, kp(&dave))
+            .expect("charlie proposes ungated");
+        s.bob_g
+            .ungated_store(&s.bob, &hostile)
+            .expect("bob stores ungated");
+        let commit = s
+            .bob_g
+            .ungated_sweep(&s.bob)
+            .expect("bob sweeps unfiltered");
+
+        // alice ran the real receipt gate, so it never stored the proposal.
+        let incoming = s
+            .alice_g
+            .process_incoming_verifying_roles(&s.alice, &hostile)
+            .expect("alice gates it");
+        assert!(matches!(incoming, Incoming::Proposal(ref r) if !r.stored));
+
+        let epoch_before = s.alice_g.epoch();
+        let err = s
+            .alice_g
+            .process_incoming_verifying_roles(&s.alice, &wire(commit))
+            .expect_err("the commit must be refused");
+        assert!(
+            format!("{err:?}").contains("MissingProposal"),
+            "expected an unresolvable by-reference proposal, got {err:?}",
+        );
+        assert_eq!(s.alice_g.epoch(), epoch_before);
+    }
+
+    /// Leaving, and the precondition that bounds it.
+    ///
+    /// ADR-0045 says `Proposal::SelfRemove` "becomes reachable for the first
+    /// time". **In Lakko it does not, yet** — [`Group::create`] leaves the
+    /// OpenMLS wire-format policy at its pure-ciphertext default, and a
+    /// `SelfRemove` must be sent as a `PublicMessage`, so OpenMLS refuses to
+    /// craft one at all. The first half of this test pins that refusal, so the
+    /// day someone changes the wire-format policy (a wire-visible change: it
+    /// would stop encrypting handshake messages to the zero-trust DS) this
+    /// named test fails and forces a look at the `ProposalKind::Leave` arm,
+    /// which is gated and unit-tested but currently unreachable from the wire.
+    ///
+    /// The self-leave route ADR-0045 **does** open is a plain `Remove` naming
+    /// the proposer's own leaf, and the second half proves the gate's owner
+    /// exception holds on it: the owner cannot leave, by any route.
+    #[test]
+    fn self_removal_is_gated_for_its_own_sender_and_refused_for_the_owner() {
+        let mut s = scene(0x05);
+
+        let refusal = s
+            .charlie_g
+            .inner
+            .leave_group_via_self_remove(&s.charlie.provider, &s.charlie.signature_keys)
+            .expect_err("SelfRemove is unreachable under a pure-ciphertext policy");
+        assert!(
+            format!("{refusal:?}").contains("CannotSelfRemoveWithPureCiphertext"),
+            "expected the wire-format refusal, got {refusal:?}",
+        );
+
+        // The reachable route: a member proposes the removal of its own leaf.
+        let own = s.charlie_g.own_leaf_index();
+        let leave = s
+            .charlie_g
+            .propose_remove_member(&s.charlie, own)
+            .expect("a member may propose its own removal");
+        let incoming = s
+            .bob_g
+            .process_incoming_verifying_roles(&s.bob, &leave)
+            .expect("bob processes it");
+        let Incoming::Proposal(record) = incoming else {
+            panic!("expected a proposal, got {incoming:?}");
+        };
+        assert!(record.stored, "a member's self-removal must be stored");
+        assert_eq!(
+            record.sender_leaf,
+            Some(own.u32()),
+            "attributed to its own sender, and to no one else",
+        );
+        assert_eq!(
+            record.kind,
+            ProposalKind::Remove {
+                target_leaf: own.u32()
+            },
+        );
+
+        // The OWNER cannot take the same route — an ownerless group could never
+        // appoint another admin again (`set_group_roles` is owner-only).
+        let alice_own = s.alice_g.own_leaf_index();
+        assert!(
+            s.alice_g
+                .propose_remove_member(&s.alice, alice_own)
+                .is_err(),
+            "the owner must not be able to leave",
+        );
+    }
 }
 
 // ============================================================================

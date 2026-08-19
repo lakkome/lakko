@@ -202,6 +202,40 @@ impl RoleTable {
     }
 }
 
+/// The ADR-0045 **committer rank** of `pubkey`: `0` for the owner, `k+1` for
+/// the `k`-th admin in the table's own canonical order, `None` for anyone else.
+///
+/// This is the whole of ADR-0045 decision 1. There is no election protocol, no
+/// election message and no committer state to hand over: the role table lives in
+/// the authenticated `0xFF02` GroupContext extension, so every member holds the
+/// identical bytes, and [`RoleTable::new`] sorts and deduplicates the admin set,
+/// so every member derives the identical order from them. A pure, total function
+/// of shared authenticated state cannot split-brain on *who* rank `k` is.
+///
+/// It deliberately ranks **signature public keys**, never leaf indices: OpenMLS
+/// reuses a vacated leaf for the next Add, so a leaf-keyed committer identity
+/// would silently change hands on every membership change — the exact reason
+/// ADR-0022 keyed the role table on the signature key in the first place. It is
+/// therefore *not* `lakko_calls::link_invite::elect_committer`, which ranks by
+/// leaf index and needs an SFU presence oracle a conversation group does not
+/// have; the two coexist by design and neither subsumes the other.
+///
+/// Rank orders the authorised committers; it does not widen them. The set that
+/// may commit is exactly ADR-0022's owner-plus-admins, unchanged.
+#[must_use]
+pub fn committer_rank(table: &RoleTable, pubkey: &[u8]) -> Option<u32> {
+    if table.is_owner(pubkey) {
+        return Some(0);
+    }
+    if pubkey.len() != PUBKEY_LEN {
+        return None;
+    }
+    let position = table.admins().iter().position(|a| a.as_slice() == pubkey)?;
+    // `admins` is capped at MAX_ADMINS (256), so neither conversion nor the
+    // increment can overflow; both are written fallibly rather than asserted.
+    u32::try_from(position).ok()?.checked_add(1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,6 +320,35 @@ mod tests {
         bytes.extend_from_slice(&pk(1));
         bytes.extend_from_slice(&u16::MAX.to_be_bytes());
         assert!(RoleTable::decode(&bytes).is_err());
+    }
+
+    #[test]
+    fn committer_rank_is_owner_first_then_the_tables_own_admin_order() {
+        // `new` sorts + dedups, so the admin order is canonical and every
+        // member derives it identically from the same GroupContext bytes.
+        let t = RoleTable::new(pk(9), vec![pk(3), pk(1), pk(2)]);
+        assert_eq!(committer_rank(&t, &pk(9)), Some(0), "owner is rank 0");
+        assert_eq!(committer_rank(&t, &pk(1)), Some(1));
+        assert_eq!(committer_rank(&t, &pk(2)), Some(2));
+        assert_eq!(committer_rank(&t, &pk(3)), Some(3));
+        assert_eq!(
+            committer_rank(&t, &pk(7)),
+            None,
+            "a plain member has no rank"
+        );
+        assert_eq!(committer_rank(&t, &[]), None);
+        assert_eq!(committer_rank(&t, &[9u8; 16]), None, "wrong-length key");
+    }
+
+    #[test]
+    fn committer_rank_is_insertion_order_independent() {
+        // The same owner + admin SET in any input order yields the same ranks —
+        // the property that makes the duty split-brain-free without negotiation.
+        let a = RoleTable::new(pk(9), vec![pk(3), pk(1), pk(2)]);
+        let b = RoleTable::new(pk(9), vec![pk(2), pk(3), pk(1), pk(1)]);
+        for key in [pk(9), pk(1), pk(2), pk(3), pk(7)] {
+            assert_eq!(committer_rank(&a, &key), committer_rank(&b, &key));
+        }
     }
 
     #[test]

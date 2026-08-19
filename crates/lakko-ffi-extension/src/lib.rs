@@ -221,7 +221,7 @@ impl Group {
                 sender_leaf,
             },
             MlsIncoming::Commit => ProcessedMessage::Commit,
-            MlsIncoming::Proposal => ProcessedMessage::Proposal,
+            MlsIncoming::Proposal(_) => ProcessedMessage::Proposal,
             MlsIncoming::ExternalJoinProposal {
                 joiner_signature_key,
             } => ProcessedMessage::ExternalJoinProposal {

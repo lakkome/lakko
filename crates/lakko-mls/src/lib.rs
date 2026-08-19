@@ -19,6 +19,7 @@ pub mod ciphersuite;
 pub mod device_group;
 pub mod error;
 pub mod group;
+pub mod group_proposals;
 pub mod group_roles;
 pub mod history_bundle;
 pub mod history_placeholder;
@@ -30,8 +31,11 @@ pub mod welcome_rendezvous;
 
 pub use device_group::{AccountId, DeviceGroup};
 pub use error::{Error, Result};
-pub use group::{epoch_of_message, Group, Incoming, MemberAddition, MemberRecord, GROUP_ID_LEN};
-pub use group_roles::{Role, RoleTable};
+pub use group::{
+    epoch_of_message, Group, Incoming, MemberAddition, MemberRecord, ProposalCommit, GROUP_ID_LEN,
+};
+pub use group_proposals::{ProposalKind, ProposalRecord};
+pub use group_roles::{committer_rank, Role, RoleTable};
 pub use identity::Identity;
 pub use publisher_group::{
     channel_id_from_group_id, ChannelId, PublisherGroup, CHANNEL_EXPORTER_LABEL, CHANNEL_ID_LEN,

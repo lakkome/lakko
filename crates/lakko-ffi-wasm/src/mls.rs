@@ -534,7 +534,7 @@ impl Group {
                 ProcessedMessage::application(bytes, sender_leaf)
             },
             MlsIncoming::Commit => ProcessedMessage::control(ProcessedMessageKind::Commit),
-            MlsIncoming::Proposal => ProcessedMessage::control(ProcessedMessageKind::Proposal),
+            MlsIncoming::Proposal(_) => ProcessedMessage::control(ProcessedMessageKind::Proposal),
             MlsIncoming::ExternalJoinProposal {
                 joiner_signature_key,
             } => ProcessedMessage::external_join(joiner_signature_key),
@@ -633,7 +633,7 @@ impl Group {
                 ProcessedMessage::application(bytes, sender_leaf)
             },
             MlsIncoming::Commit => ProcessedMessage::control(ProcessedMessageKind::Commit),
-            MlsIncoming::Proposal => ProcessedMessage::control(ProcessedMessageKind::Proposal),
+            MlsIncoming::Proposal(_) => ProcessedMessage::control(ProcessedMessageKind::Proposal),
             MlsIncoming::ExternalJoinProposal {
                 joiner_signature_key,
             } => ProcessedMessage::external_join(joiner_signature_key),
@@ -890,7 +890,7 @@ impl PublisherGroup {
                 ProcessedMessage::application(bytes, sender_leaf)
             },
             MlsIncoming::Commit => ProcessedMessage::control(ProcessedMessageKind::Commit),
-            MlsIncoming::Proposal => ProcessedMessage::control(ProcessedMessageKind::Proposal),
+            MlsIncoming::Proposal(_) => ProcessedMessage::control(ProcessedMessageKind::Proposal),
             MlsIncoming::ExternalJoinProposal {
                 joiner_signature_key,
             } => ProcessedMessage::external_join(joiner_signature_key),
@@ -1302,7 +1302,7 @@ impl DeviceGroup {
                 ProcessedMessage::application(bytes, sender_leaf)
             },
             lakko_mls::Incoming::Commit => ProcessedMessage::control(ProcessedMessageKind::Commit),
-            lakko_mls::Incoming::Proposal => {
+            lakko_mls::Incoming::Proposal(_) => {
                 ProcessedMessage::control(ProcessedMessageKind::Proposal)
             },
             lakko_mls::Incoming::ExternalJoinProposal {
@@ -1381,7 +1381,7 @@ impl DeviceGroup {
                 ProcessedMessage::application(bytes, sender_leaf)
             },
             lakko_mls::Incoming::Commit => ProcessedMessage::control(ProcessedMessageKind::Commit),
-            lakko_mls::Incoming::Proposal => {
+            lakko_mls::Incoming::Proposal(_) => {
                 ProcessedMessage::control(ProcessedMessageKind::Proposal)
             },
             lakko_mls::Incoming::ExternalJoinProposal {
