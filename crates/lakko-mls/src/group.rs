@@ -40,6 +40,7 @@ use openmls::group::{
 };
 use openmls::messages::proposals::Proposal;
 use openmls::prelude::{KeyPackage, LeafNodeIndex, ProcessedMessageContent, ProtocolVersion};
+use openmls_rust_crypto::MemoryStorage;
 use openmls_traits::OpenMlsProvider as _;
 use tls_codec::{Deserialize as _, Serialize as _};
 use zeroize::Zeroizing;
@@ -86,6 +87,34 @@ pub const GROUP_ID_LEN: usize = 32;
 /// decision (ADR-0027). A proposal arriving past this cap is surfaced but not
 /// retained — anti-spam, since a non-member can post these.
 const MAX_PENDING_EXTERNAL_JOINS: usize = 64;
+
+/// Max **member** proposals retained per group awaiting an ADR-0045 sweep.
+///
+/// The sibling of [`MAX_PENDING_EXTERNAL_JOINS`], and needed for the same
+/// reason: ADR-0045 decision 2 gives a request no deadline, so the pending set
+/// is bounded by nothing but a committer eventually noticing. It is not free to
+/// leave unbounded — the set is cloned, cleared and re-stored once per outgoing
+/// chat message ([`Group::create_application_message`]), so its size is a
+/// per-message cost paid by **every** member of the group, not only by the
+/// proposer; it is persisted, so it survives restarts; and every member holds
+/// it, because by-reference resolution requires that.
+///
+/// The rule [`crate::group_proposals::authorise`] leaves open to a plain member
+/// is proposing its **own** removal, and nothing stops one member emitting that
+/// same proposal N times: the ratchet refuses only a byte-identical replay,
+/// while N fresh encryptions of one plaintext proposal all decrypt to the same
+/// [`openmls::prelude::ProposalRef`]. That is what
+/// [`Group::gate_incoming_proposal`] de-duplicates, and this cap is what bounds
+/// the residue of N genuinely distinct requests.
+///
+/// **At the cap the late proposer pays, never the group.** A proposal arriving
+/// into a full set is refused (`stored == false`) rather than evicting one
+/// already held — evicting would be strictly worse than the flood, because a
+/// commit that references an evicted proposal can no longer be resolved and is
+/// refused with `InvalidCommit(MissingProposal)` on the evicting member alone.
+/// Refusing the newcomer costs it a re-proposal after the next sweep; evicting
+/// an incumbent would cost the whole group its next commit.
+const MAX_PENDING_PROPOSALS: usize = 64;
 
 /// A non-member's external-join request retained for an owner/admin decision
 /// (ADR-0027, G-3). `joiner_signature_key` is the canonical identity handle the
@@ -360,6 +389,64 @@ impl Group {
         Ok(Self::from_mls_group(inner))
     }
 
+    /// **A direct commit must never carry a proposal it did not ask for.**
+    ///
+    /// Every OpenMLS entry point the direct-commit paths below are built on —
+    /// `add_members`, `remove_members`, `self_update`,
+    /// `update_group_context_extensions` — builds its commit with
+    /// `consume_proposal_store` left at its default `true` and the proposal
+    /// filter hardcoded to `|_| true` (`openmls-0.8.1`
+    /// `group/mls_group/{membership,updates}.rs`). Each therefore sweeps the
+    /// **entire** pending set alongside the one change it was asked for.
+    ///
+    /// Before ADR-0045 that was harmless, because Lakko stored no proposals and
+    /// the set was always empty. ADR-0045's receipt gate created the set, and
+    /// with it two failure modes on paths that predate it and know nothing
+    /// about it:
+    ///
+    /// * **A silent fork.** An admin's `remove_member` absorbs a pending
+    ///   ownership transfer, producing a commit that
+    ///   [`crate::group_proposals::owner_survives`] refuses on every peer — but
+    ///   the direct paths merge **eagerly**, so its author is already at N+1
+    ///   and sits there alone, permanently. That is precisely the G-38
+    ///   signature ADR-0045 exists to erase, reintroduced through the back
+    ///   door.
+    /// * **A member with no Welcome.** An `add_member` that also sweeps in
+    ///   somebody else's `Add` gives that person a leaf, while the caller
+    ///   routes the single Welcome to the one person it meant to add. The
+    ///   swept-in member is in the roster and cannot join.
+    ///
+    /// So a direct commit is **refused** while anything is pending, rather than
+    /// silently widened. Refusing is the right shape rather than filtering the
+    /// store out of the commit, for two reasons. First, merging any commit
+    /// empties the proposal store on every member (`staged_commit.rs`, both
+    /// merge arms) whatever `consume_proposal_store` said, so a direct commit
+    /// that excluded the pending set would still **discard** it group-wide —
+    /// trading a silent absorb for a silent loss. Second, ADR-0045 forbids a
+    /// permanent dual path into membership: a group that has moved to proposals
+    /// should sweep, and this is what says so out loud.
+    ///
+    /// **Nothing that legitimately uses a direct commit today is affected.**
+    /// The pending set is only ever written for a group carrying an ADR-0022
+    /// role table — [`Self::gate_incoming_proposal`] returns early without
+    /// storing when [`Self::group_roles`] is `None`, [`Self::process_incoming`]
+    /// and [`Self::process_incoming_gated`] store nothing at all, and every
+    /// `propose_*` refuses without a table. So `DeviceGroup`,
+    /// `PublisherGroup`, call groups and every other
+    /// [`Group::create_with_id`] group has a permanently empty set and this
+    /// guard is a counted-zero no-op for them.
+    fn refuse_if_proposals_pending(&self, op: &str) -> Result<()> {
+        let pending = self.inner.pending_proposals().count();
+        if pending == 0 {
+            return Ok(());
+        }
+        Err(Error::Group(format!(
+            "{op} refused: {pending} membership proposal(s) are pending in this group, and a \
+             direct commit would silently absorb them (ADR-0045) — sweep them with \
+             commit_pending_proposals / stage_pending_proposals instead"
+        )))
+    }
+
     /// Add a member by their published [`KeyPackage`].
     ///
     /// Consumes one of the new member's published KeyPackages on success.
@@ -367,13 +454,15 @@ impl Group {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Group`] for any OpenMLS-side failure (validation,
-    /// signature, storage).
+    /// Returns [`Error::Group`] when a member proposal is pending (see
+    /// [`Self::refuse_if_proposals_pending`]), or for any OpenMLS-side failure
+    /// (validation, signature, storage).
     pub fn add_member(
         &mut self,
         identity: &Identity,
         key_package: KeyPackage,
     ) -> Result<MemberAddition> {
+        self.refuse_if_proposals_pending("add_member")?;
         let (commit, welcome, _group_info) = self
             .inner
             .add_members(&identity.provider, &identity.signature_keys, &[key_package])
@@ -401,9 +490,11 @@ impl Group {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Group`] for any OpenMLS-side failure.
+    /// Returns [`Error::Group`] when a member proposal is pending (see
+    /// [`Self::refuse_if_proposals_pending`]), or for any OpenMLS-side failure.
     pub fn self_update(&mut self, identity: &Identity) -> Result<Vec<u8>> {
         use openmls::prelude::LeafNodeParameters;
+        self.refuse_if_proposals_pending("self_update")?;
         let bundle = self
             .inner
             .self_update(
@@ -449,12 +540,14 @@ impl Group {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Group`] for any OpenMLS-side failure.
+    /// Returns [`Error::Group`] when a member proposal is pending (see
+    /// [`Self::refuse_if_proposals_pending`]), or for any OpenMLS-side failure.
     pub fn remove_member(
         &mut self,
         identity: &Identity,
         leaf: LeafNodeIndex,
     ) -> Result<MlsMessageOut> {
+        self.refuse_if_proposals_pending("remove_member")?;
         let (commit, _welcome_for_external_joiners, _group_info) = self
             .inner
             .remove_members(&identity.provider, &identity.signature_keys, &[leaf])
@@ -475,13 +568,16 @@ impl Group {
     ///
     /// # Errors
     ///
-    /// [`Error::Group`] on the OpenMLS update / merge (e.g. a member whose
-    /// leaf capabilities do not advertise an added extension type).
+    /// [`Error::Group`] when a member proposal is pending (see
+    /// [`Self::refuse_if_proposals_pending`]), or on the OpenMLS update / merge
+    /// (e.g. a member whose leaf capabilities do not advertise an added
+    /// extension type).
     pub fn set_group_context_extensions(
         &mut self,
         identity: &Identity,
         extensions: Extensions<GroupContext>,
     ) -> Result<MlsMessageOut> {
+        self.refuse_if_proposals_pending("set_group_context_extensions")?;
         let (commit, _welcome, _group_info) = self
             .inner
             .update_group_context_extensions(
@@ -596,13 +692,17 @@ impl Group {
     ///
     /// # Errors
     ///
-    /// [`Error::Group`] if the caller is not owner/admin, if no pending proposal
-    /// matches `proposal_ref`, or on an OpenMLS add failure.
+    /// [`Error::Group`] if the caller is not owner/admin, if a member proposal
+    /// is pending (see [`Self::refuse_if_proposals_pending`] — checked here
+    /// rather than only inside [`Self::add_member`] so a refusal does not
+    /// consume the retained request), if no pending proposal matches
+    /// `proposal_ref`, or on an OpenMLS add failure.
     pub fn approve_external_join(
         &mut self,
         identity: &Identity,
         proposal_ref: &[u8],
     ) -> Result<MemberAddition> {
+        self.refuse_if_proposals_pending("external join approve")?;
         if let Some(table) = self.group_roles() {
             if !table.can_administer(identity.signature_public_key()) {
                 return Err(Error::Group(
@@ -636,18 +736,69 @@ impl Group {
         Ok(())
     }
 
+    /// Run the checks every peer will run on a role-table rewrite, locally and
+    /// **before** any MLS state is touched.
+    ///
+    /// [`Self::transfer_ownership`] has validated up front since it landed
+    /// ([`Self::plan_ownership_transfer`]), while [`Self::set_group_roles`] —
+    /// the path transfer is built on, and the one a client actually calls to
+    /// promote or demote an admin — took any table the caller handed it and
+    /// **merged eagerly**. So the two disagreed about the same commit: a table
+    /// naming an owner no leaf holds was refused by name through one door and,
+    /// through the other, built, merged locally, published, and then refused by
+    /// every peer's [`crate::group_proposals::owner_survives`] — leaving its
+    /// author alone at N+1. Self-forking on a commit the caller could have been
+    /// told about is the asymmetry this removes; the peer gate stays the
+    /// enforcement, and both checks below are already enforced there.
+    ///
+    /// The owner check is deliberately the **pre-merge** table (ADR-0022
+    /// Finding 2): a rewrite is judged against the authority the caller
+    /// inherits, never the authority it is writing — which is exactly what lets
+    /// an ownership transfer pass, since the transferor is still the owner at
+    /// the moment it mints one.
+    fn refuse_unenforceable_role_table(
+        &self,
+        identity: &Identity,
+        roles: &RoleTable,
+    ) -> Result<()> {
+        let table = self.role_table_or_refuse("role-table change")?;
+        if !table.is_owner(identity.signature_public_key()) {
+            return Err(Error::Group(
+                "role-table change refused: this device is not the group owner".into(),
+            ));
+        }
+        if !self
+            .members()
+            .iter()
+            .any(|m| m.signature_public_key.as_slice() == roles.owner().as_slice())
+        {
+            return Err(Error::Group(
+                "role-table change refused: the named owner is not a member of this group".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Rewrite the group's ADR-0022 role table (promote / demote admins).
     /// Produces a `GroupContextExtensions` commit the caller broadcasts to the
-    /// group journal. **Authorisation is enforced on the RECEIVING side** by
+    /// group journal.
+    ///
+    /// **Authorisation is enforced on the RECEIVING side** by
     /// [`process_incoming_verifying_roles`](Self::process_incoming_verifying_roles)
-    /// — only the owner's role-change commit is merged. This method just
-    /// produces the commit, so a non-owner who calls it has their commit
-    /// refused by every conformant peer.
+    /// — that is where the boundary is, and it does not trust this method. What
+    /// this method adds is the local half: it refuses up front, before touching
+    /// any MLS state, exactly what a peer would refuse afterwards, so a caller
+    /// gets an error instead of a commit nobody will accept. See
+    /// [`Self::refuse_unenforceable_role_table`].
     ///
     /// # Errors
     ///
-    /// [`Error::Group`] on any OpenMLS-side failure.
+    /// [`Error::Group`] when the group carries no role table, when this device
+    /// is not the owner, when the new table names an owner who is not a member
+    /// of the group, when a member proposal is pending (see
+    /// [`Self::refuse_if_proposals_pending`]), or on any OpenMLS-side failure.
     pub fn set_group_roles(&mut self, identity: &Identity, roles: &RoleTable) -> Result<Vec<u8>> {
+        self.refuse_unenforceable_role_table(identity, roles)?;
         // `set_group_context_extensions` replaces the whole extension set, so
         // re-include the required-capabilities declaration alongside the new
         // table (the role type must stay in required_capabilities).
@@ -698,8 +849,20 @@ impl Group {
     /// propose. A courtesy check that keeps our own store clean and gives the
     /// user an immediate error; the enforcing copies are the peers' receipt gate
     /// and commit gate, which do not trust us.
+    ///
+    /// It also applies the [`MAX_PENDING_PROPOSALS`] cap. That one is not a
+    /// courtesy: an honest device must not hand its peers a proposal their
+    /// receipt gates would refuse for being over the cap, because it would then
+    /// hold a proposal nobody else does and sweep a commit they cannot resolve.
+    /// The cap is the same number on both sides for exactly that reason.
     fn authorise_own_proposal(&self, identity: &Identity, kind: &ProposalKind) -> Result<()> {
         let table = self.role_table_or_refuse("proposal")?;
+        if self.inner.pending_proposals().count() >= MAX_PENDING_PROPOSALS {
+            return Err(Error::Group(format!(
+                "proposal refused: this group already holds {MAX_PENDING_PROPOSALS} pending \
+                 proposals — a committer must sweep them first"
+            )));
+        }
         let members = self.members();
         let proposer = Proposer {
             leaf: self.own_leaf_index().u32(),
@@ -788,13 +951,19 @@ impl Group {
     /// # Errors
     ///
     /// [`Error::Group`] when the group has no role table, when this device is
-    /// not the owner, or on any OpenMLS-side failure.
+    /// not the owner, when the new table names an owner who is not a member of
+    /// the group, or on any OpenMLS-side failure.
     pub fn propose_group_roles(
         &mut self,
         identity: &Identity,
         roles: &RoleTable,
     ) -> Result<Vec<u8>> {
         self.authorise_own_proposal(identity, &ProposalKind::RoleChange)?;
+        // Same local pre-check as the direct path. A proposal advances nothing,
+        // so this cannot self-fork — but a table naming a non-member owner is
+        // one every sweep excludes (`sweep_keeps`), so publishing it would only
+        // occupy a slot in every member's pending set until someone noticed.
+        self.refuse_unenforceable_role_table(identity, roles)?;
         // As in `set_group_roles`: a GroupContextExtensions proposal replaces
         // the WHOLE extension set, so the required-capabilities declaration has
         // to be re-stated alongside the new table.
@@ -1387,6 +1556,33 @@ impl Group {
             return refused(kind);
         }
 
+        // Already held. A `ProposalRef` is a hash over the proposal's
+        // authenticated content, so N fresh encryptions of one plaintext
+        // proposal all decrypt to the same ref — the ratchet refuses only a
+        // byte-identical replay, and `ProposalStore::add` is a bare push with
+        // no de-duplication of its own. Without this a plain member could file
+        // its own (correctly authorised) departure hundreds of times and make
+        // every member carry, persist and re-park all of them. Reported as
+        // `stored: true`, because it is: the group holds this exact request,
+        // and the proposer's "did it land" answer is yes.
+        if self
+            .inner
+            .pending_proposals()
+            .any(|held| held.proposal_reference_ref() == qp.proposal_reference_ref())
+        {
+            return Ok(Incoming::Proposal(ProposalRecord {
+                sender_leaf,
+                kind,
+                stored: true,
+            }));
+        }
+
+        // Full. Refuse the newcomer rather than evict an incumbent — see
+        // [`MAX_PENDING_PROPOSALS`] for why that direction is the only safe one.
+        if self.inner.pending_proposals().count() >= MAX_PENDING_PROPOSALS {
+            return refused(kind);
+        }
+
         self.inner
             .store_pending_proposal(identity.provider.storage(), qp)
             .map_err(|e| Error::Group(format!("store_pending_proposal: {e:?}")))?;
@@ -1417,6 +1613,35 @@ impl Group {
     /// derived from the proposal, so a round-trip through
     /// `store_pending_proposal` reproduces it bit for bit). Everything else
     /// about the proposal path is untouched.
+    ///
+    /// # The park is in-memory only, and that is load-bearing
+    ///
+    /// The check OpenMLS makes is `self.proposal_store().is_empty()` — a read
+    /// of the **in-memory** `ProposalStore` and nothing else. Persistence has
+    /// no say in it. The two entry points that mutate that store,
+    /// `clear_pending_proposals` and `store_pending_proposal`, are each generic
+    /// over the storage they are handed and each does two things: mutate the
+    /// in-memory store, and mirror that mutation into that storage. Handing
+    /// them a **throwaway** `MemoryStorage` takes the first and discards the
+    /// second, so the whole park happens without one write to the real
+    /// provider.
+    ///
+    /// **That is what keeps a concurrent snapshot whole**, and the earlier
+    /// reasoning here — that `&mut self` on the group excludes one — was
+    /// wrong. [`crate::Identity::snapshot_storage`] takes `&self` on the
+    /// *identity*, a different object, and reads the provider's map under its
+    /// own `RwLock`; nothing about an exclusive borrow of the `Group` prevents
+    /// it. On iOS and Android that is not hypothetical — the UniFFI `Group` is
+    /// `Mutex<MlsGroup>` while `Identity` is bare, so the send thread and the
+    /// persist thread genuinely run at once. A park that emptied the persisted
+    /// queue for the length of an encrypt therefore let a snapshot capture a
+    /// group with **no** pending proposals, and a client that persisted that
+    /// snapshot and restarted could never apply the by-reference commit those
+    /// proposals belong to (`InvalidCommit(MissingProposal)`) — silently,
+    /// permanently, and needing no adversary. Since the real queue is now never
+    /// written, a snapshot taken at any instant during a send observes the set
+    /// exactly as it stood before it, which is also exactly how it stands
+    /// after.
     ///
     /// # What is *not* changed, and why
     ///
@@ -1449,13 +1674,11 @@ impl Group {
     /// is indistinguishable from a message lost in transit, which MLS receivers
     /// already tolerate.
     ///
-    /// The one window this leaves is between the park and the unpark, where the
-    /// provider holds no proposals. It spans a single synchronous encrypt with
-    /// no I/O, no `await` and no re-entry, and nothing inside it can take a
-    /// snapshot — `snapshot_storage` is an [`crate::Identity`] method a client
-    /// calls from outside, and this method holds `&mut self` throughout. So the
-    /// last snapshot a client actually persisted always predates the park and
-    /// still carries the proposals; a process killed mid-send restores them.
+    /// The unpark restores **every** proposal before reporting any failure, and
+    /// keeps only the first error. Stopping at the first would leave the
+    /// in-memory store holding a torn prefix of the set while the persisted
+    /// queue still held all of it — a divergence a reload would silently
+    /// repair, and until then one this device would sweep from.
     ///
     /// # Errors
     ///
@@ -1467,26 +1690,34 @@ impl Group {
         plaintext: &[u8],
     ) -> Result<MlsMessageOut> {
         // Nothing pending — the overwhelmingly common case, and byte-for-byte
-        // the pre-ADR-0045 path with no storage traffic at all.
+        // the pre-ADR-0045 path with no proposal-store traffic at all.
         let parked: Vec<QueuedProposal> = self.inner.pending_proposals().cloned().collect();
         if parked.is_empty() {
             return self.encrypt_application(identity, plaintext);
         }
 
-        // `clear_pending_proposals` is the only public way to empty the store
-        // OpenMLS checks; it clears the persisted queue alongside it, which is
-        // why the unpark below restores both halves rather than just the
-        // in-memory one.
+        // The throwaway that makes the park invisible to persistence. Both
+        // mutators below write it instead of `identity.provider`, so the real
+        // provider's proposal queue is not touched at any point in this method
+        // and no concurrent `snapshot_storage` can observe a torn set.
+        let scratch = MemoryStorage::default();
+
         self.inner
-            .clear_pending_proposals(identity.provider.storage())
+            .clear_pending_proposals(&scratch)
             .map_err(|e| Error::Group(format!("park pending proposals: {e:?}")))?;
         let sent = self.encrypt_application(identity, plaintext);
-        let unparked = parked.into_iter().try_for_each(|qp| {
-            self.inner
-                .store_pending_proposal(identity.provider.storage(), qp)
-                .map_err(|e| Error::Group(format!("restore pending proposals: {e:?}")))
-        });
-        unparked?;
+
+        let mut unparked: Option<Error> = None;
+        for qp in parked {
+            if let Err(e) = self.inner.store_pending_proposal(&scratch, qp) {
+                if unparked.is_none() {
+                    unparked = Some(Error::Group(format!("restore pending proposals: {e:?}")));
+                }
+            }
+        }
+        if let Some(e) = unparked {
+            return Err(e);
+        }
         sent
     }
 
@@ -1987,6 +2218,28 @@ impl Group {
             .map_err(|e| Error::Group(format!("ungated_store: {e:?}")))
     }
 
+    /// **Adversary.** Remove a member the way [`Group::remove_member`] did
+    /// before the ADR-0045 review's HIGH-1 guard: straight into OpenMLS's
+    /// `remove_members`, which builds with `consume_proposal_store` at its
+    /// default `true` and the filter hardcoded to `|_| true`, and merges
+    /// eagerly. Exists so a control test can reproduce the fork the guard
+    /// prevents, rather than the suite merely asserting that it does not
+    /// happen.
+    fn ungated_remove_member(
+        &mut self,
+        identity: &Identity,
+        leaf: LeafNodeIndex,
+    ) -> Result<MlsMessageOut> {
+        let (commit, _welcome, _group_info) = self
+            .inner
+            .remove_members(&identity.provider, &identity.signature_keys, &[leaf])
+            .map_err(|e| Error::Group(format!("ungated_remove_member: {e:?}")))?;
+        self.inner
+            .merge_pending_commit(&identity.provider)
+            .map_err(|e| Error::Group(format!("merge_pending_commit: {e:?}")))?;
+        Ok(commit)
+    }
+
     /// **Adversary.** Sweep the whole pending store with no filter — OpenMLS's
     /// `commit_to_pending_proposals` behaviour, which ADR-0045 rejects.
     fn ungated_sweep(&mut self, identity: &Identity) -> Result<MlsMessageOut> {
@@ -2309,6 +2562,69 @@ mod proposal_gate_tests {
                 .propose_remove_member(&s.alice, alice_own)
                 .is_err(),
             "the owner must not be able to leave",
+        );
+    }
+
+    /// **Control for the HIGH-1 guard.** Reproduces the hazard on the path the
+    /// guard now closes, so the property test that asserts the guard works is
+    /// provably measuring something real.
+    ///
+    /// An admin removes a member while an ownership transfer is pending.
+    /// Without the guard the removal's commit also carries the transfer, and
+    /// the pair leaves the group with an owner it is removing — so
+    /// `owner_survives` refuses it on every peer, while its author has already
+    /// merged. Committer at N+1, peers at N, silently and permanently: the
+    /// exact G-38 signature ADR-0045 exists to erase, through a path that
+    /// predates it.
+    #[test]
+    fn control_a_direct_commit_that_absorbs_a_pending_proposal_forks_the_committer() {
+        let mut s = scene(0x0B);
+
+        let transfer = s
+            .alice_g
+            .propose_ownership_transfer(
+                &s.alice,
+                s.charlie.signature_public_key(),
+                OutgoingOwner::Admin,
+            )
+            .expect("alice proposes handing the group to charlie");
+        s.bob_g
+            .process_incoming_verifying_roles(&s.bob, &transfer)
+            .expect("bob stores the transfer");
+        assert_eq!(s.bob_g.pending_proposals().len(), 1);
+
+        let charlie_leaf = LeafNodeIndex::new(
+            s.bob_g
+                .members()
+                .iter()
+                .find(|m| m.signature_public_key == s.charlie.signature_public_key())
+                .expect("charlie is a member")
+                .leaf_index,
+        );
+        let epoch_before = s.alice_g.epoch();
+
+        // The pre-guard behaviour: the removal sweeps the transfer in with it.
+        let commit = s
+            .bob_g
+            .ungated_remove_member(&s.bob, charlie_leaf)
+            .expect("the ungated path builds and merges it");
+        assert_eq!(
+            s.bob_g.epoch(),
+            epoch_before + 1,
+            "the committer merged eagerly, before anyone judged it",
+        );
+
+        assert!(
+            s.alice_g
+                .process_incoming_verifying_roles(&s.alice, &wire(commit))
+                .is_err(),
+            "every peer refuses a commit that removes the owner it installs",
+        );
+        assert_eq!(s.alice_g.epoch(), epoch_before, "so the peer stays at N");
+        assert_ne!(
+            s.alice_g.epoch(),
+            s.bob_g.epoch(),
+            "and the committer is alone at N+1 — the fork the guard prevents",
         );
     }
 

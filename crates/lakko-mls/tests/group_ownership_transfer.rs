@@ -179,12 +179,16 @@ fn only_the_owner_can_transfer() {
         .is_err());
 
     // And a modified client that skips its own check and rewrites the table by
-    // hand is refused by every PEER — the enforcing copy.
+    // hand is refused by every PEER — the enforcing copy. Built through the raw
+    // GroupContextExtensions primitive, because `set_group_roles` now refuses a
+    // non-owner locally too (ADR-0045 review, LOW-1) and this assertion is
+    // about the peer gate.
     let coup = RoleTable::new(pk32(&s.bob), vec![pk32(&s.alice)]);
-    let commit = s
-        .bob_g
-        .set_group_roles(&s.bob, &coup)
-        .expect("bob crafts a self-transfer locally");
+    let commit = wire(
+        s.bob_g
+            .set_group_context_extensions(&s.bob, role_extensions(Some(&coup)))
+            .expect("bob crafts a self-transfer locally"),
+    );
     assert!(
         s.alice_g
             .process_incoming_verifying_roles(&s.alice, &commit)
@@ -260,14 +264,14 @@ fn after_transfer_the_new_owner_holds_owner_powers_and_the_old_one_does_not() {
             OutgoingOwner::Admin
         )
         .is_err());
-    // ...and refused by peers on the direct-commit path.
-    let take_back = s
-        .alice_g
-        .set_group_roles(
-            &s.alice,
-            &RoleTable::new(pk32(&s.alice), vec![pk32(&s.bob)]),
-        )
-        .expect("alice crafts a take-back locally");
+    // ...and refused by peers on the direct-commit path. Raw primitive again:
+    // alice is no longer the owner, so `set_group_roles` refuses her locally.
+    let take_back_table = RoleTable::new(pk32(&s.alice), vec![pk32(&s.bob)]);
+    let take_back = wire(
+        s.alice_g
+            .set_group_context_extensions(&s.alice, role_extensions(Some(&take_back_table)))
+            .expect("alice crafts a take-back locally"),
+    );
     assert!(
         s.bob_g
             .process_incoming_verifying_roles(&s.bob, &take_back)
@@ -402,10 +406,11 @@ fn a_peer_refuses_a_commit_that_hands_the_group_to_a_non_member() {
     let stranger = Identity::from_seed(&[0x66u8; 64]).expect("stranger");
 
     let orphan = RoleTable::new(pk32(&stranger), vec![pk32(&s.alice), pk32(&s.bob)]);
-    let commit = s
-        .alice_g
-        .set_group_roles(&s.alice, &orphan)
-        .expect("alice crafts an orphaning table locally");
+    let commit = wire(
+        s.alice_g
+            .set_group_context_extensions(&s.alice, role_extensions(Some(&orphan)))
+            .expect("alice crafts an orphaning table locally"),
+    );
 
     assert!(
         s.bob_g

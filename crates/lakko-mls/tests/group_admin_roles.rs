@@ -12,7 +12,29 @@
 //! policy; an offender's refused commit forks them out of the honest state.
 
 use lakko_mls::{group, key_package, Group, Identity, Incoming, RoleTable};
+use openmls::extensions::{
+    Extension, ExtensionType, Extensions, RequiredCapabilitiesExtension, UnknownExtension,
+};
 use openmls::prelude::LeafNodeIndex;
+
+/// The `0xFF02` role-table extension type, restated locally — the constant is
+/// `pub(crate)` and this suite hand-builds an extension set a peer must judge.
+const ROLE_EXTENSION_TYPE: u16 = 0xFF02;
+
+/// The extension set `set_group_roles` builds, restated so a test can commit
+/// one that `set_group_roles` itself now refuses to build — the adversary seam
+/// a peer-gate test needs (mirrors `group_ownership_transfer.rs`).
+fn role_extensions(table: &RoleTable) -> Extensions<openmls::group::GroupContext> {
+    Extensions::from_vec(vec![
+        Extension::RequiredCapabilities(RequiredCapabilitiesExtension::new(
+            &[ExtensionType::Unknown(ROLE_EXTENSION_TYPE)],
+            &[],
+            &[],
+        )),
+        Extension::Unknown(ROLE_EXTENSION_TYPE, UnknownExtension(table.encode())),
+    ])
+    .expect("build role extensions")
+}
 
 fn wire(msg: openmls::framing::MlsMessageOut) -> Vec<u8> {
     group::encode_message(&msg).expect("encode message")
@@ -195,13 +217,64 @@ fn role_change_is_owner_only_so_admin_self_promote_is_refused() {
     // bob (admin) tries to rewrite the role table (add charlie as a second
     // admin) — a GroupContextExtensions commit, which is owner-only.
     let roles = RoleTable::new(pk32(&s.alice), vec![pk32(&s.bob), pk32(&s.charlie)]);
+
+    // Built through the raw GroupContextExtensions primitive, not through
+    // `set_group_roles`, which now refuses a non-owner locally (ADR-0045
+    // review, LOW-1). This test is about the PEER gate, so it needs a
+    // committer that skips the local one — the same adversary shape
+    // `group_ownership_transfer.rs` uses for its table-erasing commit.
     let commit = s
         .bob_g
-        .set_group_roles(&s.bob, &roles)
+        .set_group_context_extensions(&s.bob, role_extensions(&roles))
         .expect("bob crafts a role-table change locally");
     // alice (owner) REFUSES bob's (admin) role change.
     assert!(s
         .alice_g
-        .process_incoming_verifying_roles(&s.alice, &commit)
+        .process_incoming_verifying_roles(&s.alice, &wire(commit))
         .is_err());
+}
+
+/// The local half of the same rule (ADR-0045 review, LOW-1): `set_group_roles`
+/// refuses a table its own peers would refuse, **before** touching MLS state,
+/// rather than merging eagerly and self-forking. Both refusals are already
+/// enforced peer-side; what is new is that the caller is told.
+#[test]
+fn set_group_roles_refuses_locally_what_every_peer_would_refuse() {
+    let mut s = scene();
+    let epoch_before = s.alice_g.epoch();
+
+    // A non-owner may not rewrite the table at all.
+    assert!(
+        s.bob_g
+            .set_group_roles(
+                &s.bob,
+                &RoleTable::new(pk32(&s.alice), vec![pk32(&s.bob), pk32(&s.charlie)]),
+            )
+            .is_err(),
+        "an admin's role change must be refused locally, not merged and then refused by peers",
+    );
+
+    // The owner may, but not to an owner who is not in the group — the
+    // permanently un-administrable table `owner_survives` refuses on every peer.
+    let outsider = Identity::from_seed(&[0x5Eu8; 64]).expect("outsider");
+    assert!(
+        s.alice_g
+            .set_group_roles(&s.alice, &RoleTable::owner_only(pk32(&outsider)))
+            .is_err(),
+        "a table naming a non-member owner must be refused locally",
+    );
+
+    // Neither refusal touched the group.
+    assert_eq!(s.alice_g.epoch(), epoch_before);
+    assert_eq!(s.bob_g.epoch(), epoch_before);
+    assert_eq!(
+        s.alice_g.group_roles().expect("table").owner(),
+        &pk32(&s.alice),
+    );
+
+    // And the legitimate rewrite still works.
+    assert!(s
+        .alice_g
+        .set_group_roles(&s.alice, &RoleTable::new(pk32(&s.alice), vec![]))
+        .is_ok());
 }

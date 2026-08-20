@@ -15,8 +15,8 @@
 //! is provably measuring something real rather than passing vacuously.
 
 use lakko_mls::{
-    committer_rank, group, key_package, Group, Identity, Incoming, LeafNodeIndex, ProposalKind,
-    RoleTable,
+    committer_rank, group, key_package, Group, Identity, Incoming, LeafNodeIndex, OutgoingOwner,
+    ProposalKind, RoleTable,
 };
 
 fn wire(msg: openmls::framing::MlsMessageOut) -> Vec<u8> {
@@ -1300,4 +1300,416 @@ fn a_restart_keeps_a_pending_proposal_and_the_group_still_sends() {
         exporter(&alice_g, &alice),
     );
     assert!(is_member(&alice_g, &dave));
+}
+
+// ============================================================================
+// The direct-commit paths must not sweep the proposal store (ADR-0045 review,
+// HIGH-1)
+// ============================================================================
+
+/// **The reviewer's scenario, end to end.** The owner proposes handing the
+/// group to Charlie; an admin concurrently reaches for the ordinary
+/// `remove_member(Charlie)`. OpenMLS builds every direct commit with
+/// `consume_proposal_store` defaulting to `true` and the filter hardcoded to
+/// `|_| true`, so before the guard the admin's commit silently absorbed the
+/// transfer, violated C-63 (`owner_survives`), **merged eagerly**, and was then
+/// refused by every peer — leaving the admin alone at N+1, permanently and
+/// silently. That is the exact G-38 shape ADR-0045 exists to erase, reached
+/// through a path that predates it.
+///
+/// The assertion is the one that matters: after the refusal the committer and
+/// the peer agree on group *state* — equal exporter output, not merely equal
+/// epoch numbers, because the whole hazard is that the numbers match while the
+/// state does not.
+#[test]
+fn a_direct_commit_refuses_to_absorb_a_pending_proposal() {
+    let mut s = scene(0x26);
+
+    // alice (owner) proposes handing the group to charlie.
+    let transfer = s
+        .alice_g
+        .propose_ownership_transfer(
+            &s.alice,
+            s.charlie.signature_public_key(),
+            OutgoingOwner::Admin,
+        )
+        .expect("alice proposes the transfer");
+    s.bob_g
+        .process_incoming_verifying_roles(&s.bob, &transfer)
+        .expect("bob stores the transfer");
+    s.charlie_g
+        .process_incoming_verifying_roles(&s.charlie, &transfer)
+        .expect("charlie stores the transfer");
+    assert_eq!(s.bob_g.pending_proposals().len(), 1);
+
+    let epoch_before = s.bob_g.epoch();
+    let state_before = exporter(&s.bob_g, &s.bob);
+
+    // bob (admin) reaches for the direct path. It must refuse rather than
+    // build a commit that also carries alice's transfer.
+    let charlie_leaf = leaf_of(&s.bob_g, s.charlie.signature_public_key());
+    let refusal = s
+        .bob_g
+        .remove_member(&s.bob, charlie_leaf)
+        .expect_err("a direct commit must refuse while a proposal is pending");
+    assert!(
+        format!("{refusal}").contains("pending"),
+        "the refusal must name the reason, got {refusal}",
+    );
+
+    // Nothing moved on the committer...
+    assert_eq!(s.bob_g.epoch(), epoch_before);
+    assert_eq!(exporter(&s.bob_g, &s.bob), state_before);
+    assert_eq!(
+        s.bob_g.pending_proposals().len(),
+        1,
+        "and nothing was eaten"
+    );
+
+    // ...and the committer and the peer still agree, which is the property the
+    // absorbed commit destroyed.
+    assert_eq!(s.alice_g.epoch(), s.bob_g.epoch());
+    assert_eq!(exporter(&s.alice_g, &s.alice), exporter(&s.bob_g, &s.bob));
+    assert_eq!(
+        s.bob_g.group_roles().expect("table").owner(),
+        &pk32(&s.alice),
+        "the owner is unchanged: the transfer is still only proposed",
+    );
+    assert!(is_member(&s.bob_g, &s.charlie));
+
+    // The way through is the sweep, and it still works — the transfer lands on
+    // every member, so the refusal costs the group nothing but a detour.
+    let sweep = s
+        .bob_g
+        .commit_pending_proposals(&s.bob)
+        .expect("bob sweeps")
+        .expect("one commit");
+    let commit = wire(sweep.commit);
+    s.alice_g
+        .process_incoming_verifying_roles(&s.alice, &commit)
+        .expect("alice applies the sweep");
+    s.charlie_g
+        .process_incoming_verifying_roles(&s.charlie, &commit)
+        .expect("charlie applies the sweep");
+    assert_eq!(
+        s.alice_g.group_roles().expect("table").owner(),
+        &pk32(&s.charlie),
+    );
+    assert_eq!(exporter(&s.alice_g, &s.alice), exporter(&s.bob_g, &s.bob));
+}
+
+/// The benign half of the same defect, which needs no malice and no ownership:
+/// a direct `add_member` that also swept in somebody else's pending `Add` gave
+/// that person a **leaf but no Welcome** — the caller routes the single Welcome
+/// to the one person it meant to add, so the swept-in member is in the roster
+/// and can never join.
+#[test]
+fn a_direct_add_cannot_smuggle_in_a_second_member() {
+    let mut s = scene(0x27);
+    let dave = Identity::from_seed(&[0x2Au8; 64]).expect("dave");
+    let erin = Identity::from_seed(&[0x2Bu8; 64]).expect("erin");
+
+    // bob (admin) proposes adding dave; alice stores it.
+    let proposal = s
+        .bob_g
+        .propose_add_member_from_wire(&s.bob, &kp_wire(&dave))
+        .expect("bob proposes add-dave");
+    s.alice_g
+        .process_incoming_verifying_roles(&s.alice, &proposal)
+        .expect("alice stores it");
+
+    // alice (owner) reaches for the direct path to add erin. Refused: the
+    // commit would have carried dave too.
+    assert!(
+        s.alice_g
+            .add_member_from_wire(&s.alice, &kp_wire(&erin))
+            .is_err(),
+        "a direct add must not silently add a second member",
+    );
+    assert!(!is_member(&s.alice_g, &dave));
+    assert!(!is_member(&s.alice_g, &erin));
+}
+
+/// The claim the guard rests on, asserted rather than assumed: a group with no
+/// ADR-0022 role table never stores a proposal, so the direct-commit paths
+/// every such group depends on — `DeviceGroup`, `PublisherGroup`, call groups —
+/// are untouched by the guard.
+#[test]
+fn a_group_with_no_role_table_still_direct_commits() {
+    let alice = Identity::from_seed(&[0x91u8; 64]).expect("alice");
+    let bob = Identity::from_seed(&[0x92u8; 64]).expect("bob");
+    let charlie = Identity::from_seed(&[0x93u8; 64]).expect("charlie");
+
+    // The `create_with_id` shape: no role table, hence no proposal path.
+    let mut alice_g = Group::create_with_id(&alice, &[0x5Au8; 32]).expect("open group");
+    assert!(alice_g.group_roles().is_none());
+
+    let add_bob = alice_g
+        .add_member_from_wire(&alice, &kp_wire(&bob))
+        .expect("alice adds bob");
+    let mut bob_g = Group::join_from_welcome(&wire(add_bob.welcome), &bob).expect("bob joins");
+
+    // Such a group has no proposal path to fill the set with: `propose_*`
+    // refuses without a table...
+    assert!(alice_g
+        .propose_add_member_from_wire(&alice, &kp_wire(&charlie))
+        .is_err());
+    // ...and the receipt gate stores nothing for it either, so the set is
+    // permanently empty on both sides.
+    assert!(alice_g.pending_proposals().is_empty());
+    assert!(bob_g.pending_proposals().is_empty());
+
+    // So every direct path still works, exactly as it did.
+    let add_c = alice_g
+        .add_member_from_wire(&alice, &kp_wire(&charlie))
+        .expect("a direct add still works on an open group");
+    bob_g
+        .process_incoming_verifying_roles(&bob, &wire(add_c.commit))
+        .expect("bob applies it");
+    let update = alice_g
+        .self_update(&alice)
+        .expect("a direct self_update still works");
+    bob_g
+        .process_incoming_verifying_roles(&bob, &update)
+        .expect("bob applies the update");
+    let charlie_leaf = leaf_of(&alice_g, charlie.signature_public_key());
+    let removal = alice_g
+        .remove_member(&alice, charlie_leaf)
+        .expect("a direct remove still works");
+    bob_g
+        .process_incoming_verifying_roles(&bob, &wire(removal))
+        .expect("bob applies the removal");
+    assert_eq!(exporter(&alice_g, &alice), exporter(&bob_g, &bob));
+}
+
+// ============================================================================
+// The park must be invisible to a concurrent snapshot (ADR-0045 review, HIGH-2)
+// ============================================================================
+
+/// **The concurrency the natives actually drive.** `Group::create_application_message`
+/// parks the pending proposal set around the encrypt call, and the original
+/// argument for why that was safe — that `&mut self` on the group excludes a
+/// snapshot — was wrong: [`Identity::snapshot_storage`] takes `&self` on the
+/// *identity*, a different object, and on iOS and Android the UniFFI `Group` is
+/// `Mutex<MlsGroup>` while `Identity` is bare, so the send thread and the
+/// persist thread genuinely run at once.
+///
+/// A park that emptied the **persisted** queue for the length of an encrypt
+/// therefore let a snapshot capture a group with no pending proposals; a client
+/// that persisted that snapshot and restarted could never apply the
+/// by-reference commit those proposals belong to
+/// (`InvalidCommit(MissingProposal)`) — silently, permanently, and needing no
+/// adversary. So the property is asserted the way it is actually consumed:
+/// every snapshot taken during a send, restored into a fresh identity and
+/// reloaded, must carry the whole pending set.
+#[test]
+fn a_snapshot_taken_during_a_send_never_observes_a_torn_pending_set() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex;
+
+    const SENDS: usize = 400;
+    const MAX_SAMPLES: usize = 300;
+
+    let mut s = scene(0x28);
+    let alice_seed = [0xA0u8 ^ 0x28; 64];
+
+    // Three distinct proposals, so a torn capture is unmistakable — and one of
+    // them is charlie's own departure, which any member may file.
+    for who in [0x31u8, 0x32] {
+        let newcomer = Identity::from_seed(&[who; 64]).expect("newcomer");
+        let proposal = s
+            .bob_g
+            .propose_add_member_from_wire(&s.bob, &kp_wire(&newcomer))
+            .expect("bob proposes an add");
+        s.alice_g
+            .process_incoming_verifying_roles(&s.alice, &proposal)
+            .expect("alice stores it");
+    }
+    let own = s.charlie_g.own_leaf_index();
+    let leaving = s
+        .charlie_g
+        .propose_remove_member(&s.charlie, own)
+        .expect("charlie proposes to leave");
+    s.alice_g
+        .process_incoming_verifying_roles(&s.alice, &leaving)
+        .expect("alice stores it");
+    assert_eq!(s.alice_g.pending_proposals().len(), 3);
+
+    let group_id = s.alice_g.group_id();
+    let alice = &s.alice;
+    let alice_g = &mut s.alice_g;
+    let stop = AtomicBool::new(false);
+    let samples: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
+
+    std::thread::scope(|sc| {
+        sc.spawn(|| {
+            while !stop.load(Ordering::Relaxed) {
+                let snap = alice.snapshot_storage().expect("snapshot");
+                let mut held = samples.lock().expect("samples lock");
+                if held.len() >= MAX_SAMPLES {
+                    break;
+                }
+                held.push(snap);
+            }
+        });
+        for _ in 0..SENDS {
+            alice_g
+                .create_application_message(alice, b"chat while a proposal waits")
+                .expect("the group must keep sending");
+        }
+        stop.store(true, Ordering::Relaxed);
+    });
+
+    let captured = samples.into_inner().expect("samples lock");
+    assert!(
+        captured.len() >= 16,
+        "the probe must actually have sampled during the sends; got {}",
+        captured.len(),
+    );
+    for (i, snap) in captured.iter().enumerate() {
+        let probe = Identity::from_seed(&alice_seed).expect("probe identity");
+        probe.restore_storage(snap).expect("restore");
+        let reloaded = Group::load(&probe, &group_id)
+            .expect("load")
+            .expect("the group is present in every snapshot");
+        assert_eq!(
+            reloaded.pending_proposals().len(),
+            3,
+            "snapshot #{i} of {} captured a torn pending set",
+            captured.len(),
+        );
+    }
+
+    // And the live group is unchanged by all of it.
+    assert_eq!(alice_g.pending_proposals().len(), 3);
+}
+
+// ============================================================================
+// The pending set is bounded and de-duplicated (ADR-0045 review, MEDIUM)
+// ============================================================================
+
+/// **The cheapest denial available to an unprivileged member.** `authorise`
+/// lets any member propose its **own** removal — correctly, that is leaving —
+/// and `propose_remove_member` is on both FFI surfaces. Nothing about the
+/// ratchet stops one member emitting that same proposal N times: it refuses a
+/// byte-identical replay, while N fresh encryptions of one plaintext proposal
+/// all decrypt to the same `ProposalRef`, and `ProposalStore::add` is a bare
+/// push. Every member then carries, persists and re-parks all N — once per
+/// outgoing chat message — and ADR-0045 decision 2 gives the pending set no
+/// deadline, so nothing but an admin noticing ever clears it.
+#[test]
+fn repeating_one_proposal_does_not_grow_the_pending_set() {
+    let mut s = scene(0x29);
+    let own = s.charlie_g.own_leaf_index();
+
+    // Eight distinct ciphertexts of one and the same proposal.
+    let mut wire_copies = Vec::new();
+    for _ in 0..8 {
+        wire_copies.push(
+            s.charlie_g
+                .propose_remove_member(&s.charlie, own)
+                .expect("charlie proposes its own removal again"),
+        );
+    }
+    let distinct: std::collections::BTreeSet<&Vec<u8>> = wire_copies.iter().collect();
+    assert_eq!(
+        distinct.len(),
+        wire_copies.len(),
+        "the flood must be distinct on the wire, or the ratchet would stop it \
+         and this test would prove nothing",
+    );
+
+    for copy in &wire_copies {
+        let incoming = s
+            .alice_g
+            .process_incoming_verifying_roles(&s.alice, copy)
+            .expect("alice processes each copy");
+        let Incoming::Proposal(record) = incoming else {
+            panic!("expected a proposal, got {incoming:?}");
+        };
+        assert!(
+            record.stored,
+            "a repeat is not a refusal — the group does hold this request",
+        );
+    }
+    assert_eq!(
+        s.alice_g.pending_proposals().len(),
+        1,
+        "eight copies of one request must occupy one slot",
+    );
+
+    // And the one retained copy still commits, so de-duplication costs the
+    // proposer nothing.
+    let sweep = s
+        .alice_g
+        .commit_pending_proposals(&s.alice)
+        .expect("alice sweeps")
+        .expect("one commit");
+    assert_eq!(sweep.swept.len(), 1);
+    assert!(!is_member(&s.alice_g, &s.charlie));
+}
+
+/// The cap, and which side pays at it. A proposal arriving into a full set is
+/// refused (`stored == false`) rather than evicting one already held: evicting
+/// would be strictly worse than the flood, because a commit that references an
+/// evicted proposal can no longer be resolved and is refused with
+/// `InvalidCommit(MissingProposal)` on the evicting member alone. So the late
+/// proposer pays a re-proposal after the next sweep; the group never pays a
+/// commit.
+#[test]
+fn the_pending_set_is_capped_and_the_late_proposer_pays() {
+    const CAP: usize = 64;
+
+    let mut s = scene(0x2A);
+
+    // Fill alice's set with CAP distinct authorised requests.
+    for i in 0..CAP {
+        let newcomer = Identity::from_seed(&[0xE0u8 ^ u8::try_from(i).expect("cap < 256"); 64])
+            .expect("newcomer");
+        let proposal = s
+            .bob_g
+            .propose_add_member_from_wire(&s.bob, &kp_wire(&newcomer))
+            .expect("bob proposes an add");
+        s.alice_g
+            .process_incoming_verifying_roles(&s.alice, &proposal)
+            .expect("alice stores it");
+    }
+    assert_eq!(s.alice_g.pending_proposals().len(), CAP);
+
+    // An honest device refuses to publish past the cap too — it must not hand
+    // its peers a proposal their receipt gates would refuse, or it would hold
+    // one nobody else does and sweep a commit they cannot resolve.
+    let one_more = Identity::from_seed(&[0x7Fu8; 64]).expect("one more");
+    assert!(
+        s.bob_g
+            .propose_add_member_from_wire(&s.bob, &kp_wire(&one_more))
+            .is_err(),
+        "the local path must refuse past the cap",
+    );
+
+    // A proposal from a device that has not filled its own set still arrives,
+    // and is refused on receipt — unstored, and named as what it was.
+    let own = s.charlie_g.own_leaf_index();
+    let leaving = s
+        .charlie_g
+        .propose_remove_member(&s.charlie, own)
+        .expect("charlie proposes to leave");
+    let incoming = s
+        .alice_g
+        .process_incoming_verifying_roles(&s.alice, &leaving)
+        .expect("alice processes it");
+    let Incoming::Proposal(record) = incoming else {
+        panic!("expected a proposal, got {incoming:?}");
+    };
+    assert!(!record.stored, "the newcomer is refused at the cap");
+    assert_eq!(
+        record.kind,
+        ProposalKind::Remove {
+            target_leaf: own.u32()
+        },
+        "and the refusal still says what was refused",
+    );
+
+    // Nothing already held was evicted to make room.
+    assert_eq!(s.alice_g.pending_proposals().len(), CAP);
 }
