@@ -235,6 +235,25 @@ pub enum FfiError {
     #[error("release manifest error: {0}")]
     Release(String),
 
+    /// A second ADR-0045 sweep was staged while one is still awaiting its
+    /// journal verdict.
+    ///
+    /// Carved out of [`FfiError::Group`] for the same reason
+    /// [`FfiError::BackupHeadStale`] is carved out of [`FfiError::Backup`]: it
+    /// is the one refusal on the staged path a caller is expected to **handle**
+    /// rather than log. It is never a wire or crypto failure — it means this
+    /// device already published a sweep and has not yet told the core whether
+    /// that sweep won ([`Group::merge_staged_sweep`]) or lost
+    /// ([`Group::abandon_staged_sweep`]). The correct response is to reach the
+    /// outstanding verdict, not to retry the stage.
+    ///
+    /// Building a second sweep is refused **fail-closed** (invariant #4)
+    /// because it would silently replace a commit that may already be on the
+    /// wire — the loser of that replacement would be a commit peers had
+    /// already applied, which is precisely the fork ADR-0045 closes.
+    #[error("a staged sweep is already awaiting its journal verdict")]
+    SweepAlreadyStaged,
+
     /// Lock contention / poisoned mutex on the shared Group state.
     #[error("internal lock error")]
     LockPoisoned,
@@ -360,6 +379,112 @@ impl From<lakko_mls::ProposalRecord> for ProposalRecord {
             sender_leaf: r.sender_leaf,
             kind: r.kind.into(),
             stored: r.stored,
+        }
+    }
+}
+
+/// Result of [`Group::stage_pending_proposals`] — an ADR-0045 sweep that has
+/// been **built but not merged**.
+///
+/// Carries byte-for-byte what [`ProposalCommit`] carries, and is a **separate
+/// type on purpose**: the payloads are identical but the post-conditions are
+/// opposite. Holding a [`ProposalCommit`] means the local epoch has **already**
+/// advanced; holding a `StagedSweep` means it has **not**, and that this device
+/// owes the core a verdict. Making that visible in the type means a staged
+/// sweep cannot be handed to eager-path code — or the reverse — without a
+/// deliberate, reviewer-visible conversion.
+///
+/// The obligation attached to this value:
+///
+/// 1. durably record `commit` (and `welcome`) — ADR-0040's outbox;
+/// 2. publish them to the group journal;
+/// 3. read the journal order back;
+/// 4. **won** → [`Group::merge_staged_sweep`]; **lost** →
+///    [`Group::abandon_staged_sweep`].
+///
+/// Steps 3 and 4 are not optional. A staged sweep is persisted by OpenMLS, so
+/// leaving one unadjudicated freezes this group's own membership operations
+/// **across restarts** — see [`Group::has_staged_sweep`], which is how a
+/// freshly loaded group discovers it owes a verdict.
+#[derive(Debug, uniffi::Record)]
+pub struct StagedSweep {
+    /// Encoded MLS commit message — publish to all existing members. The local
+    /// epoch has **not** advanced; it advances only on
+    /// [`Group::merge_staged_sweep`].
+    pub commit: Vec<u8>,
+    /// Encoded MLS welcome message — deliver to the newly added members,
+    /// present only when the sweep carried at least one `Add`.
+    pub welcome: Option<Vec<u8>>,
+    /// The proposals this commit carried, in sweep order. Read back off the
+    /// staged commit by the core, so it reports what the commit really carries
+    /// rather than what the caller predicted it would.
+    pub swept: Vec<ProposalRecord>,
+}
+
+/// What a verdict call did to the sweep staged by
+/// [`Group::stage_pending_proposals`] (ADR-0045).
+///
+/// Named rather than a bare `Bool`, because the third state is the one that
+/// matters: [`StagedSweepOutcome::NothingStaged`] is **not** a failure — it is
+/// what a verdict reports on a group that never staged anything, and it is what
+/// makes both verdict entry points idempotent, so ADR-0040's restart sweep can
+/// run them twice without consequence.
+///
+/// Each entry point produces only two of the three variants:
+///
+/// | Call | Possible outcomes |
+/// |---|---|
+/// | [`Group::merge_staged_sweep`] | `Merged`, `NothingStaged` |
+/// | [`Group::abandon_staged_sweep`] | `Abandoned`, `NothingStaged` |
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum StagedSweepOutcome {
+    /// A staged sweep was merged: this device is now at the new epoch — the
+    /// same one the peers who applied the published commit reached.
+    Merged,
+    /// A staged sweep was discarded: this device stayed at the epoch the sweep
+    /// was built against, and is free to apply the winner's commit. The
+    /// proposals the sweep selected are still pending for the winner to sweep.
+    Abandoned,
+    /// Nothing was staged, so nothing was decided and no state changed.
+    NothingStaged,
+}
+
+/// What becomes of the outgoing owner when ownership is transferred (ADR-0022's
+/// deferred follow-up, built in ADR-0045). FFI projection of
+/// [`lakko_mls::OutgoingOwner`].
+///
+/// **This is a required argument, never a default.** The core deliberately
+/// forces the caller to state it, because either silent choice is wrong in one
+/// direction: silently keeping admin leaves an unwanted administrator behind in
+/// a group the outgoing owner meant to hand over and walk away from, and
+/// silently dropping to plain member strips them, in one irreversible commit,
+/// of every power they had in a group they created. That property is carried
+/// across the FFI verbatim — this enum deliberately does **not** derive
+/// `Default`, and neither
+/// [`Group::transfer_ownership`] nor [`Group::propose_ownership_transfer`]
+/// declares a UniFFI default for the parameter, so the generated Swift and
+/// Kotlin signatures make it mandatory at every call site.
+///
+/// A UI should still **pre-select** [`OutgoingOwner::Admin`] — not because it
+/// preserves a way back (it does not: a role change is owner-only, so a
+/// transfer cannot be undone by the person who made it) but because it is the
+/// recoverable side of an unrecoverable action. The outgoing owner can shed
+/// admin at any time by asking the new owner for one ordinary role change; the
+/// reverse mistake needs the new owner's cooperation too *and* costs the group
+/// an administrator in the meantime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum OutgoingOwner {
+    /// Keep the outgoing owner in the admin set. The variant to pre-select.
+    Admin,
+    /// Demote the outgoing owner to a plain member.
+    Member,
+}
+
+impl From<OutgoingOwner> for lakko_mls::OutgoingOwner {
+    fn from(o: OutgoingOwner) -> Self {
+        match o {
+            OutgoingOwner::Admin => Self::Admin,
+            OutgoingOwner::Member => Self::Member,
         }
     }
 }
@@ -962,8 +1087,18 @@ impl Group {
         Ok(g.own_committer_rank(&identity.inner))
     }
 
-    /// Sweep the authorised pending proposals into **one** Commit (ADR-0045) —
-    /// the committer half of the design.
+    /// Sweep the authorised pending proposals into **one** Commit and merge it
+    /// immediately (ADR-0045) — the **eager** committer path.
+    ///
+    /// **A committer that can lose a race must not use this.** It is exactly
+    /// [`Self::stage_pending_proposals`] followed at once by
+    /// [`Self::merge_staged_sweep`], and merging before the DS journal has
+    /// ordered the commit is precisely what strands the loser at an epoch
+    /// nobody else reached — silently and permanently (G-38 residual 1). Two
+    /// devices can both act as committer during any handover, so unless the
+    /// caller can prove it is the only one committing, the staged pair is the
+    /// correct entry point. This one is kept, unchanged, for the callers that
+    /// have not migrated.
     ///
     /// Returns `Ok(None)` when nothing authorised is pending: deliberately not
     /// an empty commit, which would advance the epoch (and race other
@@ -991,6 +1126,239 @@ impl Group {
             welcome,
             swept: swept_commit.swept.into_iter().map(Into::into).collect(),
         }))
+    }
+
+    /// Sweep the authorised pending proposals into **one** Commit and **stop
+    /// before merging it** — the ADR-0045 rollback point (G-38 residual 1).
+    ///
+    /// This is the committer entry point for any device that can lose a race,
+    /// which in practice is every device: ADR-0045's designated committer makes
+    /// two simultaneous sweeps rare, not impossible, because no liveness signal
+    /// can distinguish a dead committer from a slow one. The DS journal already
+    /// arbitrates — every member observes its order identically — so the
+    /// collision needs no negotiation. What it needs is for the loser to be
+    /// able to *survive losing*, which the eager shape denies it.
+    ///
+    /// **The sequence, in order. Every step is required.**
+    ///
+    /// 1. `stagePendingProposals` — the group stays at epoch N holding an
+    ///    un-merged commit.
+    /// 2. Durably record [`StagedSweep::commit`] (and
+    ///    [`StagedSweep::welcome`]) — ADR-0040's outbox — then publish them.
+    /// 3. Read the journal order back: did this commit land first?
+    /// 4. **Won** → [`Self::merge_staged_sweep`]. **Lost** →
+    ///    [`Self::abandon_staged_sweep`], then apply the winner's commit
+    ///    normally.
+    ///
+    /// The two mechanisms answer different questions and neither subsumes the
+    /// other: the outbox answers *did my commit reach the wire*, this pair
+    /// answers *did it win the wire order*. The first must be `yes` before the
+    /// second is meaningful. A commit that **won** must be merged and never
+    /// rolled back — rolling one back after peers applied it manufactures the
+    /// very fork this closes.
+    ///
+    /// **Abandoning costs nothing.** OpenMLS empties the proposal store on
+    /// *merge*, and an abandoned sweep was never merged, so the proposals it
+    /// selected are still pending for the winner's next sweep.
+    ///
+    /// Returns `Ok(None)` when nothing authorised is pending — the same
+    /// deliberate non-empty-commit rule as [`Self::commit_pending_proposals`],
+    /// and in that case nothing is staged and no verdict is owed.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SweepAlreadyStaged`] when a sweep is already awaiting its
+    /// verdict — handle it by reaching that verdict, never by retrying the
+    /// stage. Otherwise [`FfiError::Group`] when the group has no role table,
+    /// when this device's role does not authorise it to commit, or on any
+    /// OpenMLS-side failure.
+    pub fn stage_pending_proposals(
+        &self,
+        identity: &Identity,
+    ) -> Result<Option<StagedSweep>, FfiError> {
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        // Projected here, under the SAME lock guard the stage runs under, so
+        // there is no window between the check and the call. The core carries
+        // its own fail-closed guard and stays authoritative; this exists only
+        // to give the caller a variant it can branch on instead of a message it
+        // would have to string-match, and never to relax the refusal.
+        if g.has_staged_sweep() {
+            return Err(FfiError::SweepAlreadyStaged);
+        }
+        let Some(staged) = g.stage_pending_proposals(&identity.inner)? else {
+            return Ok(None);
+        };
+        let welcome = match staged.welcome {
+            Some(w) => Some(group::encode_message(&w)?),
+            None => None,
+        };
+        Ok(Some(StagedSweep {
+            commit: group::encode_message(&staged.commit)?,
+            welcome,
+            swept: staged.swept.into_iter().map(Into::into).collect(),
+        }))
+    }
+
+    /// `true` when a sweep built by [`Self::stage_pending_proposals`] is staged
+    /// and still awaiting its journal verdict (ADR-0045).
+    ///
+    /// **This is the restart-time obligation check, and it is why the verdict
+    /// lives on the group rather than on the staged value.** A staged commit is
+    /// persisted by OpenMLS and read back by `Group.load`, so it outlives the
+    /// process — a handle object returned by the stage call could not. After
+    /// loading a group, a client that finds this `true` still owes a verdict on
+    /// a commit it may have already published, and must resolve it (ADR-0040's
+    /// restart sweep re-publishes, re-reads the journal order, then merges or
+    /// abandons).
+    ///
+    /// Leaving one unresolved is not inert: while a sweep is staged, OpenMLS
+    /// refuses this group's own `propose*` / add / remove / role-change
+    /// operations, so the group's membership is frozen until the verdict lands.
+    /// Incoming messages are unaffected.
+    ///
+    /// Every eager path leaves this `false` — [`Self::add_member_from_wire`],
+    /// [`Self::remove_member`], [`Self::set_group_roles`],
+    /// [`Self::approve_external_join`] and [`Self::commit_pending_proposals`]
+    /// all merge before they return — which is why a rollback here can never
+    /// reach a path that never had one.
+    pub fn has_staged_sweep(&self) -> Result<bool, FfiError> {
+        let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.has_staged_sweep())
+    }
+
+    /// **Won.** Merge the sweep staged by [`Self::stage_pending_proposals`],
+    /// advancing this device to the new epoch — the same one the peers who
+    /// applied the published commit reached (ADR-0045).
+    ///
+    /// Call this only after the journal has confirmed this device's commit was
+    /// ordered first. Merging on any weaker signal is the eager shape again,
+    /// with all of its consequences.
+    ///
+    /// Returns [`StagedSweepOutcome::Merged`], or
+    /// [`StagedSweepOutcome::NothingStaged`] when there was nothing staged —
+    /// not a failure, and what makes a re-run after the merge a no-op.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::Group`] on any OpenMLS-side merge failure.
+    pub fn merge_staged_sweep(&self, identity: &Identity) -> Result<StagedSweepOutcome, FfiError> {
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(if g.merge_staged_sweep(&identity.inner)? {
+            StagedSweepOutcome::Merged
+        } else {
+            StagedSweepOutcome::NothingStaged
+        })
+    }
+
+    /// **Lost.** Discard the sweep staged by [`Self::stage_pending_proposals`],
+    /// returning this group to the epoch the sweep was built against so it can
+    /// apply the winner's commit and carry on (ADR-0045).
+    ///
+    /// This touches one group and no other: the rollback sets **this** group's
+    /// state back to operational and writes nothing else, unlike a
+    /// whole-provider `restoreStorage`, which would roll sibling groups back
+    /// past commits they have already published.
+    ///
+    /// Returns [`StagedSweepOutcome::Abandoned`], or
+    /// [`StagedSweepOutcome::NothingStaged`] when there was nothing staged —
+    /// which is what every eagerly-merged path reports, and is why calling this
+    /// after one cannot undo anything.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::Group`] if the discard did not take effect. The core
+    /// re-reads the group state afterwards and refuses to report a rollback it
+    /// did not actually perform (fail-closed, invariant #4).
+    pub fn abandon_staged_sweep(
+        &self,
+        identity: &Identity,
+    ) -> Result<StagedSweepOutcome, FfiError> {
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(if g.abandon_staged_sweep(&identity.inner)? {
+            StagedSweepOutcome::Abandoned
+        } else {
+            StagedSweepOutcome::NothingStaged
+        })
+    }
+
+    /// Hand the group's owner slot to `new_owner`, as a **direct commit**
+    /// (ADR-0022's deferred ownership-transfer follow-up, built in ADR-0045).
+    ///
+    /// `new_owner` is the member's 32-byte Ed25519 signature public key — the
+    /// same stable handle [`MemberRecord::signature_public_key`] reports and
+    /// the role table keys on, never a leaf index. `outgoing` decides what
+    /// becomes of **this** device's own role and is **required**; see
+    /// [`OutgoingOwner`].
+    ///
+    /// **Owner-only and irreversible.** Only the owner may transfer, because a
+    /// role change is owner-only and a transfer is a role change; anything
+    /// weaker would be a coup, since an admin able to transfer could name
+    /// itself. Once the commit lands, only the new owner can rewrite the table.
+    /// This does **not** recover a *lost* owner either — minting the commit
+    /// needs the owner's key.
+    ///
+    /// Transfer is what makes leaving possible: an owner may not leave while
+    /// owner, but the former owner is an ordinary member and may. The two are
+    /// necessarily separate commits — both proposals are judged against the
+    /// pre-merge table in which the transferor is still owner, so a fused
+    /// transfer-and-leave has its `Leave` half refused.
+    ///
+    /// Transfer is deliberately **not** a new commit type: it is the ordinary
+    /// owner-only role-table rewrite with the owner slot moved, so it rides the
+    /// audited [`Self::set_group_roles`] path and is judged by the existing
+    /// peer gate. Returns the wire-encoded commit to broadcast; the local epoch
+    /// has already advanced, so record it durably before publishing
+    /// (ADR-0040). In a group that has moved to the ADR-0045 proposal path,
+    /// prefer [`Self::propose_ownership_transfer`].
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::Codec`] when `new_owner` is not 32 bytes.
+    /// [`FfiError::Group`] when the group carries no role table, when this
+    /// device is not the owner, when `new_owner` is already the owner, or when
+    /// `new_owner` is **not a member of this group** — the last refused because
+    /// an owner outside the group can never be replaced (a role change is
+    /// owner-only) and never removed (the owner's leaf is unremovable), leaving
+    /// the group permanently un-administrable. Peers refuse such a commit
+    /// independently (C-63), so this local refusal is the clear error, not the
+    /// enforcement.
+    pub fn transfer_ownership(
+        &self,
+        identity: &Identity,
+        new_owner: Vec<u8>,
+        outgoing: OutgoingOwner,
+    ) -> Result<Vec<u8>, FfiError> {
+        if new_owner.len() != 32 {
+            return Err(FfiError::Codec("new owner key must be 32 bytes".into()));
+        }
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.transfer_ownership(&identity.inner, &new_owner, outgoing.into())?)
+    }
+
+    /// **Propose** handing the group's owner slot to `new_owner` (ADR-0045) —
+    /// the proposal-path twin of [`Self::transfer_ownership`], with identical
+    /// authorisation and identical refusals.
+    ///
+    /// The proposal is judged, by this device and by every peer, against the
+    /// **pre-merge** table in which this device is still the owner, so it needs
+    /// no new rule: it is a role change, which is owner-only. Any owner-or-admin
+    /// may sweep it, including the incoming owner. Returns the wire-encoded
+    /// Proposal to publish; the epoch does **not** advance.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::transfer_ownership`].
+    pub fn propose_ownership_transfer(
+        &self,
+        identity: &Identity,
+        new_owner: Vec<u8>,
+        outgoing: OutgoingOwner,
+    ) -> Result<Vec<u8>, FfiError> {
+        if new_owner.len() != 32 {
+            return Err(FfiError::Codec("new owner key must be 32 bytes".into()));
+        }
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.propose_ownership_transfer(&identity.inner, &new_owner, outgoing.into())?)
     }
 
     /// Encrypt an application payload for the current epoch.
@@ -4023,6 +4391,432 @@ mod tests {
             "a plain member may not sweep",
         );
         assert!(charlie_g.pending_proposals().unwrap().is_empty());
+    }
+
+    // ========================================================================
+    // ADR-0045 S3b — the staged sweep + ownership transfer
+    // ========================================================================
+
+    /// **Won.** Stage leaves the group at the epoch it built against, holding
+    /// an un-merged commit; the verdict merge lands it at the next epoch, in
+    /// the same state the peer that applied the published commit reached.
+    ///
+    /// This is the sequence the whole staged pair exists for: stage, publish,
+    /// read the journal order, merge.
+    #[test]
+    fn staging_then_merging_lands_the_sweep() {
+        let ((alice, alice_g), (bob, bob_g), _charlie) = adr0045_trio();
+        let dave = Identity::new("dave".into()).unwrap();
+
+        // The proposal reaches every member FIRST. A swept commit carries it
+        // by REFERENCE, and OpenMLS resolves those references at commit
+        // receipt on every member — a peer that never saw the proposal refuses
+        // the commit with `InvalidCommit(MissingProposal)`. That is RFC 9420
+        // enforcing ADR-0045's "store at receipt" rule, not a test artefact.
+        let proposal = alice_g
+            .propose_add_member_from_wire(&alice, dave.create_key_package().unwrap())
+            .unwrap();
+        assert!(matches!(
+            bob_g
+                .process_incoming_verifying_roles(&bob, proposal)
+                .unwrap(),
+            ProcessedMessage::Proposal { .. }
+        ));
+        let epoch_before = alice_g.epoch().unwrap();
+        assert!(!alice_g.has_staged_sweep().unwrap());
+
+        // 1. Stage. The epoch does NOT move, and the group now owes a verdict.
+        let staged = alice_g
+            .stage_pending_proposals(&alice)
+            .unwrap()
+            .expect("a pending add must produce a staged sweep");
+        assert_eq!(
+            alice_g.epoch().unwrap(),
+            epoch_before,
+            "staging must NOT advance the epoch — that is the whole point",
+        );
+        assert!(
+            alice_g.has_staged_sweep().unwrap(),
+            "a staged sweep must be reported as awaiting a verdict",
+        );
+        assert_eq!(staged.swept.len(), 1);
+        assert!(matches!(staged.swept[0].kind, ProposalKind::Add { .. }));
+        let welcome = staged
+            .welcome
+            .clone()
+            .expect("an add sweep carries a welcome");
+
+        // 2. Publish. Bob applies it and reaches the new epoch alone.
+        assert!(matches!(
+            bob_g
+                .process_incoming_verifying_roles(&bob, staged.commit.clone())
+                .unwrap(),
+            ProcessedMessage::Commit
+        ));
+        assert_eq!(
+            bob_g.epoch().unwrap(),
+            epoch_before + 1,
+            "the peer advances on the published commit while the stager has not",
+        );
+
+        // 3 + 4. The journal ordered it first, so merge.
+        assert_eq!(
+            alice_g.merge_staged_sweep(&alice).unwrap(),
+            StagedSweepOutcome::Merged,
+        );
+        assert!(!alice_g.has_staged_sweep().unwrap());
+        assert_eq!(alice_g.epoch().unwrap(), bob_g.epoch().unwrap());
+        assert!(
+            alice_g.pending_proposals().unwrap().is_empty(),
+            "a merged sweep empties the proposal store",
+        );
+
+        // The Welcome staged before the merge is the real one.
+        let dave_g = Group::join_from_welcome(welcome, &dave).unwrap();
+        assert_eq!(dave_g.member_count().unwrap(), 4);
+        assert_eq!(alice_g.member_count().unwrap(), 4);
+
+        // Merging again is an idempotent no-op — what makes ADR-0040's restart
+        // sweep safe to run twice.
+        assert_eq!(
+            alice_g.merge_staged_sweep(&alice).unwrap(),
+            StagedSweepOutcome::NothingStaged,
+        );
+    }
+
+    /// **Lost.** Abandoning returns the group to the epoch the sweep was built
+    /// against and throws no work away — the proposals it selected are still
+    /// pending, so the winner (or a later sweep) picks them up.
+    #[test]
+    fn staging_then_abandoning_rolls_back_and_keeps_the_proposals() {
+        let ((alice, alice_g), _bob, _charlie) = adr0045_trio();
+        let dave = Identity::new("dave".into()).unwrap();
+
+        alice_g
+            .propose_add_member_from_wire(&alice, dave.create_key_package().unwrap())
+            .unwrap();
+        let epoch_before = alice_g.epoch().unwrap();
+        let members_before = alice_g.member_count().unwrap();
+
+        let staged = alice_g.stage_pending_proposals(&alice).unwrap().unwrap();
+        assert_eq!(staged.swept.len(), 1);
+        assert!(alice_g.has_staged_sweep().unwrap());
+
+        assert_eq!(
+            alice_g.abandon_staged_sweep(&alice).unwrap(),
+            StagedSweepOutcome::Abandoned,
+        );
+        assert!(!alice_g.has_staged_sweep().unwrap());
+        assert_eq!(
+            alice_g.epoch().unwrap(),
+            epoch_before,
+            "abandoning must leave the group exactly where it was",
+        );
+        assert_eq!(alice_g.member_count().unwrap(), members_before);
+        assert_eq!(
+            alice_g.pending_proposals().unwrap().len(),
+            1,
+            "an abandoned sweep leaves its proposals for the next committer",
+        );
+
+        // And the group is free to act again: a second stage now succeeds.
+        let restaged = alice_g.stage_pending_proposals(&alice).unwrap().unwrap();
+        assert_eq!(restaged.swept.len(), 1);
+        assert_eq!(
+            alice_g.merge_staged_sweep(&alice).unwrap(),
+            StagedSweepOutcome::Merged,
+        );
+        assert_eq!(alice_g.member_count().unwrap(), members_before + 1);
+
+        // Abandoning again is an idempotent no-op.
+        assert_eq!(
+            alice_g.abandon_staged_sweep(&alice).unwrap(),
+            StagedSweepOutcome::NothingStaged,
+        );
+    }
+
+    /// A second stage is refused with the **typed** [`FfiError::SweepAlreadyStaged`]
+    /// variant, not a message a caller would have to string-match.
+    ///
+    /// Fail-closed: building a second sweep would silently replace a commit
+    /// that may already be on the wire, so the refusal is the correct
+    /// behaviour and the caller's job is to reach the outstanding verdict.
+    #[test]
+    fn a_second_stage_is_refused_with_a_typed_error() {
+        let ((alice, alice_g), _bob, _charlie) = adr0045_trio();
+        let dave = Identity::new("dave".into()).unwrap();
+        let erin = Identity::new("erin".into()).unwrap();
+
+        alice_g
+            .propose_add_member_from_wire(&alice, dave.create_key_package().unwrap())
+            .unwrap();
+        let first = alice_g.stage_pending_proposals(&alice).unwrap().unwrap();
+
+        let err = alice_g.stage_pending_proposals(&alice).unwrap_err();
+        assert!(
+            matches!(err, FfiError::SweepAlreadyStaged),
+            "the second stage must be the TYPED refusal, got {err:?}",
+        );
+
+        // A staged sweep also freezes this group's own membership operations,
+        // so the client obligation is real: reach the verdict or stay frozen.
+        assert!(
+            alice_g
+                .propose_add_member_from_wire(&alice, erin.create_key_package().unwrap())
+                .is_err(),
+            "a staged sweep freezes this group's own proposals",
+        );
+
+        // Reaching the verdict clears it, and the FIRST staged commit is still
+        // the one that was on the wire.
+        assert_eq!(
+            alice_g.merge_staged_sweep(&alice).unwrap(),
+            StagedSweepOutcome::Merged,
+        );
+        assert!(!first.commit.is_empty());
+        assert!(alice_g.stage_pending_proposals(&alice).unwrap().is_none());
+    }
+
+    /// `hasStagedSweep` reports honestly on every path, and a verdict on a
+    /// group that never staged anything is `NothingStaged` rather than an
+    /// error — which is what makes both verdict calls idempotent.
+    ///
+    /// In particular the **eager** `commitPendingProposals` leaves nothing
+    /// staged, so a rollback can never reach a commit it already merged.
+    #[test]
+    fn has_staged_sweep_reports_honestly_on_every_path() {
+        let ((alice, alice_g), _bob, _charlie) = adr0045_trio();
+        let dave = Identity::new("dave".into()).unwrap();
+
+        // A fresh group: nothing staged, both verdicts are no-ops.
+        assert!(!alice_g.has_staged_sweep().unwrap());
+        assert_eq!(
+            alice_g.merge_staged_sweep(&alice).unwrap(),
+            StagedSweepOutcome::NothingStaged,
+        );
+        assert_eq!(
+            alice_g.abandon_staged_sweep(&alice).unwrap(),
+            StagedSweepOutcome::NothingStaged,
+        );
+
+        // Nothing pending: staging emits no commit and stages nothing.
+        assert!(alice_g.stage_pending_proposals(&alice).unwrap().is_none());
+        assert!(
+            !alice_g.has_staged_sweep().unwrap(),
+            "an empty stage must not leave a verdict owed",
+        );
+
+        // The EAGER path merges before it returns, so it leaves nothing staged.
+        alice_g
+            .propose_add_member_from_wire(&alice, dave.create_key_package().unwrap())
+            .unwrap();
+        assert!(alice_g.commit_pending_proposals(&alice).unwrap().is_some());
+        assert!(
+            !alice_g.has_staged_sweep().unwrap(),
+            "the eager sweep must leave nothing to adjudicate",
+        );
+        assert_eq!(
+            alice_g.abandon_staged_sweep(&alice).unwrap(),
+            StagedSweepOutcome::NothingStaged,
+            "abandoning after an eager commit must not undo it",
+        );
+    }
+
+    /// Ownership transfer round-trips through the FFI with **both**
+    /// `OutgoingOwner` variants, and the variant is what decides the outgoing
+    /// owner's fate — `Admin` keeps them in the admin set, `Member` does not.
+    ///
+    /// The variant is a required argument on both entry points; there is no
+    /// default for a binding to collapse it to.
+    #[test]
+    fn ownership_transfer_honours_both_outgoing_owner_variants() {
+        for (outgoing, alice_keeps_admin) in
+            [(OutgoingOwner::Admin, true), (OutgoingOwner::Member, false)]
+        {
+            let ((alice, alice_g), (bob, bob_g), (charlie, charlie_g)) = adr0045_trio();
+            let alice_key = alice.signature_public_key();
+            let bob_key = bob.signature_public_key();
+
+            assert!(matches!(
+                alice_g.own_role(&alice).unwrap(),
+                Some(Role::Owner)
+            ));
+            assert!(matches!(bob_g.own_role(&bob).unwrap(), Some(Role::Member)));
+
+            let commit = alice_g
+                .transfer_ownership(&alice, bob_key.clone(), outgoing)
+                .unwrap();
+            for (id, g) in [(&bob, &bob_g), (&charlie, &charlie_g)] {
+                assert!(
+                    matches!(
+                        g.process_incoming_verifying_roles(id, commit.clone())
+                            .unwrap(),
+                        ProcessedMessage::Commit
+                    ),
+                    "every peer must accept the owner's transfer commit",
+                );
+            }
+
+            for g in [&alice_g, &bob_g, &charlie_g] {
+                let table = g.group_roles().unwrap().expect("role table");
+                assert_eq!(table.owner, bob_key, "{outgoing:?}: bob must be the owner");
+                assert_eq!(
+                    table.admins.contains(&alice_key),
+                    alice_keeps_admin,
+                    "{outgoing:?}: the outgoing owner's admin membership must follow the variant",
+                );
+            }
+            assert!(matches!(bob_g.own_role(&bob).unwrap(), Some(Role::Owner)));
+            assert!(matches!(
+                alice_g.own_role(&alice).unwrap(),
+                Some(Role::Admin | Role::Member),
+            ));
+            assert_eq!(
+                alice_g.own_committer_rank(&alice).unwrap().is_some(),
+                alice_keeps_admin,
+                "{outgoing:?}: a demoted former owner leaves the committer set entirely",
+            );
+
+            // The new owner can administer; the former owner can no longer
+            // rewrite the table however the variant went.
+            assert!(bob_g
+                .set_group_roles(&bob, bob_key.clone(), vec![alice_key.clone()])
+                .is_ok());
+            assert!(
+                alice_g
+                    .transfer_ownership(&alice, alice_key.clone(), OutgoingOwner::Admin)
+                    .is_err(),
+                "{outgoing:?}: a transfer is irreversible by the person who made it",
+            );
+        }
+    }
+
+    /// The proposal-path twin: the owner **proposes** a transfer (epoch
+    /// unchanged), a peer stores it, and a sweep installs the new owner. The
+    /// incoming owner may sweep it themselves once they are an admin.
+    #[test]
+    fn propose_ownership_transfer_rides_the_proposal_path() {
+        let ((alice, alice_g), (bob, bob_g), (charlie, charlie_g)) = adr0045_trio();
+        let bob_key = bob.signature_public_key();
+        let epoch_before = alice_g.epoch().unwrap();
+
+        let proposal = alice_g
+            .propose_ownership_transfer(&alice, bob_key.clone(), OutgoingOwner::Member)
+            .unwrap();
+        assert_eq!(
+            alice_g.epoch().unwrap(),
+            epoch_before,
+            "a proposal must not advance the epoch",
+        );
+
+        for (id, g) in [(&bob, &bob_g), (&charlie, &charlie_g)] {
+            let ProcessedMessage::Proposal { record } = g
+                .process_incoming_verifying_roles(id, proposal.clone())
+                .unwrap()
+            else {
+                panic!("expected a Proposal");
+            };
+            assert!(record.stored, "the owner's role change must be stored");
+            assert!(matches!(record.kind, ProposalKind::RoleChange));
+        }
+
+        // The owner sweeps its own proposal through the staged pair.
+        let staged = alice_g.stage_pending_proposals(&alice).unwrap().unwrap();
+        for (id, g) in [(&bob, &bob_g), (&charlie, &charlie_g)] {
+            assert!(matches!(
+                g.process_incoming_verifying_roles(id, staged.commit.clone())
+                    .unwrap(),
+                ProcessedMessage::Commit
+            ));
+        }
+        assert_eq!(
+            alice_g.merge_staged_sweep(&alice).unwrap(),
+            StagedSweepOutcome::Merged,
+        );
+
+        for g in [&alice_g, &bob_g, &charlie_g] {
+            assert_eq!(g.group_roles().unwrap().expect("table").owner, bob_key);
+        }
+        assert!(matches!(bob_g.own_role(&bob).unwrap(), Some(Role::Owner)));
+        assert!(matches!(
+            alice_g.own_role(&alice).unwrap(),
+            Some(Role::Member)
+        ));
+    }
+
+    /// C-63 at the FFI: naming an owner that no leaf holds is refused locally
+    /// with a clear error, before any MLS state is touched. An owner outside
+    /// the group could never be replaced (a role change is owner-only) nor
+    /// removed (the owner's leaf is unremovable), so the group would be
+    /// permanently un-administrable.
+    #[test]
+    fn transfer_refuses_a_non_member_and_a_bad_key_length() {
+        let ((alice, alice_g), _bob, _charlie) = adr0045_trio();
+        let stranger = Identity::new("stranger".into()).unwrap();
+        let epoch_before = alice_g.epoch().unwrap();
+
+        for outgoing in [OutgoingOwner::Admin, OutgoingOwner::Member] {
+            assert!(
+                alice_g
+                    .transfer_ownership(&alice, stranger.signature_public_key(), outgoing)
+                    .is_err(),
+                "{outgoing:?}: an owner outside the group must be refused",
+            );
+            assert!(alice_g
+                .propose_ownership_transfer(&alice, stranger.signature_public_key(), outgoing)
+                .is_err());
+            // Wrong length never reaches the core.
+            assert!(matches!(
+                alice_g
+                    .transfer_ownership(&alice, vec![0u8; 31], outgoing)
+                    .unwrap_err(),
+                FfiError::Codec(_),
+            ));
+            assert!(matches!(
+                alice_g
+                    .propose_ownership_transfer(&alice, vec![0u8; 33], outgoing)
+                    .unwrap_err(),
+                FfiError::Codec(_),
+            ));
+        }
+
+        assert_eq!(
+            alice_g.epoch().unwrap(),
+            epoch_before,
+            "every refusal must leave the group exactly as it was",
+        );
+        assert!(!alice_g.has_staged_sweep().unwrap());
+        assert!(alice_g.pending_proposals().unwrap().is_empty());
+    }
+
+    /// A plain member may neither stage a sweep nor transfer ownership.
+    #[test]
+    fn a_plain_member_can_neither_stage_nor_transfer() {
+        let ((alice, alice_g), _bob, (charlie, charlie_g)) = adr0045_trio();
+
+        assert!(
+            charlie_g.stage_pending_proposals(&charlie).is_err(),
+            "a plain member may not sweep, staged or eager",
+        );
+        assert!(charlie_g
+            .transfer_ownership(
+                &charlie,
+                charlie.signature_public_key(),
+                OutgoingOwner::Admin,
+            )
+            .is_err());
+        assert!(charlie_g
+            .propose_ownership_transfer(
+                &charlie,
+                charlie.signature_public_key(),
+                OutgoingOwner::Member,
+            )
+            .is_err());
+        assert!(!charlie_g.has_staged_sweep().unwrap());
+        assert_eq!(
+            alice_g.group_roles().unwrap().expect("table").owner,
+            alice.signature_public_key(),
+        );
     }
 
     /// `Identity::from_seed` is deterministic for the same input
