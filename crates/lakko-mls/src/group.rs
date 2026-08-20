@@ -977,6 +977,14 @@ impl Group {
     /// this returns, and the caller must durably record the returned artifacts
     /// before publishing them.
     ///
+    /// **A committer that can lose a race wants
+    /// [`Group::stage_pending_proposals`] instead.** This method is that one
+    /// followed immediately by [`Group::merge_staged_sweep`], and merging
+    /// before the DS journal has ordered the commit is precisely what leaves a
+    /// loser stranded at an epoch nobody else reached (G-38 residual 1). This
+    /// entry point is kept, unchanged, for the callers that have not yet moved
+    /// — its behaviour is byte-for-byte what it was.
+    ///
     /// Returns `Ok(None)` when nothing authorised is pending — deliberately
     /// **not** an empty commit, which would advance the epoch (and race other
     /// committers) for no effect. [`ProposalCommit::swept`] is read back off the
@@ -1001,6 +1009,88 @@ impl Group {
         &mut self,
         identity: &Identity,
     ) -> Result<Option<ProposalCommit>> {
+        let staged = self.stage_pending_proposals(identity)?;
+        if staged.is_some() {
+            self.merge_staged_sweep(identity)?;
+        }
+        Ok(staged)
+    }
+
+    /// Sweep the authorised pending proposals into one Commit and **stop before
+    /// merging it** — the ADR-0045 rollback point (G-38 residual 1).
+    ///
+    /// Identical to [`Group::commit_pending_proposals`] in what it builds and
+    /// what it returns; the difference is the post-condition. This leaves the
+    /// group at epoch **N** holding an un-merged staged commit, so the caller
+    /// can publish, learn from the DS journal whether its commit was ordered
+    /// first, and only then decide:
+    ///
+    /// * it won → [`Group::merge_staged_sweep`], landing at N+1;
+    /// * it lost → [`Group::abandon_staged_sweep`], discarding the staged
+    ///   commit and leaving the group exactly where it was, free to apply the
+    ///   winner's commit and carry on.
+    ///
+    /// **Why this exists.** ADR-0045's designated committer makes two
+    /// simultaneous commits *rare*, not impossible: no liveness timeout can
+    /// tell a dead committer from a slow one, so during a handover two devices
+    /// can both act. The journal already arbitrates — it is an append-only log
+    /// whose order every member observes identically — so the collision needs
+    /// no negotiation. What it needs is for the loser to be able to *survive
+    /// losing*, which the eager-merge shape denies it: having merged N+1 before
+    /// publishing, the loser sits at an epoch nobody else reached, silently and
+    /// permanently. Staging instead of merging is that survival.
+    ///
+    /// **What the loser loses: nothing of substance.** The proposals this sweep
+    /// selected are still in the pending store — OpenMLS empties that store
+    /// when a commit is *merged*, and this one is not — so the winner's next
+    /// sweep picks them up. Abandoning returns the group to where it was; it
+    /// does not throw work away.
+    ///
+    /// **Relationship to ADR-0040's outbox.** The two answer different
+    /// questions about the same commit and neither subsumes the other:
+    ///
+    /// | Question | Mechanism | Answer |
+    /// |---|---|---|
+    /// | Did my commit reach the wire? | the outbox | re-publish the un-acked entry |
+    /// | Did my commit win the wire order? | this pair | merge, or abandon |
+    ///
+    /// The first must be answered *yes* before the second is even meaningful,
+    /// so the sequence is: durably record → publish (or re-publish) → read the
+    /// journal verdict → merge or abandon. A commit that won must be merged,
+    /// never rolled back — rolling one back after peers have applied it would
+    /// manufacture the very fork this closes.
+    ///
+    /// The staged commit is **durable**: OpenMLS persists it as part of the
+    /// group state, so a crash between staging and the verdict reloads a group
+    /// still at N with the sweep intact, and the restart sweep re-publishes and
+    /// re-adjudicates exactly as if nothing had happened.
+    ///
+    /// **A staged sweep freezes the group's own membership operations** —
+    /// OpenMLS refuses to build a proposal or another commit while one is
+    /// pending — so a caller must reach a verdict rather than leave one staged
+    /// indefinitely. Incoming messages are unaffected: applying the winner's
+    /// commit works whether or not the loser has abandoned yet, because OpenMLS
+    /// discards a pending commit as part of merging a foreign one. Abandoning
+    /// first is the honest order and the one this crate drives; the other is
+    /// pinned as a safety net so a client that gets the order wrong still
+    /// converges rather than wedging.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Group`] when the group has no role table, when this device's
+    /// role does not authorise it to commit, when a sweep is **already** staged
+    /// (fail-closed: building a second one would silently replace the first,
+    /// stranding a commit that may already be on the wire), or on any
+    /// OpenMLS-side failure.
+    pub fn stage_pending_proposals(
+        &mut self,
+        identity: &Identity,
+    ) -> Result<Option<ProposalCommit>> {
+        if self.has_staged_sweep() {
+            return Err(Error::Group(
+                "sweep refused: a staged sweep is already awaiting a verdict".into(),
+            ));
+        }
         let table = self.role_table_or_refuse("sweep")?;
         if !table.can_administer(identity.signature_public_key()) {
             return Err(Error::Group(
@@ -1081,15 +1171,92 @@ impl Group {
             .unwrap_or_default();
 
         let (commit, welcome, _group_info) = bundle.into_messages();
-        self.inner
-            .merge_pending_commit(&identity.provider)
-            .map_err(|e| Error::Group(format!("merge_pending_commit: {e:?}")))?;
-
         Ok(Some(ProposalCommit {
             commit,
             welcome,
             swept,
         }))
+    }
+
+    /// `true` when a sweep built by [`Group::stage_pending_proposals`] is
+    /// staged and still awaiting its journal verdict.
+    ///
+    /// Only that method can put this group into that state. Every
+    /// direct-commit path ([`Group::add_member`], [`Group::remove_member`],
+    /// [`Group::set_group_context_extensions`], [`Group::self_update`],
+    /// [`Group::approve_external_join`]) merges before it returns, and
+    /// [`Group::commit_pending_proposals`] stages and merges in one call — so
+    /// after any of them this is `false` and the verdict entry points below are
+    /// no-ops. That is the whole reason a rollback here cannot reach a path
+    /// that never had one.
+    #[must_use]
+    pub fn has_staged_sweep(&self) -> bool {
+        self.inner.pending_commit().is_some()
+    }
+
+    /// **Won.** Merge the sweep staged by
+    /// [`Group::stage_pending_proposals`], advancing this device to N+1 — the
+    /// same state the peers who applied the published commit reached.
+    ///
+    /// Returns `true` when a staged sweep was merged, `false` when there was
+    /// nothing staged (idempotent: a re-run after the merge is a no-op, which
+    /// is what makes an ADR-0040 restart sweep safe to run twice).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Group`] on any OpenMLS-side merge failure.
+    pub fn merge_staged_sweep(&mut self, identity: &Identity) -> Result<bool> {
+        if !self.has_staged_sweep() {
+            return Ok(false);
+        }
+        self.inner
+            .merge_pending_commit(&identity.provider)
+            .map_err(|e| Error::Group(format!("merge_pending_commit: {e:?}")))?;
+        Ok(true)
+    }
+
+    /// **Lost.** Discard the sweep staged by
+    /// [`Group::stage_pending_proposals`], returning this group to the epoch it
+    /// was built against so it can apply the winner's commit and carry on.
+    ///
+    /// Returns `true` when a staged sweep was discarded, `false` when there was
+    /// nothing staged. The `false` case is not a failure — it is what the
+    /// method reports on every path that merges eagerly, and is why calling it
+    /// after one cannot undo anything.
+    ///
+    /// **This touches one group and no other.** The rollback is
+    /// `MlsGroup::clear_pending_commit`, whose entire effect is to set this
+    /// group's `group_state` back to `Operational` and write that one value
+    /// under this group's id. Nothing else in the provider is read or written,
+    /// which is exactly what a whole-provider `Identity::restore_storage` could
+    /// not promise: that restores *every* group on the account, so using it to
+    /// undo one group's commit would roll sibling groups back past commits they
+    /// have already published — strictly worse than the fork it was repairing.
+    ///
+    /// It also throws no work away: the proposals the sweep selected are still
+    /// pending, because OpenMLS empties the proposal store on **merge** and
+    /// this commit was never merged. The winner's sweep collects them.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Group`] if the discard did not take effect. OpenMLS's
+    /// `clear_pending_commit` is deliberately inert for a pending *external*
+    /// commit, which this crate never creates — so rather than assume that,
+    /// this re-reads the state afterwards and refuses to report success on a
+    /// group it did not actually roll back (fail-closed, invariant #4).
+    pub fn abandon_staged_sweep(&mut self, identity: &Identity) -> Result<bool> {
+        if !self.has_staged_sweep() {
+            return Ok(false);
+        }
+        self.inner
+            .clear_pending_commit(identity.provider.storage())
+            .map_err(|e| Error::Group(format!("clear_pending_commit: {e:?}")))?;
+        if self.has_staged_sweep() {
+            return Err(Error::Group(
+                "abandon refused: the staged commit could not be discarded".into(),
+            ));
+        }
+        Ok(true)
     }
 
     /// Apply an incoming conversation-group commit, **enforcing the ADR-0022
@@ -1232,10 +1399,101 @@ impl Group {
 
     /// Encrypt an application payload for the current group epoch.
     ///
+    /// **A pending membership proposal must never mute the group.** OpenMLS
+    /// refuses `MlsGroup::create_message` outright while its proposal store is
+    /// non-empty (`openmls-0.8.1/src/group/mls_group/application.rs:27-31`,
+    /// `MlsGroupStateError::PendingProposal`) — its assumption being that a
+    /// caller commits or clears the store promptly. ADR-0045 breaks that
+    /// assumption on purpose: an authorised proposal is retained until a
+    /// *designated committer* sweeps it, and no liveness rule can distinguish a
+    /// dead committer from a slow one, so a request may legitimately wait hours.
+    /// Left alone, that would take the whole group's **chat** down from the
+    /// moment one admin proposes — a consequence ADR-0045 did not record and
+    /// which is not acceptable in a messenger.
+    ///
+    /// So this method **parks** the pending set for the duration of the encrypt
+    /// call: it lifts the proposals out, sends, and puts them back exactly as
+    /// they were — same proposals, same order, same [`ProposalRef`]s (the ref is
+    /// derived from the proposal, so a round-trip through
+    /// `store_pending_proposal` reproduces it bit for bit). Everything else
+    /// about the proposal path is untouched.
+    ///
+    /// # What is *not* changed, and why
+    ///
+    /// * **Where a pending proposal lives.** It stays in the OpenMLS storage
+    ///   provider's proposal queue — the same place `store_pending_proposal`
+    ///   has always put it, the place [`crate::Identity::snapshot_storage`]
+    ///   serialises and `MlsGroup::load` rebuilds from. This crate invents no
+    ///   persistence of its own, and a restart keeps the pending set exactly as
+    ///   it did before.
+    /// * **By-reference resolution.** A Commit carries a member proposal by
+    ///   reference and OpenMLS resolves it against the **receiver's** store
+    ///   (`public_group/staged_commit.rs`, `ProposalQueue::from_committed_proposals`
+    ///   → `StageCommitError::MissingProposal`). That resolution happens on
+    ///   every member at commit receipt, not only on the committer at sweep
+    ///   time, so the store has to be populated on every member for the whole
+    ///   interval between the proposal and the commit. Parking only across the
+    ///   encrypt call is what keeps that true — the store is whole on entry and
+    ///   whole on exit, and no message is processed in between.
+    /// * **The authorisation gate.** Untouched, and still at receipt: nothing
+    ///   unauthorised is ever parked, because nothing unauthorised is ever
+    ///   stored.
+    ///
+    /// # Failure handling
+    ///
+    /// The unpark runs before either outcome is propagated, and a failed unpark
+    /// wins over a successful send: silently dropping a pending proposal would
+    /// desync this device from every peer that still holds it (their commit
+    /// would later fail to resolve), whereas a refused send costs one message
+    /// the caller can retry. A produced-then-discarded ciphertext is safe — it
+    /// is indistinguishable from a message lost in transit, which MLS receivers
+    /// already tolerate.
+    ///
+    /// The one window this leaves is between the park and the unpark, where the
+    /// provider holds no proposals. It spans a single synchronous encrypt with
+    /// no I/O, no `await` and no re-entry, and nothing inside it can take a
+    /// snapshot — `snapshot_storage` is an [`crate::Identity`] method a client
+    /// calls from outside, and this method holds `&mut self` throughout. So the
+    /// last snapshot a client actually persisted always predates the park and
+    /// still carries the proposals; a process killed mid-send restores them.
+    ///
     /// # Errors
     ///
-    /// Returns [`Error::Message`] on encryption failure.
+    /// Returns [`Error::Message`] on encryption failure, or [`Error::Group`] if
+    /// the pending set could not be parked or restored.
     pub fn create_application_message(
+        &mut self,
+        identity: &Identity,
+        plaintext: &[u8],
+    ) -> Result<MlsMessageOut> {
+        // Nothing pending — the overwhelmingly common case, and byte-for-byte
+        // the pre-ADR-0045 path with no storage traffic at all.
+        let parked: Vec<QueuedProposal> = self.inner.pending_proposals().cloned().collect();
+        if parked.is_empty() {
+            return self.encrypt_application(identity, plaintext);
+        }
+
+        // `clear_pending_proposals` is the only public way to empty the store
+        // OpenMLS checks; it clears the persisted queue alongside it, which is
+        // why the unpark below restores both halves rather than just the
+        // in-memory one.
+        self.inner
+            .clear_pending_proposals(identity.provider.storage())
+            .map_err(|e| Error::Group(format!("park pending proposals: {e:?}")))?;
+        let sent = self.encrypt_application(identity, plaintext);
+        let unparked = parked.into_iter().try_for_each(|qp| {
+            self.inner
+                .store_pending_proposal(identity.provider.storage(), qp)
+                .map_err(|e| Error::Group(format!("restore pending proposals: {e:?}")))
+        });
+        unparked?;
+        sent
+    }
+
+    /// The bare OpenMLS encrypt, with no proposal-store handling — the single
+    /// place [`Group::create_application_message`]'s two paths meet, so the
+    /// parked path and the fast path cannot drift.
+    fn encrypt_application(
         &mut self,
         identity: &Identity,
         plaintext: &[u8],
@@ -2051,6 +2309,55 @@ mod proposal_gate_tests {
                 .propose_remove_member(&s.alice, alice_own)
                 .is_err(),
             "the owner must not be able to leave",
+        );
+    }
+
+    /// **Sentinel for the park.** Pins the upstream behaviour
+    /// [`Group::create_application_message`] works around: OpenMLS refuses
+    /// `MlsGroup::create_message` outright while its proposal store is
+    /// non-empty. Driven against the RAW OpenMLS handle rather than the Lakko
+    /// wrapper, so it measures the library and not our own code.
+    ///
+    /// If a future OpenMLS bump drops this refusal, this test fails — and that
+    /// failure is the signal that the park has become dead weight and may be
+    /// deleted, rather than a regression.
+    #[test]
+    fn openmls_still_refuses_to_send_while_a_proposal_is_pending() {
+        let mut s = scene(0x0A);
+        let dave = Identity::from_seed(&[0x7Au8; 64]).expect("dave");
+
+        let proposal = s
+            .bob_g
+            .propose_add_member_from_wire(&s.bob, &kp_wire(&dave))
+            .expect("bob proposes add-dave");
+        s.alice_g
+            .process_incoming_verifying_roles(&s.alice, &proposal)
+            .expect("alice stores it");
+        assert_eq!(s.alice_g.pending_proposals().len(), 1);
+
+        let raw = s.alice_g.inner.create_message(
+            &s.alice.provider,
+            &s.alice.signature_keys,
+            b"straight at OpenMLS",
+        );
+        assert!(
+            matches!(
+                raw,
+                Err(openmls::prelude::CreateMessageError::GroupStateError(
+                    openmls::group::MlsGroupStateError::PendingProposal
+                ))
+            ),
+            "upstream must still refuse; got {raw:?}",
+        );
+
+        // And the Lakko wrapper, over the same group, does not.
+        s.alice_g
+            .create_application_message(&s.alice, b"through the park")
+            .expect("the wrapper parks the pending set and sends");
+        assert_eq!(
+            s.alice_g.pending_proposals().len(),
+            1,
+            "the park must put the pending set back exactly as it was",
         );
     }
 }

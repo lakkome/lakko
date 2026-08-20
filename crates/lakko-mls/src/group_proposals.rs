@@ -79,6 +79,16 @@
 //! ownership transfer landed, and it is what keeps that feature from being able
 //! to brick a group; see its own documentation for both cases in full.
 //!
+//! # A pending proposal must not mute the group
+//!
+//! Retaining proposals has one consequence ADR-0045 does not record: OpenMLS
+//! refuses `MlsGroup::create_message` while its proposal store is non-empty, so
+//! storing an incoming proposal would — untreated — take the whole group's chat
+//! down from the moment one admin proposes until a committer sweeps, which
+//! under ADR-0045's liveness model may be hours. That is handled entirely on
+//! the send path; see [`crate::Group::create_application_message`] for the park
+//! and the reasoning behind where the pending set lives while it happens.
+//!
 //! [ADR-0045]: ../../../docs/adr/0045-remote-commit-epoch-fork.md
 
 use openmls::framing::Sender;

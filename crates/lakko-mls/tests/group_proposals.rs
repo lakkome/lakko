@@ -108,7 +108,7 @@ fn scene(tag: u8) -> Scene {
 #[test]
 fn admin_proposal_is_stored_and_an_owner_sweep_commits_it() {
     let mut s = scene(0x01);
-    let dave = Identity::from_seed(&[0xD1u8; 64]).expect("dave");
+    let dave = Identity::from_seed(&[0x11u8; 64]).expect("dave");
 
     // bob (admin) proposes adding dave.
     let proposal = s
@@ -555,4 +555,749 @@ fn control_two_concurrent_direct_commits_still_fork() {
             .expect("bob exporter")
             .to_vec(),
     );
+}
+
+// ============================================================================
+// Losing the race survivably — the staged sweep and its rollback (ADR-0045,
+// G-38 residual 1)
+//
+// The committer election makes two simultaneous sweeps RARE, not impossible:
+// no liveness timeout can tell a dead committer from a slow one, so during a
+// handover two devices can both act. The DS journal already arbitrates, being
+// an append-only log every member observes in the same order. What was missing
+// was the loser's ability to survive losing — having eager-merged N+1 before
+// publishing, it sat at an epoch nobody else reached, silently and for ever.
+// ============================================================================
+
+fn exporter(g: &Group, id: &Identity) -> Vec<u8> {
+    g.export_secret(id, "lakko/test/v1", b"ctx", 32)
+        .expect("exporter")
+        .to_vec()
+}
+
+/// Decrypt an application message and return its plaintext, failing loudly on
+/// anything else.
+fn recv_text(g: &mut Group, id: &Identity, bytes: &[u8]) -> Vec<u8> {
+    match g.process_incoming_verifying_roles(id, bytes) {
+        Ok(Incoming::Application { bytes, .. }) => bytes,
+        other => panic!("expected an application message, got {other:?}"),
+    }
+}
+
+/// **The point of this sprint.** Two committers sweep the same epoch during a
+/// handover; the journal orders one first. The winner merges, the loser
+/// abandons, applies the winner's commit, and the two agree on group *state* —
+/// asserted as equal exporter output, not equal epoch numbers, because the
+/// whole hazard is that the numbers match while the state does not.
+#[test]
+fn the_loser_of_a_concurrent_sweep_rolls_back_and_converges() {
+    let mut s = scene(0x0D);
+    let dave = Identity::from_seed(&[0xDDu8; 64]).expect("dave");
+    let epoch = s.alice_g.epoch();
+    assert_eq!(s.bob_g.epoch(), epoch);
+
+    // Two intents against the SAME epoch; both admins hold both proposals.
+    let alice_proposal = s
+        .alice_g
+        .propose_add_member_from_wire(&s.alice, &kp_wire(&dave))
+        .expect("alice proposes add-dave");
+    let charlie_leaf = leaf_of(&s.bob_g, s.charlie.signature_public_key());
+    let bob_proposal = s
+        .bob_g
+        .propose_remove_member(&s.bob, charlie_leaf)
+        .expect("bob proposes remove-charlie");
+    s.alice_g
+        .process_incoming_verifying_roles(&s.alice, &bob_proposal)
+        .expect("alice stores bob's proposal");
+    s.bob_g
+        .process_incoming_verifying_roles(&s.bob, &alice_proposal)
+        .expect("bob stores alice's proposal");
+
+    // The handover window: BOTH believe they are the acting committer, so both
+    // sweep. Neither advances — that is what makes the loss survivable.
+    let alice_sweep = s
+        .alice_g
+        .stage_pending_proposals(&s.alice)
+        .expect("alice stages")
+        .expect("one commit");
+    let bob_sweep = s
+        .bob_g
+        .stage_pending_proposals(&s.bob)
+        .expect("bob stages")
+        .expect("one commit");
+    assert_eq!(
+        s.alice_g.epoch(),
+        epoch,
+        "staging must not advance the epoch"
+    );
+    assert_eq!(s.bob_g.epoch(), epoch, "staging must not advance the epoch");
+    assert!(s.alice_g.has_staged_sweep());
+    assert!(s.bob_g.has_staged_sweep());
+
+    // The journal orders alice's commit first. Alice reads that verdict and
+    // merges; her state is now the group's real state.
+    assert!(s
+        .alice_g
+        .merge_staged_sweep(&s.alice)
+        .expect("alice merges"));
+    assert_eq!(s.alice_g.epoch(), epoch + 1);
+    assert!(!s.alice_g.has_staged_sweep());
+
+    // Bob reads the same verdict, sees it lost, and rolls back.
+    assert!(s.bob_g.abandon_staged_sweep(&s.bob).expect("bob abandons"));
+    assert_eq!(s.bob_g.epoch(), epoch, "the loser is back where it started");
+    assert!(!s.bob_g.has_staged_sweep());
+    assert_eq!(
+        s.bob_g.pending_proposals().len(),
+        2,
+        "abandoning throws no work away: the swept proposals are still pending",
+    );
+
+    // Bob's own commit is on the wire too, and the winner rejects it as
+    // wrong-epoch — exactly the fate that used to strand its author.
+    assert!(s
+        .alice_g
+        .process_incoming_verifying_roles(&s.alice, &wire(bob_sweep.commit))
+        .is_err());
+
+    // The acceptance criterion: the loser applies the winner's commit and
+    // carries on.
+    assert!(matches!(
+        s.bob_g
+            .process_incoming_verifying_roles(&s.bob, &wire(alice_sweep.commit)),
+        Ok(Incoming::Commit)
+    ));
+    assert_eq!(s.bob_g.epoch(), s.alice_g.epoch());
+    assert_eq!(
+        exporter(&s.bob_g, &s.bob),
+        exporter(&s.alice_g, &s.alice),
+        "same epoch AND same group state, not merely the same epoch number",
+    );
+    assert!(is_member(&s.bob_g, &dave));
+    assert!(!is_member(&s.bob_g, &s.charlie));
+    assert!(
+        s.bob_g.pending_proposals().is_empty(),
+        "the winner's commit carried them, so the merge clears the store",
+    );
+
+    // And the group really is whole: dave's Welcome opens into that same state.
+    let dave_g = Group::join_from_welcome(
+        &wire(alice_sweep.welcome.expect("a swept Add produces a Welcome")),
+        &dave,
+    )
+    .expect("dave joins");
+    assert_eq!(exporter(&dave_g, &dave), exporter(&s.bob_g, &s.bob));
+}
+
+/// **Control.** The identical scene with the loser MERGING instead of
+/// abandoning reproduces G-38 residual 1: matching epoch numbers, divergent
+/// state, each rejecting the other's commit. Without this the test above could
+/// pass on the scene alone rather than on the rollback.
+#[test]
+fn control_a_lost_sweep_that_merges_instead_of_rolling_back_still_forks() {
+    let mut s = scene(0x0E);
+    let dave = Identity::from_seed(&[0xDEu8; 64]).expect("dave");
+    let epoch = s.alice_g.epoch();
+
+    let alice_proposal = s
+        .alice_g
+        .propose_add_member_from_wire(&s.alice, &kp_wire(&dave))
+        .expect("alice proposes add-dave");
+    let charlie_leaf = leaf_of(&s.bob_g, s.charlie.signature_public_key());
+    let bob_proposal = s
+        .bob_g
+        .propose_remove_member(&s.bob, charlie_leaf)
+        .expect("bob proposes remove-charlie");
+    s.alice_g
+        .process_incoming_verifying_roles(&s.alice, &bob_proposal)
+        .expect("alice stores bob's proposal");
+    s.bob_g
+        .process_incoming_verifying_roles(&s.bob, &alice_proposal)
+        .expect("bob stores alice's proposal");
+
+    let alice_sweep = s
+        .alice_g
+        .stage_pending_proposals(&s.alice)
+        .expect("alice stages")
+        .expect("one commit");
+    let bob_sweep = s
+        .bob_g
+        .stage_pending_proposals(&s.bob)
+        .expect("bob stages")
+        .expect("one commit");
+
+    // Both merge — the loser does NOT roll back.
+    assert!(s
+        .alice_g
+        .merge_staged_sweep(&s.alice)
+        .expect("alice merges"));
+    assert!(s.bob_g.merge_staged_sweep(&s.bob).expect("bob merges"));
+    assert_eq!(s.alice_g.epoch(), epoch + 1);
+    assert_eq!(s.bob_g.epoch(), epoch + 1);
+
+    // Each refuses the other's commit as wrong-epoch, and neither can recover.
+    assert!(s
+        .alice_g
+        .process_incoming_verifying_roles(&s.alice, &wire(bob_sweep.commit))
+        .is_err());
+    assert!(s
+        .bob_g
+        .process_incoming_verifying_roles(&s.bob, &wire(alice_sweep.commit))
+        .is_err());
+
+    assert_eq!(s.alice_g.epoch(), s.bob_g.epoch());
+    assert_ne!(
+        exporter(&s.alice_g, &s.alice),
+        exporter(&s.bob_g, &s.bob),
+        "same epoch number, different group state — the silent fork",
+    );
+}
+
+/// **The sibling-group hazard.** A rollback must touch the one group it is
+/// repairing. `Identity::restore_storage` restores the WHOLE provider, so
+/// using it here would roll every other group on the account back too —
+/// including past commits they have already published, which is strictly worse
+/// than the fork. This drives that difference: the sibling group advances
+/// AFTER the sweep is staged, i.e. exactly the state a whole-provider snapshot
+/// taken at staging time would destroy.
+#[test]
+fn abandoning_a_sweep_leaves_a_sibling_group_untouched() {
+    let mut s = scene(0x0F);
+    let erin = Identity::from_seed(&[0xEFu8; 64]).expect("erin");
+
+    // A second, unrelated group on the SAME two providers.
+    let mut alice_b = Group::create(&s.alice).expect("alice creates group B");
+    let add_bob_b = alice_b
+        .add_member_from_wire(&s.alice, &kp_wire(&s.bob))
+        .expect("alice adds bob to B");
+    let mut bob_b =
+        Group::join_from_welcome(&wire(add_bob_b.welcome), &s.bob).expect("bob joins B");
+    assert_ne!(alice_b.group_id(), s.alice_g.group_id());
+
+    // Group A: bob stages a sweep. A whole-provider snapshot would be taken
+    // here.
+    let charlie_leaf = leaf_of(&s.bob_g, s.charlie.signature_public_key());
+    let bob_proposal = s
+        .bob_g
+        .propose_remove_member(&s.bob, charlie_leaf)
+        .expect("bob proposes remove-charlie");
+    s.alice_g
+        .process_incoming_verifying_roles(&s.alice, &bob_proposal)
+        .expect("alice stores it");
+    let _staged = s
+        .bob_g
+        .stage_pending_proposals(&s.bob)
+        .expect("bob stages")
+        .expect("one commit");
+    assert!(s.bob_g.has_staged_sweep());
+
+    // Group B advances WHILE that sweep is staged — this is the state a
+    // whole-provider restore would silently destroy.
+    let add_erin_b = alice_b
+        .add_member_from_wire(&s.alice, &kp_wire(&erin))
+        .expect("alice adds erin to B");
+    bob_b
+        .process_incoming_verifying_roles(&s.bob, &wire(add_erin_b.commit))
+        .expect("bob applies B's add-erin");
+    let b_epoch = bob_b.epoch();
+    let b_secret = exporter(&bob_b, &s.bob);
+    assert_eq!(b_secret, exporter(&alice_b, &s.alice));
+
+    // Group A: bob loses the race and rolls back.
+    assert!(s.bob_g.abandon_staged_sweep(&s.bob).expect("bob abandons"));
+
+    // Group B is byte-for-byte where it was, and still live: it takes the next
+    // commit and stays converged with its peer.
+    assert_eq!(bob_b.epoch(), b_epoch);
+    assert_eq!(exporter(&bob_b, &s.bob), b_secret);
+    assert!(is_member(&bob_b, &erin));
+    let rotate_b = alice_b.self_update(&s.alice).expect("alice rotates B");
+    bob_b
+        .process_incoming_verifying_roles(&s.bob, &rotate_b)
+        .expect("bob applies B's rotation after the sibling rollback");
+    assert_eq!(exporter(&bob_b, &s.bob), exporter(&alice_b, &s.alice));
+}
+
+/// Abandoning returns the proposals to the pending set, so the next committer
+/// — here the same device, re-electing itself — carries the very same intents.
+/// The loser loses its commit, never the requests behind it.
+#[test]
+fn an_abandoned_sweep_leaves_its_proposals_for_the_next_committer() {
+    let mut s = scene(0x10);
+    let dave = Identity::from_seed(&[0x10u8; 64]).expect("dave");
+
+    let alice_proposal = s
+        .alice_g
+        .propose_add_member_from_wire(&s.alice, &kp_wire(&dave))
+        .expect("alice proposes add-dave");
+    s.bob_g
+        .process_incoming_verifying_roles(&s.bob, &alice_proposal)
+        .expect("bob stores alice's proposal");
+    let charlie_leaf = leaf_of(&s.bob_g, s.charlie.signature_public_key());
+    s.bob_g
+        .propose_remove_member(&s.bob, charlie_leaf)
+        .expect("bob proposes remove-charlie");
+    assert_eq!(s.bob_g.pending_proposals().len(), 2);
+
+    let first = s
+        .bob_g
+        .stage_pending_proposals(&s.bob)
+        .expect("bob stages")
+        .expect("one commit");
+    assert_eq!(first.swept.len(), 2);
+
+    // A second sweep while one is staged is refused, fail-closed: building it
+    // would silently replace a commit that may already be on the wire.
+    assert!(s.bob_g.stage_pending_proposals(&s.bob).is_err());
+
+    assert!(s.bob_g.abandon_staged_sweep(&s.bob).expect("bob abandons"));
+    assert_eq!(
+        s.bob_g.pending_proposals().len(),
+        2,
+        "both intents survive the rollback",
+    );
+
+    // Re-electing itself, the same device sweeps the same two intents again.
+    let second = s
+        .bob_g
+        .stage_pending_proposals(&s.bob)
+        .expect("bob re-stages")
+        .expect("one commit");
+    assert_eq!(second.swept.len(), 2);
+    assert!(s.bob_g.merge_staged_sweep(&s.bob).expect("bob merges"));
+    assert!(is_member(&s.bob_g, &dave));
+    assert!(!is_member(&s.bob_g, &s.charlie));
+}
+
+/// **The rollback must not reach a path that never had one.** Every
+/// eager-merging path leaves nothing staged, so `abandon_staged_sweep` is a
+/// no-op on all of them and cannot undo a merged commit.
+#[test]
+fn a_rollback_cannot_reach_an_eagerly_merged_commit() {
+    let mut s = scene(0x11);
+    let dave = Identity::from_seed(&[0x11u8; 64]).expect("dave");
+
+    // A direct commit.
+    s.alice_g
+        .add_member_from_wire(&s.alice, &kp_wire(&dave))
+        .expect("alice adds dave directly");
+    let after_direct = s.alice_g.epoch();
+    assert!(!s.alice_g.has_staged_sweep());
+    assert!(
+        !s.alice_g
+            .abandon_staged_sweep(&s.alice)
+            .expect("abandon is a no-op"),
+        "there is nothing staged to abandon after an eager merge",
+    );
+    assert_eq!(s.alice_g.epoch(), after_direct);
+
+    // And the stage-plus-merge convenience path behaves the same.
+    let charlie_leaf = leaf_of(&s.alice_g, s.charlie.signature_public_key());
+    s.alice_g
+        .propose_remove_member(&s.alice, charlie_leaf)
+        .expect("alice proposes remove-charlie");
+    s.alice_g
+        .commit_pending_proposals(&s.alice)
+        .expect("alice sweeps")
+        .expect("one commit");
+    let after_sweep = s.alice_g.epoch();
+    assert_eq!(after_sweep, after_direct + 1);
+    assert!(!s.alice_g.has_staged_sweep());
+    assert!(!s
+        .alice_g
+        .abandon_staged_sweep(&s.alice)
+        .expect("abandon is a no-op"));
+    assert_eq!(s.alice_g.epoch(), after_sweep);
+    assert!(!s
+        .alice_g
+        .merge_staged_sweep(&s.alice)
+        .expect("merge is a no-op"));
+    assert_eq!(s.alice_g.epoch(), after_sweep);
+}
+
+/// The loser converges even if its poll loop applies the winner's commit
+/// *before* it has adjudicated — OpenMLS discards a pending commit as part of
+/// merging a foreign one. Abandoning first is still the order this crate
+/// documents and drives; this pins the safety net under a client that gets the
+/// order wrong, so it is a wedged group in neither direction.
+#[test]
+fn applying_the_winner_before_abandoning_still_converges() {
+    let mut s = scene(0x12);
+    let dave = Identity::from_seed(&[0x12u8; 64]).expect("dave");
+
+    let alice_proposal = s
+        .alice_g
+        .propose_add_member_from_wire(&s.alice, &kp_wire(&dave))
+        .expect("alice proposes add-dave");
+    s.bob_g
+        .process_incoming_verifying_roles(&s.bob, &alice_proposal)
+        .expect("bob stores it");
+
+    let alice_sweep = s
+        .alice_g
+        .stage_pending_proposals(&s.alice)
+        .expect("alice stages")
+        .expect("one commit");
+    let _bob_sweep = s
+        .bob_g
+        .stage_pending_proposals(&s.bob)
+        .expect("bob stages")
+        .expect("one commit");
+    assert!(s
+        .alice_g
+        .merge_staged_sweep(&s.alice)
+        .expect("alice merges"));
+
+    // Bob applies the winner while still holding its own staged sweep.
+    assert!(s.bob_g.has_staged_sweep());
+    assert!(matches!(
+        s.bob_g
+            .process_incoming_verifying_roles(&s.bob, &wire(alice_sweep.commit)),
+        Ok(Incoming::Commit)
+    ));
+    assert!(
+        !s.bob_g.has_staged_sweep(),
+        "merging a foreign commit discards the local staged one",
+    );
+    assert_eq!(exporter(&s.bob_g, &s.bob), exporter(&s.alice_g, &s.alice));
+
+    // And the after-the-fact abandon is a harmless no-op.
+    assert!(!s.bob_g.abandon_staged_sweep(&s.bob).expect("no-op abandon"));
+    assert_eq!(exporter(&s.bob_g, &s.bob), exporter(&s.alice_g, &s.alice));
+}
+
+// ============================================================================
+// A pending proposal must not mute the group
+//
+// OpenMLS refuses `MlsGroup::create_message` outright while its proposal store
+// is non-empty (`openmls-0.8.1/src/group/mls_group/application.rs:27-31`,
+// `MlsGroupStateError::PendingProposal`). ADR-0045 stores every authorised
+// incoming proposal, so without care the whole group goes mute from the moment
+// one admin proposes until a committer sweeps — and ADR-0045's liveness model
+// lets a request wait indefinitely when no admin is running. Chat must be
+// unaffected by a membership request; these tests are what says so.
+//
+// Only `create_message` is gated this way. `is_operational`
+// (`mls_group/mod.rs:779`) — which guards `propose_*`, `add_members`,
+// `remove_members`, `self_update` and `commit_to_pending_proposals` — refuses
+// on a staged *commit*, never on a pending proposal, so those paths are a
+// separate and narrower obligation already covered by `has_staged_sweep`.
+// ============================================================================
+
+/// **The centrepiece.** With a membership proposal pending, every member —
+/// the proposer, the owner, and a plain member — can still send chat, and it
+/// round-trips to everyone else.
+#[test]
+fn a_pending_proposal_does_not_mute_the_group() {
+    let mut s = scene(0x20);
+    let dave = Identity::from_seed(&[0x20u8; 64]).expect("dave");
+
+    // bob (admin) proposes adding dave; owner + plain member both retain it.
+    let proposal = s
+        .bob_g
+        .propose_add_member_from_wire(&s.bob, &kp_wire(&dave))
+        .expect("bob proposes add-dave");
+    s.alice_g
+        .process_incoming_verifying_roles(&s.alice, &proposal)
+        .expect("alice stores it");
+    s.charlie_g
+        .process_incoming_verifying_roles(&s.charlie, &proposal)
+        .expect("charlie stores it");
+    for (who, g) in [
+        ("alice", &s.alice_g),
+        ("bob", &s.bob_g),
+        ("charlie", &s.charlie_g),
+    ] {
+        assert_eq!(
+            g.pending_proposals().len(),
+            1,
+            "{who} must be holding the pending proposal for this test to mean anything",
+        );
+    }
+
+    // The proposer sends.
+    let from_bob = wire(
+        s.bob_g
+            .create_application_message(&s.bob, b"proposed dave, chat on")
+            .expect("the PROPOSER must still be able to send"),
+    );
+    assert_eq!(
+        recv_text(&mut s.alice_g, &s.alice, &from_bob),
+        b"proposed dave, chat on".to_vec(),
+    );
+    assert_eq!(
+        recv_text(&mut s.charlie_g, &s.charlie, &from_bob),
+        b"proposed dave, chat on".to_vec(),
+    );
+
+    // The owner sends.
+    let from_alice = wire(
+        s.alice_g
+            .create_application_message(&s.alice, b"seen it, will sweep later")
+            .expect("the OWNER must still be able to send"),
+    );
+    assert_eq!(
+        recv_text(&mut s.bob_g, &s.bob, &from_alice),
+        b"seen it, will sweep later".to_vec(),
+    );
+    assert_eq!(
+        recv_text(&mut s.charlie_g, &s.charlie, &from_alice),
+        b"seen it, will sweep later".to_vec(),
+    );
+
+    // A plain member sends.
+    let from_charlie = wire(
+        s.charlie_g
+            .create_application_message(&s.charlie, b"hi from charlie")
+            .expect("a PLAIN MEMBER must still be able to send"),
+    );
+    assert_eq!(
+        recv_text(&mut s.alice_g, &s.alice, &from_charlie),
+        b"hi from charlie".to_vec(),
+    );
+    assert_eq!(
+        recv_text(&mut s.bob_g, &s.bob, &from_charlie),
+        b"hi from charlie".to_vec(),
+    );
+
+    // Sending changed nothing about what is pending.
+    for (who, g) in [
+        ("alice", &s.alice_g),
+        ("bob", &s.bob_g),
+        ("charlie", &s.charlie_g),
+    ] {
+        assert_eq!(
+            g.pending_proposals().len(),
+            1,
+            "{who} must still hold exactly the one pending proposal after sending",
+        );
+    }
+}
+
+/// Sending while proposals are pending must not disturb the sweep: the commit
+/// still carries **every** authorised intent, and every peer — including ones
+/// that sent chat in the meantime — resolves it **by reference** and converges.
+#[test]
+fn sending_while_proposals_are_pending_does_not_disturb_the_sweep() {
+    let mut s = scene(0x21);
+    let dave = Identity::from_seed(&[0x21u8; 64]).expect("dave");
+    let erin = Identity::from_seed(&[0x22u8; 64]).expect("erin");
+
+    // Two authorised intents from two devices.
+    let bob_proposal = s
+        .bob_g
+        .propose_add_member_from_wire(&s.bob, &kp_wire(&dave))
+        .expect("bob proposes add-dave");
+    let alice_proposal = s
+        .alice_g
+        .propose_add_member_from_wire(&s.alice, &kp_wire(&erin))
+        .expect("alice proposes add-erin");
+    s.alice_g
+        .process_incoming_verifying_roles(&s.alice, &bob_proposal)
+        .expect("alice stores bob's");
+    s.bob_g
+        .process_incoming_verifying_roles(&s.bob, &alice_proposal)
+        .expect("bob stores alice's");
+    s.charlie_g
+        .process_incoming_verifying_roles(&s.charlie, &bob_proposal)
+        .expect("charlie stores bob's");
+    s.charlie_g
+        .process_incoming_verifying_roles(&s.charlie, &alice_proposal)
+        .expect("charlie stores alice's");
+
+    // Everyone chats across the pending window.
+    let chatter = wire(
+        s.charlie_g
+            .create_application_message(&s.charlie, b"chatter during the pending window")
+            .expect("charlie sends"),
+    );
+    assert_eq!(
+        recv_text(&mut s.alice_g, &s.alice, &chatter),
+        b"chatter during the pending window".to_vec(),
+    );
+    assert_eq!(
+        recv_text(&mut s.bob_g, &s.bob, &chatter),
+        b"chatter during the pending window".to_vec(),
+    );
+
+    // The sweep still carries both adds.
+    let sweep = s
+        .alice_g
+        .commit_pending_proposals(&s.alice)
+        .expect("alice sweeps")
+        .expect("one commit");
+    assert_eq!(sweep.swept.len(), 2, "both intents must be in the commit");
+    assert!(sweep.welcome.is_some(), "two adds must produce a Welcome");
+
+    // Every peer resolves the by-reference proposals out of its own store.
+    let commit = wire(sweep.commit);
+    assert!(matches!(
+        s.bob_g.process_incoming_verifying_roles(&s.bob, &commit),
+        Ok(Incoming::Commit)
+    ));
+    assert!(matches!(
+        s.charlie_g
+            .process_incoming_verifying_roles(&s.charlie, &commit),
+        Ok(Incoming::Commit)
+    ));
+    assert_eq!(s.alice_g.member_count(), 5);
+    assert_eq!(exporter(&s.bob_g, &s.bob), exporter(&s.alice_g, &s.alice));
+    assert_eq!(
+        exporter(&s.charlie_g, &s.charlie),
+        exporter(&s.alice_g, &s.alice),
+    );
+    assert!(is_member(&s.alice_g, &dave) && is_member(&s.alice_g, &erin));
+
+    // The sweep emptied the pending set, and chat keeps working afterwards.
+    assert!(s.alice_g.pending_proposals().is_empty());
+    let after = wire(
+        s.alice_g
+            .create_application_message(&s.alice, b"swept, still talking")
+            .expect("alice sends after the sweep"),
+    );
+    assert_eq!(
+        recv_text(&mut s.charlie_g, &s.charlie, &after),
+        b"swept, still talking".to_vec(),
+    );
+}
+
+/// A refused proposal stays refused across a send: the send path must not be
+/// able to re-admit anything the receipt gate dropped, and a sweep taken after
+/// it carries only what was authorised.
+#[test]
+fn a_send_never_resurrects_a_refused_proposal() {
+    let mut s = scene(0x23);
+    let dave = Identity::from_seed(&[0x23u8; 64]).expect("dave");
+    let mallory = Identity::from_seed(&[0x24u8; 64]).expect("mallory");
+
+    // One authorised proposal (bob, admin) and one unauthorised (charlie, plain
+    // member) reach alice.
+    let ok_proposal = s
+        .bob_g
+        .propose_add_member_from_wire(&s.bob, &kp_wire(&dave))
+        .expect("bob proposes add-dave");
+    let bad_proposal = s
+        .charlie_g
+        .propose_add_member_from_wire(&s.charlie, &kp_wire(&mallory));
+    assert!(
+        bad_proposal.is_err(),
+        "a plain member's own client refuses to mint the proposal",
+    );
+
+    s.alice_g
+        .process_incoming_verifying_roles(&s.alice, &ok_proposal)
+        .expect("alice stores bob's");
+    assert_eq!(s.alice_g.pending_proposals().len(), 1);
+
+    // Alice sends, repeatedly, across the pending window.
+    for text in [b"one".as_slice(), b"two".as_slice(), b"three".as_slice()] {
+        let msg = wire(
+            s.alice_g
+                .create_application_message(&s.alice, text)
+                .expect("alice sends while a proposal is pending"),
+        );
+        assert_eq!(recv_text(&mut s.bob_g, &s.bob, &msg), text.to_vec());
+    }
+
+    // Exactly one proposal, unchanged, and the sweep carries exactly it.
+    assert_eq!(s.alice_g.pending_proposals().len(), 1);
+    let sweep = s
+        .alice_g
+        .commit_pending_proposals(&s.alice)
+        .expect("alice sweeps")
+        .expect("one commit");
+    assert_eq!(sweep.swept.len(), 1);
+    assert!(matches!(sweep.swept[0].kind, ProposalKind::Add { .. }));
+    assert!(is_member(&s.alice_g, &dave));
+    assert!(
+        !is_member(&s.alice_g, &mallory),
+        "the refused proposal must never reach a commit",
+    );
+}
+
+/// A restart must not lose a pending proposal — and the reloaded group must
+/// still be able to send, and still resolve the eventual commit by reference.
+#[test]
+fn a_restart_keeps_a_pending_proposal_and_the_group_still_sends() {
+    let mut s = scene(0x25);
+    let dave = Identity::from_seed(&[0x25u8; 64]).expect("dave");
+    let alice_seed = [0xA0u8 ^ 0x25; 64];
+
+    let proposal = s
+        .bob_g
+        .propose_add_member_from_wire(&s.bob, &kp_wire(&dave))
+        .expect("bob proposes add-dave");
+    s.alice_g
+        .process_incoming_verifying_roles(&s.alice, &proposal)
+        .expect("alice stores it");
+    s.charlie_g
+        .process_incoming_verifying_roles(&s.charlie, &proposal)
+        .expect("charlie stores it");
+
+    // Alice sends twice before the restart, so the restart is exercised on a
+    // group whose send path has already round-tripped the pending set — and so
+    // a park/unpark that appended a duplicate persisted entry per send would
+    // surface below as a pending set of three rather than one.
+    for text in [b"before the restart".as_slice(), b"and again".as_slice()] {
+        let before = wire(
+            s.alice_g
+                .create_application_message(&s.alice, text)
+                .expect("alice sends before the restart"),
+        );
+        assert_eq!(
+            recv_text(&mut s.charlie_g, &s.charlie, &before),
+            text.to_vec(),
+        );
+    }
+
+    // Restart alice: snapshot, drop everything, rebuild from the same seed.
+    let snapshot = s.alice.snapshot_storage().expect("snapshot");
+    let group_id = s.alice_g.group_id();
+    drop(s.alice_g);
+    drop(s.alice);
+
+    let alice = Identity::from_seed(&alice_seed).expect("restored alice");
+    alice.restore_storage(&snapshot).expect("restore");
+    let mut alice_g = Group::load(&alice, &group_id)
+        .expect("load")
+        .expect("group present after restore");
+
+    // The proposal survived, exactly once.
+    let pending = alice_g.pending_proposals();
+    assert_eq!(
+        pending.len(),
+        1,
+        "a restart must not lose (or duplicate) a pending proposal",
+    );
+    assert!(matches!(pending[0].kind, ProposalKind::Add { .. }));
+
+    // The reloaded group still sends...
+    let after = wire(
+        alice_g
+            .create_application_message(&alice, b"after the restart")
+            .expect("the reloaded group must still be able to send"),
+    );
+    assert_eq!(
+        recv_text(&mut s.charlie_g, &s.charlie, &after),
+        b"after the restart".to_vec(),
+    );
+
+    // ...and still sweeps the surviving proposal into a commit every peer
+    // resolves by reference.
+    let sweep = alice_g
+        .commit_pending_proposals(&alice)
+        .expect("alice sweeps after the restart")
+        .expect("one commit");
+    assert_eq!(sweep.swept.len(), 1);
+    let commit = wire(sweep.commit);
+    assert!(matches!(
+        s.charlie_g
+            .process_incoming_verifying_roles(&s.charlie, &commit),
+        Ok(Incoming::Commit)
+    ));
+    assert_eq!(
+        exporter(&s.charlie_g, &s.charlie),
+        exporter(&alice_g, &alice),
+    );
+    assert!(is_member(&alice_g, &dave));
 }
