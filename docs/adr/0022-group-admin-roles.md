@@ -14,6 +14,16 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
   design and the landed-code gates are green (invariant #3). Remaining: Sprint 2
   (FFI) + Sprint 3 (client wiring), with the two post-code notes (SelfRemove,
   call-path) in Open Questions.
+- **Extended by [ADR-0045](0045-remote-commit-epoch-fork.md)** (2026-08;
+  supersedes nothing here). ADR-0045 moves the role check from the **committer**
+  to each **proposal's own author**, with the by-value arm left byte-for-byte as
+  this ADR defined it; adds the `SelfRemove` branch this ADR deferred as
+  unreachable; builds the **ownership transfer** this ADR deferred; and adds the
+  commit-level never-orphan-the-owner rule (**C-63**) that closes a hole
+  `set_group_roles` has carried since this ADR shipped. Every table row below
+  still holds — what changed is *whose* role is consulted, not what each role may
+  do. The three places in this document that described transfer as a follow-up
+  are marked up rather than deleted.
 - **Date:** 2026-06-17
 - **Context:** Phase 3 closeout — blocker **C** (group-admin roles). Group-chat
   membership (add / remove / roster) now ships on all three clients (A4), but
@@ -250,22 +260,43 @@ only to the owner). The gate is the security boundary; the UI gating is just UX
   may find limiting. **Owner device loss (v1 consequence, explicit):** because
   the owner is fixed at creation and v1 has neither ownership transfer nor
   admin-quorum recovery, a group whose owner permanently loses the account key
-  becomes un-administrable (no one can promote/demote/transfer). This is
+  becomes un-administrable (no one can promote/demote/transfer). **Ownership
+  transfer has since been built** ([ADR-0045](0045-remote-commit-epoch-fork.md),
+  `e780952`: `Group::transfer_ownership` / `propose_ownership_transfer` over
+  `RoleTable::with_owner_transferred`), so a *present* owner can now hand the
+  group on — but that does **not** relieve this consequence, because minting a
+  transfer needs the owner's key. An owner who has already lost it cannot
+  transfer, and admin-quorum recovery is still deferred. This is
   **substantially mitigated** by ADR-0017: the owner's account key is the
   phrase-derived `AccountIdentity`, so recovering on a new device from the
   recovery phrase restores the owner key (and thus owner powers) — the group is
   only orphaned if the owner loses *both* every device *and* the recovery phrase.
 - **Neutral:** the role table grows the GroupContext by `32·(1+admin_count)`
-  bytes; ownership transfer + the admin-can-manage-admins question are explicit
-  follow-ups; the clients gain a role-management surface that only the owner
-  sees.
+  bytes; ~~ownership transfer +~~ the admin-can-manage-admins question ~~are~~ is
+  an explicit follow-up (**ownership transfer landed** under
+  [ADR-0045](0045-remote-commit-epoch-fork.md), and brought with it the
+  commit-level never-orphan-the-owner rule indexed as **C-63**, which closes a
+  hole that was reachable through `set_group_roles` from the day this ADR
+  shipped); the clients gain a role-management surface that only the owner sees.
 
 ## Open questions
 
-- **Ownership transfer.** v1 has none (the owner is fixed at creation). Likely a
-  future owner-only commit that rewrites `owner_pubkey`. What happens if the
-  owner loses their device before transferring? (Candidate: an admin-quorum
-  recovery, deferred.)
+- **~~Ownership transfer.~~ BUILT** under
+  [ADR-0045](0045-remote-commit-epoch-fork.md) (`e780952`), and it is exactly the
+  shape this question guessed: an **owner-only commit that rewrites the owner
+  slot**, riding the audited `set_group_roles` / `propose_group_roles` paths
+  rather than being a new commit type, so it is judged by this ADR's own gate
+  against the **pre-merge** table in which the transferor is still owner.
+  `OutgoingOwner::{Admin, Member}` states what becomes of the departing owner
+  instead of defaulting silently. It also forced a rule this ADR should have had:
+  a role table names 32-byte keys, so `set_group_roles` could always install an
+  owner that no leaf holds — permanently un-administrable, since a role change is
+  owner-only and the owner's leaf is unremovable. `group_proposals::owner_survives`
+  now refuses such a commit **on every peer** (**C-63**).
+  **The second half of this question is still open:** what happens if the owner
+  loses their device *before* transferring? Transfer does not answer it — minting
+  one needs the owner's key. (Candidate: an admin-quorum recovery, still
+  deferred.)
 - **Can an admin manage other admins?** v1 says no (only the owner promotes /
   demotes). Some products let admins demote *members* but not *admins*; revisit
   after dogfooding.
@@ -291,14 +322,19 @@ only to the owner). The gate is the security boundary; the UI gating is just UX
   and confirmed the decode parser is bounded + panic-free; all invariants
   (#2/#3/#4/#5) pass and the ADR-0015 DeviceGroup path does not regress. Two
   forward-looking notes recorded below for the client-wiring sprint.
-- **SelfRemove is invisible to the gate (defense-in-depth, post-code Finding 1).**
-  `authorise_role_commit` detects removals only via `staged.remove_proposals()`,
-  which surfaces `Proposal::Remove` exclusively — a `Proposal::SelfRemove`
-  (type `0x000a`) is not seen. Benign in v1: a SelfRemove can only evict its own
-  sender's leaf (so it cannot remove a non-consenting member), and lakko exposes
-  no self-remove API today (OpenMLS's constructor is `pub(crate)`). **If a future
-  sprint makes "leaving" a controlled action, the gate MUST add SelfRemove
-  detection** (`crates/lakko-mls/src/group.rs` `authorise_role_commit`).
+- **~~SelfRemove is invisible to the gate~~ (defense-in-depth, post-code Finding 1)
+  — ADDRESSED; that future sprint was [ADR-0045](0045-remote-commit-epoch-fork.md).**
+  The finding stood: `authorise_role_commit` detected removals only via
+  `staged.remove_proposals()`, which surfaces `Proposal::Remove` exclusively — a
+  `Proposal::SelfRemove` (type `0x000a`) was not seen. It was benign only while
+  lakko exposed no self-remove API, and this ADR recorded the trigger: *"if a
+  future sprint makes 'leaving' a controlled action, the gate MUST add SelfRemove
+  detection"*. ADR-0045 is that sprint — a member may now propose its own removal
+  — and the branch is back: `group_proposals::classify` maps
+  `Proposal::SelfRemove` to `ProposalKind::Leave`, `authorise` gives it an
+  explicit arm (anyone may leave; **the owner may not, until they transfer**), and
+  `commit_effects` folds a `SelfRemove` into the removed-leaf set by reading the
+  **sender's** leaf, since the proposal carries no target of its own.
 - **Call-path caveat for the client-wiring sprint (post-code Finding 2).** The
   multi-party **call** group is created via the same role-enabled `Group::create`
   as a chat group, so it now carries a `0xFF02` table (owner = the call

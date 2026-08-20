@@ -3,7 +3,9 @@
 
 # UX spec — proposal-based group membership (ADR-0045 S0)
 
-**Status:** design only. The core landed first ([ADR-0045] S1+S2, `9a60ab3`); no FFI, no client code.
+**Status:** design only. The core landed first ([ADR-0045] S1+S2, `9a60ab3`), then the
+FFI (`c5c0788`), **ownership transfer** (`e780952`) and the **staged-sweep rollback plus
+the mute fix** (`fe3de6c`). No client code.
 **Owner surface:** cross-platform (web SolidJS / iOS SwiftUI / Android Compose).
 **Pattern parent:** the existing members panel and its ADR-0027 `Join requests` section
 (`apps/web/src/routes/Chat.tsx` `<section aria-label="Members">`, iOS `MembersSheet` in
@@ -14,8 +16,20 @@ section shape). `docs/adr/` holds decisions, `docs/security/` holds invariants a
 neither is edited here.
 
 > **This spec was written after the core, not before it.** That is the debt, and §11
-> records precisely what it cost: eight places where the built core contradicts or omits
-> what [ADR-0045] decision 5 assumed the UI would have.
+> records precisely what it cost: **ten** places where the built core contradicts or omits
+> what [ADR-0045] decision 5 assumed the UI would have. Items 9 and 10 were added on
+> 2026-08-20 and were not caught by the spec's own writing — they came out of two later
+> core sprints, which is the debt compounding rather than being paid down.
+
+> **Revised 2026-08-20 against the built core.** Three things settle: the **owner dead end
+> is closed in the core** (ownership transfer landed, `e780952`) so §11.6 and §12.3 change
+> from open questions into a design task with a known API — affordance, member picker, the
+> `OutgoingOwner` choice, and an irreversibility confirmation, enumerated in §11.6 and
+> deliberately not designed here; a **staged sweep freezes a group's own membership
+> operations durably**, which is a hard new implementation obligation for S4-S6 (§11.9);
+> and the **FFI reaches neither of those two core surfaces**, which makes an FFI back-fill
+> a prerequisite for S4 (§11.10, §9.6). Nothing in §4's state table, §5's copy or §10's
+> visibility rule moves.
 
 > **Revised 2026-08-19 against [ADR-0045]'s rewritten decision 2 (liveness).** The ADR now
 > gives a waiting request **no deadline**: the committer duty passes to the next candidate
@@ -248,9 +262,13 @@ reason must have, and it is the fact the old immediate-looking UI concealed.
 - Body: `You will keep receiving messages until an owner or an admin applies your request. You will need a new invite to rejoin.`
 - Buttons: `Leave` (destructive) / `Cancel`
 - Pending annotation on your own row: `Waiting to leave.`
-- The control is **hidden for the group owner** — the owner cannot leave, structurally and
-  permanently, not transiently (§11.6). Showing a control that always refuses is worse than
-  not showing it.
+- The control is **hidden for the group owner** — the owner cannot leave *while owner*
+  (§11.6). ~~structurally and permanently, not transiently~~ — **that is no longer the
+  right word.** Ownership transfer is built, so the owner's inability to leave is a
+  **precondition, not a dead end**: transfer first, then leave as an ordinary member.
+  Hiding the control is still right for an owner who has not transferred (a control that
+  always refuses is worse than no control), but the hidden state now needs a way out —
+  which is the transfer flow this spec does not yet design (§11.6).
 
 **Refusal copy.** The core authorises the requester locally *before* publishing, so an
 unauthorised request never reaches the wire and the user gets a synchronous, specific
@@ -396,15 +414,17 @@ merely *device awake*.
 
 ## 9. Data the UI needs (the UX-first ask)
 
-**Status note.** At the time of writing, S3 (FFI) is **in progress, uncommitted**, in the
-working tree — `crates/lakko-ffi-uniffi/src/lib.rs` and `crates/lakko-ffi-wasm/src/mls.rs`
-already carry `ProposalKind` / `ProposalRecord` / `ProposalCommit`, the three `propose_*`
-methods, `pending_proposals`, `own_committer_rank`, `commit_pending_proposals`, and the
+**Status note (updated 2026-08-20).** S3 (FFI) **landed** as `c5c0788` —
+`crates/lakko-ffi-uniffi/src/lib.rs` and `crates/lakko-ffi-wasm/src/mls.rs` carry
+`ProposalKind` / `ProposalRecord` / `ProposalCommit`, the three `propose_*` methods,
+`pending_proposals`, `own_committer_rank`, `commit_pending_proposals`, and the
 `proposal()` accessor on the processed-message projection, with wasm using the flat
 `kind` string plus `add_signature_key` / `remove_target_leaf` shape this section asks for.
-**So items 1–5 below are landing already and are recorded here as the requirement they
-satisfy, not as new work. Item 6 and the typed refusal reason in item 1 are not in that
-change and remain open.**
+**So items 1–5 below are satisfied and are recorded as the requirement they meet, not as
+new work.** Still open: **item 6** (the staged-sweep and ownership-transfer surfaces, both
+added to the core *after* S3 shipped and neither back-filled onto it — this is a
+prerequisite for S4, see §11.10), **item 7** (the liveness timing constant), and the typed
+refusal reason in item 1.
 
 **FFI, both surfaces in lock-step (uniffi + wasm):**
 
@@ -420,7 +440,15 @@ change and remain open.**
 5. `Incoming::Proposal` on the processed-message projection: `{ senderLeaf, kind, stored }`,
    so the receive loop can refresh the panel and can drop a `stored == false` record without
    rendering anything.
-6. **One shared definition of whatever timing the chosen liveness variant needs.**
+6. **The two surfaces S3 did not carry** (added 2026-08-20; see §11.10):
+   `stagePendingProposals()` -> the same `{ commit, welcome?, swept[] }` as item 4 but
+   **without merging**, plus `hasStagedSweep()`, `mergeStagedSweep()` and
+   `abandonStagedSweep()`; and `transferOwnership(newOwnerSignatureKey, outgoing)` /
+   `proposeOwnershipTransfer(...)` with an `OutgoingOwner` enum. Both in lock-step on
+   uniffi and wasm. Without the first, §8's committer view can only be built on the
+   eager-merge path; without the second, §11.6's transfer flow cannot be built at all.
+
+7. **One shared definition of whatever timing the chosen liveness variant needs.**
    [ADR-0045] decision 2 leaves this open: **variant 1** (a candidate heartbeat) needs a
    beacon interval and a freshness window; **variant 2** (staggered takeover) needs one
    `step`. Either way the number belongs in **one** definition consumed over both FFI
@@ -489,7 +517,12 @@ stops being a content-less system row": it stops being a **timeline** row and be
 
 ## 11. What the built core contradicts or omits in decision 5
 
-The cost of writing this after the core rather than before it.
+The cost of writing this after the core rather than before it. Items 1-8 are the
+original tally against [ADR-0045] decision 5. **Items 9 and 10 came out of two core
+sprints that landed after this spec was written** — the staged-sweep rollback and
+ownership transfer — and are not decision-5 contradictions at all: they are
+obligations and gaps the client work inherits. They are kept in the same list because
+the list's real subject is *what S4-S6 must know that the ADR did not say*.
 
 1. **`refused`, as described, is unreachable — and the requester could not see it anyway.**
    Decision 5 defines it as "the proposer's role changed between proposing and the sweep, so
@@ -516,7 +549,7 @@ The cost of writing this after the core rather than before it.
    anywhere; the revised decision 2 **deleted the state rather than defining the
    threshold**, which resolves that half outright (§4). What survives is the weaker,
    permanent form: `waiting` still needs a sweep trigger to exist for it to ever end, and
-   the trigger still needs the one constant decision 2's chosen variant carries (§9.6).
+   the trigger still needs the one constant decision 2's chosen variant carries (§9.7).
    That constant has not been measured either — but nothing the **UI** says now depends on
    it, which is the difference.
 
@@ -531,24 +564,80 @@ The cost of writing this after the core rather than before it.
    nearly invisible (role changes are owner-only and the owner is rank 0, so they sweep
    immediately), but a row-level annotation for it cannot be built without an FFI addition.
 
-6. **The owner cannot leave — and the maintainer has chosen to fix it rather than ship
-   it.** The core refuses an owner `Leave`/self-`Remove` fail-closed, with a sound
-   justification (an ownerless group can never appoint another admin, because
-   `set_group_roles` is owner-only). Combined with ADR-0022's deferred ownership transfer
-   that made **an owner permanently bound to every group they create.** [ADR-0045] listed
-   ownership transfer as "load-bearing"; **§12's escalation has been answered — ownership
-   transfer is being built, and a core sprint for it is running now.** This spec does not
-   design its UI: the core API does not exist yet, and designing a transfer flow against an
-   unknown surface would be the exact mistake §11 exists to record. **What follows for this
-   spec:** the `Leave group` control stays hidden for the owner (§6) until that lands, and
-   a follow-up UX pass owns the transfer flow, the ownerless-group question and whatever
-   `Leave group` becomes for an owner afterwards.
+6. **~~The owner cannot leave~~ — RESOLVED IN THE CORE; the UI is owed.** The core still
+   refuses an owner `Leave`/self-`Remove` fail-closed, with the same sound justification
+   (an ownerless group can never appoint another admin, because `set_group_roles` is
+   owner-only). What has changed is that this is no longer a **dead end**: ownership
+   transfer landed (`e780952`), and the refusal is now a **precondition** — transfer
+   first, then leave as an ordinary member. The core deliberately keeps the two as
+   separate commits and cannot fuse them, because both proposals are judged against the
+   pre-merge table in which the transferor is still the owner, so a fused `Leave` half is
+   refused.
+
+   **The API this spec now has to design against:**
+
+   - `transferOwnership(newOwnerSignatureKey, outgoing)` and its proposal twin
+     `proposeOwnershipTransfer(...)` — owner-only, and refused locally with a clear
+     error when the named key is not a member, is already the owner, or is not 32 bytes.
+   - `OutgoingOwner` — `Admin` (the default, and the one a client should pre-select) or
+     `Member`. The core states this rather than defaulting silently *because either
+     silent default is wrong in one direction*: keeping admin leaves an unwanted
+     administrator in a group the outgoing owner meant to walk away from; dropping to
+     plain member strips them, in one irreversible commit, of every power they had in a
+     group they created.
+
+   **What is owed, and deliberately not designed here** (a follow-up UX pass owns it):
+
+   - the **affordance** — where transfer lives in the members panel, and how it relates
+     to the `Leave group` control it unblocks;
+   - the **member picker** — choosing the new owner, on the same identity treatment the
+     roster already uses (contact display name if known, else the short fingerprint),
+     keyed on the **signature public key** and never the leaf index;
+   - the **outgoing-owner choice** — `Admin` vs `Member`, presented as a real decision
+     with its consequence stated, not as a checkbox;
+   - an **irreversibility confirmation**, which this one genuinely needs: **nothing can
+     undo a transfer.** A role change is owner-only, so the moment the commit lands the
+     transferor cannot take the group back, cannot restore their own owner slot, and
+     cannot even demote themselves back without the new owner's cooperation. That is a
+     stronger claim than any other confirm in this spec — `Remove` and `Leave` are both
+     redoable — and the copy must say so plainly rather than borrowing destructive
+     styling and hoping it reads;
+   - and what `Leave group` becomes for a former owner afterwards (it becomes ordinary,
+     which is the point, but the transition needs to be legible).
+
+   The `Leave group` control therefore stays hidden for the owner (§6) until the transfer
+   flow ships — otherwise the owner is offered a way out with no way to reach it.
 
 7. **`N changes waiting to apply` is not committer-side data** (§8, deliberate departure).
 
-8. **Nothing in the ADR says there is no cancel.** The core has no withdraw and MLS offers
-   no mechanism for one, so a `Cancel` affordance cannot be honoured. Recorded here
-   explicitly so that nobody builds one in S4–S6 (§3).
+8. **Nothing in the ADR says there is no cancel.** The core has no withdraw, so a `Cancel`
+   affordance cannot be honoured. Recorded here explicitly so that nobody builds one in
+   S4–S6 (§3). *Precision, since [ADR-0045] originally stated this too strongly:* OpenMLS
+   **does** expose a local single-proposal eviction (`MlsGroup::remove_pending_proposal`).
+   What does not exist is a **wire** withdraw — evicting locally would leave the request
+   live in every peer's store, which is precisely the lie §3 refuses to build. The
+   conclusion is unchanged; only the supporting fact needed correcting.
+
+9. **A staged sweep freezes that group's own membership operations, and the freeze is
+   durable — a new, hard client obligation.** `stagePendingProposals` leaves the group at
+   epoch N holding an un-merged commit, and OpenMLS refuses every further `propose_*`,
+   add, remove and `self_update` on that group until it is adjudicated. The staged commit
+   is **persisted**, so a client that stages and never reaches a verdict leaves membership
+   frozen **across restarts**, not merely until the process dies. **The sequence S4-S6 must
+   implement is: durably record -> publish -> read the journal verdict -> `mergeStagedSweep`
+   or `abandonStagedSweep`.** Incoming messages are unaffected throughout, so the chat keeps
+   working and the freeze is invisible to the user — which is exactly why it must be got
+   right in code rather than caught in QA. Nothing in this spec's §4 state table changes;
+   this is an implementation obligation, not a state.
+
+10. **The FFI does not yet reach either of the two newest core surfaces.** Verified against
+    the tree: **neither FFI surface exposes `stagePendingProposals` /
+    `hasStagedSweep` / `mergeStagedSweep` / `abandonStagedSweep`, nor `transferOwnership` /
+    `proposeOwnershipTransfer` / `OutgoingOwner`.** S3 landed before both sprints and was
+    not back-filled. Two consequences for this spec: the committer view of §8 cannot be
+    built correctly yet (only the eager-merge sweep is reachable, which is the shape a
+    non-owner committer must not use), and **the §11.6 transfer flow cannot be built at
+    all**, however well it is designed. The FFI back-fill is a prerequisite for S4.
 
 ---
 
@@ -566,8 +655,14 @@ The cost of writing this after the core rather than before it.
    pending set is a privacy surface; a beacon is a second, larger one, and it is *not*
    role-gateable — every member would see it. It belongs on the maintainer's ledger for
    that reason as much as for the journal-litter one [ADR-0045] names.
-3. **~~The owner dead end (§11.6).~~ Answered — ownership transfer is being built**, a core
-   sprint is running, and the flow is a follow-up UX pass once the API exists.
+3. **~~The owner dead end (§11.6).~~ Closed in the core — the design work is now
+   schedulable, not blocked.** Ownership transfer landed (`e780952`) and its API is known
+   (§11.6). Nothing here waits on the maintainer any more; what it waits on is a UX pass
+   for the transfer flow — affordance, member picker, the `OutgoingOwner` choice, and an
+   irreversibility confirmation — which §11.6 enumerates and deliberately does not design.
+   **Sequencing question that is the maintainer's:** whether that pass runs before S4-S6
+   or alongside them. `Leave group` is designed and buildable today for every non-owner,
+   so S4-S6 are not blocked either way.
 4. **Visibility (§10).** I recommend owner/admin only, plus your own request. The
    counter-argument — that a member deserves to know a change is coming — is a values
    position, and it is the maintainer's.
@@ -634,8 +729,12 @@ divergences, and each is forced.
 
 - **The wait has no user-side remedy, and now no end state either.** The notice tells the
   truth and offers nothing, indefinitely. That is honest and it is also unsatisfying; the
-  real remedies are ownership transfer (now being built) and appointing more admins, both
-  outside this spec. Removing `stalled` made this *more* true, not less — the earlier design
+  real remedies are ownership transfer (**now built** — `e780952`) and appointing more
+  admins, both outside this spec. **Both remedies are pre-emptive, and that limit is worth
+  stating**: transfer needs the *current* owner's key to mint, so it helps a group whose
+  owner hands on deliberately and does nothing for one whose owner has already stopped
+  running the app — which is the case that actually stalls. Removing `stalled` made this
+  *more* true, not less — the earlier design
   at least changed its sentence eventually, which felt like progress while conveying nothing
   the client actually knew.
 - **Partial censorship is now indistinguishable from an idle group.** A committer that drops

@@ -5,15 +5,17 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0045: Closing the remote-commit epoch fork — proposal-based commits with a designated committer (G-38 residual 1)
 
-- **Status:** **Proposed.** No code. **The maintainer has chosen Option B —
-  proposal-based commits.** This ADR was originally written as a recon that
-  recommended Option C (client-side loser rollback); that recommendation has been
-  **overturned by the maintainer** and this revision records the choice, states
-  the reasoning that moved it, and settles the five design questions the recon
-  left open. The recon of every option is kept intact below, because its value is
-  the record of *why* the rejected options are rejected. Status stays **Proposed**
-  until the maintainer accepts the settled design; the maintainer accepts, not the
-  ADR.
+- **Status:** **Proposed.** **The core is built** (sprints S0-S3 plus two
+  unplanned ones — see the date line and the
+  [blast-radius table](#blast-radius-per-sprint)); the three clients are not.
+  **The maintainer has chosen Option B — proposal-based commits.** This ADR was
+  originally written as a recon that recommended Option C (client-side loser
+  rollback); that recommendation has been **overturned by the maintainer** and
+  this revision records the choice, states the reasoning that moved it, and
+  settles the five design questions the recon left open. The recon of every
+  option is kept intact below, because its value is the record of *why* the
+  rejected options are rejected. Status stays **Proposed** until the maintainer
+  accepts the settled design; the maintainer accepts, not the ADR.
 - **Date:** 2026-08-18 (recon) · revised the same day to record the Option-B pick
   and settle its design · **2026-08-19: decision 2 (liveness) rewritten** to the
   model the maintainer chose — active admin devices elect the committer, the next
@@ -25,15 +27,47 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
   `lakko-presence` is a live exported surface; what is genuinely missing is a
   *continuous* beacon, which is a narrower and more tractable gap. Decision 1,
   decision 3, decision 4 and the whole recon are unchanged.
+  · **2026-08-20: reconciled with the built core.** Four core sprints landed
+  across three commits — `9a60ab3` (S1 the gate + S2 the committer), `c5c0788`
+  (S3 both FFI surfaces, plus the S0 UX spec, written after the core rather than
+  before it), `e780952` (**ownership transfer**, ADR-0022's deferred follow-up,
+  and with it the commit-level `owner_survives` rule), and `fe3de6c` (the
+  **staged-sweep rollback** — `stage_pending_proposals` / `merge_staged_sweep` /
+  `abandon_staged_sweep` — together with the **unmute** fix for a defect the
+  rollback work surfaced). Each of the last three found a consequence this ADR
+  did not record, and every one of them is a **client** obligation, so they are
+  written into the body here before S4-S6 are built against it:
+  1. the rollback point is the **absence of the eager merge**, not a "retained
+     epoch-N snapshot" — decision 2, layer 4;
+  2. a staged sweep **freezes that group's own membership operations**, and the
+     staged commit is **durable**, so a client that stages and never adjudicates
+     wedges the group across restarts — decision 2, layer 4;
+  3. a stored proposal **muted the whole group's chat** until the sweep, because
+     OpenMLS refuses `create_message` while the proposal store is non-empty —
+     decision 3;
+  4. **by-reference resolution runs at commit receipt on every member**, not
+     only at sweep time on the committer, which is what makes "store at receipt"
+     mandatory rather than tidy — decision 3;
+  5. ownership transfer is **built**, and the security content of that sprint was
+     `owner_survives`, which closes a hole that predates it — decision 2 and
+     [§ What Option B does not fix](#what-option-b-does-not-fix) item 2.
+
+  This revision also mints the ADR's first indexed invariant, **C-63**,
+  reversing this ADR's earlier claim that it proposed none
+  (see [§ Invariants touched](#invariants-touched)).
 - **Context:** Phase 3 — group-membership commits / MLS epoch integrity. Closes
   **G-38 residual 1**, the largest unfixed item on the client-concurrency list
   and the only one on it that **no client-side lock can address by
   construction**, because the second committer is a different device.
 - **Relationship to prior ADRs.** **Extends
   [ADR-0040](0040-durable-pending-commit-outbox.md); supersedes nothing.** The
-  eager merge inside the create-commit call, the durable pending-commit outbox,
-  the fail-closed step-2 atomic write, and the idempotent restart sweep all carry
-  through verbatim. ADR-0040 closed the **crash** window between publish and
+  durable pending-commit outbox, the fail-closed step-2 atomic write, and the
+  idempotent restart sweep all carry through verbatim. ~~The eager merge inside
+  the create-commit call~~ carries through **on the four direct-commit paths
+  only**: the new sweep path stages instead of merging, which is ADR-0040's own
+  deferred "Option B" scoped narrowly — see
+  [§ The staged sweep, as built](#the-staged-sweep-as-built).
+  ADR-0040 closed the **crash** window between publish and
   persist; [ADR-0044](0044-push-routing-secret-recency.md)'s serializing per-group
   lock closed the **local** two-in-flight window (G-38 proper). This ADR addresses
   the third route to a divergent epoch, the one **both** of those leave open.
@@ -751,10 +785,14 @@ re-proposing an already-satisfied intent is caught by the ordinary
 emit MLS Proposals; exactly one elected owner-or-admin sweeps them into a single
 Commit. Option A (a DS-side epoch gate) is **not built**, for the reasons the recon
 gives and which the choice of B does not disturb. Option C is **not built as a
-standalone option**, but **one component of it survives and is required** — the
-bounded committer rollback of decision 2 below. Option C′ (re-read the journal head
-before committing) is **absorbed into B** as the committer's stand-down rule, not
-shipped as a separate companion.
+standalone option**, but **its committer rollback survives as a required part of
+B** — though not in the form C described it: what was built is
+`stage_pending_proposals` / `merge_staged_sweep` / `abandon_staged_sweep`, which
+defers the eager merge rather than retaining and restoring a snapshot. See
+[§ The staged sweep, as built](#the-staged-sweep-as-built). Option C′ (re-read the
+journal head before committing) is **absorbed into B** as the committer's
+stand-down rule, not shipped as a separate companion — and it is **client
+orchestration that does not exist yet**.
 
 Scope: **conversation groups** (`lakko_mls::Group`). Explicitly **not** DeviceGroups,
 **not** call groups, and **not** channel `PublisherGroup`s — see
@@ -980,9 +1018,92 @@ in variant 2 the reason the stagger must dominate it.
    that only runs when the owner is not the one acting.
 4. **The residual is repaired, not prevented.** If two candidates do collide, one
    forks — the hazard this ADR exists to close, in a much narrower window. So the
-   acting committer **retains its pre-commit epoch-N snapshot across the
-   publish→verdict window and rolls back if it lost**: Option C's steps 1, 3 and 5,
-   on one device, on the non-owner path only. Required in both variants.
+   acting committer must be able to survive losing the journal order across the
+   publish→verdict window. Required in both variants.
+
+   > **This is the one place the built core diverges from what this ADR
+   > prescribed, and the divergence is the better answer.** The text this
+   > paragraph replaces said the committer "retains its pre-commit epoch-N
+   > snapshot and rolls back if it lost — Option C's steps 1, 3 and 5". **No such
+   > snapshot exists and none was needed.** The rollback point is not a captured
+   > artifact; it is the **absence of the eager merge**. See
+   > [§ The staged sweep, as built](#the-staged-sweep-as-built).
+
+#### The staged sweep, as built
+
+`Group::stage_pending_proposals` builds the sweep commit and **stops before
+merging it**, so the group sits at epoch **N** holding an un-merged staged
+commit. The caller publishes, reads the journal verdict, and then calls one of:
+
+- `merge_staged_sweep` — **won**, land at N+1, the state the peers reached;
+- `abandon_staged_sweep` — **lost**, discard the staged commit and stay at N,
+  free to apply the winner and carry on.
+
+`commit_pending_proposals` is exactly the pair run back-to-back. It is kept
+unchanged for callers that have not moved onto the staged pair, and its behaviour
+is byte-for-byte what it was — but a committer that can lose a race must not use
+it, because merging before the journal has ordered the commit is precisely what
+strands the loser.
+
+**Nothing is captured and nothing is persisted separately.** Abandoning is
+OpenMLS's `clear_pending_commit`, whose entire effect is to set this group's
+`group_state` back to `Operational`. That matters beyond tidiness: a
+whole-provider `Identity::restore_storage` — the mechanism Option C's step 5
+called for, and the one ADR-0040's abort path uses — restores **every** group on
+the account, so using it to undo one group's commit would roll sibling groups
+back past commits they have already published. Per-group staging has no such
+blast radius, and `abandoning_a_sweep_leaves_a_sibling_group_untouched` pins it.
+
+Nor is any work thrown away: OpenMLS empties the proposal store on **merge**, and
+an abandoned commit was never merged, so the proposals the sweep selected are
+still pending for the winner's next sweep
+(`an_abandoned_sweep_leaves_its_proposals_for_the_next_committer`).
+
+**This is ADR-0040's own deferred "Option B" — defer the eager merge in the core
+— scoped to the sweep path only.** ADR-0040 weighed it, called it *"cleaner in
+principle"*, and rejected it for v1 because it *"touches the sacrosanct MLS core
+… and both FFI surfaces"*;
+[§ Alternatives rejected](#alternatives-rejected) below repeats that framing and
+is now out of date in exactly that respect. What landed is the narrow version:
+the four **direct**-commit paths keep merging eagerly and behave byte-for-byte as
+before (`a_rollback_cannot_reach_an_eagerly_merged_commit`), and only the new
+sweep path defers.
+
+**One expectation of ADR-0040's does not carry over, and it matters.** ADR-0040
+supposed that folding in defer-merge would *"remove the outbox's re-publish
+machinery"*. It does not: the outbox is still required, because the two mechanisms
+answer different questions about the same commit — the outbox answers *did my
+commit reach the wire*, the staged pair answers *did it win the wire order*. The
+first must be *yes* before the second is meaningful. So the client sequence is
+**durably record → publish (or re-publish) → read the verdict → merge or
+abandon**, and ADR-0040's outbox wraps both commit shapes unchanged.
+
+**Two properties of staging are new client obligations, and neither was in this
+ADR before the sprint landed.**
+
+- **A staged sweep freezes that group's own membership operations.** OpenMLS's
+  `is_operational()` returns `MlsGroupStateError::PendingCommit` while a commit
+  is staged, and it guards `add_members`, `remove_members`, `self_update`,
+  `update_group_context_extensions` and all three `propose_*` entry points. So
+  between staging and the verdict this device can neither propose nor commit
+  anything else in that group. `stage_pending_proposals` refuses a **second**
+  stage for the same reason, fail-closed — building one would silently replace a
+  commit that may already be on the wire.
+- **The staged commit is durable.** `stage_commit` writes
+  `MlsGroupState::PendingCommit` through `write_group_state`, and `MlsGroup::load`
+  reads it back. That is what makes an ADR-0040 restart sweep able to re-publish
+  and re-adjudicate after a crash — and it is also what turns the freeze above
+  from an advisory into a **binding** obligation: a client that stages and never
+  reaches a verdict leaves that group unable to change membership **across
+  restarts**, not merely until the process dies.
+
+  **Incoming messages are unaffected** — nothing on the receive path consults
+  `is_operational`, and applying the winner's commit works whether or not the
+  loser has abandoned yet, because OpenMLS discards a pending commit as part of
+  merging a foreign one. Abandon-then-apply is the honest order and the one this
+  crate drives; the reverse is pinned as a safety net
+  (`applying_the_winner_before_abandoning_still_converges`) so a client that gets
+  the order wrong still converges rather than wedging.
 
 **That rollback is materially smaller than Option C's, and it needs no budget** —
 which is why deleting the retry cap costs nothing:
@@ -1027,15 +1148,76 @@ failure, both assertions the client had no basis for. With no deadline and no bu
 the only consequence is a longer wait — which is what the maintainer's model says
 should happen.
 
-**Ownership transfer is being built.** The replaced design listed ADR-0022's
+**Ownership transfer is built** (`e780952`). The replaced design listed ADR-0022's
 deferred ownership transfer as a follow-up that B promoted from a nicety to
-load-bearing. The maintainer has since chosen to **build it** rather than ship the
-owner dead-end it would otherwise leave: the core refuses an owner `Leave` /
-self-`Remove` fail-closed (`crates/lakko-mls/src/group_proposals.rs` — *"the group
-owner cannot leave"*), and `set_group_roles` is owner-only, so an ownerless group
-could never appoint another admin and an owner is therefore bound permanently to
-every group they create. A core sprint for it is running now; its API is not
-described here because this ADR does not yet know it.
+load-bearing; an earlier revision of this paragraph then said a sprint "is running
+now" and that "this ADR does not yet know its API". It landed, and the API is:
+
+- `RoleTable::with_owner_transferred(new_owner, outgoing)` — pure, total and
+  **membership-blind**, because a role table names keys and cannot tell whether a
+  key is in the group;
+- `Group::transfer_ownership(identity, new_owner, outgoing)` — the direct-commit
+  form, and `Group::propose_ownership_transfer(...)` — the proposal form;
+- `OutgoingOwner::{Admin, Member}` — what becomes of the outgoing owner, stated
+  rather than defaulted silently, because either silent default is wrong in one
+  direction. `Admin` is the default.
+
+**Transfer is deliberately not a new commit type.** It is the ordinary owner-only
+role-table rewrite with the owner slot moved, so it rides the audited
+`set_group_roles` / `propose_group_roles` paths and is judged by the existing
+gate against the **pre-merge** table — the one in which the transferor is still
+the owner. Nothing about who may mint one changes.
+
+**What it does and does not resolve.** It removes the owner dead-end: the core
+still refuses an owner `Leave` / self-`Remove` fail-closed
+(`crates/lakko-mls/src/group_proposals.rs` — *"the group owner cannot leave"*),
+and that rule is **unchanged** by transfer, because the way out is to transfer
+first and leave as an ordinary member afterwards. The two cannot even be fused
+into one commit: both proposals are judged against the pre-merge table in which
+the transferor is still owner, so the `Leave` half is refused — which is also the
+honest ordering, since the transfer must be durable before its author departs.
+`transfer_then_the_former_owner_leaves_and_the_group_works` walks the whole path.
+
+What it does **not** resolve is the dependent consequence in
+[§ What Option B does not fix](#what-option-b-does-not-fix) item 2: **membership
+can still stall.** Transfer needs the owner's key to mint, so it does nothing for
+an owner who has *already* gone; it only lets one who is still present hand the
+duty on deliberately. Recovering a lost owner is ADR-0022's separate,
+still-open admin-quorum question.
+
+**The security content of that sprint was `owner_survives`, not the transfer
+wrapper — and it closes a hole that predates it.** See
+[§ Never leave the group without an owner in it](#never-leave-the-group-without-an-owner-in-it).
+
+#### Never leave the group without an owner in it
+
+`group_proposals::owner_survives` is the one rule in the crate that judges a
+**commit** rather than a proposal, and it is checked against the roster the commit
+*produces* — pre-merge members, minus everyone it removes, plus everyone it adds.
+It refuses a commit that would install an owner who is not a member of the
+resulting group, and a commit that rewrites the GroupContext without leaving a
+readable `0xFF02` table behind.
+
+**It is not a guard on a new feature.** `set_group_roles` has been owner-only and
+free-form since ADR-0022: a role table names 32-byte keys, so an owner could
+always hand-build a table naming a key that no leaf holds, and nothing refused it.
+The result is permanent — a role change is owner-only so nobody could ever rewrite
+the table, and the owner's leaf is unremovable so no removal could repair it (and
+there is no such leaf anyway). `owner_survives` refuses that commit **on every
+peer**, so it is a strict improvement independent of whether anyone ever calls
+`transfer_ownership`. Pinned by
+`a_peer_refuses_a_commit_that_hands_the_group_to_a_non_member` and
+`a_peer_refuses_a_commit_that_erases_the_role_table`.
+
+**The second reachable path is one this ADR created.** Because B composes N
+intents into one commit, "hand the group to Charlie" and "remove Charlie" can ride
+together, each individually authorised — the owner may rewrite the table, an admin
+may remove a plain member — so no per-proposal rule can see it. Only the
+post-commit roster can, which is why this rule cannot be folded into `authorise`.
+The committer's own sweep excludes the role change rather than publishing a commit
+every peer would refuse (`a_sweep_drops_a_transfer_to_someone_the_same_commit_removes`).
+
+Indexed as **C-63**.
 
 ### Decision 3 — the proposal-authorisation gate (the invariant #3 piece)
 
@@ -1070,12 +1252,23 @@ boundary.**
    leaf resolves through `self.members()` to a signature key and through the
    pre-merge `RoleTable` to a role, exactly as `authorise_role_commit` already
    resolves the committer. Store it only if authorised; **drop it otherwise**. Two
-   supporting facts make this the right layer to drop at: `ProposalStore::remove`
+   supporting facts make this the right layer to drop at: ~~`ProposalStore::remove`
    is `pub(crate)` in openmls, so there is **no public single-proposal eviction** —
    once stored, a proposal can only be cleared with `clear_pending_proposals`,
-   which clears *everything* — and openmls empties the store on every merged commit
+   which clears *everything*~~ — and openmls empties the store on every merged commit
    (`staged_commit.rs:549-552`), so no bespoke GC is needed for the ones that are
    legitimately stored.
+
+   > **The struck half is factually wrong and is left visible rather than
+   > quietly deleted.** `ProposalStore::remove` is indeed `pub(crate)`, but
+   > `MlsGroup::remove_pending_proposal(storage, proposal_ref)` is **public**
+   > (`openmls-0.8.1/src/group/mls_group/proposal.rs:502`), so a single-proposal
+   > eviction does exist. The **conclusion is unaffected** — dropping at receipt
+   > is still right, and no bespoke GC is still needed — and so is the UX spec's
+   > "there is no `Cancel`", because that rests on there being no *wire* withdraw:
+   > evicting locally would leave the request live in every peer's store. The
+   > correction matters only so that a future reader does not treat "openmls
+   > cannot evict one proposal" as an established fact.
 2. **Sweep filter (the committer's own hygiene).** The committer must not use
    `commit_to_pending_proposals`. It must use `CommitBuilder::build(rand, crypto,
    signer, f)` with a real `f` that re-runs the authorisation against the
@@ -1101,6 +1294,71 @@ boundary.**
 a courtesy that keeps the store clean and gives the user a fast local error; the
 **receive-side refuse-to-merge is the security boundary**, and it is fail-closed
 (invariant #4) exactly as it is today.
+
+> **Correction from the build: for a by-reference proposal, layer 1 *is* a
+> boundary.** This ADR calls layer 1 "hygiene" and layer 3 "the boundary". A peer
+> that dropped a proposal at layer 1 has nothing for OpenMLS's reference
+> resolution to find, so the commit carrying it is refused with
+> `InvalidCommit(MissingProposal)` **before layer 3 is reached** — enforced by
+> RFC 9420 itself, not by Lakko. Layer 3 remains necessary for the by-**value**
+> arm, where it is ADR-0022's original committer rule, and for the proposal kinds
+> ADR-0045 adds. The module documentation on
+> `crates/lakko-mls/src/group_proposals.rs` carries this correction too.
+
+> **Correction from the build: layer 2's stated justification does not exist.**
+> This ADR justifies the sweep filter by "a proposal stored while its sender was
+> an admin and swept after that sender was demoted". **That window is not
+> reachable.** OpenMLS empties the entire proposal store on every merged commit,
+> and the role table can only change *by* a merged commit, so the table cannot
+> move underneath a stored proposal. Layer 2 is kept, and is worth keeping, but as
+> **defence in depth over the store's other writers** — the store has three (the
+> receipt gate, this crate's own `propose_*`, and `MlsGroup::load` restoring
+> persisted entries) — and it is tested against a store primed by a path that
+> bypassed layer 1.
+
+#### Storing a proposal is not free: it muted the whole group
+
+**The consequence this ADR did not record, found only when a test finally sent a
+message while a proposal was pending** (`fe3de6c`). OpenMLS refuses
+`MlsGroup::create_message` outright while the proposal store is non-empty
+(`openmls-0.8.1/src/group/mls_group/application.rs:27-31`,
+`MlsGroupStateError::PendingProposal`), on the assumption that a caller commits or
+clears the store promptly. **ADR-0045 breaks that assumption deliberately:**
+decision 2 retains an authorised proposal until a designated committer sweeps it,
+and has no deadline, so a request may legitimately wait hours. Untreated, that
+takes the whole group's **chat** down from the moment one admin proposes until the
+sweep — every member, not only the proposer. Receiving was unaffected, which is
+what would have kept it from being obvious.
+
+**The obvious fix is wrong, and the reason is the second missing fact.** Storing
+only at *sweep* time would mute nobody and brick everybody:
+`PublicGroup::stage_commit` resolves a commit's by-reference proposals through the
+proposal store via `ProposalQueue::from_committed_proposals`, and **that runs on
+every receiving member at commit receipt**, not only on the committer at sweep
+time. So the store must be populated **on every member for exactly the interval
+that fix proposed to keep it empty**, or the commit fails to apply with
+`StageCommitError::MissingProposal`. This is what makes ADR-0045's "store at
+receipt" **mandatory rather than merely tidy**, and it is also the mechanism
+behind the layer-1 correction above.
+
+**What landed instead** touches one path that advances nothing but the sender
+ratchet: `Group::create_application_message` **parks** the pending set around the
+encrypt call — clone, clear, encrypt, restore in original order, same
+`ProposalRef`s — with a byte-for-byte unchanged fast path when nothing is pending.
+The pending set does not move house: it stays in the OpenMLS storage provider,
+which is what `Identity::snapshot_storage` already serialises and `MlsGroup::load`
+already rebuilds, so no persistence is invented and no client-side store is needed.
+
+**Client-visible consequences, all of them nil by design.** The park is a single
+synchronous encrypt with no I/O, no `await` and no re-entry; the unpark runs
+before either outcome propagates and a failed unpark beats a successful send
+(losing a pending proposal would desync this device from every peer still holding
+it, whereas a refused send costs one message the caller retries). `DeviceGroup`
+inherits the fix by delegation and always takes the fast path; `PublisherGroup`
+sends no application messages. **S4-S6 need do nothing about this** — it is
+recorded here because the ADR's decision-3 discussion otherwise reads as if
+storing a proposal were free, and because the by-reference-at-receipt constraint
+above is a rule a client refactor could break.
 
 **Two consequences of decision 3 that are easy to miss.**
 
@@ -1144,6 +1402,30 @@ gate must fail a *named* test):
 No new fuzz target: the wire parser is unchanged (`mls_message` already covers the
 framing), and the gate is logic over already-parsed structures. The
 `role_table_decode` target stands as-is.
+
+> **Where they actually landed, since the list above names a file they are not
+> in.** The gate tests live in a new binary,
+> `crates/lakko-mls/tests/group_proposals.rs` (22 tests), rather than extending
+> `group_admin_roles.rs` (which keeps its original seven, unchanged); the
+> ownership-transfer and `owner_survives` tests are a second new binary,
+> `group_ownership_transfer.rs` (12 tests). Names drifted from the list — e.g.
+> `plain_member_proposal_is_dropped_and_never_reaches_a_commit` and
+> `sweep_never_includes_an_external_join_add` — and the built set additionally
+> covers what this ADR could not have prescribed: the concurrent-sweep rollback
+> loop, two **control** tests that prove the discrimination by reproducing the
+> hazard (`control_two_concurrent_direct_commits_still_fork`,
+> `control_a_lost_sweep_that_merges_instead_of_rolling_back_still_forks`), and
+> four for the mute (`a_pending_proposal_does_not_mute_the_group` and siblings).
+> `sweep_excludes_a_stored_proposal_whose_sender_was_since_demoted` is the one
+> item with no direct counterpart — see the layer-2 correction above for why the
+> window it describes is not reachable. The three layers are additionally tested
+> **in isolation** as `#[cfg(test)]` lib tests inside
+> `crates/lakko-mls/src/group.rs`, each against a deliberately ungated
+> test-only path that skips the layer under test
+> (`sweep_filter_excludes_an_unauthorised_proposal_the_store_already_holds` for
+> layer 2, `peer_refuses_a_commit_carrying_a_proposal_from_an_unauthorised_sender`
+> for layer 3) — which is the ADR-0044 discipline of proving a gate discriminates
+> rather than asserting it.
 
 ### Decision 4 — external joins already work this way
 
@@ -1271,9 +1553,17 @@ The recon was honest about Option C's limits; B's deserve the same treatment.
    someone returns. B trades a silent fork for a **visible, honest wait** — the
    right trade, and still a new behaviour that did not exist before. It is a wait
    and not a failure: the revised decision 2 has no deadline and no retry budget, so
-   nothing expires and nothing is declared unachievable. The maintainer has chosen
-   to **build** ADR-0022's deferred **ownership transfer** rather than leave the
-   owner dead-end this exposes; a core sprint for it is running.
+   nothing expires and nothing is declared unachievable.
+
+   **ADR-0022's deferred ownership transfer is now built (`e780952`), and this
+   item survives it.** Transfer removes the *dead-end* — an owner is no longer
+   bound permanently to every group they create, and a member may now leave — but
+   it does not remove the *stall*. Minting a transfer needs the owner's key, so it
+   is something a present owner does deliberately; it does nothing for an owner
+   who has already gone, which is precisely the case that stalls. The remedies for
+   a stall remain what they were: appoint more admins, or have the owner hand the
+   group on **before** they stop running the app. Recovering a lost owner is
+   ADR-0022's separate, still-open admin-quorum question.
 3. **A new authority shift: the committer can selectively censor.** An elected
    committer that sweeps some proposals and drops others is not detectable except by
    each proposer noticing its own proposal never landed. Today an admin acts
@@ -1318,15 +1608,42 @@ The recon was honest about Option C's limits; B's deserve the same treatment.
 
 | Sprint | Surface | What changes |
 |---|---|---|
-| **S0 — UX** | none (design) | The five states of decision 5 plus the committer-side pending surface. `ux-ui` first per the repo rule. Landed as [`docs/ux/proposal-based-membership.md`](../ux/proposal-based-membership.md), out of order — after S1+S2 rather than before them. |
-| **S1 — core: the gate** | `crates/lakko-mls` (**invariant #3**) | `process_incoming_verifying_roles` proposal arm: inspect + role-check + `store_pending_proposal` or drop. `authorise_role_commit` extended from committer-only to per-proposal-sender, with the by-value arm preserved and a `SelfRemove` arm added. New `Incoming` shape for a stored-vs-dropped proposal. Ten property tests. **External crypto review.** |
-| **S2 — core: the committer** | `crates/lakko-mls` | `committer_rank` in `group_roles.rs`; a `sweep_pending_proposals` entry point over `CommitBuilder::build` with the two-arm filter; `propose_add` / `propose_remove` / `propose_role_change` wrappers over the openmls `propose_*` calls. |
-| **S3 — FFI** | `lakko-ffi-uniffi`, `lakko-ffi-wasm` | Add the propose + sweep + rank + pending-proposal-list surface beside the existing `add_member_from_wire` / `remove_member` / `set_group_roles` / `approve_external_join`. Both surfaces, in lock-step. Regenerate bindings, rebuild `LakkoCore.xcframework` and the Android `.so`. |
-| **S4 — web reference** | `apps/web/src` | `contacts/client.ts`: the four `…Locked` methods become propose-and-publish; a new sweep path. `mls/group-lock.ts` `withGroupMlsLock` still spans it. `chat/client.ts` `applyPolledBatch` / `toEvent`: the `Proposal` result stops being a content-less system row. `chat/commit-outbox.ts` + `chat/mls-store.ts` `saveSnapshotWithCommitEntry`: the retained epoch-N snapshot for the committer path. `routes/Chat.tsx` members panel: the new states. |
+| **S0 — UX** — **LANDED `c5c0788`** | none (design) | The five states of decision 5 plus the committer-side pending surface. `ux-ui` first per the repo rule. Landed as [`docs/ux/proposal-based-membership.md`](../ux/proposal-based-membership.md), out of order — after S1+S2 rather than before them. |
+| **S1 — core: the gate** — **LANDED `9a60ab3`** | `crates/lakko-mls` (**invariant #3**) | `process_incoming_verifying_roles` proposal arm: inspect + role-check + `store_pending_proposal` or drop. `authorise_role_commit` extended from committer-only to per-proposal-sender, with the by-value arm preserved and a `SelfRemove` arm added. New `Incoming` shape for a stored-vs-dropped proposal. Ten property tests. **External crypto review — still owed.** As built: the whole rule is `crates/lakko-mls/src/group_proposals.rs` `authorise`, written down once and consumed at all three layers. |
+| **S2 — core: the committer** — **LANDED `9a60ab3`** | `crates/lakko-mls` | `committer_rank` in `group_roles.rs`; a sweep entry point over `CommitBuilder::build` with the two-arm filter; `propose_*` wrappers over the openmls calls. As built the sweep is named `commit_pending_proposals`, with `pending_proposals()` and `own_committer_rank()` beside it. |
+| **S3 — FFI** — **LANDED `c5c0788`, now INCOMPLETE** | `lakko-ffi-uniffi`, `lakko-ffi-wasm` | Add the propose + sweep + rank + pending-proposal-list surface beside the existing `add_member_from_wire` / `remove_member` / `set_group_roles` / `approve_external_join`. Both surfaces, in lock-step. Regenerate bindings, rebuild `LakkoCore.xcframework` and the Android `.so`. **S3 landed BEFORE S2b and S2c, and neither was back-filled onto it** — see the note below. |
+| **S4 — web reference** | `apps/web/src` | `contacts/client.ts`: the four `…Locked` methods become propose-and-publish; a new sweep path. `mls/group-lock.ts` `withGroupMlsLock` still spans it. `chat/client.ts` `applyPolledBatch` / `toEvent`: the `Proposal` result stops being a content-less system row. `chat/commit-outbox.ts` + `chat/mls-store.ts` `saveSnapshotWithCommitEntry`: ~~the retained epoch-N snapshot for the committer path~~ — **no retained snapshot is needed**; the committer path is stage -> publish -> verdict -> `mergeStagedSweep` / `abandonStagedSweep`, and the durable write is the one the outbox already does. `routes/Chat.tsx` members panel: the new states. |
 | **S5 — iOS mirror** | `apps/ios/Lakko` | `ChatRepository.swift` (`withCommitLock`, `persistCommitEntryThenSnapshotOrThrow`), `ChatClient.swift` (`applyFetchedMessages` / `toEvent`), `CommitOutbox.swift`, `UI/Chat/MembersSheet` + `ChatViewModel`. |
 | **S6 — Android mirror** | `apps/android/.../app` | `ChatRepository.kt` under the two-tier `groupLock` + `providerLock`, `ChatClient.kt`, `CommitOutbox.kt` (`prepareCrashSafeCommit`), `ui/chat/MembersSheet` + `ChatViewModel`. |
 | **S7 — external-join convergence** | core + FFI + 3 clients | Decision 4: retire `pending_external_joins`, keep the FFI names. |
-| **S8 — docs** | `docs/` | Flip this ADR's status; reconcile `known-gaps.md` G-38 residual 1 and `invariant-index.md`; CLAUDE.md ADR-table row + `lakko-mls` module-map row. |
+| **S8 — docs** — **PARTLY DONE (2026-08-20)** | `docs/` | Flip this ADR's status; reconcile `known-gaps.md` G-38 residual 1 and `invariant-index.md`; CLAUDE.md ADR-table row + `lakko-mls` module-map row. Done so far: this ADR reconciled to the built core, ADR-0022's three transfer-as-follow-up references, the UX spec's owner dead-end, the CLAUDE.md ADR row + `lakko-mls` module-map row, and **C-63** minted in `invariant-index.md` + `calls.md`. Still owed: the status flip (the clients are not built) and `known-gaps.md` G-38 residual 1, which the maintainer holds. |
+
+**Two sprints landed that this table never had a row for, and both were forced by
+the built core rather than chosen.**
+
+| Sprint | Surface | What changed |
+|---|---|---|
+| **S2b — the staged sweep** — **LANDED `fe3de6c`** | `crates/lakko-mls` (**invariant #3**) | `stage_pending_proposals` / `has_staged_sweep` / `merge_staged_sweep` / `abandon_staged_sweep`; `commit_pending_proposals` becomes the stage-then-merge pair. The rollback decision 2 layer 4 requires, built as the **absence of the eager merge** rather than as a retained snapshot — see [§ The staged sweep, as built](#the-staged-sweep-as-built). **New client obligation:** reach a verdict; never leave a sweep staged. |
+| **S2c — ownership transfer + `owner_survives`** — **LANDED `e780952`** | `crates/lakko-mls` (**invariant #3**), and it mints **C-63** | ADR-0022's deferred follow-up, plus the commit-level never-orphan-the-owner rule that closes a pre-existing hole in `set_group_roles`. See [§ Never leave the group without an owner in it](#never-leave-the-group-without-an-owner-in-it). |
+
+The mute fix (`create_application_message` parking the pending set) rode along in
+`fe3de6c` and needed no sprint of its own: it touches one send path, and
+**S4-S6 inherit it with no client work** — see
+[§ Storing a proposal is not free: it muted the whole group](#storing-a-proposal-is-not-free-it-muted-the-whole-group).
+
+**S3b — the FFI back-fill — is a prerequisite for S4 and does not exist yet.**
+S3 landed before S2b and S2c, and nothing since has extended it: verified against
+the tree, **neither `lakko-ffi-uniffi` nor `lakko-ffi-wasm` exposes
+`stage_pending_proposals`, `has_staged_sweep`, `merge_staged_sweep`,
+`abandon_staged_sweep`, `transfer_ownership`, `propose_ownership_transfer` or
+`OutgoingOwner`.** `own_committer_rank` and the propose / sweep / pending-list
+surface are there; the rollback and ownership transfer are not. So today a client
+can propose and can sweep, but **cannot stage-and-adjudicate** — it can only take
+the eager-merge `commitPendingProposals` path, which is exactly the shape decision
+2 layer 4 says a non-owner committer must not use — and **cannot transfer
+ownership at all**, so the UX spec's owner dead-end is fixed in the core and still
+present at every client. Both surfaces, in lock-step, plus a bindings /
+`LakkoCore.xcframework` / Android `.so` rebuild.
 
 **The table does not yet scope decision 2's variant 1.** A candidate heartbeat is a
 new ephemeral in-group signal — an envelope kind in `lakko-contacts`, both FFI
@@ -1404,41 +1721,134 @@ translates.
   error and ask the user to rejoin). Rejected as a half-measure that is worth
   building *only* as a fallback inside Option C, where it is exactly what happens
   when the retry budget is exhausted.
-- **Deferring the eager merge in the core (ADR-0040's Option B).** Not an
+- ~~**Deferring the eager merge in the core (ADR-0040's Option B).** Not an
   alternative here — it would make Option C cleaner (`clear_pending_commit`,
   `openmls-0.8.1/src/group/mls_group/mod.rs:374`, would discard the loser's staged
   commit with no snapshot restore at all) but it is an invariant-#3 change that
   ADR-0040 already weighed and deferred. Noted as the refinement that would retire
   Option C's retained-snapshot machinery if a future arc reworks the commit FFI
-  anyway.
+  anyway.~~ **This is no longer a deferral: it is what was built** (`fe3de6c`,
+  sprint S2b). It is exactly the mechanism this bullet describes —
+  `clear_pending_commit` discarding a staged commit with no snapshot restore at
+  all — **scoped to the sweep path only**: the four direct-commit paths keep
+  merging eagerly and behave byte-for-byte as they did, so the commit FFI did not
+  have to be reworked and ADR-0040's outbox wraps both shapes unchanged. The
+  invariant-#3 weight ADR-0040 was avoiding is real and was paid here, under this
+  ADR. See [§ The staged sweep, as built](#the-staged-sweep-as-built).
 
 ---
 
 ## Consequences
 
-- **Positive (Option C).** The silent permanent fork becomes an automatic bounded
+> **This section was written for Option C and is now rewritten for Option B, the
+> option that was chosen and built.** The Option-C list is kept below it, struck
+> and labelled, because it is the honest record of what the recon expected to pay
+> — and because two of its items (the add-path KeyPackage and the approve-path
+> stale proposal ref) are *still* open questions, just for a different reason.
+
+**Positive (Option B, as built).**
+
+- The race is removed in the steady state rather than repaired. Concurrent
+  membership intents become concurrent **proposals**, which compose; the loser of
+  a race loses a proposal, which costs nothing, instead of a commit, which forks
+  it off the group silently and permanently.
+- **No server change, no wire-format change, no schema change and no new attack
+  surface.** The whole mechanism is RFC 9420 proposals and commits that the DS
+  already relays opaquely, plus the ADR-0022 role table that already exists in the
+  authenticated GroupContext. There is no new artifact on the journal and no new
+  per-group server state — which is exactly what Option A would have cost.
+- **The committer election needs no protocol.** `committer_rank` is a pure total
+  function of authenticated shared state, so there is no election message, no
+  handover, and no committer state to get out of sync
+  (`every_member_independently_derives_the_same_committer`).
+- **The rollback is per-group**, because it is `clear_pending_commit` rather than
+  a whole-provider restore. That is strictly safer than the abort path already
+  shipped under ADR-0040, which rolls **every** group back
+  (`abandoning_a_sweep_leaves_a_sibling_group_untouched`).
+- **`owner_survives` closes a pre-existing hole.** An owner could always
+  hand-build a role table naming a key no leaf holds and permanently brick the
+  group; every peer now refuses that commit, whether or not anyone uses the
+  transfer API. Indexed as **C-63**.
+- **Two features fall out that the product did not have:** a member can leave a
+  group, and an owner can hand one on.
+
+**Negative / new risks (Option B, as built).**
+
+- **An invariant-#3 change to the audited MLS state machine**, and the largest one
+  since ADR-0022 — a new authorisation rule (`authorise`), a new commit-level rule
+  (`owner_survives`), a new commit lifecycle (stage / merge / abandon) and a park
+  on the send path. **The external crypto review this ADR calls for has not
+  happened**; `lakko-security` has not run on any of it either.
+- **A new client obligation that can wedge a group: reach a verdict.** A staged
+  sweep freezes that group's own membership operations, and the staged commit is
+  **durable**, so a client that stages and never adjudicates leaves membership
+  frozen across restarts. This is the sharpest thing S4-S6 have to get right, and
+  it is new since this ADR was written.
+- **Membership can wait indefinitely** when no candidate is running the app — a
+  visible, honest wait replacing a silent fork, but still a behaviour that did not
+  exist before, and one ownership transfer narrows rather than removes.
+- **A new authority shift:** an elected committer can selectively censor
+  proposals, and partial censorship is bounded by nothing in this design.
+- **The race is narrowed, not eliminated** — two candidates in a handoff can still
+  both commit, which is why the stand-down re-read and the staged rollback are
+  required steps rather than optional ones.
+- **The decision-2 liveness variant is still unchosen**, so the sweep trigger —
+  the thing that makes a `waiting` request ever end — does not exist in the core
+  at all and is entirely client orchestration that has not been built.
+
+**Neutral (Option B, as built).**
+
+- The owner acting alone — the overwhelmingly common case in a small group — is
+  rank 0, sweeps its own proposal immediately, and sees today's behaviour.
+- A group with **no role table** keeps direct commits, unchanged
+  (`a_group_with_no_role_table_has_no_proposal_path`), and `Group::create` has
+  seeded one since ADR-0022, so no freshly created group reaches that path.
+- The four direct-commit paths still exist and still merge eagerly, so every
+  caller that has not migrated behaves byte-for-byte as before. ADR-0045 forbids
+  keeping them permanently; they go with S4-S7.
+- Chat sends are unaffected by a pending proposal, and unaffected by a staged
+  sweep.
+
+<details>
+<summary><strong>The original Option-C consequences, kept for the record</strong></summary>
+
+- ~~**Positive (Option C).** The silent permanent fork becomes an automatic bounded
   retry, and its worst case becomes a **visible** error rather than a mystery. No
   `lakko-mls` change (invariant #3 untouched), no FFI change, no wire change, no
   server change, no schema change, no new attack surface. The rollback reuses the
   whole-provider restore whose safety argument is already written down and already
   reviewed. The Welcome-ordering constraint closes a *worse* failure (a phantom
-  three-party fork) that exists latently today.
-- **Negative / new risks (Option C).** A second durable snapshot per in-flight
+  three-party fork) that exists latently today.~~
+- ~~**Negative / new risks (Option C).** A second durable snapshot per in-flight
   commit on every client (transient — dropped on the verdict). One extra journal
   fetch on the interactive membership path. Two unresolved retry mechanics (the
   add-path KeyPackage, the approve-path stale proposal ref) that the
   implementation must answer concretely, not paper over. A retry budget that
   bounds but does not eliminate livelock in a hot group. The race itself remains;
-  the loser's dead commit remains in the journal for its TTL.
-- **Neutral.** The steady-state (no race) path is today's behaviour plus one
+  the loser's dead commit remains in the journal for its TTL.~~
+- ~~**Neutral.** The steady-state (no race) path is today's behaviour plus one
   retained blob, one extra fetch, and a deferred second publish. Peers observe no
-  change at all.
+  change at all.~~
+
+**Two of those are still live**, for reasons that outlived Option C: the
+Welcome-ordering constraint (publish the Welcome only after the verdict) applies
+verbatim to the staged sweep, and the retry budget's removal is now recorded in
+decision 2 rather than here.
+
+</details>
 
 ### Invariants touched
 
-- **#1 (no plaintext PII on the server) — unaffected** by every option. The
+> **Read this section as the recon's cross-option comparison.** It weighs A, B
+> and C side by side, which is what it was for; the **Option B** clauses are the
+> ones that describe what was built, and each is updated below with what the build
+> settled.
+
+- **#1 (no plaintext PII on the server) — unaffected** by every option. ~~The
   retained snapshot is client-local and device-key-wrapped exactly as the existing
-  one is.
+  one is.~~ **As built there is no retained snapshot at all** (S2b staged the
+  commit instead), so #1 is untouched with nothing to argue: no new client-side
+  artifact of any kind, and nothing new reaches the server.
 - **#2 (the server sees only ciphertext + public artefacts).** **Option C: holds,
   untouched** — the server's inputs and behaviour are byte-identical. **Option A:
   no confidentiality change** (epoch, `group_id`, and `content_type` are already
@@ -1456,6 +1866,16 @@ translates.
   tests, and external crypto review — specifically because it must add a
   proposal-sender authorisation gate where `ProcessedMessageContent::ProposalMessage`
   is today discarded unexamined (`crates/lakko-mls/src/group.rs:627`).
+
+  **As built, the #3 surface is wider than that sentence anticipated** — four
+  distinct changes, not one: the per-proposal authorisation gate (`authorise`,
+  `9a60ab3`); the commit-level `owner_survives` rule (`e780952`); a **new commit
+  lifecycle**, stage / merge / abandon, which defers the eager merge on the sweep
+  path (`fe3de6c`, and the thing ADR-0040 deliberately declined to do); and a park
+  of the pending proposal set around the application-message encrypt (`fe3de6c`).
+  Property tests exist for all four (180 across seven binaries). **The external
+  crypto review is still owed, and `lakko-security` has not run on any of it** —
+  the largest single gap in this ADR's status.
 - **#4 (no fallback to non-E2EE / fail-closed).** **Strengthened by Option C**: a
   device never remains silently on an epoch the group did not adopt, and a Welcome
   is never published for a group state that no member holds. There is no
@@ -1463,22 +1883,41 @@ translates.
   divergence — so no E2EE guarantee is relaxed by any option. **Option A's
   rejection is fail-closed by construction** (refuse the publish), but its *failure
   mode* is the permanent freeze, which is availability, not safety.
+
+  **Option B as built is fail-closed at every new decision point**: an
+  unauthorised or unclassifiable proposal is dropped rather than stored
+  (`ProposalKind::Unsupported` and an unresolvable sender are both refusals); the
+  sweep filter excludes rather than includes on doubt; a commit carrying an
+  unauthorised proposal is **refused, not merged**; a second stage over an
+  un-adjudicated one is refused rather than silently replacing it;
+  `abandon_staged_sweep` re-reads the state and refuses to report success on a
+  group it did not actually roll back; and a failed unpark on the send path beats
+  a successful send. The one deliberate **non**-refusal is a group with no role
+  table, which keeps direct commits — the legacy/open case ADR-0022 already
+  defined, and one `Group::create` cannot produce.
 - **#5 (the social graph is not materialised on the server).** **Option C:
   untouched.** **Option A: a small erosion** — a per-group `current_epoch` row is
   new per-group server state (a commit-rate signal per group) where today the DS
   holds only opaque rows.
-- **Invariant-index touchpoints.** This ADR proposes **no** new indexed
-  `I-` / `C-` / `T-` entry. It resolves **G-38 residual 1**, which is a free-form
-  known-gaps entry, matching how G-35 / G-36 / G-37 were kept. The invariant-index
-  Quick-stats counts are unchanged. **The maintainer is editing
-  `docs/security/known-gaps.md` and `invariant-index.md` in parallel; this ADR
-  deliberately does not touch either.**
+- **Invariant-index touchpoints — this claim is now withdrawn.** ~~This ADR
+  proposes **no** new indexed `I-` / `C-` / `T-` entry.~~ It mints **C-63**: *a
+  commit must never leave the group with an owner who is not a member of it*
+  (`docs/security/calls.md` + `docs/security/invariant-index.md`, Quick stats
+  62 -> 63). It earns an index row on merit rather than as bookkeeping for a new
+  feature: the hole it closes has been reachable through `set_group_roles` since
+  ADR-0022, is permanent when reached, and is refused on **every peer**
+  independently of whether anyone calls `transfer_ownership`. It also resolves
+  **G-38 residual 1**, which stays a free-form known-gaps entry, matching how
+  G-35 / G-36 / G-37 were kept — that file is the maintainer's and is untouched
+  here.
 
 **Flag through `lakko-security` before merging any option.** Option C touches the
 MLS commit publish ordering and the ADR-0040 durability argument. Option A touches
 the zero-trust server's behaviour and adds an availability attack surface. Option B
 touches the audited MLS state machine and relocates ADR-0022's authorisation
-boundary. None of the three is a "no review needed" change.
+boundary. None of the three is a "no review needed" change. **This is outstanding:
+Option B's core is built and has had no `lakko-security` pass and no external
+crypto review.**
 
 ---
 
@@ -1499,47 +1938,83 @@ boundary. None of the three is a "no review needed" change.
   (the proposals are the durable record of intent, and the winning commit consumed
   them). Recorded here rather than deleted because the UX spec was written against
   the budget and had to be reconciled to its removal.
-- **The add-path retry and KeyPackage consumption.** `add_member` consumes one of
+> **The next four questions were framed against Option C's intent-replay retry,
+> which is not what was built. They are re-framed here rather than deleted,
+> because three of the four survive the change of option — a staged sweep still
+> gets abandoned, and the questions are about what an abandoned commit leaves
+> behind.**
+
+- **The add-path retry and KeyPackage consumption.** ~~`add_member` consumes one of
   the joiner's published KeyPackages. Does a discarded commit release it, must the
-  retry re-fetch from discovery, and what happens when the joiner has none left?
-  **Must be answered before implementation, not during.**
-- **The approve-path retry and the stale proposal ref.** ADR-0027's pending
+  retry re-fetch from discovery, and what happens when the joiner has none left?~~
+  **Re-framed, and smaller than it was.** Decision 2 already argued the fetch
+  happens once at *propose* time under B, so a lost race costs no KeyPackage. The
+  question that remains is narrower and concerns the built rollback: does
+  `abandon_staged_sweep` leave the joiner's `KeyPackage` usable for the winner's
+  sweep? The proposal survives abandonment by construction (the store empties on
+  **merge**), so the answer should be yes — but it is asserted, not tested.
+  **Answer it before S4.**
+- **The approve-path retry and the stale proposal ref.** ~~ADR-0027's pending
   external joins are epoch-bound and in-memory. After the replay the retained
-  proposal is stale; ADR-0028's joiner retries on a stale epoch, so recovery
-  exists, but the retry is not self-contained. Does the approve path retry
-  automatically once the joiner re-proposes, or does it surface as
-  "request expired, ask them to try again"? A UX question as much as a mechanism
-  one — route through `ux-ui`.
-- **Whether Option C generalises to the DeviceGroup and the channel
-  PublisherGroup.** The DeviceGroup's commits go to the same journal wrapped in the
-  ADR-0015 envelope, and ADR-0028 OQ3's co-publisher approve is a `PublisherGroup`
-  commit. ADR-0040 explicitly scoped itself to the four chat paths and noted the
-  same parity question; this ADR inherits it.
-- **Whether Option C′ ships regardless.** It composes with every option and is
-  cheap; the only reason to hold it is to avoid implying the hazard is closed.
+  proposal is stale~~; **decision 4 dissolves the in-memory half** — after S7 an
+  external-join proposal is a stored MLS proposal like any other. Until S7 lands,
+  the two mechanisms coexist and the question stands in its original form: the
+  Lakko-side `pending_external_joins` `Vec` is still there, still epoch-bound and
+  still in memory, and it is **not** covered by the staged rollback. A UX question
+  as much as a mechanism one — route through `ux-ui`.
+- **Whether ~~Option C~~ the staged sweep generalises to the DeviceGroup and the
+  channel PublisherGroup.** Unchanged and still open, and the answer today is
+  **no**: `PublisherGroup::rotate` still calls `self_update` and merges eagerly,
+  and DeviceGroup commits are untouched. The DeviceGroup's commits go to the same
+  journal wrapped in the ADR-0015 envelope, and ADR-0028 OQ3's co-publisher approve
+  is a `PublisherGroup` commit. ADR-0040 explicitly scoped itself to the four chat
+  paths and noted the same parity question; this ADR inherits it, and
+  [§ What Option B does not fix](#what-option-b-does-not-fix) item 5 restates it.
+- **~~Whether Option C′ ships regardless.~~ Answered by the choice of B** — the
+  journal-head re-read is promoted to a required step of the committer's
+  stand-down rule, so it ships as part of S4-S6 rather than as a companion. It is
+  **client orchestration and does not exist yet**: nothing in the core performs
+  it.
 - **Whether `epoch_of_message` should gain a `content_type` sibling on the FFI.**
-  Option C's verdict step needs "is this row a Commit framed at N", and today only
-  the epoch is exposed (`crates/lakko-ffi-uniffi/src/lib.rs:3475`,
-  `crates/lakko-ffi-wasm/src/mls.rs:3458`). Epoch alone is a *sufficient* signal for
-  the verdict when combined with "this row is not one of our own two artifacts",
-  but a `contentTypeOfMessage` peek would make the check exact rather than
-  inferential. A small, purely additive FFI addition — worth deciding explicitly
-  rather than by omission.
+  ~~Option C's verdict step needs "is this row a Commit framed at N"~~ — **and so
+  does B's**, because the staged sweep's verdict is the same question asked of the
+  same journal. Today only the epoch is exposed
+  (`crates/lakko-ffi-uniffi/src/lib.rs`, `crates/lakko-ffi-wasm/src/mls.rs`).
+  Epoch alone is a *sufficient* signal when combined with "this row is not one of
+  our own artifacts", but a `contentTypeOfMessage` peek would make the check exact
+  rather than inferential. A small, purely additive FFI addition — worth deciding
+  explicitly rather than by omission, and now **on S4's critical path** rather
+  than hypothetical.
+- **The external crypto review and the `lakko-security` pass on the built core.**
+  This ADR requires both for the invariant-#3 change, and neither has happened.
+  Four sprints of MLS state-machine change are in the tree unreviewed. **The
+  maintainer's call when to run them** — before S4, or once the clients are
+  wired — but it is not a question that closes by itself.
 - **The stale ADR index.** `docs/adr/README.md` carries a duplicated `## Index`
   section and both copies stop at ADR-0015. Out of scope here; flagged for a
   separate docs pass.
 
 ---
 
-## Sprint decomposition (if Option C is picked)
+## Sprint decomposition — **for Option C, which was NOT picked**
 
-- **S0 — UX.** The retry-exhausted error state, the approve-path
-  "request expired" state, and whether a membership commit shows a pending
-  affordance at all. `ux-ui` first, per the repo's UX-first rule.
+> **This is recon record, not a plan. Do not build from it.** The plan is
+> [§ Blast radius, per sprint](#blast-radius-per-sprint), whose S0-S3 plus S2b and
+> S2c are already built. This list is kept because it is the shape Option C would
+> have taken, and because the contrast is the clearest statement of what choosing
+> B avoided. Two of its steps name things that **no longer exist**: the
+> retry-exhausted error state (there is no retry budget — decision 2 deleted it,
+> and a client must not invent one) and the retained epoch-N snapshot (the built
+> rollback stages the commit instead).
+
+- **S0 — UX.** ~~The retry-exhausted error state~~ — **no such state exists**; the
+  approve-path "request expired" state, and whether a membership commit shows a
+  pending affordance at all. `ux-ui` first, per the repo's UX-first rule.
+  (Superseded by the real S0, [`docs/ux/proposal-based-membership.md`](../ux/proposal-based-membership.md).)
 - **S1 — resolve the two retry mechanics.** The add-path KeyPackage question and
   the approve-path proposal-ref question, answered in code before any client work.
   Possibly a small additive FFI peek (`contentTypeOfMessage`).
-- **S2 — web reference.** Retained epoch-N snapshot inside the existing
+- **S2 — web reference.** ~~Retained epoch-N snapshot~~ inside the existing
   `saveSnapshotWithCommitEntry` transaction; the verdict step; the deferred second
   publish; the replay-and-retry with a bounded budget; the sweep extension. Vitest
   coverage that **discriminates** — a neutered verdict step must fail a named test,
@@ -1556,6 +2031,46 @@ boundary. None of the three is a "no review needed" change.
 ---
 
 ## References
+
+### What was built (2026-08-20)
+
+Symbols rather than line numbers, per the anchor convention at the top.
+
+- `crates/lakko-mls/src/group_proposals.rs` — `ProposalKind`, `ProposalRecord`,
+  `Proposer`, `classify`, **`authorise`** (the one per-proposal rule, consumed at
+  all three layers), `CommitEffects` / `commit_effects`, **`owner_survives`**
+  (the commit-level rule indexed as **C-63**). Its module documentation carries
+  the corrections to decision 3 that this revision folds back into the ADR body.
+- `crates/lakko-mls/src/group_roles.rs` — **`committer_rank`** (decision 1),
+  `RoleTable::with_owner_transferred`, `OutgoingOwner`.
+- `crates/lakko-mls/src/group.rs` — `propose_add_member` /
+  `propose_add_member_from_wire` / `propose_remove_member` / `propose_group_roles`;
+  `transfer_ownership` / `propose_ownership_transfer`; `pending_proposals`,
+  `own_committer_rank`, `commit_pending_proposals`; **`stage_pending_proposals` /
+  `has_staged_sweep` / `merge_staged_sweep` / `abandon_staged_sweep`** (the
+  rollback point); **`create_application_message`** (the park that keeps a pending
+  proposal from muting the group); the proposal arm of
+  `process_incoming_verifying_roles` (the receipt gate).
+- Tests — `crates/lakko-mls/tests/group_proposals.rs` (22),
+  `group_ownership_transfer.rs` (12), the untouched `group_admin_roles.rs` (7),
+  and per-layer isolation tests as `#[cfg(test)]` lib tests in `group.rs`.
+  **Verified firsthand by the maintainer on this tree:** `cargo test -p lakko-mls`
+  180 passed across seven binaries, 0 failed; clippy on `lakko-mls` clean;
+  `cargo check --workspace --all-targets` clean.
+- `openmls-0.8.1/src/group/mls_group/mod.rs` `is_operational` +
+  `commit_builder.rs` `stage_commit` — the freeze and the durability of a staged
+  commit, both of which are client obligations
+  ([§ The staged sweep, as built](#the-staged-sweep-as-built)).
+- `openmls-0.8.1/src/group/mls_group/application.rs:27-31` — `create_message`
+  refuses on a non-empty proposal store: the mute.
+- `openmls-0.8.1/src/group/public_group/staged_commit.rs`
+  `ProposalQueue::from_committed_proposals` — by-reference resolution at commit
+  receipt on **every** member, which is what makes "store at receipt" mandatory.
+- `openmls-0.8.1/src/group/mls_group/proposal.rs:502`
+  `MlsGroup::remove_pending_proposal` — public, contrary to this ADR's original
+  decision-3 claim.
+
+### Prior art and the recon's sources
 
 - **G-38 residual 1** (`docs/security/known-gaps.md`) — the gap this ADR
   addresses, and the source of the two candidate fixes it weighs.

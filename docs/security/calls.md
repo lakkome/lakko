@@ -3582,6 +3582,118 @@ and the order still run in full against a fresh in-lock read), **#5** (unchanged
 posture — this restores the ADR-0043 forward-unlinkability in the cases the
 finding was silently revoking it, and does not touch the co-membership cluster).
 
+### C-63: A commit must never leave the group with an owner who is not a member of it
+
+[ADR-0045](../adr/0045-remote-commit-epoch-fork.md), extending
+[ADR-0022](../adr/0022-group-admin-roles.md). ADR-0022 put a group's authority in
+a `RoleTable` carried in the authenticated `0xFF02` GroupContext extension, keyed
+on Ed25519 **signature public keys**. A table names keys; it does not name group
+members, and nothing in the codec relates the two. So the table has always been
+able to say something the group cannot survive: **that the owner is a key no leaf
+holds.**
+
+**Why that is terminal rather than merely wrong.** Under ADR-0022 a role-table
+change is **owner-only**, and the owner's leaf is **unremovable**. An owner
+outside the group therefore cannot be replaced (nobody is authorised to rewrite
+the table), cannot be removed (the rule refuses it, and there is no such leaf to
+remove anyway), and cannot act (no device holds the key). The group keeps working
+as a chat and can never again add a member, remove one, or change a role. There is
+no recovery inside the protocol.
+
+**This is a pre-existing hole, not a guard on a new feature — which is why it is
+indexed on its own merit.** `Group::set_group_roles` has accepted a caller-built
+`RoleTable` since ADR-0022 shipped, with no membership check anywhere, so an owner
+could always reach this state with one ordinary commit. The rule below refuses
+that commit **on every peer**, whether or not anyone ever calls the ownership-transfer
+API that occasioned it.
+
+#### The rule
+
+`crates/lakko-mls/src/group_proposals.rs` `owner_survives(effects, members)` is the
+only rule in the crate that judges a **commit** rather than a proposal. It is
+evaluated against the roster the commit **produces** — pre-merge members, minus
+every leaf the commit removes, plus every key it adds — because that is the roster
+the new table takes effect over. It refuses:
+
+1. a commit whose role-table rewrite names an **owner who would not be a member**
+   of the resulting group; and
+2. a commit that **rewrites the GroupContext without leaving a readable `0xFF02`
+   table behind** — which would delete the group's authority structure rather
+   than change it, silently reverting a role-enabled group to the open/legacy
+   shape in which any member may add or remove.
+
+A commit carrying no role change is always authorised by this rule.
+
+#### Why it cannot be folded into the per-proposal gate
+
+Both reachable paths are invisible to a single-proposal check, and for different
+reasons.
+
+- **Transfer to a non-member.** Deciding it needs the **roster**, which a rule
+  about one proposal's authorisation does not consult. ADR-0022's
+  `authorise` asks *may this author ask for this?* — and the answer is yes: the
+  owner may rewrite the table. The table's *content* is what is wrong.
+- **Transfer to a member the same commit removes.** ADR-0045 composes N intents
+  into one commit, so "hand the group to Charlie" and "remove Charlie" can ride
+  together. Each is **individually authorised** — the owner may rewrite the table,
+  an admin may remove a plain member — so no per-proposal rule can see the
+  combination. Only the post-commit roster can. This path is one ADR-0045
+  **created**; path 1 predates it.
+
+#### Enforcement, and where it is fail-closed
+
+Three layers, and the third is the boundary:
+
+1. **Authoring, locally.** `Group::transfer_ownership` and
+   `Group::propose_ownership_transfer` both run `plan_ownership_transfer` **before
+   any OpenMLS call**, so a refusal leaves the group exactly as it was — no staged
+   commit, no epoch advance, nothing to roll back (ADR-0040). It refuses a
+   non-owner caller, a key that is not 32 bytes, a key that is already the owner,
+   and a key that is not in `members()`.
+2. **Sweeping.** The ADR-0045 committer evaluates `owner_survives` over the
+   authorised pending set and **excludes the role change** rather than publishing
+   a commit every peer would refuse. Excluding a role change removes nobody, so it
+   cannot change the answer — one pass suffices, with no fixpoint to iterate.
+3. **On receipt — the boundary.** `Group::process_incoming_verifying_roles` ->
+   `authorise_role_commit` runs `owner_survives` over the staged commit's
+   proposals against the pre-merge roster and **refuses to merge** (fail-closed,
+   invariant #4) rather than applying and then complaining. It runs **first**,
+   ahead of the per-proposal loop, so a commit that would brick the group is
+   refused before anything else about it is considered. A malicious or buggy
+   committer would not run layers 1 and 2, which is exactly why layer 3 does not
+   trust it.
+
+#### What it does not do
+
+- **It does not recover a lost owner.** Minting a transfer needs the owner's key,
+  so this rule protects a group from being *handed* into an unowned state; it says
+  nothing about an owner who has simply gone. That remains ADR-0022's open
+  admin-quorum question.
+- **It is peer-verified, not cryptographically unforgeable.** Like every ADR-0022
+  and ADR-0015 gate, a colluding majority could agree among themselves to ignore
+  it. That is inherent to a leaderless protocol and is the same residual those
+  ADRs record.
+- **It does not extend to groups with no role table.** A group with no `0xFF02`
+  table has no owner to orphan, and stays on the open/legacy path ADR-0022 defined.
+  `Group::create` has seeded a table since ADR-0022, so no freshly created group
+  reaches it.
+
+#### Tests
+
+`crates/lakko-mls/tests/group_ownership_transfer.rs` (12), notably
+`a_peer_refuses_a_commit_that_hands_the_group_to_a_non_member` and
+`a_peer_refuses_a_commit_that_erases_the_role_table` for the boundary,
+`transfer_to_a_non_member_is_refused_locally` for layer 1, and
+`a_sweep_drops_a_transfer_to_someone_the_same_commit_removes` for layer 2 and the
+composed-commit path. `transfer_then_the_former_owner_leaves_and_the_group_works`
+walks the whole intended flow.
+
+Invariants: **#2** (the role table is an opaque `0xFF02` GroupContext body; the DS
+relays the commit as ciphertext and parses nothing — unchanged), **#3** (a
+`crates/lakko-mls` state-machine change under ADR-0045; property-tested, **external
+crypto review and a `lakko-security` pass both still owed**), **#4** (refuse-to-merge,
+never apply-then-warn), **#5** (roles stay in-group; no server ever learns them).
+
 ## Exporter labels (call-side)
 
 | Label | Length | Context | Source | Used for |

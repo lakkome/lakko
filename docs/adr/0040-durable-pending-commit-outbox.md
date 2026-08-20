@@ -10,7 +10,10 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
   (this ADR + the G-35 known-gaps entry are S1). Option A (a durable
   pending-commit outbox, **no `lakko-mls` core / FFI change**) is the accepted
   mechanism; Option B (split create-from-merge in the core) is recorded as a
-  possible future refinement, not chosen for v1.
+  possible future refinement, not chosen for v1. **Update (2026-08): Option B
+  landed narrowly** under [ADR-0045](0045-remote-commit-epoch-fork.md) — for the
+  new proposal-**sweep** path only, not for the four direct-commit paths this ADR
+  covers, and it does **not** retire the outbox. See the Open Questions entry.
 - **Date:** 2026-07-23
 - **Context:** Phase 3 — group-membership commits / MLS ratchet durability.
   Closes the G-34 T2 commit-path residual (the add / remove / role-change /
@@ -389,9 +392,19 @@ closes the orphan-`messageId` edge.
   entry that repeatedly fails to re-publish (a persistently unreachable DS) needs a
   retry/backoff + a user-surfaced "membership change pending" state rather than an
   unbounded silent retry. Deferred — a UX + retry-policy follow-up.
-- **Option B as a later refinement.** Whether a future FFI rework folds in
-  defer-merge (removing the re-publish machinery). Deferred; Option A is the v1
-  mechanism.
+- **~~Option B as a later refinement.~~ PARTLY ANSWERED by
+  [ADR-0045](0045-remote-commit-epoch-fork.md) (2026-08).** Defer-merge landed in
+  the core, but **narrowly**: only the new proposal-sweep path
+  (`Group::stage_pending_proposals` -> `merge_staged_sweep` /
+  `abandon_staged_sweep`) defers. The four direct-commit paths this ADR covers
+  still merge eagerly and are byte-for-byte unchanged, so **Option A remains the
+  v1 mechanism for them**. Two corrections to the expectation recorded above:
+  the invariant-#3 cost was **paid** (under ADR-0045, with property tests; the
+  external crypto review is still owed), and it does **not** remove the
+  re-publish machinery — the outbox answers *did my commit reach the wire* while
+  the staged pair answers *did it win the wire order*, and the first must be
+  *yes* before the second is meaningful. The two compose; neither subsumes the
+  other. Still open: whether the four direct paths ever follow.
 - **DeviceGroup + channel PublisherGroup parity.** The same publish-before-persist
   shape exists on the DeviceGroup pairing path (already reordered, G-5/G-7, and
   safe there for the self-healing-joiner reason above) and would apply to the
