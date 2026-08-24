@@ -486,6 +486,15 @@ final class MultiJoinerCall {
             // out of place here — drop it. Case present to keep the switch
             // exhaustive after the Sprint-1 FFI added the variant.
             break
+        case .committerBeacon:
+            // ADR-0045 — the committer-liveness beacon likewise rides the GROUP
+            // JOURNAL as an MLS application message, never the SFU
+            // signal-relay, and it says nothing about a CALL committer (the
+            // ADR-0032 election here is leaf/presence-based and independent).
+            // A relay payload that classifies as one is out of place — drop it.
+            // Case present to keep the switch exhaustive after the FFI added
+            // the variant.
+            break
         }
     }
 

@@ -87,6 +87,30 @@ function callSignalingPayload(tag = 0x52): Uint8Array {
   return new Uint8Array([tag, 0x08, 0x01, 0x12, 0x02, 0x68, 0x69]);
 }
 
+/** `lakko_contacts::committer_beacon::COMMITTER_BEACON_ENVELOPE_DOMAIN_V1`
+ *  — `b"lakko/committer-beacon/v1\x00"`, 26 bytes. The trailing NUL is
+ *  appended programmatically so this source file stays NUL-free. */
+const COMMITTER_BEACON_DOMAIN = (() => {
+  const ascii = new TextEncoder().encode("lakko/committer-beacon/v1");
+  const out = new Uint8Array(ascii.length + 1);
+  out.set(ascii, 0);
+  out[ascii.length] = 0x00;
+  return out;
+})();
+
+/** The FFI-reported envelope length: domain(26) || version(1) = 27. */
+const COMMITTER_BEACON_LEN = COMMITTER_BEACON_DOMAIN.length + 1;
+
+/** ADR-0045 committer beacon: domain(26) || version(1)=0x01 = 27 bytes.
+ *  Field-less, so every beacon on the wire is byte-identical — which is
+ *  what lets the filter's peek be a complete test. First byte is `l`. */
+function committerBeacon(version = 0x01): Uint8Array {
+  const out = new Uint8Array(COMMITTER_BEACON_LEN);
+  out.set(COMMITTER_BEACON_DOMAIN, 0);
+  out[COMMITTER_BEACON_DOMAIN.length] = version;
+  return out;
+}
+
 /**
  * Mock wasm core. `processIncomingVerifyingRoles` throws when the
  * payload marker is "THROW", else surfaces it as an Application frame
@@ -102,6 +126,13 @@ function callSignalingPayload(tag = 0x52): Uint8Array {
  *
  * `decodePushRoutingSecret` models the fail-closed wasm codec: it THROWS
  * unless the bytes are exactly the ADR-0044 v2 envelope.
+ *
+ * `decodeCommitterBeacon` models its ADR-0045 twin, including the detail
+ * that makes the beacon's filter arm different from the routing one: it
+ * returns NOTHING on success (the envelope is field-less, so there is no
+ * handle to free), and throws on wrong domain / bad length / unknown
+ * version. `committerBeaconEnvelopeLen` models the FFI constant the
+ * filter reads instead of hardcoding 27.
  */
 function mockWasm() {
   const freeSpy = vi.fn();
@@ -145,6 +176,15 @@ function mockWasm() {
         mintEpoch: new DataView(bytes.buffer, bytes.byteOffset).getBigUint64(30, false),
         free: freeSpy,
       };
+    },
+    committerBeaconEnvelopeLen: () => COMMITTER_BEACON_LEN,
+    decodeCommitterBeacon: (bytes: Uint8Array) => {
+      if (bytes.length !== COMMITTER_BEACON_LEN) throw new Error("BadLength");
+      for (let i = 0; i < COMMITTER_BEACON_DOMAIN.length; i++) {
+        if (bytes[i] !== COMMITTER_BEACON_DOMAIN[i]) throw new Error("WrongDomain");
+      }
+      if (bytes[COMMITTER_BEACON_DOMAIN.length] !== 0x01) throw new Error("UnknownVersion");
+      // Field-less: a clean return IS the whole result.
     },
   };
 }
@@ -421,6 +461,112 @@ describe("decryptPushPreview — service envelopes are never previewed", () => {
       dsFetchGroup: vi.fn(async () => ({
         messages: [rawMsg(42, routingSecretEnvelope())],
       })),
+    });
+    await decryptPushPreview(wake(), deps);
+    expect(saveSnapshot).not.toHaveBeenCalled();
+    expect(saveMessageLog).not.toHaveBeenCalled();
+    expect(advanceCursor).not.toHaveBeenCalled();
+  });
+});
+
+describe("decryptPushPreview — the ADR-0045 committer beacon is never previewed", () => {
+  // A beacon is emitted by EVERY owner/admin every 60 s, so in an active
+  // group the newest journal row — the one previewed here — is frequently
+  // a beacon. Unfiltered, `parse_body`'s lossy-UTF-8 fallback renders it
+  // as the literal text "lakko/committer-beacon/v1" plus two control
+  // bytes.
+
+  it("the unfiltered beacon really would render as garbage text", () => {
+    // Pins the DEFECT, not the fix: the mock's parseBodyEnvelope models
+    // the real `parse_body` fallback, so this is the notification body a
+    // beacon produces when nothing filters it. If this ever stops being
+    // true the tests below stop discriminating and must be re-derived.
+    const wasm = mockWasm();
+    const parsed = wasm.parseBodyEnvelope(committerBeacon()) as { kind: string; text: string };
+    expect(parsed.kind).toBe("chat");
+    expect(parsed.text).toContain("lakko/committer-beacon/v1");
+  });
+
+  it("returns null for a lone committer beacon", async () => {
+    const { deps } = baseDeps({
+      dsFetchGroup: vi.fn(async () => ({ messages: [rawMsg(42, committerBeacon())] })),
+    });
+    expect(await decryptPushPreview(wake(), deps)).toBeNull();
+  });
+
+  it("previews the chat message when a beacon precedes it", async () => {
+    const { deps } = baseDeps({
+      dsFetchGroup: vi.fn(async () => ({
+        messages: [
+          rawMsg(41, committerBeacon()),
+          msg(42, { kind: "chat", text: "real message", attachmentCount: 0 }),
+        ],
+      })),
+    });
+    const out = await decryptPushPreview(wake({ pointer: 42 }), deps);
+    expect(out?.body).toBe("real message");
+  });
+
+  it("falls back to the older chat message when a beacon is NEWEST", async () => {
+    // The load-bearing ordering, and the common case in an active group:
+    // the beacon is the newest row, so before the fix it OVERWROTE the
+    // real preview with its garbage.
+    const { deps } = baseDeps({
+      dsFetchGroup: vi.fn(async () => ({
+        messages: [
+          msg(41, { kind: "chat", text: "real message", attachmentCount: 0 }),
+          rawMsg(42, committerBeacon()),
+        ],
+      })),
+    });
+    const out = await decryptPushPreview(wake({ pointer: 42 }), deps);
+    expect(out?.body).toBe("real message");
+  });
+
+  it("still previews an unrelated chat message that starts with `l`", async () => {
+    // The peek's first byte is `l`, shared with every in-group envelope
+    // domain. A real message beginning with `l` must survive — the
+    // authoritative codec, not the peek, is what suppresses.
+    const { deps } = baseDeps({
+      dsFetchGroup: vi.fn(async () => ({
+        messages: [msg(42, { kind: "chat", text: "lunch at six?", attachmentCount: 0 })],
+      })),
+    });
+    const out = await decryptPushPreview(wake(), deps);
+    expect(out?.body).toBe("lunch at six?");
+  });
+
+  it("still previews a 27-byte `l`-prefixed body the codec REFUSES", async () => {
+    // Same shape as the routing-secret case: the cheap peek matches but
+    // the codec rejects (unknown version), so this is a genuine message.
+    // Proves the peek alone does not suppress.
+    const notABeacon = committerBeacon(0xff);
+    const { deps } = baseDeps({
+      dsFetchGroup: vi.fn(async () => ({ messages: [rawMsg(42, notABeacon)] })),
+    });
+    const out = await decryptPushPreview(wake(), deps);
+    expect(out?.body).toContain("lakko/committer-beacon");
+  });
+
+  it("takes the envelope length from the FFI, not a hardcoded 27", async () => {
+    // Discriminates "reads committerBeaconEnvelopeLen()" from "hardcodes
+    // 27": with the FFI reporting a DIFFERENT length, a 27-byte beacon
+    // must miss the peek. A filter carrying the literal would suppress it
+    // regardless and this would fail — which is the drift ADR-0044
+    // documents, caught here rather than at the next version bump.
+    const wasm = mockWasm();
+    wasm.committerBeaconEnvelopeLen = () => 99;
+    const { deps } = baseDeps({
+      wasm,
+      dsFetchGroup: vi.fn(async () => ({ messages: [rawMsg(42, committerBeacon())] })),
+    });
+    const out = await decryptPushPreview(wake(), deps);
+    expect(out?.body).toContain("lakko/committer-beacon");
+  });
+
+  it("classifies a beacon without ever persisting (C-59)", async () => {
+    const { deps, saveSnapshot, saveMessageLog, advanceCursor } = baseDeps({
+      dsFetchGroup: vi.fn(async () => ({ messages: [rawMsg(42, committerBeacon())] })),
     });
     await decryptPushPreview(wake(), deps);
     expect(saveSnapshot).not.toHaveBeenCalled();

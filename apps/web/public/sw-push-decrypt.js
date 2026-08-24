@@ -101,6 +101,18 @@ const PREVIEW_MAX_CHARS = 140;
  *   classify a service envelope out of the preview path (never to act on
  *   the secret — the SW writes no routing state). Optional so an older
  *   deps object still loads; the cheap byte peek then decides alone.
+ * @property {(bytes: Uint8Array) => void} [decodeCommitterBeacon]
+ *   ADR-0045 — the fail-closed committer-liveness-beacon codec. THROWS
+ *   when the bytes are not that envelope; returning is the whole result
+ *   (the beacon is field-less). Used ONLY to classify the row out of the
+ *   preview path — the SW never emits a beacon and never folds a
+ *   committer verdict, which it structurally cannot (C-59). Optional so
+ *   an older deps object still loads.
+ * @property {() => number} [committerBeaconEnvelopeLen]
+ *   ADR-0045 — the exact on-wire length of a beacon envelope, read from
+ *   the FFI rather than hand-copied into each client (the drift class
+ *   ADR-0044 documents). Optional; absent means the peek skips the
+ *   length test and leans on the codec alone.
  */
 
 /**
@@ -334,6 +346,20 @@ const PUSH_ROUTING_ENVELOPE_LEN = 70;
 const PUSH_ROUTING_ENVELOPE_FIRST_BYTE = 0x6c;
 
 /**
+ * First byte of the ADR-0045 committer-beacon domain separator
+ * (`'l'` of `"lakko/committer-beacon/v1\0"`). The same `'l'` every
+ * in-group envelope domain starts with — deliberately NOT shared with
+ * the constant above, so retiring one wire format cannot silently
+ * re-point the other's peek. A chat envelope is JSON and starts with
+ * `{` (0x7B), so again no overlap.
+ *
+ * The beacon's LENGTH is deliberately not a constant here: it comes
+ * from `wasm.committerBeaconEnvelopeLen()`, which the FFI exports for
+ * exactly this reason.
+ */
+const COMMITTER_BEACON_FIRST_BYTE = 0x6c;
+
+/**
  * Cheap discriminator: are these bytes a prost-encoded
  * `CallSignalingPayload`? Mirrors `looksLikeCallSignaling` in
  * `src/chat/client.ts`. `true` when the first byte matches one of the
@@ -363,9 +389,13 @@ function looksLikeCallSignaling(bytes) {
  * body via `String::from_utf8_lossy` (a deliberate pre-1.19 wire-compat
  * fallback in `lakko-attachments`), so WITHOUT this filter a service
  * envelope surfaces as a notification containing its domain string plus
- * raw binary. The foreground (`src/chat/client.ts`) already sniffs both
+ * raw binary. The foreground (`src/chat/client.ts`) already sniffs these
  * kinds before its chat parse; this is the background mirror of that
  * same two-step peek, in the same order.
+ *
+ * Three kinds, each its own arm below: call signaling, the ADR-0042 /
+ * ADR-0044 push-routing secret, and the ADR-0045 committer beacon. Each
+ * arm is a cheap byte peek gating an authoritative codec.
  *
  * Classification ONLY — no writes, no cursor advance (C-59 / ADR-0041).
  *
@@ -376,20 +406,38 @@ function looksLikeCallSignaling(bytes) {
 function isServiceEnvelope(wasm, bytes) {
   // 1. Call signaling (prost `CallSignalingPayload`) — a pure byte check.
   if (looksLikeCallSignaling(bytes)) return true;
+  // 2. Push-routing secret (ADR-0042 / ADR-0044).
+  if (isPushRoutingSecretEnvelope(wasm, bytes)) return true;
+  // 3. Committer-liveness beacon (ADR-0045).
+  if (isCommitterBeaconEnvelope(wasm, bytes)) return true;
+  return false;
+}
 
-  // 2. Push-routing secret (ADR-0042 / ADR-0044). The cheap length +
-  //    first-byte peek runs FIRST so a real chat message never pays for
-  //    the throwing codec call.
+/**
+ * Arm 2 of {@link isServiceEnvelope} — the ADR-0042 / ADR-0044
+ * push-routing-secret distribution envelope.
+ *
+ * The cheap length + first-byte peek runs FIRST so a real chat message
+ * never pays for the throwing codec call. The peek alone is NOT a
+ * verdict here: a legacy plain-UTF-8 body that happens to be 70 bytes
+ * and start with `l` clears it, and suppressing that would swallow a
+ * real message — so the authoritative codec decides.
+ *
+ * @param {DecryptWasm} wasm
+ * @param {Uint8Array} bytes
+ * @returns {boolean}
+ */
+function isPushRoutingSecretEnvelope(wasm, bytes) {
   if (
     bytes.length !== PUSH_ROUTING_ENVELOPE_LEN ||
     bytes[0] !== PUSH_ROUTING_ENVELOPE_FIRST_BYTE
   ) {
     return false;
   }
-  //    The wasm codec is the authoritative fail-closed gate (domain +
-  //    version + exact-length; a retired v1 envelope is refused here too
-  //    — ADR-0044 is a hard flag day). It THROWS on a non-envelope, so a
-  //    throw means "not this kind" and the caller parses normally.
+  // The wasm codec is the authoritative fail-closed gate (domain +
+  // version + exact-length; a retired v1 envelope is refused here too
+  // — ADR-0044 is a hard flag day). It THROWS on a non-envelope, so a
+  // throw means "not this kind" and the caller parses normally.
   if (typeof wasm.decodePushRoutingSecret !== "function") {
     // No codec available to confirm. The peek is already exact (a
     // 70-byte plaintext starting with `l`, which a JSON chat envelope
@@ -404,6 +452,72 @@ function isServiceEnvelope(wasm, bytes) {
     return false;
   }
   freeQuietly(decoded);
+  return true;
+}
+
+/**
+ * Arm 3 of {@link isServiceEnvelope} — the ADR-0045 committer-liveness
+ * beacon.
+ *
+ * ## Why this arm is MORE load-bearing than arm 2, not less
+ *
+ * A routing secret is broadcast only on a membership change. A beacon
+ * is emitted by EVERY owner and admin every 60 s, so in an active group
+ * the newest journal row — the very row this handler previews — is
+ * frequently a beacon. Unfiltered it renders as the literal text
+ * `lakko/committer-beacon/v1` plus two control bytes.
+ *
+ * ## The exact-equality simplification, taken deliberately
+ *
+ * The beacon carries no fields — no epoch, no identity, no timestamp
+ * (see the module docs in `crates/lakko-contacts/src/committer_beacon.rs`
+ * for why each was excluded). So EVERY beacon on the wire is the SAME
+ * 27 bytes, and the length + first-byte peek is a COMPLETE test rather
+ * than merely a fast path — the opposite of arm 2, where a 70-byte
+ * legacy plaintext can clear the peek. The codec call below is
+ * therefore belt-and-braces confirmation, not a necessity; it stays
+ * because it is the single definition of this wire format, so a version
+ * bump moves the verdict without an edit here.
+ *
+ * ## The length is READ, never written down
+ *
+ * `committerBeaconEnvelopeLen()` exists on the FFI precisely so three
+ * clients do not each hand-copy `27` — the drift shape ADR-0044 was
+ * written about. An older deps object without it skips the length test
+ * and leans on the codec, which is still authoritative.
+ *
+ * Classification ONLY — no writes, no cursor advance (C-59 / ADR-0041).
+ * The SW never EMITS a beacon either: a beacon means "able to sweep",
+ * and this path structurally cannot commit.
+ *
+ * @param {DecryptWasm} wasm
+ * @param {Uint8Array} bytes
+ * @returns {boolean}
+ */
+function isCommitterBeaconEnvelope(wasm, bytes) {
+  if (bytes.length === 0 || bytes[0] !== COMMITTER_BEACON_FIRST_BYTE) return false;
+  if (typeof wasm.committerBeaconEnvelopeLen === "function") {
+    let expected;
+    try {
+      expected = wasm.committerBeaconEnvelopeLen();
+    } catch {
+      expected = undefined;
+    }
+    if (typeof expected === "number" && bytes.length !== expected) return false;
+  }
+  // No codec to confirm with. Unlike arm 2 there is no safe suppress
+  // here: without the length constant the peek is a single byte, which
+  // a real "let's meet at six" would clear. Fall through and let the
+  // message render — a missed filter costs one ugly notification, a
+  // false positive costs a swallowed message.
+  if (typeof wasm.decodeCommitterBeacon !== "function") return false;
+  try {
+    // Returns nothing on success — the beacon is field-less, so there
+    // is no handle to free.
+    wasm.decodeCommitterBeacon(bytes);
+  } catch {
+    return false;
+  }
   return true;
 }
 

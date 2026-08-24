@@ -15,6 +15,8 @@ import uniffi.lakko_ffi_uniffi.Group
 import uniffi.lakko_ffi_uniffi.Identity
 import uniffi.lakko_ffi_uniffi.MessageBodyKind
 import uniffi.lakko_ffi_uniffi.ProcessedMessage
+import uniffi.lakko_ffi_uniffi.committerBeaconEnvelopeLen
+import uniffi.lakko_ffi_uniffi.decodeCommitterBeacon
 import uniffi.lakko_ffi_uniffi.decodePushRoutingSecret
 import uniffi.lakko_ffi_uniffi.loadGroup
 import uniffi.lakko_ffi_uniffi.parseBodyEnvelope
@@ -191,17 +193,25 @@ private class RealThrowawayGroup(
         // Commit / Proposal / ExternalJoinProposal advances state (in
         // the THROWAWAY provider only) but has no body to show.
         val app = processed as? ProcessedMessage.Application ?: return null
-        // A SERVICE envelope (ADR-0042/0044 push-routing-secret, or a
-        // call-signaling proto) is machine-to-machine traffic with no
-        // user-visible body. It MUST be rejected before
-        // `parseBodyEnvelope`, whose deliberate legacy fallback would
-        // otherwise degrade the raw bytes to `Chat` via a lossy UTF-8
-        // decode and render the domain string plus binary as a
-        // notification. Returning `null` here lets the caller's loop
-        // fall back to the newest REAL chat message (and, when there is
-        // none, to the generic "New message" banner). Same filter the
-        // foreground `ChatClient` dispatch uses.
-        if (isServiceEnvelope(app.data, ::decodesAsRoutingSecret)) return null
+        // A SERVICE envelope (ADR-0042/0044 push-routing-secret, a
+        // call-signaling proto, or an ADR-0045 committer beacon) is
+        // machine-to-machine traffic with no user-visible body. It MUST
+        // be rejected before `parseBodyEnvelope`, whose deliberate
+        // legacy fallback would otherwise degrade the raw bytes to
+        // `Chat` via a lossy UTF-8 decode and render the domain string
+        // plus binary as a notification. Returning `null` here lets the
+        // caller's loop fall back to the newest REAL chat message (and,
+        // when there is none, to the generic "New message" banner). Same
+        // filter the foreground `ChatClient` dispatch uses.
+        if (isServiceEnvelope(
+                app.data,
+                ::decodesAsRoutingSecret,
+                ::decodesAsCommitterBeacon,
+                committerBeaconEnvelopeLenCached,
+            )
+        ) {
+            return null
+        }
         val body = try {
             parseBodyEnvelope(app.data)
         } catch (_: Throwable) {
@@ -257,6 +267,46 @@ private fun decodesAsRoutingSecret(bytes: ByteArray): Boolean =
     } catch (_: Throwable) {
         false
     }
+
+/**
+ * The AUTHORITATIVE committer-beacon check ([isServiceEnvelope]'s third
+ * injected step) — the native, fail-closed `decodeCommitterBeacon`
+ * (ADR-0045). It returns nothing on success, because the beacon is
+ * FIELD-LESS: a clean return IS the whole verdict, "this is a service
+ * envelope, render nothing". A wrong domain, a bad length, or an unknown
+ * schema version throws and yields `false`, so the payload falls through
+ * to the normal chat parse.
+ *
+ * READ-ONLY: a pure decode. The background path never EMITS a beacon and
+ * never folds a committer verdict — a beacon means "able to sweep", and
+ * it structurally cannot commit (C-59), so a beacon from here would be a
+ * lie that costs the group a takeover.
+ */
+private fun decodesAsCommitterBeacon(bytes: ByteArray): Boolean =
+    try {
+        decodeCommitterBeacon(bytes)
+        true
+    } catch (_: Throwable) {
+        false
+    }
+
+/**
+ * The ADR-0045 beacon envelope length, read ONCE from the FFI constant
+ * rather than hand-copied as `27` into this client — the drift shape
+ * ADR-0044 was written about. `by lazy` keeps it off the per-row hot
+ * path while still sourcing it from the one definition.
+ *
+ * A `Throwable` here (no `.so`, a stale binding) falls back to `0`,
+ * which no payload can match, so the beacon arm goes inert and beacons
+ * merely render as before — never a swallowed real message.
+ */
+private val committerBeaconEnvelopeLenCached: Int by lazy {
+    try {
+        committerBeaconEnvelopeLen().toInt()
+    } catch (_: Throwable) {
+        0
+    }
+}
 
 /** Decode a lowercase hex string into bytes. Returns `null` on any
  *  malformed input (odd length, non-hex chars). */

@@ -13,25 +13,33 @@ import XCTest
 /// to `parseBodyEnvelope`, whose deliberate legacy fallback degrades non-JSON
 /// bytes to a `Chat` body via `from_utf8_lossy` (pre-1.19 wire compatibility).
 /// So a service envelope surfaced as a notification containing its domain
-/// string plus raw binary. TWO kinds were affected:
+/// string plus raw binary. THREE kinds are affected:
 ///
 ///   1. ADR-0042 / ADR-0044 push-routing-secret envelopes (70 bytes, domain
 ///      `lakko/push-routing-secret/v1\0`),
 ///   2. prost `CallSignalingPayload` bytes — which the foreground filtered and
 ///      the background did not, so a fix covering only (1) would leave this
-///      one broken.
+///      one broken,
+///   3. ADR-0045 committer-liveness beacons (27 bytes, domain
+///      `lakko/committer-beacon/v1\0`) — the MOST reachable of the three, since
+///      a routing secret is broadcast only on a membership change while a
+///      beacon is emitted by every owner and admin every 60 s, so in an active
+///      group the newest journal row (the one previewed) is frequently one.
 ///
 /// ## What is real here and what is stubbed
 ///
 /// `nseIsServiceEnvelope` / `nseLooksLikeCallSignaling` /
-/// `nseLooksLikePushRoutingSecret` are the PRODUCTION functions (the pure NSE
-/// core is compiled into this test target). Only the authoritative Rust codec
-/// is stubbed — the test target links no `LakkoCoreExtension.xcframework` — by
-/// ``decodesAsPushRoutingSecret(_:)`` below, which re-implements the exact gate
-/// `lakko_contacts::push_routing::decode_push_routing_secret` applies (domain
-/// prefix, then version, then exact payload length). The codec itself is
-/// covered by `crates/lakko-ffi-extension`'s Rust tests, including a golden
-/// that pins the two constants this file's pre-filter keys on.
+/// `nseLooksLikePushRoutingSecret` / `nseLooksLikeCommitterBeacon` are the
+/// PRODUCTION functions (the pure NSE core is compiled into this test target).
+/// Only the authoritative Rust codecs are stubbed — the test target links no
+/// `LakkoCoreExtension.xcframework` — by ``decodesAsPushRoutingSecret(_:)`` and
+/// ``decodesAsCommitterBeacon(_:)`` below, which re-implement the exact gates
+/// `lakko_contacts::push_routing::decode_push_routing_secret` and
+/// `lakko_contacts::committer_beacon::decode_committer_beacon` apply (domain
+/// prefix, then length / version). Those codecs themselves are covered by
+/// `crates/lakko-ffi-extension`'s Rust tests, including a golden that pins the
+/// two constants this file's routing pre-filter keys on and a test pinning that
+/// an unfiltered beacon really does render as chat text.
 final class NseServiceEnvelopeTests: XCTestCase {
 
     // MARK: - Wire fixtures
@@ -74,6 +82,36 @@ final class NseServiceEnvelopeTests: XCTestCase {
         return payload.count == 1 + 8 + 32                  // exact-length gate
     }
 
+    /// The frozen 26-byte ADR-0045 domain separator
+    /// `lakko/committer-beacon/v1\0`. Built from ASCII + an explicit trailing
+    /// NUL for the same reason as ``routingDomain``: no raw NUL in this source.
+    private static let beaconDomain: Data = {
+        var d = Data("lakko/committer-beacon/v1".utf8)
+        d.append(0x00)
+        return d
+    }()
+
+    /// A well-formed committer beacon: `domain(26) || version(1)=0x01`, 27
+    /// bytes. FIELD-LESS, so every beacon on the wire is byte-identical — the
+    /// property that lets the codec be a total test.
+    private func committerBeacon(version: UInt8 = 0x01) -> Data {
+        var out = Self.beaconDomain
+        out.append(version)
+        return out
+    }
+
+    /// Test double for the slim FFI's `decodeCommitterBeacon`, applying the
+    /// same gate `lakko_contacts::committer_beacon::decode_committer_beacon`
+    /// does — domain prefix, THEN exact payload length, THEN version. Returning
+    /// `true` models the Rust `Ok(())`: the beacon carries nothing to hand back.
+    private func decodesAsCommitterBeacon(_ bytes: Data) -> Bool {
+        let domain = Self.beaconDomain
+        guard bytes.count > domain.count, bytes.prefix(domain.count) == domain else { return false }
+        let payload = bytes.dropFirst(domain.count)
+        guard payload.count == 1 else { return false }   // exact-length gate
+        return payload.first == 0x01                     // schema version v1
+    }
+
     // MARK: - Kind 1: push-routing-secret
 
     /// WITHOUT THE FIX this returns false and the envelope reaches
@@ -82,7 +120,8 @@ final class NseServiceEnvelopeTests: XCTestCase {
         XCTAssertTrue(
             nseIsServiceEnvelope(
                 routingEnvelope(),
-                decodesAsPushRoutingSecret: decodesAsPushRoutingSecret
+                decodesAsPushRoutingSecret: decodesAsPushRoutingSecret,
+                decodesAsCommitterBeacon: decodesAsCommitterBeacon
             ),
             "a v2 push-routing-secret envelope must never be rendered"
         )
@@ -116,7 +155,11 @@ final class NseServiceEnvelopeTests: XCTestCase {
         let decoy = Data(repeating: 0x6C, count: 70)
         XCTAssertTrue(nseLooksLikePushRoutingSecret(decoy), "the decoy does pass the cheap peek")
         XCTAssertFalse(
-            nseIsServiceEnvelope(decoy, decodesAsPushRoutingSecret: decodesAsPushRoutingSecret),
+            nseIsServiceEnvelope(
+                decoy,
+                decodesAsPushRoutingSecret: decodesAsPushRoutingSecret,
+                decodesAsCommitterBeacon: decodesAsCommitterBeacon
+            ),
             "the codec, not the peek, is the authority"
         )
     }
@@ -130,7 +173,11 @@ final class NseServiceEnvelopeTests: XCTestCase {
         v1.append(Data(repeating: 0x42, count: 32))
         XCTAssertEqual(v1.count, 62)
         XCTAssertFalse(
-            nseIsServiceEnvelope(v1, decodesAsPushRoutingSecret: decodesAsPushRoutingSecret)
+            nseIsServiceEnvelope(
+                v1,
+                decodesAsPushRoutingSecret: decodesAsPushRoutingSecret,
+                decodesAsCommitterBeacon: decodesAsCommitterBeacon
+            )
         )
     }
 
@@ -149,11 +196,82 @@ final class NseServiceEnvelopeTests: XCTestCase {
             XCTAssertTrue(
                 nseIsServiceEnvelope(
                     payload,
-                    decodesAsPushRoutingSecret: decodesAsPushRoutingSecret
+                    decodesAsPushRoutingSecret: decodesAsPushRoutingSecret,
+                    decodesAsCommitterBeacon: decodesAsCommitterBeacon
                 ),
                 "call signaling must never be rendered"
             )
         }
+    }
+
+    // MARK: - Kind 3: the ADR-0045 committer-liveness beacon
+
+    /// WITHOUT THE FIX this returns false and the beacon reaches
+    /// `parseBodyEnvelope`, whose lossy-UTF-8 fallback renders the literal text
+    /// `lakko/committer-beacon/v1` plus two control bytes.
+    ///
+    /// This kind is MORE reachable than the routing secret, not less: a routing
+    /// secret is broadcast on a membership change, a beacon every 60 s from
+    /// every owner and admin.
+    func testCommitterBeaconIsAServiceEnvelope() {
+        XCTAssertEqual(committerBeacon().count, 27, "domain(26) || version(1)")
+        XCTAssertTrue(
+            nseIsServiceEnvelope(
+                committerBeacon(),
+                decodesAsPushRoutingSecret: decodesAsPushRoutingSecret,
+                decodesAsCommitterBeacon: decodesAsCommitterBeacon
+            ),
+            "a committer beacon must never be rendered"
+        )
+    }
+
+    /// The beacon peek keys on the leading domain byte ALONE — deliberately no
+    /// length test, since the slim NSE surface does not export
+    /// `committerBeaconEnvelopeLen` and hardcoding 27 would be an unpinned wire
+    /// constant. Pinned here so widening or narrowing it is a visible change.
+    func testBeaconPreFilterIsFirstByteOnly() {
+        XCTAssertTrue(nseLooksLikeCommitterBeacon(committerBeacon()))
+        XCTAssertTrue(
+            nseLooksLikeCommitterBeacon(Data([0x6C])),
+            "one leading `l` is enough to reach the codec — the peek never narrows"
+        )
+        XCTAssertFalse(nseLooksLikeCommitterBeacon(chatEnvelope), "a JSON body starts with `{`")
+        XCTAssertFalse(nseLooksLikeCommitterBeacon(Data()), "empty")
+    }
+
+    /// The peek alone must NOT suppress: a genuine legacy plaintext beginning
+    /// with `l` clears it, and the codec is what decides. Without this the
+    /// filter would silently swallow real messages.
+    func testBeaconPeekAloneDoesNotSuppress() {
+        let realMessage = Data("lunch at six?".utf8)
+        XCTAssertTrue(nseLooksLikeCommitterBeacon(realMessage), "it does clear the cheap peek")
+        XCTAssertFalse(
+            nseIsServiceEnvelope(
+                realMessage,
+                decodesAsPushRoutingSecret: decodesAsPushRoutingSecret,
+                decodesAsCommitterBeacon: decodesAsCommitterBeacon
+            ),
+            "the codec, not the peek, is the authority"
+        )
+    }
+
+    /// An unknown schema version is refused by the codec, so the bytes are NOT
+    /// suppressed — the same fail-closed direction the routing v1 case takes.
+    func testBeaconWithUnknownVersionIsNotSuppressed() {
+        XCTAssertFalse(
+            nseIsServiceEnvelope(
+                committerBeacon(version: 0xFF),
+                decodesAsPushRoutingSecret: decodesAsPushRoutingSecret,
+                decodesAsCommitterBeacon: decodesAsCommitterBeacon
+            )
+        )
+    }
+
+    /// Cross-kind isolation: neither codec may accept the other's bytes, or the
+    /// filter chain would classify one kind as the other.
+    func testBeaconAndRoutingCodecsDoNotCrossAccept() {
+        XCTAssertFalse(decodesAsCommitterBeacon(routingEnvelope()))
+        XCTAssertFalse(decodesAsPushRoutingSecret(committerBeacon()))
     }
 
     // MARK: - A real chat message is never suppressed
@@ -163,12 +281,17 @@ final class NseServiceEnvelopeTests: XCTestCase {
         XCTAssertFalse(
             nseIsServiceEnvelope(
                 chatEnvelope,
-                decodesAsPushRoutingSecret: decodesAsPushRoutingSecret
+                decodesAsPushRoutingSecret: decodesAsPushRoutingSecret,
+                decodesAsCommitterBeacon: decodesAsCommitterBeacon
             ),
             "a chat envelope must still render"
         )
         XCTAssertFalse(
-            nseIsServiceEnvelope(Data(), decodesAsPushRoutingSecret: decodesAsPushRoutingSecret),
+            nseIsServiceEnvelope(
+                Data(),
+                decodesAsPushRoutingSecret: decodesAsPushRoutingSecret,
+                decodesAsCommitterBeacon: decodesAsCommitterBeacon
+            ),
             "empty bytes are not a service envelope"
         )
     }
@@ -180,20 +303,27 @@ final class NseServiceEnvelopeTests: XCTestCase {
     /// decrypt + the Rust codec are the only stubbed parts.
     private final class FilteringFakeGroup: NseThrowawayGroup {
         private let decodesAsPushRoutingSecret: (Data) -> Bool
+        private let decodesAsCommitterBeacon: (Data) -> Bool
         private let text: (Data) -> String
         private(set) var suppressed = 0
         var closed = false
 
         init(
             decodesAsPushRoutingSecret: @escaping (Data) -> Bool,
+            decodesAsCommitterBeacon: @escaping (Data) -> Bool,
             text: @escaping (Data) -> String
         ) {
             self.decodesAsPushRoutingSecret = decodesAsPushRoutingSecret
+            self.decodesAsCommitterBeacon = decodesAsCommitterBeacon
             self.text = text
         }
 
         func process(_ payload: Data) -> NseProcessedRow? {
-            if nseIsServiceEnvelope(payload, decodesAsPushRoutingSecret: decodesAsPushRoutingSecret) {
+            if nseIsServiceEnvelope(
+                payload,
+                decodesAsPushRoutingSecret: decodesAsPushRoutingSecret,
+                decodesAsCommitterBeacon: decodesAsCommitterBeacon
+            ) {
                 suppressed += 1
                 return nil
             }
@@ -229,6 +359,7 @@ final class NseServiceEnvelopeTests: XCTestCase {
     private func preview(rows: [NseFetchedRow]) async -> (NsePushPreview?, Int) {
         let group = FilteringFakeGroup(
             decodesAsPushRoutingSecret: decodesAsPushRoutingSecret,
+            decodesAsCommitterBeacon: decodesAsCommitterBeacon,
             text: { String(decoding: $0, as: UTF8.self) }
         )
         let result = await decryptPushPreview(
@@ -272,6 +403,53 @@ final class NseServiceEnvelopeTests: XCTestCase {
         ])
         XCTAssertEqual(result?.body, "real message")
         XCTAssertEqual(suppressed, 3)
+    }
+
+    /// A beacon as the NEWEST row — the common case in an active group, since
+    /// every owner and admin emits one a minute. The real chat before it must
+    /// survive. Without the fix the beacon wins (newest-wins) and the body is
+    /// `lakko/committer-beacon/v1` plus two control bytes.
+    func testCommitterBeaconAfterChatFallsBackToTheChat() async {
+        let (result, suppressed) = await preview(rows: [
+            NseFetchedRow(id: 10, payload: Data("real message".utf8)),
+            NseFetchedRow(id: 11, payload: committerBeacon()),
+        ])
+        XCTAssertEqual(result?.body, "real message")
+        XCTAssertEqual(suppressed, 1)
+    }
+
+    /// A beacon BEFORE a real chat must not disturb it either.
+    func testCommitterBeaconBeforeChatKeepsTheChat() async {
+        let (result, suppressed) = await preview(rows: [
+            NseFetchedRow(id: 10, payload: committerBeacon()),
+            NseFetchedRow(id: 11, payload: Data("real message".utf8)),
+        ])
+        XCTAssertEqual(result?.body, "real message")
+        XCTAssertEqual(suppressed, 1)
+    }
+
+    /// A beacon burst around a real chat — three admins beaconing while one
+    /// person types, which is an ordinary minute on a busy group.
+    func testBeaconBurstAroundAChatKeepsTheChat() async {
+        let (result, suppressed) = await preview(rows: [
+            NseFetchedRow(id: 10, payload: committerBeacon()),
+            NseFetchedRow(id: 11, payload: Data("real message".utf8)),
+            NseFetchedRow(id: 12, payload: committerBeacon()),
+            NseFetchedRow(id: 13, payload: committerBeacon()),
+        ])
+        XCTAssertEqual(result?.body, "real message")
+        XCTAssertEqual(suppressed, 3)
+    }
+
+    /// A batch of ONLY beacons yields no preview, so the handler degrades to
+    /// its generic banner rather than a garbage body.
+    func testOnlyBeaconsYieldNoPreview() async {
+        let (result, suppressed) = await preview(rows: [
+            NseFetchedRow(id: 10, payload: committerBeacon()),
+            NseFetchedRow(id: 11, payload: committerBeacon()),
+        ])
+        XCTAssertNil(result, "no real message → generic banner")
+        XCTAssertEqual(suppressed, 2)
     }
 
     /// A batch of ONLY service envelopes yields no preview at all, so the

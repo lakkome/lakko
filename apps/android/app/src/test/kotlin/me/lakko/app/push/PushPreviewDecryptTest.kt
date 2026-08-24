@@ -543,10 +543,41 @@ class PushPreviewDecryptTest {
             bytes.copyOfRange(0, routingDomain.size).contentEquals(routingDomain) &&
             bytes[29].toInt() == 0x02
 
+    /** `lakko/committer-beacon/v1\0` — 26 bytes. The trailing NUL is
+     *  APPENDED PROGRAMMATICALLY for the same reason as [routingDomain]:
+     *  a raw NUL makes git treat the file as binary. */
+    private val beaconDomain: ByteArray =
+        "lakko/committer-beacon/v1".toByteArray(Charsets.US_ASCII) +
+            byteArrayOf(0)
+
+    /** A well-formed ADR-0045 beacon: `domain(26) || version(1)=0x01`.
+     *  FIELD-LESS, so every beacon on the wire is byte-identical. */
+    private fun committerBeacon(version: Int = 0x01): ByteArray =
+        beaconDomain + byteArrayOf(version.toByte())
+
+    /** Stand-in for the FFI's `committerBeaconEnvelopeLen()` — DERIVED
+     *  from the fixture builder, never a literal `27`, so the double and
+     *  the length it is tested against cannot diverge. */
+    private val beaconEnvelopeLen: Int = committerBeacon().size
+
+    /** Stand-in for the native `decodeCommitterBeacon`: the same
+     *  fail-closed gate the Rust codec applies — domain prefix, THEN
+     *  exact payload length, THEN schema version. `true` models the Rust
+     *  `Ok(())`; the beacon carries nothing to hand back. */
+    private fun fakeCommitterBeaconDecode(bytes: ByteArray): Boolean =
+        bytes.size == beaconEnvelopeLen &&
+            bytes.copyOfRange(0, beaconDomain.size).contentEquals(beaconDomain) &&
+            bytes[beaconDomain.size].toInt() == 0x01
+
     /** Stand-in for the real per-row extractor: the production filter,
      *  then `parse_body`'s lossy-UTF-8 legacy fallback. */
     private val lossyChatDecode: (ByteArray) -> ProcessedRow? = { payload ->
-        if (isServiceEnvelope(payload, ::fakeRoutingSecretDecode)) {
+        if (isServiceEnvelope(
+                payload,
+                ::fakeRoutingSecretDecode,
+                ::fakeCommitterBeaconDecode,
+                beaconEnvelopeLen,
+            )) {
             null
         } else {
             chat(String(payload, Charsets.UTF_8))
@@ -561,12 +592,24 @@ class PushPreviewDecryptTest {
     @Test
     fun `isServiceEnvelope classifies both service kinds and passes real chat`() {
         // 1. The ADR-0042/0044 routing-secret envelope.
-        assertTrue(isServiceEnvelope(routingSecretEnvelope(), ::fakeRoutingSecretDecode))
+        assertTrue(
+            isServiceEnvelope(
+                routingSecretEnvelope(),
+                ::fakeRoutingSecretDecode,
+                ::fakeCommitterBeaconDecode,
+                beaconEnvelopeLen,
+            ),
+        )
         // 2. Call signaling — every oneof body tag (fields 10..13).
         for (tag in listOf(0x52, 0x5A, 0x62, 0x6A)) {
             assertTrue(
                 "tag 0x${tag.toString(16)} must classify as service",
-                isServiceEnvelope(callSignalingPayload(tag), ::fakeRoutingSecretDecode),
+                isServiceEnvelope(
+                    callSignalingPayload(tag),
+                    ::fakeRoutingSecretDecode,
+                    ::fakeCommitterBeaconDecode,
+                    beaconEnvelopeLen,
+                ),
             )
         }
         // A real chat envelope starts with `{` (0x7B) — never a service
@@ -575,9 +618,18 @@ class PushPreviewDecryptTest {
             isServiceEnvelope(
                 """{"v":"1.0","text":"hi"}""".toByteArray(Charsets.UTF_8),
                 ::fakeRoutingSecretDecode,
+                ::fakeCommitterBeaconDecode,
+                beaconEnvelopeLen,
             ),
         )
-        assertFalse(isServiceEnvelope(ByteArray(0), ::fakeRoutingSecretDecode))
+        assertFalse(
+            isServiceEnvelope(
+                ByteArray(0),
+                ::fakeRoutingSecretDecode,
+                ::fakeCommitterBeaconDecode,
+                beaconEnvelopeLen,
+            ),
+        )
     }
 
     @Test
@@ -590,12 +642,26 @@ class PushPreviewDecryptTest {
         val bytes = legacy.toByteArray(Charsets.US_ASCII)
         assertEquals(GroupPushRouting.ENVELOPE_LEN, bytes.size)
         assertTrue(GroupPushRouting.looksLikeSecretEnvelope(bytes)) // peek says yes...
-        assertFalse(isServiceEnvelope(bytes, ::fakeRoutingSecretDecode)) // ...codec says no
+        assertFalse(
+            isServiceEnvelope(
+                bytes,
+                ::fakeRoutingSecretDecode,
+                ::fakeCommitterBeaconDecode,
+                beaconEnvelopeLen,
+            ),
+        ) // ...codec says no
 
         // A retired v1 / wrong-version envelope is likewise refused and
         // falls through to the chat parse (fail-closed, never a
         // downgrade).
-        assertFalse(isServiceEnvelope(routingSecretEnvelope(version = 0x01), ::fakeRoutingSecretDecode))
+        assertFalse(
+            isServiceEnvelope(
+                routingSecretEnvelope(version = 0x01),
+                ::fakeRoutingSecretDecode,
+                ::fakeCommitterBeaconDecode,
+                beaconEnvelopeLen,
+            ),
+        )
     }
 
     @Test
@@ -669,5 +735,181 @@ class PushPreviewDecryptTest {
             ),
         )
         assertEquals("hello there", decryptPushPreview(PushWake(groupHex, 12), deps)?.body)
+    }
+
+    // -----------------------------------------------------------------
+    // KIND 3 — the ADR-0045 committer-liveness beacon.
+    //
+    // MORE reachable than the routing secret, not less: a routing secret
+    // is broadcast on a membership change, a beacon every 60 s from every
+    // owner and admin, so in an active group the newest journal row (the
+    // one previewed) is frequently a beacon.
+    // -----------------------------------------------------------------
+
+    @Test
+    fun `an unfiltered beacon really would render as garbage text`() {
+        // Pins the DEFECT rather than the fix: `lossyChatDecode` models
+        // `parse_body`'s legacy fallback, so this is the notification body
+        // a beacon produces with nothing filtering it. If this stops being
+        // true the tests below stop discriminating.
+        val text = String(committerBeacon(), Charsets.UTF_8)
+        assertTrue(
+            "the lossy fallback surfaces the domain string",
+            text.startsWith("lakko/committer-beacon/v1"),
+        )
+    }
+
+    @Test
+    fun `isServiceEnvelope classifies a committer beacon`() {
+        assertTrue(
+            isServiceEnvelope(
+                committerBeacon(),
+                ::fakeRoutingSecretDecode,
+                ::fakeCommitterBeaconDecode,
+                beaconEnvelopeLen,
+            ),
+        )
+    }
+
+    @Test
+    fun `the beacon peek is exact, and the codec still has the last word`() {
+        // The beacon is FIELD-LESS, so exact length + leading `l` fully
+        // determines the value — the peek is a complete test here, unlike
+        // the routing one. It must still ACCEPT a real beacon...
+        assertTrue(looksLikeCommitterBeacon(committerBeacon(), beaconEnvelopeLen))
+        // ...and REJECT the near-misses, keeping the codec off the hot path.
+        assertFalse(looksLikeCommitterBeacon(ByteArray(0), beaconEnvelopeLen))
+        assertFalse(
+            "a JSON chat body starts with `{`",
+            looksLikeCommitterBeacon(
+                """{"v":"1.0","text":"hi"}""".toByteArray(Charsets.UTF_8),
+                beaconEnvelopeLen,
+            ),
+        )
+        // A 27-byte legacy plaintext starting with 'l' CLEARS the peek —
+        // the codec is what stops it being swallowed as a service envelope.
+        val legacy = "lunch at six".padEnd(beaconEnvelopeLen, '.')
+            .toByteArray(Charsets.US_ASCII)
+        assertEquals(beaconEnvelopeLen, legacy.size)
+        assertTrue(looksLikeCommitterBeacon(legacy, beaconEnvelopeLen)) // peek says yes...
+        assertFalse(
+            isServiceEnvelope(
+                legacy,
+                ::fakeRoutingSecretDecode,
+                ::fakeCommitterBeaconDecode,
+                beaconEnvelopeLen,
+            ),
+        ) // ...codec says no
+        // An unknown schema version is refused too (fail-closed).
+        assertFalse(
+            isServiceEnvelope(
+                committerBeacon(version = 0xFF),
+                ::fakeRoutingSecretDecode,
+                ::fakeCommitterBeaconDecode,
+                beaconEnvelopeLen,
+            ),
+        )
+    }
+
+    @Test
+    fun `the beacon length comes from the caller, not a hardcoded 27`() {
+        // Discriminates "reads committerBeaconEnvelopeLen()" from
+        // "hardcodes 27": told a DIFFERENT length, the filter must miss a
+        // 27-byte beacon. A filter carrying the literal would suppress it
+        // regardless — the drift shape ADR-0044 documents, caught here
+        // rather than at the next envelope revision.
+        assertFalse(looksLikeCommitterBeacon(committerBeacon(), beaconEnvelopeLen + 1))
+        assertFalse(
+            isServiceEnvelope(
+                committerBeacon(),
+                ::fakeRoutingSecretDecode,
+                ::fakeCommitterBeaconDecode,
+                beaconEnvelopeLen + 1,
+            ),
+        )
+    }
+
+    @Test
+    fun `the beacon and routing codecs do not cross-accept`() {
+        assertFalse(fakeCommitterBeaconDecode(routingSecretEnvelope()))
+        assertFalse(fakeRoutingSecretDecode(committerBeacon()))
+    }
+
+    @Test
+    fun `a committer beacon alone yields no preview`() = runTest {
+        val group = FakeThrowawayGroup(decode = lossyChatDecode)
+        val deps = FakeDeps(
+            okAccount(),
+            group = group,
+            rows = listOf(rowOf(10, committerBeacon())),
+        )
+        // Pre-fix this returned a preview whose body was the domain
+        // string plus two control bytes.
+        assertNull(decryptPushPreview(PushWake(groupHex, 11), deps))
+        assertTrue(group.closed)
+    }
+
+    @Test
+    fun `a beacon before a chat message still previews the chat`() = runTest {
+        val group = FakeThrowawayGroup(decode = lossyChatDecode)
+        val deps = FakeDeps(
+            okAccount(),
+            group = group,
+            rows = listOf(
+                rowOf(10, committerBeacon()),
+                textRow(11, "hello there"),
+            ),
+        )
+        assertEquals("hello there", decryptPushPreview(PushWake(groupHex, 12), deps)?.body)
+    }
+
+    @Test
+    fun `a trailing beacon falls back to the chat`() = runTest {
+        // The load-bearing ordering, and the common case in an active
+        // group: the loop keeps the LAST previewable row, so a trailing
+        // beacon is exactly what used to overwrite a real message.
+        val group = FakeThrowawayGroup(decode = lossyChatDecode)
+        val deps = FakeDeps(
+            okAccount(),
+            group = group,
+            rows = listOf(
+                textRow(10, "hello there"),
+                rowOf(11, committerBeacon()),
+            ),
+        )
+        assertEquals("hello there", decryptPushPreview(PushWake(groupHex, 12), deps)?.body)
+    }
+
+    @Test
+    fun `a beacon burst around a chat keeps the chat`() = runTest {
+        // Three admins beaconing while one person types — an ordinary
+        // minute on a busy group.
+        val group = FakeThrowawayGroup(decode = lossyChatDecode)
+        val deps = FakeDeps(
+            okAccount(),
+            group = group,
+            rows = listOf(
+                rowOf(10, committerBeacon()),
+                textRow(11, "hello there"),
+                rowOf(12, committerBeacon()),
+                rowOf(13, committerBeacon()),
+            ),
+        )
+        assertEquals("hello there", decryptPushPreview(PushWake(groupHex, 14), deps)?.body)
+    }
+
+    @Test
+    fun `a batch of only beacons yields no preview`() = runTest {
+        val group = FakeThrowawayGroup(decode = lossyChatDecode)
+        val deps = FakeDeps(
+            okAccount(),
+            group = group,
+            rows = listOf(
+                rowOf(10, committerBeacon()),
+                rowOf(11, committerBeacon()),
+            ),
+        )
+        assertNull(decryptPushPreview(PushWake(groupHex, 12), deps))
+        assertTrue(group.closed)
     }
 }

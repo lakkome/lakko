@@ -176,13 +176,18 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
         guard case let .application(data, _) = processed else { return nil }
         // SERVICE-ENVELOPE FILTER — the background half of the gate the
         // foreground `ChatClient.toEvent` has always run, in the same order.
-        // Call-signaling proto bytes and ADR-0042/0044 push-routing-secret
-        // envelopes ride the SAME group journal as chat; without this,
-        // `parseBodyEnvelope`'s deliberate legacy UTF-8 fallback degrades them
-        // to a `.chat` body and the NSE renders a notification full of a domain
-        // string plus raw binary. Returning nil drops the row, so the caller's
-        // loop falls back to the newest REAL message (or the generic banner).
-        if nseIsServiceEnvelope(data, decodesAsPushRoutingSecret: Self.decodesAsPushRoutingSecret) {
+        // Call-signaling proto bytes, ADR-0042/0044 push-routing-secret
+        // envelopes and ADR-0045 committer-liveness beacons all ride the SAME
+        // group journal as chat; without this, `parseBodyEnvelope`'s deliberate
+        // legacy UTF-8 fallback degrades them to a `.chat` body and the NSE
+        // renders a notification full of a domain string plus raw binary.
+        // Returning nil drops the row, so the caller's loop falls back to the
+        // newest REAL message (or the generic banner).
+        if nseIsServiceEnvelope(
+            data,
+            decodesAsPushRoutingSecret: Self.decodesAsPushRoutingSecret,
+            decodesAsCommitterBeacon: Self.decodesAsCommitterBeacon
+        ) {
             return nil
         }
         let body = parseBodyEnvelope(bytes: data)
@@ -217,6 +222,23 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
     /// app's job on its own durable path. The NSE only needs the yes/no.
     private static func decodesAsPushRoutingSecret(_ bytes: Data) -> Bool {
         (try? decodePushRoutingSecret(plaintext: bytes)) != nil
+    }
+
+    /// The AUTHORITATIVE — and here COMPLETE — half of the committer-beacon
+    /// filter: the slim FFI's `decodeCommitterBeacon` (ADR-0045). It returns
+    /// nothing on success, because the beacon is FIELD-LESS: a clean return IS
+    /// the whole verdict, "this is a service envelope, render nothing".
+    ///
+    /// Unlike the routing case, the Swift-side peek in front of this is only a
+    /// hot-path guard and never a partial verdict — every beacon on the wire is
+    /// the same 27 bytes, so this one decode is a total test of that value.
+    ///
+    /// READ-ONLY: a pure decode. The NSE never EMITS a beacon and never folds a
+    /// committer verdict — a beacon means "able to sweep", and this path
+    /// structurally cannot commit (C-59), so a beacon from it would be a lie
+    /// that costs the group a takeover. Only the yes/no is used.
+    private static func decodesAsCommitterBeacon(_ bytes: Data) -> Bool {
+        (try? decodeCommitterBeacon(plaintext: bytes)) != nil
     }
 
     /// LOAD-BEARING: this does NOT persist — no `snapshotStorage()` /
