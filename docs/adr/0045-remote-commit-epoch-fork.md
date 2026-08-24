@@ -1349,8 +1349,9 @@ The pending set does not move house: it stays in the OpenMLS storage provider,
 which is what `Identity::snapshot_storage` already serialises and `MlsGroup::load`
 already rebuilds, so no persistence is invented and no client-side store is needed.
 
-**Client-visible consequences, all of them nil by design.** The park is a single
-synchronous encrypt with no I/O, no `await` and no re-entry; the unpark runs
+**Client-visible consequences, all of them nil by design.** ~~The park is a single
+synchronous encrypt with no I/O, no `await` and no re-entry~~, so nothing can
+observe the window in which the store is empty; the unpark runs
 before either outcome propagates and a failed unpark beats a successful send
 (losing a pending proposal would desync this device from every peer still holding
 it, whereas a refused send costs one message the caller retries). `DeviceGroup`
@@ -1359,6 +1360,174 @@ sends no application messages. **S4-S6 need do nothing about this** — it is
 recorded here because the ADR's decision-3 discussion otherwise reads as if
 storing a proposal were free, and because the by-reference-at-receipt constraint
 above is a rule a client refactor could break.
+
+> **The struck clause was the load-bearing safety argument for the park, and it
+> was wrong.** It is left visible rather than deleted, because it is the reason
+> the first landing shipped a defect and because the shape of the mistake is
+> worth keeping. The argument — repeated in the `create_application_message`
+> doc comment as *"nothing inside it can take a snapshot … this method holds
+> `&mut self` throughout"* — reasoned from an exclusive borrow of the **group**
+> to the absence of a concurrent reader. **That does not follow.** The `&mut` is
+> on `Group`; `Identity::snapshot_storage` takes `&self` on the **`Identity`**,
+> a different object, and reads the provider's map under its own `RwLock`.
+> Nothing about an exclusive borrow of one prevents a call on the other, and on
+> the natives the two genuinely run at once: in `crates/lakko-ffi-uniffi/src/lib.rs`
+> the FFI `Group` is `inner: Mutex<MlsGroup>` while the FFI `Identity` is a bare
+> `inner: MlsIdentity` with **no mutex at all**, which is exactly the concurrency
+> the iOS and Android send-and-persist paths drive. The `lakko-security` review
+> reproduced it by execution: **23166 of 25108 concurrent snapshots captured a
+> torn pending set**, some capturing zero — and a client that persists one can
+> never afterwards apply the by-reference commit those proposals belong to
+> (`InvalidCommit(MissingProposal)`), permanently, silently, with no adversary
+> involved.
+>
+> **What actually makes the park safe (`a90fa90`) is that the write was removed,
+> not synchronised.** The check OpenMLS makes is `proposal_store().is_empty()` —
+> a read of the **in-memory** store and nothing else; persistence has no say in
+> it. Both mutators (`clear_pending_proposals`, `store_pending_proposal`) are
+> generic over the storage they are handed and each does two things: mutate the
+> in-memory store, and mirror that into that storage. The park now hands them a
+> **throwaway `MemoryStorage`**, which takes the first effect and discards the
+> second, so the real provider's proposal queue is **not written at any point in
+> the method**. A concurrent snapshot taken at any instant during a send
+> therefore observes the set exactly as it stood before the send, which is also
+> exactly how it stands after. No lock, no new field, no cross-thread
+> coordination — and, unlike the struck argument, no dependency on what else the
+> caller happens to be doing. Pinned by
+> `a_snapshot_taken_during_a_send_never_observes_a_torn_pending_set`, which
+> drives 400 sends against a real concurrent snapshot thread and restores every
+> sample into a fresh `Identity`.
+>
+> **The general lesson, since it is not confined to this method:** in this
+> codebase an exclusive borrow of a `Group` is not a concurrency argument,
+> because the persistence surface hangs off `Identity`. Any future reasoning of
+> the form *"`&mut self` means nothing else can look"* is unsound here.
+
+#### Storing a proposal was not free for the *old* paths either: a direct commit absorbed it
+
+**The second consequence this ADR did not record, and the one the
+`lakko-security` review rated HIGH** (`a90fa90`). Every OpenMLS entry point the
+surviving direct-commit paths are built on — `add_members`, `remove_members`,
+`self_update`, `update_group_context_extensions` — constructs its commit with
+`consume_proposal_store` left at its default `true` and the proposal filter
+hardcoded to `|_| true` (`openmls-0.8.1` `group/mls_group/{membership,updates}.rs`).
+Each therefore sweeps the **entire** pending set alongside the one change it was
+asked for. That was harmless for exactly as long as the set was always empty —
+**decision 3's receipt gate created the set, and the paths that predate it know
+nothing about it.** Two failure modes followed, and both were live:
+
+- **A silent fork, which is this ADR's own hazard through the back door.** An
+  owner proposes an ownership transfer; an admin concurrently calls the ordinary
+  `remove_member` on the transfer's target; the admin's commit **absorbs** the
+  proposal, produces a commit that `owner_survives` (**C-63**) refuses on every
+  peer — and because the direct paths **merge eagerly**, its author is already at
+  N+1 and sits there alone, permanently. That is the G-38 signature verbatim.
+- **A member with no Welcome, benign-looking and worse than it reads.** An admin
+  asking to add one member adds **two**: an `add_member` that also sweeps in
+  somebody else's pending `Add` gives that person a leaf on **every peer's**
+  roster, while the caller routes the single Welcome to the one person it meant
+  to add. The group then renders a member who can never join — they hold no
+  Welcome, so they have no group state — and whom only an admin can remove.
+
+**A direct commit is therefore refused outright while anything is pending**
+(`Group::refuse_if_proposals_pending`, guarding all five Lakko entry points:
+`add_member`, `remove_member`, `self_update`, `set_group_context_extensions` —
+and through it `set_group_roles` and `transfer_ownership` — and
+`approve_external_join`).
+
+> **Why not the obvious alternative.** The natural fix is to route the direct
+> paths through a filtered `CommitBuilder` that **excludes** the pending set.
+> That was checked against openmls and **refuted**: merging any commit empties
+> the proposal store on every member unconditionally (`staged_commit.rs`, both
+> merge arms), *regardless of what `consume_proposal_store` said*. So an
+> excluding commit would still **discard** the pending set group-wide — trading a
+> silent absorb for a silent loss, which is not an improvement. Refusing is also
+> what this ADR's own [no-dual-path rule](#no-migration-and-no-compatibility-path)
+> says out loud: a group that has moved to proposals should sweep.
+
+**Nothing that legitimately uses a direct commit today is affected**, and that is
+structural rather than lucky: the pending set is only ever written for a group
+carrying an ADR-0022 role table (the receipt gate returns early without storing
+when there is none, and every `propose_*` refuses without one), so `DeviceGroup`,
+`PublisherGroup`, call groups and every other `create_with_id` group have a
+permanently empty set and the guard is a counted-zero no-op for them. **What it
+does mean for S4-S6** is that in a role-table group the direct paths and the
+sweep path are mutually exclusive at any instant — a client that still calls
+`approve_external_join` or `self_update` while a proposal is pending gets an
+error, not a widened commit. Pinned by
+`a_direct_commit_refuses_to_absorb_a_pending_proposal`,
+`a_direct_add_cannot_smuggle_in_a_second_member`,
+`a_group_with_no_role_table_still_direct_commits`, and a permanent
+`#[cfg(test)]` control,
+`control_a_direct_commit_that_absorbs_a_pending_proposal_forks_the_committer`,
+which reproduces the hazard through a deliberately ungated adversary path so the
+guard is shown to discriminate rather than merely asserted.
+
+#### The pending set is bounded: a cap of 64 and a `ProposalRef` dedup
+
+**Rated MEDIUM by the same review, and reachable with the stock API by a plain
+member.** `authorise` deliberately leaves a plain member two kinds it can emit
+without any role: removing its **own** leaf (that is how leaving works) and
+`Update` (RFC 9420 §12.1.2 replaces only the sender's own leaf node, so it
+confers no authority). Nothing stopped one member emitting the same departure N
+times: the ratchet refuses only a byte-identical replay, while N fresh
+encryptions of one plaintext proposal all decrypt to the same `ProposalRef`, and
+`ProposalStore::add` is a bare push with no de-duplication of its own. Since
+decision 2 gives a request **no deadline**, the set is otherwise bounded by
+nothing but a committer eventually noticing — and the park above makes its size a
+per-message cost paid by **every member**, not only by the proposer.
+
+Two bounds, mirroring ADR-0027's sibling `MAX_PENDING_EXTERNAL_JOINS` queue:
+
+- **Dedup by `ProposalRef`** in the receipt gate. A repeat of a proposal the
+  group already holds is reported `stored: true` — because it is: the group holds
+  this exact request, and the proposer's "did it land" answer is yes.
+- **A cap of 64** (`MAX_PENDING_PROPOSALS`), applied on **both** sides — the
+  receipt gate and this device's own `propose_*`. Both, because an honest device
+  must not publish a proposal its peers' gates would refuse for being over the
+  cap; it would then hold a proposal nobody else does and sweep a commit they
+  cannot resolve.
+
+**At the cap the late proposer pays, never the group.** A proposal arriving into
+a full set is **refused** (`stored: false`) rather than evicting an incumbent.
+The direction is not a preference: a commit that references an evicted proposal
+can no longer be resolved and is refused with `InvalidCommit(MissingProposal)` on
+**the evicting member alone** — so refusing the newcomer costs it a re-proposal
+after the next sweep, while evicting an incumbent would cost the whole group its
+next commit.
+
+> **The honest bound: the cap ceilings the quadratic park cost, it does not
+> remove it.** At 64 pending, the clone-clear-encrypt-restore round trip is still
+> a per-outgoing-message cost for every member of the group, in the single-digit
+> milliseconds. **The dedup is what keeps the realistic count small**; the cap is
+> only what stops the pathological one being unbounded. A future arc that wants
+> the cost gone needs a different park, not a smaller number.
+
+Pinned by `repeating_one_proposal_does_not_grow_the_pending_set` and
+`the_pending_set_is_capped_and_the_late_proposer_pays`.
+
+#### `set_group_roles` no longer self-forks where its twin refuses
+
+**Rated LOW, and an asymmetry rather than a new hazard.**
+`transfer_ownership` has validated up front since it landed
+(`plan_ownership_transfer`), while `set_group_roles` — the path transfer is
+*built on*, and the one a client actually calls to promote or demote an admin —
+took any table the caller handed it and **merged eagerly**. So the two disagreed
+about the same commit: a table naming an owner no leaf holds was refused by name
+through one door and, through the other, built, merged locally, published, and
+then refused by every peer's `owner_survives` — leaving its author alone at N+1.
+`refuse_unenforceable_role_table` now runs the peer's checks locally **before**
+any MLS state is touched, against the **pre-merge** table (ADR-0022 Finding 2, so
+an ownership transfer still passes: the transferor is still the owner at the
+moment it mints one). The peer gate remains the enforcement; this only stops the
+caller self-forking on a commit it could have been told about. Pinned by
+`set_group_roles_refuses_locally_what_every_peer_would_refuse`.
+
+> **This was not free, contrary to how it reads.** Four existing tests used
+> `set_group_roles` as their *adversary* seam — the way they built a commit no
+> peer should accept. Each was migrated to build through the raw extension path
+> instead, rather than weakening the fix to keep them compiling. Every
+> peer-gate assertion is unchanged.
 
 **Two consequences of decision 3 that are easy to miss.**
 
@@ -1923,14 +2092,33 @@ crypto review.**
 
 ## Open questions
 
-- **Decision 2's variant choice — a candidate heartbeat, or a staggered takeover?**
-  **The live one, and the maintainer's.** Variant 1 makes "active admin devices
-  elect the committer" literal and removes the last timing constant, at the cost of
-  multiplying an anti-pattern ADR-0024 already accepted grudgingly (continuous
-  journal rows, retained to the 30-day prune) and of publishing each candidate's
-  activity schedule to the whole group. Variant 2 needs no new signal but keeps one
-  unmeasured stagger interval. Recommendation in decision 2: build variant 1, keep
-  variant 2 as the fallback. **Neither is decided here.**
+- **~~Decision 2's variant choice — a candidate heartbeat, or a staggered
+  takeover?~~ Answered — the maintainer chose the candidate heartbeat (variant 1).**
+  Variant 1 makes "active admin devices elect the committer" literal and removes the
+  last timing constant. The cost stands as recorded and was accepted with it: it
+  multiplies an anti-pattern ADR-0024 already accepted grudgingly (continuous
+  journal rows, retained to the 30-day prune) and publishes each candidate's
+  activity schedule to the whole group. The maintainer's ground for accepting it is
+  that online/offline visibility is ordinary messenger functionality, so the privacy
+  objection does not outweigh making the model literal. **Variant 2 is kept as the
+  documented fallback**, not deleted — it needs no new signal and remains the answer
+  if the beacon's cost proves worse in practice than on paper.
+
+  **The correctness caveat is unchanged by the choice and must not be read as
+  softened by it: a heartbeat removes the *wait*, not the *race*.** Each candidate
+  computes over its own view of who beaconed recently, views differ by poll timing,
+  and a beacon is stale by up to one interval — so two candidates can still both
+  conclude they are the lowest-ranked active one. The stand-down journal re-read and
+  the bounded rollback remain **required** in both variants. Anyone reading variant 1
+  as correct-by-construction has mis-read it.
+
+  **What the choice costs in scope**, which the ADR must not leave implicit: variant
+  2 needed no new sprint, because its stagger is client orchestration inside S4-S6.
+  Variant 1 is a sprint that does not yet exist in the decomposition — it needs a
+  beacon envelope kind in `lakko-contacts`, **both** FFI surfaces (`lakko-presence`
+  is exposed on wasm only, with no UniFFI counterpart and no caller under
+  `apps/web/src`), and a beacon-plus-freshness fold on all three clients. It must be
+  scoped before S4, since S4 cannot elect a committer without it.
 - **~~The retry budget and its user-visible exhaustion state.~~ Answered — there is
   no retry budget.** The revised decision 2 removes both the cap and the terminal
   failure it produced: a request waits indefinitely rather than exhausting a budget,
