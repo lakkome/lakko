@@ -3184,6 +3184,17 @@ private class GroupRecord(
                     // `mint_epoch` the gate orders it by.
                     pushRoutingSecretSink?.invoke(event.secret, event.mintEpoch, event.senderLeaf)
                 }
+                is IncomingChatEvent.CommitterBeacon -> {
+                    // ADR-0045 decision 2 — a committer-liveness beacon. Not a
+                    // timeline row: it is an observation about WHICH owner /
+                    // admin can sweep the pending proposal set, carried by the
+                    // event's `senderLeaf` + `createdAt` (the two things the
+                    // field-less envelope deliberately omits). The takeover
+                    // fold that will consume it belongs to the client sprints
+                    // and is not built yet, so the beacon is simply consumed
+                    // here and never reaches `messages`.
+                    Unit
+                }
             }
         }
         cursor = result.cursor

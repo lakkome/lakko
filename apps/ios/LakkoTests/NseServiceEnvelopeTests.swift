@@ -37,9 +37,11 @@ import XCTest
 /// `lakko_contacts::push_routing::decode_push_routing_secret` and
 /// `lakko_contacts::committer_beacon::decode_committer_beacon` apply (domain
 /// prefix, then length / version). Those codecs themselves are covered by
-/// `crates/lakko-ffi-extension`'s Rust tests, including a golden that pins the
-/// two constants this file's routing pre-filter keys on and a test pinning that
-/// an unfiltered beacon really does render as chat text.
+/// `crates/lakko-ffi-extension`'s Rust tests, including one golden per envelope
+/// kind pinning the constants each pre-filter keys on — `(70, 0x6c)` for the
+/// routing peek and `(27, 0x6c)` for the beacon peek, the latter also pinning
+/// the exported `committerBeaconEnvelopeLen()` the NSE injects — and a test
+/// pinning that an unfiltered beacon really does render as chat text.
 final class NseServiceEnvelopeTests: XCTestCase {
 
     // MARK: - Wire fixtures
@@ -91,6 +93,16 @@ final class NseServiceEnvelopeTests: XCTestCase {
         return d
     }()
 
+    /// Stand-in for the slim FFI's `committerBeaconEnvelopeLen()`, which the
+    /// NSE passes in production. This target links no
+    /// `LakkoCoreExtension.xcframework`, so the value is restated here for the
+    /// same reason the codecs below are stubbed — and, like them, it is pinned
+    /// on the Rust side: `golden_pins_the_swift_prefilter_shape` in
+    /// `crates/lakko-ffi-extension` asserts the exported length equals the
+    /// composed wire, so a revision fails Rust CI. ``testBeaconFixtureMatchesTheAdvertisedLength``
+    /// keeps this fixture honest against the beacon this file builds.
+    private static let beaconEnvelopeLen = 27
+
     /// A well-formed committer beacon: `domain(26) || version(1)=0x01`, 27
     /// bytes. FIELD-LESS, so every beacon on the wire is byte-identical — the
     /// property that lets the codec be a total test.
@@ -121,7 +133,8 @@ final class NseServiceEnvelopeTests: XCTestCase {
             nseIsServiceEnvelope(
                 routingEnvelope(),
                 decodesAsPushRoutingSecret: decodesAsPushRoutingSecret,
-                decodesAsCommitterBeacon: decodesAsCommitterBeacon
+                decodesAsCommitterBeacon: decodesAsCommitterBeacon,
+                committerBeaconEnvelopeLen: Self.beaconEnvelopeLen
             ),
             "a v2 push-routing-secret envelope must never be rendered"
         )
@@ -158,7 +171,8 @@ final class NseServiceEnvelopeTests: XCTestCase {
             nseIsServiceEnvelope(
                 decoy,
                 decodesAsPushRoutingSecret: decodesAsPushRoutingSecret,
-                decodesAsCommitterBeacon: decodesAsCommitterBeacon
+                decodesAsCommitterBeacon: decodesAsCommitterBeacon,
+                committerBeaconEnvelopeLen: Self.beaconEnvelopeLen
             ),
             "the codec, not the peek, is the authority"
         )
@@ -176,7 +190,8 @@ final class NseServiceEnvelopeTests: XCTestCase {
             nseIsServiceEnvelope(
                 v1,
                 decodesAsPushRoutingSecret: decodesAsPushRoutingSecret,
-                decodesAsCommitterBeacon: decodesAsCommitterBeacon
+                decodesAsCommitterBeacon: decodesAsCommitterBeacon,
+                committerBeaconEnvelopeLen: Self.beaconEnvelopeLen
             )
         )
     }
@@ -197,7 +212,8 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 nseIsServiceEnvelope(
                     payload,
                     decodesAsPushRoutingSecret: decodesAsPushRoutingSecret,
-                    decodesAsCommitterBeacon: decodesAsCommitterBeacon
+                    decodesAsCommitterBeacon: decodesAsCommitterBeacon,
+                    committerBeaconEnvelopeLen: Self.beaconEnvelopeLen
                 ),
                 "call signaling must never be rendered"
             )
@@ -219,37 +235,103 @@ final class NseServiceEnvelopeTests: XCTestCase {
             nseIsServiceEnvelope(
                 committerBeacon(),
                 decodesAsPushRoutingSecret: decodesAsPushRoutingSecret,
-                decodesAsCommitterBeacon: decodesAsCommitterBeacon
+                decodesAsCommitterBeacon: decodesAsCommitterBeacon,
+                committerBeaconEnvelopeLen: Self.beaconEnvelopeLen
             ),
             "a committer beacon must never be rendered"
         )
     }
 
-    /// The beacon peek keys on the leading domain byte ALONE — deliberately no
-    /// length test, since the slim NSE surface does not export
-    /// `committerBeaconEnvelopeLen` and hardcoding 27 would be an unpinned wire
-    /// constant. Pinned here so widening or narrowing it is a visible change.
-    func testBeaconPreFilterIsFirstByteOnly() {
-        XCTAssertTrue(nseLooksLikeCommitterBeacon(committerBeacon()))
-        XCTAssertTrue(
-            nseLooksLikeCommitterBeacon(Data([0x6C])),
-            "one leading `l` is enough to reach the codec — the peek never narrows"
-        )
-        XCTAssertFalse(nseLooksLikeCommitterBeacon(chatEnvelope), "a JSON body starts with `{`")
-        XCTAssertFalse(nseLooksLikeCommitterBeacon(Data()), "empty")
+    /// The fixture length must be the length this file actually BUILDS, or
+    /// every exact-length assertion below would be self-consistent nonsense.
+    /// The corresponding Rust golden pins the exported value against the
+    /// composed Rust wire; between them the Swift peek and the codec cannot
+    /// disagree about the size of a beacon.
+    func testBeaconFixtureMatchesTheAdvertisedLength() {
+        XCTAssertEqual(committerBeacon().count, Self.beaconEnvelopeLen)
+        XCTAssertEqual(Self.beaconDomain.count, 26, "domain(26) || version(1)")
     }
 
-    /// The peek alone must NOT suppress: a genuine legacy plaintext beginning
-    /// with `l` clears it, and the codec is what decides. Without this the
-    /// filter would silently swallow real messages.
+    /// The beacon peek is the exact envelope length PLUS the leading domain
+    /// byte — the same two-part shape as the routing peek, with the length
+    /// injected from the slim FFI's `committerBeaconEnvelopeLen()` rather than
+    /// hand-copied. Pinned here so narrowing or widening it is a visible change.
+    func testBeaconPreFilterIsLengthAndFirstByte() {
+        XCTAssertTrue(
+            nseLooksLikeCommitterBeacon(committerBeacon(), envelopeLen: Self.beaconEnvelopeLen)
+        )
+        XCTAssertFalse(
+            nseLooksLikeCommitterBeacon(chatEnvelope, envelopeLen: Self.beaconEnvelopeLen),
+            "a JSON body starts with `{`"
+        )
+        XCTAssertFalse(
+            nseLooksLikeCommitterBeacon(Data(), envelopeLen: Self.beaconEnvelopeLen),
+            "empty"
+        )
+    }
+
+    /// The LENGTH half must discriminate: bytes with the right leading `l` but
+    /// the wrong size do not clear the peek. This is the assertion the
+    /// first-byte-only peek could not make, and it is why the FFI export exists
+    /// — a length is only safe to test when it is sourced, not guessed.
+    func testBeaconPreFilterRejectsAWrongLength() {
+        XCTAssertFalse(
+            nseLooksLikeCommitterBeacon(Data([0x6C]), envelopeLen: Self.beaconEnvelopeLen),
+            "one leading `l` is not a beacon"
+        )
+        XCTAssertFalse(
+            nseLooksLikeCommitterBeacon(
+                committerBeacon().dropLast(),
+                envelopeLen: Self.beaconEnvelopeLen
+            ),
+            "one byte short"
+        )
+        XCTAssertFalse(
+            nseLooksLikeCommitterBeacon(
+                committerBeacon() + Data([0x00]),
+                envelopeLen: Self.beaconEnvelopeLen
+            ),
+            "one byte long"
+        )
+    }
+
+    /// A beacon is FIELD-LESS, so the exact-length peek can never be too narrow
+    /// for a legitimate one: every beacon on the wire is byte-identical, and
+    /// each of them clears it. This is the property that makes an exact length
+    /// safe here — the reasoning the first-byte-only peek had to avoid.
+    func testEveryLegitimateBeaconClearsTheLengthPeek() {
+        XCTAssertEqual(committerBeacon(), committerBeacon(), "field-less ⇒ byte-identical")
+        XCTAssertTrue(
+            nseLooksLikeCommitterBeacon(committerBeacon(), envelopeLen: Self.beaconEnvelopeLen)
+        )
+        // Even a wrong-VERSION beacon is the right length, so it reaches the
+        // codec — which is what refuses it (see the fail-closed test below).
+        XCTAssertTrue(
+            nseLooksLikeCommitterBeacon(
+                committerBeacon(version: 0xFF),
+                envelopeLen: Self.beaconEnvelopeLen
+            ),
+            "the version gate belongs to the codec, not the peek"
+        )
+    }
+
+    /// The peek alone must NOT suppress: a plaintext that is the right length
+    /// and begins with `l` clears it, and the codec is what decides. Without
+    /// this the filter would silently swallow real messages.
     func testBeaconPeekAloneDoesNotSuppress() {
-        let realMessage = Data("lunch at six?".utf8)
-        XCTAssertTrue(nseLooksLikeCommitterBeacon(realMessage), "it does clear the cheap peek")
+        // 27 bytes, leading `l` — clears the tightened peek exactly.
+        let realMessage = Data("lunch at six? bring a map".utf8) + Data([0x21, 0x21])
+        XCTAssertEqual(realMessage.count, Self.beaconEnvelopeLen)
+        XCTAssertTrue(
+            nseLooksLikeCommitterBeacon(realMessage, envelopeLen: Self.beaconEnvelopeLen),
+            "it does clear the cheap peek"
+        )
         XCTAssertFalse(
             nseIsServiceEnvelope(
                 realMessage,
                 decodesAsPushRoutingSecret: decodesAsPushRoutingSecret,
-                decodesAsCommitterBeacon: decodesAsCommitterBeacon
+                decodesAsCommitterBeacon: decodesAsCommitterBeacon,
+                committerBeaconEnvelopeLen: Self.beaconEnvelopeLen
             ),
             "the codec, not the peek, is the authority"
         )
@@ -262,7 +344,8 @@ final class NseServiceEnvelopeTests: XCTestCase {
             nseIsServiceEnvelope(
                 committerBeacon(version: 0xFF),
                 decodesAsPushRoutingSecret: decodesAsPushRoutingSecret,
-                decodesAsCommitterBeacon: decodesAsCommitterBeacon
+                decodesAsCommitterBeacon: decodesAsCommitterBeacon,
+                committerBeaconEnvelopeLen: Self.beaconEnvelopeLen
             )
         )
     }
@@ -282,7 +365,8 @@ final class NseServiceEnvelopeTests: XCTestCase {
             nseIsServiceEnvelope(
                 chatEnvelope,
                 decodesAsPushRoutingSecret: decodesAsPushRoutingSecret,
-                decodesAsCommitterBeacon: decodesAsCommitterBeacon
+                decodesAsCommitterBeacon: decodesAsCommitterBeacon,
+                committerBeaconEnvelopeLen: Self.beaconEnvelopeLen
             ),
             "a chat envelope must still render"
         )
@@ -290,7 +374,8 @@ final class NseServiceEnvelopeTests: XCTestCase {
             nseIsServiceEnvelope(
                 Data(),
                 decodesAsPushRoutingSecret: decodesAsPushRoutingSecret,
-                decodesAsCommitterBeacon: decodesAsCommitterBeacon
+                decodesAsCommitterBeacon: decodesAsCommitterBeacon,
+                committerBeaconEnvelopeLen: Self.beaconEnvelopeLen
             ),
             "empty bytes are not a service envelope"
         )
@@ -322,7 +407,8 @@ final class NseServiceEnvelopeTests: XCTestCase {
             if nseIsServiceEnvelope(
                 payload,
                 decodesAsPushRoutingSecret: decodesAsPushRoutingSecret,
-                decodesAsCommitterBeacon: decodesAsCommitterBeacon
+                decodesAsCommitterBeacon: decodesAsCommitterBeacon,
+                committerBeaconEnvelopeLen: NseServiceEnvelopeTests.beaconEnvelopeLen
             ) {
                 suppressed += 1
                 return nil

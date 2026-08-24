@@ -24,19 +24,28 @@
 //! silently drift on the next version bump (the failure class ADR-0044
 //! documents).
 //!
-//! ## Scope: DECODE only
+//! ## Scope: DECODE + the envelope length, nothing else
 //!
-//! [`decode_committer_beacon`] and nothing else.
+//! [`decode_committer_beacon`] — the authoritative classification — plus
+//! [`committer_beacon_envelope_len`], the one wire constant the NSE's cheap
+//! pre-filter needs so it does not hand-copy `27` into Swift (the ADR-0044
+//! drift class: a stale literal fails in the DANGEROUS direction, silently
+//! ceasing to suppress beacons).
+//!
 //! `compose_committer_beacon` / `acting_committer_verdict` /
-//! `should_emit_beacon` and the timing constants are DELIBERATELY absent: the
+//! `should_emit_beacon` and the TIMING constants are DELIBERATELY absent: the
 //! NSE only asks "is this a service envelope I must not render?". It never
 //! emits a beacon — it structurally cannot sweep (the read-only-throwaway
 //! discipline, C-59), so a beacon from it would be a lie — and it never folds a
 //! verdict, because it holds no observation history and takes no committer
 //! decision. Keeping the surface to the classification question is the same
-//! discipline the rest of this crate follows.
+//! discipline the rest of this crate follows; a length is a pure value on the
+//! read side of that question, not a step toward emitting one.
 
-use lakko_contacts::committer_beacon::decode_committer_beacon as rust_decode_committer_beacon;
+use lakko_contacts::committer_beacon::{
+    decode_committer_beacon as rust_decode_committer_beacon, COMMITTER_BEACON_ENVELOPE_DOMAIN_V1,
+    COMMITTER_BEACON_PAYLOAD_LEN,
+};
 
 use crate::FfiError;
 
@@ -61,6 +70,32 @@ pub fn decode_committer_beacon(plaintext: Vec<u8>) -> Result<(), FfiError> {
     rust_decode_committer_beacon(&plaintext)
         .map(|_| ())
         .map_err(|err| FfiError::Contacts(err.to_string()))
+}
+
+/// Exact byte length of a composed committer beacon (ADR-0045) — the domain
+/// separator plus the one-byte payload.
+///
+/// Shape-identical to `lakko-ffi-uniffi`'s `committer_beacon_envelope_len` (the
+/// full surface the APP links), deliberately: the two frameworks are loaded
+/// side by side on one device, and one wire fact must not be named two ways.
+/// The value is DERIVED from the core's own constants rather than restated, so
+/// a wire revision moves it here automatically.
+///
+/// Exposed for the cheap length pre-filter the NSE runs before the
+/// authoritative [`decode_committer_beacon`], so that length is not hardcoded
+/// on a fourth platform. Because the beacon is field-less, every beacon is
+/// byte-identical, so an exact-length pre-filter is a total test of the size.
+///
+/// A pre-filter that is too NARROW fails in the dangerous direction — it stops
+/// suppressing beacons and restores the garbage-notification defect — which is
+/// why this is exported rather than copied: `golden_pins_the_swift_prefilter_shape`
+/// below makes a wire drift fail Rust CI instead of silently un-suppressing the
+/// Swift filter.
+#[uniffi::export]
+#[must_use]
+pub fn committer_beacon_envelope_len() -> u32 {
+    u32::try_from(COMMITTER_BEACON_ENVELOPE_DOMAIN_V1.len() + COMMITTER_BEACON_PAYLOAD_LEN)
+        .unwrap_or(u32::MAX)
 }
 
 #[cfg(test)]
@@ -131,6 +166,72 @@ mod tests {
         }
         // ...and the filter arm catches it first.
         decode_committer_beacon(wire).expect("the filter arm must recognise it");
+    }
+
+    /// The Swift-side cheap pre-filter keys on
+    /// `count == committerBeaconEnvelopeLen() && first == 0x6c`. Pin both here,
+    /// exactly as `push_routing::golden_pins_the_swift_prefilter_shape` does for
+    /// the sibling envelope, so a wire change fails a Rust test rather than
+    /// silently narrowing the NSE peek — which would stop suppressing beacons
+    /// and restore the garbage-notification defect this filter closes.
+    ///
+    /// The 27 and the `0x6c` are written as LITERALS on purpose. Asserting the
+    /// exported length against the same constants it is computed from would be a
+    /// tautology that no wire revision can fail; a literal is what makes the
+    /// golden discriminate.
+    #[test]
+    fn golden_pins_the_swift_prefilter_shape() {
+        let wire = compose_committer_beacon();
+        assert_eq!(wire.len(), 27, "NSE pre-filter pins the envelope length");
+        assert_eq!(wire[0], 0x6c, "NSE pre-filter pins the first domain byte");
+        assert_eq!(
+            committer_beacon_envelope_len(),
+            27,
+            "the exported length is what Swift reads — it must equal the wire",
+        );
+    }
+
+    /// The exported length must be the length actually COMPOSED, not merely a
+    /// number that agrees with itself. This is what lets the Swift pre-filter
+    /// treat `committerBeaconEnvelopeLen()` as the wire truth: if `compose` ever
+    /// grew a field without the constants moving, this fails here rather than in
+    /// a silently-narrowed notification filter.
+    #[test]
+    fn advertised_length_matches_the_composed_wire() {
+        let wire = compose_committer_beacon();
+        assert_eq!(
+            u32::try_from(wire.len()).expect("a beacon is far below u32::MAX"),
+            committer_beacon_envelope_len(),
+        );
+        // Field-less ⇒ byte-identical, so an exact-length peek is a total test
+        // of the size and can never be too narrow for a legitimate beacon.
+        assert_eq!(wire, compose_committer_beacon());
+        // ...and that exact length is what the authoritative codec accepts.
+        decode_committer_beacon(wire).expect("the composed length must decode");
+    }
+
+    /// The pre-filter's length gate must DISCRIMINATE: one byte either side of
+    /// the advertised length is not a beacon, and the codec agrees. Pins that
+    /// the exact-equality peek Swift now runs never widens (an over-long body
+    /// slipping through as a service envelope would suppress a real message).
+    #[test]
+    fn a_wrong_length_is_not_a_beacon() {
+        let len = committer_beacon_envelope_len() as usize;
+        let mut short = compose_committer_beacon();
+        short.pop();
+        assert_ne!(short.len(), len);
+        assert!(matches!(
+            decode_committer_beacon(short),
+            Err(FfiError::Contacts(_)),
+        ));
+
+        let mut long = compose_committer_beacon();
+        long.push(0x00);
+        assert_ne!(long.len(), len);
+        assert!(matches!(
+            decode_committer_beacon(long),
+            Err(FfiError::Contacts(_)),
+        ));
     }
 
     /// Cross-kind isolation at the slim boundary: the two service-envelope arms

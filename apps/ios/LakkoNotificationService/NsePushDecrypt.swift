@@ -447,35 +447,35 @@ public func nseLooksLikePushRoutingSecret(_ bytes: Data) -> Bool {
     bytes.count == pushRoutingEnvelopeLen && bytes.first == pushRoutingEnvelopeFirstByte
 }
 
-/// Cheap PRE-FILTER for an ADR-0045 committer-liveness beacon: the leading
-/// domain byte, and DELIBERATELY NOT a length test.
+/// Cheap PRE-FILTER for an ADR-0045 committer-liveness beacon: the exact
+/// envelope length plus the first domain byte — the same two-part shape as the
+/// routing peek above.
 ///
-/// ## Why no length here, unlike the routing peek above
+/// ## Why the length arrives as a parameter
 ///
-/// The beacon envelope is 27 bytes, and the FFI exports that as
-/// `committerBeaconEnvelopeLen()` precisely so no client hand-copies it — but
-/// that export is on the FULL `lakko-ffi-uniffi` surface the APP links, not on
-/// the slim `lakko-ffi-extension` this extension links, which carries
-/// `decodeCommitterBeacon` and nothing else of the beacon module. Writing `27`
-/// here would therefore be a hand-copied wire constant with no golden pinning
-/// it — the drift class ADR-0044 documents — and it would fail in the
-/// DANGEROUS direction: a length gone stale at the next envelope revision
-/// silently stops suppressing beacons, restoring the exact defect this filter
-/// closes.
+/// `envelopeLen` is the slim FFI's `committerBeaconEnvelopeLen()`, which derives
+/// it from `lakko_contacts`' own domain + payload constants, so a wire revision
+/// moves this peek automatically. It is INJECTED rather than read here for the
+/// same reason `nseIsServiceEnvelope` injects its decoders: this file is
+/// compiled into the FFI-free unit-test target, so it cannot call the FFI
+/// itself. Hand-copying `27` into this file was the alternative and is exactly
+/// what the export exists to avoid — an unpinned wire literal, the drift class
+/// ADR-0044 documents, failing in the DANGEROUS direction if it went stale
+/// (a too-narrow peek silently stops suppressing beacons, restoring the exact
+/// defect this filter closes). The Rust golden
+/// `golden_pins_the_swift_prefilter_shape` pins the exported value against the
+/// composed wire, so a drift fails Rust CI rather than a notification.
 ///
-/// A first-byte peek can only ever WIDEN what reaches the codec, never narrow
-/// it, so no drift can un-suppress. The cost is one extra FFI call for a
-/// message that begins with `l` and is not a routing envelope; the benefit is
-/// that the codec remains the complete authority.
-///
-/// ## The beacon can afford that, and the routing envelope could not
+/// ## Why an exact length is safe here
 ///
 /// A beacon carries NO FIELDS — no epoch, no identity, no timestamp — so every
-/// beacon on the wire is byte-identical, and `decodeCommitterBeacon` is a TOTAL
-/// test of that one value. For the routing secret the peek had to stay in front
-/// of the codec as a hot-path guard; here it is only that, never a verdict.
-public func nseLooksLikeCommitterBeacon(_ bytes: Data) -> Bool {
-    bytes.first == committerBeaconEnvelopeFirstByte
+/// beacon on the wire is byte-identical and this length is a TOTAL test of the
+/// size; it can never be too narrow for a legitimate beacon. The peek is still
+/// only a hot-path guard, never a verdict: `decodeCommitterBeacon` remains the
+/// complete authority, and this merely keeps an FFI call off the path for every
+/// ordinary chat message that happens to begin with `l`.
+public func nseLooksLikeCommitterBeacon(_ bytes: Data, envelopeLen: Int) -> Bool {
+    bytes.count == envelopeLen && bytes.first == committerBeaconEnvelopeFirstByte
 }
 
 /// `true` when an already-DECRYPTED MLS application body is an in-group SERVICE
@@ -497,11 +497,14 @@ public func nseLooksLikeCommitterBeacon(_ bytes: Data) -> Bool {
 /// owner and admin every 60 s, so in an active group the newest journal row —
 /// the one this handler previews — is frequently a beacon.
 ///
-/// `decodesAsPushRoutingSecret` / `decodesAsCommitterBeacon` are injected rather
-/// than called directly so this function stays FFI-free and compiles into the
-/// unit-test target; the NSE passes the slim FFI's `decodePushRoutingSecret`
-/// and `decodeCommitterBeacon`. Both are REQUIRED, with no default: a default
-/// of "never this kind" would let a caller silently reinstate the defect.
+/// `decodesAsPushRoutingSecret` / `decodesAsCommitterBeacon` /
+/// `committerBeaconEnvelopeLen` are injected rather than read directly so this
+/// function stays FFI-free and compiles into the unit-test target; the NSE
+/// passes the slim FFI's `decodePushRoutingSecret`, `decodeCommitterBeacon` and
+/// `committerBeaconEnvelopeLen()`. All three are REQUIRED, with no default: a
+/// default decoder of "never this kind" would let a caller silently reinstate
+/// the defect, and a default length would re-introduce the hand-copied wire
+/// constant the export exists to remove.
 ///
 /// Returning `true` makes the caller drop the row, and the extraction loop then
 /// falls back naturally to the newest REAL chat message (or, with none, to the
@@ -509,11 +512,15 @@ public func nseLooksLikeCommitterBeacon(_ bytes: Data) -> Bool {
 public func nseIsServiceEnvelope(
     _ bytes: Data,
     decodesAsPushRoutingSecret: (Data) -> Bool,
-    decodesAsCommitterBeacon: (Data) -> Bool
+    decodesAsCommitterBeacon: (Data) -> Bool,
+    committerBeaconEnvelopeLen: Int
 ) -> Bool {
     if nseLooksLikeCallSignaling(bytes) { return true }
     if nseLooksLikePushRoutingSecret(bytes), decodesAsPushRoutingSecret(bytes) { return true }
-    if nseLooksLikeCommitterBeacon(bytes), decodesAsCommitterBeacon(bytes) { return true }
+    if nseLooksLikeCommitterBeacon(bytes, envelopeLen: committerBeaconEnvelopeLen),
+       decodesAsCommitterBeacon(bytes) {
+        return true
+    }
     return false
 }
 

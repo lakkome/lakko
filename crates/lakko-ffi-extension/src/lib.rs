@@ -34,6 +34,10 @@
 //!   and hits the same lossy fallback. Emitting one is deliberately NOT
 //!   exposed: this process structurally cannot sweep (C-59), so a beacon from
 //!   it would be a lie.
+//! - [`committer_beacon::committer_beacon_envelope_len`] — the one wire
+//!   constant that filter's cheap pre-peek needs, so the length is not
+//!   hand-copied into Swift where nothing pins it. A pure value on the READ
+//!   side of the classification question; it opens no write path.
 //!
 //! There is deliberately **no compose / send / call / channel / transport
 //! surface**: the NSE only reads and decrypts, then discards. It NEVER writes

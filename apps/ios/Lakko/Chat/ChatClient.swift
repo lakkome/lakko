@@ -412,7 +412,13 @@ public final class ChatClient {
 
     // MARK: - ProcessedMessage → IncomingChatEvent
 
-    private static func toEvent(
+    /// Internal rather than private so `LakkoTests` can drive the
+    /// classification chain against a real ``ProcessedMessage`` and real
+    /// FFI-composed envelopes. Reimplementing the chain in a test double is
+    /// the failure mode this avoids: a double whose parse THROWS on binary
+    /// input where the real ``parseBodyEnvelope(bytes:)`` DEGRADES would make
+    /// the service-envelope tests pass with the filter arms deleted.
+    static func toEvent(
         messageId: Int64,
         createdAt: String,
         processed: ProcessedMessage
@@ -447,6 +453,23 @@ public final class ChatClient {
                     messageId: messageId,
                     secret: decoded.secret,
                     mintEpoch: decoded.mintEpoch,
+                    senderLeaf: senderLeaf,
+                    createdAt: createdAt
+                )
+            }
+            // ADR-0045 — sniff for a committer-liveness beacon before the
+            // chat parser. Without this arm the beacon reaches
+            // ``parseBodyEnvelope(bytes:)``, whose lossy-UTF-8 fallback
+            // degrades it (correctly, per its own contract — legacy plaintext
+            // must still render) into a visible bubble reading
+            // `lakko/committer-beacon/v1` plus two control bytes. Never a
+            // timeline row: it is an observation about who can sweep, and the
+            // two things the field-less envelope deliberately omits — WHO and
+            // HOW OLD — ride along from the MLS-authenticated `senderLeaf`
+            // and the DS row's `createdAt`.
+            if Self.looksLikeCommitterBeacon(data) {
+                return .committerBeacon(
+                    messageId: messageId,
                     senderLeaf: senderLeaf,
                     createdAt: createdAt
                 )
@@ -567,6 +590,43 @@ public final class ChatClient {
         guard let first = bytes.first else { return false }
         return first == 0x52 || first == 0x5A || first == 0x62 || first == 0x6A
     }
+
+    /// First byte of the ADR-0045 committer-beacon domain separator (`'l'` of
+    /// `"lakko/committer-beacon/v1"` + a trailing NUL). The cheap half of the
+    /// pre-filter; the FFI `decodeCommitterBeacon` behind it is the
+    /// authoritative fail-closed check. The same `'l'` every `lakko/…` domain
+    /// starts with, so on its own it decides nothing — it only skips an FFI
+    /// call for a chat envelope (which starts `{`).
+    private static let committerBeaconFirstByte: UInt8 = 0x6C
+
+    /// The beacon's exact wire length, read from the FFI rather than written
+    /// as a local `27`. The constant exists in
+    /// `crates/lakko-contacts/src/committer_beacon.rs` and is exported
+    /// precisely so the hosts do not each carry a copy of a number nothing
+    /// would pin; the foreground app links the full `LakkoCore`, so there is
+    /// no reason to compromise here the way the slim NSE surface once had to.
+    private static let committerBeaconLen = Int(committerBeaconEnvelopeLen())
+
+    /// ADR-0045 — is this application plaintext a committer-liveness beacon?
+    ///
+    /// Unlike the other envelope filters in this file, the length-plus-prefix
+    /// peek is a COMPLETE test rather than merely a fast path: the beacon
+    /// carries no fields at all, so every beacon on the wire is byte-identical
+    /// and the exact length plus the domain prefix already pin all but the
+    /// version byte. The FFI decode behind it is confirmation, and it is what
+    /// makes the arm fail-closed on an unknown schema version — a future v2
+    /// beacon this build does not understand is NOT silently swallowed here;
+    /// it falls through to the chat parser like any other unrecognised
+    /// plaintext.
+    static func looksLikeCommitterBeacon(_ bytes: Data) -> Bool {
+        guard bytes.count == committerBeaconLen,
+              bytes.first == committerBeaconFirstByte
+        else { return false }
+        // Not a beacon (wrong domain / unknown version) → `false` so the
+        // caller runs the normal chat parse.
+        guard (try? decodeCommitterBeacon(plaintext: bytes)) != nil else { return false }
+        return true
+    }
 }
 
 // MARK: - Result types
@@ -670,6 +730,29 @@ public enum IncomingChatEvent: Equatable {
         messageId: Int64,
         secret: Data,
         mintEpoch: UInt64,
+        senderLeaf: UInt32?,
+        createdAt: String
+    )
+    /// ADR-0045 decision 2 — a committer-liveness beacon: an owner / admin
+    /// announcing it is foregrounded and able to sweep the pending proposal
+    /// set. Never a timeline bubble.
+    ///
+    /// The envelope carries NO fields at all (a fixed 27 bytes, identical on
+    /// every call and for every sender), deliberately: naming the sender would
+    /// add an unauthenticated identity claim next to the MLS-authenticated
+    /// one, and a self-reported timestamp would let a candidate hold the
+    /// committer duty by asserting its own freshness. So everything the
+    /// takeover fold needs comes from the two associated values here — WHO,
+    /// from the MLS-authenticated `senderLeaf`, and HOW OLD, from the DS row's
+    /// `createdAt` — which is exactly why this is surfaced as an event rather
+    /// than dropped inside the parser. The fold itself (`actingCommitter`) is
+    /// not built yet; this case is the seam it will consume.
+    ///
+    /// `senderLeaf` is `nil` for a control frame / external sender, which the
+    /// fold must treat as unusable (fail-closed — an unattributable beacon
+    /// proves no candidate is live).
+    case committerBeacon(
+        messageId: Int64,
         senderLeaf: UInt32?,
         createdAt: String
     )

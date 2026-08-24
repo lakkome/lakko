@@ -1648,6 +1648,13 @@ function ChatView(props: {
           }
           continue;
         }
+        // ADR-0045 decision 2 — a committer-liveness beacon. Not a timeline
+        // row: it is an observation about WHO can sweep the pending proposal
+        // set, which the takeover fold will consume (from `e.senderLeaf` +
+        // `e.createdAt`, the two things the field-less envelope deliberately
+        // does not carry). That fold is not built yet, so for now the beacon
+        // is simply consumed here and never reaches `rows()`.
+        if (e.kind === "committerBeacon") continue;
         if (incomingIds.has(e.messageId)) continue;
         fresh.push({ kind: "incoming", event: e });
       }
@@ -3805,6 +3812,11 @@ function TimelineBubble(props: {
       // never pushes it into `rows()`. Defensive.
       return null;
     }
+    if (ev.kind === "committerBeacon") {
+      // ADR-0045 — the receive loop consumes it and never pushes it into
+      // `rows()`. Defensive.
+      return null;
+    }
     // Incoming application message — never our own → Edit/Delete
     // are not offered (the author-only gate would reject our op
     // anyway); React is.
@@ -4551,6 +4563,11 @@ function timelineRowToPersisted(row: TimelineRow): PersistedMessage | null {
   if (row.event.kind === "pushRoutingSecret") {
     // ADR-0042 — consumed by the receive loop (persist + subscribe), never
     // materialised as a timeline row, so this branch is unreachable.
+    return null;
+  }
+  if (row.event.kind === "committerBeacon") {
+    // ADR-0045 — consumed by the receive loop, never materialised as a
+    // timeline row, so this branch is unreachable. Never persist it.
     return null;
   }
   // system

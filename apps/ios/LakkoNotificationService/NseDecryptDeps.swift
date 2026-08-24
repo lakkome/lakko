@@ -186,7 +186,8 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
         if nseIsServiceEnvelope(
             data,
             decodesAsPushRoutingSecret: Self.decodesAsPushRoutingSecret,
-            decodesAsCommitterBeacon: Self.decodesAsCommitterBeacon
+            decodesAsCommitterBeacon: Self.decodesAsCommitterBeacon,
+            committerBeaconEnvelopeLen: Self.committerBeaconEnvelopeLength
         ) {
             return nil
         }
@@ -231,7 +232,8 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
     ///
     /// Unlike the routing case, the Swift-side peek in front of this is only a
     /// hot-path guard and never a partial verdict — every beacon on the wire is
-    /// the same 27 bytes, so this one decode is a total test of that value.
+    /// the same ``committerBeaconEnvelopeLength`` bytes, so this one decode is a
+    /// total test of that value.
     ///
     /// READ-ONLY: a pure decode. The NSE never EMITS a beacon and never folds a
     /// committer verdict — a beacon means "able to sweep", and this path
@@ -239,6 +241,20 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
     /// that costs the group a takeover. Only the yes/no is used.
     private static func decodesAsCommitterBeacon(_ bytes: Data) -> Bool {
         (try? decodeCommitterBeacon(plaintext: bytes)) != nil
+    }
+
+    /// The exact composed length of an ADR-0045 beacon, read from the slim FFI's
+    /// `committerBeaconEnvelopeLen()` — which derives it from `lakko_contacts`'
+    /// own domain + payload constants — so the NSE's cheap pre-filter carries no
+    /// hand-copied wire number. This is the FFI-side half of the injection
+    /// ``nseLooksLikeCommitterBeacon(_:envelopeLen:)`` describes; a Rust golden
+    /// pins the exported value against the composed wire, so a revision fails
+    /// Rust CI instead of silently narrowing this filter.
+    ///
+    /// READ-ONLY: a pure constant. It opens no write path and cannot weaken the
+    /// read-only-throwaway discipline (C-59).
+    private static var committerBeaconEnvelopeLength: Int {
+        Int(committerBeaconEnvelopeLen())
     }
 
     /// LOAD-BEARING: this does NOT persist — no `snapshotStorage()` /

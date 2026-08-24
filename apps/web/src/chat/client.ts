@@ -235,6 +235,35 @@ export type IncomingChatEvent =
        *  gate treats as unverifiable (fail-closed). */
       senderLeaf: number | undefined;
       createdAt: string;
+    }
+  | {
+      /** ADR-0045 decision 2 — a committer-liveness beacon: an owner /
+       *  admin announcing it is foregrounded and able to sweep the pending
+       *  proposal set. Never a timeline bubble.
+       *
+       *  The envelope carries NO fields at all (a fixed 27 bytes, identical
+       *  on every call and for every sender), deliberately: naming the
+       *  sender would add an unauthenticated identity claim next to the
+       *  MLS-authenticated one, and a self-reported timestamp would let a
+       *  candidate hold the committer duty by asserting its own freshness.
+       *  So everything the takeover fold needs comes from the two fields
+       *  below — WHO, from the MLS-authenticated sender leaf, and HOW OLD,
+       *  from the DS row — which is exactly why this is surfaced as an
+       *  event rather than dropped in the parser. The fold itself
+       *  (`actingCommitter`) is not built yet; this event is the seam it
+       *  will consume. */
+      kind: "committerBeacon";
+      messageId: number;
+      /** The MLS leaf that authored the beacon. The fold resolves it to a
+       *  signature public key via `group.members()` and then to an
+       *  ADR-0022 committer rank. `undefined` for a control frame /
+       *  external sender, which the fold must treat as unusable
+       *  (fail-closed — an unattributable beacon proves no candidate is
+       *  live). */
+      senderLeaf: number | undefined;
+      /** The DS row's timestamp — the beacon's age, which is the half of
+       *  the freshness question the bytes deliberately do not carry. */
+      createdAt: string;
     };
 
 /**
@@ -818,6 +847,20 @@ async function toEvent(
         createdAt,
       };
     }
+    // ADR-0045 — sniff for a committer-liveness beacon before the chat
+    // parser. Without this arm the beacon reaches `parseBodyEnvelope`,
+    // whose lossy-UTF-8 fallback degrades it (correctly, per its own
+    // contract) into a chat bubble reading `lakko/committer-beacon/v1`
+    // plus two control bytes. The wasm codec behind the peek is
+    // fail-closed on domain + version + exact length.
+    if (await looksLikeCommitterBeacon(bytes)) {
+      return {
+        kind: "committerBeacon",
+        messageId,
+        senderLeaf,
+        createdAt,
+      };
+    }
     // ADR-0023 — feed the application bytes through the
     // structured body parser, which surfaces the chat / edit /
     // delete / reaction discriminator. A plain chat message
@@ -899,4 +942,48 @@ function looksLikeCallSignaling(bytes: Uint8Array): boolean {
   if (bytes.length === 0) return false;
   const first = bytes[0] as number;
   return first === 0x52 || first === 0x5a || first === 0x62 || first === 0x6a;
+}
+
+/**
+ * First byte of the ADR-0045 committer-beacon domain separator (`'l'` of
+ * `"lakko/committer-beacon/v1\0"`). The cheap half of the pre-filter; the
+ * wasm `decodeCommitterBeacon` behind it is the authoritative fail-closed
+ * check. The same `'l'` every `lakko/…` domain starts with, so on its own it
+ * is not a decision — it only skips the wasm call for a chat envelope (which
+ * starts `{`).
+ */
+const COMMITTER_BEACON_FIRST_BYTE = 0x6c;
+
+/**
+ * ADR-0045 — is this application plaintext a committer-liveness beacon?
+ *
+ * Unlike every other envelope filter in this file, the length-plus-prefix peek
+ * here is a COMPLETE test rather than merely a fast path: the beacon carries no
+ * fields, so every beacon on the wire is byte-identical, and `length ===
+ * committerBeaconEnvelopeLen()` plus the domain prefix already pins all but the
+ * version byte. The wasm decode behind it is confirmation, and it is what makes
+ * the arm fail-closed on an unknown schema version — a future v2 beacon this
+ * build does not understand is NOT silently swallowed here; it falls through to
+ * the chat parser exactly as any other unrecognised plaintext does.
+ *
+ * The expected length comes from `committerBeaconEnvelopeLen()` on the FFI, not
+ * from a local `27`. The constant exists precisely so the hosts do not each
+ * carry their own copy of a number that lives in
+ * `crates/lakko-contacts/src/committer_beacon.rs`; the foreground links the
+ * full FFI, so there is no reason to compromise.
+ */
+async function looksLikeCommitterBeacon(bytes: Uint8Array): Promise<boolean> {
+  if (bytes.length === 0 || bytes[0] !== COMMITTER_BEACON_FIRST_BYTE) {
+    return false;
+  }
+  const wasm = await loadWasm();
+  if (bytes.length !== wasm.committerBeaconEnvelopeLen()) return false;
+  try {
+    wasm.decodeCommitterBeacon(bytes);
+    return true;
+  } catch {
+    // Not a beacon (wrong domain / unknown version) — fall through so the
+    // caller runs the normal chat parse.
+    return false;
+  }
 }

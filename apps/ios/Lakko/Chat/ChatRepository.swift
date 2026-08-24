@@ -2868,6 +2868,16 @@ private final class GroupRecord {
                 // along so the gate can also ask whether the envelope is NEWER
                 // than what is held, which is what refuses a stale replay.
                 pushRoutingSecretSink?(secret, mintEpoch, senderLeaf)
+            case .committerBeacon:
+                // ADR-0045 decision 2 — a committer-liveness beacon. Not a
+                // timeline row: it is an observation about WHICH owner / admin
+                // can sweep the pending proposal set, carried by the event's
+                // `senderLeaf` + `createdAt` (the two things the field-less
+                // envelope deliberately omits). The takeover fold that will
+                // consume it is not built yet — it belongs to the client
+                // sprints — so for now the beacon is simply consumed here and
+                // never reaches `messages`.
+                break
             }
         }
         cursor = result.cursor

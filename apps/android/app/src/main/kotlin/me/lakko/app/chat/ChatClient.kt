@@ -17,7 +17,10 @@ import uniffi.lakko_ffi_uniffi.FfiPushRoutingSecret
 import uniffi.lakko_ffi_uniffi.Group
 import uniffi.lakko_ffi_uniffi.Identity
 import uniffi.lakko_ffi_uniffi.MessageBodyKind
+import uniffi.lakko_ffi_uniffi.ParsedBody
 import uniffi.lakko_ffi_uniffi.ProcessedMessage
+import uniffi.lakko_ffi_uniffi.committerBeaconEnvelopeLen
+import uniffi.lakko_ffi_uniffi.decodeCommitterBeacon
 import uniffi.lakko_ffi_uniffi.decodePushRoutingSecret
 import uniffi.lakko_ffi_uniffi.parseBodyEnvelope
 
@@ -401,10 +404,111 @@ internal fun looksLikeCallSignaling(bytes: ByteArray): Boolean {
     return first == 0x52 || first == 0x5A || first == 0x62 || first == 0x6A
 }
 
-private fun toEvent(
+/** First byte of the ADR-0045 committer-beacon domain separator (`'l'` of
+ *  `"lakko/committer-beacon/v1"` plus a trailing NUL, written out in words and
+ *  never as a raw NUL byte). The same `'l'` every `lakko/...` in-group envelope
+ *  domain opens with, so on its own it decides nothing — it only skips an FFI
+ *  call for a chat envelope (which starts `{`, 0x7B). */
+private const val COMMITTER_BEACON_FIRST_BYTE: Int = 0x6C
+
+/**
+ * The beacon's exact wire length, from the FFI's `committerBeaconEnvelopeLen()`
+ * rather than a local `27`. That constant lives in
+ * `crates/lakko-contacts/src/committer_beacon.rs` and is exported precisely so
+ * the hosts do not each hand-copy the number — the drift shape ADR-0044 was
+ * written about. The foreground links the full FFI, so unlike the slim NSE
+ * surface there is no reason to compromise.
+ *
+ * `by lazy`, NOT an eager top-level `val`: a top-level initialiser runs at
+ * `ChatClientKt` class-init, and this file's [looksLikeCallSignaling] is reused
+ * by the background `me.lakko.app.push.isServiceEnvelope`, which runs in plain
+ * JVM unit tests where `liblakko_ffi_uniffi.so` does not exist. An eager read
+ * therefore turns every host test that merely touches this file into an
+ * `ExceptionInInitializerError`. Deferring it means the `.so` is touched on the
+ * first real classification, on-device, and never at class load.
+ */
+private val committerBeaconEnvelopeLength: Int by lazy {
+    committerBeaconEnvelopeLen().toInt()
+}
+
+/**
+ * ADR-0045 — does this application plaintext classify as a committer-liveness
+ * beacon?
+ *
+ * Unlike the other envelope filters here, the length-plus-prefix peek is a
+ * COMPLETE test rather than merely a fast path: the beacon carries no fields at
+ * all, so every beacon on the wire is byte-identical and the exact length plus
+ * the domain prefix already pin all but the version byte. [decodesAsBeacon] is
+ * confirmation, and it is what makes the arm fail-closed on an unknown schema
+ * version — a future v2 beacon this build does not understand is NOT silently
+ * swallowed here; it falls through to the chat parser like any other
+ * unrecognised plaintext.
+ *
+ * Both FFI values are PARAMETERS rather than reads inside this function, for
+ * the same reason the background `isServiceEnvelope` takes them: it keeps the
+ * decision free of the UniFFI `.so` so it runs in a plain JVM unit test. The
+ * one real call site supplies the real FFI.
+ *
+ * @param bytes the decrypted MLS Application plaintext.
+ * @param envelopeLen the exact on-wire beacon length, from the FFI constant at
+ *   the call site — never written down here.
+ * @param decodesAsBeacon the authoritative fail-closed decode (the native
+ *   `decodeCommitterBeacon`, reported as a boolean). Called ONLY after the
+ *   cheap peek passes, so a real chat envelope never pays for an exception.
+ */
+internal fun looksLikeCommitterBeacon(
+    bytes: ByteArray,
+    envelopeLen: Int,
+    decodesAsBeacon: (ByteArray) -> Boolean,
+): Boolean {
+    if (bytes.size != envelopeLen || bytes.isEmpty()) return false
+    if ((bytes[0].toInt() and 0xFF) != COMMITTER_BEACON_FIRST_BYTE) return false
+    return decodesAsBeacon(bytes)
+}
+
+/** The authoritative beacon decode, reported as a boolean. `false` for a
+ *  wrong-domain / wrong-length / unknown-version plaintext, so the caller runs
+ *  the normal chat parse (fail-closed, never a silent swallow). */
+private fun decodesAsCommitterBeacon(bytes: ByteArray): Boolean =
+    try {
+        decodeCommitterBeacon(bytes)
+        true
+    } catch (_: Throwable) {
+        false
+    }
+
+/** The production ADR-0045 beacon arm: the cheap peek sized by the FFI
+ *  constant, then the authoritative FFI decode. The default [toEvent] binding;
+ *  a host test substitutes a stand-in because both halves need the `.so`. */
+private fun committerBeaconArm(bytes: ByteArray): Boolean =
+    looksLikeCommitterBeacon(bytes, committerBeaconEnvelopeLength, ::decodesAsCommitterBeacon)
+
+/**
+ * Classify one decrypted DS row into an [IncomingChatEvent].
+ *
+ * `internal`, and with its two FFI touchpoints as DEFAULTED PARAMETERS, so the
+ * host unit suite can drive the whole classification chain: the UniFFI `.so`
+ * is Android-only, and a plain JVM test that reached either of these would die
+ * with `UnsatisfiedLinkError` rather than assert anything. Production passes
+ * nothing and gets the real FFI. Same rationale — and the same shape — as the
+ * background `me.lakko.app.push.isServiceEnvelope`, which takes its codecs the
+ * same way for the same reason.
+ *
+ * @param isCommitterBeacon the ADR-0045 beacon arm (cheap peek + authoritative
+ *   decode). Defaults to the real FFI-backed [committerBeaconArm].
+ * @param parseBody the ADR-0023 structured body parser. Defaults to the real
+ *   FFI `parseBodyEnvelope`. Note its documented contract, which is why the
+ *   beacon needs its own arm AHEAD of it: a plaintext it does not recognise
+ *   DEGRADES to [MessageBodyKind.CHAT] with lossy-UTF-8 text — it does NOT
+ *   throw. Any stand-in that throws instead would make the beacon arm look
+ *   unnecessary.
+ */
+internal fun toEvent(
     messageId: Long,
     createdAt: String,
     processed: ProcessedMessage,
+    isCommitterBeacon: (ByteArray) -> Boolean = ::committerBeaconArm,
+    parseBody: (ByteArray) -> ParsedBody = ::parseBodyEnvelope,
 ): IncomingChatEvent =
     when (processed) {
         is ProcessedMessage.Application -> {
@@ -470,6 +574,31 @@ private fun toEvent(
                     senderLeaf = processed.senderLeaf,
                     createdAt = createdAt,
                 )
+            } else if (isCommitterBeacon(processed.data)) {
+                // ADR-0045 decision 2 — a committer-liveness beacon: an
+                // owner / admin announcing it is foregrounded and able to
+                // sweep the pending proposal set. Never a timeline bubble.
+                //
+                // Without this arm the beacon reaches `parseBodyEnvelope`,
+                // whose lossy-UTF-8 fallback degrades it (correctly, per its
+                // own contract — legacy plaintext must still render) into a
+                // visible bubble reading `lakko/committer-beacon/v1` plus two
+                // control bytes.
+                //
+                // The envelope carries NO fields at all, deliberately: naming
+                // the sender would add an unauthenticated identity claim next
+                // to the MLS-authenticated one, and a self-reported timestamp
+                // would let a candidate hold the committer duty by asserting
+                // its own freshness. So the two things the takeover fold
+                // needs ride along from outside the bytes — WHO, from the
+                // MLS-authenticated `senderLeaf`, and HOW OLD, from the DS
+                // row's `createdAt`. That is why this is surfaced as an event
+                // rather than dropped here.
+                IncomingChatEvent.CommitterBeacon(
+                    messageId = messageId,
+                    senderLeaf = processed.senderLeaf,
+                    createdAt = createdAt,
+                )
             } else {
                 // ADR-0023 — feed the application bytes through
                 // the structured body parser, which surfaces the
@@ -487,7 +616,7 @@ private fun toEvent(
                 // sender — such a message can never be a valid
                 // edit/delete target). It feeds the author-only
                 // edit/delete gate + reaction attribution.
-                val body = parseBodyEnvelope(processed.data)
+                val body = parseBody(processed.data)
                 val senderLeaf = processed.senderLeaf
                 when (body.kind) {
                     MessageBodyKind.CHAT -> IncomingChatEvent.Application(
@@ -804,6 +933,35 @@ public sealed interface IncomingChatEvent {
             return result
         }
     }
+
+    /** ADR-0045 decision 2 — a committer-liveness beacon: an owner / admin
+     *  announcing it is foregrounded and able to sweep the pending proposal
+     *  set. Never a timeline bubble. Consumes a DS [messageId] like any other
+     *  application row so the poll cursor advances past it.
+     *
+     *  The envelope carries NO fields at all (a fixed 27 bytes, identical on
+     *  every call and for every sender), deliberately: naming the sender would
+     *  add an unauthenticated identity claim next to the MLS-authenticated
+     *  one, and a self-reported timestamp would let a candidate hold the
+     *  committer duty by asserting its own freshness. So everything the
+     *  takeover fold needs comes from the two properties here — WHO, from the
+     *  MLS-authenticated [senderLeaf], and HOW OLD, from the DS row's
+     *  [createdAt] — which is exactly why this is surfaced as an event rather
+     *  than dropped inside the classifier. The fold itself is not built yet;
+     *  this variant is the seam it will consume.
+     *
+     *  [senderLeaf] is `null` for a control frame / external sender, which the
+     *  fold must treat as unusable (fail-closed — an unattributable beacon
+     *  proves no candidate is live).
+     *
+     *  A plain `data class` with no custom `equals` / `hashCode`: unlike
+     *  [PushRoutingSecret] it carries no [ByteArray], so the generated
+     *  structural ones are already correct. */
+    public data class CommitterBeacon(
+        val messageId: Long,
+        val senderLeaf: UInt?,
+        val createdAt: String,
+    ) : IncomingChatEvent
 }
 
 /** Kind discriminator for [IncomingChatEvent.System]. */
