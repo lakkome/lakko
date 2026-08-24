@@ -5,9 +5,14 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0045: Closing the remote-commit epoch fork — proposal-based commits with a designated committer (G-38 residual 1)
 
-- **Status:** **Proposed.** **The core is built** (sprints S0-S3 plus two
+- **Status:** **Proposed.** **The core is built** (sprints S0-S3 plus four
   unplanned ones — see the date line and the
   [blast-radius table](#blast-radius-per-sprint)); the three clients are not.
+  Decision 2's **candidate heartbeat is built too** — the beacon envelope, the
+  acting-committer fold and the emit throttle, on both FFI surfaces — but **it is
+  inert**: nothing emits a beacon and nothing drives the fold, because both belong
+  to the client sprints. Read "the beacon landed" as *the mechanism exists*, never
+  as *the election works*.
   **The maintainer has chosen Option B — proposal-based commits.** This ADR was
   originally written as a recon that recommended Option C (client-side loser
   rollback); that recommendation has been **overturned by the maintainer** and
@@ -55,6 +60,27 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
   This revision also mints the ADR's first indexed invariant, **C-63**,
   reversing this ADR's earlier claim that it proposed none
   (see [§ Invariants touched](#invariants-touched)).
+  · **2026-08-24: reconciled with two further sprints.** **S3b** (`6c77cd6`) —
+  the FFI back-fill for the staged sweep and ownership transfer, which this ADR
+  had recorded as missing; that claim is now marked corrected rather than deleted.
+  **S3c** (`94825ec` core, `94da492` both FFI surfaces + the slim NSE surface,
+  `5d6af94` + `f53d11a` six client filter arms) — decision 2's **candidate
+  heartbeat**, the variant the maintainer chose in `3f09ca1`. It lands a field-less
+  27-byte beacon envelope in `lakko-contacts`, the pure `acting_committer_verdict`
+  fold, the `should_emit_beacon` throttle, four constants, a fuzz target, and
+  `Group::committerRank` for ranking a beacon's MLS-authenticated sender. **No
+  `lakko-mls` change — invariant #3 is untouched by this sprint.** Three things it
+  settled that this ADR could only pose are now in the body: **why the payload
+  carries no fields** (a self-reported timestamp would let a candidate hold the
+  committer duty by asserting its own freshness — a liveness claim no peer can
+  check); **why `lakko-presence` is the wrong primitive** despite being the obvious
+  candidate; and **why the interval and window are chosen rather than measured**,
+  with the budget argument that stands in for the measurement this ADR asked for.
+  One consequence it did not anticipate: a beacon collides with `parse_body`'s
+  lossy-UTF-8 legacy fallback, so the sprint had to add a service-envelope filter
+  to six client receive paths before a beacon could ride the journal without
+  appearing as a chat bubble. **The emitter and the observation store are not part
+  of it and remain the largest S4-S6 item.**
 - **Context:** Phase 3 — group-membership commits / MLS epoch integrity. Closes
   **G-38 residual 1**, the largest unfixed item on the client-concurrency list
   and the only one on it that **no client-side lock can address by
@@ -929,7 +955,17 @@ with the group open, which is precisely the candidate the sweep wants, emits
 nothing. The missing thing is not presence infrastructure; it is a **continuous,
 unconditional liveness beacon**.
 
-#### The design question this leaves, stated as a trade and not decided here
+#### The design question this leaves — **ANSWERED: variant 1, and it is built in the core**
+
+> **This section was written as an undecided trade and is kept in that voice,
+> because the trade is what the choice was made against.** The maintainer chose
+> **variant 1, the candidate heartbeat** (`3f09ca1`), and it has since been built
+> in `crates/lakko-contacts` and exposed on both FFI surfaces — see
+> [§ The beacon, as built](#the-beacon-as-built), which records what the build
+> settled that this section could only pose. **Variant 2 is kept as the documented
+> fallback, not deleted.** Nothing below is retracted: the cost stands as recorded
+> and was accepted with it, and the correctness caveat two sections down is
+> **unchanged by the choice and must not be read as softened by it**.
 
 **Variant 1 — a candidate heartbeat, and the maintainer's model becomes literal.**
 Each owner/admin device publishes a small periodic liveness signal for the group
@@ -937,10 +973,13 @@ while the app is foregrounded. Then "active admin devices elect the committer" i
 implementable as written: each candidate computes the active set from beacons seen
 within a freshness window, and the lowest-ranked active candidate sweeps. **The
 stagger, and its constant, disappear entirely** — nobody waits a turn, because the
-set is known rather than inferred. It is not built, but it is **well-precedented
-rather than blocked**: typing indicators are the working proof that a throttled
-ephemeral per-group journal signal with an expiry window functions, and
-`lakko-presence` exists for exactly this shape.
+set is known rather than inferred. ~~It is not built, but it is~~ **It is now built
+in the core and on both FFI surfaces, and it was** **well-precedented rather than
+blocked**: typing indicators are the working proof that a throttled ephemeral
+per-group journal signal with an expiry window functions, and `lakko-presence`
+exists for exactly this shape — **though the build did not use it, and
+[§ Why not `lakko-presence`](#why-not-lakko-presence) records why that sentence,
+written here in good faith, turned out to be the wrong instinct.**
 
 **The cost, recorded because it is why this is a decision and not an obvious yes.**
 ADR-0024 flags its own mechanism as an anti-pattern in its Consequences: typing
@@ -995,6 +1034,249 @@ journal row carries a server-assigned `created_at TIMESTAMP(3)`
 identical row, which removes the proposer's clock from the measurement entirely.
 What remains is each evaluator's own offset from the DS clock — a real residual, and
 in variant 2 the reason the stagger must dominate it.
+
+#### The beacon, as built
+
+Landed in four commits: `94825ec` (the core envelope, the fold, the throttle, the
+dispatch variant, the fuzz target), `94da492` (both FFI surfaces, `Group::committerRank`,
+and the slim `lakko-ffi-extension` classify surface), `5d6af94` (the three background
+notification filters), `f53d11a` (the three foreground timeline filters). The module
+documentation in `crates/lakko-contacts/src/committer_beacon.rs` is the authority;
+this section records the decisions it settled, because they are decisions this ADR
+posed and did not answer.
+
+**The wire shape — a fixed 27 bytes, and the payload carries no fields at all.**
+
+```text
+  plaintext_payload = "lakko/committer-beacon/v1\0" || 0x01
+                     └──────── 26 bytes ────────┘   └ version ┘
+```
+
+It rides an ordinary **MLS application message** on the group journal, so the DS
+sees ciphertext (invariant #2) and the whole payload is already AEAD-sealed under
+the group's epoch secret. The codec is bounded and fail-closed — domain match, then
+**exact** length, then the version gate — dispatched by `incoming_envelope` as its
+own **unit** variant `IncomingEnvelope::CommitterBeacon`, byte-distinct from every
+sibling envelope domain, and fuzzed (`committer_beacon_decode`).
+
+**Being field-less is the decision, and the timestamp is the sharp half of it.**
+Three fields a beacon might plausibly carry were each excluded for a reason:
+
+- **Identity.** Already MLS-authenticated via the sender leaf. Naming itself in the
+  payload adds a second, *unauthenticated* claim of identity beside the
+  authenticated one — a spoofing surface and nothing else.
+- **A timestamp.** This is the one that matters. Age is measured against the DS
+  row's server-assigned `created_at`, which every member reads identically on the
+  identical row. A self-reported time is not merely redundant but **wrong**: it
+  would let a candidate hold the committer duty by **asserting its own freshness**,
+  a liveness claim **no peer can check**. Against the negative consequence this ADR
+  already records — *an elected committer can selectively censor proposals* — that
+  turns a duty nobody can verify into a duty nobody can take away.
+- **A claimed rank.** The receiver re-derives rank from the authenticated role
+  table, so a claimed rank would have to be ignored, and carrying a field every
+  correct implementation must ignore is an invitation for one implementation to
+  trust it.
+
+What remains is the signal itself, whose entire content is *"the device at this
+sender leaf was foregrounded and able to sweep when the DS stamped this row"*, plus
+the version byte as the forward-compatibility knob — the same knob ADR-0044's v2
+bump proved load-bearing on the sibling push-routing envelope.
+
+**The fold and the throttle are pure, total and clock-free, and live in the core
+once.** `acting_committer_verdict(own_rank, observed, freshness_window_ms)` →
+`ActingCommitter::{Act, Defer { to_rank }, NotACandidate}`, and
+`should_emit_beacon(own_rank, last_emitted_at_ms, now_ms)`. Both are consumed over
+**both** FFI surfaces rather than re-derived per platform, for the reason ADR-0044's
+F-A replay made concrete: three clients each hand-rolling one rule is the drift
+class. Six rules govern the fold, and the sixth is the one most likely to be got
+wrong — **hearing nothing means `Act`**: silence means nobody better placed is
+running, which makes this device the answer, not a failure to elect. `Defer` and
+`NotACandidate` are deliberately distinct variants rather than one `false`, because
+one has something to re-evaluate on the next poll and the other never will.
+
+A `BeaconObservation` carries only `rank: Option<u32>` and `age_ms`, and **both are
+the observer's own re-derivation** — rank from the MLS sender leaf resolved through
+`members()` and ranked by `Group::committerRank`, age from the DS row. Nothing in
+the payload contributes to either, which is what the field-less shape buys.
+
+**`Group::committerRank(signatureKey)` is a `Group` method, not a free function
+taking a caller-supplied table, and the reason is a correctness one.** Both FFI
+surfaces carry it as a doc heading: *rank the key when you take the verdict, not
+when the beacon arrived.* A rank is a **position** in the role table's canonical
+order, not a stable identity — promoting, demoting or removing any admin renumbers
+every admin sorting after it — so a projected observation set that stored ranks at
+receipt would be mixing positions from **different orderings**, and comparing them
+against this device's own rank (which is necessarily current) is meaningless rather
+than merely stale. A free function would have let a caller supply a table it had
+cached; the method reads the group's live one. Callers persist the sender's 32-byte
+**signature key**, never a leaf index, because OpenMLS reuses a vacated leaf for the
+next member added. This orders the authorised committers; it does **not** widen them
+— the set that may commit stays exactly ADR-0022's owner-plus-admins.
+
+**The two constants are CHOSEN, not measured, and the module says so in those
+words.** `COMMITTER_BEACON_INTERVAL_MS = 60_000` and
+`COMMITTER_BEACON_FRESHNESS_WINDOW_MS = 2 * interval + worst_case_poll = 150_000`,
+with `COMMITTER_BEACON_WORST_CASE_POLL_MS = 30_000` named as its own term rather
+than folded silently into one number, because it is a **constraint on the caller**:
+a client that polls slower than that invalidates the window's derivation. This ADR
+asked for measurement (*"In either variant, measure — do not guess"*) and did not
+get it; what it got instead is a **budget argument**, stated so a later measurement
+can overturn it:
+
+- **The latency budget is not interactive.** Nobody watches a beacon. What waits on
+  it is a membership change decision 2 deliberately gave **no deadline at all**. So
+  the interval is sized for litter and privacy, not responsiveness — the opposite of
+  ADR-0024's ~4 s typing throttle, whose whole job is to look instant to a human.
+- **It is a litter budget.** At 60 s that is 60 journal rows per hour per candidate
+  per group, persisting to the 30-day prune. Halving the interval doubles that for
+  no benefit anyone is waiting on.
+- **It is a privacy budget.** Each row publishes that this candidate had the app
+  foregrounded at that moment. A shorter interval buys a **finer-grained** activity
+  schedule — a real cost with no matching gain.
+
+The window's three terms each earn their place (one interval, because a perfectly
+healthy candidate's newest beacon is already that old the moment anyone looks; a
+second, to tolerate exactly one lost or delayed beacon rather than evicting a live
+candidate on a single dropped round; plus one worst-case poll, because a beacon is
+only *observed* at the observer's next poll), and the arithmetic is pinned by
+`freshness_window_is_the_documented_construction` so shrinking the window below the
+tolerate-one-loss point fails loudly instead of quietly making takeovers flap.
+
+**Foregroundedness is a caller obligation the core cannot check**, and both FFI
+surfaces say so at `composeCommitterBeacon`: a beacon must mean *able to sweep*, and
+the ADR-0041 background decrypt is read-only-throwaway and structurally cannot
+commit (**C-59**), so a beacon emitted from the background is a lie that costs the
+group a takeover.
+
+#### Why not `lakko-presence`
+
+The crate exists, ships blinded per-conversation presence tokens, and is already
+exported on the wasm FFI — which is precisely why reaching for it is the obvious
+move, and why the build recorded four reasons for not doing so. The two sharpest:
+
+1. **A presence token is not authenticating.** `derive_token` is keyed on a seed
+   **every member holds**, so any member can mint any other member's token; the
+   crate says so itself. Identification is by *recomputing* the expected token for
+   each candidate pseudonym and matching — an O(members) scan yielding a
+   **pseudonym**, where the fold needs a **signature key** to look up
+   `committer_rank`. MLS already hands the receiver an authenticated sender leaf for
+   free. Swapping an authenticated attribution for an unauthenticated one, to obtain
+   something the transport already delivered, is a strict loss.
+2. **Its clock model contradicts this ADR.** `derive_token` binds a wall-clock epoch
+   from the **sender's** clock into the token, and a receiver must recompute with
+   the same epoch to match at all. This ADR is explicit that age comes from the DS
+   row's `created_at`, never the sender's clock. Adopting tokens would put the
+   sender's clock back into the decision as a **matching precondition**: a candidate
+   with a skewed clock emits tokens nobody can match and reads as permanently
+   absent — silently, and exactly when it is the device that should be sweeping.
+
+The other two: the blinding hides *who is present* from an observer lacking the
+group secret, which is confidentiality an enclosing MLS application message already
+provides, so it would be applied *inside* the layer that supplies it; and the crate
+is not actually wired — its own docs place sourcing `presence_seed` from an MLS
+exporter outside itself, that exporter label does not exist, nothing under
+`apps/web/src` calls it, and there is no UniFFI counterpart. Adopting it would have
+meant building a new MLS exporter, a pseudonym enumeration and a second FFI surface
+in order to obtain a weaker attribution than the one already in hand.
+
+**What would make it the right primitive, recorded so the crate is judged rather
+than dismissed:** a beacon that had to travel *outside* MLS — to non-members, or
+over a channel the server can read — is exactly what the blinding is for, because
+then there would be no enclosing layer providing confidentiality and no
+authenticated sender attribution to lean on. Inside MLS there is both.
+
+#### The filter obligation the beacon created, and why a beacon is an event rather than a drop
+
+Neither this ADR nor the beacon design anticipated this, and it is the larger half
+of the client-side work that landed. A beacon is an **ordinary MLS application
+message**, and `lakko_attachments::parse_body` carries a **deliberate** legacy
+fallback: bytes that are not the ADR-0023 JSON envelope degrade to
+`MessageBody::Chat` via `String::from_utf8_lossy`, which is what keeps pre-1.19
+plain-UTF-8 messages readable. Fed a beacon, that fallback yields "chat text"
+reading `lakko/committer-beacon/v1` plus two control bytes — on the timeline, and in
+a push notification. The fix belongs in the clients and not in `parse_body`: the
+fallback is load-bearing for wire compatibility, and `lakko-attachments` does not
+depend on `lakko-contacts`, so teaching it these domains would invert the crate
+layering.
+
+This is **more** reachable than the ADR-0042 push-routing case that first hit it,
+not less: a routing secret is broadcast on a membership change, while a beacon is
+emitted by every owner and admin every interval, so in an active group the newest
+journal row — the one a notification previews — is frequently a beacon.
+
+So all three clients gained an arm ahead of the chat parser on **both** paths:
+
+- **Background** (`5d6af94`) — the web service worker's `sw-push-decrypt.js`, the
+  Android `PushServiceEnvelopeFilter.isServiceEnvelope`, and the iOS NSE's
+  `nseIsServiceEnvelope`. Each is a cheap peek (exact length + the leading `0x6c`)
+  gating an authoritative FFI decode. The iOS NSE reaches the codec through the slim
+  `lakko-ffi-extension` surface, which exports `decode_committer_beacon` **and the
+  envelope length** so `27` is not hand-copied into Swift where nothing would pin
+  it — a stale literal there fails in the **dangerous** direction, silently ceasing
+  to suppress beacons. `golden_pins_the_swift_prefilter_shape` pins the exported
+  value against literals so a wire revision fails Rust CI rather than a
+  notification.
+- **Foreground** (`f53d11a`) — the web `chat/client.ts`, iOS `ChatClient.swift` and
+  Android `ChatClient.kt` classifiers, same two-step shape.
+
+**Unlike the other envelope filters, the peek here is a complete test rather than a
+fast path**, because the beacon is field-less: every beacon on the wire is
+byte-identical, so exact length plus the domain prefix already pin all but the
+version byte. The codec behind it confirms — and is what keeps the arm **fail-closed
+on an unknown schema version**: a future v2 beacon this build does not understand is
+not silently swallowed, it falls through to the chat parser exactly as any other
+unrecognised plaintext does.
+
+**A recognised beacon surfaces as its own event variant rather than being dropped in
+the parser**, on all three clients, and that is the load-bearing shape rather than a
+stylistic choice: the two things the fold needs — the **MLS sender leaf** and the
+**DS row's `created_at`** — are precisely what the field-less payload deliberately
+does not carry, and they exist only at that point in the receive chain. A filter
+that dropped the row would be discarding the entire signal in the act of
+recognising it. Each client therefore emits a `committerBeacon` event carrying
+`senderLeaf` and `createdAt`, which the receive loop currently consumes and does not
+render; that event is the seam the fold will attach to.
+
+The two native builds also needed an exhaustive-switch repair (`5d6af94`): the
+call-path `MultiJoinerCall` dispatchers gained a `committerBeacon` arm that drops
+the payload, because a beacon rides the **group journal** and never the SFU
+signal-relay, and it says nothing about a *call* committer — ADR-0032's election is
+leaf/presence-based and independent.
+
+#### Does the beacon earn an indexed invariant? **Not yet — and the trigger is named**
+
+Argued rather than defaulted, because the case for one is real. **For:** the
+no-self-asserted-freshness property is genuinely security-shaped and genuinely
+breakable — a later hand adding a `sent_at` field "for diagnostics" would hand a
+malicious admin an unfalsifiable claim to hold the committer duty, against a
+censorship authority this ADR already lists as a negative consequence. It has the
+same shape as C-60 sub-invariant 2 (a domain-separated, bounded, fail-closed
+in-group envelope on an MLS application message).
+
+**Against, and decisive:** the invariant index's own quick-stats row describes its
+contents as **live properties**, and this mechanism is **inert** — no client emits a
+beacon and none drives the fold, so there is no running enforcement point to pin.
+Indexing it now would make the index aspirational, which is exactly the drift the
+index exists to prevent. The beacon also authorises nothing and gates nothing today:
+it carries no key material, and the worst a forged or replayed one could do once
+wired is make a device **defer**, a liveness effect of the class this pack tracks as
+a gap rather than an invariant (cf. ADR-0038's fail-toward-UpToDate as G-32). And
+when the clients do land, the property worth indexing is broader than the beacon
+alone — the integrity of the committer election as a whole — so a narrow C-number
+minted now would need re-scoping then.
+
+**Trigger:** mint it with S4-S6, at the first client that emits a beacon and folds a
+verdict. Two properties are already written down and waiting for it — *every input
+to the committer fold comes from MLS-authenticated or server-assigned state, never
+from the payload*, and *a beacon is emitted only from a foregrounded client that can
+actually sweep* (the C-59 caller obligation, which is where a background emitter
+would turn the beacon into a lie).
+
+For the same reason, the **service-envelope suppression filter** is not indexed
+either — and note that its ADR-0042 predecessor never was, so indexing the beacon's
+half alone would be incoherent. It is live on six code paths and its failure mode is
+user-visible rather than confidentiality-affecting; if it is ever indexed it should
+be indexed whole.
 
 #### What stops two devices both sweeping — and why a heartbeat does not close it
 
@@ -1780,48 +2062,62 @@ The recon was honest about Option C's limits; B's deserve the same treatment.
 | **S0 — UX** — **LANDED `c5c0788`** | none (design) | The five states of decision 5 plus the committer-side pending surface. `ux-ui` first per the repo rule. Landed as [`docs/ux/proposal-based-membership.md`](../ux/proposal-based-membership.md), out of order — after S1+S2 rather than before them. |
 | **S1 — core: the gate** — **LANDED `9a60ab3`** | `crates/lakko-mls` (**invariant #3**) | `process_incoming_verifying_roles` proposal arm: inspect + role-check + `store_pending_proposal` or drop. `authorise_role_commit` extended from committer-only to per-proposal-sender, with the by-value arm preserved and a `SelfRemove` arm added. New `Incoming` shape for a stored-vs-dropped proposal. Ten property tests. **External crypto review — still owed.** As built: the whole rule is `crates/lakko-mls/src/group_proposals.rs` `authorise`, written down once and consumed at all three layers. |
 | **S2 — core: the committer** — **LANDED `9a60ab3`** | `crates/lakko-mls` | `committer_rank` in `group_roles.rs`; a sweep entry point over `CommitBuilder::build` with the two-arm filter; `propose_*` wrappers over the openmls calls. As built the sweep is named `commit_pending_proposals`, with `pending_proposals()` and `own_committer_rank()` beside it. |
-| **S3 — FFI** — **LANDED `c5c0788`, now INCOMPLETE** | `lakko-ffi-uniffi`, `lakko-ffi-wasm` | Add the propose + sweep + rank + pending-proposal-list surface beside the existing `add_member_from_wire` / `remove_member` / `set_group_roles` / `approve_external_join`. Both surfaces, in lock-step. Regenerate bindings, rebuild `LakkoCore.xcframework` and the Android `.so`. **S3 landed BEFORE S2b and S2c, and neither was back-filled onto it** — see the note below. |
-| **S4 — web reference** | `apps/web/src` | `contacts/client.ts`: the four `…Locked` methods become propose-and-publish; a new sweep path. `mls/group-lock.ts` `withGroupMlsLock` still spans it. `chat/client.ts` `applyPolledBatch` / `toEvent`: the `Proposal` result stops being a content-less system row. `chat/commit-outbox.ts` + `chat/mls-store.ts` `saveSnapshotWithCommitEntry`: ~~the retained epoch-N snapshot for the committer path~~ — **no retained snapshot is needed**; the committer path is stage -> publish -> verdict -> `mergeStagedSweep` / `abandonStagedSweep`, and the durable write is the one the outbox already does. `routes/Chat.tsx` members panel: the new states. |
-| **S5 — iOS mirror** | `apps/ios/Lakko` | `ChatRepository.swift` (`withCommitLock`, `persistCommitEntryThenSnapshotOrThrow`), `ChatClient.swift` (`applyFetchedMessages` / `toEvent`), `CommitOutbox.swift`, `UI/Chat/MembersSheet` + `ChatViewModel`. |
-| **S6 — Android mirror** | `apps/android/.../app` | `ChatRepository.kt` under the two-tier `groupLock` + `providerLock`, `ChatClient.kt`, `CommitOutbox.kt` (`prepareCrashSafeCommit`), `ui/chat/MembersSheet` + `ChatViewModel`. |
+| **S3 — FFI** — **LANDED `c5c0788`; completed by S3b `6c77cd6`** | `lakko-ffi-uniffi`, `lakko-ffi-wasm` | Add the propose + sweep + rank + pending-proposal-list surface beside the existing `add_member_from_wire` / `remove_member` / `set_group_roles` / `approve_external_join`. Both surfaces, in lock-step. Regenerate bindings, rebuild `LakkoCore.xcframework` and the Android `.so`. ~~S3 landed BEFORE S2b and S2c, and neither was back-filled onto it~~ — **both were, in S3b.** |
+| **S4 — web reference** | `apps/web/src` | `contacts/client.ts`: the four `…Locked` methods become propose-and-publish; a new sweep path. `mls/group-lock.ts` `withGroupMlsLock` still spans it. `chat/client.ts` `applyPolledBatch` / `toEvent`: the `Proposal` result stops being a content-less system row. `chat/commit-outbox.ts` + `chat/mls-store.ts` `saveSnapshotWithCommitEntry`: ~~the retained epoch-N snapshot for the committer path~~ — **no retained snapshot is needed**; the committer path is stage -> publish -> verdict -> `mergeStagedSweep` / `abandonStagedSweep`, and the durable write is the one the outbox already does. `routes/Chat.tsx` members panel: the new states. **Plus the beacon half S3c did not build:** the throttled emit from a foregrounded client (`shouldEmitBeacon` -> `composeCommitterBeacon` -> the existing send path), a per-`(group, signature key)` observation store fed by the `committerBeacon` event the classifier already emits, and the `actingCommitterVerdict` evaluation with ranks re-derived through `Group.committerRank` at verdict time. |
+| **S5 — iOS mirror** | `apps/ios/Lakko` | `ChatRepository.swift` (`withCommitLock`, `persistCommitEntryThenSnapshotOrThrow`), `ChatClient.swift` (`applyFetchedMessages` / `toEvent`), `CommitOutbox.swift`, `UI/Chat/MembersSheet` + `ChatViewModel`. Plus the same beacon emit / store / fold as S4 — the `.committerBeacon` event is already surfaced with its `senderLeaf` and `createdAt` and is currently consumed and dropped. |
+| **S6 — Android mirror** | `apps/android/.../app` | `ChatRepository.kt` under the two-tier `groupLock` + `providerLock`, `ChatClient.kt`, `CommitOutbox.kt` (`prepareCrashSafeCommit`), `ui/chat/MembersSheet` + `ChatViewModel`. Plus the same beacon emit / store / fold as S4 — `IncomingChatEvent.CommitterBeacon` is already surfaced and currently consumed and dropped. |
 | **S7 — external-join convergence** | core + FFI + 3 clients | Decision 4: retire `pending_external_joins`, keep the FFI names. |
-| **S8 — docs** — **PARTLY DONE (2026-08-20)** | `docs/` | Flip this ADR's status; reconcile `known-gaps.md` G-38 residual 1 and `invariant-index.md`; CLAUDE.md ADR-table row + `lakko-mls` module-map row. Done so far: this ADR reconciled to the built core, ADR-0022's three transfer-as-follow-up references, the UX spec's owner dead-end, the CLAUDE.md ADR row + `lakko-mls` module-map row, and **C-63** minted in `invariant-index.md` + `calls.md`. Still owed: the status flip (the clients are not built) and `known-gaps.md` G-38 residual 1, which the maintainer holds. |
+| **S8 — docs** — **PARTLY DONE (2026-08-20, extended 2026-08-24)** | `docs/` | Flip this ADR's status; reconcile `known-gaps.md` G-38 residual 1 and `invariant-index.md`; CLAUDE.md ADR-table row + `lakko-mls` module-map row. Done 2026-08-20: this ADR reconciled to the built core, ADR-0022's three transfer-as-follow-up references, the UX spec's owner dead-end, the CLAUDE.md ADR row + `lakko-mls` module-map row, and **C-63** minted in `invariant-index.md` + `calls.md`. Done 2026-08-24: the S3b and S3c reconcile — this ADR's three stale claims corrected in place, [§ The beacon, as built](#the-beacon-as-built) + [§ Why not `lakko-presence`](#why-not-lakko-presence) + [§ The filter obligation](#the-filter-obligation-the-beacon-created-and-why-a-beacon-is-an-event-rather-than-a-drop) + the indexed-invariant argument added, and CLAUDE.md's `lakko-contacts` / `lakko-ffi-extension` / `lakko-mls` module-map rows, ADR-0045 table row and fuzz-target list brought up to date. **No new indexed invariant** — argued, not defaulted. Still owed: the status flip (the clients are not built) and `known-gaps.md` G-38 residual 1, which the maintainer holds. |
 
-**Two sprints landed that this table never had a row for, and both were forced by
-the built core rather than chosen.**
+**Four sprints landed that this table never had a row for. The first two were
+forced by the built core rather than chosen; the last two are the FFI back-fill and
+the decision-2 beacon.**
 
 | Sprint | Surface | What changed |
 |---|---|---|
 | **S2b — the staged sweep** — **LANDED `fe3de6c`** | `crates/lakko-mls` (**invariant #3**) | `stage_pending_proposals` / `has_staged_sweep` / `merge_staged_sweep` / `abandon_staged_sweep`; `commit_pending_proposals` becomes the stage-then-merge pair. The rollback decision 2 layer 4 requires, built as the **absence of the eager merge** rather than as a retained snapshot — see [§ The staged sweep, as built](#the-staged-sweep-as-built). **New client obligation:** reach a verdict; never leave a sweep staged. |
 | **S2c — ownership transfer + `owner_survives`** — **LANDED `e780952`** | `crates/lakko-mls` (**invariant #3**), and it mints **C-63** | ADR-0022's deferred follow-up, plus the commit-level never-orphan-the-owner rule that closes a pre-existing hole in `set_group_roles`. See [§ Never leave the group without an owner in it](#never-leave-the-group-without-an-owner-in-it). |
+| **S3b — the FFI back-fill** — **LANDED `6c77cd6`** | `crates/lakko-ffi-uniffi` + `crates/lakko-ffi-wasm` | The staged pair and ownership transfer on both surfaces, in lock-step: `stagePendingProposals` / `hasStagedSweep` / `mergeStagedSweep` / `abandonStagedSweep`, `transferOwnership` / `proposeOwnershipTransfer` / `OutgoingOwner`. The S4 prerequisite this section previously recorded as missing. |
+| **S3c — the decision-2 committer beacon** — **LANDED `94825ec` core, `94da492` FFI, `5d6af94` + `f53d11a` the client filters** | `crates/lakko-contacts` (a new envelope kind, no `lakko-mls` change — **invariant #3 untouched**), both FFI surfaces + `crates/lakko-ffi-extension`, and six client receive paths | Variant 1, the maintainer's chosen heartbeat: a field-less 27-byte beacon envelope, the pure `acting_committer_verdict` fold, the `should_emit_beacon` throttle, four constants, `Group::committerRank` for ranking a beacon's sender, a fuzz target, and the service-envelope filter arms that keep a beacon off the timeline and out of a notification. See [§ The beacon, as built](#the-beacon-as-built). **The emitter and the observation store are NOT part of it** — they are S4-S6, and without them the mechanism is inert. |
 
 The mute fix (`create_application_message` parking the pending set) rode along in
 `fe3de6c` and needed no sprint of its own: it touches one send path, and
 **S4-S6 inherit it with no client work** — see
 [§ Storing a proposal is not free: it muted the whole group](#storing-a-proposal-is-not-free-it-muted-the-whole-group).
 
-**S3b — the FFI back-fill — is a prerequisite for S4 and does not exist yet.**
-S3 landed before S2b and S2c, and nothing since has extended it: verified against
-the tree, **neither `lakko-ffi-uniffi` nor `lakko-ffi-wasm` exposes
-`stage_pending_proposals`, `has_staged_sweep`, `merge_staged_sweep`,
-`abandon_staged_sweep`, `transfer_ownership`, `propose_ownership_transfer` or
-`OutgoingOwner`.** `own_committer_rank` and the propose / sweep / pending-list
-surface are there; the rollback and ownership transfer are not. So today a client
-can propose and can sweep, but **cannot stage-and-adjudicate** — it can only take
-the eager-merge `commitPendingProposals` path, which is exactly the shape decision
-2 layer 4 says a non-owner committer must not use — and **cannot transfer
-ownership at all**, so the UX spec's owner dead-end is fixed in the core and still
-present at every client. Both surfaces, in lock-step, plus a bindings /
-`LakkoCore.xcframework` / Android `.so` rebuild.
+~~**S3b — the FFI back-fill — is a prerequisite for S4 and does not exist yet.**~~
+**S3b — LANDED `6c77cd6`.** The claim that followed here — *"neither
+`lakko-ffi-uniffi` nor `lakko-ffi-wasm` exposes `stage_pending_proposals`,
+`has_staged_sweep`, `merge_staged_sweep`, `abandon_staged_sweep`,
+`transfer_ownership`, `propose_ownership_transfer` or `OutgoingOwner`"* — was true
+when written and is **no longer true**: all seven are on both surfaces, in
+lock-step, and a client can now stage-and-adjudicate rather than being confined to
+the eager-merge `commitPendingProposals` path that decision 2 layer 4 says a
+non-owner committer must not use. The UX spec's owner dead-end is reachable from a
+client. Kept rather than deleted because the prerequisite ordering it states is
+still how S4 depends on S3b.
 
-**The table does not yet scope decision 2's variant 1.** A candidate heartbeat is a
-new ephemeral in-group signal — an envelope kind in `lakko-contacts`, both FFI
-surfaces (`lakko-presence` is exposed on **wasm only** today, with no UniFFI
-counterpart), and a beacon-plus-freshness fold on each of the three clients beside
-the existing ADR-0024 typing fold. It is a sprint of its own, sequenced before or
-alongside S4, and it is not costed here because the maintainer has not yet chosen
-between the two variants. **Variant 2 needs no new sprint** — the stagger is
-client orchestration inside S4–S6.
+~~**The table does not yet scope decision 2's variant 1.**~~ **Variant 1 — LANDED
+in the core and on both FFI surfaces** (`94825ec` / `94da492`), plus the six client
+filter arms (`5d6af94` / `f53d11a`). This paragraph predicted the shape correctly —
+*"an envelope kind in `lakko-contacts`, both FFI surfaces, and a beacon-plus-freshness
+fold"* — and got one thing wrong, recorded because it is the reason the sprint cost
+more than this predicted: the fold **is** in the core, but the beacon collides with
+`parse_body`'s lossy-UTF-8 legacy fallback, so the sprint also had to add a
+service-envelope filter to **six** client code paths (foreground and background, on
+three platforms) before a beacon could ride the journal without appearing as a chat
+bubble. See [§ The filter obligation the beacon
+created](#the-filter-obligation-the-beacon-created-and-why-a-beacon-is-an-event-rather-than-a-drop).
+It also predicted `lakko-presence` might serve; it does not, and
+[§ Why not `lakko-presence`](#why-not-lakko-presence) says why. **What remains
+unbuilt is the part that makes any of it do something: the emitter and the
+observation store.** `composeCommitterBeacon` has **zero production call sites** —
+verified against the tree, it appears under `apps/` only in tests — so no beacon is
+ever sent, and nothing calls `actingCommitterVerdict` or `shouldEmitBeacon` at all.
+The plumbing is complete and the mechanism is **inert**; a reader who takes "the
+beacon landed" to mean the election works has mis-read it. That work is S4-S6.
+**Variant 2 needs no new sprint** — the stagger is client orchestration inside
+S4-S6, and it remains the documented fallback.
 
 **The outbox/lock layer is the least symmetric surface and will cost the most per
 platform.** Web has `withGroupMlsLock` plus an atomic IndexedDB transaction and no
@@ -1961,9 +2257,19 @@ translates.
 - **The race is narrowed, not eliminated** — two candidates in a handoff can still
   both commit, which is why the stand-down re-read and the staged rollback are
   required steps rather than optional ones.
-- **The decision-2 liveness variant is still unchosen**, so the sweep trigger —
+- ~~**The decision-2 liveness variant is still unchosen**, so the sweep trigger —
   the thing that makes a `waiting` request ever end — does not exist in the core
-  at all and is entirely client orchestration that has not been built.
+  at all and is entirely client orchestration that has not been built.~~
+  **Corrected: the variant is chosen (variant 1, the heartbeat) and its core half
+  is built** — the beacon envelope, the `acting_committer_verdict` fold and the
+  `should_emit_beacon` throttle are in `lakko-contacts` and on both FFI surfaces
+  ([§ The beacon, as built](#the-beacon-as-built)). **The sweep trigger still does
+  not fire**, for a different reason than this bullet gave: not because the core
+  lacks the decision, but because **nothing calls it**. `composeCommitterBeacon`
+  has zero production call sites, so no beacon is ever emitted; nothing stores an
+  observation; nothing evaluates the fold. A `waiting` request still ends only
+  when a client sprint builds the emitter, the observation store and the
+  evaluation — S4-S6.
 
 **Neutral (Option B, as built).**
 
@@ -2080,6 +2386,23 @@ decision 2 rather than here.
   G-35 / G-36 / G-37 were kept — that file is the maintainer's and is untouched
   here.
 
+  **The decision-2 beacon (S3c) mints nothing, and that was argued rather than
+  defaulted** — see
+  [§ Does the beacon earn an indexed invariant?](#does-the-beacon-earn-an-indexed-invariant-not-yet--and-the-trigger-is-named).
+  Short form: the property is real and breakable, but the mechanism is **inert**
+  (no emitter, no fold caller), so there is no live enforcement point to pin, and
+  the index describes live properties. Mint it with S4-S6, at the first client that
+  actually emits and folds. **The beacon's own invariant footprint:** **#1** and
+  **#5** untouched (the payload is field-less — no identity, no timestamp, no
+  server-visible artifact of any kind); **#2** holds — the beacon rides an MLS
+  application message, so the DS sees ciphertext and parses nothing, exactly as it
+  does for the ADR-0042 routing envelope; **#3 untouched by this sprint** — the
+  beacon lives in `lakko-contacts`, and `Group::committerRank` reads the existing
+  `0xFF02` role table through an accessor rather than changing the state machine;
+  **#4** — the codec is bounded and fail-closed (domain, then exact length, then
+  version), and every client filter arm falls **through** to the chat parser on an
+  unrecognised version rather than swallowing the row.
+
 **Flag through `lakko-security` before merging any option.** Option C touches the
 MLS commit publish ordering and the ADR-0040 durability argument. Option A touches
 the zero-trust server's behaviour and adds an availability attack surface. Option B
@@ -2092,6 +2415,50 @@ crypto review.**
 
 ## Open questions
 
+- **The beacon has no emitter, and this is the one thing a reader must not
+  mis-read.** `composeCommitterBeacon` has **zero call sites under `apps/` outside
+  tests**, and nothing calls `actingCommitterVerdict` or `shouldEmitBeacon` at all.
+  So no beacon is ever sent, no observation is ever stored, and the fold is never
+  driven: the plumbing is complete on four surfaces and the **mechanism is inert**.
+  It belongs to the client sprints (S4-S6), which must build three things together —
+  the throttled emit from a **foregrounded** client (the C-59 obligation the core
+  cannot check), a per-`(group, signature key)` observation store keyed on the
+  signature key with the DS row's `created_at`, and the fold evaluated at verdict
+  time with ranks re-derived through `Group::committerRank` against the current role
+  table.
+- **Android carries two `looksLikeCommitterBeacon` functions**, one in
+  `me.lakko.app.chat.ChatClient` (3-arg: bytes, length, decoder lambda) and one in
+  `me.lakko.app.push.PushServiceEnvelopeFilter` (2-arg: bytes, length — the peek
+  only). They agree today, and both are host-testable, so nothing is broken — but a
+  wire revision has to move two places. The duplicate is **avoidable**: the push
+  filter already imports `looksLikeCallSignaling` from `chat`, so the dependency
+  arrow exists and its own module doc argues for exactly this reuse (*"the proto
+  oneof tags must have exactly one definition; a second copy would drift silently"*)
+  — the natural shape is **chat owning the peek and push reusing it**, which is what
+  was done for call signaling and not for the beacon. Recorded as a **cleanup, not a
+  design**: the split came from how the two sprints were scoped, not from a reason.
+- **Android's routing-secret arm has no positive host test in the foreground
+  classifier.** `ChatClient.toEvent` injects its beacon arm and its body parser as
+  defaulted parameters so a plain JVM test can drive them, but the ADR-0042 /
+  ADR-0044 routing arm calls `decodePushRoutingSecret` **directly**, inside a
+  `catch (_: Throwable)`. On the host there is no `liblakko_ffi_uniffi.so`, so that
+  call throws `UnsatisfiedLinkError`, the catch swallows it, and a genuine routing
+  envelope classifies as **chat** — so a test asserting the correct classification
+  cannot pass. `ChatServiceEnvelopeTest` therefore only asserts the *negative* (the
+  beacon double rejects a routing envelope). The background
+  `PushServiceEnvelopeFilter.isServiceEnvelope` does not have this problem: it takes
+  `decodesAsRoutingSecret` as a parameter and is positively tested. Closing it means
+  giving the foreground routing arm the same injected shape its beacon neighbour
+  already has.
+- **The iOS NSE routing pre-filter still hardcodes its length.**
+  `NsePushDecrypt.swift` carries `private let pushRoutingEnvelopeLen = 70` while the
+  beacon peek beside it takes its length as an injected parameter sourced from the
+  slim FFI's `committerBeaconEnvelopeLen()` — the beacon sprint added the export
+  precisely so a wire literal would not sit unpinned in Swift. The routing literal
+  is not unpinned (`push_routing::golden_pins_the_swift_prefilter_shape` asserts
+  70 and `0x6c` in Rust), so the drift fails CI rather than a notification; but the
+  two peeks now use two different mechanisms for the same job, and the newer one is
+  the better one.
 - **~~Decision 2's variant choice — a candidate heartbeat, or a staggered
   takeover?~~ Answered — the maintainer chose the candidate heartbeat (variant 1).**
   Variant 1 makes "active admin devices elect the committer" literal and removes the
@@ -2114,11 +2481,20 @@ crypto review.**
 
   **What the choice costs in scope**, which the ADR must not leave implicit: variant
   2 needed no new sprint, because its stagger is client orchestration inside S4-S6.
-  Variant 1 is a sprint that does not yet exist in the decomposition — it needs a
-  beacon envelope kind in `lakko-contacts`, **both** FFI surfaces (`lakko-presence`
-  is exposed on wasm only, with no UniFFI counterpart and no caller under
-  `apps/web/src`), and a beacon-plus-freshness fold on all three clients. It must be
-  scoped before S4, since S4 cannot elect a committer without it.
+  ~~Variant 1 is a sprint that does not yet exist in the decomposition~~ — **it is
+  now S3c in [§ Blast radius, per sprint](#blast-radius-per-sprint), and its core
+  half has LANDED** (`94825ec` / `94da492`, with the client filter arms in
+  `5d6af94` / `f53d11a`). It needed the predicted beacon envelope kind in
+  `lakko-contacts` and **both** FFI surfaces; `lakko-presence` (exposed on wasm
+  only, no UniFFI counterpart, no caller under `apps/web/src`) was evaluated and
+  **not** used, for reasons sharper than its unwiredness — see
+  [§ Why not `lakko-presence`](#why-not-lakko-presence). It also needed one thing
+  this paragraph did not predict: a service-envelope filter arm on **six** client
+  receive paths, because a beacon otherwise renders as a chat bubble through
+  `parse_body`'s lossy-UTF-8 legacy fallback. **The beacon-plus-freshness fold is in
+  the core, but nothing drives it and nothing emits a beacon**, so S4 still cannot
+  elect a committer — what it now inherits is a complete, tested, FFI-exposed
+  mechanism with no caller, rather than a design.
 - **~~The retry budget and its user-visible exhaustion state.~~ Answered — there is
   no retry budget.** The revised decision 2 removes both the cap and the terminal
   failure it produced: a request waits indefinitely rather than exhausting a budget,
@@ -2257,6 +2633,64 @@ Symbols rather than line numbers, per the anchor convention at the top.
 - `openmls-0.8.1/src/group/mls_group/proposal.rs:502`
   `MlsGroup::remove_pending_proposal` — public, contrary to this ADR's original
   decision-3 claim.
+
+### What was built for decision 2 (2026-08-24)
+
+The heartbeat, variant 1. Four commits; the core carries no `lakko-mls` change, so
+**invariant #3 is untouched by this sprint**.
+
+- `crates/lakko-contacts/src/committer_beacon.rs` (`94825ec`) — the 27-byte
+  field-less envelope (`COMMITTER_BEACON_ENVELOPE_DOMAIN_V1` /
+  `COMMITTER_BEACON_VERSION_V1` / `COMMITTER_BEACON_PAYLOAD_LEN`),
+  `compose_committer_beacon` / `try_unwrap_committer_beacon` /
+  `decode_committer_beacon` + `CommitterBeaconError`, the fold
+  **`acting_committer_verdict`** over `BeaconObservation` →
+  `ActingCommitter::{Act, Defer, NotACandidate}`, the throttle
+  **`should_emit_beacon`**, and the three timing constants
+  (`COMMITTER_BEACON_INTERVAL_MS`, `COMMITTER_BEACON_WORST_CASE_POLL_MS`,
+  `COMMITTER_BEACON_FRESHNESS_WINDOW_MS`). 33 in-module tests. **Its module
+  documentation is the authority** for the no-fields decision, the
+  `lakko-presence` rejection and the constants' budget argument — this ADR's
+  [§ The beacon, as built](#the-beacon-as-built) records them, it does not restate
+  them in full.
+- `crates/lakko-contacts/src/incoming_envelope.rs` (`94825ec`) — dispatch step 5,
+  the `IncomingEnvelope::CommitterBeacon` **unit** variant and the
+  `DispatchError::CommitterBeacon` arm.
+- `crates/lakko-contacts/fuzz/fuzz_targets/committer_beacon_decode.rs` (`94825ec`)
+  — the bounded decode **plus** the fold driven from the same attacker-controlled
+  bytes, asserting two properties on every input: a `None` own-rank is always
+  `NotACandidate`, and a `Defer` never names a rank at or above this device's own.
+- `crates/lakko-ffi-uniffi/src/contacts.rs` + `crates/lakko-ffi-wasm/src/contacts.rs`
+  (`94da492`) — `composeCommitterBeacon` / `decodeCommitterBeacon` /
+  `actingCommitterVerdict` / `shouldEmitBeacon`, the `BeaconObservation` and
+  `ActingCommitter` mirrors, all four constants, and `committerBeaconEnvelopeLen`.
+- `crates/lakko-ffi-uniffi/src/lib.rs` + `crates/lakko-ffi-wasm/src/mls.rs`
+  (`94da492`) — **`Group::committerRank(signatureKey)`**, the peer-facing twin of
+  `ownCommitterRank` and the input `BeaconObservation.rank` needs.
+- `crates/lakko-ffi-extension/src/committer_beacon.rs` (`94da492`, extended
+  `f53d11a`) — `decode_committer_beacon` + `committer_beacon_envelope_len` for the
+  iOS NSE; compose, the fold, the throttle and the timing constants are
+  **deliberately absent**. 8 tests including
+  `an_unfiltered_beacon_would_otherwise_render_as_chat_text` and
+  `golden_pins_the_swift_prefilter_shape`.
+- The client filter arms — background (`5d6af94`):
+  `apps/web/public/sw-push-decrypt.js`,
+  `apps/android/.../push/PushServiceEnvelopeFilter.kt` +
+  `PushBackgroundDecrypt.kt`, `apps/ios/LakkoNotificationService/NsePushDecrypt.swift`
+  + `NseDecryptDeps.swift`; foreground (`f53d11a`): `apps/web/src/chat/client.ts` +
+  `routes/Chat.tsx`, `apps/android/.../chat/ChatClient.kt` + `ChatRepository.kt`,
+  `apps/ios/Lakko/Chat/ChatClient.swift` + `ChatRepository.swift`. Plus the
+  exhaustive-switch repair in both `MultiJoinerCall` dispatchers.
+- **No emitter.** Nothing under `apps/` calls `composeCommitterBeacon` outside
+  tests, and `actingCommitterVerdict` / `shouldEmitBeacon` have no client call
+  sites at all.
+
+**Gates, verified firsthand by the maintainer on this tree** (this docs pass ran
+`audit-index-check` and `spec-check` only, both clean): `cargo test -p lakko-contacts`
+249 · `-p lakko-ffi-extension` 17 · `-p lakko-ffi-uniffi` 219 · `-p lakko-ffi-wasm`
+139; web `tsc` clean with vitest 622; Android `:app:compileDebugKotlin` BUILD
+SUCCESSFUL with 555 tests and 0 failures; iOS `xcodebuild` BUILD SUCCEEDED with
+383/383 excluding the two dockerised-SFU cases.
 
 ### Prior art and the recon's sources
 

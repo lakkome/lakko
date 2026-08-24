@@ -16,10 +16,24 @@ section shape). `docs/adr/` holds decisions, `docs/security/` holds invariants a
 neither is edited here.
 
 > **This spec was written after the core, not before it.** That is the debt, and §11
-> records precisely what it cost: **ten** places where the built core contradicts or omits
-> what [ADR-0045] decision 5 assumed the UI would have. Items 9 and 10 were added on
-> 2026-08-20 and were not caught by the spec's own writing — they came out of two later
-> core sprints, which is the debt compounding rather than being paid down.
+> records precisely what it cost: **twelve** places where the built core contradicts or
+> omits what [ADR-0045] decision 5 assumed the UI would have. Items 9 and 10 were added on
+> 2026-08-20 and items 11 and 12 on 2026-08-24; none was caught by the spec's own writing —
+> they came out of later core sprints, which is the debt compounding rather than being paid
+> down.
+
+> **Revised 2026-08-24 against two further core sprints.** The FFI back-fill landed
+> (`6c77cd6`), so §11.10 **closes** and §11.6's transfer flow is now buildable. Decision
+> 2's liveness variant is **answered** — the maintainer chose the candidate heartbeat and
+> it is built in `lakko-contacts` and on both FFI surfaces (`94825ec` / `94da492`), so
+> §9.7's shared-timing ask is satisfied and §12.2 closes; both are annotated with the
+> honest qualification that the two constants are **chosen, not measured**. Two new §11
+> items: **11** the beacon has no emitter and no fold caller, so the mechanism is inert and
+> the whole election is still unbuilt client work; **12** a beacon otherwise renders as a
+> chat bubble through `parse_body`'s lossy-UTF-8 fallback, which all three clients now
+> filter on both the timeline and the notification path. Nothing in §4's state table, §5's
+> copy or §10's visibility rule moves — and §10's discipline now governs the beacon too:
+> it licenses "a candidate is active", never "this person is online".
 
 > **Revised 2026-08-20 against the built core.** Three things settle: the **owner dead end
 > is closed in the core** (ownership transfer landed, `e780952`) so §11.6 and §12.3 change
@@ -27,9 +41,10 @@ neither is edited here.
 > `OutgoingOwner` choice, and an irreversibility confirmation, enumerated in §11.6 and
 > deliberately not designed here; a **staged sweep freezes a group's own membership
 > operations durably**, which is a hard new implementation obligation for S4-S6 (§11.9);
-> and the **FFI reaches neither of those two core surfaces**, which makes an FFI back-fill
-> a prerequisite for S4 (§11.10, §9.6). Nothing in §4's state table, §5's copy or §10's
-> visibility rule moves.
+> and the ~~**FFI reaches neither of those two core surfaces**, which makes an FFI back-fill
+> a prerequisite for S4~~ — **the back-fill has since landed (`6c77cd6`); see the 2026-08-24
+> banner above and §11.10.** Nothing in §4's state table, §5's copy or §10's visibility rule
+> moves.
 
 > **Revised 2026-08-19 against [ADR-0045]'s rewritten decision 2 (liveness).** The ADR now
 > gives a waiting request **no deadline**: the committer duty passes to the next candidate
@@ -421,10 +436,13 @@ merely *device awake*.
 `proposal()` accessor on the processed-message projection, with wasm using the flat
 `kind` string plus `add_signature_key` / `remove_target_leaf` shape this section asks for.
 **So items 1–5 below are satisfied and are recorded as the requirement they meet, not as
-new work.** Still open: **item 6** (the staged-sweep and ownership-transfer surfaces, both
-added to the core *after* S3 shipped and neither back-filled onto it — this is a
-prerequisite for S4, see §11.10), **item 7** (the liveness timing constant), and the typed
-refusal reason in item 1.
+new work.** ~~Still open: **item 6** … **item 7** …~~ **Updated 2026-08-24: items 6 and 7
+are satisfied too.** Item 6's staged-sweep and ownership-transfer surfaces landed in the
+back-fill (`6c77cd6`); item 7's shared liveness timing landed with the committer beacon
+(`94825ec` / `94da492`) as `committerBeaconIntervalMs` / `committerBeaconFreshnessWindowMs`
+/ `committerBeaconWorstCasePollMs` on both surfaces, alongside the fold, the throttle and
+`Group.committerRank` — **exposed but not yet called by any client** (§11.11). **Still
+open:** the typed refusal reason in item 1, and `QUIET_WINDOW` (§12.1).
 
 **FFI, both surfaces in lock-step (uniffi + wasm):**
 
@@ -448,15 +466,24 @@ refusal reason in item 1.
    uniffi and wasm. Without the first, §8's committer view can only be built on the
    eager-merge path; without the second, §11.6's transfer flow cannot be built at all.
 
-7. **One shared definition of whatever timing the chosen liveness variant needs.**
-   [ADR-0045] decision 2 leaves this open: **variant 1** (a candidate heartbeat) needs a
-   beacon interval and a freshness window; **variant 2** (staggered takeover) needs one
-   `step`. Either way the number belongs in **one** definition consumed over both FFI
-   surfaces, never hand-copied — three clients each carrying their own copy is precisely
-   the ADR-0044 drift shape. **What this item no longer asks for is a stall threshold:**
-   the UI has no timing-derived label left to keep in step with the sweep trigger, because
-   `waiting` is unbounded and never escalates (§4). Only the sweep *trigger* consumes the
-   constant now, which makes the drift risk smaller but not zero.
+7. ~~**One shared definition of whatever timing the chosen liveness variant needs.**~~
+   **SATISFIED — the maintainer chose variant 1 (the candidate heartbeat) and it is
+   built.** [ADR-0045] decision 2 no longer leaves this open. The two numbers variant 1
+   needs live in **one** definition and are consumed over **both** FFI surfaces exactly as
+   this item asked: `committerBeaconIntervalMs()` (60 s) and
+   `committerBeaconFreshnessWindowMs()` (150 s), plus
+   `committerBeaconWorstCasePollMs()` (30 s), which is a term of the window's derivation
+   and also a **constraint on the client** — a group poll slower than it invalidates the
+   window. Nothing is hand-copied. **Honest qualification:** the numbers are **chosen, not
+   measured**, contrary to §12's ask, and the core says so in those words; what stands in
+   for a measurement is a budget argument (the beacon's latency is not interactive, so the
+   interval is sized for journal litter and for how finely a candidate's activity schedule
+   is exposed). A later measurement can overturn either. **Variant 2 remains the
+   documented fallback** and would still need its own `step`. **What this item no longer
+   asks for is a stall threshold:** the UI has no timing-derived label left to keep in step
+   with the sweep trigger, because `waiting` is unbounded and never escalates (§4). Only
+   the sweep *trigger* consumes these constants — and **that trigger is not built**: no
+   client emits a beacon or folds a verdict yet, so the constants are exposed and unused.
 
 **Client-durable state (per platform, not FFI).** A per-`(account, group)` pending-request
 record, sibling to ADR-0040's commit outbox and subject to the same discipline: written
@@ -469,9 +496,10 @@ before the publish, surviving restart, purged on `applied` / `refused` and on `r
 applied-test compares on. **There is no `attempts` field** — nothing counts re-requests any
 more (§7), so persisting a count would be dead state that invites someone to cap on it.
 
-**Timing constants** (§12 — must be measured, not guessed): `QUIET_WINDOW` (UI) and the one
-protocol constant decision 2's chosen variant needs. `owner_grace`, `stallThreshold` and
-`MAX_ATTEMPTS` are all gone.
+**Timing constants** (§12 — must be measured, not guessed): `QUIET_WINDOW` (UI) and the
+protocol constants decision 2's chosen variant needs — **now settled as variant 1's beacon
+interval and freshness window, exposed on both FFI surfaces and CHOSEN rather than
+measured** (see item 7). `owner_grace`, `stallThreshold` and `MAX_ATTEMPTS` are all gone.
 
 ---
 
@@ -549,9 +577,17 @@ the list's real subject is *what S4-S6 must know that the ADR did not say*.
    anywhere; the revised decision 2 **deleted the state rather than defining the
    threshold**, which resolves that half outright (§4). What survives is the weaker,
    permanent form: `waiting` still needs a sweep trigger to exist for it to ever end, and
-   the trigger still needs the one constant decision 2's chosen variant carries (§9.7).
-   That constant has not been measured either — but nothing the **UI** says now depends on
-   it, which is the difference.
+   the trigger still needs the constants decision 2's chosen variant carries (§9.7).
+   Those constants have not been measured either — but nothing the **UI** says now depends
+   on them, which is the difference. **Update (2026-08-24): the variant is chosen (1, the
+   heartbeat) and its core half is built** — the beacon envelope, the acting-committer fold
+   and the emit throttle are in `lakko-contacts` and on both FFI surfaces, and the fold
+   does take the DS-row age as its freshness input, which this finding said was absent.
+   **The finding still stands in its permanent form**, for a narrower reason than it gave:
+   not that the core lacks the decision, but that **nothing calls it**. No client emits a
+   beacon, none stores an observation, none evaluates the fold, and the stand-down re-read
+   is still unwritten — so `commit_pending_proposals` remains reachable by any owner/admin
+   who asks, and the election is still client orchestration that does not exist.
 
 4. **Decision 5 omits leaving entirely, and the core just built it.** `ProposalKind::Leave`
    plus self-targeted `Remove` are authorised for any member, closing ADR-0022's deliberately
@@ -630,31 +666,68 @@ the list's real subject is *what S4-S6 must know that the ADR did not say*.
    right in code rather than caught in QA. Nothing in this spec's §4 state table changes;
    this is an implementation obligation, not a state.
 
-10. **The FFI does not yet reach either of the two newest core surfaces.** Verified against
-    the tree: **neither FFI surface exposes `stagePendingProposals` /
-    `hasStagedSweep` / `mergeStagedSweep` / `abandonStagedSweep`, nor `transferOwnership` /
-    `proposeOwnershipTransfer` / `OutgoingOwner`.** S3 landed before both sprints and was
-    not back-filled. Two consequences for this spec: the committer view of §8 cannot be
-    built correctly yet (only the eager-merge sweep is reachable, which is the shape a
-    non-owner committer must not use), and **the §11.6 transfer flow cannot be built at
-    all**, however well it is designed. The FFI back-fill is a prerequisite for S4.
+10. ~~**The FFI does not yet reach either of the two newest core surfaces.**~~ **CLOSED —
+    the back-fill landed (`6c77cd6`).** The finding read: *"neither FFI surface exposes
+    `stagePendingProposals` / `hasStagedSweep` / `mergeStagedSweep` / `abandonStagedSweep`,
+    nor `transferOwnership` / `proposeOwnershipTransfer` / `OutgoingOwner`"* — true when
+    written, and all seven are now on both surfaces in lock-step. Its two consequences for
+    this spec are lifted: §8's committer view can be built on the staged path rather than
+    the eager-merge shape a non-owner committer must not use, and **§11.6's transfer flow
+    is now buildable**. Kept rather than deleted because the prerequisite ordering it
+    states is still how S4 depends on the FFI.
+
+11. **The committer beacon is on the FFI, and nothing calls it.** Decision 2's variant 1
+    landed in the core and on both surfaces (`94825ec` / `94da492`): `composeCommitterBeacon`,
+    `decodeCommitterBeacon`, `actingCommitterVerdict`, `shouldEmitBeacon`, the four timing
+    constants, and `Group.committerRank(signatureKey)` for ranking a beacon's
+    MLS-authenticated sender. **The emitter and the observation store are not built** —
+    `composeCommitterBeacon` has zero production call sites, so the mechanism is inert.
+    What S4-S6 inherit: a throttled emit gated on `shouldEmitBeacon` and on the client
+    being **foregrounded** (a beacon must mean *able to sweep*, and the ADR-0041 background
+    decrypt structurally cannot commit — C-59); a per-`(group, signature key)` observation
+    store fed by the `committerBeacon` receive event each client already surfaces with its
+    sender leaf and DS `createdAt`; and the fold evaluated at verdict time with ranks
+    **re-derived** through `Group.committerRank` against the current role table — never a
+    rank cached at receipt, because a rank is a *position* in the table's order and any
+    role change renumbers it.
+
+12. **The beacon collides with the chat parser, and all three clients now filter it.**
+    Not a UX decision so much as a UX hazard that was closed before it shipped: a beacon is
+    an ordinary MLS application message, and `parse_body`'s deliberate lossy-UTF-8 legacy
+    fallback degrades it to a **chat bubble reading `lakko/committer-beacon/v1`** plus two
+    control bytes — on the timeline and in a push notification. Filter arms landed on six
+    receive paths (foreground and background, three platforms) in `5d6af94` / `f53d11a`. A
+    recognised beacon surfaces as its **own event** rather than being dropped, because the
+    sender leaf and the row age the fold needs exist only at that point in the chain. **For
+    this spec that means the beacon has, and must keep, no UI surface at all** — §10's
+    discipline applies to it verbatim: it licenses "a candidate is active", never "this
+    person is online", and no copy may imply the stronger claim.
 
 ---
 
 ## 12. Open — needs the maintainer
 
-1. **The timing constants.** `QUIET_WINDOW` (UI) plus the one protocol constant
+1. **The timing constants.** `QUIET_WINDOW` (UI) plus the protocol constants
    [ADR-0045] decision 2's chosen variant needs. The ADR says pick them from a measurement,
-   and it is right. **Nothing in this spec is blocked on either now** — the state that was
-   blocked (`stalled`) is gone, and `QUIET_WINDOW` only decides *when* an annotation
-   appears, not whether the spec is implementable. Down from four numbers to two.
-2. **Decision 2's liveness variant** — a candidate heartbeat, or a staggered takeover?
-   Mostly invisible in the UI, and this spec is written to hold either way, with one
-   exception worth flagging from the UX side: **a heartbeat publishes each candidate's
-   activity schedule to the whole group, continuously.** §10 already argues that the
-   pending set is a privacy surface; a beacon is a second, larger one, and it is *not*
-   role-gateable — every member would see it. It belongs on the maintainer's ledger for
-   that reason as much as for the journal-litter one [ADR-0045] names.
+   and it is right. **The protocol half is now settled but NOT measured:** variant 1's
+   `committerBeaconIntervalMs` (60 s) and `committerBeaconFreshnessWindowMs` (150 s) are
+   defined once and exposed on both FFI surfaces, and the core states plainly that they are
+   **chosen, not measured** — backed by a budget argument (journal litter and how finely a
+   candidate's activity schedule is exposed) rather than by data, and overturnable by a
+   later measurement. `QUIET_WINDOW` is still unpicked. **Nothing in this spec is blocked on
+   either** — the state that was blocked (`stalled`) is gone, and `QUIET_WINDOW` only
+   decides *when* an annotation appears, not whether the spec is implementable.
+2. **~~Decision 2's liveness variant~~ — ANSWERED: the candidate heartbeat (variant 1),**
+   chosen by the maintainer and built in the core and on both FFI surfaces; variant 2 is
+   kept as the documented fallback. It is invisible in the UI, and this spec holds unchanged
+   — but **the exception this item flagged was accepted, not resolved**, and it should stay
+   on the ledger in that form: **a heartbeat publishes each candidate's activity schedule to
+   the whole group, continuously**, and it is *not* role-gateable — every member sees it.
+   §10 argues the pending set is a privacy surface; the beacon is a second, larger one. The
+   maintainer's stated ground for accepting it is that online/offline visibility is ordinary
+   messenger functionality. The 60 s interval is where that cost is actually priced: a
+   shorter one buys a finer-grained schedule for no benefit anyone is waiting on, since
+   nothing interactive waits on a beacon.
 3. **~~The owner dead end (§11.6).~~ Closed in the core — the design work is now
    schedulable, not blocked.** Ownership transfer landed (`e780952`) and its API is known
    (§11.6). Nothing here waits on the maintainer any more; what it waits on is a UX pass
