@@ -31,7 +31,13 @@
 //!    envelope (ADR-0042). Caller persists the 32-byte
 //!    secret + builds the `push_gid → group_id` reverse
 //!    index.
-//! 5. **Intro-message fallthrough** — plain free-text
+//! 5. [`crate::committer_beacon::try_unwrap_committer_beacon`]
+//!    — the committer liveness beacon (ADR-0045 decision 2,
+//!    variant 1). Caller folds it into the acting-committer
+//!    decision via
+//!    [`crate::committer_beacon::acting_committer_verdict`],
+//!    pairing it with the MLS sender leaf and the DS row age.
+//! 6. **Intro-message fallthrough** — plain free-text
 //!    `ContactRequest` (ADR-0005 scenario A; "add me as a
 //!    contact"). Caller renders the bytes as a UTF-8 intro
 //!    message.
@@ -65,6 +71,7 @@ use thiserror::Error;
 
 use crate::call_kp_forward::try_unwrap_call_kp_forward;
 use crate::call_welcome::{try_unwrap_call_welcome, CallWelcomeError};
+use crate::committer_beacon::{try_unwrap_committer_beacon, CommitterBeaconError};
 use crate::media_state::{try_unwrap_media_state, MediaStateError};
 use crate::push_routing::{try_unwrap_push_routing_secret, PushRoutingSecretError};
 
@@ -114,6 +121,27 @@ pub enum IncomingEnvelope<'a> {
         /// The decoded 32-byte per-group routing secret.
         secret: [u8; crate::push_routing::PUSH_ROUTING_SECRET_LEN],
     },
+    /// Committer liveness beacon (ADR-0045 decision 2, variant 1).
+    /// Rides an MLS application message on the group journal, and
+    /// carries **no fields** — everything the receiver needs comes
+    /// from outside the payload, which is why this is a unit
+    /// variant and not a struct one. Never rendered as a chat
+    /// bubble.
+    ///
+    /// The caller pairs it with two values the dispatcher does not
+    /// see: the **MLS sender leaf** (resolved through
+    /// `Group::members()` to a signature key, then to a rank via
+    /// `lakko_mls::group_roles::committer_rank`) and the DS row's
+    /// server-assigned `created_at` (giving the age). Those two
+    /// become a
+    /// [`crate::committer_beacon::BeaconObservation`], and the set
+    /// of them feeds
+    /// [`crate::committer_beacon::acting_committer_verdict`].
+    ///
+    /// **A beacon licenses "a candidate is active", never "this
+    /// person is online"** — no UI copy may imply the stronger
+    /// claim.
+    CommitterBeacon,
     /// Plain free-text intro message (ADR-0005 scenario A).
     /// Caller renders as a UTF-8 ContactRequest.
     IntroMessage(&'a [u8]),
@@ -142,6 +170,11 @@ pub enum DispatchError {
     /// length / unknown version).
     #[error(transparent)]
     PushRoutingSecret(#[from] PushRoutingSecretError),
+    /// A committer-beacon envelope (ADR-0045) matched its domain
+    /// separator but its payload was malformed (wrong length /
+    /// unknown version).
+    #[error(transparent)]
+    CommitterBeacon(#[from] CommitterBeaconError),
 }
 
 /// Single-call dispatcher. Runs the two unwrap helpers in
@@ -184,7 +217,11 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<IncomingEnvelope<'
             secret: envelope.secret,
         });
     }
-    // 5. Plain intro message — ADR-0005 scenario A.
+    // 5. Committer liveness beacon — ADR-0045 decision 2.
+    if try_unwrap_committer_beacon(plaintext)?.is_some() {
+        return Ok(IncomingEnvelope::CommitterBeacon);
+    }
+    // 6. Plain intro message — ADR-0005 scenario A.
     Ok(IncomingEnvelope::IntroMessage(plaintext))
 }
 
@@ -212,6 +249,33 @@ mod tests {
         let wrapped = wrap_call_kp_forward(&kp);
         let result = dispatch_incoming_envelope(&wrapped).unwrap();
         assert_eq!(result, IncomingEnvelope::CallKeyPackage(kp.as_slice()));
+    }
+
+    #[test]
+    fn dispatches_committer_beacon_envelope() {
+        use crate::committer_beacon::compose_committer_beacon;
+        let wrapped = compose_committer_beacon();
+        assert_eq!(
+            dispatch_incoming_envelope(&wrapped).unwrap(),
+            IncomingEnvelope::CommitterBeacon,
+        );
+    }
+
+    #[test]
+    fn a_malformed_beacon_is_an_error_not_an_intro_message() {
+        // Fail-closed: the domain matched, so the payload behind it is
+        // a broken beacon and must NOT fall through to be rendered as
+        // chat text. This is the discriminating case for the dispatch
+        // order — an implementation that swallowed the beacon error
+        // would surface these bytes as a bubble containing a NUL and
+        // a stray version byte.
+        use crate::committer_beacon::COMMITTER_BEACON_ENVELOPE_DOMAIN_V1;
+        let mut wrapped = COMMITTER_BEACON_ENVELOPE_DOMAIN_V1.to_vec();
+        wrapped.push(0x02); // unknown version
+        assert!(matches!(
+            dispatch_incoming_envelope(&wrapped),
+            Err(DispatchError::CommitterBeacon(_)),
+        ));
     }
 
     #[test]

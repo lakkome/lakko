@@ -55,6 +55,7 @@ pub mod ack;
 pub mod call_invite;
 pub mod call_kp_forward;
 pub mod call_welcome;
+pub mod committer_beacon;
 pub mod envelope;
 pub mod error;
 pub mod group_invite;
@@ -81,6 +82,13 @@ pub use call_kp_forward::{
 pub use call_welcome::{
     try_unwrap_call_welcome, wrap_call_welcome, CallWelcomeError, CALL_WELCOME_ENVELOPE_DOMAIN_V1,
     CALL_WELCOME_MIN_PAYLOAD_LEN,
+};
+pub use committer_beacon::{
+    acting_committer_verdict, compose_committer_beacon, decode_committer_beacon,
+    should_emit_beacon, try_unwrap_committer_beacon, ActingCommitter, BeaconObservation,
+    CommitterBeacon, CommitterBeaconError, COMMITTER_BEACON_ENVELOPE_DOMAIN_V1,
+    COMMITTER_BEACON_FRESHNESS_WINDOW_MS, COMMITTER_BEACON_INTERVAL_MS,
+    COMMITTER_BEACON_PAYLOAD_LEN, COMMITTER_BEACON_VERSION_V1, COMMITTER_BEACON_WORST_CASE_POLL_MS,
 };
 pub use error::{ContactError, Result};
 pub use group_invite::{

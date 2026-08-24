@@ -47,6 +47,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "committer_beacon_decode"
+path = "fuzz_targets/committer_beacon_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "push_routing_secret_decode"
 path = "fuzz_targets/push_routing_secret_decode.rs"
 test = false

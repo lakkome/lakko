@@ -1153,6 +1153,22 @@ pub enum WasmIncomingEnvelopeKind {
     /// getter; `cameraOn` is `undefined`. Appended as `4` so the
     /// pre-existing tags stay fixed.
     PushRoutingSecret = 4,
+    /// Committer liveness beacon (ADR-0045 decision 2, variant 1).
+    /// Carries **no** payload — `payload` is empty, `cameraOn` and
+    /// `mintEpoch` are `undefined` — because the beacon has no
+    /// fields: the sender comes from the MLS sender leaf and the age
+    /// from the DS row. Appended as `5` so the pre-existing tags stay
+    /// fixed.
+    ///
+    /// **This variant exists so a beacon is classified, not so it is
+    /// consumed.** The fold that turns beacons into an
+    /// acting-committer decision (`actingCommitterVerdict` /
+    /// `shouldEmitBeacon` and their constants) is deliberately **not
+    /// yet exposed** on this surface; until it is, a client that sees
+    /// this kind should drop it. What the variant buys today is that
+    /// a beacon can never fall through to `IntroMessage` and be
+    /// rendered as a chat bubble.
+    CommitterBeacon = 5,
 }
 
 /// FFI-portable result of [`dispatchIncomingEnvelope`]. The
@@ -1252,6 +1268,12 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<WasmIncomingEnvelo
             payload: secret.to_vec(),
             camera_on: None,
             mint_epoch: Some(mint_epoch),
+        },
+        IncomingEnvelope::CommitterBeacon => WasmIncomingEnvelope {
+            kind: WasmIncomingEnvelopeKind::CommitterBeacon,
+            payload: Vec::new(),
+            camera_on: None,
+            mint_epoch: None,
         },
         IncomingEnvelope::IntroMessage(p) => WasmIncomingEnvelope {
             kind: WasmIncomingEnvelopeKind::IntroMessage,

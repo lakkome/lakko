@@ -1318,6 +1318,22 @@ pub enum FfiIncomingEnvelopeKind {
     /// the minter's recency stamp rides `mint_epoch`;
     /// `camera_on` is `None`.
     PushRoutingSecret,
+    /// Committer liveness beacon (ADR-0045 decision 2, variant 1).
+    /// Carries **no** payload — `payload` is empty, `camera_on` and
+    /// `mint_epoch` are `None` — because the beacon has no fields:
+    /// the sender comes from the MLS sender leaf and the age from
+    /// the DS row.
+    ///
+    /// **This variant exists so a beacon is classified, not so it is
+    /// consumed.** The fold that turns beacons into an
+    /// acting-committer decision
+    /// (`acting_committer_verdict` / `should_emit_beacon` and their
+    /// constants) is deliberately **not yet exposed** on this
+    /// surface; until it is, a client that sees this kind should
+    /// drop it. What the variant buys today is that a beacon can
+    /// never fall through to `IntroMessage` and be rendered as a
+    /// chat bubble.
+    CommitterBeacon,
 }
 
 /// FFI-portable result of [`dispatch_incoming_envelope`].
@@ -1390,6 +1406,12 @@ pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvel
             secret.to_vec(),
             None,
             Some(mint_epoch),
+        ),
+        IncomingEnvelope::CommitterBeacon => (
+            FfiIncomingEnvelopeKind::CommitterBeacon,
+            Vec::new(),
+            None,
+            None,
         ),
         IncomingEnvelope::IntroMessage(p) => (
             FfiIncomingEnvelopeKind::IntroMessage,
