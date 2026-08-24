@@ -42,6 +42,15 @@ use lakko_contacts::call_welcome::{
     try_unwrap_call_welcome as rust_try_unwrap_call_welcome,
     wrap_call_welcome as rust_wrap_call_welcome, CallWelcomeError, CALL_WELCOME_MIN_PAYLOAD_LEN,
 };
+use lakko_contacts::committer_beacon::{
+    acting_committer_verdict as rust_acting_committer_verdict,
+    compose_committer_beacon as rust_compose_committer_beacon,
+    decode_committer_beacon as rust_decode_committer_beacon,
+    should_emit_beacon as rust_should_emit_beacon, ActingCommitter as RustActingCommitter,
+    BeaconObservation as RustBeaconObservation, COMMITTER_BEACON_ENVELOPE_DOMAIN_V1,
+    COMMITTER_BEACON_FRESHNESS_WINDOW_MS, COMMITTER_BEACON_INTERVAL_MS,
+    COMMITTER_BEACON_PAYLOAD_LEN, COMMITTER_BEACON_WORST_CASE_POLL_MS,
+};
 use lakko_contacts::group_invite::{
     compose as rust_group_invite_compose, decode_and_verify as rust_group_invite_decode,
     group_sign_revocation as rust_group_sign_revocation,
@@ -1629,6 +1638,278 @@ pub fn push_routing_secret_is_newer(
 }
 
 // ============================================================================
+// Committer liveness beacon — ADR-0045 decision 2, variant 1
+// ============================================================================
+
+/// One observed committer beacon, reduced to the only two things
+/// [`acting_committer_verdict`] reads. Mirror of
+/// [`lakko_contacts::committer_beacon::BeaconObservation`].
+///
+/// **Both fields are the observer's own re-derivation, never anything the
+/// beacon claimed.** The beacon payload is field-less: the sender comes from
+/// the MLS sender leaf and the age from the DS row's server-assigned
+/// `created_at`, so a sender can neither name itself nor assert its own
+/// freshness.
+#[derive(uniffi::Record, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BeaconObservation {
+    /// The committer rank the observer re-derived for this beacon's
+    /// MLS-authenticated sender, or `None` when that sender is not a candidate
+    /// at all (a plain member, or a leaf that no longer resolves).
+    ///
+    /// **Derive it with `Group.committerRank(signatureKey)` at the moment the
+    /// verdict is taken, never at the moment the beacon arrived.** A rank is a
+    /// *position* in the role table's canonical order — `0` for the owner,
+    /// `k + 1` for the `k`-th admin — so promoting, demoting or removing any
+    /// admin renumbers every admin that sorts after it. A rank captured under
+    /// one role table therefore cannot be compared against a rank taken under
+    /// another, and [`acting_committer_verdict`] compares each observation
+    /// against this device's own rank, which is necessarily current. Persist
+    /// the sender's **32-byte signature key** alongside the row timestamp and
+    /// rank it here; do not persist a leaf index, which OpenMLS reuses for the
+    /// next member added.
+    pub rank: Option<u32>,
+    /// Age of the beacon's DS row in milliseconds — `now - created_at`, on the
+    /// **server-assigned** `TIMESTAMP(3)` every member reads identically on the
+    /// identical row. The sender's own clock never enters this.
+    ///
+    /// Clamp a row that appears to come from the future to `0`; never wrap.
+    /// That is also the safe direction: an age that reads too fresh makes this
+    /// device defer and the request wait a little longer, while an age that
+    /// reads too stale makes it act and risks a double sweep.
+    pub age_ms: u64,
+}
+
+impl From<BeaconObservation> for RustBeaconObservation {
+    fn from(o: BeaconObservation) -> Self {
+        Self {
+            rank: o.rank,
+            age_ms: o.age_ms,
+        }
+    }
+}
+
+/// The fold's answer to *am I the acting committer right now?* Mirror of
+/// [`lakko_contacts::committer_beacon::ActingCommitter`].
+///
+/// A named verdict rather than a `bool` so a caller cannot collapse "not a
+/// candidate" and "deferring to someone better placed" into one branch — they
+/// are different situations with different follow-ups.
+#[derive(uniffi::Enum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActingCommitter {
+    /// This device is the acting committer: it is a candidate and has heard no
+    /// fresh beacon from any lower-ranked candidate — **including when it has
+    /// heard nothing at all**, which means nobody better placed is running.
+    ///
+    /// Still only a licence to *attempt* the sweep. ADR-0045's stand-down
+    /// journal re-read and the staged-commit rollback
+    /// (`stagePendingProposals` / `mergeStagedSweep` / `abandonStagedSweep`)
+    /// both remain required: two candidates can still both reach this verdict,
+    /// because each folds over its own poll-timed view.
+    Act,
+    /// A lower-ranked candidate beaconed inside the freshness window, so this
+    /// device stands down and re-evaluates on its next poll.
+    Defer {
+        /// The lowest rank observed active. Purely informational — the decision
+        /// is already made — but it is what lets a log line answer *deferring
+        /// to whom*.
+        to_rank: u32,
+    },
+    /// This device is not an owner or admin, so it can never sweep. Distinct
+    /// from [`ActingCommitter::Defer`]: there is nothing to re-evaluate, and no
+    /// beacon this device should be emitting.
+    NotACandidate,
+}
+
+impl From<RustActingCommitter> for ActingCommitter {
+    fn from(v: RustActingCommitter) -> Self {
+        match v {
+            RustActingCommitter::Act => Self::Act,
+            RustActingCommitter::Defer { to_rank } => Self::Defer { to_rank },
+            RustActingCommitter::NotACandidate => Self::NotACandidate,
+        }
+    }
+}
+
+/// Compose a committer-liveness beacon (ADR-0045 decision 2, variant 1).
+///
+/// The returned bytes are the **inner** plaintext handed to the MLS
+/// application-message send path, which seals them before they reach the DS.
+/// A fixed 27 bytes, identical on every call and for every sender, because the
+/// beacon carries no fields at all: naming the sender would add an
+/// unauthenticated identity claim next to the MLS-authenticated one, a
+/// self-reported timestamp would let a candidate hold the committer duty by
+/// asserting its own freshness, and a self-reported rank is one every correct
+/// receiver must ignore.
+///
+/// Gate the call on [`should_emit_beacon`], and only from a **foregrounded**
+/// client that is actually polling — a beacon means *able to sweep*, and the
+/// ADR-0041 background decrypt structurally cannot commit (C-59), so a beacon
+/// emitted from the background is a lie that costs the group a takeover.
+#[uniffi::export]
+#[must_use]
+pub fn compose_committer_beacon() -> Vec<u8> {
+    rust_compose_committer_beacon()
+}
+
+/// Strictly decode a committer-liveness beacon (ADR-0045). Fail-closed:
+/// rejects a plaintext that does not carry the beacon domain separator, or
+/// whose payload is the wrong length or an unknown schema version.
+///
+/// **Returning without throwing is the entire result.** There is deliberately
+/// no payload to hand back — everything a receiver needs (who sent it, how old
+/// it is) comes from the MLS sender leaf and the DS row, not from the bytes.
+///
+/// Use [`dispatch_incoming_envelope`] instead when the plaintext might be any
+/// relay-payload / in-group envelope kind; it classifies a beacon as
+/// [`FfiIncomingEnvelopeKind::CommitterBeacon`] and falls through to the other
+/// kinds rather than erroring.
+///
+/// # Errors
+///
+/// * [`FfiError::Contacts`] when `plaintext` is not a valid committer beacon
+///   (wrong domain / bad length / unknown version).
+#[uniffi::export]
+pub fn decode_committer_beacon(plaintext: Vec<u8>) -> Result<(), FfiError> {
+    rust_decode_committer_beacon(&plaintext)
+        .map(|_| ())
+        .map_err(|err| FfiError::Contacts(err.to_string()))
+}
+
+/// The fold: decide whether this device is the acting committer (ADR-0045
+/// decision 2, variant 1).
+///
+/// Pure, total and clock-free — the caller supplies `now` implicitly, as
+/// already-computed ages. Exposed on the FFI precisely so no client
+/// reimplements the rules: three platforms each re-deriving them is the drift
+/// class that produced ADR-0044's F-A replay.
+///
+/// The rules, in the order they apply:
+///
+/// 1. `own_rank == None` is [`ActingCommitter::NotACandidate`], decided without
+///    reading a single beacon.
+/// 2. Rank `0` — the owner — is [`ActingCommitter::Act`] immediately; no rank
+///    is lower, so no beacon could outrank it and none is consulted.
+/// 3. An observation whose `rank` is `None` is ignored (its sender is not a
+///    candidate).
+/// 4. An observation older than `freshness_window_ms` is ignored.
+/// 5. Only a **strictly** lower rank defers this device — equal rank never
+///    does, which is what makes a device's own echoed-back beacon harmless.
+/// 6. Surviving all of that with nothing left means [`ActingCommitter::Act`]:
+///    hearing nothing is the correct answer when nobody better placed is
+///    running, not a failure to elect.
+///
+/// **This does not close the race.** Each candidate folds over its own
+/// poll-timed view and a beacon is stale by up to one
+/// [`committer_beacon_interval_ms`] even when its sender is perfectly healthy,
+/// so two candidates can both reach [`ActingCommitter::Act`]. ADR-0045's
+/// stand-down journal re-read and its staged-commit rollback both remain
+/// required; deleting either on the strength of this verdict is a mis-reading.
+///
+/// Pass [`committer_beacon_freshness_window_ms`] for `freshness_window_ms`
+/// unless there is a measured reason not to — the interval and the window are
+/// two halves of one budget.
+#[uniffi::export]
+#[must_use]
+pub fn acting_committer_verdict(
+    own_rank: Option<u32>,
+    observed: Vec<BeaconObservation>,
+    freshness_window_ms: u64,
+) -> ActingCommitter {
+    let rust_observed: Vec<RustBeaconObservation> = observed.into_iter().map(Into::into).collect();
+    rust_acting_committer_verdict(own_rank, &rust_observed, freshness_window_ms).into()
+}
+
+/// The send-side throttle: should this device emit a beacon now (ADR-0045)?
+///
+/// 1. **Only candidates emit** — `own_rank == None` is `false`. A plain
+///    member's beacon can never make it the acting committer (the fold drops
+///    it), so emitting one is pure journal litter and a pure privacy leak.
+/// 2. **The first beacon of a session is immediate** — `last_emitted_at_ms ==
+///    None` is `true`, so a candidate that has just opened the app announces
+///    itself at once rather than staying invisible for a whole interval, which
+///    is exactly when a stale view is likeliest to hand the duty elsewhere.
+/// 3. Otherwise, one per [`committer_beacon_interval_ms`].
+///
+/// Both timestamps come from this device's **own local** clock, which is
+/// legitimate here and nowhere else in the beacon design: it governs only this
+/// device's send cadence and feeds no judgement about anybody else. A backward
+/// clock jump suppresses one beacon and self-heals on the next tick.
+///
+/// **Foregroundedness is a caller obligation this function cannot check.** See
+/// [`compose_committer_beacon`].
+#[uniffi::export]
+#[must_use]
+pub fn should_emit_beacon(
+    own_rank: Option<u32>,
+    last_emitted_at_ms: Option<u64>,
+    now_ms: u64,
+) -> bool {
+    rust_should_emit_beacon(own_rank, last_emitted_at_ms, now_ms)
+}
+
+/// How often a candidate re-emits its beacon, in milliseconds (ADR-0045).
+///
+/// Exposed rather than hand-copied: this and
+/// [`committer_beacon_freshness_window_ms`] are two halves of one budget, and a
+/// client that re-derives its emit cadence locally can silently fall out of
+/// step with the window every other client is judging it against.
+///
+/// **The number is CHOSEN, not measured.** It is sized for journal litter and
+/// for privacy — every beacon is a journal row that persists to the 30-day
+/// prune and publishes that this candidate had the app foregrounded at that
+/// moment — not for responsiveness, because nothing interactive waits on it.
+/// Takeover latency is bounded by the freshness window, not by this.
+#[uniffi::export]
+#[must_use]
+pub const fn committer_beacon_interval_ms() -> u64 {
+    COMMITTER_BEACON_INTERVAL_MS
+}
+
+/// The slowest group-poll cadence in the client tree, in milliseconds — a term
+/// in the freshness window's construction (ADR-0045).
+///
+/// Exposed because it is a **constraint on the caller**, not decoration: a
+/// client that polls its group journal slower than this invalidates the
+/// window's derivation, so the cadence has to be checkable against one shared
+/// number instead of against a comment.
+#[uniffi::export]
+#[must_use]
+pub const fn committer_beacon_worst_case_poll_ms() -> u64 {
+    COMMITTER_BEACON_WORST_CASE_POLL_MS
+}
+
+/// How long a beacon keeps counting its sender as an active candidate, in
+/// milliseconds, measured against the **DS row's** age (ADR-0045). Pass this to
+/// [`acting_committer_verdict`].
+///
+/// It is `2 * interval + worst_case_poll`, and each term earns its place: one
+/// interval because a perfectly healthy candidate's most recent beacon is
+/// already that old the moment anyone looks; a second to tolerate exactly one
+/// lost or delayed beacon, so a single dropped journal round does not evict a
+/// live candidate; and one poll cadence because a beacon is only *observed* at
+/// the observer's next poll.
+#[uniffi::export]
+#[must_use]
+pub const fn committer_beacon_freshness_window_ms() -> u64 {
+    COMMITTER_BEACON_FRESHNESS_WINDOW_MS
+}
+
+/// Exact byte length of a composed committer beacon (ADR-0045) — the domain
+/// separator plus the one-byte payload.
+///
+/// Exposed for the cheap length pre-filter a receive path runs before the
+/// authoritative [`decode_committer_beacon`], so that length is not hardcoded
+/// on three platforms. Because the beacon is field-less, every beacon is
+/// byte-identical, so an exact-equality pre-filter against
+/// [`compose_committer_beacon`] is also correct.
+#[uniffi::export]
+#[must_use]
+pub fn committer_beacon_envelope_len() -> u32 {
+    u32::try_from(COMMITTER_BEACON_ENVELOPE_DOMAIN_V1.len() + COMMITTER_BEACON_PAYLOAD_LEN)
+        .unwrap_or(u32::MAX)
+}
+
+// ============================================================================
 // GroupInviteCapability — ADR-0028 (group join-ticket, G-3)
 // ============================================================================
 
@@ -2657,5 +2938,241 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ===================================================================
+    // Committer liveness beacon — ADR-0045 decision 2, variant 1
+    // ===================================================================
+
+    #[test]
+    fn beacon_composes_and_decodes_across_the_boundary() {
+        let wire = compose_committer_beacon();
+        assert_eq!(
+            u32::try_from(wire.len()).unwrap(),
+            committer_beacon_envelope_len(),
+            "the advertised envelope length must be the length actually composed",
+        );
+        decode_committer_beacon(wire.clone()).expect("a composed beacon must decode");
+        assert_eq!(
+            wire,
+            compose_committer_beacon(),
+            "the beacon is field-less, so every beacon is byte-identical",
+        );
+    }
+
+    #[test]
+    fn beacon_decode_is_fail_closed() {
+        // Wrong domain — a plain chat body must not read as a beacon.
+        assert!(decode_committer_beacon(b"hello".to_vec()).is_err());
+        // Right domain, truncated payload.
+        let mut short = compose_committer_beacon();
+        short.pop();
+        assert!(decode_committer_beacon(short).is_err());
+        // Right domain, unknown schema version.
+        let mut bad_version = compose_committer_beacon();
+        let last = bad_version.len() - 1;
+        bad_version[last] = 0xFF;
+        assert!(decode_committer_beacon(bad_version).is_err());
+        // Right domain, trailing junk.
+        let mut long = compose_committer_beacon();
+        long.push(0x00);
+        assert!(decode_committer_beacon(long).is_err());
+    }
+
+    #[test]
+    fn a_beacon_classifies_as_a_beacon_and_never_as_chat() {
+        let env = dispatch_incoming_envelope(compose_committer_beacon()).expect("dispatch");
+        assert_eq!(env.kind, FfiIncomingEnvelopeKind::CommitterBeacon);
+        assert!(env.payload.is_empty(), "a beacon carries no fields");
+        assert!(env.camera_on.is_none());
+        assert!(env.mint_epoch.is_none());
+    }
+
+    #[test]
+    fn verdict_covers_its_three_outcomes() {
+        let w = committer_beacon_freshness_window_ms();
+
+        // 1 — a plain member is never a candidate, whatever it has heard.
+        assert_eq!(
+            acting_committer_verdict(
+                None,
+                vec![BeaconObservation {
+                    rank: Some(0),
+                    age_ms: 0,
+                }],
+                w,
+            ),
+            ActingCommitter::NotACandidate,
+        );
+
+        // 2 — the owner acts even with a fresh beacon from every admin.
+        assert_eq!(
+            acting_committer_verdict(
+                Some(0),
+                vec![
+                    BeaconObservation {
+                        rank: Some(1),
+                        age_ms: 0,
+                    },
+                    BeaconObservation {
+                        rank: Some(2),
+                        age_ms: 0,
+                    },
+                ],
+                w,
+            ),
+            ActingCommitter::Act,
+        );
+
+        // 3 — a strictly lower rank, fresh, defers this device and names whom.
+        assert_eq!(
+            acting_committer_verdict(
+                Some(2),
+                vec![
+                    BeaconObservation {
+                        rank: Some(1),
+                        age_ms: w,
+                    },
+                    BeaconObservation {
+                        rank: Some(3),
+                        age_ms: 0,
+                    },
+                ],
+                w,
+            ),
+            ActingCommitter::Defer { to_rank: 1 },
+            "the window boundary is inclusive, and the LOWEST active rank is named",
+        );
+
+        // 4 — silence is Act, not a failure to elect.
+        assert_eq!(
+            acting_committer_verdict(Some(3), Vec::new(), w),
+            ActingCommitter::Act,
+        );
+    }
+
+    #[test]
+    fn verdict_ignores_stale_non_candidate_and_equal_ranks() {
+        let w = committer_beacon_freshness_window_ms();
+
+        // Stale (one millisecond past the window) — ignored.
+        assert_eq!(
+            acting_committer_verdict(
+                Some(2),
+                vec![BeaconObservation {
+                    rank: Some(0),
+                    age_ms: w + 1,
+                }],
+                w,
+            ),
+            ActingCommitter::Act,
+        );
+        // A beacon whose sender the observer could not rank — ignored.
+        assert_eq!(
+            acting_committer_verdict(
+                Some(2),
+                vec![BeaconObservation {
+                    rank: None,
+                    age_ms: 0,
+                }],
+                w,
+            ),
+            ActingCommitter::Act,
+        );
+        // Equal rank never defers — this is what makes a device's own beacon,
+        // echoed back off the journal, harmless.
+        assert_eq!(
+            acting_committer_verdict(
+                Some(2),
+                vec![BeaconObservation {
+                    rank: Some(2),
+                    age_ms: 0,
+                }],
+                w,
+            ),
+            ActingCommitter::Act,
+        );
+        // A HIGHER rank never defers either.
+        assert_eq!(
+            acting_committer_verdict(
+                Some(2),
+                vec![BeaconObservation {
+                    rank: Some(5),
+                    age_ms: 0,
+                }],
+                w,
+            ),
+            ActingCommitter::Act,
+        );
+    }
+
+    #[test]
+    fn emit_throttle_gates_on_candidacy_then_cadence() {
+        let interval = committer_beacon_interval_ms();
+
+        // A plain member never emits, however long it has been.
+        assert!(!should_emit_beacon(None, None, 0));
+        assert!(!should_emit_beacon(None, Some(0), u64::MAX));
+        // The first beacon of a session is immediate.
+        assert!(should_emit_beacon(Some(0), None, 0));
+        assert!(should_emit_beacon(Some(7), None, 12_345));
+        // Then one per interval — the boundary itself emits.
+        assert!(!should_emit_beacon(
+            Some(1),
+            Some(1_000),
+            1_000 + interval - 1
+        ));
+        assert!(should_emit_beacon(Some(1), Some(1_000), 1_000 + interval));
+        // A backward clock jump suppresses rather than wrapping.
+        assert!(!should_emit_beacon(Some(1), Some(u64::MAX), 0));
+    }
+
+    /// **An absent `own_rank` must never read as rank `0`.** `0` is the owner,
+    /// who acts immediately; absence means "not in the committer set at all".
+    /// Collapsing the two would make every plain member believe it is the owner
+    /// and sweep. This is the fail-closed direction on both entry points, and it
+    /// is also what an OMITTED argument reaches at the wasm ABI (the sibling
+    /// surface encodes `None` as a sentinel, not as `0`), so a caller that
+    /// forgets the argument never sweeps and never emits.
+    #[test]
+    fn an_absent_own_rank_is_never_rank_zero() {
+        let w = committer_beacon_freshness_window_ms();
+        assert_eq!(
+            acting_committer_verdict(None, Vec::new(), w),
+            ActingCommitter::NotACandidate,
+        );
+        assert_eq!(
+            acting_committer_verdict(Some(0), Vec::new(), w),
+            ActingCommitter::Act,
+        );
+        assert!(!should_emit_beacon(None, None, 0));
+        assert!(should_emit_beacon(Some(0), None, 0));
+    }
+
+    #[test]
+    fn the_exposed_constants_are_the_cores_constants() {
+        // Identity with the core, so replacing any body with a hand-copied
+        // literal fails the moment the core's number moves — the ADR-0044
+        // drift shape this surface exists to prevent.
+        assert_eq!(committer_beacon_interval_ms(), COMMITTER_BEACON_INTERVAL_MS);
+        assert_eq!(
+            committer_beacon_worst_case_poll_ms(),
+            COMMITTER_BEACON_WORST_CASE_POLL_MS,
+        );
+        assert_eq!(
+            committer_beacon_freshness_window_ms(),
+            COMMITTER_BEACON_FRESHNESS_WINDOW_MS,
+        );
+        assert_eq!(
+            committer_beacon_envelope_len(),
+            u32::try_from(COMMITTER_BEACON_ENVELOPE_DOMAIN_V1.len() + COMMITTER_BEACON_PAYLOAD_LEN)
+                .unwrap(),
+        );
+        // And the window's construction, so a client cannot be handed an
+        // interval and a window that no longer belong to one budget.
+        assert_eq!(
+            committer_beacon_freshness_window_ms(),
+            2 * committer_beacon_interval_ms() + committer_beacon_worst_case_poll_ms(),
+        );
     }
 }

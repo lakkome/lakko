@@ -1087,6 +1087,41 @@ impl Group {
         Ok(g.own_committer_rank(&identity.inner))
     }
 
+    /// **Another** member's ADR-0045 committer rank, by its 32-byte Ed25519
+    /// signature public key: `Some(0)` for the owner, `Some(k + 1)` for the
+    /// `k`-th admin in the role table's canonical order, and `None` for a plain
+    /// member, a non-member, a wrong-length key, or a group with no role table.
+    ///
+    /// The peer-facing twin of [`Self::own_committer_rank`], and the input
+    /// `BeaconObservation.rank` needs: a beacon carries no identity, so the
+    /// receiver resolves its MLS sender leaf to a signature key through
+    /// [`Self::members`] and ranks that key here.
+    ///
+    /// # Rank the key when you take the verdict, not when the beacon arrived
+    ///
+    /// A rank is a **position** in the role table's canonical order, not a
+    /// stable identity: promoting, demoting or removing any admin renumbers
+    /// every admin sorting after it. `acting_committer_verdict` compares each
+    /// observation's rank against this device's own, which is necessarily
+    /// derived from the current table — so a rank captured at receipt and
+    /// compared later is not merely stale, it is a position in a *different*
+    /// ordering. Persist the sender's signature key with each observed beacon
+    /// and call this at fold time. Never persist a leaf index for this purpose:
+    /// OpenMLS reuses a vacated leaf for the next member added, so a stored
+    /// leaf can silently come to name someone else.
+    ///
+    /// This orders the authorised committers; it does not widen them. The set
+    /// that may commit is exactly ADR-0022's owner-plus-admins, unchanged.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`] if the group mutex was poisoned.
+    pub fn committer_rank(&self, signature_key: Vec<u8>) -> Result<Option<u32>, FfiError> {
+        let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.group_roles()
+            .and_then(|table| lakko_mls::committer_rank(&table, &signature_key)))
+    }
+
     /// Sweep the authorised pending proposals into **one** Commit and merge it
     /// immediately (ADR-0045) — the **eager** committer path.
     ///
@@ -4275,6 +4310,143 @@ mod tests {
 
         // Nothing left to sweep => no commit at all, NOT an empty one.
         assert!(alice_g.commit_pending_proposals(&alice).unwrap().is_none());
+    }
+
+    /// The peer-facing rank — the input `BeaconObservation.rank` needs. It must
+    /// agree with [`Group::own_committer_rank`] for every member seen from
+    /// every vantage point (the rank is a function of the shared, authenticated
+    /// role table, so it cannot be observer-relative), and must fail closed to
+    /// `None` for a non-member, a wrong-length key, and an open group.
+    #[test]
+    fn peer_committer_rank_agrees_with_own_rank_from_every_vantage_point() {
+        let ((alice, alice_g), (bob, bob_g), (charlie, charlie_g)) = adr0045_trio();
+        let owner_key = alice.signature_public_key();
+
+        let promote = alice_g
+            .set_group_roles(&alice, owner_key.clone(), vec![bob.signature_public_key()])
+            .unwrap();
+        for (id, g) in [(&bob, &bob_g), (&charlie, &charlie_g)] {
+            assert!(matches!(
+                g.process_incoming_verifying_roles(id, promote.clone())
+                    .unwrap(),
+                ProcessedMessage::Commit
+            ));
+        }
+
+        for (label, g) in [
+            ("alice", &alice_g),
+            ("bob", &bob_g),
+            ("charlie", &charlie_g),
+        ] {
+            assert_eq!(
+                g.committer_rank(alice.signature_public_key()).unwrap(),
+                Some(0),
+                "{label} must rank the owner 0",
+            );
+            assert_eq!(
+                g.committer_rank(bob.signature_public_key()).unwrap(),
+                Some(1),
+                "{label} must rank the sole admin 1",
+            );
+            assert_eq!(
+                g.committer_rank(charlie.signature_public_key()).unwrap(),
+                None,
+                "{label} must give a plain member NO rank — not rank 0",
+            );
+        }
+
+        // Each device's peer-derived rank for itself is its own rank.
+        for (id, g) in [(&alice, &alice_g), (&bob, &bob_g), (&charlie, &charlie_g)] {
+            assert_eq!(
+                g.committer_rank(id.signature_public_key()).unwrap(),
+                g.own_committer_rank(id).unwrap(),
+            );
+        }
+
+        // Fail-closed inputs.
+        let dave = Identity::new("dave".into()).unwrap();
+        assert_eq!(
+            alice_g.committer_rank(dave.signature_public_key()).unwrap(),
+            None,
+            "a non-member has no rank",
+        );
+        assert_eq!(alice_g.committer_rank(vec![0u8; 31]).unwrap(), None);
+        assert_eq!(alice_g.committer_rank(Vec::new()).unwrap(), None);
+    }
+
+    /// A rank is a **position** in the role table's canonical order, not a
+    /// stable identity — which is why `BeaconObservation.rank` must be derived
+    /// when the verdict is taken and never captured at receipt.
+    ///
+    /// This runs the renumbering that makes a captured rank *incommensurable*
+    /// rather than merely stale: promoting a second admin whose key sorts
+    /// BEFORE the incumbent moves the incumbent from rank 1 to rank 2, so a
+    /// rank captured under the old table names a different position in the new
+    /// one. Both directions are exercised, so the test cannot pass by accident
+    /// on whichever key happens to sort lower.
+    #[test]
+    fn a_rank_is_a_position_that_an_admin_change_renumbers() {
+        let ((alice, alice_g), (bob, bob_g), (charlie, charlie_g)) = adr0045_trio();
+        let owner_key = alice.signature_public_key();
+        let bob_key = bob.signature_public_key();
+        let charlie_key = charlie.signature_public_key();
+
+        let apply = |wire: Vec<u8>| {
+            for (id, g) in [(&bob, &bob_g), (&charlie, &charlie_g)] {
+                assert!(matches!(
+                    g.process_incoming_verifying_roles(id, wire.clone())
+                        .unwrap(),
+                    ProcessedMessage::Commit
+                ));
+            }
+        };
+
+        apply(
+            alice_g
+                .set_group_roles(&alice, owner_key.clone(), vec![bob_key.clone()])
+                .unwrap(),
+        );
+        assert_eq!(alice_g.committer_rank(bob_key.clone()).unwrap(), Some(1));
+
+        apply(
+            alice_g
+                .set_group_roles(
+                    &alice,
+                    owner_key.clone(),
+                    vec![bob_key.clone(), charlie_key.clone()],
+                )
+                .unwrap(),
+        );
+
+        let bob_now = alice_g.committer_rank(bob_key.clone()).unwrap();
+        let charlie_now = alice_g.committer_rank(charlie_key.clone()).unwrap();
+        assert_eq!(
+            [bob_now, charlie_now]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .len(),
+            2,
+            "both admins must be ranked",
+        );
+        assert_ne!(bob_now, charlie_now, "two admins cannot share a rank");
+        // Exactly one of them is now rank 1 and the other rank 2 — the table's
+        // own canonical (sorted) order decides which, and the loser of that
+        // sort has been RENUMBERED away from the rank it held a moment ago.
+        let mut ranks = [bob_now, charlie_now];
+        ranks.sort_unstable();
+        assert_eq!(ranks, [Some(1), Some(2)]);
+        if bob_key < charlie_key {
+            assert_eq!(bob_now, Some(1));
+            assert_eq!(charlie_now, Some(2));
+        } else {
+            assert_eq!(
+                bob_now,
+                Some(2),
+                "adding an admin that sorts first renumbers the incumbent from 1 to 2",
+            );
+            assert_eq!(charlie_now, Some(1));
+        }
     }
 
     /// The committer rank must distinguish "owner" (`Some(0)`) from "not in the

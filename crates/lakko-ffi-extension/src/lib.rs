@@ -29,6 +29,11 @@
 //!   instead of rendering it. Service envelopes ride the same group journal as
 //!   chat, and `parse_body_envelope`'s deliberate legacy fallback would
 //!   otherwise degrade one to a `Chat` body full of raw binary.
+//! - [`committer_beacon::decode_committer_beacon`] — the same filter question
+//!   for the ADR-0045 committer-liveness beacon, which rides the same journal
+//!   and hits the same lossy fallback. Emitting one is deliberately NOT
+//!   exposed: this process structurally cannot sweep (C-59), so a beacon from
+//!   it would be a lie.
 //!
 //! There is deliberately **no compose / send / call / channel / transport
 //! surface**: the NSE only reads and decrypts, then discards. It NEVER writes
@@ -46,6 +51,7 @@ use std::sync::{Arc, Mutex};
 use lakko_mls::{Group as MlsGroup, Identity as MlsIdentity, Incoming as MlsIncoming};
 
 pub mod attachments;
+pub mod committer_beacon;
 pub mod push_routing;
 
 uniffi::setup_scaffolding!();
