@@ -166,10 +166,45 @@ export type IncomingChatEvent =
   | {
       kind: "system";
       messageId: number;
-      /** The MLS frame kind: "commit" / "proposal" /
-       *  "external-join-proposal". Lower-case for parity with
-       *  `ProcessedMessageKind` strings on the Rust side. */
-      systemKind: "commit" | "proposal" | "external-join-proposal";
+      /** The MLS frame kind: "commit" / "external-join-proposal". Lower-case
+       *  for parity with `ProcessedMessageKind` strings on the Rust side.
+       *  ADR-0045 removed `"proposal"` from this set — a membership proposal
+       *  is now its own `membershipProposal` event, because it is not something
+       *  that happened to the group. */
+      systemKind: "commit" | "external-join-proposal";
+      createdAt: string;
+    }
+  | {
+      /** ADR-0045 — a membership PROPOSAL: a member asked for an add, a
+       *  removal, a departure or a role change, and one elected committer will
+       *  sweep it into a commit.
+       *
+       *  **Never a timeline row.** A request is not something that happened to
+       *  the group; it is an intent the system may discard a second later.
+       *  Writing "Alice asked to remove Bob" into a permanent, mutually visible
+       *  transcript would both leak a pending change to members who cannot act
+       *  on it and leave a durable record of an intent that never took effect.
+       *  Only OUTCOMES belong in the timeline. So this drives the members
+       *  panel, and `createdAt` is the DS row timestamp the panel's quiet
+       *  window is measured against — never a local clock, because every member
+       *  reads the identical value for the identical row. */
+      kind: "membershipProposal";
+      messageId: number;
+      /** `"add" | "remove" | "leave" | "update" | "role-change" |
+       *  "unsupported"` — the wasm `ProposalRecord.kind` verbatim. */
+      proposalKind: string;
+      /** `false` when the receipt gate REFUSED it: a proposal advances no
+       *  state, so dropping it unstored IS the refusal, and the core reports it
+       *  as data rather than throwing. A dropped proposal is not a pending
+       *  request and must not be surfaced as one. */
+      stored: boolean;
+      /** The prospective member's 32-byte signature key. `add` only. */
+      addSignatureKey: Uint8Array | undefined;
+      /** The leaf the proposal removes. `remove` only. */
+      removeTargetLeaf: number | undefined;
+      /** The proposing member's leaf, or `undefined` for an unresolvable
+       *  sender (always unauthorised — fail-closed). */
+      senderLeaf: number | undefined;
       createdAt: string;
     }
   | {
@@ -907,12 +942,25 @@ async function toEvent(
       createdAt,
     };
   }
-  const sk: "commit" | "proposal" | "external-join-proposal" =
-    processed.kind === "Commit"
-      ? "commit"
-      : processed.kind === "Proposal"
-        ? "proposal"
-        : "external-join-proposal";
+  // ADR-0045 — a membership proposal surfaces its full record, not a
+  // content-less system row: the panel needs WHAT was proposed, by WHOM, and
+  // whether the receipt gate stored it, and the DS row's `createdAt` is the
+  // only place the quiet window's clock can come from.
+  const proposal = processed.kind === "Proposal" ? processed.proposal : undefined;
+  if (proposal !== undefined) {
+    return {
+      kind: "membershipProposal",
+      messageId,
+      proposalKind: proposal.kind,
+      stored: proposal.stored,
+      addSignatureKey: proposal.addSignatureKey,
+      removeTargetLeaf: proposal.removeTargetLeaf,
+      senderLeaf: proposal.senderLeaf,
+      createdAt,
+    };
+  }
+  const sk: "commit" | "external-join-proposal" =
+    processed.kind === "Commit" ? "commit" : "external-join-proposal";
   return { kind: "system", messageId, systemKind: sk, createdAt };
 }
 

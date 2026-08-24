@@ -75,7 +75,7 @@ import {
   type PersistedMessage,
 } from "../chat/message-log-store";
 import { getDeviceKey } from "../auth/key-store";
-import { base64Encode, base64UrlDecodeNoPad } from "../auth/account-id";
+import { base64Decode, base64Encode, base64UrlDecodeNoPad } from "../auth/account-id";
 import { ChatClient } from "../chat/client";
 import { ContactsClient } from "../contacts/client";
 import {
@@ -113,6 +113,26 @@ import {
   rotatePushRoutingSecretIfMembershipShrank,
   type PushRotationOutcome,
 } from "../push/group-routing";
+// ADR-0045 (G-38 residual 1) — proposal-based membership. The committer sweep
+// lives in `chat/sweep.ts` and the panel's state rules in
+// `chat/pending-requests.ts`, both plain modules, because `vitest.config.ts`
+// collects `src/**\/*.test.ts` in a `node` environment with no jsdom and no
+// Solid transform — a rule that lived in this `.tsx` file could not be tested
+// at all.
+import type { SweepOutcome } from "../chat/sweep";
+import {
+  foldPendingRequests,
+  loadObservations,
+  pendingNotice,
+  proposalKey,
+  pruneObservations,
+  recordObservation,
+  rowAnnotation,
+  visibleRequests,
+  waitingToBeAdded,
+  type PendingRequest,
+  type ProposalRecordView,
+} from "../chat/pending-requests";
 import {
   applyOp,
   editDeleteAuthorized,
@@ -1349,6 +1369,236 @@ function ChatView(props: {
     }
   });
 
+  // -------------------------------------------------------------------------
+  // ADR-0045 — proposal-based membership
+  // -------------------------------------------------------------------------
+
+  /** Does this group route membership through proposals? A group with NO role
+   *  table has no owner, hence no rank 0, hence no committer — and every peer's
+   *  receipt gate drops proposals in it — so it keeps direct commits. A torn
+   *  read is treated as "no role table", which keeps the direct path working. */
+  const usesProposalPath = (): boolean => {
+    try {
+      return props.entry.group.roleTableOwner() !== undefined;
+    } catch {
+      return false;
+    }
+  };
+
+  /**
+   * Run one committer sweep for this group, then reconcile the two things a
+   * merged sweep changes locally.
+   *
+   * **The push-routing rotation is here, not at propose time, and that is
+   * C-61.** A sweep is the moment a removal actually lands on this device, so
+   * it is the moment the evicted member must stop being able to derive the
+   * group's `push_gid`. Detecting it as a membership SHRINK — the same
+   * before/after member-set diff the poll loop runs for someone else's removal
+   * — keeps the rotation strictly after the commit by construction: the new
+   * secret is stamped with the post-merge `group.epoch`, so it both out-ranks
+   * the secret it replaces (ADR-0044 recency) and is sealed at an epoch the
+   * evicted leaf can no longer read (RFC 9420 forward secrecy).
+   *
+   * Fire-and-forget on the rotation half, as everywhere else: push is
+   * best-effort and a failed rotation must never unwind a landed membership
+   * change.
+   */
+  async function sweepNow(): Promise<SweepOutcome | null> {
+    const before = memberSignatureKeys(props.entry.group);
+    let outcome: SweepOutcome;
+    try {
+      outcome = await contacts.sweepIfCommitter(
+        props.requireIdentity(),
+        props.entry.group,
+        { read: () => cursor(), advance: (to) => setCursor(to) },
+        (id) => chat.markOwnPublishedCommit(id),
+      );
+    } catch (err) {
+      // A verdict this device could not read leaves the sweep staged for the
+      // next attempt (which runs at the tail of every poll). Never surfaced as
+      // a user-facing error: nothing they did failed, and the request is still
+      // live.
+      // eslint-disable-next-line no-console
+      console.warn("ADR-0045 sweep did not complete", err);
+      return null;
+    }
+    if (outcome.kind !== "committed") return outcome;
+
+    setMemberCount(props.entry.group.memberCount);
+    setMembersVersion(membersVersion() + 1);
+
+    const s = auth.state();
+    if (s.kind === "session") {
+      const after = memberSignatureKeys(props.entry.group);
+      void (async () => {
+        await rotatePushRoutingSecretIfMembershipShrank({
+          accountId: s.account.accountId,
+          group: props.entry.group,
+          // Live role read, never the `ownRole()` signal: that is refreshed by
+          // an async effect and can still hold a pre-sweep value.
+          ownRole: await readOwnRoleNow(),
+          previousMemberKeys: before,
+          currentMemberKeys: after,
+          broadcast: broadcastToGroup,
+        });
+      })().catch((err: unknown) => {
+        // eslint-disable-next-line no-console
+        console.warn("push-routing rotation failed", err);
+      });
+      // ADR-0042 — a swept ADD needs the current routing secret, exactly as the
+      // direct add path re-broadcasts it. No-op when this device holds none.
+      if (outcome.addedCount > 0) {
+        void redistributeSecretToGroup(
+          s.account.accountId,
+          props.entry.group,
+          broadcastToGroup,
+        ).catch((err: unknown) => {
+          // eslint-disable-next-line no-console
+          console.warn("push-routing secret redistribute failed", err);
+        });
+      }
+    }
+    return outcome;
+  }
+
+  /** The observation key for a received proposal — the same synthetic key
+   *  `pending-requests.ts` derives from the core's record, so an observation
+   *  recorded when the row landed re-joins the live pending set on a later
+   *  render. Kept in step with `proposalKey` by shape, not by import, because
+   *  the event carries the wasm record's fields flat. */
+  function proposalKeyOfEvent(e: {
+    proposalKind: string;
+    addSignatureKey: Uint8Array | undefined;
+    removeTargetLeaf: number | undefined;
+    senderLeaf: number | undefined;
+    stored: boolean;
+  }): string {
+    return proposalKey({
+      kind: e.proposalKind,
+      addSignatureKey: e.addSignatureKey,
+      removeTargetLeaf: e.removeTargetLeaf,
+      senderLeaf: e.senderLeaf,
+      stored: e.stored,
+    });
+  }
+
+  /**
+   * ADR-0045 — leave the group.
+   *
+   * Reachable for the first time because of this ADR: naming your OWN leaf in a
+   * Remove proposal needs no role, and ADR-0022's gate deliberately dropped the
+   * self-remove branch as unreachable when a member could not commit their own
+   * departure. It stays HIDDEN for the owner, whose departure the core refuses
+   * fail-closed — an ownerless group could never appoint another admin, since a
+   * role change is owner-only. That is now a PRECONDITION rather than a dead
+   * end (transfer ownership first, then leave as an ordinary member), but the
+   * transfer flow is a separate UX pass, so offering the owner a control that
+   * always refuses would be worse than not offering one.
+   */
+  async function onLeaveGroup(): Promise<void> {
+    const leaf = ownLeaf();
+    if (leaf === undefined) return;
+    // The confirmation is the last exit — a published request cannot be
+    // withdrawn — and the body carries the one fact the user needs.
+    if (
+      !window.confirm(
+        "Leave this group?\n\n" +
+          "You will keep receiving messages until an owner or an admin applies " +
+          "your request. You will need a new invite to rejoin.",
+      )
+    ) {
+      return;
+    }
+    setError(null);
+    setNotice(null);
+    setBusy(true);
+    try {
+      const out = await contacts.removeMemberFromGroup(
+        props.requireIdentity(),
+        props.entry.group,
+        leaf,
+      );
+      chat.markOwnPublishedCommit(
+        out.kind === "committed" ? out.commitMessageId : out.proposalMessageId,
+      );
+      if (out.kind === "proposed") noteOwnRequest(`remove:${leaf}`);
+      setNotice(
+        "Leave requested. It applies when an owner or an admin applies the change.",
+      );
+      void refresh();
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** Record that a request this device just published landed, so the quiet
+   *  window can be measured from now and so the panel knows it is ours (the
+   *  UX §10 own-request visibility exception). */
+  function noteOwnRequest(key: string): void {
+    const s = auth.state();
+    if (s.kind !== "session") return;
+    recordObservation(
+      s.account.accountId,
+      base64Encode(props.entry.group.groupId),
+      key,
+      Date.now(),
+      true,
+    );
+    setPendingVersion(pendingVersion() + 1);
+  }
+
+  /** Bumped whenever the pending set or its observations may have moved, so the
+   *  panel memos below re-read. Separate from `membersVersion` because a
+   *  proposal changes nothing about the roster. */
+  const [pendingVersion, setPendingVersion] = createSignal(0);
+  /** Ticks so a `pending` request matures into `waiting` without traffic. */
+  const [pendingClock, setPendingClock] = createSignal(Date.now());
+
+  /** ADR-0045 — the live pending requests, joined from the core's retained set
+   *  (the truth about WHAT is pending) and the local observation store (WHEN it
+   *  landed, from the DS row). Prunes observations for requests the core no
+   *  longer holds in the same pass. */
+  const pendingRequests = createMemo<PendingRequest[]>(() => {
+    membersVersion();
+    pendingVersion();
+    const now = pendingClock();
+    const s = auth.state();
+    if (s.kind !== "session") return [];
+    const groupIdB64 = base64Encode(props.entry.group.groupId);
+    let records: ProposalRecordView[];
+    try {
+      records = props.entry.group.pendingProposals() as ProposalRecordView[];
+    } catch {
+      return [];
+    }
+    const { requests, liveKeys } = foldPendingRequests(
+      records,
+      loadObservations(s.account.accountId, groupIdB64),
+      now,
+    );
+    pruneObservations(s.account.accountId, groupIdB64, liveKeys);
+    return visibleRequests(requests, canManageMembers());
+  });
+
+  const pendingRequestNotice = createMemo(() => pendingNotice(pendingRequests()));
+  const pendingAdds = createMemo(() => waitingToBeAdded(pendingRequests()));
+
+  /** The identity treatment for a pending add — an accepted contact's display
+   *  name when we have one, else the short fingerprint, matching what the
+   *  roster and the join-request rows already do. */
+  function labelForAddRequest(req: PendingRequest): string {
+    if (req.addSignatureKeyB64 === undefined) return "(unknown)";
+    const name = acceptedByPubkey().get(req.addSignatureKeyB64);
+    if (name !== undefined && name.length > 0) return name;
+    try {
+      return shortFingerprint(base64Decode(req.addSignatureKeyB64));
+    } catch {
+      return "(unknown)";
+    }
+  }
+
   // ADR-0028 OQ2 — resolve which member's `/g/` link each pending request
   // arrived on. Per `membersVersion`, read the journal's join-attribution
   // envelopes and build a `joinerKeyB64 -> { issuerFingerprint, issuerInRoster }`
@@ -1552,6 +1802,9 @@ function ChatView(props: {
       // rendering as standalone bubbles. Each op is applied once
       // (the poll is incremental, so a given op id arrives once).
       const fresh: TimelineRow[] = [];
+      /** ADR-0045 — did this batch carry a membership proposal? Drives the
+       *  panel refresh and the tail sweep below. */
+      let sawProposal = false;
       let ops = msgOps();
       let opsChanged = false;
       // ADR-0024 — accumulate typing / read-receipt folds across the
@@ -1655,6 +1908,31 @@ function ChatView(props: {
         // does not carry). That fold is not built yet, so for now the beacon
         // is simply consumed here and never reaches `rows()`.
         if (e.kind === "committerBeacon") continue;
+        // ADR-0045 — a membership proposal is a PANEL signal, never a timeline
+        // row (UX §10). Record when it landed, using the DS row's timestamp so
+        // the quiet window means the same thing on every device, then let the
+        // panel read the core's retained set for what is actually pending.
+        //
+        // A record the receipt gate REFUSED (`stored === false`) is recorded
+        // nowhere and rendered nowhere: no sweep will ever commit it, so it is
+        // not a pending request. The drop is invisible on the receiving side by
+        // design — it is not that peer's business.
+        if (e.kind === "membershipProposal") {
+          if (e.stored) {
+            const s = auth.state();
+            if (s.kind === "session") {
+              recordObservation(
+                s.account.accountId,
+                base64Encode(props.entry.group.groupId),
+                proposalKeyOfEvent(e),
+                Date.parse(e.createdAt),
+                false,
+              );
+              sawProposal = true;
+            }
+          }
+          continue;
+        }
         if (incomingIds.has(e.messageId)) continue;
         fresh.push({ kind: "incoming", event: e });
       }
@@ -1719,6 +1997,23 @@ function ChatView(props: {
           });
         }
       }
+      // ADR-0045 — the sweep trigger. This is the ONLY thing that makes a
+      // `waiting` request ever end, so it runs at the tail of every poll rather
+      // than only when a proposal was seen: a verdict owed from a previous run
+      // (or from a page this device already closed) has to be finished too, and
+      // nothing in the batch announces one.
+      //
+      // Cheap when there is nothing to do: `sweepIfCommitter` short-circuits
+      // synchronously — before any network — when this device is not rank 0, or
+      // when nothing is pending and no verdict is owed.
+      //
+      // Deliberately AFTER the cursor has settled, and deliberately not awaited
+      // by the poll's own error path: a sweep failure is not a poll failure.
+      if (sawProposal) setPendingVersion(pendingVersion() + 1);
+      void sweepNow().catch((err: unknown) => {
+        // eslint-disable-next-line no-console
+        console.warn("ADR-0045 tail sweep failed", err);
+      });
     } catch (err) {
       setError(formatError(err));
     } finally {
@@ -1975,6 +2270,10 @@ function ChatView(props: {
   const typingSweep = setInterval(() => {
     const now = Date.now();
     setCurrentTime(now);
+    // ADR-0045 — the same tick matures a `pending` request into `waiting` with
+    // no traffic at all, which matters precisely in the case the notice exists
+    // for: a group where nobody is doing anything and nobody has swept.
+    setPendingClock(now);
     const cur = typingMap();
     const pruned = pruneTyping(cur, now);
     if (pruned !== cur) setTypingMap(pruned);
@@ -2234,9 +2533,22 @@ function ChatView(props: {
         username,
       );
       // Suppress the echo so the sender's next pollMessages
-      // doesn't try to processIncoming on its own commit at
-      // an epoch we've already advanced past.
-      chat.markOwnPublishedCommit(result.commitMessageId);
+      // doesn't try to processIncoming on its own artifact at
+      // an epoch we've already advanced past. ADR-0045: the artifact is a
+      // PROPOSAL in a role-table group and a commit only in a legacy one.
+      chat.markOwnPublishedCommit(
+        result.outcome.kind === "committed"
+          ? result.outcome.commitMessageId
+          : result.outcome.proposalMessageId,
+      );
+      // ADR-0045 — record when the request landed, so the quiet window is
+      // measured against the DS row rather than a local clock, and so this
+      // device knows the request is its own (the UX §10 visibility exception).
+      if (result.outcome.kind === "proposed") {
+        noteOwnRequest(
+          `add:${base64Encode(result.recipientSignaturePubkey)}`,
+        );
+      }
       // ADR-0042 — re-broadcast the CURRENT push-routing secret so the
       // newly-added member learns it on their next poll (no-op if this
       // device holds no secret; idempotent for existing members). Runs
@@ -2262,10 +2574,17 @@ function ChatView(props: {
       // (when open) re-reads the updated leaf set.
       setMembersVersion(membersVersion() + 1);
       setNotice(
-        `@${result.recipientUsername} added (commit #${result.commitMessageId}, welcome #${result.welcomeMessageId}).`,
+        result.outcome.kind === "committed"
+          ? `@${result.recipientUsername} added (commit #${result.outcome.commitMessageId}).`
+          : `@${result.recipientUsername} requested. They join when an owner or an admin applies the change.`,
       );
       setAddMemberInput("");
       setAddMemberOpen(false);
+      // ADR-0045 — if this device is the committer (the owner, rank 0) sweep
+      // the request it just published straight away, so the common case is
+      // still "tap, done". Awaited, not fired-and-forgotten, so the panel
+      // refresh below sees the post-sweep roster.
+      await sweepNow();
       // Pull anything that arrived during the add (no-op when
       // there's nothing new but cheap, and keeps the cursor
       // moving past the suppressed commit row).
@@ -2285,7 +2604,16 @@ function ChatView(props: {
   // their own client lands the commit on next poll and learns
   // they're out.
   async function onRemoveMember(leafIndex: number): Promise<void> {
-    if (!window.confirm(`Remove this member (leaf #${leafIndex})?`)) {
+    // ADR-0045 UX §6 — the confirmation is the LAST EXIT, because a published
+    // request cannot be withdrawn: it is in every member's proposal store and
+    // dies only when some commit lands, and there is no wire withdraw. The body
+    // line is not a nicety — it is the one fact a user removing someone for a
+    // safety reason must have, and the fact the old immediate-looking UI
+    // concealed.
+    const confirmBody = usesProposalPath()
+      ? "Remove this member?\n\nThey will keep receiving messages until an owner or an admin applies the change."
+      : `Remove this member (leaf #${leafIndex})?`;
+    if (!window.confirm(confirmBody)) {
       return;
     }
     setError(null);
@@ -2317,6 +2645,47 @@ function ChatView(props: {
       // the existing `ensureGroupPushRouting` re-broadcast branch re-sends it
       // on the next chat-open / launch.
       const session = auth.state();
+
+      // ADR-0045 — on the proposal path the removal does NOT happen here: this
+      // publishes a request, and the member leaves the group only when a
+      // committer sweeps it. That moves C-61 with it.
+      //
+      // C-61 requires the rotation to follow the Remove COMMIT, because the
+      // distribution envelope is an MLS application message: sealed before the
+      // commit, it is readable by the leaf being evicted and the rotation buys
+      // nothing. Rotating after publishing a *proposal* would do exactly that —
+      // the proposal advances no epoch, so the evicted member is still in the
+      // one the new secret would be sealed at.
+      //
+      // So the rotation moves to where the removal actually lands: the sweep,
+      // via the same membership-SHRINK detection the poll loop already runs for
+      // someone else's removal. `sweepNow` captures the roster either side and
+      // rotates when it shrinks, which keeps the ordering correct by
+      // construction rather than by an argument about two adjacent statements.
+      if (usesProposalPath()) {
+        const proposed = await contacts.removeMemberFromGroup(
+          props.requireIdentity(),
+          props.entry.group,
+          leafIndex,
+        );
+        chat.markOwnPublishedCommit(
+          proposed.kind === "committed"
+            ? proposed.commitMessageId
+            : proposed.proposalMessageId,
+        );
+        if (proposed.kind === "proposed") noteOwnRequest(`remove:${leafIndex}`);
+        const swept = await sweepNow();
+        setMemberCount(props.entry.group.memberCount);
+        setMembersVersion(membersVersion() + 1);
+        setNotice(
+          swept?.kind === "committed"
+            ? `Member at leaf #${leafIndex} removed (commit #${swept.commitMessageId}).`
+            : "Removal requested. It applies when an owner or an admin applies the change.",
+        );
+        void refresh();
+        return;
+      }
+
       const result = await publishRemoveThenRotate({
         publishRemove: async () => {
           const removed = await contacts.removeMemberFromGroup(
@@ -2324,7 +2693,9 @@ function ChatView(props: {
             props.entry.group,
             leafIndex,
           );
-          chat.markOwnPublishedCommit(removed.commitMessageId);
+          if (removed.kind === "committed") {
+            chat.markOwnPublishedCommit(removed.commitMessageId);
+          }
           return removed;
         },
         rotate:
@@ -2346,7 +2717,11 @@ function ChatView(props: {
       });
       setMemberCount(props.entry.group.memberCount);
       setMembersVersion(membersVersion() + 1);
-      setNotice(`Member at leaf #${leafIndex} removed (commit #${result.commitMessageId}).`);
+      setNotice(
+        result.kind === "committed"
+          ? `Member at leaf #${leafIndex} removed (commit #${result.commitMessageId}).`
+          : "Removal requested.",
+      );
       void refresh();
     } catch (err) {
       setError(formatError(err));
@@ -2371,13 +2746,24 @@ function ChatView(props: {
         member.sigPubkey,
         makeAdmin,
       );
-      chat.markOwnPublishedCommit(result.commitMessageId);
-      setMembersVersion(membersVersion() + 1);
-      setNotice(
-        makeAdmin
-          ? `Promoted to admin (commit #${result.commitMessageId}).`
-          : `Removed as admin (commit #${result.commitMessageId}).`,
+      chat.markOwnPublishedCommit(
+        result.kind === "committed"
+          ? result.commitMessageId
+          : result.proposalMessageId,
       );
+      if (result.kind === "proposed") noteOwnRequest("role-change");
+      // ADR-0045 — a role change is owner-only and the owner is rank 0, so the
+      // sweep that follows is the same device: in practice this is still
+      // immediate.
+      const swept = await sweepNow();
+      setMembersVersion(membersVersion() + 1);
+      if (result.kind === "committed" || swept?.kind === "committed") {
+        setNotice(makeAdmin ? "Promoted to admin." : "Removed as admin.");
+      } else {
+        setNotice(
+          "Change requested. It applies when an owner or an admin applies the change.",
+        );
+      }
       void refresh();
     } catch (err) {
       setError(formatError(err));
@@ -2396,10 +2782,19 @@ function ChatView(props: {
     setNotice(null);
     setBusy(true);
     try {
+      // ADR-0045 — an external join keeps its own direct-commit path (folding
+      // it into the sweep is S7), but a direct commit is REFUSED while anything
+      // is pending, so the approve drains the pending set first. Handing the
+      // cursor + echo hook in is what lets that drain be a real sweep rather
+      // than a no-op.
       const result = await contacts.approveExternalJoin(
         props.requireIdentity(),
         props.entry.group,
         proposalRef,
+        {
+          cursor: { read: () => cursor(), advance: (to) => setCursor(to) },
+          markOwnPublished: (id) => chat.markOwnPublishedCommit(id),
+        },
       );
       chat.markOwnPublishedCommit(result.commitMessageId);
       setMemberCount(props.entry.group.memberCount);
@@ -2529,8 +2924,18 @@ function ChatView(props: {
       // hitting CannotDecryptOwnMessage. Best-effort — a re-publish failure
       // leaves the entry un-acked for the next mount's sweep.
       try {
-        await contacts.sweepPendingCommits(props.entry.group, (id) =>
-          chat.markOwnPublishedCommit(id),
+        // ADR-0045 obligation 1 — the SAME restart seam also finishes a verdict
+        // this device owes. A staged sweep is durable and freezes this group's
+        // membership operations across restarts, so a page that closed between
+        // publishing a sweep commit and reading the journal order must resolve
+        // it before anything else touches the group. Handing the cursor + the
+        // echo hook in is what lets it re-publish idempotently and re-adjudicate
+        // exactly as if nothing had happened.
+        await contacts.sweepPendingCommits(
+          props.entry.group,
+          (id) => chat.markOwnPublishedCommit(id),
+          props.requireIdentity(),
+          { read: () => cursor(), advance: (to) => setCursor(to) },
         );
       } catch (err) {
         // eslint-disable-next-line no-console
@@ -3182,6 +3587,39 @@ function ChatView(props: {
           >
             Members ({members().length})
           </h2>
+          {/* ADR-0045 UX §5.1 — the pending notice. TOP of the panel, above
+              everything, and rendered only once at least one request is past
+              the quiet window: the owner is rank 0 and sweeps its own request
+              immediately, so in the common case nothing ever renders here. A
+              spinner that appears and vanishes in 300 ms teaches the user that
+              membership is slow when it is not.
+
+              Announced POLITELY (`aria-live="polite"`): nothing about it is
+              urgent and it can change while the roster is being read. It is
+              carried by TEXT, never by hue or a lone icon. */}
+          <Show when={pendingRequestNotice() !== null}>
+            <div
+              role="status"
+              aria-live="polite"
+              style={{
+                margin: "0 0 0.6rem 0",
+                padding: "0.4rem 0.5rem",
+                border: "1px solid var(--surface-border)",
+                "border-radius": "var(--radius-sm)",
+                background: "var(--surface-bg)",
+                display: "flex",
+                "flex-direction": "column",
+                gap: "0.2rem",
+              }}
+            >
+              <span style={{ "font-size": "0.8rem", color: "var(--surface-fg)" }}>
+                {pendingRequestNotice()?.count}
+              </span>
+              <span style={{ "font-size": "0.75rem", color: "var(--surface-muted)" }}>
+                {pendingRequestNotice()?.liveness}
+              </span>
+            </div>
+          </Show>
           {/* ADR-0028 (G-3) — owner/admin "create invite link" affordance.
               Mints a /g/<slug> link conveying this group's id; a non-member
               opens it to request to join, approved via the pending list above.
@@ -3412,6 +3850,75 @@ function ChatView(props: {
               </ul>
             </div>
           </Show>
+          {/* ADR-0045 UX §5 — `Waiting to be added ({n})`. A separate section,
+              not a roster row, and that is the load-bearing half of the
+              no-optimistic-update rule in reverse: a person who has been
+              REQUESTED is not a member, so putting them in the members list
+              would assert a membership that does not exist. Same identity
+              treatment the join-request rows use (short fingerprint). */}
+          <Show when={pendingAdds().length > 0}>
+            <div
+              style={{
+                margin: "0 0 0.6rem 0",
+                padding: "0.4rem 0.5rem",
+                border: "1px dashed var(--surface-border)",
+                "border-radius": "var(--radius-sm)",
+                background: "var(--surface-bg)",
+              }}
+            >
+              <h3
+                style={{
+                  "font-size": "0.78rem",
+                  "text-transform": "uppercase",
+                  "letter-spacing": "0.04em",
+                  color: "var(--surface-muted)",
+                  margin: "0 0 0.4rem 0",
+                }}
+              >
+                Waiting to be added ({pendingAdds().length})
+              </h3>
+              <ul
+                style={{
+                  "list-style": "none",
+                  padding: 0,
+                  margin: 0,
+                  display: "flex",
+                  "flex-direction": "column",
+                  gap: "0.3rem",
+                }}
+              >
+                <For each={pendingAdds()}>
+                  {(req) => (
+                    <li
+                      style={{
+                        display: "flex",
+                        "flex-direction": "column",
+                        gap: "0.1rem",
+                      }}
+                    >
+                      <span
+                        style={{
+                          "font-family": "monospace",
+                          "font-size": "0.78rem",
+                          color: "var(--surface-fg)",
+                        }}
+                      >
+                        {labelForAddRequest(req)}
+                      </span>
+                      <span
+                        style={{
+                          "font-size": "0.7rem",
+                          color: "var(--surface-muted)",
+                        }}
+                      >
+                        Waiting to be added.
+                      </span>
+                    </li>
+                  )}
+                </For>
+              </ul>
+            </div>
+          </Show>
           <ul
             style={{
               "list-style": "none",
@@ -3436,8 +3943,29 @@ function ChatView(props: {
                 const displayName = acceptedByPubkey().get(
                   base64Encode(m.sigPubkey),
                 );
+                // ADR-0045 — NO optimistic update. A member with a pending
+                // removal stays in the roster, annotated, because they are
+                // still cryptographically in the group and still receiving
+                // every message until the commit lands. Dropping the row would
+                // be the membership equivalent of a green E2EE pill over an
+                // unencrypted call.
+                const annotation = (): string | null =>
+                  rowAnnotation(pendingRequests(), m.leafIndex, ownLeaf());
+                const label = (): string =>
+                  displayName !== undefined
+                    ? displayName
+                    : shortFingerprint(m.sigPubkey);
                 return (
                   <li
+                    // The annotation is part of the row's ACCESSIBLE LABEL, not
+                    // a separate focus stop — a screen-reader user hears it as
+                    // one thing, and hears WHY the Remove button below is
+                    // disabled rather than losing the control.
+                    aria-label={
+                      annotation() === null
+                        ? label()
+                        : `${label()}, ${annotation()?.replace(/\.$/, "")}`
+                    }
                     style={{
                       display: "flex",
                       "align-items": "center",
@@ -3447,12 +3975,28 @@ function ChatView(props: {
                       background: "var(--surface-bg)",
                     }}
                   >
-                    <code style={{ "font-size": "0.85rem" }}>
-                      #{m.leafIndex} ·{" "}
-                      {displayName !== undefined
-                        ? displayName
-                        : shortFingerprint(m.sigPubkey)}
-                    </code>
+                    <span
+                      style={{
+                        display: "flex",
+                        "flex-direction": "column",
+                        gap: "0.1rem",
+                      }}
+                    >
+                      <code style={{ "font-size": "0.85rem" }}>
+                        #{m.leafIndex} · {label()}
+                      </code>
+                      <Show when={annotation() !== null}>
+                        <span
+                          aria-hidden="true"
+                          style={{
+                            "font-size": "0.7rem",
+                            color: "var(--surface-muted)",
+                          }}
+                        >
+                          {annotation()}
+                        </span>
+                      </Show>
+                    </span>
                     <span style={{ flex: 1 }} />
                     <Show
                       when={!isSelf}
@@ -3487,14 +4031,18 @@ function ChatView(props: {
                         </button>
                       </Show>
                       {/* ADR-0022 — only owner/admin (or an open/legacy
-                          group) sees Remove; a member's removal is refused. */}
+                          group) sees Remove; a member's removal is refused.
+                          ADR-0045 UX §5.3 — while a removal is pending the
+                          button stays VISIBLE but disabled: hiding it would
+                          read as the permission having vanished, and the row
+                          annotation is what explains the disabled state. */}
                       <Show when={canManageMembers()}>
                         <button
                           type="button"
                           onClick={() => {
                             void onRemoveMember(m.leafIndex);
                           }}
-                          disabled={busy()}
+                          disabled={busy() || annotation() !== null}
                           style={{
                             "font-size": "0.8rem",
                             color: "var(--error)",
@@ -3509,6 +4057,30 @@ function ChatView(props: {
               }}
             </For>
           </ul>
+          {/* ADR-0045 UX §5 — `Leave group`, bottom of the panel, destructive,
+              and HIDDEN for the owner (see `onLeaveGroup` for why that is a
+              precondition rather than a dead end). Only on the proposal path:
+              a legacy group's core has no self-remove route. */}
+          <Show when={usesProposalPath() && !isOwner() && ownLeaf() !== undefined}>
+            <div style={{ "margin-top": "0.6rem" }}>
+              <button
+                type="button"
+                disabled={busy() || rowAnnotation(pendingRequests(), ownLeaf() ?? -1, ownLeaf()) !== null}
+                onClick={() => void onLeaveGroup()}
+                style={{
+                  "font-size": "0.8rem",
+                  padding: "0.3rem 0.6rem",
+                  "border-radius": "var(--radius-sm)",
+                  border: "1px solid var(--surface-border)",
+                  background: "transparent",
+                  color: "var(--danger, #c0392b)",
+                  cursor: "pointer",
+                }}
+              >
+                Leave group
+              </button>
+            </div>
+          </Show>
         </section>
       </Show>
 
@@ -3815,6 +4387,12 @@ function TimelineBubble(props: {
     if (ev.kind === "committerBeacon") {
       // ADR-0045 — the receive loop consumes it and never pushes it into
       // `rows()`. Defensive.
+      return null;
+    }
+    if (ev.kind === "membershipProposal") {
+      // ADR-0045 UX §10 — a request is not something that HAPPENED to the
+      // group; only outcomes belong in the timeline. The receive loop routes
+      // it to the members panel and never pushes it into `rows()`. Defensive.
       return null;
     }
     // Incoming application message — never our own → Edit/Delete
@@ -4568,6 +5146,13 @@ function timelineRowToPersisted(row: TimelineRow): PersistedMessage | null {
   if (row.event.kind === "committerBeacon") {
     // ADR-0045 — consumed by the receive loop, never materialised as a
     // timeline row, so this branch is unreachable. Never persist it.
+    return null;
+  }
+  if (row.event.kind === "membershipProposal") {
+    // ADR-0045 UX §10 — a pending request must NEVER reach the persisted
+    // message log: it is an intent the system may discard a second later, and
+    // writing it to a durable, mutually visible transcript would both leak a
+    // pending change to members who cannot act on it and outlive the intent.
     return null;
   }
   // system

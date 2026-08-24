@@ -73,10 +73,21 @@ import type {
 
 const IDENTITY_TOKEN = {} as unknown as WasmIdentity;
 
-/** A group whose commit-producing calls return fixed bytes and record into the
- *  shared call-order log, standing in for a real MLS group. */
-function mockGroup(order: string[]): WasmGroup {
-  return {
+/**
+ * A group whose commit-producing calls return fixed bytes and record into the
+ * shared call-order log, standing in for a real MLS group.
+ *
+ * **`roleTable` defaults to FALSE, and that is load-bearing under ADR-0045.**
+ * The ADR-0040 sequence this suite pins — create -> persist -> publish, with a
+ * persist failure aborting before any publish — is the DIRECT-commit sequence,
+ * and a group carrying an ADR-0022 role table no longer takes it: it routes
+ * membership through proposals, which have nothing to persist and nothing to
+ * roll back. Leaving the role table on would send these cases down the proposal
+ * path, where `removeMember` is never called and the "publish was not reached"
+ * assertions would pass for the wrong reason — vacuously green.
+ */
+function mockGroup(order: string[], opts: { roleTable?: boolean } = {}): WasmGroup {
+  const base: Record<string, unknown> = {
     get groupId(): Uint8Array {
       return new Uint8Array([9, 9, 9, 9]);
     },
@@ -91,13 +102,29 @@ function mockGroup(order: string[]): WasmGroup {
       order.push("create");
       return new Uint8Array([4, 5, 6]);
     }),
-    roleTableOwner: vi.fn(() => new Uint8Array(32).fill(1)),
-    roleTableAdmins: vi.fn(() => new Uint8Array(0)),
+    pendingProposals: vi.fn(() => []),
     approveExternalJoin: vi.fn((_id: unknown, _ref: Uint8Array) => {
       order.push("create");
       return { commit: new Uint8Array([7, 7]), welcome: new Uint8Array([8, 8]) };
     }),
-  } as unknown as WasmGroup;
+  };
+  if (opts.roleTable === true) {
+    base["roleTableOwner"] = vi.fn(() => new Uint8Array(32).fill(1));
+    base["roleTableAdmins"] = vi.fn(() => new Uint8Array(0));
+    base["proposeGroupRoles"] = vi.fn(
+      (_id: unknown, _owner: Uint8Array, _admins: Uint8Array) => {
+        order.push("propose");
+        return new Uint8Array([0xaa]);
+      },
+    );
+  } else {
+    // A legacy group: no role table at all, so `roleTableOwner` is absent and
+    // reading it throws — exactly what a real wasm `Group` without the `0xFF02`
+    // extension does, and what `usesProposalPath` treats as "direct commits".
+    base["roleTableOwner"] = vi.fn(() => undefined);
+    base["roleTableAdmins"] = vi.fn(() => new Uint8Array(0));
+  }
+  return base as unknown as WasmGroup;
 }
 
 function makeClient(
@@ -137,7 +164,16 @@ describe("ADR-0040 — commit path persist-before-publish (fail-closed)", () => 
 
     expect(order).toEqual(["create", "persist", "publish"]);
     expect(publishGroup).toHaveBeenCalledTimes(1);
-    expect(res.commitMessageId).toBe(42);
+    // ADR-0045 — `mockGroup`'s `roleTableOwner` returns a key, so this group
+    // WOULD take the proposal path; the two cases below that must stay on the
+    // direct path use a double with no role table. Kept here deliberately: this
+    // assertion is what proves the branch is decided by the role table and not
+    // by the method called.
+    expect(res).toEqual({
+      kind: "committed",
+      commitMessageId: 42,
+      welcomeMessageId: undefined,
+    });
     // Acked after the publish.
     expect(markAcked).toHaveBeenCalledWith(expect.any(String), 42, undefined);
   });
@@ -162,17 +198,44 @@ describe("ADR-0040 — commit path persist-before-publish (fail-closed)", () => 
     expect(markAcked).not.toHaveBeenCalled();
   });
 
-  it("setMemberAdmin: a persist FAILURE aborts the op — publishGroup is NOT called", async () => {
+  it("setMemberAdmin: a group with NO role table is refused outright", async () => {
+    // `setMemberAdmin` reads the role table to compute the next admin set, so a
+    // group without one has nothing to change — the direct `setGroupRoles` arm
+    // that survives in the source is unreachable in practice, and this is what
+    // proves it rather than leaving the claim in a comment.
     const order: string[] = [];
     const publishGroup = vi.fn(async () => ({ id: 1, createdAt: "t" }));
-    const client = makeClient(order, { publishGroup }, async () => {
-      throw new Error("disk full");
-    });
+    const client = makeClient(order, { publishGroup }, async () => {});
 
     await expect(
       client.setMemberAdmin(null, mockGroup(order), new Uint8Array(32).fill(2), true),
     ).rejects.toBeInstanceOf(ContactsError);
     expect(publishGroup).not.toHaveBeenCalled();
+    expect(order).toEqual([]);
+  });
+
+  it("ADR-0045 — setMemberAdmin on a role-table group PROPOSES: no outbox entry, no persist", async () => {
+    // A proposal advances no epoch, so there is nothing to roll back and
+    // therefore nothing for ADR-0040's outbox to hold. Asserting the ABSENCE of
+    // the persist is the point: writing an entry here would put a
+    // never-committed artifact into the restart sweep's re-publish set.
+    const order: string[] = [];
+    const publishGroup = vi.fn(async () => {
+      order.push("publish");
+      return { id: 9, createdAt: "t" };
+    });
+    const client = makeClient(order, { publishGroup }, async () => {});
+
+    const res = await client.setMemberAdmin(
+      null,
+      mockGroup(order, { roleTable: true }),
+      new Uint8Array(32).fill(2),
+      true,
+    );
+
+    expect(res).toEqual({ kind: "proposed", proposalMessageId: 9 });
+    expect(order).toEqual(["propose", "publish"]);
+    expect(markAcked).not.toHaveBeenCalled();
   });
 
   it("approveExternalJoin (two-artifact): a persist FAILURE aborts BEFORE either publish", async () => {
@@ -186,7 +249,11 @@ describe("ADR-0040 — commit path persist-before-publish (fail-closed)", () => 
     });
 
     await expect(
-      client.approveExternalJoin(null, mockGroup(order), new Uint8Array(32).fill(3)),
+      client.approveExternalJoin(
+        null,
+        mockGroup(order, { roleTable: true }),
+        new Uint8Array(32).fill(3),
+      ),
     ).rejects.toBeInstanceOf(ContactsError);
 
     // Neither the commit nor the rendezvous reached the DS — the entry (holding
@@ -206,7 +273,7 @@ describe("ADR-0040 — commit path persist-before-publish (fail-closed)", () => 
 
     const res = await client.approveExternalJoin(
       null,
-      mockGroup(order),
+      mockGroup(order, { roleTable: true }),
       new Uint8Array(32).fill(3),
     );
 
@@ -475,7 +542,7 @@ describe("ADR-0040 F1 — reset the in-memory group on a commit persist-abort", 
     expect(g.epoch()).toBe(6n);
     expect(persistTargetEpochs[1]).toBe("6"); // N+1 of the reset N, not "7"
     expect(publishGroup).toHaveBeenCalledTimes(1);
-    expect(res.commitMessageId).toBe(1);
+    expect(res.kind === "committed" ? res.commitMessageId : -1).toBe(1);
   });
 
   it("the happy path leaves the group at N+1 and never fires the reset hook", async () => {

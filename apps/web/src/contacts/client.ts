@@ -79,11 +79,20 @@ import {
   parseEnvelope,
   wrapEnvelope,
 } from "./envelope";
-import { loadUnacked, markAcked } from "../chat/commit-outbox";
+import { deleteEntry, loadUnacked, markAcked } from "../chat/commit-outbox";
 import type {
   NewCommitEntry,
   PendingCommitEntry,
 } from "../chat/commit-outbox";
+import {
+  resolveOwedVerdict,
+  runOwnerSweep,
+  type SweepCursorRef,
+  type SweepDurableEntry,
+  type SweepOutcome,
+  type SweepPorts,
+  type StagedSweepArtifacts,
+} from "../chat/sweep";
 
 /** Optional wires the route layer hands to ContactsClient
  *  (Phase 1.16e6c2). See `ChatClientOptions` in
@@ -430,6 +439,210 @@ function newOutboxEntryId(): string {
   return Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
 }
 
+/**
+ * ADR-0045 — what a membership action did.
+ *
+ * The two arms are not two flavours of success, they are two different things
+ * that happened, and the UI has to say so: a `committed` action took effect
+ * across the group, a `proposed` one is a request that lands when the committer
+ * sweeps. Collapsing them into one shape would force the panel to assert an
+ * effect that has not happened, which is exactly the optimistic-update lie the
+ * UX spec forbids.
+ */
+export type MembershipOutcome =
+  /** A direct commit landed. Only reachable in a group with NO role table,
+   *  where ADR-0045's proposal path does not apply — see
+   *  {@link ContactsClient.usesProposalPath}. */
+  | {
+      readonly kind: "committed";
+      readonly commitMessageId: number;
+      readonly welcomeMessageId: number | undefined;
+    }
+  /** A proposal was published. It takes effect when a committer sweeps it. */
+  | { readonly kind: "proposed"; readonly proposalMessageId: number };
+
+/**
+ * ADR-0045 — does this group route membership through proposals?
+ *
+ * A group with **no role table** keeps direct commits, unchanged: it has no
+ * owner, therefore no rank 0, therefore no committer, and every peer's receipt
+ * gate drops proposals in such a group — so the propose path would silently
+ * discard everything. ADR-0045 says this explicitly, and `Group::create` has
+ * seeded a role table since ADR-0022, so no freshly created group reaches it.
+ *
+ * This is NOT a dual path in ADR-0045's forbidden sense. The ADR rules out a
+ * "legacy direct-commit fallback" — a second, ungated route into a group that
+ * *has* moved to proposals. This is the disjoint case: a group with no role
+ * table has no gate to bypass, because there is no table to read a role from.
+ *
+ * A torn read is treated as "no role table", which keeps the direct path
+ * working rather than routing into a proposal path whose gate cannot resolve.
+ */
+function usesProposalPath(group: WasmGroup): boolean {
+  try {
+    return group.roleTableOwner() !== undefined;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Adapt a wasm `Group` + this client's DS / outbox wiring onto the
+ * {@link SweepPorts} the ADR-0045 sweep orchestration runs over.
+ *
+ * The adapter is deliberately thin and does no deciding: every rule lives in
+ * `chat/sweep.ts`, where it is host-testable without wasm, IndexedDB or a
+ * network.
+ */
+function sweepPortsFor(
+  wasm: Wasm,
+  identity: WasmIdentity,
+  group: WasmGroup,
+  cursor: SweepCursorRef,
+  markOwnPublished: (messageId: number) => void,
+  ds: DsClient,
+  onPersistWithCommit: ((entry: NewCommitEntry) => Promise<void>) | undefined,
+  persist: () => Promise<void>,
+): SweepPorts {
+  const groupIdBytes = group.groupId;
+  const groupIdB64 = base64Encode(groupIdBytes);
+  return {
+    group: {
+      groupId: groupIdBytes,
+      get epoch(): bigint {
+        return group.epoch;
+      },
+      ownCommitterRank: () => group.ownCommitterRank(identity),
+      pendingProposalCount: () => group.pendingProposals().length,
+      hasStagedSweep: () => group.hasStagedSweep(),
+      stagePendingProposals: (): StagedSweepArtifacts | null => {
+        const staged = group.stagePendingProposals(identity);
+        if (staged === undefined) return null;
+        // `swept()` reports what the commit REALLY carries, read back off the
+        // staged commit by the core rather than predicted by the caller — which
+        // matters here because it is what addresses the Welcome.
+        const added: Uint8Array[] = [];
+        for (const raw of staged.swept()) {
+          const record = raw as { kind: string; addSignatureKey?: Uint8Array };
+          if (record.kind === "add" && record.addSignatureKey !== undefined) {
+            added.push(record.addSignatureKey);
+          }
+        }
+        return {
+          commit: staged.commit,
+          welcome: staged.welcome,
+          addedSignatureKeys: added,
+        };
+      },
+      mergeStagedSweep: () => {
+        group.mergeStagedSweep(identity);
+      },
+      abandonStagedSweep: () => {
+        group.abandonStagedSweep(identity);
+      },
+      applyIncoming: (payload) => {
+        group.processIncomingVerifyingRoles(identity, payload);
+      },
+    },
+    journal: {
+      fetch: async (after) => {
+        const res = await ds.fetchGroup(groupIdBytes, { after, waitSecs: 0 });
+        return res.messages.map((m) => ({ id: m.id, payload: m.payload }));
+      },
+      publishGroup: async (bytes) => (await ds.publishGroup(groupIdBytes, bytes)).id,
+      publishMailbox: async (pseudonym, bytes) =>
+        (await ds.publishMailbox(pseudonym, bytes)).id,
+    },
+    outbox: {
+      newEntryId: newOutboxEntryId,
+      record: async (entry) => {
+        if (onPersistWithCommit === undefined) return;
+        const next: NewCommitEntry = {
+          id: entry.id,
+          groupId: groupIdB64,
+          // The epoch the sweep was BUILT AGAINST: a staged sweep has not
+          // merged, so unlike every direct-path entry this is N, not N+1. It is
+          // diagnostics only — `sweepVerdictPending` is what the restart sweep
+          // branches on.
+          targetEpoch: group.epoch.toString(),
+          commitB64: entry.commitB64,
+          sweepVerdictPending: true,
+          welcomeMailboxesB64: [...entry.welcomeMailboxesB64],
+        };
+        if (entry.welcomeEnvelopeB64 !== undefined) {
+          next.secondArtifactB64 = entry.welcomeEnvelopeB64;
+          next.secondArtifactKind = "welcome";
+        }
+        await onPersistWithCommit(next);
+      },
+      findOwed: async () => {
+        const owed = (await loadUnacked(groupIdB64)).find(
+          (e) => e.sweepVerdictPending === true,
+        );
+        if (owed === undefined) return null;
+        return toSweepEntry(owed);
+      },
+      ack: async (id, commitMessageId, welcomeMessageId) => {
+        try {
+          await markAcked(id, commitMessageId, welcomeMessageId);
+        } catch (err) {
+          // An un-acked entry whose verdict already landed is re-adjudicated by
+          // the next restart sweep, which finds nothing staged and drops it.
+          // eslint-disable-next-line no-console
+          console.warn("ContactsClient: sweep outbox ack failed", id, err);
+        }
+      },
+      discard: async (id) => {
+        try {
+          await deleteEntry(id);
+        } catch (err) {
+          // A surviving entry is re-adjudicated by the next restart sweep, which
+          // will find nothing staged and simply drop it — so a failure here is
+          // untidy rather than unsafe.
+          // eslint-disable-next-line no-console
+          console.warn("ContactsClient: sweep outbox discard failed", id, err);
+        }
+      },
+    },
+    cursor,
+    welcomeMailbox: (signatureKey) =>
+      wasm.IdentityPseudonym.fromIdentity(signatureKey).asBytes(),
+    wrapWelcome: (welcome) => wrapEnvelope(KIND_WELCOME, welcome),
+    markOwnPublished,
+    persist,
+    encodeB64: base64Encode,
+    decodeB64: base64Decode,
+  };
+}
+
+/**
+ * ADR-0045 — is a role-change proposal already waiting to be swept?
+ *
+ * A torn read is treated as "no", which lets the request through to the core's
+ * own authorisation rather than refusing on a transient store failure — the
+ * core is the enforcement either way, and this check exists only to convert a
+ * silent loss into a clear message.
+ */
+function hasPendingRoleChange(group: WasmGroup): boolean {
+  try {
+    return (group.pendingProposals() as Array<{ kind: string }>).some(
+      (p) => p.kind === "role-change",
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Project a stored outbox row onto the sweep's own entry shape. */
+function toSweepEntry(row: PendingCommitEntry): SweepDurableEntry {
+  return {
+    id: row.id,
+    commitB64: row.commitB64,
+    welcomeEnvelopeB64: row.secondArtifactB64,
+    welcomeMailboxesB64: row.welcomeMailboxesB64 ?? [],
+  };
+}
+
 export class ContactsClient {
   private readonly identityProvider: (() => WasmIdentity | null) | undefined;
   private readonly onPersist: (() => Promise<void>) | undefined;
@@ -591,10 +804,105 @@ export class ContactsClient {
    * sweep. MUST run BEFORE the first `pollMessages` so the re-armed messageId is
    * in place when the poll re-fetches the commit.
    */
+  /**
+   * ADR-0045 S4a — run one committer sweep for `group`, if this device is the
+   * committer.
+   *
+   * The committer in this slice is the **owner** (`ownCommitterRank() === 0`).
+   * Rank 0 acts without consulting any liveness signal, so with exactly one
+   * committer there is nothing to elect: no beacon, no stagger, no fallback
+   * committer. An admin-only group waits, which ADR-0045 decision 2 designs
+   * for rather than treats as a failure.
+   *
+   * Short-circuits synchronously — before touching the network — when this
+   * device is not the committer, or when nothing is pending and no verdict is
+   * owed. That is what makes it safe to call at the tail of every poll.
+   *
+   * Runs under the same per-group MLS lock the commit and poll regions take.
+   * The whole region (stage -> publish -> verdict -> merge/abandon) is inside
+   * it, network round-trips included, because the verdict is a read-modify-write
+   * over both the group epoch and the journal cursor; a poll interleaving in
+   * the middle would not merely slow it down, it would make the verdict wrong.
+   *
+   * @param cursor  the SAME journal cursor `pollMessages` drives. The verdict
+   *   applies the rows below its own commit, so it must advance the cursor over
+   *   them or the poll would re-feed consumed rows to OpenMLS.
+   */
+  async sweepIfCommitter(
+    identity: IdentitySecrets | null,
+    group: WasmGroup,
+    cursor: SweepCursorRef,
+    markOwnPublished: (messageId: number) => void,
+  ): Promise<SweepOutcome> {
+    // A group with no role table has no committer to be, and the core refuses
+    // a sweep on it outright. Short-circuit before resolving an identity or
+    // loading wasm, so the poll tail costs nothing at all on a legacy group.
+    if (!usesProposalPath(group)) {
+      return { kind: "not-committer", rank: undefined };
+    }
+    const myIdentity = await this.resolveIdentity(identity);
+    const wasm = await loadWasm();
+    return withGroupMlsLock(base64Encode(group.groupId), async () =>
+      runOwnerSweep(
+        sweepPortsFor(
+          wasm,
+          myIdentity,
+          group,
+          cursor,
+          markOwnPublished,
+          this.ds,
+          this.onPersistWithCommit,
+          () => this.persistBestEffort(),
+        ),
+      ),
+    );
+  }
+
   async sweepPendingCommits(
     group: WasmGroup,
     markOwnPublished: (messageId: number) => void,
+    identity?: IdentitySecrets | null,
+    cursor?: SweepCursorRef,
   ): Promise<void> {
+    // ADR-0045 obligation 1 — a staged sweep is DURABLE and freezes this
+    // group's own membership operations across restarts, so a verdict owed
+    // from a previous run must be finished before anything else. It is wired
+    // into this existing restart seam rather than into a second one, because
+    // two restart paths over the same durable state is how they drift.
+    //
+    // It runs FIRST: the legacy re-publish loop below would otherwise
+    // re-publish the sweep's own commit as if it were a direct-path entry and
+    // — worse — re-publish its Welcome, which ADR-0045 forbids before the
+    // verdict.
+    if (cursor !== undefined) {
+      try {
+        const wasm = await loadWasm();
+        const myIdentity = await this.resolveIdentity(identity ?? null);
+        await withGroupMlsLock(base64Encode(group.groupId), async () =>
+          resolveOwedVerdict(
+            sweepPortsFor(
+              wasm,
+              myIdentity,
+              group,
+              cursor,
+              markOwnPublished,
+              this.ds,
+              this.onPersistWithCommit,
+              () => this.persistBestEffort(),
+            ),
+          ),
+        );
+      } catch (err) {
+        // The journal was unreadable, so the verdict stays owed and the sweep
+        // stays staged for the next attempt (which runs at the tail of every
+        // poll). Membership on this group is frozen until then — a temporary
+        // freeze that self-heals, which is strictly better than merging or
+        // abandoning on a verdict nobody read.
+        // eslint-disable-next-line no-console
+        console.warn("ContactsClient: owed sweep verdict unresolved", err);
+      }
+    }
+
     const groupIdBytes = group.groupId;
     const groupIdB64 = base64Encode(groupIdBytes);
     let entries: PendingCommitEntry[];
@@ -606,6 +914,12 @@ export class ContactsClient {
       return;
     }
     for (const entry of entries) {
+      // ADR-0045 — a staged-sweep entry is NOT re-publishable on this path.
+      // Two reasons, and either alone is decisive: its device is durably at N,
+      // not N+1, so the unconditional-re-publish argument this loop rests on
+      // does not hold for it; and its Welcome must not reach the wire until the
+      // verdict says the commit won. `resolveOwedVerdict` above owns it.
+      if (entry.sweepVerdictPending === true) continue;
       try {
         const commitBytes = base64Decode(entry.commitB64);
         const commitPub = await this.ds.publishGroup(groupIdBytes, commitBytes);
@@ -1717,7 +2031,7 @@ export class ContactsClient {
     group: WasmGroup,
     recipientAccountId: Uint8Array,
     recipientSignaturePubkey: Uint8Array,
-  ): Promise<{ commitMessageId: number; welcomeMessageId: number }> {
+  ): Promise<MembershipOutcome> {
     // 1. Fetch the new member's KeyPackage from discovery.
     //    Identical to `startGroupWith`'s step 1.
     let keyPackageBytes;
@@ -1742,14 +2056,68 @@ export class ContactsClient {
     // concurrent commit region that created its own commit against the same N
     // would publish on an epoch peers never reach. The KeyPackage fetch above
     // stays outside — it touches no MLS state and would only lengthen the hold.
-    return withGroupMlsLock(base64Encode(group.groupId), async () =>
-      this.addMemberToGroupLocked(
+    return withGroupMlsLock(base64Encode(group.groupId), async () => {
+      // ADR-0045 — a group carrying an ADR-0022 role table routes membership
+      // through proposals. The direct path stays for a group with no role
+      // table, which has no committer and whose peers' receipt gates would drop
+      // a proposal outright.
+      //
+      // The core enforces this from the other side too: `add_member` REFUSES
+      // while anything is pending, because every OpenMLS entry point the direct
+      // paths are built on sweeps the whole pending set alongside the one change
+      // it was asked for — an admin asking to add one member would add two, and
+      // route the single Welcome to only one of them.
+      if (usesProposalPath(group)) {
+        return this.proposeAddMemberLocked(myIdentity, group, keyPackageBytes);
+      }
+      return this.addMemberToGroupLocked(
         myIdentity,
         group,
         keyPackageBytes,
         recipientSignaturePubkey,
-      ),
-    );
+      );
+    });
+  }
+
+  /**
+   * ADR-0045 — publish an Add **proposal** instead of committing one.
+   *
+   * The proposal is retained in this device's own pending set as well as
+   * published, so a committer running here sweeps it like any other. It is
+   * published even when this device is the committer and will sweep it a
+   * moment later, and that is not redundant: OpenMLS resolves a commit's
+   * by-reference proposals through the proposal store on **every receiving
+   * member**, not only on the committer at sweep time, so a peer that never saw
+   * the proposal refuses the commit carrying it with
+   * `InvalidCommit(MissingProposal)`.
+   *
+   * The epoch does not advance and there is no Welcome yet — the Welcome is
+   * produced by whichever device sweeps — so there is nothing to roll back and
+   * no ADR-0040 outbox entry to write. That is the whole point of the option:
+   * a proposal that loses a race costs nothing, where a commit that loses one
+   * forks its author off the group.
+   */
+  private async proposeAddMemberLocked(
+    myIdentity: WasmIdentity,
+    group: WasmGroup,
+    keyPackageBytes: Uint8Array,
+  ): Promise<MembershipOutcome> {
+    let proposalBytes: Uint8Array;
+    try {
+      proposalBytes = group.proposeAddMember(myIdentity, keyPackageBytes);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+    // The proposal is now in this device's own pending store, which is provider
+    // state — persist so a reload does not lose a request the peers hold.
+    await this.persistBestEffort();
+    let publish;
+    try {
+      publish = await this.ds.publishGroup(group.groupId, proposalBytes);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+    return { kind: "proposed", proposalMessageId: publish.id };
   }
 
   /** The serialized body of {@link addMemberToGroup} — see that method for the
@@ -1759,7 +2127,7 @@ export class ContactsClient {
     group: WasmGroup,
     keyPackageBytes: Uint8Array,
     recipientSignaturePubkey: Uint8Array,
-  ): Promise<{ commitMessageId: number; welcomeMessageId: number }> {
+  ): Promise<MembershipOutcome> {
     // 3. Drive the MLS add. Returns `{ commit, welcome }` — the
     //    commit is the wire bytes existing members process to
     //    advance their tree; the welcome is what the new member
@@ -1841,6 +2209,7 @@ export class ContactsClient {
     await this.ackCommitBestEffort(entryId, commitPublish.id, welcomePublish.id);
 
     return {
+      kind: "committed",
       commitMessageId: commitPublish.id,
       welcomeMessageId: welcomePublish.id,
     };
@@ -1875,14 +2244,55 @@ export class ContactsClient {
     identity: IdentitySecrets | null,
     group: WasmGroup,
     leafIndex: number,
-  ): Promise<{ commitMessageId: number }> {
+  ): Promise<MembershipOutcome> {
     const myIdentity = await this.resolveIdentity(identity);
 
     // SERIALIZED per group — the create-commit below eager-merges N -> N+1, so
     // it must run against the epoch the predecessor region actually published.
-    return withGroupMlsLock(base64Encode(group.groupId), async () =>
-      this.removeMemberFromGroupLocked(myIdentity, group, leafIndex),
-    );
+    return withGroupMlsLock(base64Encode(group.groupId), async () => {
+      // ADR-0045 — proposal path for a role-table group; the direct commit
+      // survives only where there is no role table and therefore no committer.
+      if (usesProposalPath(group)) {
+        return this.proposeRemoveMemberLocked(myIdentity, group, leafIndex);
+      }
+      return this.removeMemberFromGroupLocked(myIdentity, group, leafIndex);
+    });
+  }
+
+  /**
+   * ADR-0045 — publish a Remove **proposal**.
+   *
+   * Naming this device's OWN leaf is how a member leaves, and needs no role;
+   * any other leaf needs owner or admin, and the owner's leaf is refused for
+   * everyone. The core runs that rule locally before anything is published, so
+   * an unauthorised request never reaches the wire and the caller gets a
+   * synchronous, specific error — but the local check is a courtesy: the
+   * enforcing copies are every peer's receipt gate and commit gate, which do
+   * not trust us.
+   *
+   * The member STAYS in the roster until a sweep lands, and the UI must keep
+   * showing them. Dropping the row now would assert they are gone while they
+   * are still in the group and still receiving every message.
+   */
+  private async proposeRemoveMemberLocked(
+    myIdentity: WasmIdentity,
+    group: WasmGroup,
+    leafIndex: number,
+  ): Promise<MembershipOutcome> {
+    let proposalBytes: Uint8Array;
+    try {
+      proposalBytes = group.proposeRemoveMember(myIdentity, leafIndex);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+    await this.persistBestEffort();
+    let publish;
+    try {
+      publish = await this.ds.publishGroup(group.groupId, proposalBytes);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+    return { kind: "proposed", proposalMessageId: publish.id };
   }
 
   /** The serialized body of {@link removeMemberFromGroup}. Runs under
@@ -1891,7 +2301,7 @@ export class ContactsClient {
     myIdentity: WasmIdentity,
     group: WasmGroup,
     leafIndex: number,
-  ): Promise<{ commitMessageId: number }> {
+  ): Promise<MembershipOutcome> {
     let commitBytes: Uint8Array;
     try {
       commitBytes = group.removeMember(myIdentity, leafIndex);
@@ -1935,7 +2345,11 @@ export class ContactsClient {
 
     await this.ackCommitBestEffort(entryId, commitPublish.id);
 
-    return { commitMessageId: commitPublish.id };
+    return {
+      kind: "committed",
+      commitMessageId: commitPublish.id,
+      welcomeMessageId: undefined,
+    };
   }
 
   /** ADR-0022 — promote / demote a member as an admin (owner only). Reads the
@@ -1950,7 +2364,7 @@ export class ContactsClient {
     group: WasmGroup,
     memberSigPubkey: Uint8Array,
     makeAdmin: boolean,
-  ): Promise<{ commitMessageId: number }> {
+  ): Promise<MembershipOutcome> {
     const myIdentity = await this.resolveIdentity(identity);
 
     // SERIALIZED per group. Unlike the other three, this region deliberately
@@ -1972,19 +2386,18 @@ export class ContactsClient {
     );
   }
 
-  /** The serialized body of {@link setMemberAdmin} — including the role-table
-   *  read. Runs under `withGroupMlsLock`; never call it directly. */
-  private async setMemberAdminLocked(
-    myIdentity: WasmIdentity,
+  /** Read the group's current role table and return the admin set with
+   *  `memberSigPubkey` added or removed. Shared by the direct and the proposal
+   *  path so the two can never compute a different table. */
+  private nextAdminSet(
     group: WasmGroup,
     memberSigPubkey: Uint8Array,
     makeAdmin: boolean,
-  ): Promise<{ commitMessageId: number }> {
+  ): { owner: Uint8Array; adminsFlat: Uint8Array } {
     const owner = group.roleTableOwner();
     if (owner === undefined) {
       throw ContactsError.wrap(new Error("group has no role table"));
     }
-    // Current admins, chunked into 32-byte keys.
     const flat = group.roleTableAdmins();
     const eq = (a: Uint8Array, b: Uint8Array): boolean =>
       a.length === b.length && a.every((x, i) => x === b[i]);
@@ -1996,6 +2409,74 @@ export class ContactsClient {
     if (makeAdmin) next = [...next, memberSigPubkey];
     const adminsFlat = new Uint8Array(next.length * 32);
     next.forEach((a, i) => adminsFlat.set(a, i * 32));
+    return { owner, adminsFlat };
+  }
+
+  /** The serialized body of {@link setMemberAdmin} — including the role-table
+   *  read. Runs under `withGroupMlsLock`; never call it directly. */
+  private async setMemberAdminLocked(
+    myIdentity: WasmIdentity,
+    group: WasmGroup,
+    memberSigPubkey: Uint8Array,
+    makeAdmin: boolean,
+  ): Promise<MembershipOutcome> {
+    const { owner, adminsFlat } = this.nextAdminSet(
+      group,
+      memberSigPubkey,
+      makeAdmin,
+    );
+
+    // ADR-0045 — a role change in a role-table group is a PROPOSAL. Note the
+    // asymmetry with add / remove is only apparent: reaching this method at all
+    // means the group HAS a role table (`nextAdminSet` refuses without one), so
+    // the direct arm below is unreachable in practice and is kept only because
+    // the local role read is what proves it.
+    if (usesProposalPath(group)) {
+      // A SECOND role change while one is pending is refused, and this is a
+      // real consequence of the proposal path rather than caution.
+      //
+      // A role change is a read-modify-write over the role table, and on the
+      // direct path the per-group lock was enough: the first toggle's commit
+      // updated the table, so the second read it and composed. A PROPOSAL
+      // changes nothing until it is swept, so two toggles taken a moment apart
+      // both read the SAME committed table and each proposes a table carrying
+      // only its own change. RFC 9420 permits at most one
+      // `GroupContextExtensions` proposal per commit, so the sweep keeps one
+      // and silently discards the other — the first promotion would vanish with
+      // no error anywhere. Serializing cannot fix that, because there is
+      // nothing for the second read to observe.
+      //
+      // Recomputing from "the committed table as amended by our own pending
+      // proposal" is not available either: `ProposalKind::RoleChange` carries
+      // no payload (the core's `classify` discards the extensions), so a client
+      // cannot read back what it proposed.
+      //
+      // So the honest answer is to refuse, and say so. The window is one sweep
+      // — the owner is rank 0 and sweeps immediately — so this is momentary in
+      // the ordinary case and a real, visible wait only when the committer is
+      // absent, which is precisely when a silent loss would be worst.
+      if (hasPendingRoleChange(group)) {
+        throw ContactsError.wrap(
+          new Error(
+            "A role change is already waiting to apply. Wait for it to land, then try again.",
+          ),
+        );
+      }
+      let proposalBytes: Uint8Array;
+      try {
+        proposalBytes = group.proposeGroupRoles(myIdentity, owner, adminsFlat);
+      } catch (err) {
+        throw ContactsError.wrap(err);
+      }
+      await this.persistBestEffort();
+      let publish;
+      try {
+        publish = await this.ds.publishGroup(group.groupId, proposalBytes);
+      } catch (err) {
+        throw ContactsError.wrap(err);
+      }
+      return { kind: "proposed", proposalMessageId: publish.id };
+    }
 
     let commitBytes: Uint8Array;
     try {
@@ -2039,7 +2520,11 @@ export class ContactsClient {
 
     await this.ackCommitBestEffort(entryId, commitPublish.id);
 
-    return { commitMessageId: commitPublish.id };
+    return {
+      kind: "committed",
+      commitMessageId: commitPublish.id,
+      welcomeMessageId: undefined,
+    };
   }
 
   /** ADR-0027 (G-3) — approve a pending external-join request (owner / admin
@@ -2062,9 +2547,39 @@ export class ContactsClient {
     identity: IdentitySecrets | null,
     group: WasmGroup,
     proposalRef: Uint8Array,
+    // ADR-0045 — supplied so the approve can drain the pending proposal set
+    // first; see the comment inside. Optional so the ADR-0028 co-publisher
+    // caller, whose `PublisherGroup` carries no role table and can therefore
+    // never hold a proposal, is unaffected.
+    sweepFirst?: {
+      cursor: SweepCursorRef;
+      markOwnPublished: (messageId: number) => void;
+    },
   ): Promise<{ commitMessageId: number; welcomeMessageId: number }> {
     const wasm = await loadWasm();
     const myIdentity = await this.resolveIdentity(identity);
+
+    // ADR-0045 — an external join keeps its own path (converging it onto the
+    // sweep is S7), but it can no longer simply commit: the core REFUSES a
+    // direct commit while anything is pending, because the OpenMLS entry point
+    // it is built on would sweep the whole pending set alongside the one add it
+    // was asked for. Two live failure modes followed from that, and both are
+    // this ADR's own hazard through the back door — a commit that
+    // `owner_survives` refuses on every peer while its eagerly-merging author
+    // sits alone at N+1, and an admin asking to add one member adding two, with
+    // the single Welcome routed to only one of them.
+    //
+    // So: sweep the pending set first (this device is the committer, or the
+    // sweep is a no-op), THEN approve. The two take the group lock in turn
+    // rather than nesting, because the lock is non-reentrant.
+    if (sweepFirst !== undefined && usesProposalPath(group)) {
+      await this.sweepIfCommitter(
+        identity,
+        group,
+        sweepFirst.cursor,
+        sweepFirst.markOwnPublished,
+      );
+    }
 
     // SERIALIZED per group — `approveExternalJoin` reuses the audited
     // `add_member` and eager-merges N -> N+1 like the other three.
@@ -2437,8 +2952,13 @@ export class ContactsClient {
   ): Promise<{
     recipientUsername: string;
     recipientAccountId: Uint8Array;
-    commitMessageId: number;
-    welcomeMessageId: number;
+    /** The added member's 32-byte Ed25519 signature key — the stable handle the
+     *  ADR-0045 pending-request record keys on (never a leaf index: OpenMLS
+     *  reuses a vacated leaf for the next Add). */
+    recipientSignaturePubkey: Uint8Array;
+    /** ADR-0045 — `committed` only in a group with no role table; otherwise the
+     *  add was published as a proposal for a committer to sweep. */
+    outcome: MembershipOutcome;
   }> {
     if (identity === null) {
       throw ContactsError.noIdentitySecrets();
@@ -2469,7 +2989,7 @@ export class ContactsClient {
     await this.verifyBundleAccountKey(lookup.account, bundle);
     const recipientSignaturePubkey = base64Decode(bundle.signature_pubkey);
 
-    const out = await this.addMemberToGroup(
+    const outcome = await this.addMemberToGroup(
       identity,
       group,
       lookup.account,
@@ -2478,8 +2998,8 @@ export class ContactsClient {
     return {
       recipientUsername: lookup.normalisedUsername,
       recipientAccountId: lookup.account,
-      commitMessageId: out.commitMessageId,
-      welcomeMessageId: out.welcomeMessageId,
+      recipientSignaturePubkey,
+      outcome,
     };
   }
 }

@@ -108,6 +108,9 @@ import { useChats } from "../chat/ChatContext";
 import { deleteMlsSnapshot } from "../chat/mls-store";
 import { clearAllGroupRouting } from "../push/group-routing-store";
 import { deleteOutboxForAccount } from "../chat/commit-outbox";
+// ADR-0045 — the pending-request observation store follows the outbox's
+// hygiene: a prior session's request ages must never be read by a later one.
+import { clearObservationsForAccount } from "../chat/pending-requests";
 import { deleteMessageLog } from "../chat/message-log-store";
 import { rehydrateMlsState } from "../chat/rehydrate";
 import { subscribeToPush, unsubscribeFromPush } from "../push/subscribe";
@@ -2179,6 +2182,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // never be swept into the fresh state.
         try {
           await deleteOutboxForAccount(accountIdB64);
+          clearObservationsForAccount(accountIdB64);
         } catch (err) {
           // eslint-disable-next-line no-console
           console.warn("deleteOutboxForAccount during recover failed", err);
@@ -2612,6 +2616,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // future signup on the same accountId never sweeps a stale entry.
         try {
           await deleteOutboxForAccount(cached.accountIdB64);
+          clearObservationsForAccount(cached.accountIdB64);
         } catch {
           // Ignore — same best-effort policy as above.
         }

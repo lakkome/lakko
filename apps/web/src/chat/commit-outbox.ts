@@ -89,6 +89,31 @@ export interface PendingCommitEntry {
    *  for a `"welcome"` second artifact. Absent for `"rendezvous"` (that rides the
    *  group journal, addressed by `groupId`). */
   secondArtifactMailboxB64?: string;
+  /**
+   * ADR-0045 — this entry belongs to a STAGED sweep, so its commit is on the
+   * wire but the local epoch has NOT advanced and a journal verdict is still
+   * owed.
+   *
+   * The flag is what keeps the restart sweep from treating the two shapes
+   * alike, and the difference is not cosmetic: for a legacy direct-commit entry
+   * the device is durably at N+1 and the second artifact may be re-published
+   * unconditionally, whereas for a sweep entry the Welcome must NOT be
+   * published until the verdict says the commit won (ADR-0045's Welcome
+   * ordering rule — publishing it on a commit that then loses puts a joiner
+   * into a state no other member holds).
+   *
+   * Absent on every entry the four direct paths write.
+   */
+  sweepVerdictPending?: boolean;
+  /**
+   * ADR-0045 — the sweep's Welcome fan-out targets: base64 mailbox pseudonyms,
+   * one per member the sweep adds.
+   *
+   * A list, where the direct add path has the singular
+   * `secondArtifactMailboxB64`, because one sweep commit can carry several adds
+   * under a single Welcome. Empty when the sweep carried no add.
+   */
+  welcomeMailboxesB64?: string[];
   /** `false` until BOTH artifacts have (re)published. An un-acked entry is swept
    *  on restart / group-open. */
   acked: boolean;
