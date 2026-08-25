@@ -7,7 +7,8 @@
  *
  * It lives in its own module because three unrelated modules take it and there
  * must be exactly one queue: `contacts/client.ts` (the four create-commit ->
- * publish regions), `chat/client.ts` (the poll's apply half), and
+ * publish regions plus the ADR-0045 sweep), `chat/client.ts` (the poll's apply
+ * half AND the send path's seal -> publish region), and
  * `channels/copublisher.ts` (the PublisherGroup poll + approve). Two locks over
  * one resource is worse than none, so the lock does NOT live with any one of its
  * callers. It was extracted from `contacts/client.ts` for exactly that reason —
@@ -34,6 +35,18 @@
  * parked in its publish is the same interleave with the same outcome. Android
  * closed this first (`SplitPoll.kt` `runSplitPoll` takes the same per-group
  * mutex the commits take); this is the web mirror.
+ *
+ * The SEND path (`ChatClient.sendMessage` / `broadcastControl`) takes it for a
+ * THIRD, distinct reason, and one worth stating because the obvious reading is
+ * wrong: it is not that two `createApplicationMessage` calls interleave (that
+ * wasm call is synchronous, so they cannot), nor that two same-epoch messages
+ * arrive out of order (MLS orders those by generation). It is that a message
+ * sealed at epoch N and published on the far side of a commit that moved the
+ * group to N+1 is undecryptable for every recipient — `lakko-mls` never sets
+ * `max_past_epochs`, so it is openmls's default of 0 and no peer retains a
+ * past-epoch secret. See `ChatClient.sendMessage` for both reachable directions
+ * and for the half this lock does NOT close (a race against a REMOTE commit,
+ * which is a race with the DS rather than with local state).
  *
  * ## What is NOT in the region
  *
@@ -91,6 +104,15 @@
  *   - nothing awaited inside an apply region reaches a commit. The poll's region
  *     awaits only `parseBodyEnvelope` / `tryDecodeSecretEnvelope` (wasm codecs)
  *     and the best-effort snapshot persist;
+ *   - nothing awaited inside a SEND region reaches any of the others. It awaits
+ *     only `persistDurableOrThrow` (device key + IndexedDB) and the plain-HTTP
+ *     `publishGroup`; the push wake is `void`-fired and never awaited. In the
+ *     other direction, every caller of `sendMessage` / `broadcastControl` is a
+ *     plain user handler or a timer — the poll-tail and sweep-tail broadcasts
+ *     (`rotatePushRoutingSecretIfMembershipShrank`,
+ *     `redistributeSecretToGroup`) are fired from a `void (async () => …)`
+ *     AFTER the awaited region has already resolved, so they queue behind it
+ *     rather than nesting inside it;
  *   - `routes/Chat.tsx` fires `void refresh()` at the TAIL of each commit
  *     handler, i.e. after `await contacts.<op>()` has already resolved and the
  *     region has been left. The poll it starts therefore QUEUES behind the

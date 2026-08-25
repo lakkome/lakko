@@ -485,6 +485,48 @@ export class ChatClient {
    * ciphertext never reaches the DS without its N+1 ratchet state
    * durably on disk — see the persist-before-publish comment
    * below for the nonce-reuse-on-crash rationale.
+   *
+   * ## The seal and the publish are SERIALIZED against epoch changes
+   *
+   * Runs under the same per-group `withGroupMlsLock` the four
+   * `ContactsClient` create-commit regions, the poll's apply half and the
+   * ADR-0045 sweep take. The hazard is NOT two `createApplicationMessage`
+   * calls interleaving — that wasm call is synchronous, so they cannot — nor
+   * two same-epoch messages arriving out of order, which MLS resolves by
+   * generation. It is that a message can be SEALED at one epoch and PUBLISHED
+   * on the far side of a commit that changes it. `lakko-mls` never sets
+   * `max_past_epochs`, so it is openmls's default of **0**: a recipient keeps
+   * no past-epoch secrets, and a straddling message is not late but
+   * permanently undecryptable for everyone, dropped silently while the
+   * sender's own optimistic echo stays on screen.
+   *
+   * Both directions were reachable while this path held no lock:
+   *
+   *   - a commit region eager-merges N -> N+1 *inside* its create and then
+   *     parks in persist + publish, so a send in that window seals at N+1 and
+   *     can reach the DS first — a future epoch to peers still at N;
+   *   - an ADR-0045 sweep STAGES (the group stays at N), publishes the commit,
+   *     then spends a second round-trip on the journal verdict.
+   *     `MlsGroup::create_message` gates on `is_active()`, not
+   *     `is_operational()`, so a pending commit does not block a send: it
+   *     seals at N with the commit already on the wire, which makes the loss a
+   *     certainty rather than a race for that whole window.
+   *
+   * The lock closes the LOCAL half only, and that bound is real: a poll
+   * applying somebody ELSE's commit is a race against the DS, not against
+   * local state, so a message sealed here and published after a remote commit
+   * that was already ordered ahead of it is still lost. Closing that needs
+   * `max_past_epochs > 0` in `lakko-mls` (invariant #3 — an ADR and property
+   * tests), not a client-side lock.
+   *
+   * The DS publish is INSIDE the region, deliberately: the whole hazard is
+   * seal-then-publish-late, so leaving the publish out would fix nothing. That
+   * is not the ADR-0044 wedge shape — `withGroupMlsLock` releases on the
+   * task's rejection as well as its resolution, so a failed publish frees the
+   * queue. The cost is a stall, and it is bounded: no caller of this lock long
+   * polls (the sweep's own verdict read is `waitSecs: 0`). Sends on one group
+   * now serialize, which is a latency cost on back-to-back sends and is also
+   * what makes the concurrent-persist overlap below unreachable.
    */
   async sendMessage(
     identity: IdentitySecrets | null,
@@ -496,6 +538,35 @@ export class ChatClient {
     }
     const myIdentity = await this.resolveIdentity(identity);
 
+    // Read BEFORE the lock is keyed and before anything is sealed — a
+    // synchronous getter that touches no mutable state.
+    let groupId: Uint8Array;
+    try {
+      groupId = group.groupId;
+    } catch (err) {
+      throw new ChatError("group.groupId unavailable", err);
+    }
+
+    return withGroupMlsLock(base64Encode(groupId), async () =>
+      this.sealAndPublish(myIdentity, group, groupId, plaintext, true),
+    );
+  }
+
+  /**
+   * The serialized body shared by {@link sendMessage} and
+   * {@link broadcastControl}: seal at the live epoch, persist fail-closed,
+   * publish. Runs under `withGroupMlsLock`; never call it directly.
+   *
+   * `notifyPush` is the ONLY difference between the two callers — a control
+   * envelope fires no user-facing wake.
+   */
+  private async sealAndPublish(
+    myIdentity: WasmIdentity,
+    group: WasmGroup,
+    groupId: Uint8Array,
+    plaintext: Uint8Array,
+    notifyPush: boolean,
+  ): Promise<SendMessageResult> {
     // `createApplicationMessage` ADVANCES the MLS sender ratchet:
     // it consumes the current generation N (deriving the AEAD
     // key+nonce from N) and leaves the in-memory OpenMLS provider
@@ -507,13 +578,6 @@ export class ChatClient {
       wireBytes = group.createApplicationMessage(myIdentity, plaintext);
     } catch (err) {
       throw new ChatError("createApplicationMessage failed", err);
-    }
-
-    let groupId: Uint8Array;
-    try {
-      groupId = group.groupId;
-    } catch (err) {
-      throw new ChatError("group.groupId unavailable", err);
     }
 
     // SECURITY (nonce-reuse-on-crash) — PERSIST BEFORE PUBLISH,
@@ -537,7 +601,9 @@ export class ChatClient {
       await this.persistDurableOrThrow();
     } catch (err) {
       throw new ChatError(
-        "MLS snapshot persist failed — send aborted to prevent nonce reuse",
+        `MLS snapshot persist failed — ${
+          notifyPush ? "send" : "control broadcast"
+        } aborted to prevent nonce reuse`,
         err,
       );
     }
@@ -556,7 +622,10 @@ export class ChatClient {
     // recipients will see it on their next poll regardless).
     // No await; the function returns the DS receipt
     // immediately while the wake fans out in the background.
-    this.notifyPushGroupBestEffort(groupId, publish.id);
+    //
+    // ADR-0042 — a CONTROL envelope skips it: a routing-secret handshake or a
+    // liveness beacon should not wake devices.
+    if (notifyPush) this.notifyPushGroupBestEffort(groupId, publish.id);
 
     return { messageId: publish.id, createdAt: publish.createdAt };
   }
@@ -641,6 +710,18 @@ export class ChatClient {
    *
    * Records the DS id in `ownPublishedIds` so the broadcaster's own next
    * poll drops the echo (the owner already holds the secret it minted).
+   *
+   * Serialized under the same per-group `withGroupMlsLock` as `sendMessage`,
+   * for the epoch-straddle reason documented there — it shares that method's
+   * body verbatim (`sealAndPublish`), differing only in firing no push wake.
+   * Both are in scope because both reach the identical seal-then-publish
+   * window; the payloads differ only in what a loss costs. A lost beacon is
+   * absorbed by ADR-0045's freshness window (sized for exactly one), a lost
+   * routing secret self-heals on the next re-broadcast, and a lost chat
+   * message does not come back at all. This is also the timer-driven caller
+   * set — the ADR-0045 beacon on its 15 s tick, and via `sendMessage` the
+   * ADR-0024 typing throttle and read-receipt debounce, which have been
+   * firing off timers since long before the beacon existed.
    */
   async broadcastControl(
     identity: IdentitySecrets | null,
@@ -652,13 +733,6 @@ export class ChatClient {
     }
     const myIdentity = await this.resolveIdentity(identity);
 
-    let wireBytes: Uint8Array;
-    try {
-      wireBytes = group.createApplicationMessage(myIdentity, controlBytes);
-    } catch (err) {
-      throw new ChatError("createApplicationMessage failed", err);
-    }
-
     let groupId: Uint8Array;
     try {
       groupId = group.groupId;
@@ -666,24 +740,10 @@ export class ChatClient {
       throw new ChatError("group.groupId unavailable", err);
     }
 
-    // PERSIST BEFORE PUBLISH, FAIL-CLOSED — same rationale as sendMessage.
-    try {
-      await this.persistDurableOrThrow();
-    } catch (err) {
-      throw new ChatError(
-        "MLS snapshot persist failed — control broadcast aborted to prevent nonce reuse",
-        err,
-      );
-    }
-
-    let publish;
-    try {
-      publish = await this.ds.publishGroup(groupId, wireBytes);
-    } catch (err) {
-      throw new ChatError("DS publish failed", err);
-    }
-    this.ownPublishedIds.add(publish.id);
-    return { messageId: publish.id };
+    const result = await withGroupMlsLock(base64Encode(groupId), async () =>
+      this.sealAndPublish(myIdentity, group, groupId, controlBytes, false),
+    );
+    return { messageId: result.messageId };
   }
 
   /**
