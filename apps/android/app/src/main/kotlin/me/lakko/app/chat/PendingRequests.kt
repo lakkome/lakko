@@ -79,7 +79,12 @@ public data class PendingRequest(
     val kind: PendingRequestKind,
     /** base64 of the prospective member's signature key. [PendingRequestKind.ADD] only. */
     val addSignatureKeyB64: String?,
-    /** The leaf this request removes. REMOVE / LEAVE only. */
+    /** The leaf this request removes. REMOVE / LEAVE only.
+     *
+     *  For a REMOVE this is the proposal's own target field; for a LEAVE it is
+     *  the SENDER's leaf, because RFC 9420 `SelfRemove` carries no target and the
+     *  removed leaf is the sender's own. `null` when the sender could not be
+     *  resolved — see [targetLeafOf]. */
     val targetLeaf: UInt?,
     /** The proposing member's leaf, or `null` for an unresolvable sender. */
     val senderLeaf: UInt?,
@@ -172,6 +177,35 @@ internal data class FoldedRequests(
 )
 
 /**
+ * Which leaf a request removes, for the two kinds that remove one.
+ *
+ * A REMOVE names its target explicitly. A LEAVE does NOT: it is RFC 9420
+ * `SelfRemove`, and the core is the authority on what that means —
+ * `commit_effects` in `crates/lakko-mls/src/group_proposals.rs` states it,
+ * "`SelfRemove` names no target: the removed leaf is the sender's own", and the
+ * UniFFI mapping carries no target field on [ProposalKind.Leave] at all. So the
+ * removed leaf is resolved here from the SENDER, exactly as the core resolves it.
+ *
+ * Reading `ProposalKind.Remove.targetLeaf` straight through — which is what this
+ * used to do — left every leave with a `null` [PendingRequest.targetLeaf], so
+ * [rowAnnotation]'s `targetLeaf == leafIndex` test could never match one and the
+ * `Waiting to leave.` copy the UX spec §5.2 requires was unreachable.
+ *
+ * This is the same leaf [proposalKey] already keys a leave on, so the two now
+ * agree rather than carrying two different notions of which leaf a leave
+ * concerns.
+ *
+ * An UNRESOLVABLE sender stays `null` and must not collapse onto a real leaf: the
+ * core refuses such a proposal anyway, and defaulting it to `0` would annotate the
+ * owner's row for a request nobody made.
+ */
+private fun targetLeafOf(record: ProposalRecord): UInt? = when (val k = record.kind) {
+    is ProposalKind.Remove -> k.targetLeaf
+    ProposalKind.Leave -> record.senderLeaf
+    else -> null
+}
+
+/**
  * Join the core's live pending set to the observation store.
  *
  * A record with `stored == false` is EXCLUDED: the receipt gate refused it, so no
@@ -200,7 +234,7 @@ internal fun foldPendingRequests(
                 key = key,
                 kind = normaliseKind(record.kind),
                 addSignatureKeyB64 = (record.kind as? ProposalKind.Add)?.let { b64(it.signatureKey) },
-                targetLeaf = (record.kind as? ProposalKind.Remove)?.targetLeaf,
+                targetLeaf = targetLeafOf(record),
                 senderLeaf = record.senderLeaf,
                 observedAtMs = seen?.atMs,
                 own = seen?.own ?: false,

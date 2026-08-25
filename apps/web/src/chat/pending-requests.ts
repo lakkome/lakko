@@ -82,7 +82,12 @@ export interface PendingRequest {
   readonly kind: PendingRequestKind;
   /** base64 of the prospective member's signature key. `add` only. */
   readonly addSignatureKeyB64: string | undefined;
-  /** The leaf this request removes. `remove` / `leave` only. */
+  /** The leaf this request removes. `remove` / `leave` only.
+   *
+   *  For a `remove` this is the proposal's own target field; for a `leave` it
+   *  is the SENDER's leaf, because RFC 9420 `SelfRemove` carries no target and
+   *  the removed leaf is the sender's own. `undefined` when the sender could
+   *  not be resolved. */
   readonly targetLeaf: number | undefined;
   /** The proposing member's leaf, or `undefined` for an unresolvable sender. */
   readonly senderLeaf: number | undefined;
@@ -200,7 +205,22 @@ export function foldPendingRequests(
       kind: normaliseKind(record.kind),
       addSignatureKeyB64:
         record.addSignatureKey === undefined ? undefined : b64(record.addSignatureKey),
-      targetLeaf: record.removeTargetLeaf,
+      // A `leave` is RFC 9420 `SelfRemove`, which names NO target on the wire:
+      // the core maps `ProposalKind::Leave` to `(kind, None, None)`, and
+      // `commit_effects` states the rule — "`SelfRemove` names no target: the
+      // removed leaf is the sender's own." So the removed leaf is resolved here
+      // from the sender, exactly as the core resolves it, and reading
+      // `removeTargetLeaf` straight through would leave every leave with
+      // `targetLeaf === undefined` — which is what made `rowAnnotation`'s
+      // `Waiting to leave.` branch unreachable.
+      //
+      // This is the same leaf {@link proposalKey} already keys a leave on, so
+      // the two agree rather than carrying two notions of which leaf a leave
+      // concerns. An UNRESOLVABLE sender stays `undefined` and must not
+      // collapse onto a real leaf — the core refuses such a proposal anyway,
+      // and defaulting it to `0` would annotate the owner's row for a request
+      // nobody made.
+      targetLeaf: record.kind === "leave" ? record.senderLeaf : record.removeTargetLeaf,
       senderLeaf: record.senderLeaf,
       observedAtMs: seen?.atMs,
       own: seen?.own ?? false,

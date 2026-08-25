@@ -49,7 +49,40 @@
  *    A request that keeps being re-sent would never mature past the window and
  *    would stay invisible forever — precisely the wait the notice exists for.
  *
- * BOUNDARY GUARD, not a discriminator: the exact-copy assertions. They pass
+ * 5. **`resolves a leave's target to the SENDER's own leaf`** — this one pins a
+ *    defect that WAS live: `foldPendingRequests` read `record.removeTargetLeaf`
+ *    straight into `targetLeaf`, and the core populates that field for a
+ *    `Remove` only (`ProposalKind::Leave => ("leave", None, None)` in
+ *    `crates/lakko-ffi-wasm/src/mls.rs`), so a leave's `targetLeaf` was always
+ *    `undefined` and `rowAnnotation`'s `r.targetLeaf === leafIndex` could never
+ *    match one. The `Waiting to leave.` copy the UX spec §5.2 requires was
+ *    unreachable dead code. With the old expression restored, three tests go
+ *    red:
+ *
+ *        FAIL … > a `leave` carries no target on the wire > resolves a leave's
+ *        target to the SENDER's own leaf
+ *        AssertionError: expected undefined to be 4 // Object.is equality
+ *
+ *        FAIL … > annotates `Waiting to leave.` for self and `Waiting to be
+ *        removed.` for another — for a LEAVE
+ *        AssertionError: expected null to be 'Waiting to leave.'
+ *
+ *        FAIL … > keys a leave on the sender leaf, which is the same leaf it
+ *        now targets
+ *        AssertionError: expected undefined to be 4 // Object.is equality
+ *
+ *    and with the over-eager fix `record.senderLeaf ?? 0` instead, the fourth:
+ *
+ *        FAIL … > a leave with an unresolvable sender targets nobody — not
+ *        leaf 0, not anybody
+ *        AssertionError: expected +0 to be undefined
+ *
+ *    i.e. `Waiting to leave.` on the OWNER's row for a request nobody made.
+ *
+ * BOUNDARY GUARD, not a discriminator: the exact-copy assertions, and the
+ * `…— for a REMOVE` twin of the leave annotation case (it passed before the fix
+ * and after it; its job is to prove the two kinds now behave identically rather
+ * than that one of them changed). They pass
  * with every rule above neutered; their job is to fail when the wording drifts
  * away from the spec, and in particular when the blameless single-line liveness
  * sentence acquires a second, escalated variant that the deleted `stalled`
@@ -354,5 +387,74 @@ describe("ADR-0045 — the observation store", () => {
     // Degrades to "render immediately", never to losing the request — the
     // request itself lives in the core's pending set, not here.
     expect(requestState(undefined, T0)).toBe("waiting");
+  });
+});
+
+describe("ADR-0045 — a `leave` carries no target on the wire", () => {
+  /**
+   * The core's `ProposalKind::Leave` is RFC 9420 `SelfRemove`, which names no
+   * target at all: `crates/lakko-ffi-wasm/src/mls.rs` maps it to
+   * `("leave", None, None)`, and `commit_effects` in
+   * `crates/lakko-mls/src/group_proposals.rs` says why — "`SelfRemove` names no
+   * target: the removed leaf is the sender's own."
+   *
+   * So `removeTargetLeaf` is `undefined` for every leave, and reading it
+   * straight into `PendingRequest.targetLeaf` made `rowAnnotation`'s
+   * `r.targetLeaf === leafIndex` test unsatisfiable for a leave — the
+   * `Waiting to leave.` copy the UX spec §5.2 requires was dead code.
+   */
+  function leave(senderLeaf: number | undefined): ProposalRecordView {
+    return record({ kind: "leave", senderLeaf, removeTargetLeaf: undefined });
+  }
+
+  function waitingReqs(records: ProposalRecordView[]) {
+    const obs = new Map<string, RequestObservation>(
+      records.map((r) => [proposalKey(r), { atMs: T0, own: false }] as const),
+    );
+    return foldPendingRequests(records, obs, T0 + QUIET_WINDOW_MS).requests;
+  }
+
+  it("resolves a leave's target to the SENDER's own leaf", () => {
+    const [req] = waitingReqs([leave(4)]);
+    expect(req?.kind).toBe("leave");
+    expect(req?.senderLeaf).toBe(4);
+    expect(req?.targetLeaf).toBe(4);
+  });
+
+  it("annotates `Waiting to leave.` for self and `Waiting to be removed.` for another — for a REMOVE", () => {
+    const reqs = waitingReqs([record({ kind: "remove", removeTargetLeaf: 4 })]);
+    expect(rowAnnotation(reqs, 4, 4)).toBe("Waiting to leave.");
+    expect(rowAnnotation(reqs, 4, 9)).toBe("Waiting to be removed.");
+  });
+
+  it("annotates `Waiting to leave.` for self and `Waiting to be removed.` for another — for a LEAVE", () => {
+    // This is the row the UX spec asks for and that never rendered: a member
+    // who pressed `Leave group` must see the status of their own request.
+    const reqs = waitingReqs([leave(4)]);
+    expect(rowAnnotation(reqs, 4, 4)).toBe("Waiting to leave.");
+    expect(rowAnnotation(reqs, 4, 9)).toBe("Waiting to be removed.");
+    expect(rowAnnotation(reqs, 5, 5)).toBeNull();
+  });
+
+  it("a leave with an unresolvable sender targets nobody — not leaf 0, not anybody", () => {
+    // `undefined` must not collapse onto a real leaf. An unresolvable sender is
+    // always unauthorised in the core anyway, so annotating leaf 0 would put
+    // `Waiting to leave.` on the OWNER's row for a request nobody made.
+    const [req] = waitingReqs([leave(undefined)]);
+    expect(req?.targetLeaf).toBeUndefined();
+    const reqs = waitingReqs([leave(undefined)]);
+    for (let leaf = 0; leaf < 5; leaf++) {
+      expect(rowAnnotation(reqs, leaf, leaf)).toBeNull();
+      expect(rowAnnotation(reqs, leaf, 9)).toBeNull();
+    }
+  });
+
+  it("keys a leave on the sender leaf, which is the same leaf it now targets", () => {
+    // `proposalKey` already keyed a leave on its sender; resolving `targetLeaf`
+    // to that same leaf makes the two consistent rather than introducing a
+    // second notion of "which leaf does this leave concern".
+    const r = leave(4);
+    expect(proposalKey(r)).toBe("leave:4");
+    expect(waitingReqs([r])[0]?.targetLeaf).toBe(4);
   });
 });

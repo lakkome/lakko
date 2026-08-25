@@ -59,6 +59,16 @@ final class CommitterSweepTests: XCTestCase {
         /// COMMIT and advance the epoch when applied. Anything else is an
         /// application message / proposal / non-MLS envelope and does not.
         static let foreignCommitTag: UInt8 = 0xC0
+        /// Rows whose payload starts with this byte make the apply THROW — a
+        /// non-MLS Lakko envelope (rendezvous / attribution), a wrong-epoch
+        /// frame, or a role-refused commit. Skipped exactly as the poll skips it.
+        static let unappliableTag: UInt8 = 0xFF
+        /// What the applied rows handed to the timeline, in journal order.
+        ///
+        /// The real adapter both applies the row and surfaces what it produced;
+        /// modelling only the apply half here would make the defect untestable,
+        /// because the whole failure was that the second half did not exist.
+        var surfaced: [String] = []
         var stageThrows: Error?
         var welcome: Data? = Data([0x11, 0x22])
         var addedKeys: [Data] = [Data(repeating: 0xAA, count: 32)]
@@ -132,9 +142,14 @@ final class CommitterSweepTests: XCTestCase {
                     group.staged = false
                     group.log.append("abandon")
                 },
-                applyIncoming: { payload in
+                applyIncoming: { row in
                     group.log.append("apply")
-                    if payload.first == FakeGroup.foreignCommitTag { group.epoch += 1 }
+                    if row.payload.first == FakeGroup.unappliableTag { throw StubError() }
+                    // Surfacing happens only AFTER a successful apply, exactly as
+                    // in the adapter — the throw above is what keeps a skipped row
+                    // from producing an event.
+                    group.surfaced.append("row#\(row.id)@\(row.createdAt)")
+                    if row.payload.first == FakeGroup.foreignCommitTag { group.epoch += 1 }
                 }
             ),
             actingCommitter: acting,
@@ -238,7 +253,7 @@ final class CommitterSweepTests: XCTestCase {
         let ports = swapFetch(h) { after in
             call += 1
             if call == 1 { return [] }
-            return [SweepJournalRow(id: 50, payload: Data([FakeGroup.foreignCommitTag]))]
+            return [SweepJournalRow(id: 50, payload: Data([FakeGroup.foreignCommitTag]), createdAt: "t-50")]
         }
 
         let outcome = try await runCommitterSweep(ports)
@@ -270,7 +285,7 @@ final class CommitterSweepTests: XCTestCase {
             call += 1
             return call == 1
                 ? []
-                : [SweepJournalRow(id: 50, payload: Data([FakeGroup.foreignCommitTag]))]
+                : [SweepJournalRow(id: 50, payload: Data([FakeGroup.foreignCommitTag]), createdAt: "t-50")]
         }
         _ = try await runCommitterSweep(ports)
         XCTAssertEqual(
@@ -356,7 +371,7 @@ final class CommitterSweepTests: XCTestCase {
 
     func testAnyUnappliedRowStandsTheSweepDownWithoutStaging() async throws {
         let h = makeHarness()
-        h.journal.rowsAfter[40] = [SweepJournalRow(id: 41, payload: Data([0xA0]))]
+        h.journal.rowsAfter[40] = [SweepJournalRow(id: 41, payload: Data([0xA0]), createdAt: "t-41")]
 
         let outcome = try await runCommitterSweep(h.ports)
 
@@ -479,6 +494,175 @@ final class CommitterSweepTests: XCTestCase {
     func testOnlyAnEpochAdvanceReadsAsALoss() {
         XCTAssertEqual(sweepVerdict(epochBefore: 5, epochAfter: 5), .won)
         XCTAssertEqual(sweepVerdict(epochBefore: 5, epochAfter: 6), .lost)
+    }
+
+    // MARK: - The verdict apply must not swallow the rows it consumes
+
+    /// The defect this block pins.
+    ///
+    /// `adjudicate` applies every row the DS ordered below our own commit, and
+    /// the cursor then advances past them, so the poll never fetches them again.
+    /// When one of those rows is an ordinary chat message from another member,
+    /// applying it correctly advances the ratchet — and, before this, threw the
+    /// plaintext away. The message was permanently lost from the timeline,
+    /// silently. This file's own `adjudicate` comment used to record it as a
+    /// KNOWN CONSEQUENCE.
+    ///
+    /// The window is narrow but real and reachable without any fault: the
+    /// stand-down check proves the journal empty, and between that check and the
+    /// publish another member can send. Anything the DS orders below our commit
+    /// lands in exactly this loop.
+    ///
+    /// What is assertable HERE is that the sweep hands the port every applied row
+    /// WHOLE — DS id and DS timestamp included, which is what the shared
+    /// `ChatClient.toEvent` needs — in journal order, only below our own commit,
+    /// and only after a successful apply. That the real adapter then surfaces it
+    /// runs against a live `Group`, a DS client and the message log, so the double
+    /// models the adapter's apply-and-surface contract rather than only its apply
+    /// half.
+    func testAChatMessageBelowOurOwnCommitIsSurfacedNotSwallowed() async throws {
+        let h = makeHarness()
+        // An ordinary application message another member sent in the window
+        // between the stand-down re-read and our publish, so the DS orders it
+        // BELOW our commit. It applies cleanly and moves NO epoch, so our own
+        // sweep still WINS — losing is a separate case below.
+        var call = 0
+        let ports = swapFetch(h) { _ in
+            call += 1
+            return call == 1
+                ? []
+                : [SweepJournalRow(id: 50, payload: Data([0xA0]), createdAt: "t-50")]
+        }
+
+        let outcome = try await runCommitterSweep(ports)
+
+        // The verdict is unaffected — an application message moves no epoch.
+        guard case .committed = outcome else {
+            return XCTFail("an application message moves no epoch, so the sweep WON, got \(outcome)")
+        }
+        // …and the message reached the timeline, carrying the DS row id and the
+        // DS row timestamp, which is what the shared event constructor needs.
+        XCTAssertEqual(h.group.surfaced, ["row#50@t-50"])
+    }
+
+    /// Every applied row, in journal order — nothing reordered, nothing coalesced.
+    func testEveryAppliedRowIsSurfacedInJournalOrder() async throws {
+        let h = makeHarness()
+        var call = 0
+        let ports = swapFetch(h) { _ in
+            call += 1
+            return call == 1 ? [] : [
+                SweepJournalRow(id: 50, payload: Data([0xA0]), createdAt: "t-50"),
+                SweepJournalRow(id: 51, payload: Data([0xA1]), createdAt: "t-51"),
+                SweepJournalRow(id: 52, payload: Data([0xA2]), createdAt: "t-52"),
+            ]
+        }
+
+        _ = try await runCommitterSweep(ports)
+
+        XCTAssertEqual(h.group.surfaced, ["row#50@t-50", "row#51@t-51", "row#52@t-52"])
+    }
+
+    /// A row whose apply THROWS surfaces nothing but still advances the cursor
+    /// over it, byte-for-byte as before. A skipped row was never decrypted, so
+    /// there is no plaintext to surface and inventing one would be a lie.
+    func testARowWhoseApplyThrowsSurfacesNothingAndStillAdvancesTheCursor() async throws {
+        var cursorValue: Int64 = 40
+        let h = makeHarness()
+        var call = 0
+        var ports = swapFetch(h) { _ in
+            call += 1
+            return call == 1 ? [] : [
+                SweepJournalRow(id: 50, payload: Data([FakeGroup.unappliableTag]), createdAt: "t-50"),
+                SweepJournalRow(id: 51, payload: Data([0xA1]), createdAt: "t-51"),
+            ]
+        }
+        ports.cursor = SweepCursorRef(read: { cursorValue }, advance: { cursorValue = $0 })
+
+        _ = try await runCommitterSweep(ports)
+
+        XCTAssertEqual(h.group.surfaced, ["row#51@t-51"])
+        XCTAssertEqual(
+            cursorValue, 51,
+            "the cursor stops at the last row this run consumed, skipped rows included"
+        )
+    }
+
+    /// Rows AT or ABOVE our own commit are not part of the question: nothing is
+    /// applied, nothing is surfaced, and the cursor is untouched — the poll
+    /// re-fetches them and drops our own through the echo filter.
+    func testRowsAtOrAboveOurOwnCommitSurfaceNothing() async throws {
+        var cursorValue: Int64 = 40
+        let h = makeHarness()
+        var call = 0
+        // Our commit takes DS id 71 (the harness starts `nextId` at 70 and
+        // pre-increments), so both of these are ordered at or above it.
+        var ports = swapFetch(h) { _ in
+            call += 1
+            return call == 1 ? [] : [
+                SweepJournalRow(id: 71, payload: Data([0xA0]), createdAt: "t-71"),
+                SweepJournalRow(id: 72, payload: Data([0xA1]), createdAt: "t-72"),
+            ]
+        }
+        ports.cursor = SweepCursorRef(read: { cursorValue }, advance: { cursorValue = $0 })
+
+        _ = try await runCommitterSweep(ports)
+
+        XCTAssertEqual(h.group.surfaced, [])
+        XCTAssertEqual(cursorValue, 40, "the cursor must not move past our own commit")
+    }
+
+    /// A LOSING sweep still surfaces the rows it applied.
+    ///
+    /// Losing the ORDER says nothing about the rows below our commit: they were
+    /// applied, the ratchet moved and the cursor advanced past them either way, so
+    /// the only question left is whether the user gets to read them. On web this
+    /// needed a deliberate `finally`; here surfacing happens inline, per row,
+    /// inside the apply — which is what makes the losing path automatic rather
+    /// than a second thing to remember.
+    func testALosingSweepStillSurfacesTheRowsItApplied() async throws {
+        let h = makeHarness()
+        var call = 0
+        let ports = swapFetch(h) { _ in
+            call += 1
+            return call == 1 ? [] : [
+                SweepJournalRow(id: 50, payload: Data([0xA0]), createdAt: "t-50"),
+                // The winner's commit, ordered below ours — this is what makes us lose.
+                SweepJournalRow(
+                    id: 51, payload: Data([FakeGroup.foreignCommitTag]), createdAt: "t-51"),
+            ]
+        }
+
+        let outcome = try await runCommitterSweep(ports)
+
+        guard case .lost = outcome else {
+            return XCTFail("a foreign commit ordered below ours must read as a LOSS, got \(outcome)")
+        }
+        XCTAssertEqual(h.group.surfaced, ["row#50@t-50", "row#51@t-51"])
+    }
+
+    /// The restart / owed-verdict path consumes rows exactly as a fresh sweep
+    /// does, so it has to surface them too. Reached through
+    /// ``resolveOwedVerdict(_:)``, the OTHER entry point into `adjudicate`.
+    func testTheRestartPathSurfacesTheRowsItsOwedVerdictApplied() async throws {
+        let h = makeHarness()
+        h.group.staged = true
+        h.outbox.owed = SweepDurableEntry(
+            id: "entry-owed",
+            commitB64: Data([0xC0, 0x05]).base64EncodedString(),
+            welcomeEnvelopeB64: nil,
+            welcomeMailboxesB64: []
+        )
+        let ports = swapFetch(h) { _ in
+            [SweepJournalRow(id: 50, payload: Data([0xA0]), createdAt: "t-50")]
+        }
+
+        let outcome = try await resolveOwedVerdict(ports)
+
+        guard case .committed = outcome else {
+            return XCTFail("an application message moves no epoch, so the owed verdict WON, got \(outcome)")
+        }
+        XCTAssertEqual(h.group.surfaced, ["row#50@t-50"])
     }
 
     // MARK: - Helpers

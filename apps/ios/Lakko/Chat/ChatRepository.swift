@@ -1155,9 +1155,38 @@ public final class ChatRepository: ObservableObject {
         groupIdHex: String,
         proposalRef: Data
     ) async throws -> Int64 {
+        // ADR-0045 — an external join keeps its own direct-commit path (folding
+        // it into the sweep is S7), but it can no longer simply commit: the core
+        // REFUSES a direct commit while ANY proposal is pending, because the
+        // OpenMLS entry point the approve is built on would sweep the whole
+        // pending set alongside the one add it was asked for. Under ADR-0045 a
+        // non-empty pending set is the ORDINARY state between any member's
+        // request and the next sweep, so without this the Approve button fails
+        // for every admin whenever anything at all is waiting.
+        //
+        // So: drain the pending set first (this device is the acting committer,
+        // or the sweep short-circuits), THEN approve.
+        //
+        // The drain runs OUTSIDE the commit lock, and must: the sweep takes
+        // ``withCommitLock(groupIdHex:_:)`` itself and that chain is NOT
+        // reentrant — an inner acquisition awaits the tail its own outer section
+        // installed, which only completes when that section returns, so nesting
+        // deadlocks. The poll path documents the same constraint where it runs
+        // its own sweep outside the lock.
+        //
+        // That leaves a window: between the drain and the lock, this device's
+        // poll can apply a batch that stores a fresh proposal. It is handled
+        // rather than wished away — ``approveExternalJoinLocked`` re-reads the
+        // pending count INSIDE the lock and refuses with human copy, so the
+        // window can produce a readable "not yet", never the core's developer
+        // string, and never a half-done approve. The next tap (or the sweep at
+        // the tail of the next poll) clears it.
+        if usesProposalPath(groupIdHex: groupIdHex) {
+            await sweepIfCommitter(groupIdHex: groupIdHex)
+        }
         // ADR-0040 (G-35) — serialize the whole eager-merge-through-publish
         // region against every other membership commit on this group.
-        try await withCommitLock(groupIdHex: groupIdHex) { [self] in
+        return try await withCommitLock(groupIdHex: groupIdHex) { [self] in
             try await approveExternalJoinLocked(
                 groupIdHex: groupIdHex,
                 proposalRef: proposalRef
@@ -1178,6 +1207,33 @@ public final class ChatRepository: ObservableObject {
         }
         guard let record = groups[groupIdHex] else {
             throw ChatError.argument("no live Group handle for \(groupIdHex)")
+        }
+        // ADR-0045 — the surviving refusal, in human words.
+        //
+        // The drain outside the lock does not always clear the set: it is a
+        // no-op when this device is not the acting committer (a better-placed
+        // candidate beaconed recently), and a poll can store a fresh proposal in
+        // the window between it and this section. Either way the core's
+        // `refuse_if_proposals_pending` would throw next, and its message names
+        // two Rust functions — so this asks the SAME question first and answers
+        // it in copy the admin can act on.
+        //
+        // This is the identical predicate, not an approximation:
+        // `Group::pending_proposals()` maps `inner.pending_proposals()` one for
+        // one, which is exactly what the core counts. And it cannot be
+        // out-of-date by the time the core runs: both calls are synchronous with
+        // no `await` between them, on `@MainActor`, under the commit lock — so
+        // nothing can interleave and the core can never reach that refusal after
+        // this check has passed.
+        let pending = ((try? record.group.pendingProposals()) ?? []).count
+        if pending > 0 {
+            // The reason stays visible to a developer; only the user-facing
+            // string changes.
+            NSLog(
+                "ADR-0045: external join approve refused — %d membership proposal(s) still "
+                + "pending after the drain (this device is not the acting committer, or a poll "
+                + "stored one in the window)", pending)
+            throw ChatError.membershipChangesPending
         }
         let addResult: AddMember
         do {
@@ -2536,12 +2592,62 @@ public final class ChatRepository: ObservableObject {
                     }
                     _ = try record.group.abandonStagedSweep(identity: identity)
                 },
-                applyIncoming: { [weak self] payload in
-                    guard let identity = self?.canonicalIdentity else {
+                // ADR-0045 — apply AND surface. The verdict consumes every row the
+                // DS ordered below our own commit and the shared cursor then
+                // advances past them, so a row applied here is a row the poll will
+                // never fetch again: discarding what it decrypted loses an ordinary
+                // chat message from the timeline permanently and silently. Routed
+                // through the SAME `ChatClient.toEvent` + ``GroupRecord/consumeEvents``
+                // the poll uses, so every envelope kind is dispatched by one ladder.
+                applyIncoming: { [weak self] row in
+                    guard let self, let identity = self.canonicalIdentity else {
                         throw ChatError.argument("ChatRepository not bootstrapped — cannot apply")
                     }
-                    _ = try record.group.processIncomingVerifyingRoles(
-                        identity: identity, bytes: payload)
+                    // The MLS apply is what the verdict reads, so it is
+                    // deliberately OUTSIDE the surfacing below: a throw here must
+                    // reach `adjudicate`, which skips the row exactly as the poll
+                    // loop does, and a skipped row must surface nothing.
+                    let processed = try record.group.processIncomingVerifyingRoles(
+                        identity: identity, bytes: row.payload)
+                    record.consumeEvents(
+                        [
+                            ChatClient.toEvent(
+                                messageId: row.id,
+                                createdAt: row.createdAt,
+                                processed: processed
+                            )
+                        ],
+                        callSignalingSink: { [weak self] payload in
+                            self?.callSignalingSink?(groupIdHex, payload)
+                        },
+                        chatStatusSink: { [weak self] status in
+                            self?.chatStatusSink?(groupIdHex, status)
+                        },
+                        pushRoutingSecretSink: { [weak self] secret, mintEpoch, senderLeaf in
+                            self?.receivePushRoutingSecret(
+                                groupIdHex: groupIdHex, secret: secret, mintEpoch: mintEpoch,
+                                senderLeaf: senderLeaf)
+                        },
+                        committerBeaconSink: { [weak self] senderLeaf, createdAt in
+                            self?.recordCommitterBeacon(
+                                groupIdHex: groupIdHex, senderLeaf: senderLeaf,
+                                createdAt: createdAt)
+                        },
+                        membershipProposalSink: { [weak self] proposal, createdAt in
+                            self?.recordPendingRequestObservation(
+                                groupIdHex: groupIdHex, record: proposal, createdAt: createdAt)
+                        }
+                    )
+                    // Per row, and deliberately not deferred to the end of the
+                    // sweep: this is what republishes `record.messages` into the
+                    // observable state the chat screen reads, and it must happen on
+                    // a LOST verdict and on a thrown one too. Whether our own commit
+                    // won the order says nothing about the rows below it — they were
+                    // applied, the ratchet moved and the cursor advanced past them
+                    // either way, so the only question left is whether the user gets
+                    // to read them. Cheap because the window this loop consumes is
+                    // narrow by construction.
+                    self.state = self.state.with(threads: self.buildThreadList())
                 }
             ),
             actingCommitter: { [weak self] ownRank in
@@ -2559,7 +2665,11 @@ public final class ChatRepository: ObservableObject {
                     guard let self else { throw ChatError.argument("ChatRepository deallocated") }
                     let raw = try await self.dsClient.fetchGroup(
                         groupId: record.groupId, after: after, waitSecs: 0)
-                    return raw.messages.map { SweepJournalRow(id: $0.id, payload: $0.payload) }
+                    // ADR-0045 — `createdAt` carried so an applied row can become
+                    // a timeline event.
+                    return raw.messages.map {
+                        SweepJournalRow(id: $0.id, payload: $0.payload, createdAt: $0.createdAt)
+                    }
                 },
                 publishGroup: { [weak self] bytes in
                     guard let self else { throw ChatError.argument("ChatRepository deallocated") }
@@ -3605,7 +3715,46 @@ private final class GroupRecord {
         committerBeaconSink: ((UInt32?, String) -> Void)? = nil,
         membershipProposalSink: ((ProposalRecord, String) -> Void)? = nil
     ) {
-        for event in result.events {
+        consumeEvents(
+            result.events,
+            callSignalingSink: callSignalingSink,
+            chatStatusSink: chatStatusSink,
+            pushRoutingSecretSink: pushRoutingSecretSink,
+            committerBeaconSink: committerBeaconSink,
+            membershipProposalSink: membershipProposalSink
+        )
+        cursor = result.cursor
+    }
+
+    /// Consume a batch of receive-path events — the ONE place a decoded event
+    /// becomes record state.
+    ///
+    /// Two callers, and that is the point. The poll is the obvious one, via
+    /// ``applyPollResult(_:callSignalingSink:chatStatusSink:pushRoutingSecretSink:committerBeaconSink:membershipProposalSink:)``.
+    /// The other is the ADR-0045 committer sweep: its verdict applies every
+    /// journal row the DS ordered below its own commit and then advances the SAME
+    /// cursor over them, so those rows are gone from the poll's future forever. A
+    /// chat message another member sent in the window between the sweep's
+    /// stand-down re-read and its publish lands in exactly that set, and before
+    /// this it was decrypted and then thrown away. Feeding both paths through this
+    /// function is what keeps the two from drifting — every envelope kind is
+    /// folded here once.
+    ///
+    /// Deliberately does NOT touch ``cursor``: the poll advances it from the batch
+    /// it fetched, the sweep advances it itself to the last row its verdict
+    /// consumed, and a second writer here would let one path wind the other's
+    /// cursor.
+    ///
+    /// Events must arrive in journal order; the op fold assumes it.
+    func consumeEvents(
+        _ events: [IncomingChatEvent],
+        callSignalingSink: ((Data) -> Void)? = nil,
+        chatStatusSink: ((ChatStatusEvent) -> Void)? = nil,
+        pushRoutingSecretSink: ((Data, UInt64, UInt32?) -> Void)? = nil,
+        committerBeaconSink: ((UInt32?, String) -> Void)? = nil,
+        membershipProposalSink: ((ProposalRecord, String) -> Void)? = nil
+    ) {
+        for event in events {
             switch event {
             case .application(let messageId, let text, let attachments, let senderLeaf, let createdAt):
                 messages.append(
@@ -3703,7 +3852,6 @@ private final class GroupRecord {
                 membershipProposalSink?(record, createdAt)
             }
         }
-        cursor = result.cursor
     }
 
     /// ADR-0023 — fold an incoming edit / delete / reaction op

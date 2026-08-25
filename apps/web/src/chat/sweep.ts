@@ -143,16 +143,49 @@ export interface SweepGroupPort {
    *  Per-group: it never reaches a sibling group, unlike a whole-provider
    *  `restoreStorage`. */
   abandonStagedSweep(): void;
-  /** Apply one journal row through the audited role-verifying receive path.
-   *  THROWS on a bad frame / wrong epoch / refused commit — the caller skips,
-   *  exactly as the poll loop does. */
-  applyIncoming(payload: Uint8Array): void;
+  /**
+   * Apply one journal row through the audited role-verifying receive path AND
+   * surface whatever it produced.
+   *
+   * THROWS on a bad frame / wrong epoch / refused commit — the caller skips,
+   * exactly as the poll loop does, and a skipped row must surface nothing.
+   *
+   * ## Why the WHOLE row, and why the port also surfaces
+   *
+   * The verdict consumes every row the DS ordered below our own commit and then
+   * advances the shared cursor over them, so the poll never fetches them again.
+   * Anything one of those rows carried — an ordinary chat message another member
+   * sent in the window between the stand-down re-read and our publish — is gone
+   * from the UI forever unless it is surfaced HERE. Applying it and discarding
+   * the result decrypts the message, advances the ratchet, and loses the
+   * plaintext silently.
+   *
+   * Surfacing therefore belongs to the port rather than to this module, and the
+   * port is handed the whole {@link SweepJournalRow} rather than just its
+   * payload: the shared event constructor in `chat/client.ts` needs the DS row
+   * id and the DS row `createdAt`, and every envelope kind must be dispatched by
+   * that ONE ladder — a second copy of it here is how the poll path and the
+   * sweep path would drift. The alternative (returning an opaque value for this
+   * module to collect) was rejected because it would either weaken the event
+   * type to `unknown` at the app boundary or make every `SweepOutcome` variant
+   * generic, for no gain: this module has nothing to decide about an event.
+   *
+   * Asynchronous because that shared constructor is (it resolves the wasm
+   * module to parse an application envelope).
+   */
+  applyIncoming(row: SweepJournalRow): Promise<void>;
 }
 
 /** One row of the DS group journal. */
 export interface SweepJournalRow {
   readonly id: number;
   readonly payload: Uint8Array;
+  /** The DS-assigned row timestamp, verbatim as the DS returned it.
+   *
+   *  Carried because an applied row becomes a timeline event and the shared
+   *  event constructor requires it — and because it is the one clock every
+   *  member reads identically for the identical row. */
+  readonly createdAt: string;
 }
 
 /** The DS operations the sweep drives. */
@@ -559,12 +592,16 @@ async function adjudicate(
     // the question. Rows above it are left for the poll.
     if (row.id >= ownCommitMessageId) break;
     try {
-      group.applyIncoming(row.payload);
+      // The port applies AND surfaces — see {@link SweepGroupPort.applyIncoming}.
+      // These rows are the only ones the poll will never see again, because the
+      // cursor advance below moves past them.
+      await group.applyIncoming(row);
     } catch {
       // Bad frame, wrong epoch, a non-MLS Lakko envelope (rendezvous /
       // attribution), a role-refused commit, or one of our own rows. Skipped,
       // exactly as the poll loop skips it — and none of those advance the
-      // epoch, which is the only thing the verdict reads.
+      // epoch, which is the only thing the verdict reads. A skipped row was
+      // never decrypted, so it surfaces nothing.
     }
     lastApplied = row.id;
   }

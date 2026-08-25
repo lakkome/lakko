@@ -3331,6 +3331,26 @@ simply **lose**. The guarantee degrades from "the rotation always wins" to a
 **silent coin flip**. C-61 is therefore no longer a precondition of one property
 but of two — C-60 sub-invariant 6 and C-62's closure of the stale-replay undo.
 
+**AMENDED 2026-08-25 by [ADR-0045](../adr/0045-remote-commit-epoch-fork.md): the
+rule is unchanged, but the place it attaches to moved.** ADR-0043 seamed the
+ordering onto `removeMemberFromGroup` on all three clients, on the premise that a
+removal always lands there. Under ADR-0045 it usually does **not**: in a group with
+an ADR-0022 role table a removal becomes a **proposal**, which advances no epoch, so
+firing the rotation at that call site would seal the new secret at an epoch **the
+member being evicted is still in and can open** — the exact violation this entry
+exists to prevent, reached without touching a line of rotation code, and (per the
+paragraph above) also inverting the C-62 comparison so the rotation may lose the
+byte tiebreak. The rotation therefore moves to **where the removal actually lands**:
+the **sweep**, via the membership-**shrink** diff (a set difference over member
+Ed25519 signature keys) that the poll already runs for someone else's removal. Web
+drives it from `sweepNow`; Android reaches the same place from the other end, with a
+removal-landed flag the rotate step consults so `publishRemoveThenRotate` skips when
+nothing was removed. **This is the general form of the amendment and it is the part
+worth carrying forward: any client discipline seamed onto a direct-commit call site
+has to be re-seamed onto the sweep, and the ones that matter are the ones whose
+correctness argument mentions an epoch.** The named-seam requirement and the
+test-pinning above are unchanged; what changed is which operation the seam wraps.
+
 Invariants: **#2** (the envelope is opaque to the DS and to push-gw either way —
 this is not a server-visible property but a client sequencing one), **#4** (a
 member without the current secret defers rather than downgrading; the rotation adds
@@ -3693,6 +3713,162 @@ relays the commit as ciphertext and parses nothing — unchanged), **#3** (a
 `crates/lakko-mls` state-machine change under ADR-0045; property-tested, **external
 crypto review and a `lakko-security` pass both still owed**), **#4** (refuse-to-merge,
 never apply-then-warn), **#5** (roles stay in-group; no server ever learns them).
+
+**Amended 2026-08-25 by the client sprints (`1de5fe7` / `1f230ab`).** Two of the
+three enforcement layers acquired production callers. **Layer 2 is live for the
+first time** — there was no sweep on any client until S4a, so the sweep-side
+exclusion had nothing to run in. **Layer 3, the boundary, was already live**
+through each client's `processIncomingVerifyingRoles` receive path and is unchanged.
+**Layer 1 still has no production caller anywhere**: `transferOwnership` /
+`proposeOwnershipTransfer` are on both FFI surfaces and no client offers an
+ownership-transfer affordance, so the authoring pre-check is reachable only from
+tests. That is a **UX gap and not a weakening** — layer 3 is the boundary
+precisely because it does not trust layer 1 — but it does mean the sentence
+"ownership transfer is built" is true of `crates/lakko-mls` and false of the
+product.
+
+### C-64: The committer election and the staged sweep decide from authenticated state, and no epoch advances until the journal has ordered it
+
+[ADR-0045](../adr/0045-remote-commit-epoch-fork.md). Under ADR-0022 a membership
+change was one atomic call: an owner or admin created a commit that eager-merged
+before it returned. ADR-0045 splits it into **propose**, **sweep** and
+**adjudicate**, and every property below is something that used to sit *inside* that
+atomic step and now spans it — which is why they are pinned together rather than
+one per mechanism.
+
+**This entry was deliberately deferred and the deferral is part of its record.**
+ADR-0045 argued against minting a beacon-shaped invariant while nothing emitted a
+beacon and nothing drove the fold: the index describes **live properties**, and
+indexing an inert mechanism would make it aspirational. It named the trigger — *the
+first client that emits a beacon and folds a verdict* — and predicted that the
+property worth indexing would then be **broader than the beacon alone**. Both held.
+`02f0037` (web) and `1f230ab` (iOS + Android) are those clients, and what they added
+around the beacon is not a liveness mechanism: a sweep that merges before the
+journal has ordered its commit is the device-ahead brick ADR-0045 exists to close.
+
+#### The five sub-invariants
+
+**(1) No input to the committer fold is self-asserted.** The beacon payload is
+**field-less by construction** — 27 bytes of domain separator plus a version byte,
+and nothing else — and that is the decision, not an omission. Both inputs the fold
+consumes are the **observer's own re-derivation**: the sender's rank comes from the
+MLS-authenticated sender leaf resolved through `members()` and
+`Group::committerRank`, and the age comes from the DS row's **server-assigned**
+`created_at`, which every member reads identically on the identical row. A
+self-reported timestamp would let a candidate hold the committer duty by asserting
+its own freshness — a liveness claim **no peer can check** — so a later hand adding
+a `sent_at` field "for diagnostics" would be a real regression, not a cosmetic one.
+A beacon whose row timestamp cannot be parsed is **dropped, not stored as fresh**:
+stored fresh it would make the observer defer forever to something that can never
+age out.
+
+**(2) A rank is taken at verdict time, never carried from receipt.** The observation
+store persists the sender's 32-byte **Ed25519 signature key** — never a leaf index
+(OpenMLS hands a vacated leaf to the next member added) and never a rank. A rank is
+a **position** in the role table's canonical order, so promoting, demoting or
+removing any admin renumbers every candidate sorting after it; a rank captured under
+one table and compared against a rank taken under another is not stale, it is a
+position in a **different ordering**, and nothing in the comparison can notice.
+`None` and `0` are never interchangeable — `0` is the owner, `None` is not a
+candidate — and an unreadable rank fails **closed** to defer.
+
+**(3) A beacon is emitted only from a client that can actually sweep.** The
+foreground gate is a **caller obligation the core cannot check**, and it rests on
+**C-59**: the ADR-0041 background decrypt is read-only-throwaway, the slim
+`lakko-ffi-extension` surface does not even export `composeCommitterBeacon`, and a
+backgrounded process can be frozen at any moment. A beacon from the background would
+therefore be a *lie that costs the group a takeover* — every other candidate defers
+to a device that is not going to sweep, and keeps deferring for as long as the lie
+continues. Each platform reads "foreground" in its own idiom and none of them
+guesses: web checks `document` visibility (a missing document reads as **not**
+foreground), iOS requires **both** the screen visible **and**
+`applicationState == .active` because neither implies the other, and Android's
+`repeatOnLifecycle(RESUMED)` scope *is* the gate while still passing the flag
+through so the rule is written down in one testable place.
+
+**(4) The sweep stages; it does not merge until the journal has ordered its commit.**
+The order is **stand down, durably record, publish, read the verdict, then merge or
+abandon**, and each step is load-bearing. The **stand-down** re-reads the journal
+head immediately before staging and stands down on **any** unapplied row, not only a
+commit — the asymmetry is deliberate, since standing down costs one retry while
+staging on an unapplied commit costs a commit every peer drops. The **verdict** is
+read by *applying* the rows below this device's own commit and asking whether the
+epoch moved; only a commit moves it, so the question needs no content-type
+discrimination, and guessing in the permissive direction would abandon a sweep that
+**won** and strand the device at N with the group at N+1 holding a commit it can
+never re-apply (`CannotDecryptOwnMessage`). An **unreadable verdict leaves the sweep
+staged**: merging on an unread verdict is the eager shape this ADR removes, and
+abandoning would discard a commit already on the wire. Rollback is per-group
+(`clear_pending_commit`), never a whole-provider `restore_storage` that would roll
+sibling groups back past commits they have published.
+
+**(5) The Welcome is published only after the verdict, and a staged sweep is owed
+one.** A Welcome released for a commit that then loses lets a joiner open into a
+state **no member holds** — a three-party fork, strictly worse than the two-party one
+this ADR closes — so the Welcome bytes and their mailbox pseudonyms are computed at
+record time but sent only on the **merge** branch. And because a staged commit is
+**durable** (`MlsGroupState::PendingCommit` through `write_group_state`) and freezes
+that group's `propose_*` / add / remove / `self_update` via `is_operational()`, a
+sweep that never reaches a verdict wedges membership **across restarts**. So every
+sweep adjudicates what it staged, an owed verdict is resolved at restart through
+ADR-0040's existing `sweepPendingCommits` seam rather than a second restart path, and
+the owed-verdict check runs **ahead of** the acting-committer rank check — an admin
+can be demoted while holding a staged sweep, and gating the resolution behind the
+rank check would freeze that device permanently. Re-publishing is safe: peers refuse
+a demoted author's commit, so it loses and is abandoned, which is the unwedge.
+
+#### What this does not claim
+
+- **It is not a leader election and does not make one.** Each candidate folds over
+  its own poll-timed view, and a beacon is stale by up to one interval even when its
+  sender is perfectly healthy, so **two candidates can both reach `Act`**. The
+  heartbeat removes the *wait*, not the *race*. Sub-invariants 4 and 5 are what make
+  the collision survivable; reading the beacon as correct-by-construction and
+  dropping either of them would restore the hazard.
+- **A forged or replayed beacon buys nothing but a deferral.** It carries no key
+  material and authorises nothing; the worst outcome is that a device declines to
+  sweep, which sub-invariant 1 bounds and which is a liveness effect. The
+  confidentiality-shaped half of this entry is sub-invariant 5's Welcome rule.
+- **The freshness window is met on two platforms of three.** It is derived as
+  `2 × interval + worst-case poll`, and the web client has **no periodic poll** —
+  mount, a user action and the Refresh button drive it — so a web observer can see a
+  beacon well after the window it was sized for and a takeover lags. Both natives
+  long-poll and meet it. Stated here because it is a property of the deployment, not
+  of the mechanism, and a reader should not infer the window holds everywhere.
+- **The constants are chosen, not measured.** `COMMITTER_BEACON_INTERVAL_MS` (60 s)
+  and `COMMITTER_BEACON_FRESHNESS_WINDOW_MS` (150 s) rest on a budget argument —
+  journal litter and how finely a candidate's activity schedule is exposed — and the
+  core says so. Nothing interactive waits on a beacon.
+
+#### Where it lives
+
+Core: `crates/lakko-contacts/src/committer_beacon.rs` (the envelope,
+`acting_committer_verdict`, `should_emit_beacon`, the constants; 33 in-module tests
+and the `committer_beacon_decode` fuzz target, which drives the **fold** from the
+same attacker-controlled bytes and asserts that a `None` own-rank is always
+`NotACandidate` and that a `Defer` never names a rank at or above the observer's
+own) and `crates/lakko-mls/src/group.rs` (`stage_pending_proposals` /
+`merge_staged_sweep` / `abandon_staged_sweep`, plus `group_roles::committer_rank`).
+Clients: `apps/web/src/chat/{sweep,committer-beacon}.ts`,
+`apps/ios/Lakko/Chat/{CommitterSweep,CommitterBeacon}.swift`,
+`apps/android/.../chat/{CommitterSweep,CommitterBeacon}.kt`, each expressed over
+injected ports so the whole orchestration runs in a plain host test environment, and
+each carrying probes whose **discrimination was measured by running them and
+recording the failure** — hoisting the Welcome above the verdict, merging instead of
+abandoning on a loss, putting the owed-verdict check back behind the rank check,
+deleting the foreground gate, and carrying a rank over from receipt.
+
+Invariants: **#1** and **#5** (the beacon payload is field-less — no identity, no
+timestamp, no server-visible artifact of any kind; the election is in-group and no
+server learns who commits), **#2** (both the beacon and the sweep commit ride the DS
+as opaque ciphertext; the only server contribution is the row's `created_at`
+timestamp, which is metadata the DS already assigns to every row), **#3** (the staged
+commit lifecycle is a `crates/lakko-mls` state-machine change under ADR-0045;
+property-tested, **external crypto review and a `lakko-security` pass both still
+owed**), **#4** (every new decision point fails closed toward the cheap outcome — an
+unreadable verdict defers, an unreadable journal leaves the sweep staged, an
+unclassifiable row stands the sweep down, and a device that cannot establish it is a
+candidate does not claim to be one).
 
 ## Exporter labels (call-side)
 

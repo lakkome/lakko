@@ -3,9 +3,24 @@
 
 # UX spec — proposal-based group membership (ADR-0045 S0)
 
-**Status:** design only. The core landed first ([ADR-0045] S1+S2, `9a60ab3`), then the
-FFI (`c5c0788`), **ownership transfer** (`e780952`) and the **staged-sweep rollback plus
-the mute fix** (`fe3de6c`). No client code.
+**Status:** **implemented, with named exceptions.** The core landed first ([ADR-0045]
+S1+S2, `9a60ab3`), then the FFI (`c5c0788`), **ownership transfer** (`e780952`), the
+**staged-sweep rollback plus the mute fix** (`fe3de6c`), the **committer beacon**
+(`94825ec` / `94da492`) — and then the clients: `1de5fe7` (web), `02f0037` (the
+beacon), `000d9f8` (the send lock), `1f230ab` (iOS + Android). **What this spec
+designed and the clients did NOT build** is listed once, here, so a reader does not
+have to reconstruct it from §11: the **ownership-transfer flow** (§11.6 — enumerated
+and deliberately not designed, so this is a UX pass that has not happened rather than
+an implementation that skipped it), the **typed refusal-reason table** (§9.1 / §12.6 —
+the core still returns prose `Error::Group` strings, and mapping prose to fixed copy
+is the drift class this spec itself flags), the **committer-side failure surface** with
+its `Retry now` (§7 / §8 — as written it is gated on an "activation delay" belonging to
+the *staggered* variant the maintainer did not choose, so it is unimplementable as
+specified), and the **automatic re-request on supersession** (§7 — no client has the
+code; a superseded request is dropped and the user must ask again). One more, which is
+a per-platform gap rather than a missing design: **`Leave group` shipped on web only**
+(§5, §12.3), so the member-facing half of what [ADR-0045] unlocked is reachable on one
+client of three.
 **Owner surface:** cross-platform (web SolidJS / iOS SwiftUI / Android Compose).
 **Pattern parent:** the existing members panel and its ADR-0027 `Join requests` section
 (`apps/web/src/routes/Chat.tsx` `<section aria-label="Members">`, iOS `MembersSheet` in
@@ -21,6 +36,23 @@ neither is edited here.
 > 2026-08-20 and items 11 and 12 on 2026-08-24; none was caught by the spec's own writing —
 > they came out of later core sprints, which is the debt compounding rather than being paid
 > down.
+
+> **Revised 2026-08-25 against the three client sprints.** The spec is now measurable
+> against code rather than against intent, and it comes out well: §4's state table,
+> §5's copy, §6's flow, §8's automatic-and-invisible committer and §10's visibility
+> rule were all built as written, and the `QUIET_WINDOW` §12.1 left open is picked
+> (3 s, and each client says in its own source that it is **chosen, not measured** —
+> which is the honest form). **Three corrections it earned, and one thing it got
+> wrong.** The wrong one is §5.3: *"a second, different add composes into the same
+> sweep"* is true of adds and **false if generalised to role changes** — RFC 9420
+> permits one `GroupContextExtensions` proposal per commit, so a sweep silently
+> discards the second and `ProposalKind::RoleChange` carries no payload for a client to
+> repair it from. §5.3 is amended below. The corrections: §11.11's *the beacon has no
+> emitter* **closes** (all three clients emit, store and fold); §11.9's staged-sweep
+> obligation **is discharged** on all three, and how is worth recording because it is
+> not obvious; and §11.3's permanent form finally closes too, since `waiting` now ends
+> without anyone being asked. What did **not** get built is listed in the status line
+> above rather than buried here.
 
 > **Revised 2026-08-24 against two further core sprints.** The FFI back-fill landed
 > (`6c77cd6`), so §11.10 **closes** and §11.6's transfer flow is now buildable. Decision
@@ -200,6 +232,7 @@ The members panel gains one notice and one section. Nothing moves; nothing is re
 4. Add-member form + invite link — existing, owner/admin only.
 5. Members list — existing, with new row annotations.
 6. **`Leave group`** — new, bottom, destructive styling, hidden for the owner.
+   **Built on web only** (2026-08-25); iOS and Android shipped items 1-5 and not this one.
 
 Requests-to-join stay above pending changes because they need a **decision**; pending
 changes need none.
@@ -249,6 +282,23 @@ A pending **role change** gets no row annotation — it cannot be attributed to 
   proposals in one sweep is a defect, not a feature.
 - The `Add member` form stays enabled — a second, different add is legitimate and composes
   into the same sweep. That composition is the entire point of [ADR-0045].
+
+  > **Amended 2026-08-25: true for adds, false for role changes, and the difference is
+  > not a UI nicety.** A role change is a read-modify-write over the role table. On the
+  > old direct path the per-group lock sufficed, because the first toggle's *commit*
+  > updated the table and the second read it. A **proposal** changes nothing until it is
+  > swept, so two toggles a moment apart both read the same committed table and each
+  > proposes a table carrying only its own change — and RFC 9420 permits at most one
+  > `GroupContextExtensions` proposal per commit, so the sweep keeps one and **silently
+  > discards the other**. Serializing cannot fix it (there is nothing for the second read
+  > to observe) and the client cannot repair it (`ProposalKind::RoleChange` carries no
+  > payload, so it cannot read back what it proposed). The honest answer is to **refuse
+  > the second and say so**, which web and iOS do:
+  > `A role change is already waiting to apply. Wait for it to land, then try again.`
+  > The window is one sweep — the owner is rank 0 and sweeps immediately — so this is
+  > momentary in the ordinary case and a real wait only when the committer is absent,
+  > which is precisely when a silent loss would be worst. **Android does not carry the
+  > refusal**, so a second concurrent toggle there still loses one silently.
 
 ---
 
@@ -327,6 +377,15 @@ the user is told nothing. This is right because the user's intent is unchanged a
 system is doing what they asked. There is **no attempt cap**: a request that keeps getting
 superseded keeps being re-requested, and returns to plain `waiting` each time.
 
+> **NOT BUILT (2026-08-25).** No client re-requests. All three prune the observation of a
+> request that has left the core's pending set — swept, superseded, or the group moved —
+> and stop there, so a superseded request is simply **dropped** and the user must ask
+> again. The design above is still the right one and nothing built contradicts it; it
+> has no implementation. The effect is a functional gap rather than a safety one: the
+> user sees a request that quietly did not happen, which is the same thing they see when
+> nobody sweeps. It is also why the re-request-only-on-an-observed-superseding-commit
+> mitigation below has never been exercised — there is no loop yet to bound.
+
 > **The one thing this leaves unhandled, named rather than papered over.** A cap existed
 > for a second reason as well as the timing one: it bounded the [ADR-0045] residual of a
 > **partially censoring committer** — one that sweeps some requests and silently drops
@@ -350,6 +409,17 @@ receiving side by design, and correctly so: it is not that peer's business.
 
 `Retry now` appears **only** in this failure state. It is not a manual apply button; the
 normal path has none (§8).
+
+> **NOT BUILT (2026-08-25), and as written it is unimplementable.** §8 gates this surface
+> on the device "holding authorised pending requests past its own **activation delay**",
+> and an activation delay belongs to decision 2's **staggered** variant — which the
+> maintainer did not choose. Under the heartbeat there is no delay to be past. What the
+> clients do instead is retry silently: a sweep that cannot complete leaves itself staged
+> and is re-attempted at the tail of the next poll, and an unreadable verdict is logged
+> rather than surfaced, on the ground that nothing the user did failed and the request is
+> still live. That is a defensible reading of the same intent, but it is **not** what this
+> section specifies, and the specification needs re-deriving against the chosen variant
+> before anyone builds to it.
 
 **Group with no role table.** Every peer's receipt gate drops proposals in a group with no
 role table, so the propose path would silently discard everything. The client must branch on
@@ -401,6 +471,12 @@ feature.**
 is a candidate, holds authorised pending requests past its own activation delay, and its own
 sweep or publish is failing, only this device can fix it — so only this device is told, with
 the §7 copy and its `Retry now`.
+
+> **Unimplementable as written, and unbuilt — see the §7 note.** The "activation delay"
+> is the staggered variant's constant and the maintainer chose the heartbeat, so the
+> trigger this paragraph names does not exist. The rest of §8 was built exactly as
+> specified: there is no `Apply changes` button anywhere, no committer badge, no count
+> that others lack, and no notification.
 
 **Deliberate departure from decision 5.** The ADR frames `N changes waiting to apply` as "one
 committer-side surface". It is not committer-side data: `pending_proposals()` is populated on
@@ -583,16 +659,24 @@ the list's real subject is *what S4-S6 must know that the ADR did not say*.
    heartbeat) and its core half is built** — the beacon envelope, the acting-committer fold
    and the emit throttle are in `lakko-contacts` and on both FFI surfaces, and the fold
    does take the DS-row age as its freshness input, which this finding said was absent.
-   **The finding still stands in its permanent form**, for a narrower reason than it gave:
-   not that the core lacks the decision, but that **nothing calls it**. No client emits a
-   beacon, none stores an observation, none evaluates the fold, and the stand-down re-read
-   is still unwritten — so `commit_pending_proposals` remains reachable by any owner/admin
-   who asks, and the election is still client orchestration that does not exist.
+   ~~**The finding still stands in its permanent form**, for a narrower reason than it gave:
+   not that the core lacks the decision, but that **nothing calls it**.~~ **CLOSED
+   (2026-08-25).** All three clients emit a beacon, store observations and evaluate the
+   fold at verdict time, and the stand-down re-read is written on all three — so `waiting`
+   now ends without anybody being asked to do anything, which is the whole of what this
+   finding was about. Two notes for a reader of the built code rather than the design: the
+   clients do **not** call `commit_pending_proposals` (it eager-merges, which a committer
+   that can lose a race must not do) but the staged pair; and the stand-down was built one
+   notch more conservative than the ADR specified, standing down on **any** unapplied
+   journal row rather than only a commit, because standing down costs one retry while
+   staging on an unapplied commit costs a commit every peer drops.
 
 4. **Decision 5 omits leaving entirely, and the core just built it.** `ProposalKind::Leave`
    plus self-targeted `Remove` are authorised for any member, closing ADR-0022's deliberately
    unreachable self-remove branch. That is a **new user-facing action on every group for
-   every member** with no design in the ADR. §6 designs it.
+   every member** with no design in the ADR. §6 designs it. **Built on web only
+   (2026-08-25)** — the natives mirrored the rest of the membership surface and left this
+   out, so the "every group for every member" claim is currently true of one client.
 
 5. **A pending role change cannot be attributed to a member.** `ProposalKind::RoleChange`
    carries no target — `classify` discards the `GroupContextExtensions` payload — so a
@@ -666,6 +750,18 @@ the list's real subject is *what S4-S6 must know that the ADR did not say*.
    right in code rather than caught in QA. Nothing in this spec's §4 state table changes;
    this is an implementation obligation, not a state.
 
+   **DISCHARGED (2026-08-25) on all three, and how is worth recording.** Every sweep
+   adjudicates what it staged; an owed verdict is resolved at restart through ADR-0040's
+   existing `sweepPendingCommits` seam rather than a second restart path; and the
+   owed-verdict check runs **ahead of** the acting-committer rank check — because an admin
+   can be **demoted while holding a durable staged sweep**, and gating the resolution
+   behind the rank check would freeze that device permanently. Re-publishing is safe:
+   peers refuse a demoted author's commit, so it loses and is abandoned, which is the
+   unwedge. One further rule the obligation implies and this item did not spell out: an
+   **unreadable** verdict leaves the sweep staged rather than resolving it either way —
+   merging on an unread verdict is the eager shape the arc removes, and abandoning would
+   discard a commit already on the wire.
+
 10. ~~**The FFI does not yet reach either of the two newest core surfaces.**~~ **CLOSED —
     the back-fill landed (`6c77cd6`).** The finding read: *"neither FFI surface exposes
     `stagePendingProposals` / `hasStagedSweep` / `mergeStagedSweep` / `abandonStagedSweep`,
@@ -676,7 +772,22 @@ the list's real subject is *what S4-S6 must know that the ADR did not say*.
     is now buildable**. Kept rather than deleted because the prerequisite ordering it
     states is still how S4 depends on the FFI.
 
-11. **The committer beacon is on the FFI, and nothing calls it.** Decision 2's variant 1
+11. ~~**The committer beacon is on the FFI, and nothing calls it.**~~ **CLOSED
+    (2026-08-25) — everything this item said S4-S6 must inherit was built, in the shape it
+    named.** Each client emits a throttled beacon gated on `shouldEmitBeacon` **and** on
+    being foregrounded, keeps a per-`(group, signature key)` observation store fed by the
+    `committerBeacon` receive event's sender leaf and DS `createdAt`, and evaluates the
+    fold at verdict time with ranks **re-derived** through `Group.committerRank` — never
+    cached at receipt. Two details the item did not anticipate: emission is driven by a
+    **dedicated ticker rather than the poll**, because a beacon's meaning is a cadence and
+    web's poll is event-driven; and an **unparseable row timestamp is dropped rather than
+    stored as fresh**, since a beacon stored fresh could never age out and the observer
+    would defer to it forever. The one thing that did **not** come out as designed is a
+    deployment property rather than a UI one: the freshness window is
+    `2 x interval + worst-case poll` and the web client has **no periodic poll**, so a web
+    takeover can lag past the window; both natives long-poll and meet it. For this spec
+    that changes nothing — the beacon still has, and must keep, no UI surface (item 12). The
+    original text follows. Decision 2's variant 1
     landed in the core and on both surfaces (`94825ec` / `94da492`): `composeCommitterBeacon`,
     `decodeCommitterBeacon`, `actingCommitterVerdict`, `shouldEmitBeacon`, the four timing
     constants, and `Group.committerRank(signatureKey)` for ranking a beacon's
@@ -714,7 +825,9 @@ the list's real subject is *what S4-S6 must know that the ADR did not say*.
    defined once and exposed on both FFI surfaces, and the core states plainly that they are
    **chosen, not measured** — backed by a budget argument (journal litter and how finely a
    candidate's activity schedule is exposed) rather than by data, and overturnable by a
-   later measurement. `QUIET_WINDOW` is still unpicked. **Nothing in this spec is blocked on
+   later measurement. ~~`QUIET_WINDOW` is still unpicked.~~ **Picked: 3 seconds**, on all
+   three clients, and each says in its own source that it is **chosen, not measured** —
+   the same honest form the protocol constants use. **Nothing in this spec was blocked on
    either** — the state that was blocked (`stalled`) is gone, and `QUIET_WINDOW` only
    decides *when* an annotation appears, not whether the spec is implementable.
 2. **~~Decision 2's liveness variant~~ — ANSWERED: the candidate heartbeat (variant 1),**
@@ -733,9 +846,19 @@ the list's real subject is *what S4-S6 must know that the ADR did not say*.
    (§11.6). Nothing here waits on the maintainer any more; what it waits on is a UX pass
    for the transfer flow — affordance, member picker, the `OutgoingOwner` choice, and an
    irreversibility confirmation — which §11.6 enumerates and deliberately does not design.
-   **Sequencing question that is the maintainer's:** whether that pass runs before S4-S6
-   or alongside them. `Leave group` is designed and buildable today for every non-owner,
-   so S4-S6 are not blocked either way.
+   ~~**Sequencing question that is the maintainer's:** whether that pass runs before S4-S6
+   or alongside them.~~ **Answered by events: neither.** The client sprints did not build
+   the transfer, so the owner dead-end is closed in `lakko-mls` and **still open in the
+   product** — an owner has no way to reach the control that would let them leave. This is
+   now the largest outstanding UX item in this spec, and it is a pass that has not happened
+   rather than an implementation that skipped it.
+
+   **And a second, smaller gap appeared alongside it: `Leave group` itself shipped on
+   WEB ONLY.** §5's panel order puts it at the bottom of the members panel on all three
+   platforms; web has it (hidden for the owner, as specified), iOS and Android built the
+   rest of the membership surface without it. So the member-facing half of what
+   [ADR-0045] unlocked — naming your own leaf in a Remove proposal, which needs no role —
+   is reachable on one client of three.
 4. **Visibility (§10).** I recommend owner/admin only, plus your own request. The
    counter-argument — that a member deserves to know a change is coming — is a values
    position, and it is the maintainer's.
@@ -744,9 +867,23 @@ the list's real subject is *what S4-S6 must know that the ADR did not say*.
    presents as a permanent `waiting` with no user-side signal at all. Recommended
    mitigation is in §7 (re-request only on an observed superseding commit, never on a
    timer) — enough to bound journal litter and battery, **not** enough to make censorship
-   visible. Accept, or ask for a different treatment.
+   visible. Accept, or ask for a different treatment. **Moot for now and worth saying so:
+   no client re-requests at all** (§7), so there is no loop to bound; a superseded request
+   is dropped and the user asks again. The decision is still owed, but it is owed *before*
+   the re-request is built rather than about something that exists.
 6. **Typed refusal reasons on the FFI (§9.1).** Prose-matching `Error::Group` strings across
-   three clients would work and would be wrong. Worth the small core change.
+   three clients would work and would be wrong. Worth the small core change. **Still open,
+   and the clients did the defensible thing rather than the wrong one:** none of them
+   built the six-string refusal table this spec specifies, precisely because mapping core
+   prose to fixed copy is the drift class the spec flags. So the table is unbuilt *and*
+   the FFI change it depends on is unmade — the two go together and neither should ship
+   without the other.
+7. **Android does not refuse a second concurrent role change** (§5.3). Web and iOS do, and
+   say so with the copy quoted there. The loss on Android is silent, which is the worst
+   available shape for it. Whether the fix belongs on the third client or in
+   `Group::propose_group_roles` — where it would hold for every caller and could not drift
+   between platforms — is a real choice, at the cost of putting a client-ergonomics rule
+   into the core.
 
 ---
 

@@ -1001,3 +1001,32 @@ public class ChatClientArgError(message: String) : IllegalArgumentException(mess
  *  cause carries the original exception for diagnostics. */
 public class ChatError(message: String, cause: Throwable) :
     RuntimeException(message, cause)
+
+/**
+ * ADR-0045 — a direct membership commit was asked for while this group still
+ * holds pending proposals, so the core would refuse it.
+ *
+ * This is a USER-FACING state, not a programmer error: under ADR-0045 a
+ * non-empty pending set is the ordinary condition between any member's request
+ * and the next committer sweep. It is its own type rather than a [ChatError] for
+ * two reasons — a test can assert on it by identity instead of by prose, and the
+ * core's own refusal string (which names `commit_pending_proposals` /
+ * `stage_pending_proposals`, two Rust entry points no user can call) can never
+ * reach the screen through it.
+ *
+ * Its [message] IS the user-facing copy, so the existing
+ * `catch (e: Throwable) { membershipError = e.message }` path renders it
+ * verbatim. The copy follows `docs/ux/proposal-based-membership.md` §5.1: it
+ * states inaction, names no person, and implies no deadline — ADR-0045
+ * decision 2 deliberately gives a pending request none. It is byte-identical to
+ * the iOS `ChatError.membershipChangesPendingCopy`.
+ */
+public class MembershipChangesPendingException :
+    RuntimeException(MEMBERSHIP_CHANGES_PENDING_COPY)
+
+/** The one string for [MembershipChangesPendingException], exposed so a test can
+ *  pin it without re-typing it (a second copy is how the two platforms would
+ *  drift apart). */
+public const val MEMBERSHIP_CHANGES_PENDING_COPY: String =
+    "Other membership changes are waiting to apply, so this request cannot be approved yet. " +
+        "They are applied by the group owner or an admin, and this will work once they have."

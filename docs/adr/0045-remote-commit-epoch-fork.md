@@ -5,14 +5,27 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0045: Closing the remote-commit epoch fork — proposal-based commits with a designated committer (G-38 residual 1)
 
-- **Status:** **Proposed.** **The core is built** (sprints S0-S3 plus four
-  unplanned ones — see the date line and the
-  [blast-radius table](#blast-radius-per-sprint)); the three clients are not.
-  Decision 2's **candidate heartbeat is built too** — the beacon envelope, the
-  acting-committer fold and the emit throttle, on both FFI surfaces — but **it is
-  inert**: nothing emits a beacon and nothing drives the fold, because both belong
-  to the client sprints. Read "the beacon landed" as *the mechanism exists*, never
-  as *the election works*.
+- **Status:** **Proposed.** **The arc is built end to end** — the core (sprints
+  S0-S3 plus four unplanned ones), both FFI surfaces, and **all three clients**
+  (S4a/S4b web, S5 iOS, S6 Android); see the date line and the
+  [blast-radius table](#blast-radius-per-sprint). Decision 2's **candidate
+  heartbeat is live**, not merely present: every client emits a throttled beacon
+  from a foregrounded chat screen, stores the observations, and folds them into
+  an acting-committer verdict at sweep time, so an admin-only group no longer
+  waits for an absent owner. Earlier revisions of this line said the mechanism was
+  **inert**; that is no longer true and the passages that said so are corrected in
+  place rather than deleted, because the reasoning under them still holds.
+  **What is still open** is named honestly in
+  [§ Open questions](#open-questions) and summarised here: **S7** — the
+  external-join convergence of decision 4 — is **not built**, so
+  `Group::approve_external_join` remains a live direct-commit path that
+  eager-merges (`crates/lakko-mls/src/group.rs`); the **external crypto review
+  this ADR requires and the `lakko-security` pass have both still not happened**
+  on any sprint, which is the largest open item on the list; and the UX spec's
+  ownership-transfer flow, its typed-refusal table, its committer-side failure surface
+  and its automatic re-request on supersession are designed or enumerated but unbuilt
+  on every client, while `Leave group` — the member-facing feature this ADR unlocked —
+  shipped on **web only**.
   **The maintainer has chosen Option B — proposal-based commits.** This ADR was
   originally written as a recon that recommended Option C (client-side loser
   rollback); that recommendation has been **overturned by the maintainer** and
@@ -81,6 +94,21 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
   to six client receive paths before a beacon could ride the journal without
   appearing as a chat bubble. **The emitter and the observation store are not part
   of it and remain the largest S4-S6 item.**
+  · **2026-08-25: reconciled with the three client sprints.** **S4a** (`1de5fe7`) —
+  the web reference: admins propose, the owner sweeps, with the five obligations
+  each placed somewhere a test can run it. **S4b** (`02f0037`) — the beacon emitter,
+  the observation store and the fold, which ends the admin-only group's wait and
+  gives `composeCommitterBeacon` its first call site anywhere in the tree.
+  **`000d9f8`** — the send-path serialization, an unplanned fix for a hazard the
+  staged sweep turns from a race into a certainty. **S5 + S6** (`1f230ab`) — the iOS
+  and Android mirrors, which satisfy the beacon's worst-case-poll constraint that
+  web structurally does not. Five things the clients found that this ADR did not
+  anticipate are written into the body here rather than left in commit messages —
+  see [§ What the client sprints found](#what-the-client-sprints-found). This
+  revision also **mints C-64**, the indexed invariant this ADR deferred until "the
+  first client that emits a beacon and folds a verdict"; that condition is met, so
+  the deferral section is rewritten into the mint, scoped as it always said it
+  would have to be — to the election and the sweep, not to the beacon alone.
 - **Context:** Phase 3 — group-membership commits / MLS epoch integrity. Closes
   **G-38 residual 1**, the largest unfixed item on the client-concurrency list
   and the only one on it that **no client-side lock can address by
@@ -817,8 +845,11 @@ B** — though not in the form C described it: what was built is
 defers the eager merge rather than retaining and restoring a snapshot. See
 [§ The staged sweep, as built](#the-staged-sweep-as-built). Option C′ (re-read the
 journal head before committing) is **absorbed into B** as the committer's
-stand-down rule, not shipped as a separate companion — and it is **client
-orchestration that does not exist yet**.
+stand-down rule, not shipped as a separate companion — ~~and it is client
+orchestration that does not exist yet~~ **and it is now built on all three
+clients**, immediately before staging, standing down on **any** unapplied row
+rather than only on a commit (the reason is in
+[§ What the client sprints found](#what-the-client-sprints-found), item 2).
 
 Scope: **conversation groups** (`lakko_mls::Group`). Explicitly **not** DeviceGroups,
 **not** call groups, and **not** channel `PublisherGroup`s — see
@@ -974,7 +1005,8 @@ implementable as written: each candidate computes the active set from beacons se
 within a freshness window, and the lowest-ranked active candidate sweeps. **The
 stagger, and its constant, disappear entirely** — nobody waits a turn, because the
 set is known rather than inferred. ~~It is not built, but it is~~ **It is now built
-in the core and on both FFI surfaces, and it was** **well-precedented rather than
+in the core, on both FFI surfaces and on all three clients, and it was**
+**well-precedented rather than
 blocked**: typing indicators are the working proof that a throttled ephemeral
 per-group journal signal with an expiry window functions, and `lakko-presence`
 exists for exactly this shape — **though the build did not use it, and
@@ -1044,6 +1076,17 @@ notification filters), `f53d11a` (the three foreground timeline filters). The mo
 documentation in `crates/lakko-contacts/src/committer_beacon.rs` is the authority;
 this section records the decisions it settled, because they are decisions this ADR
 posed and did not answer.
+
+**The emitter and the observation store came later and are on all three clients**
+(`02f0037` web, `1f230ab` iOS + Android), which is what turned this from a mechanism
+into an election. The two rules the clients had to add on top of the core's are
+pinned as **C-64** and are both about where an input comes from: a beacon's rank is
+re-derived through `Group::committerRank` **at verdict time and never at receipt**
+(a rank is a *position* in the role table's canonical order, so any promotion,
+demotion or removal renumbers every candidate sorting after it — a stored rank is not
+stale, it is a position in a different ordering), and a beacon is emitted **only from
+a foregrounded client that can actually sweep**, which the core cannot check and
+which rests on C-59.
 
 **The wire shape — a fixed 27 bytes, and the payload carries no fields at all.**
 
@@ -1243,7 +1286,12 @@ the payload, because a beacon rides the **group journal** and never the SFU
 signal-relay, and it says nothing about a *call* committer — ADR-0032's election is
 leaf/presence-based and independent.
 
-#### Does the beacon earn an indexed invariant? **Not yet — and the trigger is named**
+#### Does the beacon earn an indexed invariant? **Yes — and it is minted as C-64**
+
+> **This section previously read "Not yet — and the trigger is named". The trigger
+> has fired.** The reasoning below is kept in full rather than rewritten away,
+> because the *argument* for deferring was correct at the time and the shape of what
+> was minted is exactly what that argument predicted.
 
 Argued rather than defaulted, because the case for one is real. **For:** the
 no-self-asserted-freshness property is genuinely security-shaped and genuinely
@@ -1253,30 +1301,36 @@ censorship authority this ADR already lists as a negative consequence. It has th
 same shape as C-60 sub-invariant 2 (a domain-separated, bounded, fail-closed
 in-group envelope on an MLS application message).
 
-**Against, and decisive:** the invariant index's own quick-stats row describes its
-contents as **live properties**, and this mechanism is **inert** — no client emits a
-beacon and none drives the fold, so there is no running enforcement point to pin.
-Indexing it now would make the index aspirational, which is exactly the drift the
-index exists to prevent. The beacon also authorises nothing and gates nothing today:
-it carries no key material, and the worst a forged or replayed one could do once
-wired is make a device **defer**, a liveness effect of the class this pack tracks as
-a gap rather than an invariant (cf. ADR-0038's fail-toward-UpToDate as G-32). And
-when the clients do land, the property worth indexing is broader than the beacon
-alone — the integrity of the committer election as a whole — so a narrow C-number
-minted now would need re-scoping then.
+**The deferral, and why it lapsed.** The argument against minting was that the
+invariant index's own quick-stats row describes its contents as **live properties**
+and this mechanism was **inert** — no client emitted a beacon and none drove the
+fold — so there was no running enforcement point to pin, and indexing it would have
+made the index aspirational, exactly the drift the index exists to prevent. That
+condition was named as a **trigger**, not as a permanent judgement: *mint it at the
+first client that emits a beacon and folds a verdict*. **S4b (`02f0037`) is that
+client and S5/S6 (`1f230ab`) are the other two**, so the deferral is spent.
 
-**Trigger:** mint it with S4-S6, at the first client that emits a beacon and folds a
-verdict. Two properties are already written down and waiting for it — *every input
-to the committer fold comes from MLS-authenticated or server-assigned state, never
-from the payload*, and *a beacon is emitted only from a foregrounded client that can
-actually sweep* (the C-59 caller obligation, which is where a background emitter
-would turn the beacon into a lie).
+**And the mint is broader than the beacon, exactly as this section predicted it
+would have to be.** The prediction was that "the property worth indexing is broader
+than the beacon alone — the integrity of the committer election as a whole — so a
+narrow C-number minted now would need re-scoping then". Building the clients bore
+that out twice over. The beacon on its own still authorises nothing and gates
+nothing: the worst a forged or replayed one can do is make a device **defer**, a
+liveness effect of the class this pack tracks as a gap rather than an invariant (cf.
+ADR-0038's fail-toward-UpToDate as G-32). What the clients added *around* it is not a
+liveness effect — a sweep that merges before the journal has ordered its commit is
+the device-ahead brick this ADR exists to close, and a Welcome published before that
+verdict is strictly worse than the two-party fork. So **C-64 pins the election and
+the sweep together**: the fold's inputs, the emitter's foreground obligation, the
+stand-down, the stage-verdict-adjudicate ordering, and the Welcome-after-verdict
+rule. Its two originally-named properties are sub-invariants 1 and 3 of it.
 
-For the same reason, the **service-envelope suppression filter** is not indexed
-either — and note that its ADR-0042 predecessor never was, so indexing the beacon's
-half alone would be incoherent. It is live on six code paths and its failure mode is
-user-visible rather than confidentiality-affecting; if it is ever indexed it should
-be indexed whole.
+For the same reason as the original deferral, the **service-envelope suppression
+filter** is *still* not indexed — and note that its ADR-0042 predecessor never was,
+so indexing the beacon's half alone would be incoherent. It is live on six code paths
+and its failure mode is user-visible rather than confidentiality-affecting; if it is
+ever indexed it should be indexed whole. That is a judgement, not a measurement, and
+it is the same one this section made before the clients landed.
 
 #### What stops two devices both sweeping — and why a heartbeat does not close it
 
@@ -1298,6 +1352,14 @@ be indexed whole.
    a **required step of the algorithm** in both variants — it is what makes the
    election effective rather than merely probable, and it costs one fetch on a path
    that only runs when the owner is not the one acting.
+
+   > **Built on all three clients, and built one notch more conservative than this
+   > text.** The clients stand down on **any** unapplied journal row, not only on a
+   > commit, because no FFI surface can tell a commit from an application message
+   > pre-decrypt and the two mistakes cost very different amounts: standing down on
+   > a row that was not a commit costs one retry, while staging on a row that *was*
+   > costs a commit every peer drops. See
+   > [§ What the client sprints found](#what-the-client-sprints-found) item 2.
 4. **The residual is repaired, not prevented.** If two candidates do collide, one
    forks — the hazard this ADR exists to close, in a much narrower window. So the
    acting committer must be able to survive losing the journal order across the
@@ -1361,7 +1423,9 @@ first must be *yes* before the second is meaningful. So the client sequence is
 abandon**, and ADR-0040's outbox wraps both commit shapes unchanged.
 
 **Two properties of staging are new client obligations, and neither was in this
-ADR before the sprint landed.**
+ADR before the sprint landed.** Both are discharged on all three clients, and
+[§ Consequences](#consequences) records how; the point of stating them here is that
+they are obligations a later refactor can drop, not facts the core enforces.
 
 - **A staged sweep freezes that group's own membership operations.** OpenMLS's
   `is_operational()` returns `MlsGroupStateError::PendingCommit` while a commit
@@ -1404,7 +1468,10 @@ which is why deleting the retry cap costs nothing:
   happens once at *propose* time regardless.
 - **No approve-path stale-proposal question.** The external-join proposal is not
   held in a Lakko-side in-memory queue under B; it is a stored MLS proposal like any
-  other (decision 4).
+  other (decision 4). **That is true of B as designed and not of B as built** —
+  decision 4 is S7 and S7 is unbuilt, so the in-memory `pending_external_joins`
+  `Vec` is still there, still epoch-bound, and still not covered by the staged
+  rollback.
 
 #### Every candidate offline: the request waits
 
@@ -1466,6 +1533,16 @@ can still stall.** Transfer needs the owner's key to mint, so it does nothing fo
 an owner who has *already* gone; it only lets one who is still present hand the
 duty on deliberately. Recovering a lost owner is ADR-0022's separate,
 still-open admin-quorum question.
+
+**And it does not resolve it in the product either, because no client offers it.**
+`transferOwnership` / `proposeOwnershipTransfer` / `OutgoingOwner` are on both FFI
+surfaces and have **no production call site on web, iOS or Android** — the client
+sprints built `Leave group` (which the transfer exists to make reachable for an
+owner) and did not build the transfer itself. The UX spec enumerates what the flow
+needs and deliberately does not design it. So the dead-end is closed in the core and
+open to a user, which is a UX gap rather than a protocol one, and is worth stating
+plainly because "ownership transfer is built" is true of the crate and false of the
+app.
 
 **The security content of that sprint was `owner_survives`, not the transfer
 wrapper — and it closes a hole that predates it.** See
@@ -1638,7 +1715,16 @@ before either outcome propagates and a failed unpark beats a successful send
 (losing a pending proposal would desync this device from every peer still holding
 it, whereas a refused send costs one message the caller retries). `DeviceGroup`
 inherits the fix by delegation and always takes the fast path; `PublisherGroup`
-sends no application messages. **S4-S6 need do nothing about this** — it is
+sends no application messages. ~~**S4-S6 need do nothing about this**~~ — **the
+clients inherited the unmute with no work, as predicted, but the prediction was
+narrower than it read**: what they inherited was *this* fix, and the send path
+turned out to need one of its own. The staged sweep gates on `is_active`, not
+`is_operational`, so a send is not blocked by a pending commit either — which means
+it can be sealed at epoch N while the sweep's commit is already on the wire, and
+`lakko-mls` never sets `max_past_epochs`, so a straddling message is not late but
+permanently undecryptable. That is a **client** obligation and it is recorded in
+[§ What the client sprints found](#what-the-client-sprints-found), item 3. The park
+itself is
 recorded here because the ADR's decision-3 discussion otherwise reads as if
 storing a proposal were free, and because the by-reference-at-receipt constraint
 above is a rule a client refactor could break.
@@ -1733,10 +1819,15 @@ carrying an ADR-0022 role table (the receipt gate returns early without storing
 when there is none, and every `propose_*` refuses without one), so `DeviceGroup`,
 `PublisherGroup`, call groups and every other `create_with_id` group have a
 permanently empty set and the guard is a counted-zero no-op for them. **What it
-does mean for S4-S6** is that in a role-table group the direct paths and the
+meant for the clients** is that in a role-table group the direct paths and the
 sweep path are mutually exclusive at any instant — a client that still calls
 `approve_external_join` or `self_update` while a proposal is pending gets an
-error, not a widened commit. Pinned by
+error, not a widened commit. **That is now a live consequence rather than a
+prediction, and it is the sharpest argument for finishing S7:**
+`approve_external_join` is still a direct commit on all three clients, so in a
+role-table group an admin approving a join while any membership request is pending
+gets a refusal — correct, fail-closed, and a user-visible dead end nobody designed.
+Pinned by
 `a_direct_commit_refuses_to_absorb_a_pending_proposal`,
 `a_direct_add_cannot_smuggle_in_a_second_member`,
 `a_group_with_no_role_table_still_direct_commits`, and a permanent
@@ -1923,6 +2014,17 @@ separate inside the gate.**
   it, instead of two paths with two retention mechanisms and two authorisation
   stories.
 
+**S7 is not built, and staging it second turned out to cost more than "keep the
+approve buttons out of one sprint".** With the member paths converged and the
+external-join path not, a role-table group now has one live direct-commit path left,
+and `refuse_if_proposals_pending` makes the two **mutually exclusive at any
+instant** — so an admin approving a join while any membership request is pending is
+refused. That is the correct fail-closed answer and it is also a user-visible dead
+end nobody designed. It is worth being precise about what remains open: **G-38
+residual 1 is closed for the member paths and open for this one.** Two admins
+approving two different joiners against the same epoch still fork each other exactly
+as before this ADR, because both are still direct commits.
+
 ### Decision 5 — what the user sees
 
 **Naming the states only. The screens are `ux-ui`'s call, and per the repo's
@@ -2007,9 +2109,10 @@ The recon was honest about Option C's limits; B's deserve the same treatment.
    nothing expires and nothing is declared unachievable.
 
    **ADR-0022's deferred ownership transfer is now built (`e780952`), and this
-   item survives it.** Transfer removes the *dead-end* — an owner is no longer
-   bound permanently to every group they create, and a member may now leave — but
-   it does not remove the *stall*. Minting a transfer needs the owner's key, so it
+   item survives it.** Transfer removes the *dead-end in the core* — an owner is no
+   longer bound permanently to every group they create, and a member may now
+   leave — but it does not remove the *stall*, and neither feature has reached
+   every client (transfer has no affordance anywhere; `Leave group` is web-only). Minting a transfer needs the owner's key, so it
    is something a present owner does deliberately; it does nothing for an owner
    who has already gone, which is precisely the case that stalls. The remedies for
    a stall remain what they were: appoint more admins, or have the owner hand the
@@ -2023,11 +2126,17 @@ The recon was honest about Option C's limits; B's deserve the same treatment.
    committer that sweeps *nothing* loses the duty — but **partial** censorship by an
    otherwise-active committer is not bounded by anything in this design. Named, not
    solved.
-4. **Proposals go stale too.** ValSem003 rejects *any* non-Application message at
-   the wrong epoch, not only Commits, so a proposal that misses the sweep must be
-   re-proposed. This is cheap — the whole point — but it is a client state machine,
-   not a no-op, and a stale proposal litters the journal for its 30-day TTL the way
-   the recon says a dead commit does under C.
+4. **Proposals go stale too, and the automatic re-proposal is not built.**
+   ValSem003 rejects *any* non-Application message at the wrong epoch, not only
+   Commits, so a proposal that misses the sweep must be re-proposed. This is cheap —
+   the whole point — but it is a client state machine, not a no-op, and a stale
+   proposal litters the journal for its 30-day TTL the way the recon says a dead
+   commit does under C. **As built, none of the three clients re-proposes.** The UX
+   spec §7 specifies it as silent and automatic; no client has the code, so a
+   superseded request is dropped and the user must ask again. It is the one designed
+   state in decision 5 with no implementation behind it, and it is a functional gap
+   rather than a safety one: the effect is a request that quietly does not happen,
+   which is the same thing the user sees when nobody sweeps.
 5. **`self_update` / `PublisherGroup::rotate` is a fifth epoch-advancing path B
    does not cover.** `rotate` (`crates/lakko-mls/src/publisher_group.rs:455`) is
    FFI-exposed on both surfaces and advances the epoch via `self_update`. Two
@@ -2052,6 +2161,171 @@ The recon was honest about Option C's limits; B's deserve the same treatment.
 8. **It does not make an already-forked device converge.** Nothing in B repairs a
    device that forked before B shipped. With no deployment that is vacuous today,
    and it stops being vacuous the moment there is one.
+9. **The external-join path is still a direct commit, so G-38 residual 1 is closed
+   for the member paths and open for that one.** Decision 4's convergence is **S7
+   and S7 is unbuilt**: `Group::approve_external_join` calls `add_member` and
+   eager-merges, so two admins approving two different joiners against the same
+   epoch fork each other exactly as they did before this ADR. Everything the fix
+   needs already exists; what it needs is deciding what `Approve` means once it
+   stops meaning "added".
+10. **A send can still straddle an epoch when the commit is a REMOTE one.** The
+    client sprints closed the local half by serializing seal-and-publish under the
+    per-group lock, and the bound is written into the code rather than implied: a
+    message sealed on this device and published after a **peer's** commit has
+    already been ordered ahead of it is still permanently undecryptable, because
+    `lakko-mls` never sets `max_past_epochs` and openmls's default of `0` retains no
+    past-epoch secrets. No client-side lock reaches that, for the same structural
+    reason no lock reaches the fork this ADR is about — the other party is a
+    different device. Closing it means retaining at least one past epoch, which is
+    an invariant-#3 change with its own ADR and property tests, and it is a real
+    trade rather than an oversight: retention is a forward-secrecy cost.
+
+---
+
+## What the client sprints found
+
+Eight things the clients found that this ADR did not anticipate, and one it got
+wrong in the dangerous direction. They are here rather than in commit messages
+because each is a rule a later hand can break, and because the pattern across the
+first six is worth naming: **every one is a consequence of a membership operation
+ceasing to be atomic.** The direct path advanced the epoch inside one call; the
+proposal path splits it into propose, sweep and adjudicate, and each of those six is
+something that used to sit inside that atomic step and now spans it.
+
+The last two are a different kind, and how they were found is the point. Items 7 and
+8 were surfaced not by writing the sweep but by **mirroring it onto a second
+platform** — a defect that reads as correct in one implementation becomes visible
+the moment a second author has to reproduce its behaviour and cannot. Both were
+present in the web reference, both had shipped, and neither was recorded anywhere.
+That is the argument for mirroring attentively rather than transliterating.
+
+**1. The verdict's open question was wrong, and wrong in the dangerous direction.**
+[§ Open questions](#open-questions) asked whether `epoch_of_message` should gain a
+`contentTypeOfMessage` sibling, and answered that "epoch alone is a *sufficient*
+signal when combined with *this row is not one of our own artifacts*". It is not.
+Another member's ordinary application message is framed at N, is not one of our
+artifacts, and is not a commit — so epoch-alone reads it as a **loss** and abandons
+a sweep that actually **won**, after every peer applied it, leaving this device at N
+with the group at N+1 and its own commit un-re-appliable
+(`CannotDecryptOwnMessage`). That is G-38's brick reached in reverse, not an
+accuracy nicety. What the clients built instead needs no discrimination at all:
+**apply every row below our own commit's DS id, then ask whether our epoch moved**
+— only a commit moves it, and applying is the audited receive path. That makes the
+FFI addition unnecessary for the verdict; it survives as a smaller question about
+the stand-down (below).
+
+**2. The stand-down stands down on any unapplied row, not only on a commit.** The
+same missing discrimination, met from the other side, and resolved the other way
+round — because the costs are asymmetric. Standing down on a row that turns out not
+to be a commit costs **one retry**; staging on a row that *was* one costs a commit
+every peer drops. So all three clients stand down on any unapplied journal row. This
+is where a `contentTypeOfMessage` peek would still earn its keep: it would make the
+stand-down exact rather than conservative. It is an optimisation now, not a
+correctness gap.
+
+**3. The send path had to be serialized, and the sweep is what makes it certain.**
+The clients found that a chat message can be **sealed at one epoch and published
+across a commit that changes it**. `lakko-mls` never sets `max_past_epochs`, so
+openmls's default of `0` applies and a recipient retains **no** past-epoch secrets:
+such a message is not late, it is **permanently undecryptable for every recipient**,
+dropped silently while the sender's own echo stays on screen. Both directions are
+reachable — *sealed ahead*, when a direct commit region has eager-merged and then
+parks in its persist and publish; and *sealed behind*, which is the one this ADR
+created. A staged sweep publishes its commit and then spends a round trip reading
+the verdict, and `create_message` gates on `is_active`, **not** `is_operational`, so
+a pending commit does not block a send. For that whole window the loss is not a race
+but a **certainty**. All three clients now hold the per-group MLS lock across
+seal-and-publish. **The bound is stated rather than glossed:** this closes the
+**local** half only — a message sealed here and published after a *remote* commit
+already ordered ahead of it is still lost, and closing that needs `max_past_epochs`
+above zero in `lakko-mls`, which is invariant #3 and would need its own ADR and
+property tests.
+
+**4. C-61 moves with the removal, and no document said so.** ADR-0043's ordering
+rule — publish the Remove commit, *then* rotate the push routing secret — was seamed
+onto `removeMemberFromGroup` on all three clients, on the premise that a removal
+always lands there. Under ADR-0045 it usually does not: it becomes a **proposal**,
+which advances no epoch, so rotating at that point seals the new secret at an epoch
+**the member being evicted is still in and can open**. That silently revokes C-61's
+forward-secrecy half without touching a line of rotation code, and under ADR-0044 it
+also stamps the new secret at the pre-removal epoch, where it **ties** with the
+stale secret and can simply lose the byte tiebreak. The rotation therefore moves to
+where the removal actually lands — the sweep, via the membership-**shrink** diff the
+poll already runs for someone else's removal — which keeps the ordering correct by
+construction rather than by an argument about two adjacent statements. Android
+reaches the same place from the other end, with a removal-landed flag the rotate
+step consults. **The general rule, worth stating because it will recur: any client
+discipline seamed onto a direct-commit call site has to be re-seamed onto the sweep,
+and the ones that matter are the ones whose correctness argument mentions an
+epoch.**
+
+**5. Concurrent role changes became lossy, and neither document noticed.** A role
+change is a read-modify-write whose read is the committed role table and whose write
+is now a proposal. On the direct path the per-group lock sufficed — the first
+toggle's commit updated the table and the second read it. On the proposal path a
+proposal changes nothing until it is swept, so two toggles taken a moment apart both
+read the **same** committed table and each proposes a table carrying only its own
+change; RFC 9420 permits at most one `GroupContextExtensions` proposal per commit,
+so the sweep keeps one and **silently discards the other**. Serializing cannot fix
+it, because there is nothing for the second read to observe, and the client cannot
+repair it either — `ProposalKind::RoleChange` carries no payload, so it cannot read
+back what it proposed. Web and iOS **refuse** a second role change while one is
+pending and say so; **Android does not**, so a second concurrent toggle there still
+loses one silently (recorded in [§ Open questions](#open-questions)). The UX spec's
+"a second, different add composes into the same sweep" is true for adds and **false
+if generalised to role changes**.
+
+**6. The direct-commit refusal reaches the external-join path, and only S7 closes
+it.** `refuse_if_proposals_pending` (the `a90fa90` hardening) makes the direct and
+sweep paths mutually exclusive in a role-table group. `approve_external_join` is
+still a direct commit on every client, so approving a join while any membership
+request is pending now returns an error. Correct and fail-closed, but a user-visible
+dead end nobody designed, and the sharpest practical argument for finishing S7.
+
+*Mitigated on all three clients, not closed.* Approve now drains first — it runs the
+committer sweep, then re-reads the pending count **inside** the lock and, if the set
+survived, refuses in copy a person can act on instead of in a core diagnostic naming
+two Rust entry points. Neither platform's lock is reentrant (iOS's `withCommitLock`
+is a task chain that would await the tail its own outer section installed; Android's
+is a `kotlinx.coroutines.sync.Mutex`), so the drain runs **outside** the lock on both
+and the in-lock re-read is what closes the window the poll opens between them. Two
+ceilings remain, and both are S7's to lift rather than a client's: the stand-down
+stands down on **any** unapplied row including this device's own just-published
+proposal, so an admin who removes someone and immediately approves a join is still
+refused; and an admin correctly **deferring to a live owner** never drains at all, so
+for a non-owner admin the Approve button is effectively unavailable whenever anything
+is pending. The client change converts a crash-shaped error into an honest "not yet",
+which is the most a client can do while approval remains a direct commit.
+
+**7. The verdict apply swallowed the rows it applied.** The sibling of item 1, and
+the sharper half. `adjudicate` applies every row the DS ordered below its own commit
+in order to read the epoch — and each row went through the audited receive path with
+its **result discarded** while the shared cursor advanced past it. When such a row is
+an ordinary chat message the ratchet advances correctly, the cursor moves on, and the
+plaintext is dropped: the message never reaches the timeline, and because the cursor
+already passed it, no poll ever re-fetches it. Permanently lost, silently, with no
+error anywhere. The window is narrow — the stand-down has just proved the journal
+empty — but it is exactly the window a concurrent sender lands in, and it is reached
+again on the restart path. **The fix is that the verdict apply must surface what it
+applies through the same event ladder the poll uses**, never a second copy of that
+dispatch, since two copies drift; the natives split their existing poll-side consumer
+so the sweep can dispatch without touching the cursor. Note the ordering trap web hit
+and the natives did not: rows are applied *before* the verdict is known, so a client
+that returns early on a **loss** swallows them anyway. iOS had this recorded as a
+`KNOWN CONSEQUENCE` comment in its own `adjudicate` and had shipped it, which is worse
+than not knowing — a defect annotated in place reads as a decision.
+
+**8. A row annotation that could never render.** UX §5.2 specifies `Waiting to leave.`
+for a member's own pending departure. Web and Android read a pending request's target
+straight off `ProposalKind::Remove`'s target field — which is `None` for a `Leave`,
+because RFC 9420 `SelfRemove` names no target at all and the removed leaf is the
+sender's own, exactly as `commit_effects` says. So the leave branch could never match
+and the copy was unreachable on two of three clients. Small in consequence and
+instructive in cause: **the core states the rule in a comment, the FFI expresses it as
+an absent field, and two independent clients read the absence as "no target" rather
+than as "the target is the sender"**. The type was honest and the reading was not. It
+was found only because iOS resolved it correctly and the mirror had to explain the
+discrepancy.
 
 ---
 
@@ -2063,11 +2337,12 @@ The recon was honest about Option C's limits; B's deserve the same treatment.
 | **S1 — core: the gate** — **LANDED `9a60ab3`** | `crates/lakko-mls` (**invariant #3**) | `process_incoming_verifying_roles` proposal arm: inspect + role-check + `store_pending_proposal` or drop. `authorise_role_commit` extended from committer-only to per-proposal-sender, with the by-value arm preserved and a `SelfRemove` arm added. New `Incoming` shape for a stored-vs-dropped proposal. Ten property tests. **External crypto review — still owed.** As built: the whole rule is `crates/lakko-mls/src/group_proposals.rs` `authorise`, written down once and consumed at all three layers. |
 | **S2 — core: the committer** — **LANDED `9a60ab3`** | `crates/lakko-mls` | `committer_rank` in `group_roles.rs`; a sweep entry point over `CommitBuilder::build` with the two-arm filter; `propose_*` wrappers over the openmls calls. As built the sweep is named `commit_pending_proposals`, with `pending_proposals()` and `own_committer_rank()` beside it. |
 | **S3 — FFI** — **LANDED `c5c0788`; completed by S3b `6c77cd6`** | `lakko-ffi-uniffi`, `lakko-ffi-wasm` | Add the propose + sweep + rank + pending-proposal-list surface beside the existing `add_member_from_wire` / `remove_member` / `set_group_roles` / `approve_external_join`. Both surfaces, in lock-step. Regenerate bindings, rebuild `LakkoCore.xcframework` and the Android `.so`. ~~S3 landed BEFORE S2b and S2c, and neither was back-filled onto it~~ — **both were, in S3b.** |
-| **S4 — web reference** | `apps/web/src` | `contacts/client.ts`: the four `…Locked` methods become propose-and-publish; a new sweep path. `mls/group-lock.ts` `withGroupMlsLock` still spans it. `chat/client.ts` `applyPolledBatch` / `toEvent`: the `Proposal` result stops being a content-less system row. `chat/commit-outbox.ts` + `chat/mls-store.ts` `saveSnapshotWithCommitEntry`: ~~the retained epoch-N snapshot for the committer path~~ — **no retained snapshot is needed**; the committer path is stage -> publish -> verdict -> `mergeStagedSweep` / `abandonStagedSweep`, and the durable write is the one the outbox already does. `routes/Chat.tsx` members panel: the new states. **Plus the beacon half S3c did not build:** the throttled emit from a foregrounded client (`shouldEmitBeacon` -> `composeCommitterBeacon` -> the existing send path), a per-`(group, signature key)` observation store fed by the `committerBeacon` event the classifier already emits, and the `actingCommitterVerdict` evaluation with ranks re-derived through `Group.committerRank` at verdict time. |
-| **S5 — iOS mirror** | `apps/ios/Lakko` | `ChatRepository.swift` (`withCommitLock`, `persistCommitEntryThenSnapshotOrThrow`), `ChatClient.swift` (`applyFetchedMessages` / `toEvent`), `CommitOutbox.swift`, `UI/Chat/MembersSheet` + `ChatViewModel`. Plus the same beacon emit / store / fold as S4 — the `.committerBeacon` event is already surfaced with its `senderLeaf` and `createdAt` and is currently consumed and dropped. |
-| **S6 — Android mirror** | `apps/android/.../app` | `ChatRepository.kt` under the two-tier `groupLock` + `providerLock`, `ChatClient.kt`, `CommitOutbox.kt` (`prepareCrashSafeCommit`), `ui/chat/MembersSheet` + `ChatViewModel`. Plus the same beacon emit / store / fold as S4 — `IncomingChatEvent.CommitterBeacon` is already surfaced and currently consumed and dropped. |
-| **S7 — external-join convergence** | core + FFI + 3 clients | Decision 4: retire `pending_external_joins`, keep the FFI names. |
-| **S8 — docs** — **PARTLY DONE (2026-08-20, extended 2026-08-24)** | `docs/` | Flip this ADR's status; reconcile `known-gaps.md` G-38 residual 1 and `invariant-index.md`; CLAUDE.md ADR-table row + `lakko-mls` module-map row. Done 2026-08-20: this ADR reconciled to the built core, ADR-0022's three transfer-as-follow-up references, the UX spec's owner dead-end, the CLAUDE.md ADR row + `lakko-mls` module-map row, and **C-63** minted in `invariant-index.md` + `calls.md`. Done 2026-08-24: the S3b and S3c reconcile — this ADR's three stale claims corrected in place, [§ The beacon, as built](#the-beacon-as-built) + [§ Why not `lakko-presence`](#why-not-lakko-presence) + [§ The filter obligation](#the-filter-obligation-the-beacon-created-and-why-a-beacon-is-an-event-rather-than-a-drop) + the indexed-invariant argument added, and CLAUDE.md's `lakko-contacts` / `lakko-ffi-extension` / `lakko-mls` module-map rows, ADR-0045 table row and fuzz-target list brought up to date. **No new indexed invariant** — argued, not defaulted. Still owed: the status flip (the clients are not built) and `known-gaps.md` G-38 residual 1, which the maintainer holds. |
+| **S4a — web reference** — **LANDED `1de5fe7`** | `apps/web/src` | Admins propose, the **owner** sweeps — no beacon, no election, no takeover, which is correct by construction at rank 0 (nothing to elect with exactly one committer) and leaves an admin-only group waiting, the designed behaviour. `contacts/client.ts`: the four `…Locked` methods become propose-and-publish, gated on `usesProposalPath` so the no-role-table path is byte-for-byte unchanged. New `chat/sweep.ts` (the stage -> publish -> verdict -> merge/abandon orchestration over injected ports, host-testable with no wasm, no IndexedDB and no network) and `chat/pending-requests.ts` (the §4 state fold + the §5 copy). `chat/commit-outbox.ts` gains the sweep entry; `resolveOwedVerdict` is wired into ADR-0040's existing `sweepPendingCommits` seam rather than becoming a second restart path. ~~The retained epoch-N snapshot~~ — none is needed. `routes/Chat.tsx`: the members panel states and `Leave group`. |
+| **S4b — the beacon, web** — **LANDED `02f0037`** | `apps/web/src` | Ends the admin-only wait: candidates announce themselves and the lowest-ranked active one sweeps. `chat/committer-beacon.ts` — the emitter's foreground+throttle gate, the per-`(group, signature key)` observation store, and `decideActingCommitter` over the core's fold. **`composeCommitterBeacon` gets its first call site anywhere in the tree.** Ranks are re-derived through `Group.committerRank` **at verdict time**, never carried from receipt; age comes from the DS row, never a local clock; an unparseable row timestamp is **dropped rather than stored as fresh**, since storing it fresh would make this device defer forever to something that can never age out. Emission is a **dedicated interval on the chat component**, not the poll, because the web poll is event-driven while a beacon's whole meaning is a cadence. One S4a guarantee moved deliberately: the owed-verdict check now runs **ahead of** the rank check, because S4b made a demoted admin holding a durable staged sweep newly reachable and gating it behind the rank check would freeze that device permanently. |
+| **The send lock, web** — **LANDED `000d9f8`** | `apps/web/src` | Unplanned, and forced by the staged sweep. Both send methods take `withGroupMlsLock` across seal **and** publish. See [§ What the client sprints found](#what-the-client-sprints-found), item 3. |
+| **S5 + S6 — the iOS and Android mirrors** — **LANDED `1f230ab`** | `apps/ios/Lakko`, `apps/android/.../app` | The same shape on both: `CommitterSweep`, `CommitterBeacon`, `PendingRequests` beside the existing `CommitOutbox`, driven from `ChatRepository` / `ChatViewModel` / the members sheet, plus the send lock (Android's `GroupSend.kt` `runGroupSend`). **Both natives run a periodic long poll, so unlike web they satisfy the worst-case-poll constraint the beacon's freshness window is derived against** — the takeover works there as designed. Platform shapes that differ **by necessity, not by taste**: Android brackets the whole adjudication in one provider region, because between two applied rows the group is applied-but-not-persisted and a sibling group's restore must never observe that, and its sweep outbox entries carry a marker, because a sweep entry is written while the group deliberately sits **below** its recorded epoch — which the legacy reconciler reads as a torn write and would discard. iOS moved the lock seam up a layer, since its only lock primitive lives on the repository. Android also took the group lock on `broadcastControlToGroup`, **reversing a documented decision** in the ADR-0042/0043 subsystem that had declined it: that made it the one Android send path that could straddle an epoch, and a straddled routing secret means a member silently never learns the rotation and defers forever. |
+| **S7 — external-join convergence** — **NOT BUILT** | core + FFI + 3 clients | Decision 4: retire `pending_external_joins`, keep the FFI names. `Group::approve_external_join` still calls `add_member` directly and eager-merges, so it is the **one remaining live direct-commit path** in a role-table group and the last hole in G-38 residual 1. It is also now user-visible: `refuse_if_proposals_pending` refuses an approve while any request is pending — see [§ What the client sprints found](#what-the-client-sprints-found), item 6. |
+| **S8 — docs** — **PARTLY DONE (2026-08-20, extended 2026-08-24 and 2026-08-25)** | `docs/` | Flip this ADR's status; reconcile `known-gaps.md` G-38 residual 1 and `invariant-index.md`; CLAUDE.md ADR-table row + `lakko-mls` module-map row. Done 2026-08-20: this ADR reconciled to the built core, ADR-0022's three transfer-as-follow-up references, the UX spec's owner dead-end, the CLAUDE.md ADR row + `lakko-mls` module-map row, and **C-63** minted in `invariant-index.md` + `calls.md`. Done 2026-08-24: the S3b and S3c reconcile — this ADR's three stale claims corrected in place, [§ The beacon, as built](#the-beacon-as-built) + [§ Why not `lakko-presence`](#why-not-lakko-presence) + [§ The filter obligation](#the-filter-obligation-the-beacon-created-and-why-a-beacon-is-an-event-rather-than-a-drop) + the indexed-invariant argument added, and CLAUDE.md's `lakko-contacts` / `lakko-ffi-extension` / `lakko-mls` module-map rows, ADR-0045 table row and fuzz-target list brought up to date. **No new indexed invariant** — argued, not defaulted. Done 2026-08-25: the client reconcile — this ADR's ~ten "inert" / "the clients are not built" passages corrected in place rather than bulk-deleted (several carry reasoning that survives the correction), the S4a/S4b/S5/S6 rows above, [§ What the client sprints found](#what-the-client-sprints-found), the CLAUDE.md ADR-table row + the `lakko-contacts` / `lakko-mls` module-map rows, **C-64** minted in `invariant-index.md` + `calls.md` with C-61 and C-63 amended, `known-gaps.md` G-38 residual 1 re-scoped to the external-join path, and the UX spec reconciled against what was actually built. **Still owed: the status flip**, which is the maintainer's, and which this pass deliberately did not take. |
 
 **Four sprints landed that this table never had a row for. The first two were
 forced by the built core rather than chosen; the last two are the FFI back-fill and
@@ -2078,12 +2353,15 @@ the decision-2 beacon.**
 | **S2b — the staged sweep** — **LANDED `fe3de6c`** | `crates/lakko-mls` (**invariant #3**) | `stage_pending_proposals` / `has_staged_sweep` / `merge_staged_sweep` / `abandon_staged_sweep`; `commit_pending_proposals` becomes the stage-then-merge pair. The rollback decision 2 layer 4 requires, built as the **absence of the eager merge** rather than as a retained snapshot — see [§ The staged sweep, as built](#the-staged-sweep-as-built). **New client obligation:** reach a verdict; never leave a sweep staged. |
 | **S2c — ownership transfer + `owner_survives`** — **LANDED `e780952`** | `crates/lakko-mls` (**invariant #3**), and it mints **C-63** | ADR-0022's deferred follow-up, plus the commit-level never-orphan-the-owner rule that closes a pre-existing hole in `set_group_roles`. See [§ Never leave the group without an owner in it](#never-leave-the-group-without-an-owner-in-it). |
 | **S3b — the FFI back-fill** — **LANDED `6c77cd6`** | `crates/lakko-ffi-uniffi` + `crates/lakko-ffi-wasm` | The staged pair and ownership transfer on both surfaces, in lock-step: `stagePendingProposals` / `hasStagedSweep` / `mergeStagedSweep` / `abandonStagedSweep`, `transferOwnership` / `proposeOwnershipTransfer` / `OutgoingOwner`. The S4 prerequisite this section previously recorded as missing. |
-| **S3c — the decision-2 committer beacon** — **LANDED `94825ec` core, `94da492` FFI, `5d6af94` + `f53d11a` the client filters** | `crates/lakko-contacts` (a new envelope kind, no `lakko-mls` change — **invariant #3 untouched**), both FFI surfaces + `crates/lakko-ffi-extension`, and six client receive paths | Variant 1, the maintainer's chosen heartbeat: a field-less 27-byte beacon envelope, the pure `acting_committer_verdict` fold, the `should_emit_beacon` throttle, four constants, `Group::committerRank` for ranking a beacon's sender, a fuzz target, and the service-envelope filter arms that keep a beacon off the timeline and out of a notification. See [§ The beacon, as built](#the-beacon-as-built). **The emitter and the observation store are NOT part of it** — they are S4-S6, and without them the mechanism is inert. |
+| **S3c — the decision-2 committer beacon** — **LANDED `94825ec` core, `94da492` FFI, `5d6af94` + `f53d11a` the client filters** | `crates/lakko-contacts` (a new envelope kind, no `lakko-mls` change — **invariant #3 untouched**), both FFI surfaces + `crates/lakko-ffi-extension`, and six client receive paths | Variant 1, the maintainer's chosen heartbeat: a field-less 27-byte beacon envelope, the pure `acting_committer_verdict` fold, the `should_emit_beacon` throttle, four constants, `Group::committerRank` for ranking a beacon's sender, a fuzz target, and the service-envelope filter arms that keep a beacon off the timeline and out of a notification. See [§ The beacon, as built](#the-beacon-as-built). **The emitter and the observation store were NOT part of it** — they landed in S4b / S5 / S6, and until they did the mechanism was inert. |
 
 The mute fix (`create_application_message` parking the pending set) rode along in
 `fe3de6c` and needed no sprint of its own: it touches one send path, and
-**S4-S6 inherit it with no client work** — see
+**the clients inherited it with no work** — see
 [§ Storing a proposal is not free: it muted the whole group](#storing-a-proposal-is-not-free-it-muted-the-whole-group).
+The send path nevertheless needed a **client-side** fix of its own, for a different
+reason the core cannot address: `000d9f8` above, and
+[§ What the client sprints found](#what-the-client-sprints-found) item 3.
 
 ~~**S3b — the FFI back-fill — is a prerequisite for S4 and does not exist yet.**~~
 **S3b — LANDED `6c77cd6`.** The claim that followed here — *"neither
@@ -2109,24 +2387,35 @@ three platforms) before a beacon could ride the journal without appearing as a c
 bubble. See [§ The filter obligation the beacon
 created](#the-filter-obligation-the-beacon-created-and-why-a-beacon-is-an-event-rather-than-a-drop).
 It also predicted `lakko-presence` might serve; it does not, and
-[§ Why not `lakko-presence`](#why-not-lakko-presence) says why. **What remains
+[§ Why not `lakko-presence`](#why-not-lakko-presence) says why. ~~**What remains
 unbuilt is the part that makes any of it do something: the emitter and the
-observation store.** `composeCommitterBeacon` has **zero production call sites** —
-verified against the tree, it appears under `apps/` only in tests — so no beacon is
-ever sent, and nothing calls `actingCommitterVerdict` or `shouldEmitBeacon` at all.
-The plumbing is complete and the mechanism is **inert**; a reader who takes "the
-beacon landed" to mean the election works has mis-read it. That work is S4-S6.
-**Variant 2 needs no new sprint** — the stagger is client orchestration inside
-S4-S6, and it remains the documented fallback.
+observation store.**~~ **Both landed in S4b / S5 / S6** (`02f0037`, `1f230ab`):
+`composeCommitterBeacon` now has a production call site on every client
+(`apps/web/src/routes/Chat.tsx`, `apps/ios/Lakko/Chat/ChatRepository.swift`,
+`apps/android/.../chat/ChatRepository.kt`), each stores observations keyed on the
+sender's signature key, and each drives `actingCommitterVerdict` at sweep time.
+The warning this paragraph carried — *a reader who takes "the beacon landed" to
+mean the election works has mis-read it* — has **spent its purpose and is retained
+as history, not as a caution**; the election works, subject to the caveat that has
+never been about the wiring: **a heartbeat removes the wait, not the race**, which
+is why the stand-down and the staged rollback are built alongside it rather than
+instead of it. **Variant 2 needed no new sprint** — the stagger would have been
+client orchestration inside the same sprints — and it remains the documented
+fallback if the beacon's journal-litter and activity-schedule cost proves worse in
+practice than on paper.
 
-**The outbox/lock layer is the least symmetric surface and will cost the most per
-platform.** Web has `withGroupMlsLock` plus an atomic IndexedDB transaction and no
-single create+persist+publish wrapper; iOS has `withCommitLock` (a `@MainActor`
-task chain) plus an ordered, non-atomic two-step persist; Android has the two-tier
-`groupLock` + `providerLock` with `prepareCrashSafeCommit` inside the provider lock
-and the publish outside it. Any change to the commit sequence has to be expressed
-three different ways — budget for that rather than assuming the web reference
-translates.
+**The outbox/lock layer is the least symmetric surface and ~~will cost~~ cost the
+most per platform.** Web has `withGroupMlsLock` plus an atomic IndexedDB transaction
+and no single create+persist+publish wrapper; iOS has `withCommitLock` (a
+`@MainActor` task chain) plus an ordered, non-atomic two-step persist; Android has
+the two-tier `groupLock` + `providerLock` with `prepareCrashSafeCommit` inside the
+provider lock and the publish outside it. Any change to the commit sequence has to
+be expressed three different ways — budget for that rather than assuming the web
+reference translates. **This held, and the divergences it predicted are exactly the
+ones the mirrors recorded** (the S5+S6 row above): Android's single-provider-region
+adjudication and its sweep-entry marker, and iOS's lock seam moved up a layer. None
+of the three is a stylistic choice; each falls out of that platform's existing
+durability shape.
 
 ---
 
@@ -2235,7 +2524,22 @@ translates.
   group; every peer now refuses that commit, whether or not anyone uses the
   transfer API. Indexed as **C-63**.
 - **Two features fall out that the product did not have:** a member can leave a
-  group, and an owner can hand one on.
+  group, and an owner can hand one on. **Neither has reached every client.**
+  `Leave group` is on the **web** members panel only — hidden for the owner, whose
+  departure the core refuses fail-closed — and iOS and Android built the rest of the
+  membership surface without it. Ownership transfer is on both FFI surfaces with **no
+  affordance anywhere**. So both features exist in `lakko-mls`, one exists on one
+  client, and the owner dead-end the transfer was built to close is still open to
+  every user.
+- **The election is real, not a design.** All three clients emit a throttled beacon
+  from a foregrounded chat screen, store the observations and fold them at sweep
+  time, so an admin-only group is served by whichever admin is running the app
+  rather than waiting on an absent owner. **With one honest platform asymmetry:**
+  the freshness window is derived against a worst-case *poll* interval, and the web
+  client has no periodic poll at all (its poll is event-driven — mount, a user
+  action, the Refresh button), so a takeover there can lag well past the window.
+  Both natives long-poll and do meet the constraint. The mechanism is built
+  everywhere and **underperforms its own design on web**.
 
 **Negative / new risks (Option B, as built).**
 
@@ -2247,8 +2551,32 @@ translates.
 - **A new client obligation that can wedge a group: reach a verdict.** A staged
   sweep freezes that group's own membership operations, and the staged commit is
   **durable**, so a client that stages and never adjudicates leaves membership
-  frozen across restarts. This is the sharpest thing S4-S6 have to get right, and
-  it is new since this ADR was written.
+  frozen across restarts. This was the sharpest thing the client sprints had to get
+  right, and **all three discharge it the same way**: every sweep adjudicates what
+  it staged, an owed verdict is resolved at restart through ADR-0040's existing
+  `sweepPendingCommits` seam rather than a second restart path, and the owed-verdict
+  check runs **ahead of** the acting-committer rank check — because a demoted admin
+  holding a durable staged sweep would otherwise be frozen permanently, and
+  re-publishing is safe (peers refuse a demoted author's commit, so it loses and is
+  abandoned, which is the unwedge). An unreadable verdict deliberately **leaves the
+  sweep staged**: merging on an unread verdict is the eager shape this arc exists to
+  remove, and abandoning would discard a commit already on the wire.
+- **A send is not blocked by a pending commit, which turns an epoch straddle from a
+  race into a certainty for the duration of a verdict read.** Closed on all three by
+  serializing seal-and-publish under the per-group MLS lock — but only the **local**
+  half; see [§ What the client sprints found](#what-the-client-sprints-found) item 3
+  for the bound and what closing the rest would cost.
+- **Any client discipline seamed onto a direct-commit call site has to be re-seamed
+  onto the sweep**, and C-61 is the worked example: a removal that becomes a
+  proposal seals a rotated push-routing secret at an epoch the target can still
+  open. Found and fixed during the client sprints, from both ends
+  ([§ What the client sprints found](#what-the-client-sprints-found) item 4), and
+  recorded here because it is a *class*, not an incident.
+- **Concurrent role changes are lossy where concurrent adds compose.** RFC 9420
+  permits one `GroupContextExtensions` proposal per commit, so a sweep silently
+  discards the second, and `ProposalKind::RoleChange` carries no payload for the
+  client to reconstruct from. Web and iOS refuse the second and say so; **Android
+  does not** ([§ Open questions](#open-questions)).
 - **Membership can wait indefinitely** when no candidate is running the app — a
   visible, honest wait replacing a silent fork, but still a behaviour that did not
   exist before, and one ownership transfer narrows rather than removes.
@@ -2263,13 +2591,14 @@ translates.
   **Corrected: the variant is chosen (variant 1, the heartbeat) and its core half
   is built** — the beacon envelope, the `acting_committer_verdict` fold and the
   `should_emit_beacon` throttle are in `lakko-contacts` and on both FFI surfaces
-  ([§ The beacon, as built](#the-beacon-as-built)). **The sweep trigger still does
-  not fire**, for a different reason than this bullet gave: not because the core
-  lacks the decision, but because **nothing calls it**. `composeCommitterBeacon`
-  has zero production call sites, so no beacon is ever emitted; nothing stores an
-  observation; nothing evaluates the fold. A `waiting` request still ends only
-  when a client sprint builds the emitter, the observation store and the
-  evaluation — S4-S6.
+  ([§ The beacon, as built](#the-beacon-as-built)). ~~**The sweep trigger still does
+  not fire** … `composeCommitterBeacon` has zero production call sites~~ —
+  **corrected again, and this time the bullet closes.** The emitter, the observation
+  store and the fold landed on all three clients (`02f0037`, `1f230ab`), so a
+  `waiting` request ends when any candidate next has the group open. **What survives
+  of this bullet is the platform asymmetry above, not the mechanism:** the beacon's
+  freshness window is derived against a worst-case poll and web has no periodic poll,
+  so a web-only group's takeover can lag past it.
 
 **Neutral (Option B, as built).**
 
@@ -2280,9 +2609,14 @@ translates.
   seeded one since ADR-0022, so no freshly created group reaches that path.
 - The four direct-commit paths still exist and still merge eagerly, so every
   caller that has not migrated behaves byte-for-byte as before. ADR-0045 forbids
-  keeping them permanently; they go with S4-S7.
-- Chat sends are unaffected by a pending proposal, and unaffected by a staged
-  sweep.
+  keeping them permanently. **Three of the four have no production caller left in a
+  role-table group** — add, remove and role-change all propose on all three clients
+  — and the fourth, `approve_external_join`, goes with **S7**.
+- Chat sends are unaffected by a pending proposal, and — for *decryptability* —
+  unaffected by a staged sweep. **The second half of that sentence was true of the
+  core and false of the clients**, and is what item 3 of
+  [§ What the client sprints found](#what-the-client-sprints-found) is about: not
+  being *blocked* by a staged sweep is exactly what lets a send straddle its epoch.
 
 <details>
 <summary><strong>The original Option-C consequences, kept for the record</strong></summary>
@@ -2370,38 +2704,62 @@ decision 2 rather than here.
   a successful send. The one deliberate **non**-refusal is a group with no role
   table, which keeps direct commits — the legacy/open case ADR-0022 already
   defined, and one `Group::create` cannot produce.
+
+  **The clients are fail-closed at their own new decision points too**, and each
+  refusal costs the *cheap* thing: an unreadable acting-committer verdict defers
+  (a sweep attempt) rather than acting on a view of who else is running that this
+  device could not read; the stand-down stands down on any unapplied row (one
+  retry) rather than staging on a possible commit (a commit every peer drops); an
+  unreadable journal verdict leaves the sweep staged rather than merging on an
+  unread verdict or discarding a commit already on the wire; a beacon is not emitted
+  when this device cannot establish that it is a candidate; and a sealed-but-unsent
+  message never leaves the device if the seal's durable persist failed.
 - **#5 (the social graph is not materialised on the server).** **Option C:
   untouched.** **Option A: a small erosion** — a per-group `current_epoch` row is
   new per-group server state (a commit-rate signal per group) where today the DS
   holds only opaque rows.
 - **Invariant-index touchpoints — this claim is now withdrawn.** ~~This ADR
-  proposes **no** new indexed `I-` / `C-` / `T-` entry.~~ It mints **C-63**: *a
-  commit must never leave the group with an owner who is not a member of it*
-  (`docs/security/calls.md` + `docs/security/invariant-index.md`, Quick stats
-  62 -> 63). It earns an index row on merit rather than as bookkeeping for a new
-  feature: the hole it closes has been reachable through `set_group_roles` since
-  ADR-0022, is permanent when reached, and is refused on **every peer**
-  independently of whether anyone calls `transfer_ownership`. It also resolves
-  **G-38 residual 1**, which stays a free-form known-gaps entry, matching how
-  G-35 / G-36 / G-37 were kept — that file is the maintainer's and is untouched
-  here.
+  proposes **no** new indexed `I-` / `C-` / `T-` entry.~~ It mints **two**.
+  **C-63**: *a commit must never leave the group with an owner who is not a member
+  of it* (`docs/security/calls.md` + `docs/security/invariant-index.md`). It earns
+  an index row on merit rather than as bookkeeping for a new feature: the hole it
+  closes has been reachable through `set_group_roles` since ADR-0022, is permanent
+  when reached, and is refused on **every peer** independently of whether anyone
+  calls `transfer_ownership`. **What the client sprints changed about C-63 is that
+  two of its three enforcement layers acquired production callers**: layer (b), the
+  sweep-side exclusion, is live on all three clients now that a sweep exists at all,
+  and layer (c), the receipt boundary, was already live through
+  `processIncomingVerifyingRoles`. Layer (a), the authoring pre-check, still has
+  **no production caller anywhere** — no client builds an ownership-transfer
+  affordance — which is a UX gap and not a weakening, since (c) is the boundary and
+  does not trust (a).
 
-  **The decision-2 beacon (S3c) mints nothing, and that was argued rather than
-  defaulted** — see
-  [§ Does the beacon earn an indexed invariant?](#does-the-beacon-earn-an-indexed-invariant-not-yet--and-the-trigger-is-named).
-  Short form: the property is real and breakable, but the mechanism is **inert**
-  (no emitter, no fold caller), so there is no live enforcement point to pin, and
-  the index describes live properties. Mint it with S4-S6, at the first client that
-  actually emits and folds. **The beacon's own invariant footprint:** **#1** and
-  **#5** untouched (the payload is field-less — no identity, no timestamp, no
-  server-visible artifact of any kind); **#2** holds — the beacon rides an MLS
-  application message, so the DS sees ciphertext and parses nothing, exactly as it
-  does for the ADR-0042 routing envelope; **#3 untouched by this sprint** — the
-  beacon lives in `lakko-contacts`, and `Group::committerRank` reads the existing
-  `0xFF02` role table through an accessor rather than changing the state machine;
-  **#4** — the codec is bounded and fail-closed (domain, then exact length, then
-  version), and every client filter arm falls **through** to the chat parser on an
-  unrecognised version rather than swallowing the row.
+  **C-64**: *the committer election and the staged sweep decide from authenticated
+  state, and no epoch advances until the journal has ordered it* (Quick stats
+  63 -> 64). ~~The decision-2 beacon (S3c) mints nothing~~ — that was argued rather
+  than defaulted and it was **argued against a condition that has since lapsed**;
+  see
+  [§ Does the beacon earn an indexed invariant?](#does-the-beacon-earn-an-indexed-invariant-yes--and-it-is-minted-as-c-64).
+  Short form: the deferral rested on the mechanism being **inert** and the index
+  describing live properties, with the trigger named as *the first client that emits
+  a beacon and folds a verdict*; S4b is that client and S5/S6 are the other two, and
+  the mint is scoped to the election plus the sweep exactly as that section
+  predicted a later mint would have to be. **The beacon's own invariant footprint,
+  unchanged by the clients:** **#1** and **#5** untouched (the payload is field-less
+  — no identity, no timestamp, no server-visible artifact of any kind); **#2** holds
+  — the beacon rides an MLS application message, so the DS sees ciphertext and
+  parses nothing, exactly as it does for the ADR-0042 routing envelope; **#3
+  untouched by the beacon** — it lives in `lakko-contacts`, and
+  `Group::committerRank` reads the existing `0xFF02` role table through an accessor
+  rather than changing the state machine; **#4** — the codec is bounded and
+  fail-closed (domain, then exact length, then version), and every client filter arm
+  falls **through** to the chat parser on an unrecognised version rather than
+  swallowing the row.
+
+  Both entries also bear on **G-38 residual 1**, which stays a free-form known-gaps
+  entry, matching how G-35 / G-36 / G-37 were kept. It is now **closed for the chat
+  membership paths and open for the external-join one** — see
+  [§ What Option B does not fix](#what-option-b-does-not-fix) and the S7 row.
 
 **Flag through `lakko-security` before merging any option.** Option C touches the
 MLS commit publish ordering and the ADR-0040 durability argument. Option A touches
@@ -2415,17 +2773,51 @@ crypto review.**
 
 ## Open questions
 
-- **The beacon has no emitter, and this is the one thing a reader must not
-  mis-read.** `composeCommitterBeacon` has **zero call sites under `apps/` outside
-  tests**, and nothing calls `actingCommitterVerdict` or `shouldEmitBeacon` at all.
-  So no beacon is ever sent, no observation is ever stored, and the fold is never
-  driven: the plumbing is complete on four surfaces and the **mechanism is inert**.
-  It belongs to the client sprints (S4-S6), which must build three things together —
-  the throttled emit from a **foregrounded** client (the C-59 obligation the core
-  cannot check), a per-`(group, signature key)` observation store keyed on the
-  signature key with the DS row's `created_at`, and the fold evaluated at verdict
-  time with ranks re-derived through `Group::committerRank` against the current role
-  table.
+- **~~The beacon has no emitter~~ — ANSWERED; the three things it named are built
+  on all three clients.** The throttled emit from a **foregrounded** client (the
+  C-59 obligation the core cannot check), the per-`(group, signature key)`
+  observation store fed by the DS row's `created_at`, and the fold evaluated at
+  verdict time with ranks re-derived through `Group::committerRank` against the
+  current role table — `02f0037` on web, `1f230ab` on both natives, and all three
+  are pinned as **C-64**. **What is left of this item is a platform gap, not a
+  missing part:** the beacon's freshness window is `2 × interval + worst-case poll`,
+  and the web client has **no periodic poll at all** — mount, a user action and the
+  Refresh button drive it — so on web a beacon can be observed well after the window
+  it was sized for and a takeover lags. Both natives long-poll and meet the
+  constraint. Fixing it means either giving the web chat a periodic poll or deriving
+  its window from what it actually does; neither is designed here, and the honest
+  statement in the meantime is that the mechanism **underperforms its own design on
+  one of three platforms**.
+- **`approve_external_join` is the last live direct-commit path, and it is now
+  user-visible.** S7 is unbuilt, so a role-table group's admin approving a join
+  while any membership request is pending is **refused** by
+  `refuse_if_proposals_pending` — correct and fail-closed, and a dead end nobody
+  designed. It is also the remaining half of G-38 residual 1: two admins approving
+  two different joiners against the same epoch still fork, exactly as before this
+  ADR. Everything S7 needs exists (the proposal store, the gate's deliberately
+  separate external-join arm, the sweep); what it needs deciding is what `Approve`
+  *means* once it stops meaning "added", which the UX spec §7 already drafts.
+- **Android does not refuse a second concurrent role change; web and iOS do.** The
+  loss is real and silent — RFC 9420 permits one `GroupContextExtensions` proposal
+  per commit, so the sweep keeps one and drops the other, and
+  `ProposalKind::RoleChange` carries no payload for the client to notice with.
+  `Group::propose_group_roles` does not refuse it either, so **the natural fix is
+  arguably the core rather than the third client**: a refusal there would hold for
+  every caller and could not drift between platforms, at the cost of a rule that is
+  about client ergonomics rather than protocol safety. Recorded as a decision, not
+  scheduled.
+- **Android surfaces a received proposal as a timeline row, and never stamps an
+  observation for one.** UX §10 treats a membership request as a panel signal, and
+  web and iOS do; Android's `ChatClient` maps `ProcessedMessage.Proposal` to a
+  `System` row in the message list instead. The consequence runs deeper than a stray
+  bubble: `recordPendingRequestObservation`'s only production caller there is the
+  own-request path, so a request that arrives from **someone else** is never given a
+  DS timestamp, and the §4 quiet window — which exists precisely so a request that
+  resolves in milliseconds never flashes an annotation — silently never applies to
+  it. Pre-existing on the poll path; the sweep path was deliberately made to behave
+  identically rather than diverge, so the inconsistency is now uniform on that client
+  instead of uniform across the three. Closing it needs an event variant plus a sink,
+  which is a change of its own.
 - **Android carries two `looksLikeCommitterBeacon` functions**, one in
   `me.lakko.app.chat.ChatClient` (3-arg: bytes, length, decoder lambda) and one in
   `me.lakko.app.push.PushServiceEnvelopeFilter` (2-arg: bytes, length — the peek
@@ -2480,21 +2872,28 @@ crypto review.**
   as correct-by-construction has mis-read it.
 
   **What the choice costs in scope**, which the ADR must not leave implicit: variant
-  2 needed no new sprint, because its stagger is client orchestration inside S4-S6.
-  ~~Variant 1 is a sprint that does not yet exist in the decomposition~~ — **it is
-  now S3c in [§ Blast radius, per sprint](#blast-radius-per-sprint), and its core
-  half has LANDED** (`94825ec` / `94da492`, with the client filter arms in
-  `5d6af94` / `f53d11a`). It needed the predicted beacon envelope kind in
-  `lakko-contacts` and **both** FFI surfaces; `lakko-presence` (exposed on wasm
-  only, no UniFFI counterpart, no caller under `apps/web/src`) was evaluated and
-  **not** used, for reasons sharper than its unwiredness — see
+  2 needed no new sprint, because its stagger would have been client orchestration
+  inside the client sprints. ~~Variant 1 is a sprint that does not yet exist in the
+  decomposition~~ — **it is S3c in
+  [§ Blast radius, per sprint](#blast-radius-per-sprint), and it has LANDED end to
+  end**: the core and both FFI surfaces in `94825ec` / `94da492` with the client
+  filter arms in `5d6af94` / `f53d11a`, and the emitter, the observation store and
+  the fold in `02f0037` (web) and `1f230ab` (both natives). It needed the predicted
+  beacon envelope kind in `lakko-contacts` and **both** FFI surfaces;
+  `lakko-presence` (exposed on wasm only, no UniFFI counterpart, no caller under
+  `apps/web/src`) was evaluated and **not** used, for reasons sharper than its
+  unwiredness — see
   [§ Why not `lakko-presence`](#why-not-lakko-presence). It also needed one thing
   this paragraph did not predict: a service-envelope filter arm on **six** client
   receive paths, because a beacon otherwise renders as a chat bubble through
-  `parse_body`'s lossy-UTF-8 legacy fallback. **The beacon-plus-freshness fold is in
-  the core, but nothing drives it and nothing emits a beacon**, so S4 still cannot
-  elect a committer — what it now inherits is a complete, tested, FFI-exposed
-  mechanism with no caller, rather than a design.
+  `parse_body`'s lossy-UTF-8 legacy fallback. ~~**The beacon-plus-freshness fold is
+  in the core, but nothing drives it and nothing emits a beacon**, so S4 still cannot
+  elect a committer~~ — **it does now, on all three clients.** The scope cost the
+  choice actually carried is one core sprint, one FFI sprint, six filter arms and a
+  per-client emitter-plus-store; and one thing nobody priced, recorded because it is
+  the least obvious of them: **an emitter is a timer, and a timer on the send path
+  widens every hazard that path already had** — which is how `000d9f8` came to be
+  written.
 - **~~The retry budget and its user-visible exhaustion state.~~ Answered — there is
   no retry budget.** The revised decision 2 removes both the cap and the terminal
   failure it produced: a request waits indefinitely rather than exhausting a budget,
@@ -2517,7 +2916,9 @@ crypto review.**
   `abandon_staged_sweep` leave the joiner's `KeyPackage` usable for the winner's
   sweep? The proposal survives abandonment by construction (the store empties on
   **merge**), so the answer should be yes — but it is asserted, not tested.
-  **Answer it before S4.**
+  ~~**Answer it before S4.**~~ **S4 shipped without it being answered**, which is
+  where it now sits: still asserted, still untested, and now load-bearing on three
+  clients rather than none.
 - **The approve-path retry and the stale proposal ref.** ~~ADR-0027's pending
   external joins are epoch-bound and in-memory. After the replay the retained
   proposal is stale~~; **decision 4 dissolves the in-memory half** — after S7 an
@@ -2534,26 +2935,41 @@ crypto review.**
   is a `PublisherGroup` commit. ADR-0040 explicitly scoped itself to the four chat
   paths and noted the same parity question; this ADR inherits it, and
   [§ What Option B does not fix](#what-option-b-does-not-fix) item 5 restates it.
-- **~~Whether Option C′ ships regardless.~~ Answered by the choice of B** — the
-  journal-head re-read is promoted to a required step of the committer's
-  stand-down rule, so it ships as part of S4-S6 rather than as a companion. It is
-  **client orchestration and does not exist yet**: nothing in the core performs
-  it.
+- **~~Whether Option C′ ships regardless.~~ Answered by the choice of B, and now
+  built** — the journal-head re-read is a required step of the committer's
+  stand-down rule, and it exists on all three clients immediately before staging.
+  ~~It is client orchestration and does not exist yet~~; it is client orchestration
+  and it does. Nothing in the core performs it, by design: the core cannot see the
+  journal.
 - **Whether `epoch_of_message` should gain a `content_type` sibling on the FFI.**
   ~~Option C's verdict step needs "is this row a Commit framed at N"~~ — **and so
   does B's**, because the staged sweep's verdict is the same question asked of the
   same journal. Today only the epoch is exposed
   (`crates/lakko-ffi-uniffi/src/lib.rs`, `crates/lakko-ffi-wasm/src/mls.rs`).
-  Epoch alone is a *sufficient* signal when combined with "this row is not one of
-  our own artifacts", but a `contentTypeOfMessage` peek would make the check exact
-  rather than inferential. A small, purely additive FFI addition — worth deciding
-  explicitly rather than by omission, and now **on S4's critical path** rather
-  than hypothetical.
+  ~~Epoch alone is a *sufficient* signal when combined with "this row is not one of
+  our own artifacts"~~ — **that answer was wrong and wrong in the dangerous
+  direction; see
+  [§ What the client sprints found](#what-the-client-sprints-found) item 1.** The
+  clients sidestepped it entirely by asking a question that needs no
+  discrimination — apply the rows below our own commit, then ask whether the epoch
+  moved — so **the addition is no longer on any critical path**. It survives as a
+  smaller, genuinely optional question: a `contentTypeOfMessage` peek would let the
+  **stand-down** discriminate instead of standing down conservatively on any
+  unapplied row (item 2). An optimisation, decided explicitly rather than by
+  omission.
 - **The external crypto review and the `lakko-security` pass on the built core.**
-  This ADR requires both for the invariant-#3 change, and neither has happened.
-  Four sprints of MLS state-machine change are in the tree unreviewed. **The
-  maintainer's call when to run them** — before S4, or once the clients are
-  wired — but it is not a question that closes by itself.
+  This ADR requires both for the invariant-#3 change, and **neither has happened on
+  any sprint** — this is the largest open item on the list, and it grew rather than
+  shrank: what is unreviewed is now six sprints of MLS state-machine change **plus**
+  three client implementations of the authorisation, ordering and rollback
+  disciplines that change depends on. **The maintainer's call when to run them** —
+  the ADR's own earlier framing offered "before S4, or once the clients are wired",
+  and the clients are wired. Two specific things a review should be pointed at,
+  because the client sprints created them: the **send lock** (`000d9f8` and its two
+  native mirrors), which is an MLS-ordering discipline expressed three different
+  ways, and the **C-61 re-seam** onto the sweep, which is a security ordering rule
+  that moved call sites (Android's commit message asks for exactly this look). It is
+  not a question that closes by itself.
 - **The stale ADR index.** `docs/adr/README.md` carries a duplicated `## Index`
   section and both copies stop at ADR-0015. Out of scope here; flagged for a
   separate docs pass.
@@ -2681,9 +3097,7 @@ The heartbeat, variant 1. Four commits; the core carries no `lakko-mls` change, 
   `routes/Chat.tsx`, `apps/android/.../chat/ChatClient.kt` + `ChatRepository.kt`,
   `apps/ios/Lakko/Chat/ChatClient.swift` + `ChatRepository.swift`. Plus the
   exhaustive-switch repair in both `MultiJoinerCall` dispatchers.
-- **No emitter.** Nothing under `apps/` calls `composeCommitterBeacon` outside
-  tests, and `actingCommitterVerdict` / `shouldEmitBeacon` have no client call
-  sites at all.
+- ~~**No emitter.**~~ True when written; see the next section.
 
 **Gates, verified firsthand by the maintainer on this tree** (this docs pass ran
 `audit-index-check` and `spec-check` only, both clean): `cargo test -p lakko-contacts`
@@ -2691,6 +3105,57 @@ The heartbeat, variant 1. Four commits; the core carries no `lakko-mls` change, 
 139; web `tsc` clean with vitest 622; Android `:app:compileDebugKotlin` BUILD
 SUCCESSFUL with 555 tests and 0 failures; iOS `xcodebuild` BUILD SUCCEEDED with
 383/383 excluding the two dockerised-SFU cases.
+
+### What the clients built (2026-08-25)
+
+Four commits, no core change in any of them. Where the natives differ from the web
+reference the difference is named in the S5+S6 row of
+[§ Blast radius, per sprint](#blast-radius-per-sprint) and is forced by that
+platform's durability shape, not chosen.
+
+- `apps/web/src/chat/sweep.ts` + `pending-requests.ts` (`1de5fe7`),
+  `committer-beacon.ts` (`02f0037`) — the web reference. The orchestration is
+  expressed over injected ports so the whole of it runs in the plain `node` vitest
+  environment: no IndexedDB, no wasm, no network. `apps/web/src/contacts/client.ts`
+  supplies the adapters and is the sweep module's only production caller.
+- `apps/ios/Lakko/Chat/{CommitterSweep,CommitterBeacon,PendingRequests}.swift` and
+  `apps/android/.../chat/{CommitterSweep,CommitterBeacon,PendingRequests,GroupSend}.kt`
+  (`1f230ab`) — the mirrors, same port-injected shape.
+- The emitters, which are what ended the beacon's inertness:
+  `apps/web/src/routes/Chat.tsx` (a dedicated `setInterval` on the chat component —
+  **not** the poll, because the web poll is event-driven while a beacon's meaning is
+  a cadence), `apps/ios/Lakko/UI/Chat/ChatViewModel.swift` (a `Timer` started and
+  stopped with screen visibility, where `isForeground` requires **both** the screen
+  visible **and** `UIApplication.shared.applicationState == .active`, since neither
+  implies the other), and
+  `apps/android/.../ui/chat/ChatScreen.kt` (a `repeatOnLifecycle(RESUMED)` loop —
+  the lifecycle scope **is** the foreground gate, and the flag is still passed
+  through explicitly so the rule is written down in one testable place).
+- The send lock: `000d9f8` (web, both send methods deduplicated into one
+  `sealAndPublish` under `withGroupMlsLock`) and `1f230ab`
+  (`GroupSend.kt` `runGroupSend` on Android; the iOS twin on the repository).
+
+**Two things about how it was verified are worth keeping**, because they are what
+distinguishes a test that passes from a test that discriminates. Every claim of
+discrimination in these commits was **measured by running a probe and recording its
+failure**, then reverting the probe — hoisting the Welcome above the verdict, merging
+instead of abandoning on a loss, putting the owed-verdict check back behind the rank
+check, deleting the foreground gates, carrying a rank over from receipt, removing the
+send lock (which reproduces both straddle directions), and re-keying either lock
+globally (which deadlocks, so the per-group keying is load-bearing on all three). And
+the oracles avoid simulating the property under test: the iOS straddle oracle drives
+a **real second MLS member** replaying the recorded journal, so zero past-epoch
+retention is whatever `lakko-mls` actually configures rather than what a double
+asserts; Android's concurrency tests run on `Dispatchers.IO` with real gates, never a
+confined dispatcher, because an earlier sprint found a confined dispatcher masking a
+genuine defect.
+
+**Gates, as recorded in the commits** (not re-run by this docs pass, which ran
+`audit-index-check` and `reuse` only): web `tsc --noEmit` clean with vitest 706
+across 46 files and `vite build` ok; iOS `xcodebuild` BUILD SUCCEEDED with 432 tests
+and 0 failures excluding the two pre-existing dockerised-SFU cases; Android
+`:app:compileDebugKotlin` BUILD SUCCESSFUL and `:app:testDebugUnitTest` 598 tests
+with 0 failures and 0 errors, the two gates run separately.
 
 ### Prior art and the recon's sources
 

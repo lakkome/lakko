@@ -53,6 +53,26 @@
  *    `an admin defers to a fresh beacon from a lower rank`. The admin arm is
  *    the whole of S4b: an admin-only group used to wait indefinitely.
  *
+ * 6. **`a chat message ordered below our own commit is SURFACED, not
+ *    swallowed`** — the adapter half of a defect that WAS live. The port
+ *    implementation read `group.processIncomingVerifyingRoles(identity,
+ *    payload)` and threw the result away, so every row the verdict consumed
+ *    (and the shared cursor then moved past) lost its plaintext silently. With
+ *    the discard restored:
+ *
+ *        FAIL … > the verdict apply surfaces the rows it consumes > a chat
+ *        message ordered below our own commit is SURFACED, not swallowed
+ *        AssertionError: expected [] to have a length of 1 but got +0
+ *
+ * 7. **`a row whose apply THROWS surfaces nothing`** — with the surfacing
+ *    hoisted ABOVE the apply, so a skipped row leaks an event for a message
+ *    that was never decrypted:
+ *
+ *        FAIL … > a row whose apply THROWS surfaces nothing
+ *        AssertionError: expected [ { kind: 'system', …(3) } ] to deeply equal []
+ *
+ *    plus a second failure on the case above (two events for one row).
+ *
  * BOUNDARY GUARD, not a discriminator: `the sweep never runs on a legacy
  * group`. It passes under every probe above; its job is to catch a future
  * change that let the sweep reach a group whose core would refuse it.
@@ -78,11 +98,24 @@ vi.mock("../wasm", () => ({
         asBytes: (): Uint8Array => new Uint8Array([0xbb, pk[0] ?? 0]),
       }),
     },
+    // ADR-0045 — the sweep's verdict apply now routes an applied row through
+    // `chat/client.ts`'s `toEvent`, which reaches the chat-envelope parser for
+    // an Application message. The other three pre-filters in that ladder
+    // (call signaling, the push-routing secret, the committer beacon) all
+    // short-circuit on the first byte or the length before touching wasm, so
+    // this is the only export they need.
+    parseBodyEnvelope: (bytes: Uint8Array) => ({
+      kind: "chat",
+      text: new TextDecoder().decode(bytes),
+      attachmentCount: 0,
+      free: (): void => {},
+    }),
   }),
 }));
 
 import { ContactsClient } from "./client";
 import type { ActingCommitter } from "../chat/committer-beacon";
+import type { IncomingChatEvent } from "../chat/client";
 import type { DsClient } from "../ds/client";
 import type { DiscoveryClient } from "../discovery/client";
 import type {
@@ -267,6 +300,10 @@ afterEach(() => {
 
 const CURSOR = { read: (): number => 0, advance: (): void => {} };
 const NOOP = (): void => {};
+/** ADR-0045 — the timeline sink the verdict apply surfaces into. These cases
+ *  put nothing below the sweep's own commit, so nothing is applied and nothing
+ *  is surfaced; the surfacing itself is pinned in its own describe below. */
+const NO_EVENTS = (): void => {};
 /** ADR-0045 S4b — the acting-committer port. `ACT` is what the real fold gives
  *  the owner unconditionally and gives an admin that has heard nothing; `defer`
  *  is what a fresh beacon from a strictly better-placed candidate gives. */
@@ -314,7 +351,7 @@ describe("ADR-0045 obligation 5 — which path a group takes", () => {
     const g = fakeGroup({ gid: freshGid(), roleTable: false });
     const c = client(g.order, ds(g.order));
 
-    const out = await c.sweepIfCommitter(null, g.group, CURSOR, NOOP, ACT);
+    const out = await c.sweepIfCommitter(null, g.group, CURSOR, NOOP, ACT, NO_EVENTS);
 
     // `ownCommitterRank` is absent on a legacy group, so the adapter's read
     // throws and the sweep must not proceed regardless.
@@ -334,7 +371,7 @@ describe("ADR-0045 — who sweeps", () => {
     const proposed = await c.removeMemberFromGroup(null, g.group, 4);
     expect(proposed).toMatchObject({ kind: "proposed" });
 
-    const swept = await c.sweepIfCommitter(null, g.group, CURSOR, NOOP, ACT);
+    const swept = await c.sweepIfCommitter(null, g.group, CURSOR, NOOP, ACT, NO_EVENTS);
 
     expect(swept.kind).toBe("committed");
     expect(g.order).toEqual([
@@ -369,6 +406,7 @@ describe("ADR-0045 — who sweeps", () => {
       CURSOR,
       NOOP,
       DEFER_TO(0),
+      NO_EVENTS,
     );
 
     expect(swept).toEqual({ kind: "deferred", rank: 1, toRank: 0 });
@@ -388,7 +426,7 @@ describe("ADR-0045 — who sweeps", () => {
     const c = client(g.order, ds(g.order));
 
     await c.removeMemberFromGroup(null, g.group, 4);
-    const swept = await c.sweepIfCommitter(null, g.group, CURSOR, NOOP, ACT);
+    const swept = await c.sweepIfCommitter(null, g.group, CURSOR, NOOP, ACT, NO_EVENTS);
 
     expect(swept.kind).toBe("committed");
     expect(g.epoch()).toBe(7n);
@@ -404,7 +442,7 @@ describe("ADR-0045 — who sweeps", () => {
     const c = client(g.order, ds(g.order));
 
     await c.removeMemberFromGroup(null, g.group, 4);
-    const swept = await c.sweepIfCommitter(null, g.group, CURSOR, NOOP, ACT);
+    const swept = await c.sweepIfCommitter(null, g.group, CURSOR, NOOP, ACT, NO_EVENTS);
 
     // `undefined` and `0` are never interchangeable: `0` is the owner.
     expect(swept).toEqual({ kind: "not-committer", rank: undefined });
@@ -435,6 +473,7 @@ describe("ADR-0045 — who sweeps", () => {
       CURSOR,
       NOOP,
       ACT,
+      NO_EVENTS,
     );
 
     expect(swept.kind).toBe("committed");
@@ -492,5 +531,105 @@ describe("ADR-0045 — the restart sweep resolves an owed verdict FIRST", () => 
     await c.sweepPendingCommits(g.group, NOOP);
 
     expect(order).toContain("publish");
+  });
+});
+
+describe("ADR-0045 — the verdict apply surfaces the rows it consumes", () => {
+  /**
+   * The adapter half of the defect.
+   *
+   * `chat/sweep.ts` hands the whole journal row to `applyIncoming`; this pins
+   * that the adapter turns it into a timeline event through the SAME `toEvent`
+   * the poll uses, rather than applying it and discarding the plaintext. Those
+   * rows are the ones the poll will never fetch again — the sweep advances the
+   * shared cursor over them — so a discarded event is a message lost from the
+   * UI for good.
+   */
+
+  /** A DS that is EMPTY for the stand-down re-read and carries `rows` for the
+   *  verdict read — the real shape of the race, where another member's message
+   *  lands between the two. */
+  function racingDs(
+    order: string[],
+    rows: { id: number; payload: Uint8Array; createdAt: string }[],
+  ): Partial<DsClient> {
+    let id = 100;
+    let fetches = 0;
+    return {
+      publishGroup: vi.fn(async () => {
+        order.push("publish");
+        return { id: (id += 1), createdAt: "t" };
+      }),
+      publishMailbox: vi.fn(async () => {
+        order.push("publish-mailbox");
+        return { id: (id += 1), createdAt: "t" };
+      }),
+      fetchGroup: vi.fn(async () => {
+        fetches += 1;
+        order.push("fetch");
+        return { messages: fetches === 1 ? [] : rows, hasMore: false };
+      }) as unknown as DsClient["fetchGroup"],
+    };
+  }
+
+  /** Make the group's receive path decode `text` for whatever row it is given,
+   *  so the surfaced event carries something identifiable. */
+  function applyingChat(g: Fake, text: string): void {
+    (g.group as unknown as Record<string, unknown>).processIncomingVerifyingRoles =
+      vi.fn(() => {
+        g.order.push("apply");
+        return {
+          kind: "Application",
+          applicationData: new TextEncoder().encode(text),
+          senderLeaf: 2,
+        };
+      });
+  }
+
+  it("a chat message ordered below our own commit is SURFACED, not swallowed", async () => {
+    const g = fakeGroup({ gid: freshGid(), roleTable: true, rank: 0, pending: 1 });
+    applyingChat(g, "hello from the race window");
+    const c = client(g.order, racingDs(g.order, [
+      { id: 50, payload: new Uint8Array([0x02]), createdAt: "2026-08-25T00:00:05Z" },
+    ]));
+
+    const surfaced: IncomingChatEvent[] = [];
+    const swept = await c.sweepIfCommitter(null, g.group, CURSOR, NOOP, ACT, (e) =>
+      surfaced.push(e),
+    );
+
+    expect(swept.kind).toBe("committed");
+    expect(surfaced).toHaveLength(1);
+    // Not a content-less system row: the actual plaintext, attributed to its
+    // author's leaf, stamped with the DS row's own id and timestamp.
+    expect(surfaced[0]).toMatchObject({
+      kind: "application",
+      messageId: 50,
+      text: "hello from the race window",
+      senderLeaf: 2,
+      createdAt: "2026-08-25T00:00:05Z",
+    });
+  });
+
+  it("a row whose apply THROWS surfaces nothing", async () => {
+    const g = fakeGroup({ gid: freshGid(), roleTable: true, rank: 0, pending: 1 });
+    (g.group as unknown as Record<string, unknown>).processIncomingVerifyingRoles =
+      vi.fn(() => {
+        throw new Error("wrong epoch");
+      });
+    const c = client(g.order, racingDs(g.order, [
+      { id: 50, payload: new Uint8Array([0xff]), createdAt: "t-50" },
+    ]));
+
+    const surfaced: IncomingChatEvent[] = [];
+    const swept = await c.sweepIfCommitter(null, g.group, CURSOR, NOOP, ACT, (e) =>
+      surfaced.push(e),
+    );
+
+    // The row was skipped exactly as the poll skips it, so it was never
+    // decrypted — there is no plaintext to surface and inventing one would be a
+    // lie. The verdict is unaffected.
+    expect(swept.kind).toBe("committed");
+    expect(surfaced).toEqual([]);
   });
 });

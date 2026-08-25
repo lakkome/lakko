@@ -94,6 +94,12 @@ import {
   type StagedSweepArtifacts,
 } from "../chat/sweep";
 import type { ActingCommitter } from "../chat/committer-beacon";
+// ADR-0045 — the ONE dispatch ladder that turns a processed MLS message into a
+// timeline event. The sweep's verdict apply consumes journal rows the poll will
+// never fetch again, so it has to build events for them, and it has to build
+// them the same way the poll does.
+import { toEvent } from "../chat/client";
+import type { IncomingChatEvent } from "../chat/client";
 
 /** Optional wires the route layer hands to ContactsClient
  *  (Phase 1.16e6c2). See `ChatClientOptions` in
@@ -505,6 +511,7 @@ function sweepPortsFor(
   onPersistWithCommit: ((entry: NewCommitEntry) => Promise<void>) | undefined,
   persist: () => Promise<void>,
   actingCommitter: (ownRank: number) => Promise<ActingCommitter>,
+  onSweptEvent: (event: IncomingChatEvent) => void,
 ): SweepPorts {
   const groupIdBytes = group.groupId;
   const groupIdB64 = base64Encode(groupIdBytes);
@@ -543,14 +550,37 @@ function sweepPortsFor(
       abandonStagedSweep: () => {
         group.abandonStagedSweep(identity);
       },
-      applyIncoming: (payload) => {
-        group.processIncomingVerifyingRoles(identity, payload);
+      // ADR-0045 — apply AND surface. The verdict consumes every row the DS
+      // ordered below our own commit and the shared cursor then advances past
+      // them, so a row applied here is a row the poll will never fetch again:
+      // discarding what it decrypted loses an ordinary chat message from the
+      // timeline permanently and silently. Routed through the SAME `toEvent`
+      // the poll uses, so every envelope kind is dispatched by one ladder.
+      applyIncoming: async (row) => {
+        // The MLS apply is what the verdict reads, so it is deliberately OUTSIDE
+        // the guard below: a throw here must reach `adjudicate`, which skips the
+        // row exactly as the poll loop does.
+        const processed = group.processIncomingVerifyingRoles(identity, row.payload);
+        try {
+          onSweptEvent(await toEvent(row.id, row.createdAt, processed));
+        } catch (err) {
+          // The ratchet has already moved and the row is consumed, so an event
+          // that could not be built costs one timeline row — never the verdict,
+          // which is why this is not allowed to look like a failed apply.
+          // eslint-disable-next-line no-console
+          console.warn("ContactsClient: swept row not surfaced", row.id, err);
+        }
       },
     },
     journal: {
       fetch: async (after) => {
         const res = await ds.fetchGroup(groupIdBytes, { after, waitSecs: 0 });
-        return res.messages.map((m) => ({ id: m.id, payload: m.payload }));
+        return res.messages.map((m) => ({
+          id: m.id,
+          payload: m.payload,
+          // ADR-0045 — carried so an applied row can become a timeline event.
+          createdAt: m.createdAt,
+        }));
       },
       publishGroup: async (bytes) => (await ds.publishGroup(groupIdBytes, bytes)).id,
       publishMailbox: async (pseudonym, bytes) =>
@@ -834,6 +864,11 @@ export class ContactsClient {
    * @param cursor  the SAME journal cursor `pollMessages` drives. The verdict
    *   applies the rows below its own commit, so it must advance the cursor over
    *   them or the poll would re-feed consumed rows to OpenMLS.
+   * @param onSweptEvent  called, in journal order, with the timeline event of
+   *   every row the verdict applied. REQUIRED rather than optional: the cursor
+   *   moves past those rows, so a caller that has nowhere to put them is a
+   *   caller that loses them, and that must be a visible decision at the call
+   *   site rather than a defaulted no-op.
    */
   async sweepIfCommitter(
     identity: IdentitySecrets | null,
@@ -841,6 +876,7 @@ export class ContactsClient {
     cursor: SweepCursorRef,
     markOwnPublished: (messageId: number) => void,
     actingCommitter: (ownRank: number) => Promise<ActingCommitter>,
+    onSweptEvent: (event: IncomingChatEvent) => void,
   ): Promise<SweepOutcome> {
     // A group with no role table has no committer to be, and the core refuses
     // a sweep on it outright. Short-circuit before resolving an identity or
@@ -862,16 +898,25 @@ export class ContactsClient {
           this.onPersistWithCommit,
           () => this.persistBestEffort(),
           actingCommitter,
+          onSweptEvent,
         ),
       ),
     );
   }
 
+  /**
+   * @param onSweptEvent  ADR-0045 — as on {@link sweepIfCommitter}: the timeline
+   *   events of every row an OWED verdict applied. Optional only because the
+   *   whole owed-verdict branch is skipped when no `cursor` is supplied; when a
+   *   cursor IS supplied, rows are consumed and dropping their events loses
+   *   messages, so a caller with a timeline must pass this.
+   */
   async sweepPendingCommits(
     group: WasmGroup,
     markOwnPublished: (messageId: number) => void,
     identity?: IdentitySecrets | null,
     cursor?: SweepCursorRef,
+    onSweptEvent?: (event: IncomingChatEvent) => void,
   ): Promise<void> {
     // ADR-0045 obligation 1 — a staged sweep is DURABLE and freezes this
     // group's own membership operations across restarts, so a verdict owed
@@ -905,6 +950,7 @@ export class ContactsClient {
               // would stop a sweep from STARTING, which is recoverable, rather
               // than let one start on no evidence, which is the hazard.
               () => Promise.resolve({ kind: "defer", toRank: undefined }),
+              onSweptEvent ?? (() => {}),
             ),
           ),
         );
@@ -2571,6 +2617,10 @@ export class ContactsClient {
       cursor: SweepCursorRef;
       markOwnPublished: (messageId: number) => void;
       actingCommitter: (ownRank: number) => Promise<ActingCommitter>;
+      /** ADR-0045 — the timeline events of every row that drain's verdict
+       *  applied. The drain moves the shared cursor, so these are rows the poll
+       *  will never fetch again. */
+      onSweptEvent: (event: IncomingChatEvent) => void;
     },
   ): Promise<{ commitMessageId: number; welcomeMessageId: number }> {
     const wasm = await loadWasm();
@@ -2596,6 +2646,7 @@ export class ContactsClient {
         sweepFirst.cursor,
         sweepFirst.markOwnPublished,
         sweepFirst.actingCommitter,
+        sweepFirst.onSweptEvent,
       );
     }
 

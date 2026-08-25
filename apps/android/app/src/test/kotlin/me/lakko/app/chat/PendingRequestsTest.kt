@@ -251,4 +251,82 @@ class PendingRequestsTest {
             SharedPrefsPendingRequestStore.decodeRow("garbage"),
         )
     }
+
+    // ------------------------------------------------------ a `leave` has no target
+
+    /**
+     * A `leave` is RFC 9420 `SelfRemove`, which names NO target on the wire.
+     *
+     * The core is the authority: `crates/lakko-mls/src/group_proposals.rs`
+     * `commit_effects` states it — "`SelfRemove` names no target: the removed
+     * leaf is the sender's own" — and the UniFFI mapping carries no target field
+     * on [ProposalKind.Leave] at all, so there is nowhere for one to come from.
+     */
+    private fun leave(sender: UInt?) =
+        ProposalRecord(senderLeaf = sender, kind = ProposalKind.Leave, stored = true)
+
+    /** The live pending set, already past the quiet window, so [rowAnnotation]
+     *  (which only ever looks at [RequestState.WAITING] rows) can see them. */
+    private fun waitingReqs(records: List<ProposalRecord>): List<PendingRequest> {
+        val observations = records.associate { proposalKey(it) to RequestObservation(atMs = 0L, own = false) }
+        return foldPendingRequests(records, observations, nowMs = QUIET_WINDOW_MS).requests
+    }
+
+    /**
+     * The defect: `targetLeaf` was read straight off `ProposalKind.Remove`, so a
+     * leave always folded to `null` and `rowAnnotation`'s `targetLeaf == leafIndex`
+     * test could never match one.
+     */
+    @Test
+    fun `a leave resolves its target to the senders own leaf`() {
+        val req = waitingReqs(listOf(leave(4u))).single()
+        assertEquals(PendingRequestKind.LEAVE, req.kind)
+        assertEquals(4u, req.senderLeaf)
+        assertEquals(4u, req.targetLeaf)
+    }
+
+    /** The REMOVE twin. A boundary guard, not a discriminator: it passed before
+     *  the fix and after it. Its job is to prove the two kinds now behave
+     *  identically rather than that one of them changed. */
+    @Test
+    fun `a remove annotates waiting to leave for self and waiting to be removed for another`() {
+        val reqs = waitingReqs(listOf(remove(leaf = 4u)))
+        assertEquals("Waiting to leave.", rowAnnotation(reqs, leafIndex = 4u, ownLeaf = 4u))
+        assertEquals("Waiting to be removed.", rowAnnotation(reqs, leafIndex = 4u, ownLeaf = 9u))
+    }
+
+    /** The row the UX spec §5.2 asks for and that never rendered: a member who
+     *  pressed `Leave group` must see the status of their own request. */
+    @Test
+    fun `a leave annotates waiting to leave for self and waiting to be removed for another`() {
+        val reqs = waitingReqs(listOf(leave(4u)))
+        assertEquals("Waiting to leave.", rowAnnotation(reqs, leafIndex = 4u, ownLeaf = 4u))
+        assertEquals("Waiting to be removed.", rowAnnotation(reqs, leafIndex = 4u, ownLeaf = 9u))
+        assertNull(rowAnnotation(reqs, leafIndex = 5u, ownLeaf = 5u))
+    }
+
+    /**
+     * `null` must not collapse onto a real leaf. An unresolvable sender is always
+     * unauthorised in the core anyway, so defaulting to leaf 0 would put
+     * `Waiting to leave.` on the OWNER's row for a request nobody made.
+     */
+    @Test
+    fun `a leave with an unresolvable sender targets nobody`() {
+        val reqs = waitingReqs(listOf(leave(null)))
+        assertNull(reqs.single().targetLeaf)
+        for (leaf in 0u..4u) {
+            assertNull(rowAnnotation(reqs, leafIndex = leaf, ownLeaf = leaf))
+            assertNull(rowAnnotation(reqs, leafIndex = leaf, ownLeaf = 9u))
+        }
+    }
+
+    /** [proposalKey] already keyed a leave on its SENDER leaf; resolving
+     *  `targetLeaf` to that same leaf makes the two agree rather than carrying
+     *  two notions of which leaf a leave concerns. */
+    @Test
+    fun `a leave is keyed on the same leaf it now targets`() {
+        val record = leave(4u)
+        assertEquals("leave:4", proposalKey(record))
+        assertEquals(4u, waitingReqs(listOf(record)).single().targetLeaf)
+    }
 }

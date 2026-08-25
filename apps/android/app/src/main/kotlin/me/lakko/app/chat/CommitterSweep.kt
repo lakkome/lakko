@@ -152,8 +152,20 @@ internal class StagedSweepArtifacts(
     val addedSignatureKeys: List<ByteArray>,
 )
 
-/** One row of the DS group journal. */
-internal class SweepJournalRow(val id: Long, val payload: ByteArray)
+/**
+ * One row of the DS group journal.
+ *
+ * [createdAt] is not decoration: an applied row becomes a timeline event, and
+ * the shared event constructor requires the DS row timestamp — it is the one
+ * clock every member reads identically for the identical row. A row shape that
+ * carried only the payload is exactly what made the verdict apply unable to
+ * surface anything.
+ */
+internal class SweepJournalRow(
+    val id: Long,
+    val payload: ByteArray,
+    val createdAt: String,
+)
 
 /**
  * The MLS operations the sweep drives, adapted onto the FFI `Group`.
@@ -203,10 +215,37 @@ internal interface SweepGroupPort {
      *  `restoreStorage`. */
     fun abandonStagedSweep()
 
-    /** Apply one journal row through the audited role-verifying receive path.
-     *  THROWS on a bad frame / wrong epoch / refused commit — the caller skips,
-     *  exactly as the poll loop does. */
-    fun applyIncoming(payload: ByteArray)
+    /**
+     * Apply one journal row through the audited role-verifying receive path AND
+     * surface whatever it produced to the timeline.
+     *
+     * THROWS on a bad frame / wrong epoch / refused commit — the caller skips,
+     * exactly as the poll loop does, and a skipped row must surface nothing.
+     *
+     * ## Why the WHOLE row, and why the port also surfaces
+     *
+     * The verdict consumes every row the DS ordered below our own commit and then
+     * advances the shared cursor over them, so the poll never fetches them again.
+     * Anything one of those rows carried — an ordinary chat message another member
+     * sent in the window between the stand-down re-read and our publish — is gone
+     * from the UI forever unless it is surfaced HERE. Applying it and discarding
+     * the result decrypts the message, advances the ratchet, and loses the
+     * plaintext silently.
+     *
+     * Surfacing therefore belongs to the port rather than to this module, and the
+     * port is handed the whole [SweepJournalRow] rather than just its payload: the
+     * shared event constructor in `ChatClient.kt` needs the DS row id and the DS
+     * row timestamp, and every envelope kind must be dispatched by that ONE ladder
+     * — a second copy of it here is how the poll path and the sweep path would
+     * drift. This module has nothing to decide about an event, so returning one
+     * for it to collect would buy nothing.
+     *
+     * Because surfacing happens inline, per row, a LOST verdict and a thrown
+     * verdict both leave the already-applied rows on the timeline — which is
+     * correct: whether our own commit won the order says nothing about the rows
+     * below it, which were applied and consumed either way.
+     */
+    fun applyIncoming(row: SweepJournalRow)
 }
 
 /** The DS operations the sweep drives. */
@@ -635,12 +674,18 @@ private suspend fun adjudicate(
             // part of the question. Rows above it are left for the poll.
             if (row.id >= ownCommitMessageId) break
             try {
-                ports.group.applyIncoming(row.payload)
+                // The port applies AND surfaces — see [SweepGroupPort.applyIncoming].
+                // These rows are the only ones the poll will never see again,
+                // because the cursor advance below moves past them, so the WHOLE
+                // row goes over (the DS id and timestamp are what let the adapter
+                // build a timeline event).
+                ports.group.applyIncoming(row)
             } catch (_: Throwable) {
                 // Bad frame, wrong epoch, a non-MLS Lakko envelope (rendezvous /
                 // attribution), a role-refused commit, or one of our own rows.
                 // Skipped, exactly as the poll loop skips it — and none of those
                 // advance the epoch, which is the only thing the verdict reads.
+                // A skipped row was never decrypted, so it surfaces nothing.
             }
             lastApplied = row.id
         }

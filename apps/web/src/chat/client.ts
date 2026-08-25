@@ -890,7 +890,25 @@ export class ChatClient {
   }
 }
 
-async function toEvent(
+/**
+ * Turn one processed MLS message into the timeline event it represents.
+ *
+ * INTERNAL API, exported for exactly one other caller: the ADR-0045 committer
+ * sweep's verdict apply (`chat/sweep.ts`, adapted in `contacts/client.ts`).
+ * That path consumes journal rows the poll will never fetch again — it advances
+ * the same cursor over them — so it must produce timeline events for them, and
+ * it must produce them through THIS function rather than a second dispatch of
+ * its own. The ladder below routes call signaling, the ADR-0042/0044
+ * push-routing secret, the ADR-0045 committer beacon, external-join proposals,
+ * membership proposals and the ADR-0023/0024 chat / edit / delete / reaction /
+ * typing / read-receipt bodies; two copies of that would be two things to keep
+ * in step, and the one that fell behind would silently render a service
+ * envelope as a chat bubble.
+ *
+ * Not part of the public `ChatClient` surface — nothing outside those two
+ * receive paths should be constructing timeline events.
+ */
+export async function toEvent(
   messageId: number,
   createdAt: string,
   processed: ReturnType<WasmGroup["processIncoming"]>,

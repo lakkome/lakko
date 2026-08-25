@@ -845,6 +845,21 @@ public enum ChatError: Error {
     /// Wraps any underlying failure (DS, MLS process, FFI). The
     /// `underlying` carries the original error for diagnostics.
     case wrapped(String, underlying: Error)
+    /// ADR-0045 — a direct membership commit was asked for while this group
+    /// still holds pending proposals, so the core would refuse it.
+    ///
+    /// This is a USER-FACING state, not a programmer error: under ADR-0045 a
+    /// non-empty pending set is the ordinary condition between any member's
+    /// request and the next committer sweep. It has its own case rather than
+    /// riding ``argument(_:)`` for two reasons — a test can assert on it by
+    /// identity instead of by prose, and the core's own refusal string (which
+    /// names `commit_pending_proposals` / `stage_pending_proposals`, two Rust
+    /// entry points no user can call) can never reach the screen through it.
+    ///
+    /// The copy follows `docs/ux/proposal-based-membership.md` §5.1: it states
+    /// inaction, names no person, and implies no deadline — ADR-0045 decision 2
+    /// deliberately gives a pending request none.
+    case membershipChangesPending
 }
 
 extension ChatError: LocalizedError {
@@ -854,6 +869,15 @@ extension ChatError: LocalizedError {
             return message
         case .wrapped(let message, let underlying):
             return "\(message): \(underlying)"
+        case .membershipChangesPending:
+            return ChatError.membershipChangesPendingCopy
         }
     }
+
+    /// The one string for ``ChatError/membershipChangesPending``, exposed so a
+    /// test can pin it without re-typing it (a second copy is how the two
+    /// platforms would drift apart).
+    public static let membershipChangesPendingCopy =
+        "Other membership changes are waiting to apply, so this request cannot be approved yet. "
+        + "They are applied by the group owner or an admin, and this will work once they have."
 }

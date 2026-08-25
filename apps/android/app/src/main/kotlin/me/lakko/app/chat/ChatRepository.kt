@@ -1247,91 +1247,159 @@ public class ChatRepository(
             ?: throw IllegalStateException(
                 "ChatRepository not bootstrapped — call bootstrap() first",
             )
+        // ADR-0045 — an external join keeps its own direct-commit path (folding
+        // it into the sweep is S7), but it can no longer simply commit: the core
+        // REFUSES a direct commit while ANY proposal is pending, because the
+        // OpenMLS entry point the approve is built on would sweep the whole
+        // pending set alongside the one add it was asked for. Under ADR-0045 a
+        // non-empty pending set is the ORDINARY state between any member's
+        // request and the next sweep, so without this the Approve button fails
+        // for every admin whenever anything at all is waiting.
+        //
+        // The whole ordering — drain, then the two locks, then the pending
+        // re-read, then the commit — lives in [runApproveExternalJoin], where a
+        // host test can run it. The reason the drain must stay outside both
+        // locks (a kotlinx `Mutex` is not reentrant, so nesting the sweep inside
+        // them HANGS) is documented there and proven by a test that runs the
+        // inverted shape against a timeout.
+        //
+        // The drain is called unconditionally rather than behind a
+        // `usesProposalPath` gate (the iOS shape): reading that predicate is a
+        // provider read, so gating would cost an extra `providerLock` region to
+        // avoid one the sweep's own prelude takes anyway — and that prelude asks
+        // the identical question (`ownCommitterRank() == null` for a group with
+        // no role table) and returns `NotCommitter` without touching the network.
+        // Different structure, identical observable behaviour.
+        //
         // G-37 — per-group lock spans the WHOLE op; the provider lock covers
         // only the provider-touching prefix, so both publishes run outside it.
-        return groupLock(groupIdHex).withLock {
-            val publishStep = providerLock.withLock {
+        return runApproveExternalJoin(
+            drain = { sweepIfCommitter(groupIdHex) },
+            lock = groupLock(groupIdHex),
+            providerLock = providerLock,
+            // ADR-0045 — the surviving refusal, in human words. The drain does
+            // not always clear the set: it is a no-op when this device is not the
+            // acting committer (a better-placed candidate beaconed recently), and
+            // a poll can store a fresh proposal in the window between it and the
+            // lock. Either way the core's `refuse_if_proposals_pending` would
+            // throw next, and its message names two Rust functions — so this asks
+            // the SAME question first and lets the caller answer it in copy the
+            // admin can act on.
+            //
+            // This is the identical predicate, not an approximation:
+            // `Group::pending_proposals()` maps `inner.pending_proposals()` one
+            // for one, which is exactly what the core counts. And it cannot be
+            // out-of-date by the time the core runs: this read and the core call
+            // are both non-suspending and sit in the SAME `providerLock` region
+            // with no suspension point between them, so nothing can interleave
+            // and the core can never reach that refusal after this passed.
+            pendingProposalCount = {
                 val record = groups[groupIdHex]
                     ?: throw ChatError(
                         "no live Group handle for $groupIdHex",
                         IllegalStateException("missing group record"),
                     )
-                // 1. create-commit — reuses the audited add path, eager-merges N -> N+1.
-                val addResult = try {
-                    record.group.approveExternalJoin(identity, proposalRef)
-                } catch (e: FfiException) {
-                    throw ChatError("approveExternalJoin failed", e)
-                }
-                // Compute the second artifact (the rendezvous) UP-FRONT so the outbox
-                // entry can hold both artifacts (two-artifact coverage). The
-                // rendezvous rides the SAME group journal as the commit.
-                //
-                // 2. ADR-0040 (G-35) — durable pending-commit outbox: persist the
-                //    entry (commit + rendezvous, BOTH artifacts) THEN the N+1
-                //    snapshot, BOTH fail-closed, BEFORE any publish. A throw aborts
-                //    the op (no publish); the restart sweep re-publishes both. See
-                //    [sweepPendingCommits].
-                //
-                // ADR-0040 F1 residual (lakko-security) — reset-guard the WHOLE
-                // pre-persist region (wrapWelcomeRendezvous + entry build): any throw
-                // here runs AFTER the eager merge (N -> N+1) and BEFORE
-                // runCrashSafeCommit, and would else strand the in-memory group at the
-                // un-published N+1. No outbox entry exists yet -> reset the group
-                // DIRECTLY. See [withPrePersistReset].
-                val (rendezvous, entry) = withPrePersistReset(
-                    reset = { resetGroupToDurableSnapshotOrThrow(groupIdHex) },
-                ) {
-                    val rendezvous = try {
-                        uniffi.lakko_ffi_uniffi.wrapWelcomeRendezvous(proposalRef, addResult.welcome)
-                    } catch (e: FfiException) {
-                        throw ChatError("wrapWelcomeRendezvous failed", e)
+                try {
+                    record.group.pendingProposals().size
+                } catch (e: Throwable) {
+                    // A torn read is treated as "nothing pending" so the core
+                    // stays the authority: it would refuse anyway, and guessing
+                    // the other way would refuse an approve that could proceed.
+                    android.util.Log.w("ChatRepository", "ADR-0045 pending-proposal read failed", e)
+                    0
+                }.also {
+                    // The reason stays visible to a developer; only the
+                    // user-facing string changes.
+                    if (it > 0) {
+                        android.util.Log.w(
+                            "ChatRepository",
+                            "ADR-0045: external join approve refused — $it membership " +
+                                "proposal(s) still pending after the drain (this device is not " +
+                                "the acting committer, or a poll stored one in the window)",
+                        )
                     }
-                    val entry = PendingCommitEntry(
-                        id = newOutboxEntryId(),
-                        accountId = requireAccountId(),
-                        groupId = outboxB64(record.groupId),
-                        targetEpoch = record.group.epoch().toString(),
-                        commitB64 = outboxB64(addResult.commit),
-                        secondArtifactB64 = outboxB64(rendezvous),
-                        secondArtifactKind = SecondArtifactKind.RENDEZVOUS,
-                    )
-                    Pair(rendezvous, entry)
                 }
-                prepareCrashSafeCommit(
-                    persistEntryOrThrow = { CommitOutboxStore.putEntry(applicationContext, entry) },
-                    persistSnapshotOrThrow = { persistSnapshotDurableOrThrow() },
-                    // ADR-0040 F1 (lakko-security) — on a fail-closed persist-abort,
-                    // reset the eager-merged in-memory group (N+1) back to the durable
-                    // snapshot (N) so a subsequent same-session commit builds on N, not
-                    // the unpublished N+1. Fires ONLY on the persist-abort, never on a
-                    // publish failure (that commit is durably recorded — the sweep
-                    // re-publishes it). See [onCommitPersistAbort].
-                    onPersistAbort = { onCommitPersistAbort(groupIdHex, entry.id) },
+            },
+        ) {
+            val record = groups[groupIdHex]
+                ?: throw ChatError(
+                    "no live Group handle for $groupIdHex",
+                    IllegalStateException("missing group record"),
                 )
-                // Returning normally means BOTH durable writes landed, so the
-                // commit is now safe to put on the wire — the ADR-0040 §2 ordering,
-                // unchanged, just expressed across the lock release.
-                suspend {
-                    // 3. publish artifact 1 (commit) so every existing member
-                    //    admits the joiner, then artifact 2 (the rendezvous).
-                    val commitPublish = try {
-                        dsClient.publishGroup(record.groupId, addResult.commit)
-                    } catch (e: Throwable) {
-                        throw ChatError("DS publishGroup (approve commit) failed", e)
-                    }
-                    chatClient.markOwnPublishedCommit(commitPublish.id)
-                    val rendezvousPublish = try {
-                        dsClient.publishGroup(record.groupId, rendezvous)
-                    } catch (e: Throwable) {
-                        throw ChatError("DS publishGroup (Welcome rendezvous) failed", e)
-                    }
-                    // 4. both artifacts on the wire -> ack (best-effort).
-                    ackCommitBestEffort(entry.id, commitPublish.id, rendezvousPublish.id)
-                    publishThreadList()
-                    commitPublish.id
-                }
+            // 1. create-commit — reuses the audited add path, eager-merges N -> N+1.
+            val addResult = try {
+                record.group.approveExternalJoin(identity, proposalRef)
+            } catch (e: FfiException) {
+                throw ChatError("approveExternalJoin failed", e)
             }
-            publishStep()
+            // Compute the second artifact (the rendezvous) UP-FRONT so the outbox
+            // entry can hold both artifacts (two-artifact coverage). The
+            // rendezvous rides the SAME group journal as the commit.
+            //
+            // 2. ADR-0040 (G-35) — durable pending-commit outbox: persist the
+            //    entry (commit + rendezvous, BOTH artifacts) THEN the N+1
+            //    snapshot, BOTH fail-closed, BEFORE any publish. A throw aborts
+            //    the op (no publish); the restart sweep re-publishes both. See
+            //    [sweepPendingCommits].
+            //
+            // ADR-0040 F1 residual (lakko-security) — reset-guard the WHOLE
+            // pre-persist region (wrapWelcomeRendezvous + entry build): any throw
+            // here runs AFTER the eager merge (N -> N+1) and BEFORE
+            // runCrashSafeCommit, and would else strand the in-memory group at the
+            // un-published N+1. No outbox entry exists yet -> reset the group
+            // DIRECTLY. See [withPrePersistReset].
+            val (rendezvous, entry) = withPrePersistReset(
+                reset = { resetGroupToDurableSnapshotOrThrow(groupIdHex) },
+            ) {
+                val rendezvous = try {
+                    uniffi.lakko_ffi_uniffi.wrapWelcomeRendezvous(proposalRef, addResult.welcome)
+                } catch (e: FfiException) {
+                    throw ChatError("wrapWelcomeRendezvous failed", e)
+                }
+                val entry = PendingCommitEntry(
+                    id = newOutboxEntryId(),
+                    accountId = requireAccountId(),
+                    groupId = outboxB64(record.groupId),
+                    targetEpoch = record.group.epoch().toString(),
+                    commitB64 = outboxB64(addResult.commit),
+                    secondArtifactB64 = outboxB64(rendezvous),
+                    secondArtifactKind = SecondArtifactKind.RENDEZVOUS,
+                )
+                Pair(rendezvous, entry)
+            }
+            prepareCrashSafeCommit(
+                persistEntryOrThrow = { CommitOutboxStore.putEntry(applicationContext, entry) },
+                persistSnapshotOrThrow = { persistSnapshotDurableOrThrow() },
+                // ADR-0040 F1 (lakko-security) — on a fail-closed persist-abort,
+                // reset the eager-merged in-memory group (N+1) back to the durable
+                // snapshot (N) so a subsequent same-session commit builds on N, not
+                // the unpublished N+1. Fires ONLY on the persist-abort, never on a
+                // publish failure (that commit is durably recorded — the sweep
+                // re-publishes it). See [onCommitPersistAbort].
+                onPersistAbort = { onCommitPersistAbort(groupIdHex, entry.id) },
+            )
+            // Returning normally means BOTH durable writes landed, so the
+            // commit is now safe to put on the wire — the ADR-0040 §2 ordering,
+            // unchanged, just expressed across the lock release.
+            suspend {
+                // 3. publish artifact 1 (commit) so every existing member
+                //    admits the joiner, then artifact 2 (the rendezvous).
+                val commitPublish = try {
+                    dsClient.publishGroup(record.groupId, addResult.commit)
+                } catch (e: Throwable) {
+                    throw ChatError("DS publishGroup (approve commit) failed", e)
+                }
+                chatClient.markOwnPublishedCommit(commitPublish.id)
+                val rendezvousPublish = try {
+                    dsClient.publishGroup(record.groupId, rendezvous)
+                } catch (e: Throwable) {
+                    throw ChatError("DS publishGroup (Welcome rendezvous) failed", e)
+                }
+                // 4. both artifacts on the wire -> ack (best-effort).
+                ackCommitBestEffort(entry.id, commitPublish.id, rendezvousPublish.id)
+                publishThreadList()
+                commitPublish.id
+            }
         }
     }
 
@@ -3463,8 +3531,64 @@ public class ChatRepository(
                     record.group.abandonStagedSweep(identity)
                 }
 
-                override fun applyIncoming(payload: ByteArray) {
-                    record.group.processIncomingVerifyingRoles(identity, payload)
+                // ADR-0045 — apply AND surface. The verdict consumes every row the
+                // DS ordered below our own commit and the shared cursor then
+                // advances past them, so a row applied here is a row the poll will
+                // never fetch again: discarding what it decrypted loses an ordinary
+                // chat message from the timeline permanently and silently. Routed
+                // through the SAME [toEvent] + [GroupRecord.consumeEvents] the poll
+                // uses, so every envelope kind is dispatched by one ladder.
+                override fun applyIncoming(row: SweepJournalRow) {
+                    // The MLS apply is what the verdict reads, so it is deliberately
+                    // OUTSIDE the guard below: a throw here must reach `adjudicate`,
+                    // which skips the row exactly as the poll loop does.
+                    val processed =
+                        record.group.processIncomingVerifyingRoles(identity, row.payload)
+                    try {
+                        record.consumeEvents(
+                            events = listOf(toEvent(row.id, row.createdAt, processed)),
+                            callSignalingSink = { payload ->
+                                callSignalingSink?.invoke(groupIdHex, payload)
+                            },
+                            pushRoutingSecretSink = { secret, mintEpoch, senderLeaf ->
+                                receivePushRoutingSecretBestEffort(
+                                    record.group,
+                                    identity,
+                                    secret,
+                                    mintEpoch,
+                                    senderLeaf,
+                                )
+                            },
+                            committerBeaconSink = { senderLeaf, createdAt ->
+                                recordCommitterBeaconBestEffort(
+                                    group = record.group,
+                                    groupIdHex = groupIdHex,
+                                    senderLeaf = senderLeaf,
+                                    createdAt = createdAt,
+                                )
+                            },
+                        )
+                        // Per row, and deliberately not deferred to the end of the
+                        // sweep: this is what pushes `record.messages` into the
+                        // StateFlow the chat screen reads, and it must happen on a
+                        // LOST verdict and on a thrown one too. Whether our own
+                        // commit won the order says nothing about the rows below
+                        // it — they were applied, the ratchet moved and the cursor
+                        // advanced past them either way, so the only question left
+                        // is whether the user gets to read them. Cheap because the
+                        // window this loop consumes is narrow by construction.
+                        publishThreadList()
+                    } catch (cause: Throwable) {
+                        // The ratchet has already moved and the row is consumed, so
+                        // an event that could not be built costs one timeline row —
+                        // never the verdict, which is why this is not allowed to
+                        // look like a failed apply.
+                        android.util.Log.w(
+                            "ChatRepository",
+                            "ADR-0045 swept row not surfaced: ${row.id}",
+                            cause,
+                        )
+                    }
                 }
             },
             journal = object : SweepJournalPort {
@@ -3473,7 +3597,11 @@ public class ChatRepository(
                         groupId = record.groupId,
                         after = after,
                         waitSecs = 0,
-                    ).messages.map { SweepJournalRow(it.id, it.payload) }
+                    ).messages.map {
+                        // ADR-0045 — `createdAt` carried so an applied row can
+                        // become a timeline event.
+                        SweepJournalRow(it.id, it.payload, it.createdAt)
+                    }
 
                 override suspend fun publishGroup(bytes: ByteArray): Long =
                     dsClient.publishGroup(record.groupId, bytes).id
@@ -3920,7 +4048,42 @@ private class GroupRecord(
         pushRoutingSecretSink: ((ByteArray, ULong, UInt?) -> Unit)? = null,
         committerBeaconSink: ((UInt?, String) -> Unit)? = null,
     ) {
-        for (event in result.events) {
+        consumeEvents(
+            events = result.events,
+            callSignalingSink = callSignalingSink,
+            pushRoutingSecretSink = pushRoutingSecretSink,
+            committerBeaconSink = committerBeaconSink,
+        )
+        cursor = result.cursor
+    }
+
+    /**
+     * Consume a batch of receive-path events — the ONE place a decoded event
+     * becomes record state.
+     *
+     * Two callers, and that is the point. The poll is the obvious one, via
+     * [applyPollResult]. The other is the ADR-0045 committer sweep: its verdict
+     * applies every journal row the DS ordered below its own commit and then
+     * advances the SAME cursor over them, so those rows are gone from the poll's
+     * future forever. A chat message another member sent in the window between the
+     * sweep's stand-down re-read and its publish lands in exactly that set, and
+     * before this it was decrypted and then thrown away. Feeding both paths
+     * through this function is what keeps the two from drifting — every envelope
+     * kind is folded here once.
+     *
+     * Deliberately does NOT touch [cursor]: the poll advances it from the batch it
+     * fetched, the sweep advances it itself to the last row its verdict consumed,
+     * and a second writer here would let one path wind the other's cursor.
+     *
+     * Events must arrive in journal order; the op fold assumes it.
+     */
+    fun consumeEvents(
+        events: List<IncomingChatEvent>,
+        callSignalingSink: ((ByteArray) -> Unit)? = null,
+        pushRoutingSecretSink: ((ByteArray, ULong, UInt?) -> Unit)? = null,
+        committerBeaconSink: ((UInt?, String) -> Unit)? = null,
+    ) {
+        for (event in events) {
             when (event) {
                 is IncomingChatEvent.Application -> messages.add(
                     ChatMessage(
@@ -3996,7 +4159,6 @@ private class GroupRecord(
                 }
             }
         }
-        cursor = result.cursor
     }
 
     /**

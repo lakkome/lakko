@@ -84,8 +84,22 @@ class CommitterSweepTest {
         val applied = mutableListOf<Int>()
         val providerTrace = mutableListOf<String>()
 
+        /** What the applied rows handed to the timeline, in journal order. */
+        val surfaced = mutableListOf<String>()
+
         /** Rows whose payload byte is in here advance the epoch when applied. */
         val foreignCommits = mutableSetOf<Int>()
+
+        /**
+         * Rows whose payload byte is in here apply CLEANLY but move no epoch —
+         * an ordinary application message or a proposal.
+         *
+         * Distinct from [foreignCommits] because only a Commit moves the epoch,
+         * and the verdict reads nothing else. Without this distinction every
+         * successfully applied row would lose the sweep, and the winning path
+         * could never carry a surfaced row at all.
+         */
+        val applicableRows = mutableSetOf<Int>()
 
         override suspend fun <T> exclusiveProvider(block: suspend () -> T): T {
             providerTrace.add("enter")
@@ -129,11 +143,21 @@ class CommitterSweepTest {
             // The proposals SURVIVE for the winner's next sweep.
         }
 
-        override fun applyIncoming(payload: ByteArray) {
-            val tag = payload[0].toInt()
+        override fun applyIncoming(row: SweepJournalRow) {
+            val tag = row.payload[0].toInt()
             applied.add(tag)
             providerTrace.add("apply")
-            if (tag !in foreignCommits) throw IllegalStateException("not an applyable commit")
+            if (tag !in foreignCommits && tag !in applicableRows) {
+                throw IllegalStateException("not an applyable message")
+            }
+            // The double stands in for the REAL adapter, which both applies the
+            // row and surfaces what it produced to the timeline. Splitting the
+            // two here would make the defect untestable: the whole failure was
+            // that the second half did not exist. Surfacing happens only AFTER a
+            // successful apply, exactly as in the adapter — the throw above is
+            // what keeps a skipped row from producing an event.
+            surfaced.add("row#${row.id}@${row.createdAt}")
+            if (tag !in foreignCommits) return
             // Applying a foreign commit discards our pending one.
             if (hasStaged) hasStaged = false
             epoch = epoch + 1uL
@@ -205,6 +229,17 @@ class CommitterSweepTest {
             value = to
         }
     }
+
+    /**
+     * One DS journal row, timestamp included.
+     *
+     * The `createdAt` is not decoration: the real adapter turns each applied row
+     * into a timeline event through the SAME `toEvent` the poll uses, and that
+     * function requires the DS row timestamp. A row shape that carried only the
+     * payload is exactly what made the sweep unable to surface anything.
+     */
+    private fun row(id: Long, tag: Int) =
+        SweepJournalRow(id = id, payload = byteArrayOf(tag.toByte()), createdAt = "t-$id")
 
     private fun ports(
         group: FakeGroup = FakeGroup(),
@@ -309,7 +344,7 @@ class CommitterSweepTest {
         group.foreignCommits.add(42)
         val journal = FakeJournal(
             // Our commit takes DS id 9, so the winner at id 3 is BELOW it.
-            rows = listOf(SweepJournalRow(id = 3, payload = byteArrayOf(42))),
+            rows = listOf(row(id = 3, tag = 42)),
             // The obligation-3 stand-down read must be empty, or the sweep
             // correctly refuses to stage and never reaches the verdict.
             scripted = mutableListOf(emptyList()),
@@ -336,7 +371,7 @@ class CommitterSweepTest {
         val group = FakeGroup(rank = 0u, pending = 1)
         group.foreignCommits.add(42)
         val journal = FakeJournal(
-            rows = listOf(SweepJournalRow(id = 3, payload = byteArrayOf(42))),
+            rows = listOf(row(id = 3, tag = 42)),
             scripted = mutableListOf(emptyList()),
         )
         journal.nextId = 9
@@ -383,7 +418,7 @@ class CommitterSweepTest {
     fun `an owed verdict is resolved even after a demotion`() = runTest {
         val group = FakeGroup(rank = null, pending = 1).apply { hasStaged = true }
         group.foreignCommits.add(42)
-        val journal = FakeJournal(rows = listOf(SweepJournalRow(id = 3, payload = byteArrayOf(42))))
+        val journal = FakeJournal(rows = listOf(row(id = 3, tag = 42)))
         journal.nextId = 9
         val outbox = FakeOutbox(
             owed = SweepDurableEntry("entry-demoted", "1", null, emptyList()),
@@ -415,7 +450,7 @@ class CommitterSweepTest {
     fun `an unapplied row stands the sweep down`() = runTest {
         val group = FakeGroup()
         val journal = FakeJournal(
-            scripted = mutableListOf(listOf(SweepJournalRow(id = 1, payload = byteArrayOf(7)))),
+            scripted = mutableListOf(listOf(row(id = 1, tag = 7))),
         )
 
         val outcome = runCommitterSweep(ports(group, journal))
@@ -544,9 +579,9 @@ class CommitterSweepTest {
         group.foreignCommits.add(42)
         val journal = FakeJournal(
             rows = listOf(
-                SweepJournalRow(id = 2, payload = byteArrayOf(7)),
-                SweepJournalRow(id = 3, payload = byteArrayOf(42)),
-                SweepJournalRow(id = 4, payload = byteArrayOf(8)),
+                row(id = 2, tag = 7),
+                row(id = 3, tag = 42),
+                row(id = 4, tag = 8),
             ),
             scripted = mutableListOf(emptyList()),
         )
@@ -588,8 +623,8 @@ class CommitterSweepTest {
         val group = FakeGroup(rank = 0u, pending = 1)
         val journal = FakeJournal(
             rows = listOf(
-                SweepJournalRow(id = 1, payload = byteArrayOf(7)),
-                SweepJournalRow(id = 5, payload = byteArrayOf(8)),
+                row(id = 1, tag = 7),
+                row(id = 5, tag = 8),
             ),
             scripted = mutableListOf(emptyList()),
         )
@@ -610,5 +645,173 @@ class CommitterSweepTest {
         assertFalse("a moved epoch means a foreign commit won", sweepVerdict(7uL, 8uL))
         assertFalse(shouldStandDown(0))
         assertTrue(shouldStandDown(1))
+    }
+
+    // ------------------------------------- the verdict apply must not swallow rows
+
+    /**
+     * The defect this block pins.
+     *
+     * `adjudicate` applies every row the DS ordered below our own commit, and the
+     * cursor then advances past them, so the poll never fetches them again. When
+     * one of those rows is an ordinary chat message from another member, applying
+     * it correctly advances the ratchet — and, before this, threw the plaintext
+     * away. The message was permanently lost from the timeline, silently.
+     *
+     * The window is narrow but real and reachable without any fault: the
+     * stand-down check proves the journal empty, and between that check and the
+     * publish another member can send. Anything the DS orders below our commit
+     * lands in exactly this loop.
+     *
+     * What is assertable HERE is that the sweep hands the port every applied row
+     * WHOLE — DS id and DS timestamp included, which is what the shared `toEvent`
+     * needs — in journal order, only below our own commit, and only after a
+     * successful apply. That the real adapter then surfaces it is not host-testable
+     * (it needs the UniFFI `.so`), which is why the double models the adapter's
+     * apply-and-surface contract rather than only its apply half.
+     */
+    @Test
+    fun `a chat message ordered below our own commit is surfaced not swallowed`() = runTest {
+        val group = FakeGroup(rank = 0u, pending = 1)
+        // An ordinary application message another member sent in the window
+        // between the stand-down re-read and our publish, so the DS orders it
+        // BELOW our commit. It applies cleanly and moves NO epoch, so our own
+        // sweep still WINS — losing is a separate case below.
+        group.applicableRows.add(7)
+        val journal = FakeJournal(
+            rows = listOf(row(id = 50, tag = 7)),
+            scripted = mutableListOf(emptyList()),
+        )
+        journal.nextId = 101
+        val cursor = FakeCursor()
+
+        val outcome = runCommitterSweep(ports(group, journal, cursor = cursor))
+
+        // The verdict is unaffected — an application message moves no epoch.
+        assertTrue("outcome was $outcome", outcome is SweepOutcome.Committed)
+        // …and the message reached the timeline, carrying the DS row id and the
+        // DS row timestamp, which is what the shared event constructor needs.
+        assertEquals(listOf("row#50@t-50"), group.surfaced)
+        // The cursor moved past it, which is exactly why surfacing is mandatory:
+        // the poll will never fetch this row again.
+        assertEquals(50L, cursor.value)
+    }
+
+    /** Every applied row, in journal order — nothing reordered, nothing coalesced. */
+    @Test
+    fun `every applied row is surfaced in journal order`() = runTest {
+        val group = FakeGroup(rank = 0u, pending = 1)
+        group.applicableRows.addAll(listOf(7, 8, 9))
+        val journal = FakeJournal(
+            rows = listOf(row(id = 40, tag = 7), row(id = 41, tag = 8), row(id = 42, tag = 9)),
+            scripted = mutableListOf(emptyList()),
+        )
+        journal.nextId = 101
+
+        runCommitterSweep(ports(group, journal))
+
+        assertEquals(listOf("row#40@t-40", "row#41@t-41", "row#42@t-42"), group.surfaced)
+    }
+
+    /**
+     * A row whose apply THROWS surfaces nothing but still advances the cursor over
+     * it, byte-for-byte as before. A skipped row was never decrypted, so there is
+     * no plaintext to surface and inventing one would be a lie.
+     */
+    @Test
+    fun `a row whose apply throws surfaces nothing and still advances the cursor`() = runTest {
+        val group = FakeGroup(rank = 0u, pending = 1)
+        // 99 is in neither set, so the fake throws on it — a non-MLS Lakko
+        // envelope (rendezvous / attribution), skipped exactly as the poll skips
+        // it.
+        group.applicableRows.add(7)
+        val journal = FakeJournal(
+            rows = listOf(row(id = 40, tag = 99), row(id = 41, tag = 7)),
+            scripted = mutableListOf(emptyList()),
+        )
+        journal.nextId = 101
+        val cursor = FakeCursor()
+
+        runCommitterSweep(ports(group, journal, cursor = cursor))
+
+        assertEquals(listOf("row#41@t-41"), group.surfaced)
+        assertEquals("the cursor stops at the last row this run consumed", 41L, cursor.value)
+    }
+
+    /**
+     * Rows AT or ABOVE our own commit are not part of the question: nothing is
+     * applied, nothing is surfaced, and the cursor is untouched — the poll
+     * re-fetches them and drops our own through the echo filter.
+     */
+    @Test
+    fun `rows at or above our own commit surface nothing and do not move the cursor`() = runTest {
+        val group = FakeGroup(rank = 0u, pending = 1)
+        group.applicableRows.add(7)
+        val journal = FakeJournal(
+            // Our commit takes DS id 1, so both of these are ordered at or above it.
+            rows = listOf(row(id = 1, tag = 7), row(id = 5, tag = 7)),
+            scripted = mutableListOf(emptyList()),
+        )
+        val cursor = FakeCursor()
+
+        runCommitterSweep(ports(group, journal, cursor = cursor))
+
+        assertEquals(emptyList<String>(), group.surfaced)
+        assertEquals(0L, cursor.value)
+    }
+
+    /**
+     * A LOSING sweep still surfaces the rows it applied.
+     *
+     * Losing the ORDER says nothing about the rows below our commit: they were
+     * applied, the ratchet moved and the cursor advanced past them either way, so
+     * the only question left is whether the user gets to read them. On web this
+     * needed a deliberate `finally`; here surfacing happens inline, per row,
+     * inside the apply — which is what makes the losing path automatic rather
+     * than a second thing to remember.
+     */
+    @Test
+    fun `a losing sweep still surfaces the rows it applied`() = runTest {
+        val group = FakeGroup(rank = 0u, pending = 1)
+        group.applicableRows.add(7)
+        // The winner's commit, ordered below ours — this is what makes us lose.
+        group.foreignCommits.add(42)
+        val journal = FakeJournal(
+            rows = listOf(row(id = 50, tag = 7), row(id = 51, tag = 42)),
+            scripted = mutableListOf(emptyList()),
+        )
+        journal.nextId = 101
+        val cursor = FakeCursor()
+
+        val outcome = runCommitterSweep(ports(group, journal, cursor = cursor))
+
+        assertTrue("outcome was $outcome", outcome is SweepOutcome.Lost)
+        assertEquals(listOf("row#50@t-50", "row#51@t-51"), group.surfaced)
+        assertEquals(51L, cursor.value)
+    }
+
+    /**
+     * The restart / owed-verdict path consumes rows exactly as a fresh sweep does,
+     * so it has to surface them too. Reached through `resolveOwedVerdict`, the
+     * OTHER entry point into `adjudicate`.
+     */
+    @Test
+    fun `the restart path surfaces the rows its owed verdict applied`() = runTest {
+        val group = FakeGroup(rank = 0u, pending = 1)
+        group.hasStaged = true
+        group.applicableRows.add(7)
+        val owed = SweepDurableEntry(
+            id = "entry-owed",
+            commitB64 = "1",
+            welcomeEnvelopeB64 = null,
+            welcomeMailboxesB64 = emptyList(),
+        )
+        val journal = FakeJournal(rows = listOf(row(id = 50, tag = 7)))
+        journal.nextId = 101
+
+        val outcome = resolveOwedVerdict(ports(group, journal, FakeOutbox(owed = owed)))
+
+        assertTrue("outcome was $outcome", outcome is SweepOutcome.Committed)
+        assertEquals(listOf("row#50@t-50"), group.surfaced)
     }
 }

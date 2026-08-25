@@ -122,10 +122,19 @@ public struct StagedSweepArtifacts: Equatable {
 public struct SweepJournalRow: Equatable {
     public var id: Int64
     public var payload: Data
+    /// The DS-assigned row timestamp, verbatim as the DS returned it.
+    ///
+    /// Not decoration: an applied row becomes a timeline event, and the shared
+    /// event constructor requires the DS row timestamp — it is the one clock
+    /// every member reads identically for the identical row. A row shape that
+    /// carried only the payload is exactly what made the verdict apply unable to
+    /// surface anything.
+    public var createdAt: String
 
-    public init(id: Int64, payload: Data) {
+    public init(id: Int64, payload: Data, createdAt: String) {
         self.id = id
         self.payload = payload
+        self.createdAt = createdAt
     }
 }
 
@@ -183,10 +192,35 @@ public struct SweepGroupPort {
     /// Per-group: it never reaches a sibling group, unlike a whole-provider
     /// snapshot restore.
     public var abandonStagedSweep: () throws -> Void
-    /// Apply one journal row through the audited role-verifying receive path.
+    /// Apply one journal row through the audited role-verifying receive path AND
+    /// surface whatever it produced to the timeline.
+    ///
     /// THROWS on a bad frame / wrong epoch / refused commit — the caller skips,
-    /// exactly as the poll loop does.
-    public var applyIncoming: (Data) throws -> Void
+    /// exactly as the poll loop does, and a skipped row must surface nothing.
+    ///
+    /// ## Why the WHOLE row, and why the port also surfaces
+    ///
+    /// The verdict consumes every row the DS ordered below our own commit and
+    /// then advances the shared cursor over them, so the poll never fetches them
+    /// again. Anything one of those rows carried — an ordinary chat message
+    /// another member sent in the window between the stand-down re-read and our
+    /// publish — is gone from the UI forever unless it is surfaced HERE.
+    /// Applying it and discarding the result decrypts the message, advances the
+    /// ratchet, and loses the plaintext silently.
+    ///
+    /// Surfacing therefore belongs to the port rather than to this module, and
+    /// the port is handed the whole ``SweepJournalRow`` rather than just its
+    /// payload: the shared event constructor in `ChatClient.swift` needs the DS
+    /// row id and the DS row timestamp, and every envelope kind must be
+    /// dispatched by that ONE ladder — a second copy of it here is how the poll
+    /// path and the sweep path would drift. This module has nothing to decide
+    /// about an event, so returning one for it to collect would buy nothing.
+    ///
+    /// Because surfacing happens inline, per row, a LOST verdict and a thrown
+    /// verdict both leave the already-applied rows on the timeline — which is
+    /// correct: whether our own commit won the order says nothing about the rows
+    /// below it, which were applied and consumed either way.
+    public var applyIncoming: (SweepJournalRow) throws -> Void
 
     public init(
         groupId: Data,
@@ -197,7 +231,7 @@ public struct SweepGroupPort {
         stagePendingProposals: @escaping () throws -> StagedSweepArtifacts?,
         mergeStagedSweep: @escaping () throws -> Void,
         abandonStagedSweep: @escaping () throws -> Void,
-        applyIncoming: @escaping (Data) throws -> Void
+        applyIncoming: @escaping (SweepJournalRow) throws -> Void
     ) {
         self.groupId = groupId
         self.epoch = epoch
@@ -688,17 +722,16 @@ private func adjudicate(
         // Bad frame, wrong epoch, a non-MLS Lakko envelope (rendezvous /
         // attribution), a role-refused commit, or one of our own rows. Skipped,
         // exactly as the poll loop skips it — and none of those advance the
-        // epoch, which is the only thing the verdict reads.
+        // epoch, which is the only thing the verdict reads. A skipped row was
+        // never decrypted, so it surfaces nothing.
         //
-        // KNOWN CONSEQUENCE, carried over from the web reference: a row applied
-        // here is consumed for MLS but never reaches the chat timeline, because
-        // this path drives the audited receive call directly rather than the
-        // poll's `applyPollResult` fold. The window is narrow by construction —
-        // obligation 3 established the journal was EMPTY immediately before the
-        // stage, so only rows that landed between that re-read and our publish
-        // can be here — but it is not empty, and a chat message in it is
-        // decrypted and dropped rather than rendered.
-        try? group.applyIncoming(row.payload)
+        // The port applies AND surfaces — see ``SweepGroupPort/applyIncoming``.
+        // These rows are the only ones the poll will never see again, because
+        // the cursor advance below moves past them, so the WHOLE row goes over
+        // (the DS id and timestamp are what let the adapter build a timeline
+        // event). Before that, a row applied here was consumed for MLS and
+        // silently dropped from the chat timeline.
+        try? group.applyIncoming(row)
         lastApplied = row.id
     }
     if lastApplied != cursorBefore { ports.cursor.advance(lastApplied) }

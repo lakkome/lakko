@@ -1574,7 +1574,13 @@ function ChatView(props: {
 
   async function sweepNow(): Promise<SweepOutcome | null> {
     const before = memberSignatureKeys(props.entry.group);
-    let outcome: SweepOutcome;
+    // ADR-0045 — the verdict apply consumes journal rows BELOW our own commit
+    // and advances the shared cursor over them, so the poll will never fetch
+    // them again. Collected in journal order and fed to the SAME consumer the
+    // poll uses, once the sweep has settled: they are strictly newer than
+    // anything the poll just rendered, so appending them is journal order.
+    const swept: IncomingChatEvent[] = [];
+    let outcome: SweepOutcome | null = null;
     try {
       outcome = await contacts.sweepIfCommitter(
         props.requireIdentity(),
@@ -1582,6 +1588,7 @@ function ChatView(props: {
         { read: () => cursor(), advance: (to) => setCursor(to) },
         (id) => chat.markOwnPublishedCommit(id),
         actingCommitterNow,
+        (event) => swept.push(event),
       );
     } catch (err) {
       // A verdict this device could not read leaves the sweep staged for the
@@ -1590,8 +1597,14 @@ function ChatView(props: {
       // live.
       // eslint-disable-next-line no-console
       console.warn("ADR-0045 sweep did not complete", err);
-      return null;
+    } finally {
+      // On EVERY exit, including a LOST verdict and a throw. Whether our own
+      // commit won the order says nothing about the rows below it: they were
+      // applied, the ratchet moved and the cursor advanced past them either
+      // way, so the only question left is whether the user gets to read them.
+      if (swept.length > 0) consumeEvents(swept);
     }
+    if (outcome === null) return null;
     if (outcome.kind !== "committed") return outcome;
 
     setMemberCount(props.entry.group.memberCount);
@@ -1924,6 +1937,210 @@ function ChatView(props: {
     return applyOp(prev, { op: "delete", target: e.target });
   }
 
+  /**
+   * Consume a batch of receive-path events — the ONE place a decoded event
+   * becomes UI state.
+   *
+   * Two callers, and that is the point. The poll is the obvious one. The other
+   * is the ADR-0045 committer sweep: its verdict applies every journal row the
+   * DS ordered below its own commit and then advances the SAME cursor over
+   * them, so those rows are gone from the poll's future forever. A chat message
+   * another member sent in the window between the sweep's stand-down re-read
+   * and its publish lands in exactly that set, and before this it was decrypted
+   * and then thrown away. Feeding both paths through this function is what
+   * keeps the two from drifting — every envelope kind is folded here once.
+   *
+   * Events must arrive in journal order; the ops fold and the `fresh` scan both
+   * assume it.
+   */
+  function consumeEvents(events: readonly IncomingChatEvent[]): void {
+    // De-dup: the same DS message id can come back across
+    // refreshes after a reset; outgoing rows we sent in
+    // this session also surface here on a second refresh
+    // through a different path (we already filter the echo
+    // in ChatClient via ownPublishedIds, so duplicates here
+    // are rare).
+    const incomingIds = new Set(
+      rows().flatMap((r) =>
+        r.kind === "incoming" ? [r.event.messageId] : [],
+      ),
+    );
+    // ADR-0023 — split the batch: chat / system / callSignaling
+    // events become timeline rows as before; edit / delete /
+    // reaction OPS fold into the per-message overlay instead of
+    // rendering as standalone bubbles. Each op is applied once
+    // (the poll is incremental, so a given op id arrives once).
+    const fresh: TimelineRow[] = [];
+    /** ADR-0045 — did this batch carry a membership proposal? Drives the
+     *  panel refresh and the tail sweep below. */
+    let sawProposal = false;
+    let ops = msgOps();
+    let opsChanged = false;
+    // ADR-0024 — accumulate typing / read-receipt folds across the
+    // batch, then write each signal once at the end.
+    let typing = typingMap();
+    let typingChanged = false;
+    let watermarks = readWatermarks();
+    let watermarksChanged = false;
+    const nowMs = Date.now();
+    for (const e of events) {
+      if (e.kind === "op") {
+        // ADR-0024 — typing / read-receipt are ephemeral status,
+        // not message overlays: fold them into their own state.
+        if (e.op === "typing") {
+          if (e.senderLeaf !== undefined) {
+            const createdAtMs = Date.parse(e.createdAt);
+            // A malformed timestamp parses to NaN — treat it as
+            // stale (drop the `true`) rather than resurrecting it.
+            const stamp = Number.isNaN(createdAtMs)
+              ? nowMs - TYPING_EXPIRY_MS
+              : createdAtMs;
+            const next = foldTyping(
+              typing,
+              e.senderLeaf,
+              e.isTyping ?? false,
+              stamp,
+              nowMs,
+            );
+            if (next !== typing) {
+              typing = next;
+              typingChanged = true;
+            }
+          }
+          continue;
+        }
+        if (e.op === "read-receipt") {
+          if (e.senderLeaf !== undefined) {
+            const next = foldReadWatermark(watermarks, e.senderLeaf, e.target);
+            if (next !== watermarks) {
+              watermarks = next;
+              watermarksChanged = true;
+            }
+          }
+          continue;
+        }
+        // Fold the edit/delete/reaction op into the overlay first
+        // so a chat row + an op that targets it that arrive in the
+        // same batch both land (the chat row appears in `fresh`
+        // below; the author-leaf lookup also scans `fresh`).
+        const next = applyIncomingOp(e, fresh, ops);
+        if (next !== ops) {
+          ops = next;
+          opsChanged = true;
+        }
+        continue;
+      }
+      // ADR-0027 (G-3) — an external-join request is not a timeline row; it
+      // surfaces in the members panel via the `pendingJoins` memo. The
+      // membersVersion bump after this loop refreshes that memo, so just
+      // skip it here (don't materialise a chat bubble for it).
+      if (e.kind === "externalJoinRequest") continue;
+      // ADR-0042 — a push-routing-secret distribution envelope: persist the
+      // secret (idempotent) + subscribe under the derived opaque `push_gid`.
+      // Never a timeline bubble. Fire-and-forget (best-effort).
+      //
+      // GATED on the ADR-0022 role table, ranked owner > admin > member:
+      // the OWNER may rotate whatever is stored; an ADMIN may only seed a
+      // device that holds none (so an admin-performed add-member still
+      // delivers routing to the new member); a plain member may never
+      // change it. An identical re-broadcast is always idempotent-accepted
+      // from anyone, so the post-add-member redistribute keeps working.
+      // Without this, any single member could unilaterally rotate the
+      // group's routing id and strand an orphan push-gw subscription on
+      // every churn.
+      if (e.kind === "pushRoutingSecret") {
+        const s = auth.state();
+        if (s.kind === "session") {
+          const groupIdB64 = base64Encode(props.entry.group.groupId);
+          void receivePushRoutingSecretGated(
+            s.account.accountId,
+            props.entry.group,
+            groupIdB64,
+            e.senderLeaf,
+            e.secret,
+            // ADR-0044 — the minter's stamp. The gate refuses anything
+            // ahead of our own epoch (`reject-future`) and anything not
+            // strictly newer than what we hold (`reject-stale`), so a
+            // stale re-broadcast can no longer retire the live routing id.
+            e.mintEpoch,
+          ).catch((err) => {
+            // eslint-disable-next-line no-console
+            console.warn("push-routing secret receive failed", err);
+          });
+        }
+        continue;
+      }
+      // ADR-0045 S4b — a committer-liveness beacon. Not a timeline row: it
+      // is an observation about WHO can sweep the pending proposal set,
+      // recorded here from the only two things the field-less envelope
+      // deliberately does not carry — WHO, from the MLS-authenticated sender
+      // leaf, and HOW OLD, from the DS row's server-assigned timestamp
+      // (never a local clock, and never anything the sender asserted).
+      //
+      // The leaf is resolved to a signature KEY here and the key is what is
+      // stored; the rank is derived later, at verdict time, against the role
+      // table as it stands then.
+      if (e.kind === "committerBeacon") {
+        const s = auth.state();
+        if (s.kind === "session" && e.senderLeaf !== undefined) {
+          const senderKey = signatureKeyOfLeaf(e.senderLeaf);
+          if (senderKey !== undefined) {
+            recordBeaconObservation(
+              s.account.accountId,
+              base64Encode(props.entry.group.groupId),
+              base64Encode(senderKey),
+              Date.parse(e.createdAt),
+            );
+          }
+        }
+        continue;
+      }
+      // ADR-0045 — a membership proposal is a PANEL signal, never a timeline
+      // row (UX §10). Record when it landed, using the DS row's timestamp so
+      // the quiet window means the same thing on every device, then let the
+      // panel read the core's retained set for what is actually pending.
+      //
+      // A record the receipt gate REFUSED (`stored === false`) is recorded
+      // nowhere and rendered nowhere: no sweep will ever commit it, so it is
+      // not a pending request. The drop is invisible on the receiving side by
+      // design — it is not that peer's business.
+      if (e.kind === "membershipProposal") {
+        if (e.stored) {
+          const s = auth.state();
+          if (s.kind === "session") {
+            recordObservation(
+              s.account.accountId,
+              base64Encode(props.entry.group.groupId),
+              proposalKeyOfEvent(e),
+              Date.parse(e.createdAt),
+              false,
+            );
+            sawProposal = true;
+          }
+        }
+        continue;
+      }
+      if (incomingIds.has(e.messageId)) continue;
+      fresh.push({ kind: "incoming", event: e });
+    }
+    if (fresh.length > 0) {
+      setRows([...rows(), ...fresh]);
+    }
+    if (opsChanged) {
+      setMsgOps(ops);
+    }
+    if (typingChanged) {
+      setTypingMap(typing);
+    }
+    if (watermarksChanged) {
+      setReadWatermarks(watermarks);
+    }
+    // ADR-0045 — a proposal in this batch changed what the pending-request
+    // panel should show. Bumped here rather than at either call site, so both
+    // receive paths refresh it identically.
+    if (sawProposal) setPendingVersion(pendingVersion() + 1);
+  }
+
   async function refresh(): Promise<void> {
     setError(null);
     setBusy(true);
@@ -1955,187 +2172,8 @@ function ChatView(props: {
       // were parked on the fetch). Nothing was applied and the cursor was not
       // touched — drop it. The poll that DID apply owns rendering those rows.
       if (result.outcome === "cursor-moved") return;
-      // De-dup: the same DS message id can come back across
-      // refreshes after a reset; outgoing rows we sent in
-      // this session also surface here on a second refresh
-      // through a different path (we already filter the echo
-      // in ChatClient via ownPublishedIds, so duplicates here
-      // are rare).
-      const incomingIds = new Set(
-        rows().flatMap((r) =>
-          r.kind === "incoming" ? [r.event.messageId] : [],
-        ),
-      );
-      // ADR-0023 — split the batch: chat / system / callSignaling
-      // events become timeline rows as before; edit / delete /
-      // reaction OPS fold into the per-message overlay instead of
-      // rendering as standalone bubbles. Each op is applied once
-      // (the poll is incremental, so a given op id arrives once).
-      const fresh: TimelineRow[] = [];
-      /** ADR-0045 — did this batch carry a membership proposal? Drives the
-       *  panel refresh and the tail sweep below. */
-      let sawProposal = false;
-      let ops = msgOps();
-      let opsChanged = false;
-      // ADR-0024 — accumulate typing / read-receipt folds across the
-      // batch, then write each signal once at the end.
-      let typing = typingMap();
-      let typingChanged = false;
-      let watermarks = readWatermarks();
-      let watermarksChanged = false;
-      const nowMs = Date.now();
-      for (const e of result.events) {
-        if (e.kind === "op") {
-          // ADR-0024 — typing / read-receipt are ephemeral status,
-          // not message overlays: fold them into their own state.
-          if (e.op === "typing") {
-            if (e.senderLeaf !== undefined) {
-              const createdAtMs = Date.parse(e.createdAt);
-              // A malformed timestamp parses to NaN — treat it as
-              // stale (drop the `true`) rather than resurrecting it.
-              const stamp = Number.isNaN(createdAtMs)
-                ? nowMs - TYPING_EXPIRY_MS
-                : createdAtMs;
-              const next = foldTyping(
-                typing,
-                e.senderLeaf,
-                e.isTyping ?? false,
-                stamp,
-                nowMs,
-              );
-              if (next !== typing) {
-                typing = next;
-                typingChanged = true;
-              }
-            }
-            continue;
-          }
-          if (e.op === "read-receipt") {
-            if (e.senderLeaf !== undefined) {
-              const next = foldReadWatermark(watermarks, e.senderLeaf, e.target);
-              if (next !== watermarks) {
-                watermarks = next;
-                watermarksChanged = true;
-              }
-            }
-            continue;
-          }
-          // Fold the edit/delete/reaction op into the overlay first
-          // so a chat row + an op that targets it that arrive in the
-          // same batch both land (the chat row appears in `fresh`
-          // below; the author-leaf lookup also scans `fresh`).
-          const next = applyIncomingOp(e, fresh, ops);
-          if (next !== ops) {
-            ops = next;
-            opsChanged = true;
-          }
-          continue;
-        }
-        // ADR-0027 (G-3) — an external-join request is not a timeline row; it
-        // surfaces in the members panel via the `pendingJoins` memo. The
-        // membersVersion bump after this loop refreshes that memo, so just
-        // skip it here (don't materialise a chat bubble for it).
-        if (e.kind === "externalJoinRequest") continue;
-        // ADR-0042 — a push-routing-secret distribution envelope: persist the
-        // secret (idempotent) + subscribe under the derived opaque `push_gid`.
-        // Never a timeline bubble. Fire-and-forget (best-effort).
-        //
-        // GATED on the ADR-0022 role table, ranked owner > admin > member:
-        // the OWNER may rotate whatever is stored; an ADMIN may only seed a
-        // device that holds none (so an admin-performed add-member still
-        // delivers routing to the new member); a plain member may never
-        // change it. An identical re-broadcast is always idempotent-accepted
-        // from anyone, so the post-add-member redistribute keeps working.
-        // Without this, any single member could unilaterally rotate the
-        // group's routing id and strand an orphan push-gw subscription on
-        // every churn.
-        if (e.kind === "pushRoutingSecret") {
-          const s = auth.state();
-          if (s.kind === "session") {
-            const groupIdB64 = base64Encode(props.entry.group.groupId);
-            void receivePushRoutingSecretGated(
-              s.account.accountId,
-              props.entry.group,
-              groupIdB64,
-              e.senderLeaf,
-              e.secret,
-              // ADR-0044 — the minter's stamp. The gate refuses anything
-              // ahead of our own epoch (`reject-future`) and anything not
-              // strictly newer than what we hold (`reject-stale`), so a
-              // stale re-broadcast can no longer retire the live routing id.
-              e.mintEpoch,
-            ).catch((err) => {
-              // eslint-disable-next-line no-console
-              console.warn("push-routing secret receive failed", err);
-            });
-          }
-          continue;
-        }
-        // ADR-0045 S4b — a committer-liveness beacon. Not a timeline row: it
-        // is an observation about WHO can sweep the pending proposal set,
-        // recorded here from the only two things the field-less envelope
-        // deliberately does not carry — WHO, from the MLS-authenticated sender
-        // leaf, and HOW OLD, from the DS row's server-assigned timestamp
-        // (never a local clock, and never anything the sender asserted).
-        //
-        // The leaf is resolved to a signature KEY here and the key is what is
-        // stored; the rank is derived later, at verdict time, against the role
-        // table as it stands then.
-        if (e.kind === "committerBeacon") {
-          const s = auth.state();
-          if (s.kind === "session" && e.senderLeaf !== undefined) {
-            const senderKey = signatureKeyOfLeaf(e.senderLeaf);
-            if (senderKey !== undefined) {
-              recordBeaconObservation(
-                s.account.accountId,
-                base64Encode(props.entry.group.groupId),
-                base64Encode(senderKey),
-                Date.parse(e.createdAt),
-              );
-            }
-          }
-          continue;
-        }
-        // ADR-0045 — a membership proposal is a PANEL signal, never a timeline
-        // row (UX §10). Record when it landed, using the DS row's timestamp so
-        // the quiet window means the same thing on every device, then let the
-        // panel read the core's retained set for what is actually pending.
-        //
-        // A record the receipt gate REFUSED (`stored === false`) is recorded
-        // nowhere and rendered nowhere: no sweep will ever commit it, so it is
-        // not a pending request. The drop is invisible on the receiving side by
-        // design — it is not that peer's business.
-        if (e.kind === "membershipProposal") {
-          if (e.stored) {
-            const s = auth.state();
-            if (s.kind === "session") {
-              recordObservation(
-                s.account.accountId,
-                base64Encode(props.entry.group.groupId),
-                proposalKeyOfEvent(e),
-                Date.parse(e.createdAt),
-                false,
-              );
-              sawProposal = true;
-            }
-          }
-          continue;
-        }
-        if (incomingIds.has(e.messageId)) continue;
-        fresh.push({ kind: "incoming", event: e });
-      }
-      if (fresh.length > 0) {
-        setRows([...rows(), ...fresh]);
-      }
-      if (opsChanged) {
-        setMsgOps(ops);
-      }
-      if (typingChanged) {
-        setTypingMap(typing);
-      }
-      if (watermarksChanged) {
-        setReadWatermarks(watermarks);
-      }
+      // ADR-0045 — the shared consumer; see `consumeEvents`.
+      consumeEvents(result.events);
       // NB: no `setCursor` here — `pollMessages` advanced it under the lock.
       // 1.18g — mirror the post-poll member count so the
       // header re-renders after an incoming commit advances
@@ -2197,7 +2235,6 @@ function ChatView(props: {
       //
       // Deliberately AFTER the cursor has settled, and deliberately not awaited
       // by the poll's own error path: a sweep failure is not a poll failure.
-      if (sawProposal) setPendingVersion(pendingVersion() + 1);
       void sweepNow().catch((err: unknown) => {
         // eslint-disable-next-line no-console
         console.warn("ADR-0045 tail sweep failed", err);
@@ -2991,16 +3028,25 @@ function ChatView(props: {
       // is pending, so the approve drains the pending set first. Handing the
       // cursor + echo hook in is what lets that drain be a real sweep rather
       // than a no-op.
-      const result = await contacts.approveExternalJoin(
-        props.requireIdentity(),
-        props.entry.group,
-        proposalRef,
-        {
-          cursor: { read: () => cursor(), advance: (to) => setCursor(to) },
-          markOwnPublished: (id) => chat.markOwnPublishedCommit(id),
-          actingCommitter: actingCommitterNow,
-        },
-      );
+      // ADR-0045 — that drain is a real sweep, so its verdict consumes journal
+      // rows and moves the shared cursor over them. They go to the same
+      // consumer the poll uses, or they are lost.
+      const sweptByDrain: IncomingChatEvent[] = [];
+      const result = await contacts
+        .approveExternalJoin(
+          props.requireIdentity(),
+          props.entry.group,
+          proposalRef,
+          {
+            cursor: { read: () => cursor(), advance: (to) => setCursor(to) },
+            markOwnPublished: (id) => chat.markOwnPublishedCommit(id),
+            actingCommitter: actingCommitterNow,
+            onSweptEvent: (event) => sweptByDrain.push(event),
+          },
+        )
+        .finally(() => {
+          if (sweptByDrain.length > 0) consumeEvents(sweptByDrain);
+        });
       chat.markOwnPublishedCommit(result.commitMessageId);
       setMemberCount(props.entry.group.memberCount);
       setMembersVersion(membersVersion() + 1);
@@ -3136,12 +3182,23 @@ function ChatView(props: {
         // it before anything else touches the group. Handing the cursor + the
         // echo hook in is what lets it re-publish idempotently and re-adjudicate
         // exactly as if nothing had happened.
-        await contacts.sweepPendingCommits(
-          props.entry.group,
-          (id) => chat.markOwnPublishedCommit(id),
-          props.requireIdentity(),
-          { read: () => cursor(), advance: (to) => setCursor(to) },
-        );
+        // ADR-0045 — an owed verdict applies journal rows exactly as a fresh
+        // sweep does and advances the same cursor over them, so the restart
+        // path has to surface them too. `hydrateFromLog()` has already run, so
+        // the timeline is ready to receive them, and `refresh()` below starts
+        // from the cursor this leaves behind.
+        const sweptOnRestart: IncomingChatEvent[] = [];
+        try {
+          await contacts.sweepPendingCommits(
+            props.entry.group,
+            (id) => chat.markOwnPublishedCommit(id),
+            props.requireIdentity(),
+            { read: () => cursor(), advance: (to) => setCursor(to) },
+            (event) => sweptOnRestart.push(event),
+          );
+        } finally {
+          if (sweptOnRestart.length > 0) consumeEvents(sweptOnRestart);
+        }
       } catch (err) {
         // eslint-disable-next-line no-console
         console.warn("commit-outbox sweep failed", err);

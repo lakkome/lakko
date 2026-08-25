@@ -3851,7 +3851,7 @@ which write survives, changed. What was lost was liveness on a shared lock, and 
 one path (ADR-0044's routing row, since insulated by `boundedOrNull`) liveness was
 what a confidentiality guarantee rested on.
 
-### G-38: Two membership commits could be in flight to the DS at once → inverted journal order → device-ahead — **serialized on web + iOS + Android and the local poll-vs-commit interleave closed on all three (2026-08); the remote-commit epoch fork is UNFIXED on every platform**
+### G-38: Two membership commits could be in flight to the DS at once → inverted journal order → device-ahead — **serialized on web + iOS + Android and the local poll-vs-commit interleave closed on all three (2026-08); the remote-commit epoch fork is CLOSED for the member membership paths by ADR-0045 and REMAINS OPEN for the external-join path**
 
 **Get the mechanism right, because the obvious statement of it is wrong.** The hazard
 is **not** "two commits built on the same epoch". On all three clients the
@@ -3912,22 +3912,59 @@ nothing, since the eager merge is exactly what goes stale.
 - **Android — not reachable before the change**: the repository-wide mutex already
   prevented it, and the G-37 narrowing preserves the same-group guarantee by design.
 
-**Residuals — read residual 2 first, it is the largest unfixed item here.**
+**Residuals — read residual 1 first. It was the largest unfixed item here and it is
+now the largest PARTLY fixed one: closed for the member membership paths by
+ADR-0045, still open for external joins.**
 
-1. **The remote-commit fork. UNFIXED on every platform; no lock addresses it.** A poll
-   applying a **remote** commit while a local one is mid-publish is a genuine MLS
-   commit race: the peer built its commit against epoch N independently, so whichever
-   commit loses the DS journal ordering is rejected by everyone who applied the
-   winner — while its own author has already eager-merged it locally. Local
-   serialization is powerless here by construction: the second committer is a
-   different device. Closing it needs a **DS-side epoch gate** (reject a commit whose
-   epoch is not `current + 1`) or **proposal-based commits** (members propose, one
-   designated committer commits). The sub-case that was platform-dependent is now
-   **closed on all three**: the poll apply takes the same per-group lock as the
-   commits, with the network fetch outside it and the MLS apply plus the cursor
-   advance inside, so the purely **local** poll-vs-commit interleave can no longer
-   occur. What remains here is only the genuinely remote case, where the second
-   committer is a different device and no client-side lock can help.
+1. **The remote-commit fork. CLOSED for the member membership paths (2026-08-25,
+   [ADR-0045](../adr/0045-remote-commit-epoch-fork.md)); OPEN for the external-join
+   path.** The hazard, unchanged: a poll applying a **remote** commit while a local
+   one is mid-publish is a genuine MLS commit race — the peer built its commit
+   against epoch N independently, so whichever commit loses the DS journal ordering
+   is rejected by everyone who applied the winner, while its own author has already
+   eager-merged it locally. Local serialization is powerless here **by
+   construction**: the second committer is a different device. The two ways out were
+   a **DS-side epoch gate** or **proposal-based commits**; ADR-0045 chose the second,
+   and the reasons the first was rejected are recorded there (a DS that cannot verify
+   a commit must accept well-formed garbage and bump its counter on it, which hands
+   anyone who has ever held a `/g/` invite link a permanent group-freeze primitive).
+
+   **What is closed.** In a group with an ADR-0022 role table, **add, remove and
+   role-change no longer commit on any client**: a member emits an MLS **Proposal**,
+   which advances no epoch, and exactly one elected owner-or-admin sweeps the pending
+   set into a single commit. A proposal that loses a race is not a fork and needs no
+   repair — the retry moved from the expensive artifact to the cheap one. The
+   committer is elected by a pure total function of the authenticated `0xFF02` role
+   table (`committer_rank`), so there is no election message and nothing to
+   split-brain on, and the sweep **stages** its commit rather than eager-merging: it
+   stands down on any unapplied journal row, publishes, reads the verdict by applying
+   the rows below its own commit, and only then merges or abandons. Two candidates
+   that both act therefore **do not fork** — the loser abandons. Built on the core
+   (`9a60ab3`, `e780952`, `fe3de6c`, `a90fa90`), both FFI surfaces (`c5c0788`,
+   `6c77cd6`, `94da492`) and all three clients (`1de5fe7`, `02f0037`, `1f230ab`).
+   Pinned as **C-64**; the ownership-transfer safety rule the same arc produced is
+   **C-63**.
+
+   **What is NOT closed.** `Group::approve_external_join` still calls `add_member`
+   and **eager-merges**, so it is the one remaining direct-commit path in a
+   role-table group. Two admins approving two different joiners against the same
+   epoch fork each other **exactly as they did before ADR-0045**. That convergence is
+   ADR-0045's S7 and it is unbuilt. It has also become user-visible: the `a90fa90`
+   hardening `refuse_if_proposals_pending` makes the direct and sweep paths mutually
+   exclusive at any instant, so an admin approving a join while any membership
+   request is pending gets a refusal — correct and fail-closed, and a dead end nobody
+   designed. **Two further residuals of the closure itself**, both recorded in the
+   ADR rather than here: a chat message can still straddle an epoch when the commit
+   that changes it is a **remote** one (the clients serialized seal-and-publish, which
+   closes the local half only; closing the rest needs `max_past_epochs` above zero in
+   `lakko-mls`, an invariant-#3 change with its own forward-secrecy cost), and
+   `PublisherGroup::rotate` / `self_update` remain a fifth epoch-advancing path
+   ADR-0045 does not scope.
+
+   The sub-case that was platform-dependent is **closed on all three**: the poll apply
+   takes the same per-group lock as the commits, with the network fetch outside it and
+   the MLS apply plus the cursor advance inside, so the purely **local**
+   poll-vs-commit interleave can no longer occur.
 2. **web two-tab is NOT fixable by a lock and was deliberately not patched.** Each tab
    holds an independent in-memory wasm provider, and the snapshot is written whole to
    a row keyed on `accountId` alone (`chat/mls-store.ts`). Tab B, even after acquiring
@@ -3965,17 +4002,29 @@ nothing, since the eager merge is exactly what goes stale.
    call, not on the section. Android's transport-level budget (G-37 part 2) is the
    worked example.
 
-**Invariants.** No `lakko-mls` change on any client — orchestration over the audited
-create-commit and publish paths, so invariant #3 is untouched. Invariant #4 is
-**strengthened**: no group-epoch advance reaches the DS while another advance on the
-same group is still in flight. Invariants #1 / #2 are unaffected (the lock changes
-ordering, not what the server sees). No indexed `C-` / `I-` / `T-` invariant is added
-by this entry — see the Quick stats table in
-[`invariant-index.md`](./invariant-index.md) for the current counts.
+**Invariants — of the SERIALIZATION fix.** No `lakko-mls` change on any client —
+orchestration over the audited create-commit and publish paths, so invariant #3 is
+untouched. Invariant #4 is **strengthened**: no group-epoch advance reaches the DS
+while another advance on the same group is still in flight. Invariants #1 / #2 are
+unaffected (the lock changes ordering, not what the server sees). That fix added no
+indexed `C-` / `I-` / `T-` invariant.
 
-**Verified firsthand by the maintainer against the current tree:** Android
-`:app:compileDebugKotlin` BUILD SUCCESSFUL and `testDebugUnitTest --rerun-tasks` 515
-tests / 0 failures; web `tsc --noEmit` clean and vitest 583; iOS `xcodebuild` BUILD
-SUCCEEDED with LakkoTests 342/342 excluding the two dockerised-SFU cases;
-`just spec-check` OK. The residuals above are **not** covered by those
-gates — residual 1 in particular needs a live multi-device environment.
+**Invariants — of the ADR-0045 closure of residual 1**, which is a different change
+and a much larger one. It **does** touch `crates/lakko-mls` (invariant **#3**): a new
+per-proposal authorisation rule, a commit-level never-orphan-the-owner rule, a new
+stage / merge / abandon commit lifecycle, and a park on the send path. **The external
+crypto review that ADR requires and a `lakko-security` pass have both still not
+happened on any of it** — the largest open item on the arc, and it grew rather than
+shrank once three client implementations of the same disciplines landed on top.
+Two indexed invariants were minted: **C-63** and **C-64**. See the Quick stats table
+in [`invariant-index.md`](./invariant-index.md) for the current counts.
+
+**Verified firsthand by the maintainer against the tree at the time of the
+serialization fix:** Android `:app:compileDebugKotlin` BUILD SUCCESSFUL and
+`testDebugUnitTest --rerun-tasks` 515 tests / 0 failures; web `tsc --noEmit` clean
+and vitest 583; iOS `xcodebuild` BUILD SUCCEEDED with LakkoTests 342/342 excluding
+the two dockerised-SFU cases; `just spec-check` OK. **The ADR-0045 client sprints
+record their own gates** (`1de5fe7` / `02f0037` / `000d9f8` / `1f230ab`): web vitest
+706, iOS 432 tests, Android 598 tests, all with zero failures. The residuals above
+are **not** covered by any of those gates — the remaining half of residual 1 in
+particular needs a live multi-device environment.

@@ -99,6 +99,26 @@
  *    The device's membership operations stay frozen — durably, since the
  *    staged commit survives a restart — with nothing that could unwedge it.
  *
+ * ## The swallowed-rows probe (also MEASURED)
+ *
+ * 7. **`a chat message ordered below our own commit is SURFACED, not
+ *    swallowed`** — this pins a defect that WAS live. `adjudicate` called
+ *    `group.applyIncoming(row.payload)` and discarded whatever it produced, and
+ *    the cursor then advanced past the row, so an ordinary chat message another
+ *    member sent in the window between the stand-down re-read and our publish
+ *    was decrypted, consumed, and lost from the timeline for good. With the old
+ *    call restored (payload only, un-awaited), four tests in this block go red:
+ *
+ *        FAIL … > the verdict apply must not swallow the rows it consumes >
+ *        a chat message ordered below our own commit is SURFACED, not swallowed
+ *        AssertionError: expected [] to deeply equal [ 'chat#50@t-50' ]
+ *
+ *    plus `surfaces every applied row in journal order`, `a row that THROWS
+ *    surfaces nothing`, and `the restart path surfaces them too`. (The same
+ *    probe also reds three pre-existing verdict tests, because a model whose
+ *    `applyIncoming` is handed a bare payload cannot apply anything at all —
+ *    that part is an artefact of the probe, not evidence.)
+ *
  * BOUNDARY GUARD, not a discriminator: `nothing pending is a no-op` and
  * `a non-committer never sweeps` both pass with every rule above neutered.
  * They pin the short-circuits that keep this safe to call at the tail of every
@@ -137,14 +157,35 @@ const APPLICATION = 0x02;
 const PROPOSAL = 0x03;
 const NOT_MLS = 0xff;
 
+function kindName(kind: number | undefined): string {
+  if (kind === COMMIT) return "commit";
+  if (kind === APPLICATION) return "chat";
+  if (kind === PROPOSAL) return "proposal";
+  return "other";
+}
+
 function frame(kind: number, epoch: number, tag = 0): Uint8Array {
   return new Uint8Array([kind, epoch, tag]);
+}
+
+/**
+ * One DS journal row, timestamp included.
+ *
+ * The `createdAt` is not decoration: the adapter turns each applied row into a
+ * timeline event through the SAME `toEvent` the poll uses, and that function
+ * requires the DS row timestamp. A row shape that carried only the payload is
+ * exactly what made the sweep unable to surface anything.
+ */
+function row(id: number, kind: number, epoch: number, tag = 0): SweepJournalRow {
+  return { id, payload: frame(kind, epoch, tag), createdAt: `t-${id}` };
 }
 
 interface Model {
   readonly ports: SweepPorts;
   readonly order: string[];
   readonly published: string[];
+  /** What the applied rows handed to the timeline, in journal order. */
+  readonly surfaced: string[];
   epoch: () => bigint;
   pending: () => number;
   staged: () => boolean;
@@ -173,6 +214,8 @@ function model(opts: {
 }): Model {
   const order: string[] = [];
   const published: string[] = [];
+  /** Everything the applied rows surfaced to the timeline, in journal order. */
+  const surfaced: string[] = [];
   let epoch = BigInt(opts.epoch ?? 6);
   let pending = opts.pending ?? 0;
   let staged = opts.owed !== undefined;
@@ -223,12 +266,20 @@ function model(opts: {
         // pending is deliberately UNTOUCHED — an abandoned sweep was never
         // merged, so its proposals are still there for the winner.
       },
-      applyIncoming: (payload) => {
+      // The double stands in for the REAL adapter, which both applies the row
+      // and surfaces what it produced. Splitting those two in the model would
+      // make the defect untestable here: the whole failure was that the second
+      // half did not exist.
+      applyIncoming: async (journalRow) => {
+        const payload = journalRow.payload;
         const kind = payload[0];
         const framedAt = BigInt(payload[1] ?? 0);
         if (kind === NOT_MLS) throw new Error("not an MLS message");
         if (framedAt !== epoch) throw new Error("wrong epoch");
         order.push(`apply:${kind}@${framedAt}`);
+        // Surfacing happens only AFTER a successful apply, exactly as in the
+        // adapter — a skipped row must produce no event.
+        surfaced.push(`${kindName(kind)}#${journalRow.id}@${journalRow.createdAt}`);
         if (kind === COMMIT) {
           epoch += 1n;
           staged = false; // OpenMLS discards a pending commit on a foreign merge
@@ -247,7 +298,7 @@ function model(opts: {
         published.push(`group:${bytes[0] === COMMIT ? "commit" : "other"}`);
         order.push("publish");
         const id = (nextId += 1);
-        journal.push({ id, payload: bytes });
+        journal.push({ id, payload: bytes, createdAt: `t-${id}` });
         // Splice the racing rows in at ids BELOW ours, the way the DS would
         // have ordered a commit that arrived first.
         for (const r of raceRows.splice(0)) journal.push(r);
@@ -297,6 +348,7 @@ function model(opts: {
     ports,
     order,
     published,
+    surfaced,
     epoch: () => epoch,
     pending: () => pending,
     staged: () => staged,
@@ -389,7 +441,7 @@ describe("ADR-0045 — the sweep short-circuits", () => {
 describe("ADR-0045 — obligation 3: the stand-down re-read", () => {
   it("stands down when the journal moved, and stages nothing", async () => {
     const m = model({ rank: 0, pending: 1 });
-    m.journal.push({ id: 1, payload: frame(APPLICATION, 6) });
+    m.journal.push(row(1, APPLICATION, 6));
 
     const out = await runCommitterSweep(m.ports);
 
@@ -490,7 +542,7 @@ describe("ADR-0045 — obligation 2: the Welcome waits for the verdict", () => {
   it("the Welcome is NOT published before the verdict — and never at all on a LOSS", async () => {
     const m = model({ rank: 0, pending: 1, adds: [ALICE], epoch: 6 });
     // A foreign commit at OUR epoch, ordered BELOW ours by the DS.
-    m.raceRows.push({ id: 50, payload: frame(COMMIT, 6, 0xfa) });
+    m.raceRows.push(row(50, COMMIT, 6, 0xfa));
 
     const out = await runCommitterSweep(m.ports);
 
@@ -506,7 +558,7 @@ describe("ADR-0045 — obligation 2: the Welcome waits for the verdict", () => {
 describe("ADR-0045 — a losing sweep", () => {
   it("abandons, and the proposals survive for the next one", async () => {
     const m = model({ rank: 0, pending: 2, epoch: 6 });
-    m.raceRows.push({ id: 50, payload: frame(COMMIT, 6, 0xfa) });
+    m.raceRows.push(row(50, COMMIT, 6, 0xfa));
 
     const out = await runCommitterSweep(m.ports);
 
@@ -526,7 +578,7 @@ describe("ADR-0045 — a losing sweep", () => {
 
   it("advances the cursor over the rows the verdict applied", async () => {
     const m = model({ rank: 0, pending: 1, epoch: 6 });
-    m.raceRows.push({ id: 50, payload: frame(COMMIT, 6, 0xfa) });
+    m.raceRows.push(row(50, COMMIT, 6, 0xfa));
 
     await runCommitterSweep(m.ports);
 
@@ -598,7 +650,7 @@ describe("ADR-0045 — obligation 1: a restart finishes an owed verdict", () => 
 
   it("abandons when the re-adjudication says it lost", async () => {
     const m = model({ rank: 0, pending: 1, epoch: 6, owed: { entry: OWED } });
-    m.raceRows.push({ id: 50, payload: frame(COMMIT, 6, 0xfa) });
+    m.raceRows.push(row(50, COMMIT, 6, 0xfa));
 
     const out = await resolveOwedVerdict(m.ports);
 
@@ -646,9 +698,9 @@ describe("ADR-0045 — the verdict reads only the rows BELOW our own commit", ()
 
   it("non-MLS rows and application messages below our commit do not move the epoch", async () => {
     const m = model({ rank: 0, pending: 1, epoch: 6 });
-    m.raceRows.push({ id: 40, payload: frame(NOT_MLS, 0) });
-    m.raceRows.push({ id: 41, payload: frame(APPLICATION, 6) });
-    m.raceRows.push({ id: 42, payload: frame(PROPOSAL, 6) });
+    m.raceRows.push(row(40, NOT_MLS, 0));
+    m.raceRows.push(row(41, APPLICATION, 6));
+    m.raceRows.push(row(42, PROPOSAL, 6));
 
     const out = await runCommitterSweep(m.ports);
 
@@ -657,5 +709,117 @@ describe("ADR-0045 — the verdict reads only the rows BELOW our own commit", ()
     // have over-detected all three of these as losses and bricked the device.
     expect(out.kind).toBe("committed");
     expect(m.order).toContain("merge");
+  });
+});
+
+describe("ADR-0045 — the verdict apply must not swallow the rows it consumes", () => {
+  /**
+   * The defect this pins.
+   *
+   * `adjudicate` applies every row the DS ordered below our own commit, and the
+   * cursor then advances past them, so the poll never fetches them again. When
+   * one of those rows is an ordinary chat message from another member, applying
+   * it correctly advances the ratchet — and, before this, threw the plaintext
+   * away. The message was permanently lost from the timeline, silently.
+   *
+   * The window is narrow but real and reachable without any fault: the
+   * stand-down check proves the journal empty, and between that check and the
+   * publish another member can send. Anything the DS orders below our commit
+   * lands in exactly this loop.
+   */
+  it("a chat message ordered below our own commit is SURFACED, not swallowed", async () => {
+    const m = model({ rank: 0, pending: 1, epoch: 6 });
+    // Sent by another member in the window between the stand-down re-read and
+    // our publish, so the DS orders it BELOW our commit.
+    m.raceRows.push(row(50, APPLICATION, 6));
+
+    const out = await runCommitterSweep(m.ports);
+
+    // The verdict is unaffected — an application message moves no epoch.
+    expect(out.kind).toBe("committed");
+    // …and the message reached the timeline, carrying the DS row id and the DS
+    // row timestamp, which is what the shared `toEvent` needs.
+    expect(m.surfaced).toEqual(["chat#50@t-50"]);
+    // The cursor moved past it, which is exactly why surfacing is mandatory:
+    // the poll will never fetch this row again.
+    expect(m.cursorValue()).toBe(50);
+  });
+
+  it("surfaces every applied row in journal order, and only those below our commit", async () => {
+    const m = model({ rank: 0, pending: 1, epoch: 6 });
+    m.raceRows.push(row(40, APPLICATION, 6));
+    m.raceRows.push(row(41, PROPOSAL, 6));
+    m.raceRows.push(row(42, APPLICATION, 6));
+
+    const out = await runCommitterSweep(m.ports);
+
+    expect(out.kind).toBe("committed");
+    expect(m.surfaced).toEqual(["chat#40@t-40", "proposal#41@t-41", "chat#42@t-42"]);
+  });
+
+  it("a row that THROWS surfaces nothing, and still advances the cursor over it", async () => {
+    const m = model({ rank: 0, pending: 1, epoch: 6 });
+    // A non-MLS Lakko envelope (rendezvous / attribution) — skipped exactly as
+    // the poll skips it. A skipped row was never decrypted, so there is no
+    // plaintext to surface and inventing one would be a lie.
+    m.raceRows.push(row(40, NOT_MLS, 0));
+    m.raceRows.push(row(41, APPLICATION, 6));
+
+    const out = await runCommitterSweep(m.ports);
+
+    expect(out.kind).toBe("committed");
+    expect(m.surfaced).toEqual(["chat#41@t-41"]);
+    // `lastApplied` still advanced over the skipped row, byte-for-byte as
+    // before: the cursor stops at the last row this run consumed.
+    expect(m.cursorValue()).toBe(41);
+  });
+
+  it("rows AT or ABOVE our own commit surface nothing and do not move the cursor past it", async () => {
+    const m = model({ rank: 0, pending: 1, epoch: 6 });
+    const out = await runCommitterSweep(m.ports);
+    expect(out.kind).toBe("committed");
+
+    // Our own commit is id 101 and is the only row in the journal. It is not
+    // part of the question, so nothing is applied, nothing is surfaced, and the
+    // cursor is untouched — the poll re-fetches it and drops it through the
+    // echo filter.
+    expect(m.surfaced).toEqual([]);
+    expect(m.cursorValue()).toBe(0);
+  });
+
+  it("a LOSING sweep still surfaces the rows it applied", async () => {
+    const m = model({ rank: 0, pending: 1, epoch: 6 });
+    m.raceRows.push(row(50, APPLICATION, 6));
+    // The winner's commit, ordered below ours — this is what makes us lose.
+    m.raceRows.push(row(51, COMMIT, 6, 0xfa));
+
+    const out = await runCommitterSweep(m.ports);
+
+    expect(out.kind).toBe("lost");
+    // Losing the ORDER says nothing about the rows: they were applied, the
+    // ratchet moved, and the cursor advanced past them either way.
+    expect(m.surfaced).toEqual(["chat#50@t-50", "commit#51@t-51"]);
+    expect(m.cursorValue()).toBe(51);
+  });
+
+  it("the restart path surfaces them too — an owed verdict consumes rows exactly as a fresh sweep does", async () => {
+    const OWED_ENTRY: SweepDurableEntry = {
+      id: "entry-owed",
+      commitB64: Buffer.from(frame(COMMIT, 6, 0x5e)).toString("base64"),
+      welcomeEnvelopeB64: undefined,
+      welcomeMailboxesB64: [],
+    };
+    const m = model({
+      rank: 0,
+      pending: 1,
+      epoch: 6,
+      owed: { entry: OWED_ENTRY },
+    });
+    m.raceRows.push(row(50, APPLICATION, 6));
+
+    const out = await resolveOwedVerdict(m.ports);
+
+    expect(out.kind).toBe("committed");
+    expect(m.surfaced).toEqual(["chat#50@t-50"]);
   });
 });
