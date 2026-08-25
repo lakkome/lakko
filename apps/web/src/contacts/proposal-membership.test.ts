@@ -32,7 +32,7 @@
  *    the concurrent path.
  *
  * 3. **`the owner's own change still applies immediately`** — with the
- *    `rank !== 0` gate in `runOwnerSweep` changed to reject rank 0. THREE tests
+ *    `rank !== 0` gate in `runCommitterSweep` changed to reject rank 0. THREE tests
  *    went red:
  *
  *        AssertionError: expected 'not-committer' to be 'committed'
@@ -40,18 +40,18 @@
  *    The owner would publish a request nobody ever sweeps, so "tap, done"
  *    becomes an indefinite wait in the overwhelmingly common case.
  *
- * 4. **`an admin's request waits for a committer — it does not sweep itself`**
- *    — with the same gate made permissive (`rank === undefined` refused):
+ * 4. **`a plain member's request waits for a committer`** — with the
+ *    `rank === undefined` gate made permissive:
  *
  *        AssertionError: expected { kind: 'committed', …(3) } to deeply equal
- *        { kind: 'not-committer', rank: 1 }
- *        -   "kind": "not-committer",
- *        -   "rank": 1,
- *        +   "addedCount": 0,
- *        +   "commitMessageId": 102,
+ *        { kind: 'not-committer', rank: undefined }
  *
- *    A non-owner sweeping is S4b, and doing it here without the beacon would be
- *    the uncoordinated multi-committer race in a narrower window.
+ *    A plain member's commit is refused by every peer's role gate, so it would
+ *    eager-merge alone at N+1 — this ADR's own hazard through the back door.
+ *
+ * 5. **S4b — `an admin sweeps when nobody better placed is running`** and
+ *    `an admin defers to a fresh beacon from a lower rank`. The admin arm is
+ *    the whole of S4b: an admin-only group used to wait indefinitely.
  *
  * BOUNDARY GUARD, not a discriminator: `the sweep never runs on a legacy
  * group`. It passes under every probe above; its job is to catch a future
@@ -82,6 +82,7 @@ vi.mock("../wasm", () => ({
 }));
 
 import { ContactsClient } from "./client";
+import type { ActingCommitter } from "../chat/committer-beacon";
 import type { DsClient } from "../ds/client";
 import type { DiscoveryClient } from "../discovery/client";
 import type {
@@ -266,6 +267,14 @@ afterEach(() => {
 
 const CURSOR = { read: (): number => 0, advance: (): void => {} };
 const NOOP = (): void => {};
+/** ADR-0045 S4b — the acting-committer port. `ACT` is what the real fold gives
+ *  the owner unconditionally and gives an admin that has heard nothing; `defer`
+ *  is what a fresh beacon from a strictly better-placed candidate gives. */
+const ACT = async (): Promise<ActingCommitter> => ({ kind: "act" });
+const DEFER_TO = (toRank: number) => async (): Promise<ActingCommitter> => ({
+  kind: "defer",
+  toRank,
+});
 
 describe("ADR-0045 obligation 5 — which path a group takes", () => {
   it("a group with NO role table still direct-commits", async () => {
@@ -305,7 +314,7 @@ describe("ADR-0045 obligation 5 — which path a group takes", () => {
     const g = fakeGroup({ gid: freshGid(), roleTable: false });
     const c = client(g.order, ds(g.order));
 
-    const out = await c.sweepIfCommitter(null, g.group, CURSOR, NOOP);
+    const out = await c.sweepIfCommitter(null, g.group, CURSOR, NOOP, ACT);
 
     // `ownCommitterRank` is absent on a legacy group, so the adapter's read
     // throws and the sweep must not proceed regardless.
@@ -314,7 +323,7 @@ describe("ADR-0045 obligation 5 — which path a group takes", () => {
   });
 });
 
-describe("ADR-0045 — the owner sweeps, nobody else", () => {
+describe("ADR-0045 — who sweeps", () => {
   it("the owner's own change still applies immediately", async () => {
     // UX §2 — the load-bearing common case. The owner is rank 0, so its own
     // device is the acting committer and sweeps its own request with no round
@@ -325,7 +334,7 @@ describe("ADR-0045 — the owner sweeps, nobody else", () => {
     const proposed = await c.removeMemberFromGroup(null, g.group, 4);
     expect(proposed).toMatchObject({ kind: "proposed" });
 
-    const swept = await c.sweepIfCommitter(null, g.group, CURSOR, NOOP);
+    const swept = await c.sweepIfCommitter(null, g.group, CURSOR, NOOP, ACT);
 
     expect(swept.kind).toBe("committed");
     expect(g.order).toEqual([
@@ -345,20 +354,49 @@ describe("ADR-0045 — the owner sweeps, nobody else", () => {
     expect(g.staged()).toBe(false);
   });
 
-  it("an admin's request waits for a committer — it does not sweep itself", async () => {
-    // In this slice the committer is the OWNER only. An admin (rank 1) publishes
-    // its request and waits, which ADR-0045 decision 2 designs for rather than
-    // treats as a failure: a request has no deadline.
+  it("an admin defers to a fresh beacon from a lower rank — it does not sweep", async () => {
+    // ADR-0045 S4b. An admin (rank 1) that hears the owner (rank 0) beacon
+    // inside the freshness window stands down: only a STRICTLY lower rank
+    // defers it, and rank 0 is strictly lower. Nothing is staged, so nothing
+    // can race the owner's own sweep.
     const g = fakeGroup({ gid: freshGid(), roleTable: true, rank: 1 });
     const c = client(g.order, ds(g.order));
 
     await c.removeMemberFromGroup(null, g.group, 4);
-    const swept = await c.sweepIfCommitter(null, g.group, CURSOR, NOOP);
+    const swept = await c.sweepIfCommitter(
+      null,
+      g.group,
+      CURSOR,
+      NOOP,
+      DEFER_TO(0),
+    );
 
-    expect(swept).toEqual({ kind: "not-committer", rank: 1 });
+    expect(swept).toEqual({ kind: "deferred", rank: 1, toRank: 0 });
     expect(g.pending()).toBe(1);
     expect(g.epoch()).toBe(6n);
     expect(g.order).not.toContain("stage");
+    // The stand-down happens BEFORE the journal re-read, so a deferring device
+    // does not even reach the network.
+    expect(g.order).not.toContain("fetch");
+  });
+
+  it("an admin sweeps when nobody better placed is running", async () => {
+    // ADR-0045 S4b — the whole point of the slice. Under S4a this admin
+    // returned `not-committer` and the group waited for an owner who might
+    // never open the app. Hearing nothing means ACT.
+    const g = fakeGroup({ gid: freshGid(), roleTable: true, rank: 1 });
+    const c = client(g.order, ds(g.order));
+
+    await c.removeMemberFromGroup(null, g.group, 4);
+    const swept = await c.sweepIfCommitter(null, g.group, CURSOR, NOOP, ACT);
+
+    expect(swept.kind).toBe("committed");
+    expect(g.epoch()).toBe(7n);
+    expect(g.pending()).toBe(0);
+    expect(g.staged()).toBe(false);
+    // The stand-down re-read is still there — the beacon removed the WAIT,
+    // not the RACE.
+    expect(g.order).toContain("fetch");
   });
 
   it("a plain member's request waits for a committer", async () => {
@@ -366,7 +404,7 @@ describe("ADR-0045 — the owner sweeps, nobody else", () => {
     const c = client(g.order, ds(g.order));
 
     await c.removeMemberFromGroup(null, g.group, 4);
-    const swept = await c.sweepIfCommitter(null, g.group, CURSOR, NOOP);
+    const swept = await c.sweepIfCommitter(null, g.group, CURSOR, NOOP, ACT);
 
     // `undefined` and `0` are never interchangeable: `0` is the owner.
     expect(swept).toEqual({ kind: "not-committer", rank: undefined });
@@ -396,6 +434,7 @@ describe("ADR-0045 — the owner sweeps, nobody else", () => {
       owner.group,
       CURSOR,
       NOOP,
+      ACT,
     );
 
     expect(swept.kind).toBe("committed");

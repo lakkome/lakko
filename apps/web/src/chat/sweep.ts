@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0045 S4a — the committer sweep: stage, publish, read the journal
+ * ADR-0045 S4a/S4b — the committer sweep: stage, publish, read the journal
  * verdict, then merge or abandon.
  *
  * ## What this closes
@@ -14,20 +14,26 @@
  * **proposals** (not epoch-advancing, so a lost race costs nothing) and one
  * elected owner-or-admin sweeps them into a single commit.
  *
- * In this slice the committer is the **owner only** (`ownCommitterRank() === 0`).
- * Rank 0 acts without consulting any beacon, so with exactly one committer
- * there is nothing to elect and no stagger, no timeout and no fallback
- * committer to build. An admin-only group simply waits — the designed
- * behaviour, per ADR-0045 decision 2, which gives a request no deadline.
+ * S4a made the committer the **owner only** (`ownCommitterRank() === 0`), so an
+ * admin-only group simply waited. **S4b widened it to every candidate**, ordered
+ * by the ADR-0045 liveness beacon: this device sweeps when it is a candidate and
+ * has heard no fresh beacon from anyone **strictly** better placed — including
+ * when it has heard nothing at all, which means nobody better placed is running.
+ * The decision itself is not made here: {@link SweepPorts.actingCommitter} hands
+ * it in, computed by `chat/committer-beacon.ts` over the core's own fold.
  *
  * ## Why the sweep still stages rather than eager-merging
  *
  * Because a committer that *can* lose a race must not merge before the journal
- * has ordered its commit, and "can lose" is a property of the design, not of
- * this slice: S4b adds admin takeover, and two candidates in a handover can
- * both act. `commitPendingProposals` is exactly `stagePendingProposals`
- * followed at once by `mergeStagedSweep` — building on it now and swapping it
- * later would be building the hazard and then removing it.
+ * has ordered its commit, and with S4b that is no longer hypothetical: each
+ * candidate folds over its own poll-timed view and a beacon is stale by up to
+ * one interval even when its sender is healthy, so two candidates can both
+ * reach `act`. **The beacon removes the wait, not the race** — the stand-down
+ * re-read below and the staged-commit rollback are as required after S4b as
+ * before it, and reading the acting verdict as a licence to drop either would
+ * be a mis-reading. `commitPendingProposals` is exactly `stagePendingProposals`
+ * followed at once by `mergeStagedSweep`; building on it would be building the
+ * hazard.
  *
  * ## The five obligations, and where each one lives
  *
@@ -35,7 +41,7 @@
  *    *durable* (OpenMLS persists `MlsGroupState::PendingCommit`) and freezes
  *    that group's own membership operations across restarts — `is_operational()`
  *    refuses `propose_*` / add / remove / `self_update` while one is pending.
- *    So {@link runOwnerSweep} adjudicates every sweep it stages, and
+ *    So {@link runCommitterSweep} adjudicates every sweep it stages, and
  *    {@link resolveOwedVerdict} is what a restart runs first: it is wired into
  *    ADR-0040's existing `sweepPendingCommits` seam rather than becoming a
  *    second restart path.
@@ -88,6 +94,8 @@
  * is host-testable in the plain `node` vitest environment — no IndexedDB, no
  * wasm, no network. `contacts/client.ts` supplies the thin adapters.
  */
+
+import type { ActingCommitter } from "./committer-beacon";
 
 /** The MLS artifacts a staged sweep produced. Mirrors the wasm `StagedSweep`. */
 export interface StagedSweepArtifacts {
@@ -192,6 +200,20 @@ export interface SweepCursorRef {
 /** Everything the sweep needs. */
 export interface SweepPorts {
   readonly group: SweepGroupPort;
+  /**
+   * ADR-0045 S4b — is this device the acting committer right now?
+   *
+   * Called with this device's CURRENT rank (never `undefined` — the caller has
+   * already established it is a candidate) and answered by the core's
+   * `actingCommitterVerdict` fold over the beacons this device has observed.
+   * Asynchronous because the fold needs wasm and the observation store; it is
+   * awaited before anything is staged, so a slow answer costs one attempt and
+   * nothing else.
+   *
+   * A throw is treated as `defer` — fail-closed, because the alternative is a
+   * device that sweeps on no evidence about who else is running.
+   */
+  actingCommitter(ownRank: number): Promise<ActingCommitter>;
   readonly journal: SweepJournalPort;
   readonly outbox: SweepOutboxPort;
   readonly cursor: SweepCursorRef;
@@ -212,8 +234,19 @@ export interface SweepPorts {
 
 /** What one sweep attempt did. */
 export type SweepOutcome =
-  /** This device is not the committer (not rank 0). Nothing happened. */
+  /** This device is not in the committer set at all (a plain member, or a
+   *  group with no role table). Nothing happened, and nothing ever will on
+   *  this device — distinct from `deferred`, which re-evaluates. */
   | { readonly kind: "not-committer"; readonly rank: number | undefined }
+  /** ADR-0045 S4b — this device IS a candidate, but a strictly better-placed
+   *  one beaconed inside the freshness window. Stood down without staging;
+   *  the next poll re-evaluates, and if that candidate goes quiet its beacon
+   *  ages out of the window and this device takes over on its own. */
+  | {
+      readonly kind: "deferred";
+      readonly rank: number;
+      readonly toRank: number | undefined;
+    }
   /** Nothing authorised was pending and nothing was staged. */
   | { readonly kind: "nothing-pending" }
   /** Obligation 3 — the journal moved since our cursor, so a commit may
@@ -292,30 +325,59 @@ export function shouldStandDown(unappliedRowCount: number): boolean {
 /**
  * Run one committer sweep. Callers MUST hold the per-group MLS lock.
  *
- * Short-circuits without touching the network when this device is not the
- * committer, or when nothing is pending and no verdict is owed — so wiring
+ * Short-circuits without touching the network when this device is not a
+ * candidate, or when nothing is pending and no verdict is owed — so wiring
  * this into the tail of every poll costs one synchronous check in the common
  * case.
  *
  * @throws {@link SweepVerdictUnavailable} when the journal order could not be
  *   read. The sweep is left staged for the next attempt.
  */
-export async function runOwnerSweep(ports: SweepPorts): Promise<SweepOutcome> {
+export async function runCommitterSweep(ports: SweepPorts): Promise<SweepOutcome> {
   const { group } = ports;
 
-  // Only rank 0 sweeps in this slice. `undefined` (plain member / no role
-  // table) and any admin rank are both "not me": an admin-only group waits,
-  // which is the designed behaviour, not a failure.
-  const rank = group.ownCommitterRank();
-  if (rank !== 0) return { kind: "not-committer", rank };
-
-  // Obligation 1 — an owed verdict takes precedence over starting a new sweep.
-  // It has to: a staged sweep freezes this group's membership operations, and
-  // `stagePendingProposals` refuses a second stage fail-closed, so trying to
+  // Obligation 1, and it runs BEFORE the rank check on purpose.
+  //
+  // A staged sweep is DURABLE and freezes this group's membership operations
+  // across restarts, so it must be adjudicated by whoever staged it —
+  // including a device that has since been demoted out of the committer set,
+  // a case S4b made newly reachable (S4a's only committer was the owner, whom
+  // no role change can demote). Gating this behind the rank check would leave
+  // such a device frozen permanently, with nothing that could ever unwedge it.
+  // Re-publishing a demoted device's commit is safe: every peer's role gate
+  // refuses it, so it loses the order and is abandoned — which is exactly the
+  // unwedge.
+  //
+  // It also takes precedence over starting a NEW sweep, because
+  // `stagePendingProposals` refuses a second stage fail-closed: trying to
   // start one first would throw and leave the freeze in place.
   if (group.hasStagedSweep()) return resolveOwedVerdict(ports);
 
+  // `undefined` is "not in the committer set at all" — a plain member or a
+  // group with no role table. `0` is the OWNER, so `if (rank)` would be wrong
+  // in both directions.
+  const rank = group.ownCommitterRank();
+  if (rank === undefined) return { kind: "not-committer", rank };
+
   if (group.pendingProposalCount() === 0) return { kind: "nothing-pending" };
+
+  // ADR-0045 S4b — is anyone strictly better placed announcing itself? Asked
+  // only once there is something to sweep, so a quiet group never pays for it.
+  // A throw is a defer: sweeping on an unreadable view of who else is running
+  // is the failure this whole election exists to avoid.
+  let acting: ActingCommitter;
+  try {
+    acting = await ports.actingCommitter(rank);
+  } catch {
+    acting = { kind: "defer", toRank: undefined };
+  }
+  if (acting.kind !== "act") {
+    return {
+      kind: "deferred",
+      rank,
+      toRank: acting.kind === "defer" ? acting.toRank : undefined,
+    };
+  }
 
   // Obligation 3 — the stand-down re-read, immediately before creating the
   // commit.

@@ -111,6 +111,10 @@ import { deleteOutboxForAccount } from "../chat/commit-outbox";
 // ADR-0045 — the pending-request observation store follows the outbox's
 // hygiene: a prior session's request ages must never be read by a later one.
 import { clearObservationsForAccount } from "../chat/pending-requests";
+// ADR-0045 S4b — the same hygiene for the committer-beacon observation
+// store: a stale beacon carried across a recover / forgetDevice would let
+// this device defer to a candidate it has no current evidence about.
+import { clearBeaconObservationsForAccount } from "../chat/committer-beacon";
 import { deleteMessageLog } from "../chat/message-log-store";
 import { rehydrateMlsState } from "../chat/rehydrate";
 import { subscribeToPush, unsubscribeFromPush } from "../push/subscribe";
@@ -2183,6 +2187,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         try {
           await deleteOutboxForAccount(accountIdB64);
           clearObservationsForAccount(accountIdB64);
+          clearBeaconObservationsForAccount(accountIdB64);
         } catch (err) {
           // eslint-disable-next-line no-console
           console.warn("deleteOutboxForAccount during recover failed", err);
@@ -2617,6 +2622,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         try {
           await deleteOutboxForAccount(cached.accountIdB64);
           clearObservationsForAccount(cached.accountIdB64);
+          clearBeaconObservationsForAccount(cached.accountIdB64);
         } catch {
           // Ignore — same best-effort policy as above.
         }

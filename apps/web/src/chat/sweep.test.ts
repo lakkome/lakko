@@ -42,11 +42,11 @@
  *    That extra row is the three-party fork ADR-0045 calls the worse failure: a
  *    joiner opening into a state no other member holds.
  *
- * 3. **`runOwnerSweep routes an owed verdict rather than staging a second
+ * 3. **`runCommitterSweep routes an owed verdict rather than staging a second
  *    sweep`** — with the `hasStagedSweep()` branch removed from
- *    `runOwnerSweep`:
+ *    `runCommitterSweep`:
  *
- *        FAIL … > a restart finishes an owed verdict > runOwnerSweep routes an
+ *        FAIL … > a restart finishes an owed verdict > runCommitterSweep routes an
  *        owed verdict rather than staging a second sweep
  *        Error: ADR-0045: a sweep is already staged
  *
@@ -70,6 +70,35 @@
  *    `hasStagedSweep()` still true after an abort that published nothing — the
  *    group left frozen for a commit that never existed.
  *
+ * ## S4b probes (also MEASURED)
+ *
+ * 5. **`a deferring candidate never sweeps, and never reaches the network`** —
+ *    with the `acting.kind !== "act"` gate forced false. THREE tests went red
+ *    across this file and `contacts/proposal-membership.test.ts`:
+ *
+ *        FAIL … > a deferring candidate never sweeps, and never reaches the network
+ *        AssertionError: expected { kind: 'committed', …(3) } to deeply equal
+ *        { Object (kind, rank, ...) }
+ *        -   "kind": "deferred",
+ *        -   "rank": 2,
+ *        -   "toRank": 1,
+ *        +   "addedCount": 0,
+ *        +   "commitMessageId": 101,
+ *
+ *    That `committed` is a second committer staging on top of one already
+ *    running — the multi-committer race in a narrower window.
+ *
+ * 6. **`a device DEMOTED while its sweep was staged still resolves the
+ *    verdict`** — with the owed-verdict check moved back BEHIND the rank check
+ *    (the S4a order):
+ *
+ *        FAIL … > a device DEMOTED while its sweep was staged still resolves
+ *        the verdict
+ *        AssertionError: expected 'not-committer' not to be 'not-committer'
+ *
+ *    The device's membership operations stay frozen — durably, since the
+ *    staged commit survives a restart — with nothing that could unwedge it.
+ *
  * BOUNDARY GUARD, not a discriminator: `nothing pending is a no-op` and
  * `a non-committer never sweeps` both pass with every rule above neutered.
  * They pin the short-circuits that keep this safe to call at the tail of every
@@ -81,7 +110,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   resolveOwedVerdict,
-  runOwnerSweep,
+  runCommitterSweep,
   shouldStandDown,
   sweepVerdict,
   SweepVerdictUnavailable,
@@ -90,6 +119,7 @@ import {
   type SweepPorts,
   type StagedSweepArtifacts,
 } from "./sweep";
+import type { ActingCommitter } from "./committer-beacon";
 
 // ---------------------------------------------------------------------------
 // A faithful in-memory MLS model
@@ -136,6 +166,10 @@ function model(opts: {
   fetchThrows?: boolean;
   /** Pre-seed a staged sweep + its durable entry, as a restart would find. */
   owed?: { entry: SweepDurableEntry } | undefined;
+  /** ADR-0045 S4b — the acting-committer verdict. Defaults to `act`, which
+   *  is what the owner (rank 0) always gets from the real fold, so every S4a
+   *  test below keeps meaning exactly what it meant. */
+  acting?: (ownRank: number) => Promise<ActingCommitter>;
 }): Model {
   const order: string[] = [];
   const published: string[] = [];
@@ -151,6 +185,12 @@ function model(opts: {
   let entrySeq = 0;
 
   const ports: SweepPorts = {
+    actingCommitter: async (ownRank) => {
+      order.push(`acting?${ownRank}`);
+      return opts.acting === undefined
+        ? { kind: "act" }
+        : await opts.acting(ownRank);
+    },
     group: {
       groupId: new Uint8Array([7, 7]),
       get epoch(): bigint {
@@ -293,25 +333,54 @@ describe("ADR-0045 — the pure verdict rules", () => {
 });
 
 describe("ADR-0045 — the sweep short-circuits", () => {
-  it("a non-committer never sweeps, and never reaches the network", async () => {
+  it("an admin sweeps once it is the acting committer (S4b)", async () => {
+    // S4a returned `not-committer` here and the group waited for an owner who
+    // might never open the app. S4b asks the beacon fold instead, and an admin
+    // that has heard nothing better placed acts — the whole of the slice.
     const m = model({ rank: 1, pending: 3 });
-    const out = await runOwnerSweep(m.ports);
-    expect(out).toEqual({ kind: "not-committer", rank: 1 });
-    expect(m.order).toEqual([]);
+    const out = await runCommitterSweep(m.ports);
+    expect(out.kind).toBe("committed");
+    // The fold is consulted BEFORE anything is staged or fetched.
+    expect(m.order[0]).toBe("acting?1");
+  });
+
+  it("a deferring candidate never sweeps, and never reaches the network", async () => {
+    const m = model({
+      rank: 2,
+      pending: 3,
+      acting: async () => ({ kind: "defer", toRank: 1 }),
+    });
+    const out = await runCommitterSweep(m.ports);
+    expect(out).toEqual({ kind: "deferred", rank: 2, toRank: 1 });
+    // Consulted, then nothing: no stand-down fetch, no stage, no publish.
+    expect(m.order).toEqual(["acting?2"]);
+  });
+
+  it("an unreadable acting verdict defers — it never sweeps on no evidence", async () => {
+    const m = model({
+      rank: 1,
+      pending: 3,
+      acting: async () => {
+        throw new Error("wasm unavailable");
+      },
+    });
+    const out = await runCommitterSweep(m.ports);
+    expect(out).toEqual({ kind: "deferred", rank: 1, toRank: undefined });
+    expect(m.order).toEqual(["acting?1"]);
   });
 
   it("rank `undefined` (a plain member) is not rank 0", async () => {
     // `undefined` and `0` are not interchangeable and `if (rank)` is wrong in
     // both directions — 0 is the OWNER, the one device that always sweeps.
     const m = model({ rank: undefined, pending: 3 });
-    const out = await runOwnerSweep(m.ports);
+    const out = await runCommitterSweep(m.ports);
     expect(out).toEqual({ kind: "not-committer", rank: undefined });
     expect(m.order).toEqual([]);
   });
 
   it("nothing pending is a no-op with no fetch — safe at the tail of every poll", async () => {
     const m = model({ rank: 0, pending: 0 });
-    const out = await runOwnerSweep(m.ports);
+    const out = await runCommitterSweep(m.ports);
     expect(out).toEqual({ kind: "nothing-pending" });
     expect(m.order).toEqual([]);
   });
@@ -322,7 +391,7 @@ describe("ADR-0045 — obligation 3: the stand-down re-read", () => {
     const m = model({ rank: 0, pending: 1 });
     m.journal.push({ id: 1, payload: frame(APPLICATION, 6) });
 
-    const out = await runOwnerSweep(m.ports);
+    const out = await runCommitterSweep(m.ports);
 
     expect(out).toEqual({ kind: "stood-down", unappliedRows: 1 });
     expect(m.staged()).toBe(false);
@@ -334,7 +403,7 @@ describe("ADR-0045 — obligation 3: the stand-down re-read", () => {
 
   it("proceeds when the journal is drained", async () => {
     const m = model({ rank: 0, pending: 1 });
-    const out = await runOwnerSweep(m.ports);
+    const out = await runCommitterSweep(m.ports);
     expect(out.kind).toBe("committed");
   });
 });
@@ -343,11 +412,12 @@ describe("ADR-0045 — obligation 4: record before publish, verdict before merge
   it("a WON sweep records, publishes, adjudicates, then merges", async () => {
     const m = model({ rank: 0, pending: 2, epoch: 6 });
 
-    const out = await runOwnerSweep(m.ports);
+    const out = await runCommitterSweep(m.ports);
 
     expect(out.kind).toBe("committed");
     expect(m.order).toEqual([
-      "fetch>0", // the stand-down re-read
+      "acting?0", // S4b — the fold runs first, and the owner always acts
+      "fetch>0", // the stand-down re-read — STILL required after S4b
       "stage",
       "record", // BEFORE any publish (ADR-0040)
       "publish",
@@ -365,7 +435,7 @@ describe("ADR-0045 — obligation 4: record before publish, verdict before merge
   it("a record failure abandons the stage and publishes nothing", async () => {
     const m = model({ rank: 0, pending: 1, recordThrows: true });
 
-    await expect(runOwnerSweep(m.ports)).rejects.toThrow(/IndexedDB quota/);
+    await expect(runCommitterSweep(m.ports)).rejects.toThrow(/IndexedDB quota/);
 
     // FAIL-CLOSED: nothing on the wire, and — the half that matters — the group
     // is NOT left frozen behind a staged commit that never existed.
@@ -385,7 +455,7 @@ describe("ADR-0045 — obligation 4: record before publish, verdict before merge
       return realFetch(after);
     };
 
-    await expect(runOwnerSweep(m.ports)).rejects.toBeInstanceOf(
+    await expect(runCommitterSweep(m.ports)).rejects.toBeInstanceOf(
       SweepVerdictUnavailable,
     );
 
@@ -404,7 +474,7 @@ describe("ADR-0045 — obligation 2: the Welcome waits for the verdict", () => {
   it("publishes the Welcome only AFTER a winning verdict", async () => {
     const m = model({ rank: 0, pending: 1, adds: [ALICE] });
 
-    const out = await runOwnerSweep(m.ports);
+    const out = await runCommitterSweep(m.ports);
 
     expect(out.kind).toBe("committed");
     // The commit publishes, THEN the verdict is read, THEN the Welcome.
@@ -422,7 +492,7 @@ describe("ADR-0045 — obligation 2: the Welcome waits for the verdict", () => {
     // A foreign commit at OUR epoch, ordered BELOW ours by the DS.
     m.raceRows.push({ id: 50, payload: frame(COMMIT, 6, 0xfa) });
 
-    const out = await runOwnerSweep(m.ports);
+    const out = await runCommitterSweep(m.ports);
 
     expect(out.kind).toBe("lost");
     // The whole point. A Welcome on the wire for a commit that lost would put a
@@ -438,7 +508,7 @@ describe("ADR-0045 — a losing sweep", () => {
     const m = model({ rank: 0, pending: 2, epoch: 6 });
     m.raceRows.push({ id: 50, payload: frame(COMMIT, 6, 0xfa) });
 
-    const out = await runOwnerSweep(m.ports);
+    const out = await runCommitterSweep(m.ports);
 
     expect(out.kind).toBe("lost");
     expect(m.order).toContain("abandon");
@@ -458,7 +528,7 @@ describe("ADR-0045 — a losing sweep", () => {
     const m = model({ rank: 0, pending: 1, epoch: 6 });
     m.raceRows.push({ id: 50, payload: frame(COMMIT, 6, 0xfa) });
 
-    await runOwnerSweep(m.ports);
+    await runCommitterSweep(m.ports);
 
     // The winner's row was consumed here, so the poll must not re-feed it to
     // OpenMLS. The cursor stops BELOW our own commit (101), which the poll
@@ -488,17 +558,42 @@ describe("ADR-0045 — obligation 1: a restart finishes an owed verdict", () => 
     expect(m.published).toEqual(["group:commit", "mailbox:welcome"]);
   });
 
-  it("runOwnerSweep routes an owed verdict rather than staging a second sweep", async () => {
+  it("runCommitterSweep routes an owed verdict rather than staging a second sweep", async () => {
     // Staging a second sweep is refused fail-closed by the core, so a sweep that
     // did not check first would throw and leave the group's membership frozen —
     // and the freeze survives a restart, because the staged commit is durable.
     const m = model({ rank: 0, pending: 1, epoch: 6, owed: { entry: OWED } });
 
-    const out = await runOwnerSweep(m.ports);
+    const out = await runCommitterSweep(m.ports);
 
     expect(out.kind).toBe("committed");
     expect(m.order).not.toContain("stage");
     expect(m.staged()).toBe(false);
+  });
+
+  it("a device DEMOTED while its sweep was staged still resolves the verdict", async () => {
+    // ADR-0045 S4b made this newly reachable: S4a's only committer was the
+    // owner, whom no role change can demote, but an ADMIN can be demoted while
+    // holding a staged sweep. A staged commit is DURABLE and freezes this
+    // group's membership operations, so gating the owed verdict behind the
+    // rank check would freeze such a device permanently, with nothing that
+    // could ever unwedge it. Re-publishing is safe: every peer's role gate
+    // refuses a demoted author's commit, so it loses and is abandoned — which
+    // IS the unwedge.
+    const m = model({
+      rank: undefined, // demoted out of the committer set
+      pending: 1,
+      epoch: 6,
+      owed: { entry: OWED },
+    });
+
+    const out = await runCommitterSweep(m.ports);
+
+    expect(out.kind).not.toBe("not-committer");
+    expect(m.staged()).toBe(false);
+    // The acting fold is never consulted on this path — an owed verdict is
+    // finished by whoever staged it, not by whoever is currently acting.
+    expect(m.order).not.toContain("acting?");
   });
 
   it("abandons when the re-adjudication says it lost", async () => {
@@ -539,7 +634,7 @@ describe("ADR-0045 — obligation 1: a restart finishes an owed verdict", () => 
 describe("ADR-0045 — the verdict reads only the rows BELOW our own commit", () => {
   it("a foreign commit ABOVE our id does not make us lose", async () => {
     const m = model({ rank: 0, pending: 1, epoch: 6 });
-    const out = await runOwnerSweep(m.ports);
+    const out = await runCommitterSweep(m.ports);
     expect(out.kind).toBe("committed");
 
     // A commit the DS ordered after ours is the OTHER device's problem — it is
@@ -555,7 +650,7 @@ describe("ADR-0045 — the verdict reads only the rows BELOW our own commit", ()
     m.raceRows.push({ id: 41, payload: frame(APPLICATION, 6) });
     m.raceRows.push({ id: 42, payload: frame(PROPOSAL, 6) });
 
-    const out = await runOwnerSweep(m.ports);
+    const out = await runCommitterSweep(m.ports);
 
     // Only a Commit advances an epoch, so the verdict is a WIN — which is what
     // makes "apply, then read the epoch" exact where an epoch-only peek would

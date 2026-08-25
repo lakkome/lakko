@@ -86,13 +86,14 @@ import type {
 } from "../chat/commit-outbox";
 import {
   resolveOwedVerdict,
-  runOwnerSweep,
+  runCommitterSweep,
   type SweepCursorRef,
   type SweepDurableEntry,
   type SweepOutcome,
   type SweepPorts,
   type StagedSweepArtifacts,
 } from "../chat/sweep";
+import type { ActingCommitter } from "../chat/committer-beacon";
 
 /** Optional wires the route layer hands to ContactsClient
  *  (Phase 1.16e6c2). See `ChatClientOptions` in
@@ -503,10 +504,12 @@ function sweepPortsFor(
   ds: DsClient,
   onPersistWithCommit: ((entry: NewCommitEntry) => Promise<void>) | undefined,
   persist: () => Promise<void>,
+  actingCommitter: (ownRank: number) => Promise<ActingCommitter>,
 ): SweepPorts {
   const groupIdBytes = group.groupId;
   const groupIdB64 = base64Encode(groupIdBytes);
   return {
+    actingCommitter,
     group: {
       groupId: groupIdBytes,
       get epoch(): bigint {
@@ -805,18 +808,22 @@ export class ContactsClient {
    * in place when the poll re-fetches the commit.
    */
   /**
-   * ADR-0045 S4a — run one committer sweep for `group`, if this device is the
-   * committer.
+   * ADR-0045 S4a/S4b — run one committer sweep for `group`, if this device is
+   * the acting committer.
    *
-   * The committer in this slice is the **owner** (`ownCommitterRank() === 0`).
-   * Rank 0 acts without consulting any liveness signal, so with exactly one
-   * committer there is nothing to elect: no beacon, no stagger, no fallback
-   * committer. An admin-only group waits, which ADR-0045 decision 2 designs
-   * for rather than treats as a failure.
+   * The committer set is the ADR-0022 owner plus admins, ordered by
+   * `ownCommitterRank()`; which of them ACTS is decided by `actingCommitter`,
+   * the caller-supplied fold over the observed liveness beacons. Rank 0 — the
+   * owner — always acts, because no rank is lower; an admin acts when nobody
+   * strictly better placed has beaconed inside the freshness window, which
+   * includes the case where it has heard nothing at all. So an admin-only
+   * group no longer waits for an absent owner.
    *
    * Short-circuits synchronously — before touching the network — when this
-   * device is not the committer, or when nothing is pending and no verdict is
-   * owed. That is what makes it safe to call at the tail of every poll.
+   * device is not a candidate, or when nothing is pending and no verdict is
+   * owed. `actingCommitter` is consulted only once there IS something to
+   * sweep, so a quiet group never pays for the fold. That is what makes this
+   * safe to call at the tail of every poll.
    *
    * Runs under the same per-group MLS lock the commit and poll regions take.
    * The whole region (stage -> publish -> verdict -> merge/abandon) is inside
@@ -833,6 +840,7 @@ export class ContactsClient {
     group: WasmGroup,
     cursor: SweepCursorRef,
     markOwnPublished: (messageId: number) => void,
+    actingCommitter: (ownRank: number) => Promise<ActingCommitter>,
   ): Promise<SweepOutcome> {
     // A group with no role table has no committer to be, and the core refuses
     // a sweep on it outright. Short-circuit before resolving an identity or
@@ -843,7 +851,7 @@ export class ContactsClient {
     const myIdentity = await this.resolveIdentity(identity);
     const wasm = await loadWasm();
     return withGroupMlsLock(base64Encode(group.groupId), async () =>
-      runOwnerSweep(
+      runCommitterSweep(
         sweepPortsFor(
           wasm,
           myIdentity,
@@ -853,6 +861,7 @@ export class ContactsClient {
           this.ds,
           this.onPersistWithCommit,
           () => this.persistBestEffort(),
+          actingCommitter,
         ),
       ),
     );
@@ -889,6 +898,13 @@ export class ContactsClient {
               this.ds,
               this.onPersistWithCommit,
               () => this.persistBestEffort(),
+              // ADR-0045 S4b — never consulted on this path: an OWED verdict
+              // is finished by whoever staged it, not by whoever is currently
+              // acting, and `resolveOwedVerdict` therefore never asks. A
+              // `defer` is the fail-closed value should that ever change: it
+              // would stop a sweep from STARTING, which is recoverable, rather
+              // than let one start on no evidence, which is the hazard.
+              () => Promise.resolve({ kind: "defer", toRank: undefined }),
             ),
           ),
         );
@@ -2554,6 +2570,7 @@ export class ContactsClient {
     sweepFirst?: {
       cursor: SweepCursorRef;
       markOwnPublished: (messageId: number) => void;
+      actingCommitter: (ownRank: number) => Promise<ActingCommitter>;
     },
   ): Promise<{ commitMessageId: number; welcomeMessageId: number }> {
     const wasm = await loadWasm();
@@ -2578,6 +2595,7 @@ export class ContactsClient {
         group,
         sweepFirst.cursor,
         sweepFirst.markOwnPublished,
+        sweepFirst.actingCommitter,
       );
     }
 

@@ -133,6 +133,17 @@ import {
   type PendingRequest,
   type ProposalRecordView,
 } from "../chat/pending-requests";
+// ADR-0045 S4b — the committer liveness beacon. Same split as above: every
+// rule (the emit gate, the rank-at-verdict-time projection, the observation
+// store) lives in `chat/committer-beacon.ts` where it is host-testable, and
+// this file only drives it.
+import {
+  BEACON_TICK_MS,
+  beaconEmitVerdict,
+  decideActingCommitter,
+  recordBeaconObservation,
+  type ActingCommitter,
+} from "../chat/committer-beacon";
 import {
   applyOp,
   editDeleteAuthorized,
@@ -1403,6 +1414,164 @@ function ChatView(props: {
    * best-effort and a failed rotation must never unwind a landed membership
    * change.
    */
+  /**
+   * The web's reading of "foregrounded" — see {@link emitBeaconIfDue} for why
+   * it is load-bearing rather than cosmetic.
+   *
+   * `visibilityState` covers the tab being hidden, backgrounded or in a
+   * background window; it does NOT cover an unmounted route, which the
+   * emitter's own lifetime already covers (this component owns the interval,
+   * and `onCleanup` stops it). An environment with no `document` reads as NOT
+   * foreground — the fail-closed direction, since a beacon nobody can back up
+   * with a sweep is worse than no beacon.
+   */
+  function isForeground(): boolean {
+    return globalThis.document?.visibilityState === "visible";
+  }
+
+  /**
+   * ADR-0045 S4b — resolve a beacon's MLS sender leaf to its signature key.
+   *
+   * The leaf is resolved HERE, at receipt, because that is the only moment the
+   * roster is authenticated in the epoch the beacon was sealed at. The KEY is
+   * what gets persisted, never the leaf: OpenMLS reuses a vacated leaf for the
+   * next member added, so a stored leaf silently comes to name somebody else.
+   */
+  function signatureKeyOfLeaf(leaf: number): Uint8Array | undefined {
+    try {
+      const roster = props.entry.group.members() as Array<{
+        leafIndex: number;
+        signaturePublicKey: Uint8Array;
+      }>;
+      return roster.find((m) => m.leafIndex === leaf)?.signaturePublicKey;
+    } catch {
+      // A torn roster read: the sender is unattributable, so the beacon is no
+      // evidence about anyone and is simply not recorded.
+      return undefined;
+    }
+  }
+
+  /**
+   * ADR-0045 S4b — the acting-committer verdict, taken fresh on every sweep
+   * attempt.
+   *
+   * **Every rank in the projection is derived HERE and now**, by
+   * `Group.committerRank` against the group's live `0xFF02` role table — never
+   * carried over from when the beacon arrived. A rank is a position in that
+   * table's canonical order, so promoting, demoting or removing any admin
+   * renumbers every admin sorting after it; a rank captured under one ordering
+   * and compared against this device's own current rank is not stale, it is
+   * meaningless.
+   *
+   * Fails closed to `defer` on anything it cannot read — no session, no wasm.
+   * Deferring costs a sweep attempt; acting on a view of who else is running
+   * that this device could not actually read is the hazard.
+   */
+  async function actingCommitterNow(ownRank: number): Promise<ActingCommitter> {
+    const s = auth.state();
+    if (s.kind !== "session") return { kind: "defer", toRank: undefined };
+    const wasm = await loadWasmForCalls();
+    return decideActingCommitter({
+      accountIdB64: s.account.accountId,
+      groupIdB64: base64Encode(props.entry.group.groupId),
+      ownRank,
+      rankOf: (senderKeyB64) => {
+        try {
+          return props.entry.group.committerRank(base64Decode(senderKeyB64));
+        } catch {
+          return undefined;
+        }
+      },
+      nowMs: Date.now(),
+      // Read off the FFI, never hand-copied — the interval and the window are
+      // two halves of one budget and a local literal is the drift class
+      // ADR-0044 exists about.
+      freshnessWindowMs: wasm.committerBeaconFreshnessWindowMs(),
+      fold: (rank, observed, windowMs) => {
+        const verdict = wasm.actingCommitterVerdict(
+          rank,
+          // wasm-bindgen CONSUMES each observation, which is why they are
+          // built fresh here on every evaluation rather than cached — and
+          // which is also what ranking-at-verdict-time requires anyway.
+          observed.map((o) => new wasm.BeaconObservation(o.rank, o.ageMs)),
+          windowMs,
+        );
+        try {
+          if (verdict.kind === "act") return { kind: "act" };
+          if (verdict.kind === "defer") {
+            return { kind: "defer", toRank: verdict.deferToRank };
+          }
+          return { kind: "not-a-candidate" };
+        } finally {
+          // The verdict is a wasm-owned object; this runs on every poll of
+          // every open group, so leaking one per tick is not academic.
+          verdict.free();
+        }
+      },
+    });
+  }
+
+  /**
+   * ADR-0045 S4b — emit this device's own liveness beacon.
+   *
+   * **The foreground gate is the load-bearing part and it is a caller
+   * obligation the core cannot check.** A beacon means *able to sweep*, and on
+   * this client a sweep runs only at the tail of a poll driven by this
+   * component while the tab is visible — the ADR-0041 background decrypt is
+   * read-only-throwaway and structurally cannot commit (C-59). A beacon from a
+   * hidden tab would therefore be a lie that costs the group a takeover: every
+   * other candidate would defer to a device that is not going to sweep, and
+   * would keep deferring for as long as the hidden tab kept beaconing.
+   *
+   * Everything else — only-candidates-emit, first-of-session-immediate, one
+   * per interval — is the core's `shouldEmitBeacon`, called through the gate.
+   *
+   * Best-effort and silent: nobody is watching a beacon, and a failed emit
+   * only means this device does not claim the duty on this tick.
+   */
+  let lastBeaconAtMs: number | undefined;
+  async function emitBeaconIfDue(): Promise<void> {
+    // Short-circuited FIRST so a hidden tab does no work at all — the same
+    // answer `beaconEmitVerdict` gives below, reached before the Ed25519 key
+    // derivation the rank read costs. The gate there stays the authority.
+    if (!isForeground()) return;
+    if (!usesProposalPath()) return;
+    const wasm = await loadWasmForCalls();
+    let ownRank: number | undefined;
+    try {
+      const secrets = props.requireIdentity();
+      const identity = wasm.Identity.fromSeed(secrets.accountIdentitySeed);
+      try {
+        ownRank = props.entry.group.ownCommitterRank(identity);
+      } finally {
+        identity.free();
+      }
+    } catch {
+      // No identity / torn group — this device cannot establish that it is a
+      // candidate, so it must not claim to be one.
+      return;
+    }
+    const verdict = beaconEmitVerdict({
+      ownRank,
+      foreground: isForeground(),
+      lastEmittedAtMs: lastBeaconAtMs,
+      nowMs: Date.now(),
+      throttle: (rank, last, now) => wasm.shouldEmitBeacon(rank, last, now),
+    });
+    if (verdict !== "emit") return;
+    // Stamped BEFORE the await, so a publish that is slow or that fails
+    // cannot let the next tick fire a second beacon a few seconds later. It is
+    // also this device's re-entrancy guard: a publish outlasting the tick
+    // interval reads as throttled on the next pass rather than doubling up.
+    lastBeaconAtMs = Date.now();
+    try {
+      await broadcastToGroup(wasm.composeCommitterBeacon());
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("ADR-0045 committer beacon not emitted", err);
+    }
+  }
+
   async function sweepNow(): Promise<SweepOutcome | null> {
     const before = memberSignatureKeys(props.entry.group);
     let outcome: SweepOutcome;
@@ -1412,6 +1581,7 @@ function ChatView(props: {
         props.entry.group,
         { read: () => cursor(), advance: (to) => setCursor(to) },
         (id) => chat.markOwnPublishedCommit(id),
+        actingCommitterNow,
       );
     } catch (err) {
       // A verdict this device could not read leaves the sweep staged for the
@@ -1901,13 +2071,31 @@ function ChatView(props: {
           }
           continue;
         }
-        // ADR-0045 decision 2 — a committer-liveness beacon. Not a timeline
-        // row: it is an observation about WHO can sweep the pending proposal
-        // set, which the takeover fold will consume (from `e.senderLeaf` +
-        // `e.createdAt`, the two things the field-less envelope deliberately
-        // does not carry). That fold is not built yet, so for now the beacon
-        // is simply consumed here and never reaches `rows()`.
-        if (e.kind === "committerBeacon") continue;
+        // ADR-0045 S4b — a committer-liveness beacon. Not a timeline row: it
+        // is an observation about WHO can sweep the pending proposal set,
+        // recorded here from the only two things the field-less envelope
+        // deliberately does not carry — WHO, from the MLS-authenticated sender
+        // leaf, and HOW OLD, from the DS row's server-assigned timestamp
+        // (never a local clock, and never anything the sender asserted).
+        //
+        // The leaf is resolved to a signature KEY here and the key is what is
+        // stored; the rank is derived later, at verdict time, against the role
+        // table as it stands then.
+        if (e.kind === "committerBeacon") {
+          const s = auth.state();
+          if (s.kind === "session" && e.senderLeaf !== undefined) {
+            const senderKey = signatureKeyOfLeaf(e.senderLeaf);
+            if (senderKey !== undefined) {
+              recordBeaconObservation(
+                s.account.accountId,
+                base64Encode(props.entry.group.groupId),
+                base64Encode(senderKey),
+                Date.parse(e.createdAt),
+              );
+            }
+          }
+          continue;
+        }
         // ADR-0045 — a membership proposal is a PANEL signal, never a timeline
         // row (UX §10). Record when it landed, using the DS row's timestamp so
         // the quiet window means the same thing on every device, then let the
@@ -2279,6 +2467,22 @@ function ChatView(props: {
     if (pruned !== cur) setTypingMap(pruned);
   }, 2_000);
   onCleanup(() => clearInterval(typingSweep));
+
+  // ADR-0045 S4b — the beacon emitter.
+  //
+  // Driven by its own timer rather than by the poll, because the poll on this
+  // client is event-driven (mount, a user action, the Refresh button) while a
+  // beacon's whole meaning is a CADENCE: "still here". The tick is cheap and
+  // deliberately much shorter than the beacon interval — `shouldEmitBeacon` is
+  // the throttle, so the tick only has to be fine-grained enough not to add
+  // meaningful latency to the first beacon after the tab becomes visible.
+  //
+  // It lives on this component, so it exists exactly while this group's chat
+  // is open — which is exactly when this device can sweep it.
+  const beaconTick = setInterval(() => {
+    void emitBeaconIfDue();
+  }, BEACON_TICK_MS);
+  onCleanup(() => clearInterval(beaconTick));
 
   /**
    * Encrypt + upload an iterable of files sequentially (so a
@@ -2794,6 +2998,7 @@ function ChatView(props: {
         {
           cursor: { read: () => cursor(), advance: (to) => setCursor(to) },
           markOwnPublished: (id) => chat.markOwnPublishedCommit(id),
+          actingCommitter: actingCommitterNow,
         },
       );
       chat.markOwnPublishedCommit(result.commitMessageId);
@@ -2942,6 +3147,11 @@ function ChatView(props: {
         console.warn("commit-outbox sweep failed", err);
       }
       await refresh();
+      // ADR-0045 S4b — announce this device immediately rather than waiting a
+      // tick. The core's own rule is that the FIRST beacon of a session is
+      // immediate, precisely because a candidate that has just opened the app
+      // is when a stale view is likeliest to hand the duty elsewhere.
+      void emitBeaconIfDue();
       // ADR-0042 — ensure this group's opaque push routing is provisioned.
       // Owner + no secret yet → mint + persist + broadcast the distribution
       // envelope (E2EE journal); then subscribe under `push_gid` (or defer
