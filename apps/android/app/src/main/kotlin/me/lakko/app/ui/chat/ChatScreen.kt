@@ -74,6 +74,7 @@ import androidx.compose.foundation.background
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import me.lakko.app.ui.call.CallScreen
 import kotlinx.coroutines.Dispatchers
+import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -189,6 +190,30 @@ public fun ChatScreen(
             }
         }
     }
+    // ADR-0045 S4b — the committer-liveness beacon emitter.
+    //
+    // `repeatOnLifecycle(RESUMED)` IS the foreground gate: the coroutine is
+    // cancelled when the app stops and restarted when it resumes, so a
+    // backgrounded device simply does not beacon. That matters because a beacon
+    // means *able to sweep*, and a sweep runs only at the tail of the poll this
+    // screen drives — the ADR-0041 / C-59 background decrypt is
+    // read-only-throwaway and structurally cannot commit, so a beacon from the
+    // background would make every other candidate defer to a device that is
+    // never going to sweep.
+    //
+    // The tick is deliberately much shorter than the beacon INTERVAL, which is
+    // the core's `shouldEmitBeacon` and is never hand-copied here: the tick only
+    // bounds how long after a resume the first beacon waits.
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    LaunchedEffect(lifecycleOwner) {
+        lifecycleOwner.lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.RESUMED) {
+            while (isActive) {
+                viewModel.emitCommitterBeaconTick(foreground = true)
+                delay(me.lakko.app.chat.BEACON_TICK_MS)
+            }
+        }
+    }
+
     LaunchedEffect(state.messages.size) {
         // Auto-scroll to the latest row on every new message
         // (Outgoing send + Incoming poll both bump the count).
@@ -1318,6 +1343,8 @@ private fun MembersSheet(viewModel: ChatViewModel) {
     val isOwner by viewModel.isOwner.collectAsStateWithLifecycle()
     val roleTable by viewModel.roleTable.collectAsStateWithLifecycle()
     val pendingJoins by viewModel.pendingJoins.collectAsStateWithLifecycle()
+    val pendingRequests by viewModel.pendingRequests.collectAsStateWithLifecycle()
+    val pendingNotice by viewModel.pendingNotice.collectAsStateWithLifecycle()
     val joinAttributions by viewModel.joinAttributions.collectAsStateWithLifecycle()
     val inviteLink by viewModel.inviteLink.collectAsStateWithLifecycle()
     val clipboard = LocalClipboardManager.current
@@ -1394,6 +1421,52 @@ private fun MembersSheet(viewModel: ChatViewModel) {
                     )
                 }
                 Spacer(Modifier.height(12.dp))
+                // ADR-0045 / UX §5.1 — the pending-membership notice. Renders
+                // only once something has been outstanding past the quiet
+                // window, because the owner sweeps its own request immediately
+                // and an affordance that appears and vanishes teaches the user
+                // that membership is slow when it is not. The visibility gate
+                // was already applied in the view model (UX §10): owner and
+                // admins see the set, every other member sees only their own.
+                //
+                // ONE liveness line, not an escalating pair: ADR-0045 gives a
+                // waiting request no deadline, so there is no moment at which
+                // the client learns something new to say.
+                pendingNotice?.let { notice ->
+                    Text(text = notice.count, style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        text = notice.liveness,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    // UX — a person who has been REQUESTED is not a member, so
+                    // they must not appear in the roster above; they get their
+                    // own line here instead.
+                    val waitingAdds = me.lakko.app.chat.waitingToBeAdded(pendingRequests)
+                    if (waitingAdds.isNotEmpty()) {
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            text = "Waiting to be added (${waitingAdds.size})",
+                            style = MaterialTheme.typography.titleSmall,
+                        )
+                        // UX §5.2 — one row per pending add, with the same identity
+                        // treatment the join-request rows already use (the short
+                        // fingerprint; a prospective member has no roster entry to
+                        // read a display name from), plus the secondary line.
+                        waitingAdds.forEach { request ->
+                            Text(
+                                text = viewModel.fingerprintOfKeyB64(request.addSignatureKeyB64),
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                            Text(
+                                text = "Waiting to be added.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(12.dp))
+                }
                 // ADR-0027 (G-3) — pending external-join requests. Owner/admin
                 // only (same gate as add/remove); hidden when there are none.
                 // Approve drives the role-gated MLS approve + posts the commit &
@@ -1466,10 +1539,29 @@ private fun MembersSheet(viewModel: ChatViewModel) {
                                 .fillMaxWidth()
                                 .padding(vertical = 4.dp),
                         ) {
-                            Text(
-                                text = viewModel.memberLabel(member),
-                                modifier = Modifier.weight(1f),
+                            // ADR-0045 — NO optimistic update: a member with a
+                            // pending removal STAYS in the roster, annotated.
+                            // Dropping the row would assert they are gone while
+                            // they are still cryptographically in the group —
+                            // still receiving every message, still able to
+                            // decrypt — until a committer sweeps. That is the
+                            // membership equivalent of a green E2EE pill over an
+                            // unencrypted call.
+                            val annotation = me.lakko.app.chat.rowAnnotation(
+                                pendingRequests,
+                                member.leafIndex,
+                                ownLeaf,
                             )
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(text = viewModel.memberLabel(member))
+                                annotation?.let {
+                                    Text(
+                                        text = it,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            }
                             // ADR-0022 — owner-only promote / demote toggle;
                             // never the owner's own row.
                             val isMemberOwner = roleTable?.owner
@@ -1487,7 +1579,11 @@ private fun MembersSheet(viewModel: ChatViewModel) {
                             if (canManage && ownLeaf != member.leafIndex) {
                                 TextButton(
                                     onClick = { viewModel.onRemoveMember(member.leafIndex) },
-                                    enabled = !busy,
+                                    // UX §5.3 — a member with a pending removal keeps
+                                    // Remove VISIBLE but DISABLED. Hiding it would read
+                                    // as the permission having vanished; the annotation
+                                    // above explains the disabled state.
+                                    enabled = !busy && annotation == null,
                                 ) { Text("Remove") }
                             }
                         }

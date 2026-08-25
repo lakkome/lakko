@@ -4,6 +4,7 @@
 import Combine
 import Foundation
 import LakkoCore
+import UIKit
 
 /// State + dispatcher for the per-thread ``ChatScreen``.
 ///
@@ -110,6 +111,17 @@ public final class ChatViewModel: ObservableObject {
     /// truth — re-read on `refreshMembers()` + on each poll while the sheet is
     /// open.
     @Published public private(set) var pendingJoins: [Data] = []
+
+    /// ADR-0045 S4a — the membership requests waiting for a committer to sweep
+    /// them, already filtered by the UX §10 visibility gate. A pending REMOVAL
+    /// leaves its member in ``members`` and annotates the row; a pending ADD is
+    /// NOT in ``members`` and gets its own section — neither is an optimistic
+    /// update, because neither has taken effect yet.
+    @Published public private(set) var pendingRequests: [PendingRequest] = []
+
+    /// ADR-0045 S4a — the §5.1 notice, or `nil` when nothing is past the quiet
+    /// window.
+    public var pendingNoticeText: PendingNotice? { pendingNotice(pendingRequests) }
     /// ADR-0028 OQ2 (G-3) — advisory attribution for a pending request: which
     /// member minted the `/g/` link it arrived on, and whether that issuer is in
     /// the current roster.
@@ -230,16 +242,71 @@ public final class ChatViewModel: ObservableObject {
                 // Newly visible — publish a receipt for whatever's
                 // already loaded.
                 maybePublishReadReceipt()
+                // ADR-0045 S4b — start announcing that this device can sweep.
+                startBeaconTicker()
             } else {
                 // Left the thread — stop advertising that we're typing.
                 stopTyping()
+                // ADR-0045 S4b — and stop announcing that we can sweep: a sweep
+                // runs only at the tail of a poll driven by a visible screen, so
+                // a beacon from here on would be a claim this device cannot back
+                // up, and every other candidate would defer to it.
+                stopBeaconTicker()
             }
         }
+    }
+
+    // MARK: - ADR-0045 S4b — the committer liveness beacon
+
+    /// Wakes the emitter. **Not the beacon interval** — that is the core's
+    /// `committerBeaconIntervalMs`, enforced by `shouldEmitBeacon` and never
+    /// hand-copied here. This only bounds how long after the screen becomes
+    /// visible the first beacon waits.
+    private var beaconTicker: Timer?
+
+    /// The iOS reading of "foregrounded", and it is load-bearing rather than
+    /// cosmetic — see `ChatRepository.emitCommitterBeaconIfDue`.
+    ///
+    /// BOTH conditions are required and neither implies the other: an app can be
+    /// `.active` with this thread off-screen (its poll loop is not running, so it
+    /// cannot sweep), and this screen can be the top view controller with the app
+    /// `.inactive` or `.background` (same). The ADR-0041 NotificationService
+    /// extension is a different process entirely and never reaches this code.
+    private var isForeground: Bool {
+        screenVisible && UIApplication.shared.applicationState == .active
+    }
+
+    private func startBeaconTicker() {
+        guard beaconTicker == nil else { return }
+        // The core makes the FIRST beacon of a session immediate, so fire once
+        // now rather than waiting a whole tick to claim a duty this device is
+        // ready to take.
+        Task { @MainActor [weak self] in await self?.emitBeaconTick() }
+        let ticker = Timer.scheduledTimer(withTimeInterval: beaconTickSeconds, repeats: true) {
+            [weak self] _ in
+            Task { @MainActor [weak self] in await self?.emitBeaconTick() }
+        }
+        RunLoop.main.add(ticker, forMode: .common)
+        beaconTicker = ticker
+    }
+
+    private func stopBeaconTicker() {
+        beaconTicker?.invalidate()
+        beaconTicker = nil
+    }
+
+    private func emitBeaconTick() async {
+        await repository.emitCommitterBeaconIfDue(
+            groupIdHex: groupIdHex, foreground: isForeground)
+        // The quiet window matures with the clock, so re-fold on the same tick
+        // rather than only when the user does something.
+        if membersPanelOpen { refreshPendingRequests() }
     }
 
     deinit {
         typingExpiryTimer?.invalidate()
         typingSendThrottle?.cancel()
+        beaconTicker?.invalidate()
     }
 
     /// ADR-0042 — provision this thread's opaque push routing on appear
@@ -587,6 +654,7 @@ public final class ChatViewModel: ObservableObject {
         // ADR-0027 (G-3) — refresh the pending external-join list alongside the
         // roster (the retained set is the source of truth).
         pendingJoins = repository.pendingExternalJoins(groupIdHex: groupIdHex)
+        refreshPendingRequests()
         refreshJoinAttributions()
         // G-18 / ADR-0029 — a roster refresh follows every local
         // membership commit (add / remove / role / approve), any of which
@@ -594,6 +662,28 @@ public final class ChatViewModel: ObservableObject {
         // (a no-op when the seed is unchanged, e.g. a panel-open refresh).
         maybeRekeyActiveGroupCall()
     }
+
+    /// ADR-0045 S4a — re-join the core's retained pending set to this device's
+    /// observation store and apply the UX §10 visibility gate.
+    ///
+    /// Cheap and idempotent, so it runs on every roster refresh AND on the
+    /// beacon tick: the quiet window matures with the clock, not with a user
+    /// action, so a request that was `pending` when the sheet opened has to be
+    /// able to become `waiting` while it stays open.
+    func refreshPendingRequests() {
+        pendingRequests = visibleRequests(
+            repository.pendingRequests(groupIdHex: groupIdHex),
+            canManageMembers: canManageMembers
+        )
+    }
+
+    /// ADR-0045 S4a — the row annotation for one roster member, or `nil`.
+    func pendingAnnotation(_ member: GroupMember) -> String? {
+        rowAnnotation(pendingRequests, leafIndex: member.leafIndex, ownLeaf: ownLeafIndex)
+    }
+
+    /// ADR-0045 S4a — the `Waiting to be added` rows.
+    var waitingToBeAddedRequests: [PendingRequest] { waitingToBeAdded(pendingRequests) }
 
     /// ADR-0028 OQ2 (G-3) — refresh the advisory join-attribution map for the
     /// current pending requests. Best-effort: failures leave the map empty (the
@@ -664,12 +754,17 @@ public final class ChatViewModel: ObservableObject {
             defer { membershipBusy = false }
             do {
                 let resolved = try await resolveRecipient(username)
-                _ = try await repository.addMemberToGroup(
+                let outcome = try await repository.addMemberToGroup(
                     groupIdHex: groupIdHex,
                     recipientAccountId: resolved.accountId,
                     recipientSignaturePubkey: resolved.signaturePubkey
                 )
                 addMemberInput = ""
+                // ADR-0045 — `proposed` is not a quieter `committed`: nobody has
+                // been added yet. `refreshMembers` re-reads the roster (which is
+                // unchanged) AND the pending set (which now holds the request),
+                // so the sheet shows a request rather than a member.
+                _ = outcome
                 refreshMembers()
             } catch {
                 membershipError = error.localizedDescription
@@ -691,6 +786,10 @@ public final class ChatViewModel: ObservableObject {
         Task { @MainActor in
             defer { membershipBusy = false }
             do {
+                // ADR-0045 — on the proposal path the member STAYS in the
+                // roster, annotated, until a committer sweeps. Dropping the row
+                // now would assert they are gone while they are still in the
+                // group and still receiving every message.
                 _ = try await repository.removeMemberFromGroup(
                     groupIdHex: groupIdHex,
                     leafIndex: leafIndex
@@ -1441,6 +1540,10 @@ public final class ChatViewModel: ObservableObject {
         // the current epoch (a no-op when the seed is unchanged). This is
         // the iOS analog of the web `membersVersion`-driven rekey effect.
         maybeRekeyActiveGroupCall()
+        // ADR-0045 — the poll's tail ran a sweep, which may have landed a
+        // membership change, and the batch may have carried a peer's proposal.
+        // Either way the sheet's roster + pending set are stale.
+        if membersPanelOpen { refreshMembers() }
     }
 
     /// DS long-poll budget — same value as

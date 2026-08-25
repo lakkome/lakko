@@ -698,7 +698,7 @@ public class ChatRepository(
         groupIdHex: String,
         memberSignaturePubkey: ByteArray,
         makeAdmin: Boolean,
-    ): Long {
+    ): MembershipOutcome {
         val identity = canonicalIdentity.get()
             ?: throw IllegalStateException(
                 "ChatRepository not bootstrapped — call bootstrap() first",
@@ -727,6 +727,31 @@ public class ChatRepository(
                     .toMutableList()
                 if (makeAdmin) {
                     admins.add(memberSignaturePubkey)
+                }
+                // ADR-0045 obligation 5 — a role change is a membership commit
+                // like any other, so it proposes too. A group reaching this
+                // point necessarily HAS a role table (it was just read above),
+                // so unlike add / remove there is no direct-path fallback to
+                // preserve — but the branch is still written explicitly rather
+                // than assumed, because `usesProposalPath` is the one predicate
+                // that decides this and it should be asked, not inferred.
+                if (usesProposalPath(record.group)) {
+                    val proposalBytes = try {
+                        record.group.proposeGroupRoles(identity, table.owner, admins)
+                    } catch (e: FfiException) {
+                        throw ChatError("proposeGroupRoles failed", e)
+                    }
+                    persistSnapshotBestEffort()
+                    return@withLock suspend {
+                        val publish = try {
+                            dsClient.publishGroup(record.groupId, proposalBytes)
+                        } catch (e: Throwable) {
+                            throw ChatError("DS publishGroup (role-change proposal) failed", e)
+                        }
+                        noteOwnRequestBestEffort(groupIdHex, "role-change")
+                        publishThreadList()
+                        MembershipOutcome.Proposed(publish.id) as MembershipOutcome
+                    }
                 }
                 val commitBytes = try {
                     record.group.setGroupRoles(identity, table.owner, admins)
@@ -778,7 +803,7 @@ public class ChatRepository(
                     chatClient.markOwnPublishedCommit(commitPublish.id)
                     ackCommitBestEffort(entry.id, commitPublish.id, null)
                     publishThreadList()
-                    commitPublish.id
+                    MembershipOutcome.Committed(commitPublish.id, null) as MembershipOutcome
                 }
             }
             publishStep()
@@ -800,7 +825,7 @@ public class ChatRepository(
         groupIdHex: String,
         recipientAccountId: ByteArray,
         recipientSignaturePubkey: ByteArray,
-    ): Long {
+    ): MembershipOutcome {
         val identity = canonicalIdentity.get()
             ?: throw IllegalStateException(
                 "ChatRepository not bootstrapped — call bootstrap() first",
@@ -814,13 +839,46 @@ public class ChatRepository(
         // record, both publishes), so two membership commits on the SAME group
         // still serialise exactly as before: A is on the wire before B is even
         // created. The provider lock covers only the provider-touching prefix.
-        val addedCommitId = groupLock(groupIdHex).withLock {
+        val outcome = groupLock(groupIdHex).withLock {
             val publishStep = providerLock.withLock {
                 val record = groups[groupIdHex]
                     ?: throw ChatError(
                         "no live Group handle for $groupIdHex",
                         IllegalStateException("missing group record"),
                     )
+                // ADR-0045 obligation 5 — a group carrying an ADR-0022 role
+                // table routes membership through PROPOSALS. The direct path
+                // below stays byte-for-byte for a group with NO role table,
+                // which has no committer and whose peers' receipt gates would
+                // drop a proposal outright.
+                //
+                // The core enforces the split from the other side too:
+                // `addMemberFromWire` REFUSES while anything is pending, because
+                // every OpenMLS entry point the direct paths are built on sweeps
+                // the WHOLE pending set alongside the one change it was asked for
+                // — an admin asking to add one member would add two, and route
+                // the single Welcome to only one of them.
+                if (usesProposalPath(record.group)) {
+                    val proposalBytes = try {
+                        record.group.proposeAddMemberFromWire(identity, keyPackageBytes)
+                    } catch (e: FfiException) {
+                        throw ChatError("proposeAddMemberFromWire failed", e)
+                    }
+                    // The proposal is now in this device's own pending store,
+                    // which is provider state — persist so a relaunch does not
+                    // lose a request the peers hold.
+                    persistSnapshotBestEffort()
+                    return@withLock suspend {
+                        val publish = try {
+                            dsClient.publishGroup(record.groupId, proposalBytes)
+                        } catch (e: Throwable) {
+                            throw ChatError("DS publishGroup (add-member proposal) failed", e)
+                        }
+                        noteOwnRequestBestEffort(groupIdHex, "add:" + outboxB64(recipientSignaturePubkey))
+                        publishThreadList()
+                        MembershipOutcome.Proposed(publish.id) as MembershipOutcome
+                    }
+                }
                 // 1. create-commit — eager-merges epoch N -> N+1 in the in-memory provider.
                 val addResult = try {
                     record.group.addMemberFromWire(identity, keyPackageBytes)
@@ -894,7 +952,7 @@ public class ChatRepository(
                     // 4. both artifacts on the wire -> ack (best-effort).
                     ackCommitBestEffort(entry.id, commitPublish.id, welcomePublish.id)
                     publishThreadList()
-                    commitPublish.id
+                    MembershipOutcome.Committed(commitPublish.id, welcomePublish.id) as MembershipOutcome
                 }
             }
             publishStep()
@@ -912,8 +970,12 @@ public class ChatRepository(
         // forever (never a fallback to the leaky group_id). Only the OWNER's
         // sweep acts on the pending flag; an ADMIN may also reach this path
         // (ADR-0022 lets an admin add members) and its mark is inert.
-        redistributePushRoutingBestEffort(groupIdHex)
-        return addedCommitId
+        // ADR-0045 — only when the ADD actually LANDED. On the proposal path
+        // nobody has been added yet, so there is no new member to teach the
+        // secret to; the redistribute is driven by whichever device sweeps the
+        // proposal (see [sweepIfCommitter]).
+        if (outcome is MembershipOutcome.Committed) redistributePushRoutingBestEffort(groupIdHex)
+        return outcome
     }
 
     /**
@@ -953,21 +1015,49 @@ public class ChatRepository(
     public suspend fun removeMemberFromGroup(
         groupIdHex: String,
         leafIndex: UInt,
-    ): Long {
+    ): MembershipOutcome {
         val identity = canonicalIdentity.get()
             ?: throw IllegalStateException(
                 "ChatRepository not bootstrapped — call bootstrap() first",
             )
+        // ADR-0045 — on the PROPOSAL path nothing has been removed yet, so the
+        // rotation must NOT fire: the envelope would be sealed at the
+        // PRE-removal epoch, which the still-present target can open — the exact
+        // C-61 violation the seam below exists to prevent, reached from the
+        // other end. The branch cannot be taken before `publishRemove` runs
+        // (`usesProposalPath` is a provider read and the authoritative branch is
+        // taken under the group lock inside it), so it is recorded BY that call
+        // and consulted by the rotate step — which `publishRemoveThenRotate`
+        // invokes strictly afterwards, so the flag is always settled by then.
+        // The removal that DOES land is rotated by whichever device sweeps it
+        // (see [sweepIfCommitter]) or, for every other member, by the poll's
+        // membership-shrink diff.
+        var removalLanded = false
+        val step = rotationStepOrNull(groupIdHex)
         return GroupPushRouting.publishRemoveThenRotate(
             scope = pushScope,
             // Owner-or-admin gated inside `GroupPushRouting.rotate`, which
             // also no-ops when this device holds no secret, so rotation
             // never becomes a second mint path.
-            rotate = rotationStepOrNull(groupIdHex),
+            rotate = if (step == null) {
+                null
+            } else {
+                suspend {
+                    if (removalLanded) {
+                        step()
+                    } else {
+                        GroupPushRouting.RotationOutcome.SKIP_NO_SHRINK
+                    }
+                }
+            },
             onRotationError = { cause ->
                 android.util.Log.w("ChatRepository", "push routing: rotation failed", cause)
             },
-            publishRemove = { publishRemoveCommit(groupIdHex, identity, leafIndex) },
+            publishRemove = {
+                publishRemoveCommit(groupIdHex, identity, leafIndex).also {
+                    removalLanded = it is MembershipOutcome.Committed
+                }
+            },
         )
     }
 
@@ -981,7 +1071,7 @@ public class ChatRepository(
         groupIdHex: String,
         identity: Identity,
         leafIndex: UInt,
-    ): Long =
+    ): MembershipOutcome =
         // G-37 — per-group lock spans the WHOLE op; the provider lock covers
         // only the provider-touching prefix, so the publish is outside it.
         groupLock(groupIdHex).withLock {
@@ -991,6 +1081,26 @@ public class ChatRepository(
                         "no live Group handle for $groupIdHex",
                         IllegalStateException("missing group record"),
                     )
+                // ADR-0045 obligation 5 — propose in a role-tabled group; the
+                // direct commit below survives verbatim for a group with none.
+                if (usesProposalPath(record.group)) {
+                    val proposalBytes = try {
+                        record.group.proposeRemoveMember(identity, leafIndex)
+                    } catch (e: FfiException) {
+                        throw ChatError("proposeRemoveMember failed", e)
+                    }
+                    persistSnapshotBestEffort()
+                    return@withLock suspend {
+                        val publish = try {
+                            dsClient.publishGroup(record.groupId, proposalBytes)
+                        } catch (e: Throwable) {
+                            throw ChatError("DS publishGroup (remove-member proposal) failed", e)
+                        }
+                        noteOwnRequestBestEffort(groupIdHex, "remove:$leafIndex")
+                        publishThreadList()
+                        MembershipOutcome.Proposed(publish.id) as MembershipOutcome
+                    }
+                }
                 val commitBytes = try {
                     record.group.removeMember(identity, leafIndex)
                 } catch (e: FfiException) {
@@ -1043,7 +1153,7 @@ public class ChatRepository(
                     chatClient.markOwnPublishedCommit(commitPublish.id)
                     ackCommitBestEffort(entry.id, commitPublish.id, null)
                     publishThreadList()
-                    commitPublish.id
+                    MembershipOutcome.Committed(commitPublish.id, null) as MembershipOutcome
                 }
             }
             publishStep()
@@ -1529,6 +1639,10 @@ public class ChatRepository(
                     persistRatchet = { persistSnapshotDurableOrThrow() },
                 )
             }
+            // ADR-0045 — the publish is INSIDE the per-group lock (see
+            // [runGroupSend]): a message sealed at one epoch and published on the
+            // far side of a commit is permanently undecryptable for every
+            // recipient, because `lakko-mls` retains no past-epoch secrets.
             chatClient.publishPreparedSend(prepared)
         }
     }
@@ -1953,14 +2067,20 @@ public class ChatRepository(
      * reverse index + the push-gw subscribe + the journal broadcast (a
      * persist-before-publish control application message under [providerLock]).
      */
-    private fun pushRoutingPorts(group: Group, identity: Identity): PushRoutingPorts =
+    private fun pushRoutingPorts(
+        groupIdHex: String,
+        group: Group,
+        identity: Identity,
+    ): PushRoutingPorts =
         NativePushRoutingPorts(
             context = applicationContext,
             accountIdB64 = currentAccountIdB64.get() ?: "",
             routeStore = pushRouteStore,
             subscribeFn = { pushGid -> subscribePushGidBestEffort(pushGid) },
             unsubscribeFn = { pushGid -> unsubscribePushGidBestEffort(pushGid) },
-            broadcastFn = { envelope -> broadcastControlToGroup(identity, group, envelope) },
+            broadcastFn = { envelope ->
+                broadcastControlToGroup(identity, groupIdHex, group, envelope)
+            },
             // ADR-0044 — the MINT stamp source. Read under [providerLock]
             // (the `Group` handle is not safe to touch off it, the same
             // discipline `broadcastControlToGroup` follows) and read
@@ -1993,22 +2113,66 @@ public class ChatRepository(
      */
     private suspend fun broadcastControlToGroup(
         identity: Identity,
+        groupIdHex: String,
         group: Group,
         envelope: ByteArray,
     ) {
-        // G-37 — provider lock only, for the same reason as `groupEpochFn`:
-        // this runs inside `GroupPushRouting`'s routing lock, so it must not
-        // introduce a routing -> group lock edge. The ratchet advance + durable
-        // persist stay atomic; only the DS publish moves outside.
-        val prepared = providerLock.withLock {
-            chatClient.prepareSend(
-                identity = identity,
-                group = group,
-                plaintext = envelope,
-                persistRatchet = { persistSnapshotDurableOrThrow() },
-            )
-        }
-        chatClient.publishPreparedSend(prepared)
+        // ADR-0045 — the SEAL and the PUBLISH are both inside the per-group
+        // lock, exactly as `sendMessage` / `sendTyping` / `sendReadReceipt`
+        // already are. This is a CORRECTION of the previous "provider lock only"
+        // shape, which left this the one send path on Android that could
+        // STRADDLE an epoch change:
+        //
+        //   `lakko-mls` never sets `max_past_epochs`, so openmls's default of 0
+        //   applies and a recipient keeps NO past-epoch secrets. A control
+        //   envelope sealed at epoch N and published on the far side of a commit
+        //   is therefore not late — it is permanently undecryptable for every
+        //   recipient, dropped silently. Sealed AHEAD (a commit region
+        //   eager-merged N -> N+1 and is parked in its publish, so this seals at
+        //   N+1 and can reach the DS first) or BEHIND (an ADR-0045 sweep has
+        //   STAGED at N and published its commit, and `create_message` gates on
+        //   `is_active()` not `is_operational()`, so this still seals at N and
+        //   necessarily lands after the commit — a CERTAINTY for the whole
+        //   verdict window, not a race).
+        //
+        // What the envelope carries decides only what a loss COSTS, never
+        // whether the hazard exists: a lost routing secret leaves a member
+        // deferring until the next re-broadcast, and a lost beacon is absorbed
+        // by ADR-0045's freshness window (sized for exactly one).
+        //
+        // ## Lock ordering — this ADDS a routing -> group edge
+        //
+        // The previous comment declined the group lock to avoid exactly that
+        // edge. The edge is safe because the reverse never occurs: EVERY
+        // repository-side push-routing call is `pushScope.launch`ed rather than
+        // awaited under a group lock (`ensurePushRoutingBestEffort`,
+        // `receivePushRoutingSecretBestEffort`, `rotatePushRoutingIfShrankBestEffort`,
+        // `redistributePushRoutingBestEffort`, and `publishRemoveThenRotate`'s
+        // own `scope.launch`), so no group -> routing edge exists and the global
+        // order is routing -> group -> provider, consistent with group ->
+        // provider everywhere else. It must stay that way: awaiting a
+        // `GroupPushRouting` entry point under a group lock would close the
+        // cycle.
+        //
+        // The cost the old comment named is real and is accepted rather than
+        // denied: the routing lock's hold can now wait on a group lock held by a
+        // send publish or by a sweep's two DS round-trips. Every `ports.broadcast`
+        // call in `GroupPushRouting` runs under `bounded(...)`, so that wait is
+        // capped and a timeout leaves the row PENDING for the existing
+        // re-broadcast branch — the same degradation a DS error already produces.
+        runGroupSend(
+            lock = groupLock(groupIdHex),
+            providerLock = providerLock,
+            seal = {
+                chatClient.prepareSend(
+                    identity = identity,
+                    group = group,
+                    plaintext = envelope,
+                    persistRatchet = { persistSnapshotDurableOrThrow() },
+                )
+            },
+            publish = { prepared -> chatClient.publishPreparedSend(prepared) },
+        )
     }
 
     /**
@@ -2035,7 +2199,7 @@ public class ChatRepository(
                     accountIdB64 = accountIdB64,
                     groupIdHex = groupIdHex,
                     isOwner = isOwner,
-                    ports = pushRoutingPorts(group, identity),
+                    ports = pushRoutingPorts(groupIdHex, group, identity),
                 )
             } catch (_: Throwable) {
                 // best-effort — push is a UX nicety
@@ -2153,7 +2317,7 @@ public class ChatRepository(
                     senderSignatureKey = senderKey,
                     owner = owner,
                     ownGroupEpoch = ownGroupEpoch,
-                    ports = pushRoutingPorts(group, identity),
+                    ports = pushRoutingPorts(groupIdHex, group, identity),
                 )
                 if (!verdict.accepts) {
                     // ADR-0044 — the verdict is logged by NAME. The three
@@ -2284,7 +2448,7 @@ public class ChatRepository(
                 accountIdB64 = accountIdB64,
                 groupIdHex = groupIdHex,
                 ownRole = role,
-                ports = pushRoutingPorts(record.group, identity),
+                ports = pushRoutingPorts(groupIdHex, record.group, identity),
             )
         }
     }
@@ -2320,7 +2484,7 @@ public class ChatRepository(
                     ownRole = role,
                     previousMemberKeys = previousMemberKeys,
                     currentMemberKeys = currentMemberKeys,
-                    ports = pushRoutingPorts(group, identity),
+                    ports = pushRoutingPorts(groupIdHex, group, identity),
                 )
             } catch (_: Throwable) {
                 // best-effort — push is a UX nicety
@@ -2343,7 +2507,7 @@ public class ChatRepository(
                 GroupPushRouting.redistribute(
                     accountIdB64,
                     groupIdHex,
-                    pushRoutingPorts(record.group, identity),
+                    pushRoutingPorts(groupIdHex, record.group, identity),
                 )
             } catch (_: Throwable) {
                 // best-effort
@@ -2419,6 +2583,18 @@ public class ChatRepository(
                 callSignalingSink = { payload ->
                     callSignalingSink?.invoke(groupIdHex, payload)
                 },
+                committerBeaconSink = { senderLeaf, createdAt ->
+                    // ADR-0045 S4b — inside the poll's provider critical
+                    // section, which is where the `Group` handle is safe to
+                    // touch and where the roster is the one this beacon was
+                    // sealed against.
+                    recordCommitterBeaconBestEffort(
+                        group = record.group,
+                        groupIdHex = groupIdHex,
+                        senderLeaf = senderLeaf,
+                        createdAt = createdAt,
+                    )
+                },
                 pushRoutingSecretSink = { secret, mintEpoch, senderLeaf ->
                     // ADR-0042 — gate on the MLS-authenticated sender leaf
                     // (only the ADR-0022 owner may CHANGE the secret), then
@@ -2459,6 +2635,18 @@ public class ChatRepository(
             )
             publishThreadList()
         }
+        // ADR-0045 — the committer sweep runs at the TAIL of every poll, AFTER
+        // [runSplitPoll] has released the per-group lock: the sweep takes that
+        // same lock itself and holds it across its own two DS round-trips, and
+        // `Mutex` is not reentrant. Running it here rather than inside is also
+        // what makes the stand-down re-read meaningful — the batch this poll
+        // just applied is already consumed, so a non-empty re-read genuinely
+        // means new rows.
+        //
+        // Short-circuits synchronously for a plain member, for a group with no
+        // role table, and for a candidate with nothing pending, so the common
+        // case costs one short provider region.
+        sweepIfCommitter(groupIdHex)
     }
 
     /**
@@ -2547,6 +2735,23 @@ public class ChatRepository(
             } catch (_: Throwable) {
                 // best-effort
             }
+            // ADR-0045 — drop the committer-beacon observations and the
+            // pending-request observations. Neither is key material, but a
+            // stale observation would make a later session defer to a candidate
+            // it never actually heard from, and a stale request observation
+            // would age a request that no longer exists. Same per-account reset
+            // discipline as the outbox above.
+            try {
+                beaconObservations.clearForAccount(accountIdB64)
+            } catch (_: Throwable) {
+                // best-effort
+            }
+            try {
+                SharedPrefsPendingRequestStore(applicationContext).clearForAccount(accountIdB64)
+            } catch (_: Throwable) {
+                // best-effort
+            }
+            lastBeaconAtMs.clear()
             // ADR-0042 — wipe the push-routing secrets + the push_gid reverse
             // index. The secret is encrypted at rest, but a stale reverse-index
             // row (plaintext push_gid -> group_id) would leave push-routing
@@ -2832,12 +3037,586 @@ public class ChatRepository(
      * sweep, and a duplicate re-publish is dropped by peers (wrong epoch) and by
      * the committer (echo filter).
      */
+    // -----------------------------------------------------------------
+    // ADR-0045 — proposal-based membership: the committer sweep + the
+    // liveness beacon.
+    // -----------------------------------------------------------------
+
+    /**
+     * ADR-0045 — does this group route membership through proposals?
+     *
+     * A group with **no role table** keeps direct commits, unchanged: it has no
+     * owner, therefore no rank 0, therefore no committer, and every peer's
+     * receipt gate drops proposals in such a group — so the propose path would
+     * silently discard everything. ADR-0045 says this explicitly, and
+     * `Group::create` has seeded a role table since ADR-0022, so no freshly
+     * created group reaches it.
+     *
+     * This is NOT a dual path in ADR-0045's forbidden sense. The ADR rules out a
+     * "legacy direct-commit fallback" — a second, ungated route into a group
+     * that *has* moved to proposals. This is the disjoint case: a group with no
+     * role table has no gate to bypass, because there is no table to read a role
+     * from.
+     *
+     * A torn read is treated as "no role table", which keeps the direct path
+     * working rather than routing into a proposal path whose gate cannot
+     * resolve.
+     *
+     * MUST be called on the [providerLock] critical path.
+     */
+    private fun usesProposalPath(group: Group): Boolean = try {
+        group.groupRoles() != null
+    } catch (_: Throwable) {
+        false
+    }
+
+    /**
+     * ADR-0045 S4b — the ONE place the FFI's `ActingCommitter` and the
+     * client-side [ActingCommitter] meet. Declared as a conversion rather than
+     * reusing the FFI type throughout so `CommitterSweep.kt` and
+     * `CommitterBeacon.kt` stay drivable from a plain JVM host test.
+     */
+    private fun toActingCommitter(
+        verdict: uniffi.lakko_ffi_uniffi.ActingCommitter,
+    ): ActingCommitter = when (verdict) {
+        is uniffi.lakko_ffi_uniffi.ActingCommitter.Act -> ActingCommitter.Act
+        is uniffi.lakko_ffi_uniffi.ActingCommitter.Defer -> ActingCommitter.Defer(verdict.toRank)
+        is uniffi.lakko_ffi_uniffi.ActingCommitter.NotACandidate -> ActingCommitter.NotACandidate
+    }
+
+    /**
+     * ADR-0045 — the pending-request observation store. Plain
+     * `SharedPreferences`: a request key names a proposal already retained in
+     * the core's own pending set, plus a timestamp.
+     */
+    private val pendingRequestObservations: PendingRequestStore by lazy {
+        SharedPrefsPendingRequestStore(applicationContext)
+    }
+
+    /**
+     * ADR-0045 — record that a request THIS device just published landed, so the
+     * quiet window can be measured from now and so the panel knows it is ours
+     * (the UX §10 own-request visibility exception, without which a self-remove
+     * is an action with no feedback).
+     *
+     * The stamp is this device's own clock, unlike a RECEIVED request, whose
+     * stamp must be the DS row's. That asymmetry is deliberate and harmless:
+     * the DS-row rule exists so every member measures the SAME request from the
+     * same instant, and for a request this device authored there is no other
+     * member's reading to agree with yet — the row's own timestamp arrives on
+     * the next poll and, because the FIRST observation of a key wins, does not
+     * overwrite this one.
+     */
+    private fun noteOwnRequestBestEffort(groupIdHex: String, key: String) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        try {
+            recordPendingRequestObservation(
+                store = pendingRequestObservations,
+                accountIdB64 = accountIdB64,
+                groupIdHex = groupIdHex,
+                key = key,
+                atMs = System.currentTimeMillis(),
+                own = true,
+            )
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "pending request: note own failed", cause)
+        }
+    }
+
+    /**
+     * ADR-0045 — the live pending membership requests for [groupIdHex], joined
+     * from the core's retained set (the truth about WHAT is pending) and the
+     * local observation store (WHEN each landed, and whether it is ours).
+     *
+     * Prunes the observation store against the live set in the same pass, so a
+     * swept or superseded request leaves no residue. Empty on any failure — the
+     * panel showing nothing is a strictly better failure than the panel showing
+     * a request that is not there.
+     */
+    public fun pendingMembershipRequests(groupIdHex: String): List<PendingRequest> {
+        val accountIdB64 = currentAccountIdB64.get() ?: return emptyList()
+        val record = groups[groupIdHex] ?: return emptyList()
+        return try {
+            val records = record.group.pendingProposals()
+            val folded = foldPendingRequests(
+                records = records,
+                observations = pendingRequestObservations.load(accountIdB64, groupIdHex),
+                nowMs = System.currentTimeMillis(),
+            )
+            prunePendingRequestObservations(
+                store = pendingRequestObservations,
+                accountIdB64 = accountIdB64,
+                groupIdHex = groupIdHex,
+                liveKeys = folded.liveKeys,
+            )
+            folded.requests
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "pendingMembershipRequests failed", cause)
+            emptyList()
+        }
+    }
+
+    /**
+     * ADR-0045 — the beacon observation store. Plain `SharedPreferences`: an
+     * observation is a signature key already public inside the group plus a
+     * server-assigned timestamp, so there is no key material to protect.
+     */
+    private val beaconObservations: BeaconObservationStore by lazy {
+        SharedPrefsBeaconObservationStore(applicationContext)
+    }
+
+    /** ADR-0045 — when this device last emitted a beacon, per group, from its
+     *  OWN local clock. Legitimate here and nowhere else in the beacon design,
+     *  because it governs only this device's send cadence and feeds no judgement
+     *  about anybody else. */
+    private val lastBeaconAtMs = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    /**
+     * ADR-0045 S4b — record that a beacon landed on [groupIdHex].
+     *
+     * The MLS sender leaf is resolved to a signature KEY **here, at receipt**,
+     * because that is the only moment the roster is authenticated in the epoch
+     * the beacon was sealed at — and the KEY is what is persisted, never the
+     * leaf: OpenMLS reuses a vacated leaf for the next member added, so a stored
+     * leaf silently comes to name somebody else. The RANK is not derived here at
+     * all; it is derived at verdict time, against the role table as it stands
+     * then (see [actingCommitterNow]).
+     *
+     * The age comes from the DS row's server-assigned [createdAt], never a local
+     * clock: every member reads the identical value for the identical row. A row
+     * whose timestamp does not parse is DROPPED rather than stored — there is no
+     * age to measure, so it is no evidence of liveness, and storing it as
+     * "fresh" would defer this device forever with nothing to age out.
+     *
+     * Called from the poll's [providerLock] critical section (the `Group` handle
+     * is not safe to touch off it). Best-effort throughout: losing an
+     * observation costs a takeover's promptness, never its correctness.
+     */
+    private fun recordCommitterBeaconBestEffort(
+        group: Group,
+        groupIdHex: String,
+        senderLeaf: UInt?,
+        createdAt: String,
+    ) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        val senderKey = signatureKeyForLeaf(group, senderLeaf) ?: return
+        val atMs = GroupRecord.parseIsoMillis(createdAt) ?: return
+        try {
+            recordBeaconObservation(
+                store = beaconObservations,
+                accountIdB64 = accountIdB64,
+                groupIdHex = groupIdHex,
+                senderKeyB64 = outboxB64(senderKey),
+                atMs = atMs,
+            )
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "committer beacon: record failed", cause)
+        }
+    }
+
+    /**
+     * ADR-0045 S4b — the acting-committer verdict, taken fresh on every sweep
+     * attempt.
+     *
+     * **Every rank in the projection is derived HERE and now**, by
+     * `Group.committerRank` against the group's live `0xFF02` role table — never
+     * carried over from when the beacon arrived. A rank is a position in that
+     * table's canonical order, so promoting, demoting or removing any admin
+     * renumbers every admin sorting after it; a rank captured under one ordering
+     * and compared against this device's own current rank is not stale, it is
+     * meaningless.
+     *
+     * Fails closed to `Defer` on anything it cannot read. Deferring costs a
+     * sweep attempt; acting on a view of who else is running that this device
+     * could not actually read is the hazard.
+     *
+     * Takes [providerLock] itself, so it must NOT be called from inside one.
+     */
+    private suspend fun actingCommitterNow(
+        group: Group,
+        groupIdHex: String,
+        ownRank: UInt,
+    ): ActingCommitter {
+        val accountIdB64 = currentAccountIdB64.get()
+            ?: return ActingCommitter.Defer(null)
+        return try {
+            providerLock.withLock {
+                decideActingCommitter(
+                    store = beaconObservations,
+                    accountIdB64 = accountIdB64,
+                    groupIdHex = groupIdHex,
+                    ownRank = ownRank,
+                    rankOf = { senderKeyB64 ->
+                        try {
+                            group.committerRank(outboxUnb64(senderKeyB64))
+                        } catch (_: Throwable) {
+                            null
+                        }
+                    },
+                    nowMs = System.currentTimeMillis(),
+                    // Read off the FFI, never hand-copied — the interval and the
+                    // window are two halves of one budget and a local literal is
+                    // the drift class ADR-0044 exists about.
+                    freshnessWindowMs = uniffi.lakko_ffi_uniffi.committerBeaconFreshnessWindowMs(),
+                    fold = { rank, observed, windowMs ->
+                        toActingCommitter(
+                            uniffi.lakko_ffi_uniffi.actingCommitterVerdict(
+                                rank,
+                                observed.map {
+                                    uniffi.lakko_ffi_uniffi.BeaconObservation(it.rank, it.ageMs)
+                                },
+                                windowMs,
+                            ),
+                        )
+                    },
+                )
+            }
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "committer beacon: verdict unreadable", cause)
+            ActingCommitter.Defer(null)
+        }
+    }
+
+    /**
+     * ADR-0045 S4b — emit this device's own liveness beacon for [groupIdHex],
+     * if it is due.
+     *
+     * **The foreground gate is the load-bearing part and it is a caller
+     * obligation the core cannot check.** A beacon means *able to sweep*, and on
+     * this client a sweep runs only at the tail of a poll driven by a RESUMED
+     * chat screen; the ADR-0041 / C-59 background decrypt is read-only-throwaway
+     * and structurally cannot commit, and a backgrounded process can be frozen
+     * at any moment. A beacon from the background would therefore be a lie that
+     * costs the group a takeover: every other candidate would defer to a device
+     * that is not going to sweep, and would keep deferring for as long as the
+     * backgrounded app kept beaconing.
+     *
+     * Everything else — only-candidates-emit, first-of-session-immediate, one
+     * per interval — is the core's `shouldEmitBeacon`, called through the gate.
+     *
+     * Best-effort and silent: nobody is watching a beacon, and a failed emit
+     * only means this device does not claim the duty on this tick.
+     *
+     * @return the verdict, so a caller (and a test) can see WHY nothing went out.
+     */
+    public suspend fun emitCommitterBeaconIfDue(
+        groupIdHex: String,
+        foreground: Boolean,
+    ): String {
+        // Short-circuited FIRST so a backgrounded app does no work at all — the
+        // same answer [beaconEmitVerdict] gives below, reached before the
+        // Ed25519 key derivation the rank read costs. The gate there stays the
+        // authority.
+        if (!foreground) return BeaconEmitVerdict.NOT_FOREGROUND.name
+        val identity = canonicalIdentity.get() ?: return BeaconEmitVerdict.NOT_A_CANDIDATE.name
+        val record = groups[groupIdHex] ?: return BeaconEmitVerdict.NOT_A_CANDIDATE.name
+        val ownRank = try {
+            providerLock.withLock {
+                if (!usesProposalPath(record.group)) return BeaconEmitVerdict.NOT_A_CANDIDATE.name
+                record.group.ownCommitterRank(identity)
+            }
+        } catch (_: Throwable) {
+            // No identity / torn group — this device cannot establish that it is
+            // a candidate, so it must not claim to be one.
+            return BeaconEmitVerdict.NOT_A_CANDIDATE.name
+        }
+        val verdict = beaconEmitVerdict(
+            ownRank = ownRank,
+            foreground = foreground,
+            lastEmittedAtMs = lastBeaconAtMs[groupIdHex],
+            nowMs = System.currentTimeMillis(),
+            throttle = { rank, last, now -> uniffi.lakko_ffi_uniffi.shouldEmitBeacon(rank, last, now) },
+        )
+        if (verdict != BeaconEmitVerdict.EMIT) return verdict.name
+        // Stamped BEFORE the send, so a publish that is slow or that fails
+        // cannot let the next tick fire a second beacon a few seconds later. It
+        // is also this device's re-entrancy guard: a publish outlasting the tick
+        // interval reads as throttled on the next pass rather than doubling up.
+        lastBeaconAtMs[groupIdHex] = System.currentTimeMillis()
+        try {
+            broadcastControlToGroup(
+                identity = identity,
+                groupIdHex = groupIdHex,
+                group = record.group,
+                envelope = uniffi.lakko_ffi_uniffi.composeCommitterBeacon(),
+            )
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "ADR-0045 committer beacon not emitted", cause)
+        }
+        return verdict.name
+    }
+
+    /**
+     * ADR-0045 S4a/S4b — run one committer sweep for [groupIdHex], if this
+     * device is the acting committer.
+     *
+     * The committer set is the ADR-0022 owner plus admins, ordered by
+     * `ownCommitterRank()`; which of them ACTS is decided by the beacon fold.
+     * Rank 0 — the owner — always acts, because no rank is lower; an admin acts
+     * when nobody strictly better placed has beaconed inside the freshness
+     * window, which includes the case where it has heard nothing at all. So an
+     * admin-only group no longer waits for an absent owner.
+     *
+     * Short-circuits before touching the network when this device is not a
+     * candidate, or when nothing is pending and no verdict is owed — so wiring
+     * this into the tail of every poll costs one short provider region in the
+     * common case.
+     *
+     * Runs under the same per-group lock the commit and poll regions take. The
+     * whole region (stage -> publish -> verdict -> merge/abandon) is inside it,
+     * network round-trips included, because the verdict is a read-modify-write
+     * over both the group epoch and the journal cursor; a poll interleaving in
+     * the middle would not merely slow it down, it would make the verdict wrong.
+     * The blast radius is one group — G-37's concern was a repository-wide lock.
+     */
+    public suspend fun sweepIfCommitter(groupIdHex: String): SweepOutcome? {
+        val identity = canonicalIdentity.get() ?: return null
+        val record = groups[groupIdHex] ?: return null
+        if (currentAccountIdB64.get() == null) return null
+        // ADR-0043 — the baseline for the membership diff, captured INSIDE the
+        // group lock immediately before the sweep, so a commit landing in the
+        // window cannot race the shrink diff. Lock order is always group first,
+        // provider second.
+        var membersBefore: List<String>? = null
+        val outcome = try {
+            groupLock(groupIdHex).withLock {
+                membersBefore = providerLock.withLock { memberSignatureKeysOrNull(record.group) }
+                runCommitterSweep(sweepPortsFor(record, identity, groupIdHex))
+            }
+        } catch (cause: Throwable) {
+            // A verdict this device could not read leaves the sweep staged for
+            // the next attempt (which runs at the tail of every poll). Never
+            // surfaced as a user-facing error: nothing the user did failed, and
+            // the request is still live.
+            android.util.Log.w("ChatRepository", "ADR-0045 sweep did not complete", cause)
+            return null
+        }
+        if (outcome !is SweepOutcome.Committed) return outcome
+        publishThreadList()
+        // ADR-0043 / C-61 — the sweep just landed a membership change, and a
+        // Remove among it means the evicted member still derives the current
+        // push_gid. Started strictly AFTER the merge + publish, so the new
+        // secret is sealed at the post-removal epoch. Fire-and-forget.
+        rotatePushRoutingIfShrankBestEffort(
+            groupIdHex = groupIdHex,
+            group = record.group,
+            identity = identity,
+            previousMemberKeys = membersBefore,
+            currentMemberKeys = providerLock.withLock { memberSignatureKeysOrNull(record.group) },
+        )
+        // ADR-0042 — a swept ADD needs the current routing secret, exactly as
+        // the direct add path re-broadcasts it. No-op when this device holds
+        // none.
+        if (outcome.addedCount > 0) redistributePushRoutingBestEffort(groupIdHex)
+        return outcome
+    }
+
+    /**
+     * Adapt a live [GroupRecord] onto the [SweepPorts] the ADR-0045 sweep
+     * orchestration runs over.
+     *
+     * The adapter is deliberately thin and does no deciding: every rule lives in
+     * `CommitterSweep.kt`, where it is host-testable without the FFI, a
+     * `Context` or a network.
+     */
+    private fun sweepPortsFor(
+        record: GroupRecord,
+        identity: Identity,
+        groupIdHex: String,
+    ): SweepPorts {
+        val accountIdB64 = requireAccountId()
+        val groupIdB64 = outboxB64(record.groupId)
+        return SweepPorts(
+            group = object : SweepGroupPort {
+                override suspend fun <T> exclusiveProvider(block: suspend () -> T): T =
+                    providerLock.withLock { block() }
+
+                override fun epoch(): ULong = record.group.epoch()
+
+                override fun ownCommitterRank(): UInt? = record.group.ownCommitterRank(identity)
+
+                override fun pendingProposalCount(): Int = record.group.pendingProposals().size
+
+                override fun hasStagedSweep(): Boolean = record.group.hasStagedSweep()
+
+                override fun stagePendingProposals(): StagedSweepArtifacts? {
+                    val staged = record.group.stagePendingProposals(identity) ?: return null
+                    // `swept` reports what the commit REALLY carries, read back
+                    // off the staged commit by the core rather than predicted by
+                    // the caller — which matters here because it is what
+                    // addresses the Welcome.
+                    val added = staged.swept.mapNotNull {
+                        (it.kind as? uniffi.lakko_ffi_uniffi.ProposalKind.Add)?.signatureKey
+                    }
+                    return StagedSweepArtifacts(
+                        commit = staged.commit,
+                        welcome = staged.welcome,
+                        addedSignatureKeys = added,
+                    )
+                }
+
+                override fun mergeStagedSweep() {
+                    record.group.mergeStagedSweep(identity)
+                }
+
+                override fun abandonStagedSweep() {
+                    record.group.abandonStagedSweep(identity)
+                }
+
+                override fun applyIncoming(payload: ByteArray) {
+                    record.group.processIncomingVerifyingRoles(identity, payload)
+                }
+            },
+            journal = object : SweepJournalPort {
+                override suspend fun fetch(after: Long): List<SweepJournalRow> =
+                    chatClient.fetchGroupJournal(
+                        groupId = record.groupId,
+                        after = after,
+                        waitSecs = 0,
+                    ).messages.map { SweepJournalRow(it.id, it.payload) }
+
+                override suspend fun publishGroup(bytes: ByteArray): Long =
+                    dsClient.publishGroup(record.groupId, bytes).id
+
+                override suspend fun publishMailbox(pseudonym: ByteArray, bytes: ByteArray): Long =
+                    dsClient.publishMailbox(pseudonym, bytes).id
+            },
+            outbox = object : SweepOutboxPort {
+                override fun newEntryId(): String = newOutboxEntryId()
+
+                override suspend fun record(entry: SweepDurableEntry) {
+                    // ADR-0040 obligation 4 — the durable entry AND the MLS
+                    // snapshot, in that order, BOTH fail-closed, before any
+                    // publish. Unlike the four direct paths there is no
+                    // eager-merged N+1 to reset on a failure: the sweep is
+                    // STAGED, so the caller's `abandonStagedSweep` is the
+                    // rollback and it is per-group.
+                    prepareCrashSafeCommit(
+                        persistEntryOrThrow = {
+                            CommitOutboxStore.putEntry(
+                                applicationContext,
+                                PendingCommitEntry(
+                                    id = entry.id,
+                                    accountId = accountIdB64,
+                                    groupId = groupIdB64,
+                                    // The group deliberately sits at N holding an
+                                    // UN-merged commit, so this records the epoch
+                                    // the sweep was BUILT ON. `reconcileVerdict`
+                                    // never reads it — a sweep entry is routed to
+                                    // `resolveOwedVerdict`, whose authority is the
+                                    // core's `hasStagedSweep()`.
+                                    targetEpoch = record.group.epoch().toString(),
+                                    commitB64 = entry.commitB64,
+                                    secondArtifactB64 = entry.welcomeEnvelopeB64,
+                                    secondArtifactKind = entry.welcomeEnvelopeB64
+                                        ?.let { SecondArtifactKind.WELCOME },
+                                    isSweep = true,
+                                    sweepWelcomeMailboxesB64 = entry.welcomeMailboxesB64,
+                                ),
+                            )
+                        },
+                        persistSnapshotOrThrow = { persistSnapshotDurableOrThrow() },
+                    )
+                }
+
+                override suspend fun findOwed(): SweepDurableEntry? =
+                    try {
+                        CommitOutboxStore
+                            .loadForGroup(applicationContext, accountIdB64, groupIdB64)
+                            .firstOrNull { it.isSweep && !it.acked }
+                            ?.let {
+                                SweepDurableEntry(
+                                    id = it.id,
+                                    commitB64 = it.commitB64,
+                                    welcomeEnvelopeB64 = it.secondArtifactB64,
+                                    welcomeMailboxesB64 = it.sweepWelcomeMailboxesB64,
+                                )
+                            }
+                    } catch (_: Throwable) {
+                        null
+                    }
+
+                override suspend fun ack(
+                    id: String,
+                    commitMessageId: Long,
+                    welcomeMessageId: Long?,
+                ) {
+                    ackCommitBestEffort(id, commitMessageId, welcomeMessageId)
+                }
+
+                override suspend fun discard(id: String) {
+                    try {
+                        CommitOutboxStore.deleteEntry(applicationContext, id)
+                    } catch (_: Throwable) {
+                        // best-effort — the next sweep retries.
+                    }
+                }
+            },
+            cursor = object : SweepCursorRef {
+                override fun read(): Long = record.cursor
+
+                override fun advance(to: Long) {
+                    record.advanceCursor(to)
+                }
+            },
+            actingCommitter = ActingCommitterOracle { ownRank ->
+                actingCommitterNow(record.group, groupIdHex, ownRank)
+            },
+            welcomeMailbox = { signatureKey ->
+                uniffi.lakko_ffi_uniffi.IdentityPseudonym
+                    .fromIdentity(signatureKey)
+                    .use { it.asBytes() }
+            },
+            wrapWelcome = { welcome -> wrapEnvelope(KIND_WELCOME, welcome) },
+            markOwnPublished = { id -> chatClient.markOwnPublishedCommit(id) },
+            // `persistSnapshotBestEffort` calls `Identity.snapshotStorage()`,
+            // which serialises the WHOLE provider — every group at once — so it
+            // must hold the provider lock or it can capture a SIBLING group
+            // mid-operation and persist it torn. Every other caller already runs
+            // inside a provider region; the sweep calls this from OUTSIDE one (a
+            // merge/abandon region has just closed), so it takes the lock here.
+            // It is never reached from inside `exclusiveProvider`, which would
+            // self-deadlock a non-reentrant `Mutex`.
+            persist = { providerLock.withLock { persistSnapshotBestEffort() } },
+            encodeB64 = ::outboxB64,
+            decodeB64 = ::outboxUnb64,
+        )
+    }
+
     public suspend fun sweepPendingCommits(groupIdHex: String) {
         val accountIdB64 = currentAccountIdB64.get() ?: return
         val record = groups[groupIdHex] ?: return
         val groupIdB64 = outboxB64(record.groupId)
+        // ADR-0045 obligation 1 — a staged sweep is DURABLE and freezes this
+        // group's own membership operations across restarts, so a verdict owed
+        // from a previous run must be finished before anything else. It is wired
+        // into this EXISTING restart seam rather than into a second one, because
+        // two restart paths over the same durable state is how they drift.
+        //
+        // It runs FIRST for two reasons: the legacy loop below would otherwise
+        // re-publish the sweep's own commit as if it were a direct-path entry,
+        // and — worse — re-publish its Welcome, which ADR-0045 obligation 2
+        // forbids before the verdict. And `reconcileVerdict` would DISCARD it:
+        // a staged sweep deliberately leaves the group BELOW the entry's
+        // recorded epoch, which for a direct-path entry means a torn write.
+        val identity = canonicalIdentity.get()
+        if (identity != null) {
+            try {
+                groupLock(groupIdHex).withLock {
+                    resolveOwedVerdict(sweepPortsFor(record, identity, groupIdHex))
+                }
+            } catch (cause: Throwable) {
+                // An unreadable verdict leaves the sweep staged for the next
+                // attempt; the poll tail retries continuously.
+                android.util.Log.w("ChatRepository", "ADR-0045 owed verdict unresolved", cause)
+            }
+        }
         val entries = try {
-            CommitOutboxStore.loadForGroup(applicationContext, accountIdB64, groupIdB64)
+            CommitOutboxStore
+                .loadForGroup(applicationContext, accountIdB64, groupIdB64)
+                // ADR-0045 — a sweep entry belongs to `resolveOwedVerdict`
+                // above, never to the direct-path reconciler.
+                .filterNot { it.isSweep }
         } catch (_: Throwable) {
             return
         }
@@ -3063,6 +3842,22 @@ private class GroupRecord(
         private set
 
     /**
+     * ADR-0045 — advance the journal cursor from outside the poll fold.
+     *
+     * The committer sweep's verdict APPLIES the rows below its own commit, so it
+     * must move the cursor over exactly those rows or the poll would re-feed
+     * consumed rows to OpenMLS. MONOTONE by construction: a lower value is
+     * ignored, so a stale caller can never wind the cursor backward and resurrect
+     * rows this record has already folded.
+     *
+     * The caller holds the per-group lock (and, for the sweep, the provider lock
+     * too), which is what makes the read-modify-write atomic against the poll.
+     */
+    fun advanceCursor(to: Long) {
+        if (to > cursor) cursor = to
+    }
+
+    /**
      * G-37 — per-group poll latch. Now that the DS fetch runs OUTSIDE
      * the provider lock, two concurrent `pollGroup` calls for the same group could
      * otherwise both fetch from the same cursor and then apply overlapping
@@ -3123,6 +3918,7 @@ private class GroupRecord(
         result: PollMessagesResult,
         callSignalingSink: ((ByteArray) -> Unit)? = null,
         pushRoutingSecretSink: ((ByteArray, ULong, UInt?) -> Unit)? = null,
+        committerBeaconSink: ((UInt?, String) -> Unit)? = null,
     ) {
         for (event in result.events) {
             when (event) {
@@ -3188,12 +3984,15 @@ private class GroupRecord(
                     // ADR-0045 decision 2 — a committer-liveness beacon. Not a
                     // timeline row: it is an observation about WHICH owner /
                     // admin can sweep the pending proposal set, carried by the
-                    // event's `senderLeaf` + `createdAt` (the two things the
-                    // field-less envelope deliberately omits). The takeover
-                    // fold that will consume it belongs to the client sprints
-                    // and is not built yet, so the beacon is simply consumed
-                    // here and never reaches `messages`.
-                    Unit
+                    // event's `senderLeaf` + `createdAt` — the two things the
+                    // field-less envelope deliberately omits, and the only two
+                    // the takeover fold consumes. Handed to the sink, which
+                    // resolves the leaf to a signature KEY while the roster is
+                    // still authenticated in this epoch and files it against the
+                    // DS row's server-assigned timestamp. The RANK is derived
+                    // nowhere near here: it is a position in the role table's
+                    // canonical order and is taken at VERDICT time.
+                    committerBeaconSink?.invoke(event.senderLeaf, event.createdAt)
                 }
             }
         }
@@ -3363,7 +4162,7 @@ private class GroupRecord(
         SystemKind.ExternalJoinProposal -> "[mls external join]"
     }
 
-    private companion object {
+    companion object {
         /** ADR-0024 — a typing indicator auto-expires this long
          *  after the last fresh `typing:true`; the same window is
          *  the stale-`createdAt` re-sync replay guard. ~6 s per

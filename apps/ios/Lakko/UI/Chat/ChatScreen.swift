@@ -1174,10 +1174,50 @@ private struct MembersSheet: View {
                         }
                     }
                 }
+                // ADR-0045 S4a (UX §5.1) — the pending notice. One line, and it
+                // states INACTION rather than a deadline: decision 2 gives a
+                // waiting request no expiry, so there is no moment at which the
+                // client learns something new to say. Rendered only past the
+                // quiet window, because the common case — the owner sweeping its
+                // own request — lands before anyone could look, and a notice
+                // that appears and vanishes teaches the user that membership is
+                // slow when it is not.
+                if let notice = viewModel.pendingNoticeText {
+                    Section {
+                        Text(notice.count).font(.footnote)
+                        Text(notice.liveness)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                // ADR-0045 S4a — a requested member is NOT a member and must not
+                // appear in the roster below. Their own section says exactly
+                // what is true: they are waiting to be added.
+                if !viewModel.waitingToBeAddedRequests.isEmpty {
+                    Section("Waiting to be added (\(viewModel.waitingToBeAddedRequests.count))") {
+                        ForEach(viewModel.waitingToBeAddedRequests) { request in
+                            Text(Self.pendingAddLabel(request))
+                                .font(.system(.footnote, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
                 Section(memberCountLabel) {
                     ForEach(viewModel.members, id: \.leafIndex) { member in
                         HStack {
-                            Text(viewModel.memberLabel(member))
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(viewModel.memberLabel(member))
+                                // ADR-0045 S4a — NO optimistic update: a member
+                                // with a pending removal stays in the roster and
+                                // is annotated. Dropping the row would assert
+                                // they are gone while they are still in the
+                                // group and still decrypting every message.
+                                if let annotation = viewModel.pendingAnnotation(member) {
+                                    Text(annotation)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
                             Spacer()
                             // Owner-only promote / demote toggle; never the
                             // owner's own row (ADR-0022).
@@ -1224,6 +1264,15 @@ private struct MembersSheet: View {
             }
             .onAppear { viewModel.refreshMembers() }
         }
+    }
+
+    /// A prospective member has no roster row and no contact entry to resolve
+    /// against yet, so the only honest label is a fingerprint of the signature
+    /// key the request carries.
+    private static func pendingAddLabel(_ request: PendingRequest) -> String {
+        guard let b64 = request.addSignatureKeyB64,
+              let bytes = base64Decode(b64) else { return "Pending member" }
+        return "Member " + bytes.prefix(4).map { String(format: "%02x", $0) }.joined()
     }
 
     private var memberCountLabel: String {

@@ -195,137 +195,113 @@ final class CommitOutboxSweepPlannerTests: XCTestCase {
         )
     }
 }
+// MARK: - (1) A fail-closed durable record aborts the SWEEP before any publish
 
-// MARK: - (1) A persist failure aborts a commit path BEFORE any publish
-
-/// Drives a REAL founder MLS group through `ChatRepository.setMemberAdmin` (a
-/// role-change commit, valid on a single-member founder group whose role table
-/// `Group.create` seeds) with the commit outbox pointed at an UNAVAILABLE store,
-/// and asserts (a) the path THROWS and (b) ZERO DS requests were attempted — the
-/// commit's fail-closed durable record is the gate that stops the publish.
+/// Drives a REAL founder MLS group through the ADR-0045 committer sweep with
+/// the commit outbox pointed at an UNAVAILABLE store.
+///
+/// ## Why the vehicle moved
+///
+/// This class used to drive `ChatRepository.setMemberAdmin`, because that was a
+/// direct-commit path with an ADR-0040 fail-closed durable record in front of
+/// its publish. ADR-0045 turned it into a **proposal**: a proposal advances no
+/// epoch and produces nothing to re-publish, so it has no outbox entry, and
+/// asserting one would be asserting behaviour that no longer exists. Every group
+/// `Group.create` produces carries an ADR-0022 role table, so the same is true
+/// of add and remove — the epoch-advancing commit is now the sweep, and the
+/// sweep is where the fail-closed record lives.
+///
+/// The property under test is unchanged and still ADR-0040's: **no epoch
+/// advance reaches the wire without a durable, re-publishable record of the
+/// commit that caused it**, and a failed record ABORTS with the group rolled
+/// back rather than half-applied.
 @MainActor
 final class CommitOutboxCommitPathAbortTests: XCTestCase {
 
-    /// A DsClient whose requests are intercepted + counted by
-    /// ``RecordingURLProtocol`` (defined in `ChatSendNonceReuseTests`), so any
-    /// publish attempt is directly observable.
-    private func makeRecordingDs() -> DsClient {
-        RecordingURLProtocol.reset()
-        let config = URLSessionConfiguration.ephemeral
-        config.protocolClasses = [RecordingURLProtocol.self]
-        let session = URLSession(configuration: config)
-        return DsClient(baseURL: "http://127.0.0.1:9", session: session)
-    }
+    /// A DS double that answers a journal FETCH with an empty batch and a
+    /// PUBLISH with a valid receipt, counting each separately.
+    ///
+    /// The sweep needs both: obligation 3's stand-down re-read is a fetch, and
+    /// an empty answer is what lets it proceed to stage. Counting them apart is
+    /// what makes "the publish was not attempted" assertable at all — a single
+    /// request counter would be satisfied by the fetch alone.
+    final class SweepDsURLProtocol: URLProtocol {
+        private static let lock = NSLock()
+        private static var _fetches = 0
+        private static var _publishes = 0
+        private static var _nextId: Int64 = 1
+        /// When true, every publish fails — the "record succeeded, publish did
+        /// not" half of the pair.
+        static var failPublishes = false
 
-    func testPersistFailureAbortsRoleCommitBeforePublish() async throws {
-        // 1. Build a real founder group + its identity from a seed. `Group.create`
-        //    seeds the owner role table (ADR-0022), so `setMemberAdmin` can craft
-        //    a real `setGroupRoles` commit on this single-member group.
-        let seed = Data(repeating: 0x11, count: 32)
-        let founder = try Identity.fromSeed(seed: seed)
-        let group = try Group.create(identity: founder)
-        let groupId = try group.groupId()
-        let groupIdHex = DsClient.pseudonymHex(groupId)
-        let snapshotBlob = try founder.snapshotStorage()
-
-        // 2. A random account id keeps the shared IdentitySnapshotStore /
-        //    KnownGroupsStore rows isolated across runs.
-        var accountIdBytes = Data(count: 16)
-        accountIdBytes.withUnsafeMutableBytes { _ = SecRandomCopyBytes(kSecRandomDefault, 16, $0.baseAddress!) }
-        let accountIdB64 = base64Encode(accountIdBytes)
-
-        let snapshotStore = IdentitySnapshotStore()
-        let knownGroupsStore = KnownGroupsStore(
-            defaults: UserDefaults(suiteName: "commit-outbox-test-\(UUID().uuidString)")!
-        )
-        defer { snapshotStore.deleteSnapshot(accountIdB64: accountIdB64) }
-
-        // 3. Pre-seed the restore path: the snapshot + the known-group id, so
-        //    `bootstrap` rehydrates the founder group into the repo.
-        snapshotStore.putSnapshot(accountIdB64: accountIdB64, blob: snapshotBlob)
-        knownGroupsStore.add(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
-
-        // 4. Repo with the recording DS + an UNAVAILABLE outbox (fail-closed on
-        //    every durable write).
-        let repo = ChatRepository(
-            chatClient: ChatClient(),
-            dsClient: makeRecordingDs(),
-            discovery: DiscoveryClient(),
-            snapshotStore: snapshotStore,
-            knownGroupsStore: knownGroupsStore,
-            messageLogStore: MessageLogStore(),
-            commitOutbox: CommitOutboxStore(rootDir: nil)
-        )
-
-        repo.bootstrap(
-            secrets: IdentitySecrets(
-                accountId: accountIdBytes,
-                exportKey: Data(repeating: 0x22, count: 32),
-                accountIdentitySeed: seed,
-                sessionToken: "t",
-                sessionExpiresAtMs: 0
-            )
-        )
-
-        // Guard: the founder group must have rehydrated, else the abort below
-        // would be for the wrong reason ("no live Group handle").
-        XCTAssertEqual(
-            repo.memberCount(groupIdHex: groupIdHex), 1,
-            "founder group must rehydrate for the commit path to reach the persist gate"
-        )
-
-        // 5. A DIFFERENT valid 32-byte signature key to promote to admin.
-        let otherKey = try Identity.fromSeed(seed: Data(repeating: 0x33, count: 32))
-            .signaturePublicKey()
-
-        // Only count requests from here on — bootstrap issues none on the
-        // recording DS, but reset defensively.
-        RecordingURLProtocol.reset()
-
-        do {
-            _ = try await repo.setMemberAdmin(
-                groupIdHex: groupIdHex,
-                memberSignaturePubkey: otherKey,
-                makeAdmin: true
-            )
-            XCTFail("setMemberAdmin must throw when the outbox persist fails")
-        } catch {
-            XCTAssertTrue(
-                error is CommitOutboxStoreError,
-                "abort must be attributed to the fail-closed outbox persist, got \(error)"
-            )
+        static func reset() {
+            lock.lock(); defer { lock.unlock() }
+            _fetches = 0
+            _publishes = 0
+            _nextId = 1
+            failPublishes = false
         }
 
-        // The load-bearing assertion: the commit never reached the DS.
-        XCTAssertEqual(
-            RecordingURLProtocol.startedRequestCount, 0,
-            "the DS publish must NOT be attempted after a failed outbox persist"
-        )
+        static var fetchCount: Int { lock.lock(); defer { lock.unlock() }; return _fetches }
+        static var publishCount: Int { lock.lock(); defer { lock.unlock() }; return _publishes }
+
+        override class func canInit(with request: URLRequest) -> Bool { true }
+        override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+        override func startLoading() {
+            let isPublish = request.httpMethod == "POST"
+            Self.lock.lock()
+            if isPublish { Self._publishes += 1 } else { Self._fetches += 1 }
+            let id = Self._nextId
+            if isPublish { Self._nextId += 1 }
+            let fail = isPublish && Self.failPublishes
+            Self.lock.unlock()
+
+            if fail {
+                client?.urlProtocol(self, didFailWithError: URLError(.notConnectedToInternet))
+                return
+            }
+            let json = isPublish
+                ? "{\"id\":\(id),\"created_at\":\"2026-08-25T10:00:00.000Z\"}"
+                : "{\"messages\":[],\"has_more\":false}"
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: Data(json.utf8))
+            client?.urlProtocolDidFinishLoading(self)
+        }
+
+        override func stopLoading() {}
     }
 
-    // MARK: - (F1) The abort RESETS the in-memory group to epoch N
+    private func makeSweepDs() -> DsClient {
+        SweepDsURLProtocol.reset()
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [SweepDsURLProtocol.self]
+        return DsClient(baseURL: "http://127.0.0.1:9", session: URLSession(configuration: config))
+    }
 
-    /// The pieces an F1 reset test asserts against — a real single-member founder
-    /// group (its role table seeded by `Group.create`, so `setMemberAdmin` crafts a
-    /// real `setGroupRoles` commit) rehydrated into a repo with an injectable
-    /// commit outbox + recording DS.
     private struct Fixture {
         let repo: ChatRepository
         let groupIdHex: String
         let accountIdB64: String
-        let otherKey: Data
         let snapshotStore: IdentitySnapshotStore
+        let promotableKey: Data
     }
 
-    private func makeFounderRepo(
-        outbox: CommitOutboxStore,
-        discovery: DiscoveryClient = DiscoveryClient()
-    ) throws -> Fixture {
+    /// A real single-member founder group (its role table seeded by
+    /// `Group.create`, so this device is the ADR-0022 owner and therefore
+    /// committer rank 0) rehydrated into a repo whose outbox is `outboxDir`.
+    /// `nil` makes every durable write fail closed.
+    private func makeFixture(outboxDir: URL?) throws -> Fixture {
         let seed = Data(repeating: 0x11, count: 32)
         let founder = try Identity.fromSeed(seed: seed)
         let group = try Group.create(identity: founder)
-        let groupId = try group.groupId()
-        let groupIdHex = DsClient.pseudonymHex(groupId)
+        let groupIdHex = DsClient.pseudonymHex(try group.groupId())
         let snapshotBlob = try founder.snapshotStorage()
 
         var accountIdBytes = Data(count: 16)
@@ -336,21 +312,24 @@ final class CommitOutboxCommitPathAbortTests: XCTestCase {
 
         let snapshotStore = IdentitySnapshotStore()
         let knownGroupsStore = KnownGroupsStore(
-            defaults: UserDefaults(suiteName: "commit-outbox-f1-\(UUID().uuidString)")!
+            defaults: UserDefaults(suiteName: "commit-outbox-test-\(UUID().uuidString)")!
         )
-        // Pre-seed the restore path so `bootstrap` rehydrates the founder group
-        // (at epoch 0) — this durable snapshot is what a reset rolls back TO.
         snapshotStore.putSnapshot(accountIdB64: accountIdB64, blob: snapshotBlob)
         knownGroupsStore.add(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
 
         let repo = ChatRepository(
             chatClient: ChatClient(),
-            dsClient: makeRecordingDs(),
-            discovery: discovery,
+            dsClient: makeSweepDs(),
+            discovery: DiscoveryClient(),
             snapshotStore: snapshotStore,
             knownGroupsStore: knownGroupsStore,
             messageLogStore: MessageLogStore(),
-            commitOutbox: outbox
+            commitOutbox: CommitOutboxStore(rootDir: outboxDir),
+            pushRouting: PushGroupRouting(),
+            beaconStore: BeaconObservationStore(
+                defaults: UserDefaults(suiteName: "cob-\(UUID().uuidString)")!),
+            pendingRequestStore: PendingRequestStore(
+                defaults: UserDefaults(suiteName: "cop-\(UUID().uuidString)")!)
         )
         repo.bootstrap(
             secrets: IdentitySecrets(
@@ -363,224 +342,150 @@ final class CommitOutboxCommitPathAbortTests: XCTestCase {
         )
         XCTAssertEqual(
             repo.memberCount(groupIdHex: groupIdHex), 1,
-            "founder group must rehydrate for the commit path to reach the persist gate"
+            "founder group must rehydrate for the sweep to reach the record gate"
         )
-        let otherKey = try Identity.fromSeed(seed: Data(repeating: 0x33, count: 32))
-            .signaturePublicKey()
+        XCTAssertEqual(
+            repo.ownCommitterRank(groupIdHex: groupIdHex), 0,
+            "the founder is the ADR-0022 owner, hence committer rank 0 — if this were nil the "
+            + "sweep would short-circuit as `notCommitter` and every assertion below would be "
+            + "vacuously true"
+        )
         return Fixture(
             repo: repo,
             groupIdHex: groupIdHex,
             accountIdB64: accountIdB64,
-            otherKey: otherKey,
-            snapshotStore: snapshotStore
+            snapshotStore: snapshotStore,
+            promotableKey: try Identity.fromSeed(seed: Data(repeating: 0x33, count: 32))
+                .signaturePublicKey()
         )
     }
 
-    /// F1 — after a commit persist-ABORT, the in-memory group is RESET to the
-    /// durable snapshot (epoch N=0), NOT left at the eager-merged N+1. Otherwise a
-    /// second same-session commit would build on the un-published N+1 and publish
-    /// commit(N+1 -> N+2), which peers still at N drop as wrong-epoch — stranding
-    /// the whole group (the "device-ahead" outcome worse than the brick).
-    func testPersistAbortResetsInMemoryGroupToEpochN() async throws {
-        // `rootDir: nil` -> `putNewDurable` throws on the entry write, so the
-        // FAIL-CLOSED persist aborts the commit AFTER the eager merge.
-        let fx = try makeFounderRepo(outbox: CommitOutboxStore(rootDir: nil))
+    /// Publish one role-change PROPOSAL so the sweep has something to stage.
+    /// A proposal touches no outbox, so this works even against the unavailable
+    /// store the abort cases use.
+    private func seedPendingProposal(_ fx: Fixture) async throws {
+        let outcome = try await fx.repo.setMemberAdmin(
+            groupIdHex: fx.groupIdHex,
+            memberSignaturePubkey: fx.promotableKey,
+            makeAdmin: true
+        )
+        guard case .proposed = outcome else {
+            return XCTFail("ADR-0045 routes a role change on a role-table group through a proposal")
+        }
+        XCTAssertEqual(
+            fx.repo.pendingProposals(groupIdHex: fx.groupIdHex).filter({ $0.stored }).count, 1,
+            "the sweep needs an authorised pending proposal or it short-circuits"
+        )
+    }
+
+    // MARK: - (1) The record fails -> no publish
+
+    func testDurableRecordFailureAbortsTheSweepBeforePublish() async throws {
+        // An UNAVAILABLE outbox: every durable write throws.
+        let fx = try makeFixture(outboxDir: nil)
         defer { fx.snapshotStore.deleteSnapshot(accountIdB64: fx.accountIdB64) }
+        try await seedPendingProposal(fx)
 
-        // Pre-condition: a freshly created + rehydrated founder group is at epoch 0.
-        XCTAssertEqual(fx.repo.epoch(groupIdHex: fx.groupIdHex), 0)
+        SweepDsURLProtocol.reset()
+        let outcome = await fx.repo.sweepIfCommitter(groupIdHex: fx.groupIdHex)
 
-        do {
-            _ = try await fx.repo.setMemberAdmin(
-                groupIdHex: fx.groupIdHex,
-                memberSignaturePubkey: fx.otherKey,
-                makeAdmin: true
-            )
-            XCTFail("setMemberAdmin must throw when the outbox persist fails")
-        } catch {
-            XCTAssertTrue(
-                error is CommitOutboxStoreError,
-                "abort must be attributed to the fail-closed outbox persist, got \(error)"
-            )
-        }
-
-        // THE F1 ASSERTION: the eager merge advanced the in-memory group to epoch
-        // 1, but the abort ROLLED IT BACK to the durable N (0).
+        // THE LOAD-BEARING ASSERTION: the commit never reached the DS.
         XCTAssertEqual(
-            fx.repo.epoch(groupIdHex: fx.groupIdHex), 0,
-            "in-memory group must reset to N (0) after a persist-abort, not stay at the un-published N+1 (1)"
+            SweepDsURLProtocol.publishCount, 0,
+            "the sweep commit must NOT be published after a failed durable record — "
+            + "ADR-0040's whole point is that no epoch advance reaches the wire without a "
+            + "re-publishable record of the commit that caused it"
         )
+        XCTAssertGreaterThan(
+            SweepDsURLProtocol.fetchCount, 0,
+            "the stand-down re-read must still have run, else this test proves nothing about "
+            + "the record gate — it would only prove the sweep never started"
+        )
+        // The repository swallows a sweep failure (a sweep failure is not a user
+        // failure), so it is reported rather than thrown — and reported as
+        // `unresolved`, not `noVerdictOwed`: something was left unfinished,
+        // which is the opposite of there having been nothing to do.
+        XCTAssertEqual(outcome, .unresolved)
+    }
 
-        // A SECOND commit attempt in the SAME session still builds on N: it aborts
-        // the same way and the group stays at 0 — it never reaches the stranding
-        // N+1 -> N+2 that the bug produced.
-        do {
-            _ = try await fx.repo.setMemberAdmin(
-                groupIdHex: fx.groupIdHex,
-                memberSignaturePubkey: fx.otherKey,
-                makeAdmin: true
-            )
-            XCTFail("second setMemberAdmin must also throw")
-        } catch {
-            XCTAssertTrue(error is CommitOutboxStoreError)
-        }
+    // MARK: - (2) The abort ROLLS BACK: no staged sweep, epoch unmoved
+
+    func testDurableRecordFailureLeavesNoStagedSweepAndNoEpochAdvance() async throws {
+        let fx = try makeFixture(outboxDir: nil)
+        defer { fx.snapshotStore.deleteSnapshot(accountIdB64: fx.accountIdB64) }
+        try await seedPendingProposal(fx)
+        let epochBefore = fx.repo.epoch(groupIdHex: fx.groupIdHex)
+
+        SweepDsURLProtocol.reset()
+        _ = await fx.repo.sweepIfCommitter(groupIdHex: fx.groupIdHex)
+
         XCTAssertEqual(
-            fx.repo.epoch(groupIdHex: fx.groupIdHex), 0,
-            "a second same-session commit must still build on N (0), never on a stranded N+1"
+            fx.repo.epoch(groupIdHex: fx.groupIdHex), epochBefore,
+            "an aborted sweep must leave the group exactly where it was"
+        )
+        // The rollback is per-group `abandonStagedSweep`, and it matters that it
+        // RAN: a staged sweep is durable and freezes this group's own membership
+        // operations until a verdict is reached, so leaving one behind after an
+        // abort that published nothing would wedge membership for nothing.
+        XCTAssertFalse(
+            fx.repo.hasStagedSweep(groupIdHex: fx.groupIdHex),
+            "the fail-closed abort must abandon the staged sweep, or membership on this group "
+            + "stays frozen across relaunches with no commit on the wire to justify it"
+        )
+        XCTAssertEqual(
+            fx.repo.pendingProposals(groupIdHex: fx.groupIdHex).filter({ $0.stored }).count, 1,
+            "abandoning keeps the proposals pending — nothing the user asked for is lost"
         )
     }
 
-    /// F1 — the reset fires ONLY on the persist-abort. When the persist SUCCEEDS
-    /// (durable N+1 + a re-publishable outbox entry) and only the PUBLISH fails,
-    /// the in-memory group correctly STAYS at N+1 — the restart sweep re-publishes
-    /// the recorded commit, and rolling back here would strand the group instead.
-    func testPersistSuccessButPublishFailureKeepsGroupAtEpochNPlus1() async throws {
+    // MARK: - (3) Record succeeds, publish fails -> the verdict stays OWED
+
+    /// The ADR-0045 counterpart of ADR-0040's "persist-success / publish-fail
+    /// leaves the group at N+1 for the restart sweep".
+    ///
+    /// The sweep's answer is deliberately different, and the difference is the
+    /// whole point of staging: the group stays at **N**, because a staged sweep
+    /// has not merged. What must survive is the durable entry, flagged
+    /// `sweepVerdictPending` so ADR-0040's re-publish loop leaves it alone and
+    /// `resolveOwedVerdict` owns it instead — re-publishing it as a direct-path
+    /// entry would push its Welcome onto the wire before any verdict, which
+    /// ADR-0045 obligation 2 forbids.
+    func testRecordSucceedsButPublishFailsLeavesTheVerdictOwed() async throws {
         let outboxDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("commit-outbox-f1-\(UUID().uuidString)")
-        let outbox = CommitOutboxStore(rootDir: outboxDir)
-        let fx = try makeFounderRepo(outbox: outbox)
+            .appendingPathComponent("commit-outbox-sweep-\(UUID().uuidString)")
+        let fx = try makeFixture(outboxDir: outboxDir)
         defer {
             fx.snapshotStore.deleteSnapshot(accountIdB64: fx.accountIdB64)
             try? FileManager.default.removeItem(at: outboxDir)
         }
+        try await seedPendingProposal(fx)
+        let epochBefore = fx.repo.epoch(groupIdHex: fx.groupIdHex)
 
-        XCTAssertEqual(fx.repo.epoch(groupIdHex: fx.groupIdHex), 0)
+        SweepDsURLProtocol.reset()
+        SweepDsURLProtocol.failPublishes = true
+        _ = await fx.repo.sweepIfCommitter(groupIdHex: fx.groupIdHex)
 
-        // The recording DS points at 127.0.0.1:9 (connection refused): the persist
-        // SUCCEEDS, then `publishGroup` throws.
-        do {
-            _ = try await fx.repo.setMemberAdmin(
-                groupIdHex: fx.groupIdHex,
-                memberSignaturePubkey: fx.otherKey,
-                makeAdmin: true
-            )
-            XCTFail("setMemberAdmin must throw on the DS publish failure")
-        } catch {
-            XCTAssertFalse(
-                error is CommitOutboxStoreError,
-                "the failure must be the DS publish, not the outbox persist, got \(error)"
-            )
-        }
-
-        // The group STAYS at N+1 (1) — the reset must NOT fire on a publish failure
-        // (the commit is durably recorded; the sweep re-publishes it on restart).
         XCTAssertEqual(
-            fx.repo.epoch(groupIdHex: fx.groupIdHex), 1,
-            "a persist-success / publish-fail must leave the group at N+1 for the restart sweep"
+            fx.repo.epoch(groupIdHex: fx.groupIdHex), epochBefore,
+            "a STAGED sweep has not merged — the group stays at N until the journal verdict"
         )
-
-        // And the durable outbox holds exactly one un-acked entry at target epoch 1,
-        // ready for the idempotent restart re-publish.
-        let entries = outbox.loadUnacked(accountIdB64: fx.accountIdB64)
-        XCTAssertEqual(entries.count, 1, "the persisted-but-unpublished commit must be recorded for re-publish")
-        XCTAssertEqual(entries.first?.targetEpoch, "1")
+        XCTAssertTrue(
+            fx.repo.hasStagedSweep(groupIdHex: fx.groupIdHex),
+            "the sweep must stay staged: its commit may or may not have reached the wire, and "
+            + "both merging and abandoning on an unread verdict are wrong"
+        )
+        let entries = CommitOutboxStore(rootDir: outboxDir)
+            .loadUnacked(accountIdB64: fx.accountIdB64)
+        XCTAssertEqual(entries.count, 1, "the commit must be durably recorded for the retry")
+        XCTAssertEqual(
+            entries.first?.sweepVerdictPending, true,
+            "a staged-sweep entry must be flagged so ADR-0040's re-publish loop skips it — that "
+            + "loop would publish its Welcome before the verdict, which obligation 2 forbids"
+        )
         XCTAssertEqual(entries.first?.acked, false)
     }
-
-    // MARK: - (F1 residual) An ARTIFACT-compute throw after the merge also resets
-
-    /// F1 pre-persist residual — on the two-artifact add path the SECOND artifact
-    /// (the Welcome mailbox pseudonym) is computed AFTER the core
-    /// `addMemberFromWire` eager-merges epoch N -> N+1 but BEFORE any publish. If
-    /// that compute throws it must ALSO roll the in-memory group back to N — the
-    /// same "device-ahead" hazard as a persist-abort, just a rarer path. Before
-    /// the widened reset guard this throw aborted WITHOUT resetting, leaving the
-    /// group at the un-published N+1.
-    ///
-    /// This drives a REAL add: a stub discovery feeds a valid KeyPackage (so
-    /// `fetchKeyPackage` succeeds and `addMemberFromWire` eager-merges to epoch 1),
-    /// then a MALFORMED `recipientSignaturePubkey` (3 bytes, not 32) makes
-    /// `IdentityPseudonym.fromIdentity` throw — the second-artifact compute, NOT
-    /// the persist (a WORKING outbox is supplied, and its remaining-empty state
-    /// proves the persist was never reached). The group must reset to N (0).
-    func testAddPathArtifactComputeThrowAfterMergeResetsToEpochN() async throws {
-        // A real member identity + its KeyPackage — what `addMemberFromWire`
-        // consumes to eager-merge the founder group to epoch 1.
-        let member = try Identity.fromSeed(seed: Data(repeating: 0x55, count: 32))
-        let keyPackageBytes = try member.createKeyPackage()
-
-        // Stub discovery: answer `GET /discovery/keypackage/...` with a 200 whose
-        // body carries the base64 KeyPackage, so `fetchKeyPackage` returns it.
-        StubKeyPackageURLProtocol.responseBody = try JSONEncoder().encode(
-            KeyPackageFetchResponse(keypackage: base64Encode(keyPackageBytes))
-        )
-        let config = URLSessionConfiguration.ephemeral
-        config.protocolClasses = [StubKeyPackageURLProtocol.self]
-        let discovery = DiscoveryClient(
-            baseURL: "http://127.0.0.1:9",
-            session: URLSession(configuration: config),
-            antiCensorship: .disarmed
-        )
-
-        // A WORKING outbox (temp dir): if the persist ran it would SUCCEED (leaving
-        // an entry). The throw must come earlier, at the pseudonym compute, so the
-        // outbox stays empty.
-        let outboxDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("commit-outbox-f1-artifact-\(UUID().uuidString)")
-        let outbox = CommitOutboxStore(rootDir: outboxDir)
-        let fx = try makeFounderRepo(outbox: outbox, discovery: discovery)
-        defer {
-            fx.snapshotStore.deleteSnapshot(accountIdB64: fx.accountIdB64)
-            try? FileManager.default.removeItem(at: outboxDir)
-        }
-
-        // Pre-condition: the rehydrated founder group is at epoch 0 (= N).
-        XCTAssertEqual(fx.repo.epoch(groupIdHex: fx.groupIdHex), 0)
-
-        // A valid 16-byte recipient account id (so `fetchKeyPackage`'s length gate
-        // passes) but a MALFORMED 3-byte signature pubkey (so the pseudonym
-        // derivation — the second artifact — throws AFTER the eager merge).
-        let recipientAccountId = Data(repeating: 0x66, count: 16)
-        let malformedPubkey = Data([0x01, 0x02, 0x03])
-
-        do {
-            _ = try await fx.repo.addMemberToGroup(
-                groupIdHex: fx.groupIdHex,
-                recipientAccountId: recipientAccountId,
-                recipientSignaturePubkey: malformedPubkey
-            )
-            XCTFail("addMemberToGroup must throw when the second-artifact pseudonym compute fails")
-        } catch {
-            // The failure is the artifact compute, NOT the outbox persist.
-            XCTAssertFalse(
-                error is CommitOutboxStoreError,
-                "the failure must be the pseudonym compute, not the outbox persist, got \(error)"
-            )
-        }
-
-        // THE RESIDUAL ASSERTION: the eager merge advanced the in-memory group to
-        // epoch 1, but the artifact-compute throw ROLLED IT BACK to the durable N (0).
-        XCTAssertEqual(
-            fx.repo.epoch(groupIdHex: fx.groupIdHex), 0,
-            "in-memory group must reset to N (0) after an artifact-compute throw, not stay at the un-published N+1 (1)"
-        )
-
-        // The persist was never reached — the outbox holds no entry (confirming the
-        // throw was the second-artifact compute, strictly before the persist).
-        XCTAssertEqual(
-            outbox.loadUnacked(accountIdB64: fx.accountIdB64).count, 0,
-            "the outbox must be empty — the throw preceded the persist, so nothing was recorded"
-        )
-
-        // And a SECOND same-session commit still builds on N (0): with the malformed
-        // pubkey it throws the same way and the group never reaches the stranding
-        // N+1 -> N+2.
-        do {
-            _ = try await fx.repo.addMemberToGroup(
-                groupIdHex: fx.groupIdHex,
-                recipientAccountId: recipientAccountId,
-                recipientSignaturePubkey: malformedPubkey
-            )
-            XCTFail("second addMemberToGroup must also throw")
-        } catch {
-            XCTAssertFalse(error is CommitOutboxStoreError)
-        }
-        XCTAssertEqual(
-            fx.repo.epoch(groupIdHex: fx.groupIdHex), 0,
-            "a second same-session commit must still build on N (0), never on a stranded N+1"
-        )
-    }
 }
+
 
 /// Answers every request with a fixed 200 + a JSON body set in
 /// ``responseBody`` — used to feed `DiscoveryClient.fetchKeyPackage` a real

@@ -561,10 +561,17 @@ public final class ChatClient {
                 systemKind: .commit,
                 createdAt: createdAt
             )
-        case .proposal:
-            return .system(
+        case .proposal(let record):
+            // ADR-0045 — a membership proposal is a PANEL signal, never a
+            // timeline row (UX §10). It is surfaced with its `ProposalRecord`
+            // intact rather than flattened to a system bubble, because the
+            // members sheet needs what was proposed AND whether the receipt gate
+            // retained it, and the DS row's `createdAt` is what the quiet window
+            // is measured against — a local clock would make that window mean
+            // something different on every device.
+            return .membershipProposal(
                 messageId: messageId,
-                systemKind: .proposal,
+                record: record,
                 createdAt: createdAt
             )
         case .externalJoinProposal(let joinerSignatureKey):
@@ -756,6 +763,21 @@ public enum IncomingChatEvent: Equatable {
         senderLeaf: UInt32?,
         createdAt: String
     )
+
+    /// ADR-0045 — a standalone membership proposal landed. **No state advance**
+    /// — a proposal is not epoch-advancing, which is the whole point: two
+    /// members proposing concurrently compose instead of forking the loser.
+    ///
+    /// Not a timeline row (UX §10): the members sheet reads the core's retained
+    /// pending set for what is actually pending, and joins it to the DS row
+    /// timestamp carried here so the quiet window means the same thing on every
+    /// device. `record.stored == false` is the receipt gate's REFUSAL reported
+    /// as data — no sweep will ever commit it, so it is not a pending request.
+    case membershipProposal(
+        messageId: Int64,
+        record: ProposalRecord,
+        createdAt: String
+    )
 }
 
 /// ADR-0024 — an inbound ephemeral chat-status signal lifted out of
@@ -793,7 +815,6 @@ public enum OpKind: Equatable {
 /// Kind discriminator for ``IncomingChatEvent/system(messageId:systemKind:createdAt:)``.
 public enum SystemKind: Equatable {
     case commit
-    case proposal
     case externalJoinProposal
 }
 

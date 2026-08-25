@@ -135,6 +135,35 @@ public data class PendingCommitEntry(
     /** DS ids once known — recorded on ack for diagnostics. */
     val commitMessageId: Long? = null,
     val secondMessageId: Long? = null,
+    /**
+     * ADR-0045 — `true` when this entry records a **staged committer sweep**
+     * rather than one of the four direct-commit paths.
+     *
+     * The two are reconciled by different rules and MUST NOT be mixed:
+     *
+     *  - a direct-path entry is written AFTER the core eager-merged N -> N+1, so
+     *    [reconcileVerdict] can ask "did the durable snapshot reach
+     *    [targetEpoch]?" and treat a shortfall as a torn write;
+     *  - a sweep entry is written while the group deliberately sits at N holding
+     *    an UN-merged commit, so that same question would answer "torn" for
+     *    every healthy sweep and DISCARD a commit that is already on the wire —
+     *    and, worse, the legacy loop would re-publish the sweep's Welcome, which
+     *    ADR-0045 obligation 2 forbids before the verdict.
+     *
+     * So [ChatRepository.sweepPendingCommits] routes a sweep entry to
+     * [resolveOwedVerdict] FIRST and excludes it from the legacy loop. The
+     * authority on whether a verdict is owed is the core's `hasStagedSweep()`,
+     * never this flag; the flag only says which reconciler owns the entry.
+     */
+    val isSweep: Boolean = false,
+    /**
+     * ADR-0045 — base64 mailbox pseudonyms for a sweep's Welcome fan-out.
+     *
+     * A sweep commit can carry SEVERAL adds under ONE Welcome, where every
+     * direct path has at most one destination ([secondArtifactMailboxB64]).
+     * Empty for a direct-path entry and for a sweep that added nobody.
+     */
+    val sweepWelcomeMailboxesB64: List<String> = emptyList(),
 )
 
 /** The reconciliation verdict for one un-acked entry read on the restart sweep. */

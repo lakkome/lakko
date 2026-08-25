@@ -142,18 +142,31 @@ final class GatedPublishURLProtocol: URLProtocol {
 
 // MARK: - ADR-0040 (G-35) per-group commit serialization
 
-/// Two membership commits driven CONCURRENTLY at one `ChatRepository`.
+/// Two membership operations driven CONCURRENTLY at one `ChatRepository`.
 ///
-/// Without a lock the sequence is: op A eager-merges epoch N -> N+1, persists,
-/// and suspends at `await publishGroup`; `@MainActor` isolation is released at
-/// that suspension, so op B runs its own create + persist and publishes while
-/// A's request is still open. Two commits are then in flight at once, and the
-/// DS assigns journal order by ARRIVAL, not by which call started first — land
-/// them inverted and peers still at N drop the N+1 commit as wrong-epoch, apply
-/// the N one, and settle at N+1 while this device sits at N+2. That is the
-/// "device-ahead" outcome ADR-0040 exists to prevent, and the pending-commit
-/// outbox cannot recover it: both publishes succeeded, so both entries are
-/// acked and the restart sweep has nothing to re-publish.
+/// Without a lock the sequence is: op A mutates the shared OpenMLS provider,
+/// persists, and suspends at `await publishGroup`; `@MainActor` isolation is
+/// released at that suspension, so op B runs its own create + persist and
+/// publishes while A's request is still open. Two membership artifacts are then
+/// in flight at once, and the DS assigns journal order by ARRIVAL, not by which
+/// call started first.
+///
+/// ## What ADR-0045 changed about this suite, and what it did not
+///
+/// The vehicle changed. Every group `Group.create` produces carries an ADR-0022
+/// role table, so add / remove / role-change no longer eager-merge a commit at
+/// all — they publish a **proposal**, and the epoch-advancing commit is the
+/// committer's sweep. The consequence the original assertions read (`epoch == 2`
+/// after two role changes) is therefore no longer true, and asserting it would
+/// be asserting the hazard this arc removed.
+///
+/// The property under test did NOT change: the region from "mutate the shared
+/// provider" to "the artifact is on the wire" must be the sole in-flight section
+/// for one group, must be keyed PER group, and must release on the throw path.
+/// Those are what the three cases below assert, now over the artifacts the
+/// paths actually publish. The epoch-advancing half of the hazard is covered by
+/// `SendEpochStraddleTests`, whose oracle replays the recorded journal as a
+/// recipient at `max_past_epochs = 0`.
 @MainActor
 final class CommitSerializationTests: XCTestCase {
 
@@ -166,27 +179,45 @@ final class CommitSerializationTests: XCTestCase {
         )
     }
 
-    /// A founder identity carrying `groupCount` real MLS groups, rehydrated into
-    /// a repo whose outbox + snapshot persists genuinely SUCCEED — the commit
-    /// paths must reach the publish, which is the region under test.
+    /// A founder identity carrying `groupCount` real MLS groups, each with a
+    /// second real member, rehydrated into a repo whose outbox + snapshot
+    /// persists genuinely SUCCEED — the membership paths must reach the publish,
+    /// which is the region under test.
+    ///
+    /// The second member is what makes a Remove proposal available: a
+    /// one-of-one group has no removable leaf, and ADR-0045 turned the only
+    /// other verb (role change) into something that refuses a SECOND concurrent
+    /// request by design, so two same-kind operations can no longer be used to
+    /// probe the lock.
     private struct Fixture {
         let repo: ChatRepository
         let groupIdHexes: [String]
+        let memberLeaves: [UInt32]
         let accountIdB64: String
         let snapshotStore: IdentitySnapshotStore
         let outboxDir: URL
         /// Two distinct valid 32-byte signature keys to promote, so back-to-back
-        /// role commits are genuinely different operations rather than a repeat.
+        /// role operations are genuinely different operations rather than a repeat.
         let promotableKeys: [Data]
     }
 
     private func makeFounderRepo(groupCount: Int) throws -> Fixture {
         let seed = Data(repeating: 0x11, count: 32)
         let founder = try Identity.fromSeed(seed: seed)
+        let other = try Identity.fromSeed(seed: Data(repeating: 0x55, count: 32))
         var hexes: [String] = []
+        var memberLeaves: [UInt32] = []
         for _ in 0..<groupCount {
             let group = try Group.create(identity: founder)
+            _ = try group.addMemberFromWire(
+                identity: founder,
+                keyPackage: try other.createKeyPackage()
+            )
             hexes.append(DsClient.pseudonymHex(try group.groupId()))
+            let ownerKey = try XCTUnwrap(try group.groupRoles()).owner
+            memberLeaves.append(
+                try XCTUnwrap(
+                    try group.members().first { $0.signaturePublicKey != ownerKey }?.leafIndex))
         }
         let snapshotBlob = try founder.snapshotStorage()
 
@@ -213,7 +244,12 @@ final class CommitSerializationTests: XCTestCase {
             snapshotStore: snapshotStore,
             knownGroupsStore: knownGroupsStore,
             messageLogStore: MessageLogStore(),
-            commitOutbox: CommitOutboxStore(rootDir: outboxDir)
+            commitOutbox: CommitOutboxStore(rootDir: outboxDir),
+            pushRouting: PushGroupRouting(),
+            beaconStore: BeaconObservationStore(
+                defaults: UserDefaults(suiteName: "commit-serialization-b-\(UUID().uuidString)")!),
+            pendingRequestStore: PendingRequestStore(
+                defaults: UserDefaults(suiteName: "commit-serialization-p-\(UUID().uuidString)")!)
         )
         repo.bootstrap(
             secrets: IdentitySecrets(
@@ -226,8 +262,14 @@ final class CommitSerializationTests: XCTestCase {
         )
         for hex in hexes {
             XCTAssertEqual(
-                repo.memberCount(groupIdHex: hex), 1,
-                "founder group \(hex) must rehydrate for the commit path to reach the publish"
+                repo.memberCount(groupIdHex: hex), 2,
+                "founder group \(hex) must rehydrate for the membership path to reach the publish"
+            )
+            XCTAssertTrue(
+                repo.usesProposalPath(groupIdHex: hex),
+                "every `Group.create` seeds an ADR-0022 role table, so ADR-0045 routes "
+                + "membership on this group through proposals — if this ever became false "
+                + "the cases below would silently be testing the direct-commit path instead"
             )
         }
         let promotableKeys = [
@@ -237,6 +279,7 @@ final class CommitSerializationTests: XCTestCase {
         return Fixture(
             repo: repo,
             groupIdHexes: hexes,
+            memberLeaves: memberLeaves,
             accountIdB64: accountIdB64,
             snapshotStore: snapshotStore,
             outboxDir: outboxDir,
@@ -249,71 +292,86 @@ final class CommitSerializationTests: XCTestCase {
         try? FileManager.default.removeItem(at: fx.outboxDir)
     }
 
-    // MARK: - (1) Same group: two commits must NOT be in flight at once
+    // MARK: - (1) Same group: two membership publishes must NOT be in flight at once
 
-    func testTwoConcurrentCommitsOnOneGroupSerialize() async throws {
+    func testTwoConcurrentMembershipOpsOnOneGroupSerialize() async throws {
         let fx = try makeFounderRepo(groupCount: 1)
         defer { tearDown(fx) }
         let hex = fx.groupIdHexes[0]
         GatedPublishURLProtocol.reset()
 
-        // Both ops are dispatched before either is awaited, so they are genuinely
-        // concurrent from the repository's point of view — exactly the shape a
+        // Two DIFFERENT kinds, dispatched before either is awaited, so they are
+        // genuinely concurrent from the repository's point of view — the shape a
         // double tap (or a re-created view model clearing `membershipBusy`)
-        // produces.
-        async let first: Int64 = fx.repo.setMemberAdmin(
+        // produces. Two ROLE changes would no longer work as a probe: ADR-0045
+        // refuses a second role request while one is pending, because RFC 9420
+        // permits at most one `GroupContextExtensions` proposal per commit and
+        // the sweep would silently discard one of them.
+        async let first: MembershipOutcome = fx.repo.setMemberAdmin(
             groupIdHex: hex,
             memberSignaturePubkey: fx.promotableKeys[0],
             makeAdmin: true
         )
-        async let second: Int64 = fx.repo.setMemberAdmin(
+        async let second: MembershipOutcome = fx.repo.removeMemberFromGroup(
             groupIdHex: hex,
-            memberSignaturePubkey: fx.promotableKeys[1],
-            makeAdmin: true
+            leafIndex: fx.memberLeaves[0]
         )
-        _ = try await (first, second)
+        let (a, b) = try await (first, second)
 
-        // THE ASSERTION: the two commits were never simultaneously in flight, so
-        // the DS cannot have received them out of creation order.
+        // THE ASSERTION: the two publishes were never simultaneously in flight,
+        // so the DS cannot have received them out of creation order.
         XCTAssertEqual(
             GatedPublishURLProtocol.maxConcurrent(pathContaining: hex), 1,
-            "two membership commits on ONE group must never be in flight at once — "
-            + "the DS orders the journal by arrival, so an overlap lets commit(N+1 -> N+2) "
-            + "land before commit(N -> N+1) and strand the group at 'device ahead'"
+            "two membership operations on ONE group must never be in flight at once — "
+            + "the DS orders the journal by arrival, and the section from the shared "
+            + "OpenMLS provider mutation to the completed publish is a critical section"
         )
 
-        // And the consequence of that, stated directly: the DS saw the commits in
-        // strictly increasing epoch order.
+        // And the consequence of that, stated directly: the DS saw them in
+        // non-decreasing epoch order. Both are proposals, so both are framed at
+        // the epoch the group is actually at — which is the point: a proposal
+        // advances nothing, so there is no second epoch for the loser to be
+        // stranded at.
         let epochs = GatedPublishURLProtocol.arrivalOrder
             .filter { $0.path.contains(hex) }
             .compactMap { epochOfMessage(bytes: $0.body) }
-        XCTAssertEqual(epochs.count, 2, "both commits must have reached the DS")
+        XCTAssertEqual(epochs.count, 2, "both proposals must have reached the DS")
         XCTAssertEqual(
             epochs, epochs.sorted(),
-            "commits must arrive at the DS in increasing epoch order, got \(epochs)"
+            "artifacts must arrive at the DS in non-decreasing epoch order, got \(epochs)"
         )
 
-        // Both landed, and the group advanced exactly twice (0 -> 1 -> 2).
+        // Neither lost: serializing must not drop an intent, and both are now
+        // waiting for a committer to sweep them.
+        for outcome in [a, b] {
+            guard case .proposed = outcome else {
+                return XCTFail("ADR-0045 routes membership on a role-table group through proposals")
+            }
+        }
         XCTAssertEqual(
-            fx.repo.epoch(groupIdHex: hex), 2,
-            "serializing must not lose a commit — both operations still apply"
+            fx.repo.pendingProposals(groupIdHex: hex).filter({ $0.stored }).count, 2,
+            "serializing must not lose a request — both survive for the sweep"
+        )
+        XCTAssertEqual(
+            fx.repo.epoch(groupIdHex: hex), 1,
+            "a proposal advances NO epoch: the group is still where the fixture's add left it"
         )
     }
 
     // MARK: - (2) Different groups: the lock must be per-group, not global
 
-    func testConcurrentCommitsOnDifferentGroupsDoNotBlockEachOther() async throws {
+    func testConcurrentMembershipOpsOnDifferentGroupsDoNotBlockEachOther() async throws {
         let fx = try makeFounderRepo(groupCount: 2)
         defer { tearDown(fx) }
         let (hexA, hexB) = (fx.groupIdHexes[0], fx.groupIdHexes[1])
         GatedPublishURLProtocol.reset()
 
-        async let first: Int64 = fx.repo.setMemberAdmin(
+        async let first: MembershipOutcome = fx.repo.setMemberAdmin(
             groupIdHex: hexA,
             memberSignaturePubkey: fx.promotableKeys[0],
             makeAdmin: true
         )
-        async let second: Int64 = fx.repo.setMemberAdmin(
+        async let second: MembershipOutcome = fx.repo.setMemberAdmin(
             groupIdHex: hexB,
             memberSignaturePubkey: fx.promotableKeys[0],
             makeAdmin: true
@@ -325,13 +383,13 @@ final class CommitSerializationTests: XCTestCase {
         // other group's network round-trip; only this catches that.
         XCTAssertEqual(
             GatedPublishURLProtocol.maxConcurrentOverall, 2,
-            "commits on DIFFERENT groups must run concurrently — the chain is keyed "
+            "operations on DIFFERENT groups must run concurrently — the chain is keyed "
             + "per group, and a global lock would stall unrelated conversations"
         )
         XCTAssertEqual(GatedPublishURLProtocol.maxConcurrent(pathContaining: hexA), 1)
         XCTAssertEqual(GatedPublishURLProtocol.maxConcurrent(pathContaining: hexB), 1)
-        XCTAssertEqual(fx.repo.epoch(groupIdHex: hexA), 1)
-        XCTAssertEqual(fx.repo.epoch(groupIdHex: hexB), 1)
+        XCTAssertEqual(fx.repo.pendingProposals(groupIdHex: hexA).count, 1)
+        XCTAssertEqual(fx.repo.pendingProposals(groupIdHex: hexB).count, 1)
     }
 
     // MARK: - (3) A failing section must not wedge the group's chain
@@ -340,34 +398,38 @@ final class CommitSerializationTests: XCTestCase {
     /// that throws must still release the group so the next one runs — otherwise
     /// one failed membership operation would silently disable membership
     /// management for that conversation for the rest of the session.
-    func testAFailedCommitDoesNotWedgeTheChain() async throws {
+    func testAFailedMembershipOpDoesNotWedgeTheChain() async throws {
         let fx = try makeFounderRepo(groupCount: 1)
         defer { tearDown(fx) }
         let hex = fx.groupIdHexes[0]
         GatedPublishURLProtocol.reset()
 
-        // A 3-byte key is not a valid Ed25519 signature key, so `setGroupRoles`
-        // throws inside the locked section, before any publish.
+        // A 3-byte key is not a valid Ed25519 signature key, so
+        // `proposeGroupRoles` throws inside the locked section, before any
+        // publish.
         do {
             _ = try await fx.repo.setMemberAdmin(
                 groupIdHex: hex,
                 memberSignaturePubkey: Data([0x01, 0x02, 0x03]),
                 makeAdmin: true
             )
-            XCTFail("a malformed signature key must fail the role commit")
+            XCTFail("a malformed signature key must fail the role request")
         } catch {
             // expected
         }
 
         // The next caller must still get through.
-        _ = try await fx.repo.setMemberAdmin(
+        let outcome = try await fx.repo.setMemberAdmin(
             groupIdHex: hex,
             memberSignaturePubkey: fx.promotableKeys[0],
             makeAdmin: true
         )
+        guard case .proposed = outcome else {
+            return XCTFail("the second request must reach the wire")
+        }
         XCTAssertEqual(
-            fx.repo.epoch(groupIdHex: hex), 1,
-            "a throwing section must release the chain so the next commit still applies"
+            fx.repo.pendingProposals(groupIdHex: hex).filter({ $0.stored }).count, 1,
+            "a throwing section must release the chain so the next request still lands"
         )
     }
 }

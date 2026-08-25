@@ -1,0 +1,678 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+package me.lakko.app.chat
+
+/**
+ * ADR-0045 S4a/S4b — the committer sweep: stage, publish, read the journal
+ * verdict, then merge or abandon.
+ *
+ * Android mirror of `apps/web/src/chat/sweep.ts`. Same five obligations, same
+ * ordering, same fail-closed directions; what differs is the concurrency model
+ * (see "The two-tier lock" below), which is the one thing the web reference
+ * could not express.
+ *
+ * ## What this closes
+ *
+ * G-38 residual 1: two devices build a membership commit against the same epoch
+ * N, the DS journal orders them by arrival, and the loser has *already*
+ * eager-merged its own N+1 — so it sits at an epoch nobody else reached,
+ * silently and permanently. ADR-0045's answer is that members emit **proposals**
+ * (not epoch-advancing, so a lost race costs nothing) and one elected
+ * owner-or-admin sweeps them into a single commit.
+ *
+ * Rank 0 is the owner and acts without consulting a beacon; any other candidate
+ * acts only when [SweepPorts.actingCommitter] — the core's own
+ * `actingCommitterVerdict` fold over the beacons this device observed — says so.
+ * The decision itself is never made here.
+ *
+ * ## Why the sweep stages rather than eager-merging
+ *
+ * A committer that *can* lose a race must not merge before the journal has
+ * ordered its commit, and that is not hypothetical: each candidate folds over
+ * its own poll-timed view and a beacon is stale by up to one interval even when
+ * its sender is healthy, so two candidates can both reach `act`. **The beacon
+ * removes the wait, not the race** — the stand-down re-read below and the
+ * staged-commit rollback are as required with a beacon as without one, and
+ * reading the acting verdict as a licence to drop either would be a mis-reading.
+ * `commitPendingProposals` is exactly `stagePendingProposals` followed at once
+ * by `mergeStagedSweep`; building on it would be building the hazard.
+ *
+ * ## The five obligations, and where each one lives
+ *
+ * 1. **Reach a verdict; never leave a sweep staged.** A staged sweep is
+ *    *durable* (OpenMLS persists `MlsGroupState::PendingCommit`) and freezes
+ *    that group's own membership operations across restarts —
+ *    `is_operational()` refuses `propose_*` / add / remove / `self_update` while
+ *    one is pending. So [runCommitterSweep] adjudicates every sweep it stages,
+ *    and [resolveOwedVerdict] is what a restart runs first: it is wired into
+ *    ADR-0040's existing `ChatRepository.sweepPendingCommits` seam rather than
+ *    becoming a second restart path.
+ * 2. **Publish the Welcome only AFTER the verdict.** If the commit loses and a
+ *    Welcome is already out, a joiner opens into a state nobody holds — a
+ *    three-party fork, strictly worse than the two-party one. [publishWelcomes]
+ *    is reached only on the merge branch.
+ * 3. **The stand-down re-read.** Immediately before staging, re-read the journal
+ *    head; if it has moved, stand down and re-evaluate. A required step of the
+ *    algorithm, not a mitigation.
+ * 4. **durably record -> publish (or re-publish) -> read the verdict -> merge or
+ *    abandon.** ADR-0040's outbox and this pair answer *different* questions
+ *    about the same commit — the outbox answers *did my commit reach the wire*,
+ *    the staged pair answers *did it win the wire order* — and the first must be
+ *    `yes` before the second is meaningful. So the outbox entry is written
+ *    BEFORE any publish, exactly as it is on the direct paths.
+ * 5. Obligation 5 (the direct-commit paths become propose-or-sweep) lives in
+ *    [ChatRepository], this module's only production caller.
+ *
+ * ## The verdict is read by APPLYING, not by peeking at the epoch field
+ *
+ * The question is "did a **Commit** land below my own commit's DS id". The FFI
+ * exposes no `contentTypeOfMessage`, and epoch alone cannot tell a Commit from
+ * an Application message or a Proposal — every one of them is framed at the
+ * current epoch. Guessing in the permissive direction is not an option:
+ * abandoning a sweep that actually WON, after peers applied it, leaves this
+ * device at N with the group at N+1 and its own commit un-re-appliable
+ * (`CannotDecryptOwnMessage`) — the same brick, in reverse.
+ *
+ * So the verdict asks a question that needs no discrimination: **apply every row
+ * below our own commit, then ask whether our epoch moved.** Only a Commit moves
+ * it. Applying is the audited receive path, so nothing new is invented, and it
+ * is safe while a sweep is staged: nothing on the receive path consults
+ * `is_operational`, and OpenMLS discards a pending commit as part of merging a
+ * foreign one.
+ *
+ * ## The two-tier lock — the Android-specific part
+ *
+ * The caller holds the **per-group** `Mutex` across this whole call, including
+ * both DS round-trips. That is deliberate and it is the one place Android's
+ * usual "keep the network outside the lock" advice (G-37) is overridden: the
+ * verdict is a read-modify-write over both the group epoch and the journal
+ * cursor, and a poll interleaving inside it would not merely slow the sweep
+ * down, it would make the verdict *wrong*. The blast radius is one group.
+ *
+ * The **global** provider lock is taken inside, and only around
+ * provider-touching regions, via [SweepGroupPort.exclusiveProvider]. One
+ * OpenMLS provider serves every group, so a sibling group's whole-provider
+ * `snapshotStorage` taken mid-region would capture this group torn, and its
+ * `restoreStorage` (the ADR-0040 F1 abort path) would roll this group back
+ * outright. That is why [adjudicate] brackets *the whole apply loop plus both
+ * epoch reads plus the cursor advance* in ONE `exclusiveProvider` region rather
+ * than taking the lock per row: between two rows this group is applied-but-not-
+ * persisted, i.e. exactly the state a sibling restore must never observe.
+ *
+ * `Mutex` is not reentrant, so no code reached from inside an
+ * [SweepGroupPort.exclusiveProvider] block may take it again. Every port method
+ * on [SweepGroupPort] is therefore documented as "call inside
+ * [SweepGroupPort.exclusiveProvider]" and this file never nests one.
+ *
+ * ## Ports, not FFI
+ *
+ * Everything here is expressed over injected ports so the whole orchestration is
+ * host-testable on the plain JVM — no `Context`, no UniFFI `.so`, no network.
+ * [ChatRepository] supplies the thin adapters. Same rationale (and same shape)
+ * as [runCrashSafeCommit] and [runSplitPoll].
+ */
+
+/**
+ * ADR-0045 — what a membership action did.
+ *
+ * The two arms are not two flavours of success, they are two different things
+ * that happened, and the UI has to say so: a [Committed] action took effect
+ * across the group, a [Proposed] one is a request that lands when the committer
+ * sweeps. Collapsing them into one shape would force the panel to assert an
+ * effect that has not happened, which is exactly the optimistic-update lie the
+ * UX spec forbids.
+ */
+public sealed class MembershipOutcome {
+    /** A direct commit landed. Only reachable in a group with NO role table,
+     *  where ADR-0045's proposal path does not apply. */
+    data class Committed(
+        val commitMessageId: Long,
+        val welcomeMessageId: Long?,
+    ) : MembershipOutcome()
+
+    /** A proposal was published. It takes effect when a committer sweeps it. */
+    data class Proposed(val proposalMessageId: Long) : MembershipOutcome()
+}
+
+/** The MLS artifacts a staged sweep produced. Mirrors the FFI `StagedSweep`. */
+internal class StagedSweepArtifacts(
+    /** The commit wire bytes to publish. The local epoch has NOT advanced. */
+    val commit: ByteArray,
+    /** The Welcome, present only when the sweep carried at least one add. */
+    val welcome: ByteArray?,
+    /**
+     * The 32-byte Ed25519 signature key of every member this sweep ADDS.
+     *
+     * One sweep commit can carry several adds under a single Welcome, which is
+     * why this is a list where the direct add path has one destination. Each key
+     * derives that member's mailbox pseudonym — the Welcome's delivery address,
+     * since a not-yet-member does not poll the group journal.
+     */
+    val addedSignatureKeys: List<ByteArray>,
+)
+
+/** One row of the DS group journal. */
+internal class SweepJournalRow(val id: Long, val payload: ByteArray)
+
+/**
+ * The MLS operations the sweep drives, adapted onto the FFI `Group`.
+ *
+ * Every method except [exclusiveProvider] MUST be invoked from inside an
+ * [exclusiveProvider] block, and [exclusiveProvider] must never be nested (the
+ * underlying `Mutex` is not reentrant).
+ */
+internal interface SweepGroupPort {
+    /**
+     * Run [block] holding the global provider lock.
+     *
+     * The adapter maps this onto `providerLock.withLock`; a test maps it onto a
+     * recorder so the atomicity of the adjudication region is assertable.
+     */
+    suspend fun <T> exclusiveProvider(block: suspend () -> T): T
+
+    /** The current MLS epoch. Read before and after the verdict apply. */
+    fun epoch(): ULong
+
+    /**
+     * ADR-0045 committer rank: `0` for the owner, `k + 1` for the k-th admin,
+     * `null` for a plain member or a group with no role table.
+     *
+     * `null` and `0` are NOT interchangeable — `0` is the owner, the one device
+     * that always sweeps.
+     */
+    fun ownCommitterRank(): UInt?
+
+    /** How many authorised proposals are waiting. `0` short-circuits the sweep
+     *  before it touches the network. */
+    fun pendingProposalCount(): Int
+
+    /** `true` when a staged sweep is still awaiting its journal verdict. */
+    fun hasStagedSweep(): Boolean
+
+    /** Build the sweep commit and STOP before merging. `null` when nothing
+     *  authorised is pending (deliberately not an empty commit, which would
+     *  advance the epoch and race other committers for no effect). */
+    fun stagePendingProposals(): StagedSweepArtifacts?
+
+    /** Won — land at the new epoch, the one the peers reached. */
+    fun mergeStagedSweep()
+
+    /** Lost — discard the staged commit and stay put, free to apply the winner.
+     *  Per-group: it never reaches a sibling group, unlike a whole-provider
+     *  `restoreStorage`. */
+    fun abandonStagedSweep()
+
+    /** Apply one journal row through the audited role-verifying receive path.
+     *  THROWS on a bad frame / wrong epoch / refused commit — the caller skips,
+     *  exactly as the poll loop does. */
+    fun applyIncoming(payload: ByteArray)
+}
+
+/** The DS operations the sweep drives. */
+internal interface SweepJournalPort {
+    /** Rows strictly after [after], in ascending id order. */
+    suspend fun fetch(after: Long): List<SweepJournalRow>
+
+    /** Publish to this group's journal; returns the DS-assigned id. */
+    suspend fun publishGroup(bytes: ByteArray): Long
+
+    /** Publish to a member's mailbox pseudonym; returns the DS id. */
+    suspend fun publishMailbox(pseudonym: ByteArray, bytes: ByteArray): Long
+}
+
+/**
+ * What the sweep durably records, per ADR-0040.
+ *
+ * Deliberately NOT [PendingCommitEntry]: this module must stay free of the
+ * on-disk schema so it is drivable from a host test, and the sweep's Welcome
+ * fans out to *several* mailboxes where a direct-path entry has at most one.
+ */
+internal data class SweepDurableEntry(
+    val id: String,
+    val commitB64: String,
+    val welcomeEnvelopeB64: String?,
+    val welcomeMailboxesB64: List<String>,
+)
+
+/** The ADR-0040 outbox operations the sweep drives. */
+internal interface SweepOutboxPort {
+    /** Mint a fresh entry id. */
+    fun newEntryId(): String
+
+    /**
+     * Durably record the entry AND the current MLS snapshot, BEFORE any publish.
+     * A throw ABORTS the sweep fail-closed.
+     */
+    suspend fun record(entry: SweepDurableEntry)
+
+    /** The un-acked verdict-owed entry for this group, or `null`. */
+    suspend fun findOwed(): SweepDurableEntry?
+
+    /** Mark the entry acked once every artifact is on the wire. */
+    suspend fun ack(id: String, commitMessageId: Long, welcomeMessageId: Long?)
+
+    /** Delete the entry. Used on a LOSS: a commit that lost the order must never
+     *  be re-published by the restart sweep. */
+    suspend fun discard(id: String)
+}
+
+/** The journal cursor, as the read/write pair `ChatRepository.pollGroup` drives. */
+internal interface SweepCursorRef {
+    fun read(): Long
+
+    fun advance(to: Long)
+}
+
+/**
+ * ADR-0045 S4b — is this device the acting committer right now?
+ *
+ * Called with this device's CURRENT rank (never `null` — the caller has already
+ * established it is a candidate) and answered by the core's
+ * `actingCommitterVerdict` fold over the beacons this device has observed.
+ * Suspending because the fold reads the observation store; it is awaited before
+ * anything is staged, so a slow answer costs one attempt and nothing else.
+ *
+ * A throw is treated as `Defer` — fail-closed, because the alternative is a
+ * device that sweeps on no evidence about who else is running.
+ */
+internal fun interface ActingCommitterOracle {
+    suspend fun decide(ownRank: UInt): ActingCommitter
+}
+
+/** Everything the sweep needs. */
+internal class SweepPorts(
+    val group: SweepGroupPort,
+    val journal: SweepJournalPort,
+    val outbox: SweepOutboxPort,
+    val cursor: SweepCursorRef,
+    val actingCommitter: ActingCommitterOracle,
+    /** Derive a member's mailbox pseudonym from their 32-byte signature key. */
+    val welcomeMailbox: (ByteArray) -> ByteArray,
+    /** Wrap the raw Welcome in the stranger-inbox envelope the recipient's
+     *  mailbox poll expects (`wrapEnvelope(KIND_WELCOME, welcome)`). */
+    val wrapWelcome: (ByteArray) -> ByteArray,
+    /** Echo-suppress a row this device published, so its own next poll drops it
+     *  instead of hitting `CannotDecryptOwnMessage`. */
+    val markOwnPublished: (Long) -> Unit,
+    /** Best-effort MLS snapshot persist after a merge / abandon. */
+    val persist: suspend () -> Unit,
+    val encodeB64: (ByteArray) -> String,
+    val decodeB64: (String) -> ByteArray,
+)
+
+/** What one sweep attempt did. */
+public sealed class SweepOutcome {
+    /** This device is not in the committer set at all (a plain member, or a
+     *  group with no role table). Nothing happened, and nothing ever will on
+     *  this device — distinct from [Deferred], which re-evaluates. */
+    data class NotCommitter(val rank: UInt?) : SweepOutcome()
+
+    /** This device IS a candidate, but a strictly better-placed one beaconed
+     *  inside the freshness window. Stood down without staging; the next poll
+     *  re-evaluates, and if that candidate goes quiet its beacon ages out of the
+     *  window and this device takes over on its own. */
+    data class Deferred(val rank: UInt, val toRank: UInt?) : SweepOutcome()
+
+    /** Nothing authorised was pending and nothing was staged. */
+    object NothingPending : SweepOutcome()
+
+    /** Obligation 3 — the journal moved since our cursor, so a commit may
+     *  already be in flight. Stood down without staging; the poll drains the
+     *  rows and the next attempt re-evaluates. */
+    data class StoodDown(val unappliedRows: Int) : SweepOutcome()
+
+    /** Won the journal order: merged, and the Welcome (if any) published. */
+    data class Committed(
+        val commitMessageId: Long,
+        val welcomeMessageIds: List<Long>,
+        val addedCount: Int,
+    ) : SweepOutcome()
+
+    /** Lost the journal order: abandoned, no Welcome published, the proposals
+     *  survive for the winner's next sweep. */
+    data class Lost(val commitMessageId: Long) : SweepOutcome()
+
+    /** A staged sweep was found with no durable record of its commit, so the
+     *  commit provably never reached the wire (ADR-0040 records before it
+     *  publishes). Abandoned, which also unwedges the frozen membership ops. */
+    object AbandonedOrphan : SweepOutcome()
+
+    /** There was no verdict owed. Only ever returned by [resolveOwedVerdict]. */
+    object NoVerdictOwed : SweepOutcome()
+}
+
+/**
+ * The journal order could not be read, so the verdict is genuinely unknown.
+ *
+ * The sweep is left STAGED and its outbox entry un-acked on purpose. Both
+ * alternatives are worse: merging on an unread verdict is the eager shape that
+ * strands the loser, and abandoning would discard a commit that is already on
+ * the wire and may have won. The next sweep attempt re-adjudicates through
+ * [resolveOwedVerdict], and the sweep runs at the tail of every poll, so the
+ * retry is continuous. The cost is that this group's own membership operations
+ * stay frozen until it succeeds — a temporary freeze that self-heals, which is
+ * strictly better than either wrong answer.
+ */
+internal class SweepVerdictUnavailable(cause: Throwable) : Exception(
+    "ADR-0045: could not read the journal verdict — sweep left staged: $cause",
+    cause,
+)
+
+/**
+ * The pure verdict rule: did anything applied below our own commit advance the
+ * group's epoch?
+ *
+ * Only a Commit advances an epoch. An Application message drains a ratchet, a
+ * Proposal queues, a non-MLS envelope throws and is skipped — none of them move
+ * it. So an unchanged epoch means our commit is first in the order and we WON; a
+ * moved epoch means a foreign commit was ordered ahead of ours and we LOST.
+ */
+internal fun sweepVerdict(epochBefore: ULong, epochAfter: ULong): Boolean =
+    epochAfter == epochBefore
+
+/**
+ * Obligation 3, as a pure rule: may this device stage a sweep right now?
+ *
+ * A row this device has not applied might be a Commit, and without a
+ * content-type peek there is no way to tell. Standing down is free — the poll
+ * drains the rows and the next attempt re-evaluates — whereas staging on top of
+ * an unapplied commit publishes a commit peers will drop as wrong-epoch. So the
+ * rule errs deliberately in the conservative direction: ANY unapplied row stands
+ * the sweep down, not only a Commit.
+ *
+ * This narrows the window; it does not close it. A commit can still land between
+ * this check and our publish, which is exactly what the verdict step repairs.
+ */
+internal fun shouldStandDown(unappliedRowCount: Int): Boolean = unappliedRowCount > 0
+
+/**
+ * Run one committer sweep. Callers MUST hold the per-group MLS lock and MUST NOT
+ * hold the provider lock (this takes it itself, and it is not reentrant).
+ *
+ * Short-circuits without touching the network when this device is not a
+ * candidate, or when nothing is pending and no verdict is owed — so wiring this
+ * into the tail of every poll costs one short provider region in the common
+ * case.
+ *
+ * @throws SweepVerdictUnavailable when the journal order could not be read. The
+ *   sweep is left staged for the next attempt.
+ */
+internal suspend fun runCommitterSweep(ports: SweepPorts): SweepOutcome {
+    val group = ports.group
+
+    // Obligation 1, and it runs BEFORE the rank check on purpose.
+    //
+    // A staged sweep is DURABLE and freezes this group's membership operations
+    // across restarts, so it must be adjudicated by whoever staged it —
+    // INCLUDING a device that has since been demoted out of the committer set.
+    // Gating this behind the rank check would leave such a device frozen
+    // permanently, with nothing that could ever unwedge it. Re-publishing a
+    // demoted device's commit is safe: every peer's role gate refuses it, so it
+    // loses the order and is abandoned — which is exactly the unwedge.
+    //
+    // It also takes precedence over starting a NEW sweep, because
+    // `stagePendingProposals` refuses a second stage fail-closed: trying to
+    // start one first would throw and leave the freeze in place.
+    val prelude = group.exclusiveProvider {
+        if (group.hasStagedSweep()) {
+            SweepPrelude.OwedVerdict
+        } else {
+            val rank = group.ownCommitterRank()
+            when {
+                rank == null -> SweepPrelude.NotCommitter
+                group.pendingProposalCount() == 0 -> SweepPrelude.NothingPending
+                else -> SweepPrelude.Candidate(rank)
+            }
+        }
+    }
+    val rank = when (prelude) {
+        SweepPrelude.OwedVerdict -> return resolveOwedVerdict(ports)
+        SweepPrelude.NotCommitter -> return SweepOutcome.NotCommitter(null)
+        SweepPrelude.NothingPending -> return SweepOutcome.NothingPending
+        is SweepPrelude.Candidate -> prelude.rank
+    }
+
+    // ADR-0045 S4b — is anyone strictly better placed announcing itself? Asked
+    // only once there is something to sweep, so a quiet group never pays for it.
+    // A throw is a defer: sweeping on an unreadable view of who else is running
+    // is the failure this whole election exists to avoid.
+    val acting = try {
+        ports.actingCommitter.decide(rank)
+    } catch (_: Throwable) {
+        ActingCommitter.Defer(null)
+    }
+    if (acting !is ActingCommitter.Act) {
+        return SweepOutcome.Deferred(
+            rank = rank,
+            toRank = (acting as? ActingCommitter.Defer)?.toRank,
+        )
+    }
+
+    // Obligation 3 — the stand-down re-read, immediately before creating the
+    // commit. Runs OUTSIDE the provider lock: it is pure network and touches no
+    // MLS state, and the provider lock is global.
+    val cursorBefore = ports.cursor.read()
+    val ahead = try {
+        ports.journal.fetch(cursorBefore)
+    } catch (cause: Throwable) {
+        // Nothing has been staged yet, so a failed re-read costs only this
+        // attempt. Treat an unreadable head as "the journal may have moved".
+        throw SweepVerdictUnavailable(cause)
+    }
+    if (shouldStandDown(ahead.size)) return SweepOutcome.StoodDown(ahead.size)
+
+    val staged = group.exclusiveProvider { group.stagePendingProposals() }
+        ?: return SweepOutcome.NothingPending
+
+    return publishAndAdjudicate(ports, staged, cursorBefore, owed = null)
+}
+
+/** The short synchronous prelude decision, taken in ONE provider region. */
+private sealed class SweepPrelude {
+    object OwedVerdict : SweepPrelude()
+
+    object NotCommitter : SweepPrelude()
+
+    object NothingPending : SweepPrelude()
+
+    data class Candidate(val rank: UInt) : SweepPrelude()
+}
+
+/**
+ * Obligation 1, restart half — finish a verdict this device owes.
+ *
+ * A staged commit is persisted by OpenMLS and read back by `Identity.loadGroup`,
+ * so it outlives the process. A client that finds one after a relaunch still
+ * owes a verdict on a commit it may already have published, and until it reaches
+ * one the group's membership is frozen. This is wired into ADR-0040's existing
+ * restart sweep rather than being a second restart path.
+ *
+ * The re-publish is idempotent by the same argument the ADR-0040 sweep already
+ * rests on: peers that applied the original drop the duplicate as wrong-epoch,
+ * and peers that never saw it apply it now. The verdict is then read exactly as
+ * it would have been the first time — including the case where our ORIGINAL
+ * commit sits in the journal below the re-published one, which applies as
+ * `CannotDecryptOwnMessage`, is skipped, and correctly does not move our epoch.
+ *
+ * Callers MUST hold the per-group MLS lock and MUST NOT hold the provider lock.
+ */
+internal suspend fun resolveOwedVerdict(ports: SweepPorts): SweepOutcome {
+    val group = ports.group
+    if (!group.exclusiveProvider { group.hasStagedSweep() }) {
+        return SweepOutcome.NoVerdictOwed
+    }
+
+    val owed = ports.outbox.findOwed()
+    if (owed == null) {
+        // No durable record of the commit. ADR-0040 writes the record BEFORE the
+        // publish, so a snapshot carrying a staged sweep and no entry means the
+        // write never completed and the commit never reached the wire.
+        // Abandoning is therefore correct, and it is also what unwedges the
+        // frozen membership operations — the worse failure of the two.
+        group.exclusiveProvider { group.abandonStagedSweep() }
+        ports.persist()
+        return SweepOutcome.AbandonedOrphan
+    }
+
+    return publishAndAdjudicate(
+        ports,
+        StagedSweepArtifacts(
+            commit = ports.decodeB64(owed.commitB64),
+            welcome = owed.welcomeEnvelopeB64?.let(ports.decodeB64),
+            // Already wrapped + already addressed when the entry was written.
+            addedSignatureKeys = emptyList(),
+        ),
+        ports.cursor.read(),
+        owed,
+    )
+}
+
+/**
+ * The shared tail of both entry points: durably record (first time only),
+ * publish the commit, read the verdict, then merge or abandon.
+ *
+ * [owed] is supplied on the restart path, where the entry already exists and its
+ * Welcome is already wrapped and addressed.
+ */
+private suspend fun publishAndAdjudicate(
+    ports: SweepPorts,
+    staged: StagedSweepArtifacts,
+    cursorBefore: Long,
+    owed: SweepDurableEntry?,
+): SweepOutcome {
+    val group = ports.group
+
+    val entry: SweepDurableEntry
+    if (owed == null) {
+        // Obligation 4 — durably record BOTH artifacts before ANY publish. The
+        // Welcome is wrapped and addressed HERE, so the bytes the restart sweep
+        // would publish are the very bytes computed now; nothing can drift.
+        val mailboxes = staged.addedSignatureKeys.map { ports.encodeB64(ports.welcomeMailbox(it)) }
+        val wrapped = staged.welcome?.let(ports.wrapWelcome)
+        entry = SweepDurableEntry(
+            id = ports.outbox.newEntryId(),
+            commitB64 = ports.encodeB64(staged.commit),
+            welcomeEnvelopeB64 = wrapped?.let(ports.encodeB64),
+            welcomeMailboxesB64 = mailboxes,
+        )
+        try {
+            ports.outbox.record(entry)
+        } catch (cause: Throwable) {
+            // FAIL-CLOSED. Nothing was published, so the group must look as
+            // though the sweep never happened. Abandoning is the per-group
+            // rollback — it touches this group only, unlike ADR-0040's
+            // whole-provider `restoreStorage`, which would roll sibling groups
+            // back past commits they have already published.
+            group.exclusiveProvider { group.abandonStagedSweep() }
+            throw cause
+        }
+    } else {
+        entry = owed
+    }
+
+    val commitMessageId = ports.journal.publishGroup(ports.decodeB64(entry.commitB64))
+    ports.markOwnPublished(commitMessageId)
+
+    val won = adjudicate(ports, cursorBefore, commitMessageId)
+
+    if (!won) {
+        group.exclusiveProvider { group.abandonStagedSweep() }
+        ports.persist()
+        // A commit that lost must never be re-published: the restart sweep would
+        // re-adjudicate a commit whose proposals the winner has already swept.
+        // Discarding is safe because abandoning kept the proposals pending, so
+        // nothing the user asked for is lost.
+        ports.outbox.discard(entry.id)
+        return SweepOutcome.Lost(commitMessageId)
+    }
+
+    group.exclusiveProvider { group.mergeStagedSweep() }
+    ports.persist()
+
+    // Obligation 2 — the Welcome is published HERE and nowhere earlier.
+    // Publishing it before the verdict would let a joiner open into a state no
+    // other member holds if the commit then lost: a three-party fork, strictly
+    // worse than the two-party one this whole mechanism exists to close.
+    val welcomeMessageIds = publishWelcomes(ports, entry)
+    ports.outbox.ack(entry.id, commitMessageId, welcomeMessageIds.firstOrNull())
+
+    return SweepOutcome.Committed(
+        commitMessageId = commitMessageId,
+        welcomeMessageIds = welcomeMessageIds,
+        addedCount = entry.welcomeMailboxesB64.size,
+    )
+}
+
+/**
+ * Apply every row below our own commit, then read the epoch.
+ *
+ * The whole region — both epoch reads, the apply loop and the cursor advance —
+ * is ONE provider-lock hold. Between two rows this group is applied-but-not-
+ * persisted, and a sibling group's `restoreStorage` observing that state would
+ * roll the applied rows back while the cursor advanced past them.
+ *
+ * The cursor advances only to the last row actually applied — never past our own
+ * commit, which the poll re-fetches and drops through the echo filter, and never
+ * past a row this run did not consume.
+ */
+private suspend fun adjudicate(
+    ports: SweepPorts,
+    cursorBefore: Long,
+    ownCommitMessageId: Long,
+): Boolean {
+    val rows = try {
+        ports.journal.fetch(cursorBefore)
+    } catch (cause: Throwable) {
+        throw SweepVerdictUnavailable(cause)
+    }
+
+    return ports.group.exclusiveProvider {
+        val epochBefore = ports.group.epoch()
+        var lastApplied = cursorBefore
+        for (row in rows) {
+            // Our own commit, and everything the DS ordered after it, is not
+            // part of the question. Rows above it are left for the poll.
+            if (row.id >= ownCommitMessageId) break
+            try {
+                ports.group.applyIncoming(row.payload)
+            } catch (_: Throwable) {
+                // Bad frame, wrong epoch, a non-MLS Lakko envelope (rendezvous /
+                // attribution), a role-refused commit, or one of our own rows.
+                // Skipped, exactly as the poll loop skips it — and none of those
+                // advance the epoch, which is the only thing the verdict reads.
+            }
+            lastApplied = row.id
+        }
+        if (lastApplied != cursorBefore) ports.cursor.advance(lastApplied)
+        sweepVerdict(epochBefore, ports.group.epoch())
+    }
+}
+
+/**
+ * Fan the (already wrapped) Welcome out to every added member's mailbox.
+ *
+ * A newly added member is not yet in the group and does not poll its journal, so
+ * the Welcome goes to their stranger-inbox pseudonym — the same destination the
+ * direct add path uses. One sweep commit can carry several adds under one
+ * Welcome, which is why this is a fan-out where the direct path has a single
+ * publish.
+ *
+ * A failure here leaves the entry un-acked, so the restart sweep re-publishes
+ * and re-adjudicates. That re-run reaches the merge branch again (our commit is
+ * skipped as our own, the epoch does not move, so it reports won) and retries
+ * the fan-out — which is why this can be allowed to throw rather than being
+ * swallowed.
+ */
+private suspend fun publishWelcomes(
+    ports: SweepPorts,
+    entry: SweepDurableEntry,
+): List<Long> {
+    val envelopeB64 = entry.welcomeEnvelopeB64 ?: return emptyList()
+    val bytes = ports.decodeB64(envelopeB64)
+    val ids = mutableListOf<Long>()
+    for (mailboxB64 in entry.welcomeMailboxesB64) {
+        ids.add(ports.journal.publishMailbox(ports.decodeB64(mailboxB64), bytes))
+    }
+    return ids
+}

@@ -361,6 +361,32 @@ public class ChatViewModel(
      *  open. */
     public val pendingJoins: StateFlow<List<ByteArray>> = mutablePendingJoins.asStateFlow()
 
+    private val mutablePendingRequests:
+        MutableStateFlow<List<me.lakko.app.chat.PendingRequest>> = MutableStateFlow(emptyList())
+
+    /**
+     * ADR-0045 — the pending MEMBERSHIP requests (proposals awaiting a
+     * committer sweep), already filtered by the UX §10 visibility gate: the
+     * owner and admins see the whole set, every other member sees only requests
+     * they made themselves.
+     *
+     * Distinct from [pendingJoins], which is the ADR-0027 EXTERNAL-join queue —
+     * a stranger asking to be let in, which an admin acts on. These are requests
+     * an existing member already published, which nobody approves; they simply
+     * apply when a committer sweeps.
+     */
+    public val pendingRequests: StateFlow<List<me.lakko.app.chat.PendingRequest>> =
+        mutablePendingRequests.asStateFlow()
+
+    private val mutablePendingNotice:
+        MutableStateFlow<me.lakko.app.chat.PendingNotice?> = MutableStateFlow(null)
+
+    /** ADR-0045 / UX §5.1 — the panel-level "N membership changes are waiting"
+     *  notice, or `null` when nothing has been outstanding past the quiet
+     *  window. */
+    public val pendingNotice: StateFlow<me.lakko.app.chat.PendingNotice?> =
+        mutablePendingNotice.asStateFlow()
+
     /** ADR-0028 OQ2 (G-3) — advisory attribution for a pending request: which
      *  member minted the `/g/` link it arrived on, and whether that issuer is in
      *  the current roster. */
@@ -408,7 +434,37 @@ public class ChatViewModel(
         // ADR-0027 (G-3) — refresh the pending external-join list alongside the
         // roster (the retained set is the source of truth).
         mutablePendingJoins.value = repo.pendingExternalJoins(groupIdHex)
+        // ADR-0045 — and the pending MEMBERSHIP requests, gated by the UX §10
+        // visibility rule. Read after the role above, so a just-changed role is
+        // reflected in what this member is allowed to see.
+        val visible = me.lakko.app.chat.visibleRequests(
+            repo.pendingMembershipRequests(groupIdHex),
+            mutableCanManageMembers.value,
+        )
+        mutablePendingRequests.value = visible
+        mutablePendingNotice.value = me.lakko.app.chat.pendingNotice(visible)
         refreshJoinAttributions()
+    }
+
+    /**
+     * ADR-0045 S4b — one committer-liveness beacon tick.
+     *
+     * Driven by the chat screen on a `repeatOnLifecycle(RESUMED)` loop, which is
+     * this platform's reading of "foregrounded": the coroutine simply does not
+     * run while the app is stopped. The flag is passed through as well rather
+     * than assumed, so the rule the emit gate enforces is written down in one
+     * place and is testable — and so a future caller that is NOT lifecycle-scoped
+     * cannot accidentally inherit a beacon it has no right to send.
+     *
+     * Best-effort: nobody is watching a beacon, and a failed tick only means this
+     * device does not claim the committer duty on this pass.
+     */
+    public suspend fun emitCommitterBeaconTick(foreground: Boolean = true) {
+        try {
+            repo.emitCommitterBeaconIfDue(groupIdHex, foreground)
+        } catch (_: Throwable) {
+            // best-effort
+        }
     }
 
     /** ADR-0028 OQ2 (G-3) — refresh the advisory join-attribution map for the
@@ -447,6 +503,30 @@ public class ChatViewModel(
         val fp = member.signaturePublicKey.take(4)
             .joinToString("") { "%02x".format(it.toInt() and 0xff) }
         return "Member $fp$suffix"
+    }
+
+    /**
+     * ADR-0045 / UX §5.2 — the identity treatment for a PROSPECTIVE member: a
+     * matched contact's chosen name, else a short fingerprint of the signature
+     * key the Add proposal carries.
+     *
+     * Deliberately NOT [memberLabel]: the subject of a pending add is not in the
+     * roster at all — that is the whole point of giving it its own section rather
+     * than a roster row — so there is no `GroupMember` to read, and no "(you)"
+     * case (nobody sees a request to add themselves to a group they are already
+     * in).
+     */
+    public fun fingerprintOfKeyB64(keyB64: String?): String {
+        val key = try {
+            keyB64?.let { android.util.Base64.decode(it, android.util.Base64.DEFAULT) }
+        } catch (_: Throwable) {
+            null
+        } ?: return "Unknown member"
+        for (c in AcceptedContactsStore.load(repo.context)) {
+            if (c.request.fromPubkey.contentEquals(key)) return c.displayLabel
+        }
+        val fp = key.take(4).joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        return "Member $fp"
     }
 
     /**

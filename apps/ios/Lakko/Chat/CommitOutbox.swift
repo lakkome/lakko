@@ -109,6 +109,22 @@ public struct PendingCommitEntry: Codable, Equatable {
     /// for a `.welcome` second artifact. `nil` for `.rendezvous` (it rides the
     /// group journal, addressed by `groupId`).
     public var secondArtifactMailboxB64: String?
+    /// ADR-0045 — `true` while this entry belongs to a STAGED sweep whose
+    /// journal verdict has not been read yet.
+    ///
+    /// Such an entry is NOT re-publishable by the ADR-0040 restart loop, and
+    /// either reason alone is decisive: its device is durably at N, not N+1, so
+    /// the unconditional-re-publish argument that loop rests on does not hold
+    /// for it; and its Welcome must not reach the wire until the verdict says
+    /// the commit won (ADR-0045 obligation 2). `resolveOwedVerdict` owns it.
+    /// Optional so an entry written before ADR-0045 decodes as `nil` = a plain
+    /// direct-path commit, which is what it is.
+    public var sweepVerdictPending: Bool?
+    /// ADR-0045 — base64 mailbox pseudonyms for EVERY member a staged sweep
+    /// adds. One sweep commit can carry several adds under a single Welcome,
+    /// where the direct add path has exactly one destination
+    /// (``secondArtifactMailboxB64``, which stays untouched for that path).
+    public var welcomeMailboxesB64: [String]?
     /// `false` until BOTH artifacts have (re)published. An un-acked entry is
     /// swept on the first `pollGroup` of a session.
     public var acked: Bool
@@ -125,6 +141,8 @@ public struct PendingCommitEntry: Codable, Equatable {
         secondArtifactB64: String? = nil,
         secondArtifactKind: SecondArtifactKind? = nil,
         secondArtifactMailboxB64: String? = nil,
+        sweepVerdictPending: Bool? = nil,
+        welcomeMailboxesB64: [String]? = nil,
         acked: Bool = false,
         commitMessageId: Int64? = nil,
         secondMessageId: Int64? = nil
@@ -137,6 +155,8 @@ public struct PendingCommitEntry: Codable, Equatable {
         self.secondArtifactB64 = secondArtifactB64
         self.secondArtifactKind = secondArtifactKind
         self.secondArtifactMailboxB64 = secondArtifactMailboxB64
+        self.sweepVerdictPending = sweepVerdictPending
+        self.welcomeMailboxesB64 = welcomeMailboxesB64
         self.acked = acked
         self.commitMessageId = commitMessageId
         self.secondMessageId = secondMessageId
@@ -154,6 +174,10 @@ public struct NewCommitEntry: Equatable {
     public var secondArtifactB64: String?
     public var secondArtifactKind: SecondArtifactKind?
     public var secondArtifactMailboxB64: String?
+    /// ADR-0045 — see ``PendingCommitEntry/sweepVerdictPending``.
+    public var sweepVerdictPending: Bool?
+    /// ADR-0045 — see ``PendingCommitEntry/welcomeMailboxesB64``.
+    public var welcomeMailboxesB64: [String]?
 
     public init(
         id: String,
@@ -162,7 +186,9 @@ public struct NewCommitEntry: Equatable {
         commitB64: String,
         secondArtifactB64: String? = nil,
         secondArtifactKind: SecondArtifactKind? = nil,
-        secondArtifactMailboxB64: String? = nil
+        secondArtifactMailboxB64: String? = nil,
+        sweepVerdictPending: Bool? = nil,
+        welcomeMailboxesB64: [String]? = nil
     ) {
         self.id = id
         self.groupId = groupId
@@ -171,6 +197,8 @@ public struct NewCommitEntry: Equatable {
         self.secondArtifactB64 = secondArtifactB64
         self.secondArtifactKind = secondArtifactKind
         self.secondArtifactMailboxB64 = secondArtifactMailboxB64
+        self.sweepVerdictPending = sweepVerdictPending
+        self.welcomeMailboxesB64 = welcomeMailboxesB64
     }
 }
 
@@ -249,6 +277,8 @@ public final class CommitOutboxStore {
             secondArtifactB64: entry.secondArtifactB64,
             secondArtifactKind: entry.secondArtifactKind,
             secondArtifactMailboxB64: entry.secondArtifactMailboxB64,
+            sweepVerdictPending: entry.sweepVerdictPending,
+            welcomeMailboxesB64: entry.welcomeMailboxesB64,
             acked: false
         )
         try putEntryDurable(accountIdB64: accountIdB64, entry: full)
