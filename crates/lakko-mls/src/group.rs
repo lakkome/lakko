@@ -447,6 +447,60 @@ impl Group {
         )))
     }
 
+    /// Refuse a role-table rewrite while another one is already pending
+    /// (ADR-0045 § *What the client sprints found*, item 5).
+    ///
+    /// A role change is a read-modify-write whose read is the **committed**
+    /// role table and whose write is now a proposal. On the direct path the
+    /// caller's per-group lock sufficed: the first toggle's commit updated the
+    /// table and the second read the updated one. A proposal changes nothing
+    /// until it is swept, so two toggles taken a moment apart both read the
+    /// **same** committed table and each proposes a table carrying only its own
+    /// change. Serializing cannot repair that — there is nothing for the second
+    /// read to observe — and neither can the caller, because
+    /// [`ProposalKind::RoleChange`] carries no payload, so it cannot read back
+    /// what it proposed.
+    ///
+    /// What the two then do is worse than losing one of them, and worse than
+    /// ADR-0045 recorded. RFC 9420 admits **at most one**
+    /// `GroupContextExtensions` proposal per commit, and OpenMLS enforces that
+    /// as a hard validation failure rather than a silent selection
+    /// (`validate_group_context_extensions_proposal` → `TooManyGCEProposals`,
+    /// reached from `CommitBuilder::build`). So a pending set holding two role
+    /// changes cannot be swept **at all**: every candidate committer's sweep
+    /// errors, the store only ever empties when a commit is *merged*, and every
+    /// direct-commit escape is closed by [`Self::refuse_if_proposals_pending`].
+    /// A group whose every committer holds both is wedged for membership until
+    /// a committer that holds only one lands a commit — and if none exists, it
+    /// stays wedged. Chat is unaffected (see
+    /// [`Self::create_application_message`], which parks the pending set).
+    ///
+    /// **Only a role change collides.** A pending add or remove composes into
+    /// the same sweep perfectly well; the exclusive slot is the
+    /// `GroupContextExtensions` one, so this guard is deliberately narrower
+    /// than [`Self::refuse_if_proposals_pending`] and must stay that way.
+    ///
+    /// This is the *local* half. The sweep carries the other half — it keeps at
+    /// most one role change (see `sweep_keeps`), so a set that reaches two
+    /// through some path this guard cannot see still converges instead of
+    /// wedging.
+    fn refuse_if_role_change_pending(&self, op: &str) -> Result<()> {
+        let pending = self
+            .inner
+            .pending_proposals()
+            .filter(|qp| matches!(classify(qp.proposal()), ProposalKind::RoleChange))
+            .count();
+        if pending == 0 {
+            return Ok(());
+        }
+        Err(Error::Group(format!(
+            "{op} refused: {pending} role-table change(s) are already pending in this group, and \
+             RFC 9420 admits at most one GroupContextExtensions proposal per commit, so a second \
+             one could not be swept (ADR-0045) — wait for the pending change to be committed, \
+             then propose again"
+        )))
+    }
+
     /// Add a member by their published [`KeyPackage`].
     ///
     /// Consumes one of the new member's published KeyPackages on success.
@@ -948,11 +1002,21 @@ impl Group {
     /// twin of [`Group::set_group_roles`]. Owner-only, enforced locally here and
     /// again by every peer's receipt gate and commit gate.
     ///
+    /// **One at a time.** Only one role change may be pending at once — see
+    /// [`Self::refuse_if_role_change_pending`] for why, and note that the guard
+    /// is deliberately narrow: a pending add or remove does not block a role
+    /// change, only another role change does. A caller that wants to pre-empt
+    /// the refusal rather than surface it reads
+    /// [`Self::pending_proposals`] and looks for a
+    /// [`ProposalKind::RoleChange`]; that is the same question this asks, and
+    /// it needs no new surface.
+    ///
     /// # Errors
     ///
     /// [`Error::Group`] when the group has no role table, when this device is
     /// not the owner, when the new table names an owner who is not a member of
-    /// the group, or on any OpenMLS-side failure.
+    /// the group, when a role-table change is already pending, or on any
+    /// OpenMLS-side failure.
     pub fn propose_group_roles(
         &mut self,
         identity: &Identity,
@@ -964,6 +1028,12 @@ impl Group {
         // one every sweep excludes (`sweep_keeps`), so publishing it would only
         // occupy a slot in every member's pending set until someone noticed.
         self.refuse_unenforceable_role_table(identity, roles)?;
+        // Last, so a caller handed an unenforceable table learns *that* even
+        // while another change is in flight: authority and validity first, then
+        // availability. `set_group_roles` needs no equivalent — its
+        // `refuse_if_proposals_pending` already refuses on any pending
+        // proposal, of which a role change is one.
+        self.refuse_if_role_change_pending("role-table change")?;
         // As in `set_group_roles`: a GroupContextExtensions proposal replaces
         // the WHOLE extension set, so the required-capabilities declaration has
         // to be re-stated alongside the new table.
@@ -1090,9 +1160,18 @@ impl Group {
     /// no new rule: it is a [`ProposalKind::RoleChange`], which is owner-only.
     /// Any owner-or-admin may sweep it, including the incoming owner.
     ///
+    /// Being a role change is also why it collides with one, **in both
+    /// directions**: a transfer occupies the same exclusive
+    /// `GroupContextExtensions` slot as a promote or demote, so
+    /// [`Self::refuse_if_role_change_pending`] refuses a transfer while a role
+    /// change is pending and refuses a role change while a transfer is. That
+    /// falls out of delegating to [`Group::propose_group_roles`] rather than
+    /// being restated here, which is the point: one rule, one place.
+    ///
     /// # Errors
     ///
-    /// As [`Group::transfer_ownership`].
+    /// As [`Group::transfer_ownership`], plus [`Error::Group`] when a
+    /// role-table change — including another transfer — is already pending.
     pub fn propose_ownership_transfer(
         &mut self,
         identity: &Identity,
@@ -1292,16 +1371,25 @@ impl Group {
         // the filter below will keep, and it is used ONLY to decide emptiness;
         // `swept` is read back off the staged commit afterwards so the caller is
         // told what the commit really carried rather than what we expected it to.
-        let nothing_to_sweep = !self
-            .inner
-            .pending_proposals()
-            .any(|qp| sweep_keeps(&table, &members, role_change_survives, qp));
+        let mut predicted_role_change = false;
+        let nothing_to_sweep = !self.inner.pending_proposals().any(|qp| {
+            sweep_keeps(
+                &table,
+                &members,
+                role_change_survives,
+                &mut predicted_role_change,
+                qp,
+            )
+        });
         if nothing_to_sweep {
             return Ok(None);
         }
 
         let filter_members = members;
         let filter_table = table;
+        // A FRESH flag: the prediction above consumed its own, and sharing one
+        // would leave the real filter with the role-change slot already spent.
+        let mut filter_role_change = false;
         let bundle = self
             .inner
             .commit_builder()
@@ -1312,7 +1400,15 @@ impl Group {
                 identity.provider.rand(),
                 identity.provider.crypto(),
                 &identity.signature_keys,
-                |qp| sweep_keeps(&filter_table, &filter_members, role_change_survives, qp),
+                |qp| {
+                    sweep_keeps(
+                        &filter_table,
+                        &filter_members,
+                        role_change_survives,
+                        &mut filter_role_change,
+                        qp,
+                    )
+                },
             )
             .map_err(|e| Error::Group(format!("sweep build: {e:?}")))?
             .stage_commit(&identity.provider)
@@ -2052,14 +2148,45 @@ fn proposal_is_authorised(
 /// here is simply not committed, its author re-proposes, and the rest of the
 /// sweep still lands. Refusing the whole sweep instead would let one bad role
 /// change block every unrelated membership change in the group.
+///
+/// The third clause is the same shape for the same reason, and is the sweep-side
+/// half of [`Group::refuse_if_role_change_pending`]: **at most one role change
+/// per sweep**. RFC 9420 admits one `GroupContextExtensions` proposal per
+/// commit, and OpenMLS enforces it as a hard build failure
+/// (`TooManyGCEProposals`), so a set holding two cannot be swept at all — and
+/// because the proposal store only empties when a commit is *merged* and every
+/// direct-commit path is closed while proposals are pending, that is a
+/// **permanent membership wedge** for every committer that holds both, not a
+/// lost toggle. `propose_group_roles` keeps a well-behaved device from ever
+/// building that set; this keeps a set that reached it anyway — a peer whose
+/// proposal was published before the crash that lost its record of it, say —
+/// from wedging the whole group. Which of the two is kept is the store's own
+/// order and is arbitrary; the one dropped is dropped from every member's store
+/// when the commit merges, so its author must re-propose. The caller learns
+/// which survived from [`ProposalCommit::swept`].
+///
+/// `role_change_taken` carries that "one already" across calls, so the predicate
+/// is stateful and each pass over the pending set needs its own flag: the
+/// emptiness prediction and the real filter must not share one, or the
+/// prediction would spend the budget the filter needs.
 fn sweep_keeps(
     table: &RoleTable,
     members: &[MemberRecord],
     role_change_survives: bool,
+    role_change_taken: &mut bool,
     qp: &QueuedProposal,
 ) -> bool {
-    proposal_is_authorised(table, members, qp)
-        && (role_change_survives || !matches!(classify(qp.proposal()), ProposalKind::RoleChange))
+    if !proposal_is_authorised(table, members, qp) {
+        return false;
+    }
+    if !matches!(classify(qp.proposal()), ProposalKind::RoleChange) {
+        return true;
+    }
+    if !role_change_survives || *role_change_taken {
+        return false;
+    }
+    *role_change_taken = true;
+    true
 }
 
 /// Enforce the ADR-0022 role policy on a staged commit BEFORE it is merged,

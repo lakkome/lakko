@@ -330,6 +330,14 @@ public class ChatViewModel(
     /** Last add / remove error surfaced to the sheet, else `null`. */
     public val membershipError: StateFlow<String?> = mutableMembershipError.asStateFlow()
 
+    private val mutableMembershipNotice: MutableStateFlow<String?> = MutableStateFlow(null)
+
+    /** ADR-0045 — feedback for a membership request that was accepted locally
+     *  and published. Distinct from [membershipError] because a request is not
+     *  an outcome: the change has NOT happened yet, and the copy must not
+     *  suggest it has. */
+    public val membershipNotice: StateFlow<String?> = mutableMembershipNotice.asStateFlow()
+
     private val mutableCanManageMembers: MutableStateFlow<Boolean> = MutableStateFlow(true)
 
     /** ADR-0022 — `true` when the local member may add / remove (owner, admin,
@@ -420,6 +428,10 @@ public class ChatViewModel(
         mutableMembersPanelOpen.value = opening
         if (opening) {
             mutableMembershipError.value = null
+            // A notice describes one action's outcome, so it must not outlive
+            // the panel that produced it: the pending row annotation is the
+            // durable signal, not this.
+            mutableMembershipNotice.value = null
             refreshMembers()
         }
     }
@@ -574,6 +586,83 @@ public class ChatViewModel(
             } catch (e: Throwable) {
                 mutableMembershipError.value = e.message ?: e.toString()
                 android.util.Log.w("ChatViewModel", "onRemoveMember failed", e)
+            } finally {
+                mutableMembershipBusy.value = false
+            }
+        }
+    }
+
+    /**
+     * ADR-0045 — whether to offer `Leave group`, and whether it is live.
+     *
+     * One rule, two consumers: `MembersSheet` renders from
+     * [me.lakko.app.chat.leaveGroupAffordance] over the state it has already
+     * collected (a Compose read, so it recomposes), and [onLeaveGroup] re-asks
+     * here before publishing. A hidden control is not a guarantee — [isOwner] is
+     * only as fresh as the last roster refresh — so the action must not assume
+     * the gate it was drawn behind still holds.
+     *
+     * `roleTable != null` IS the proposal-path predicate: `ChatRepository`'s own
+     * `usesProposalPath` is `group.groupRoles() != null` under the same
+     * catch-Throwable-to-null, and [groupRoles] is that read.
+     */
+    internal fun leaveAffordance(): me.lakko.app.chat.LeaveGroupAffordance =
+        me.lakko.app.chat.leaveGroupAffordance(
+            usesProposalPath = mutableRoleTable.value != null,
+            isOwner = mutableIsOwner.value,
+            ownLeaf = ownLeafIndex(),
+            busy = mutableMembershipBusy.value,
+            requests = mutablePendingRequests.value,
+        )
+
+    /**
+     * ADR-0045 — ask to leave the group.
+     *
+     * Reachable for the first time because of that ADR: naming this device's OWN
+     * leaf in a Remove proposal needs no role, where ADR-0022 had recorded
+     * self-leave as impossible because OpenMLS `CannotRemoveSelf` stops a member
+     * committing their own departure. A proposal is not a commit, so there is
+     * nothing to commit and nothing to refuse.
+     *
+     * Deliberately NOT routed through [onRemoveMember], whose own-leaf guard is
+     * still correct for the direct-commit path a table-less group takes.
+     *
+     * The caller is expected to have confirmed first: a published request cannot
+     * be withdrawn — there is no wire withdraw, and evicting it locally would
+     * leave it live in every peer's store — so the confirmation is the last exit
+     * and this method is past it.
+     */
+    public fun onLeaveGroup() {
+        when (val affordance = leaveAffordance()) {
+            is me.lakko.app.chat.LeaveGroupAffordance.Hidden -> {
+                // Reached only if the gate went stale between draw and tap.
+                // Answer in this feature's own vocabulary rather than letting
+                // the core's prose surface to a user who never asked about
+                // proposals.
+                mutableMembershipError.value = affordance.reason.message
+                return
+            }
+            // Busy, or we have already asked. Asking twice would put two
+            // identical Remove proposals into one sweep.
+            me.lakko.app.chat.LeaveGroupAffordance.Disabled -> return
+            me.lakko.app.chat.LeaveGroupAffordance.Enabled -> Unit
+        }
+        val leaf = ownLeafIndex() ?: return
+        mutableMembershipBusy.value = true
+        mutableMembershipError.value = null
+        mutableMembershipNotice.value = null
+        viewModelScope.launch {
+            try {
+                // The repository records the own-request observation itself, so
+                // unlike the web reference there is nothing to do here afterwards
+                // but re-read the roster — which must still contain us, annotated.
+                repo.removeMemberFromGroup(groupIdHex, leaf)
+                mutableMembershipNotice.value =
+                    "Leave requested. It applies when an owner or an admin applies the change."
+                refreshMembers()
+            } catch (e: Throwable) {
+                mutableMembershipError.value = e.message ?: e.toString()
+                android.util.Log.w("ChatViewModel", "onLeaveGroup failed", e)
             } finally {
                 mutableMembershipBusy.value = false
             }

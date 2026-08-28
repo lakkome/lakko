@@ -39,6 +39,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -1333,6 +1334,43 @@ private fun shareDecryptedBytes(
 // contacts list (ADR-0021), falling back to a short key fingerprint.
 // =============================================================================
 
+/**
+ * ADR-0045 (UX §6) — the `Leave group` confirmation.
+ *
+ * The confirm is the LAST EXIT, not a courtesy: a published request cannot be
+ * withdrawn (there is no wire withdraw, and evicting it locally would leave it
+ * live in every peer's store), so this dialog is the only place the user can
+ * still change their mind. The body carries the one fact they need — that they
+ * remain in the group, receiving messages, until somebody applies it.
+ */
+@Composable
+private fun LeaveGroupDialog(
+    onCancel: () -> Unit,
+    onLeave: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onCancel,
+        title = { Text("Leave this group?") },
+        text = {
+            Text(
+                "You will keep receiving messages until an owner or an admin applies " +
+                    "your request. You will need a new invite to rejoin.",
+            )
+        },
+        confirmButton = {
+            TextButton(
+                onClick = onLeave,
+                colors = ButtonDefaults.textButtonColors(
+                    contentColor = MaterialTheme.colorScheme.error,
+                ),
+            ) { Text("Leave") }
+        },
+        dismissButton = {
+            TextButton(onClick = onCancel) { Text("Cancel") }
+        },
+    )
+}
+
 @Composable
 private fun MembersSheet(viewModel: ChatViewModel) {
     val members by viewModel.members.collectAsStateWithLifecycle()
@@ -1347,8 +1385,23 @@ private fun MembersSheet(viewModel: ChatViewModel) {
     val pendingNotice by viewModel.pendingNotice.collectAsStateWithLifecycle()
     val joinAttributions by viewModel.joinAttributions.collectAsStateWithLifecycle()
     val inviteLink by viewModel.inviteLink.collectAsStateWithLifecycle()
+    val notice by viewModel.membershipNotice.collectAsStateWithLifecycle()
     val clipboard = LocalClipboardManager.current
     val ownLeaf = viewModel.ownLeafIndex()
+    // ADR-0045 (UX §6) — the `Leave group` confirmation. Local to the sheet: it
+    // is a presentation concern with no bearing on the request, and nothing
+    // outside this composable may open it.
+    var confirmingLeave by remember { mutableStateOf(false) }
+
+    if (confirmingLeave) {
+        LeaveGroupDialog(
+            onCancel = { confirmingLeave = false },
+            onLeave = {
+                confirmingLeave = false
+                viewModel.onLeaveGroup()
+            },
+        )
+    }
 
     Dialog(
         onDismissRequest = viewModel::toggleMembersPanel,
@@ -1411,6 +1464,18 @@ private fun MembersSheet(viewModel: ChatViewModel) {
                             enabled = !busy,
                         ) { Text("Revoke link") }
                     }
+                }
+                // ADR-0045 — the request accepted locally and published. Kept
+                // beside the error and, like it, UNGATED: a plain member now has
+                // a membership action (`Leave group`), so the feedback for one
+                // must reach a member who cannot manage anybody.
+                notice?.let { message ->
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        text = message,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
                 error?.let { message ->
                     Spacer(Modifier.height(6.dp))
@@ -1588,6 +1653,40 @@ private fun MembersSheet(viewModel: ChatViewModel) {
                             }
                         }
                     }
+                }
+                // ADR-0045 (UX §5 item 6) — `Leave group`: bottom of the panel,
+                // destructive, and HIDDEN for the owner. The owner's departure is
+                // refused by the core fail-closed (`set_group_roles` is
+                // owner-only, so an ownerless group could never appoint another
+                // admin again); that is a PRECONDITION rather than a dead end —
+                // transfer ownership, then leave as an ordinary member — but no
+                // client has a transfer affordance yet, so offering a control
+                // that always refuses would be worse than offering none.
+                //
+                // Computed here rather than read from `viewModel.leaveAffordance()`
+                // so the inputs are Compose state reads and the control
+                // recomposes when any of them changes; both call the one rule in
+                // `me.lakko.app.chat`.
+                val leave = me.lakko.app.chat.leaveGroupAffordance(
+                    usesProposalPath = roleTable != null,
+                    isOwner = isOwner,
+                    ownLeaf = ownLeaf,
+                    busy = busy,
+                    requests = pendingRequests,
+                )
+                if (leave !is me.lakko.app.chat.LeaveGroupAffordance.Hidden) {
+                    Spacer(Modifier.height(12.dp))
+                    TextButton(
+                        onClick = { confirmingLeave = true },
+                        // UX §5.3 — visible but disabled once we have asked.
+                        // Hiding it then would read as the permission having
+                        // vanished, where our own row's "Waiting to leave."
+                        // annotation explains a disabled control.
+                        enabled = leave is me.lakko.app.chat.LeaveGroupAffordance.Enabled,
+                        colors = ButtonDefaults.textButtonColors(
+                            contentColor = MaterialTheme.colorScheme.error,
+                        ),
+                    ) { Text("Leave group") }
                 }
                 Spacer(Modifier.height(12.dp))
                 Row(modifier = Modifier.fillMaxWidth()) {

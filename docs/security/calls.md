@@ -3870,6 +3870,146 @@ unreadable verdict defers, an unreadable journal leaves the sweep staged, an
 unclassifiable row stands the sweep down, and a device that cannot establish it is a
 candidate does not claim to be one).
 
+### C-65: At most one role-table change may be in flight in a group at a time
+
+[ADR-0045](../adr/0045-remote-commit-epoch-fork.md), extending
+[ADR-0022](../adr/0022-group-admin-roles.md). ADR-0022 carries a group's `RoleTable` in
+the authenticated `0xFF02` GroupContext extension, so **changing a role means rewriting
+the GroupContext**, which on the wire is a `GroupContextExtensions` proposal. RFC 9420
+admits **at most one** of those per commit. Under ADR-0022 that ceiling was invisible: a
+role change was one atomic direct commit, so a second toggle read a table the first had
+already committed. ADR-0045 turned the change into a **proposal**, and a proposal changes
+nothing until it is swept — so two toggles taken a moment apart both read the **same**
+committed table, each proposes a table carrying only its own change, and both sit in the
+pending set at once.
+
+**Why that is a membership wedge and not a lost toggle.** OpenMLS enforces the RFC's
+ceiling as a **hard validation failure**, not a silent selection:
+`validate_group_context_extensions_proposal` returns `TooManyGCEProposals` on the second
+`GroupContextExtensions` proposal (`openmls-0.8.1`,
+`src/group/public_group/validation.rs`), reached from `CommitBuilder::build`
+(`src/group/mls_group/commit_builder.rs`). So a pending set holding two role changes
+**cannot be swept at all**. The proposal store empties only when a commit is *merged*,
+and `refuse_if_proposals_pending` closes every direct-commit escape (add, remove,
+role-change, external-join approve, `self_update`) while anything is pending — so a
+committer holding both has **no way out**: its membership operations are dead.
+
+**Two faces, and the reassuring one is the lucky outcome.** Both proposals travel the
+group journal, so the ordinary case is that both reach **every** candidate committer, and
+then the whole group's membership is wedged — escapable only if some committer's view
+happens to hold just one. The **asymmetric** case is milder: one committer holds a single
+role change, sweeps, the merge empties everyone's store, and the other change is dropped
+group-wide with no error anywhere. ADR-0045 originally recorded only that second face.
+Chat is unaffected in both, because `create_application_message` parks the pending set
+around the encrypt call.
+
+**Neither serialization nor the client can repair it after the fact.** Serializing the two
+toggles cannot help, because there is nothing for the second read to observe — the first
+proposal has changed no committed state. Recomputing "the committed table as amended by our
+own pending proposal" is not available either: `ProposalKind::RoleChange` carries no
+payload (the core's `classify` discards the extensions), so a client cannot read back what
+it proposed, cannot withdraw a proposal, and — in the symmetric case — cannot even sweep
+past it. The repair therefore has to be a **refusal before the second proposal exists**,
+which is why the rule lives in the core rather than in three clients.
+
+#### The rule, in two halves
+
+1. **Propose time — refuse.** `Group::refuse_if_role_change_pending` counts pending
+   proposals classifying as `ProposalKind::RoleChange` and refuses a new one if any exist.
+   It is called from `propose_group_roles` **last**, after authority
+   (`authorise_own_proposal`) and validity (`refuse_unenforceable_role_table`), so a caller
+   handed an unenforceable table learns *that* rather than "not now" — availability is the
+   least informative refusal, so it goes at the back.
+2. **Sweep time — bound.** `sweep_keeps` keeps **at most one** role change per sweep, via a
+   `role_change_taken` flag, using the same exclusion-not-refusal mechanism its existing
+   `role_change_survives` clause uses. Which of the two survives is the proposal store's own
+   order and is arbitrary; the one dropped is dropped from every member's store when the
+   commit merges, so its author must re-propose, and the caller learns which survived from
+   `ProposalCommit::swept`. The predicate is **stateful**, so each pass over the pending set
+   needs its own flag — the emptiness prediction and the real filter must not share one, or
+   the prediction would spend the budget the filter needs.
+
+**The second half is not made redundant by the first, and this is the part a later hand
+will get wrong.** The propose-time guard cannot see a state that arises **legitimately**. A
+device that publishes a role-change proposal and then loses its own record of it before
+persisting — the ADR-0040 crash window — proposes a second one in good faith, and every
+*peer* then holds two. Without the sweep-side bound those peers can never sweep again. The
+guard keeps a well-behaved device from building the set; the bound keeps a set that reached
+it anyway from wedging the group.
+
+#### Deliberately narrower than the direct-commit guard
+
+`refuse_if_role_change_pending` counts **only** role changes, where
+`refuse_if_proposals_pending` counts everything. That asymmetry is the rule, not an
+oversight: a pending add or remove composes into the same sweep perfectly well, and the
+exclusive resource is the single `GroupContextExtensions` slot. Widening this guard to "no
+role change while anything is pending" would make the core **stricter than the protocol
+requires** and would block a legitimate toggle behind an unrelated membership request.
+
+Two consequences fall out rather than being restated:
+
+- **Ownership transfer collides in both directions.** `Group::propose_ownership_transfer`
+  is the same owner-only role-table rewrite under another name, and it reaches the guard by
+  delegating to `propose_group_roles` — so a pending transfer refuses a promote or demote,
+  and a pending promote or demote refuses a transfer. One rule, one place.
+- **A group with no role table is untouched.** Such a group has no proposal path at all
+  (every `propose_*` refuses without a table, and `gate_incoming_proposal` stores nothing),
+  so its pending set is permanently empty and the guard is a counted-zero no-op.
+  `DeviceGroup`, `PublisherGroup`, call groups and every other `Group::create_with_id`
+  group keep their direct commits unchanged.
+
+#### What it does not do
+
+- **It is not a confidentiality or integrity property.** Nothing here protects a secret or
+  authenticates an actor: the guard converts a wedge (and, in the lucky case, a silent
+  loss) into a synchronous, specific refusal. It is indexed because the state it prevents
+  is one the group **cannot recover from inside the protocol** in the symmetric case — the
+  same reason C-63 is indexed — not because an attacker gains anything by reaching it.
+- **It does not tell the second proposer what it collided with.** The refusal names the
+  count and the reason; it does not identify the pending change or its author. A client
+  wanting to pre-empt the refusal rather than surface it reads `pending_proposals` and looks
+  for a `ProposalKind::RoleChange`, which is the same question the guard asks.
+- **It is a local pre-check plus a committer-side bound, not a peer-verified gate.** Unlike
+  C-63's `owner_survives`, no peer refuses a *commit* on this rule — it never needs to,
+  because a commit carrying two role changes cannot be built in the first place, and
+  OpenMLS's own receive-side validation (`staged_commit.rs`) would refuse one anyway.
+- **It does not remove the need to re-propose.** Whichever change loses — to the guard at
+  propose time, or to the bound at sweep time — its author must ask again. Under ADR-0045's
+  no-deadline model the wait is one sweep in the ordinary case (the owner is rank 0 and
+  sweeps immediately) and a real wait only when no candidate committer is running the app.
+
+#### Tests
+
+`crates/lakko-mls/tests/group_proposals.rs`:
+`a_second_role_change_is_refused_while_one_is_pending` (the guard, including that the
+refusal message names *what* was refused and that it is a timing refusal rather than an
+authority one, that nothing was published, and that the surviving change still lands);
+`control_two_role_changes_in_one_pending_set_cannot_both_be_swept` — the **control**, which
+reaches the two-role-change state the guard makes unreachable (by rolling the proposer's
+provider back between the two proposals) and asserts a sweep over it still lands, carries
+exactly one role change, and advances the epoch;
+`a_pending_add_or_remove_does_not_block_a_role_change` (the narrowness, with all three
+intents riding one commit); `ownership_transfer_and_a_role_change_exclude_each_other` (both
+directions); and `a_group_with_no_role_table_is_untouched_by_the_role_change_guard`, which
+also asserts the refusal such a group *does* get names the pre-existing no-role-table
+reason and not this one. 33 tests in the binary, all green.
+
+Invariants: **#2** (unchanged — the role table is an opaque `0xFF02` GroupContext body and
+the DS parses nothing; this rule adds no wire format and no server surface), **#3** (a
+`crates/lakko-mls` state-machine change under ADR-0045 — a new refusal on the propose path
+and a stateful predicate on the sweep filter; property-tested, **external crypto review and
+a `lakko-security` pass both still owed**), **#4** (fail-closed: the second propose is
+refused rather than published, and the sweep excludes rather than building a commit
+OpenMLS would reject), **#5** (unchanged — roles stay in-group).
+
+**Client status (2026-08-28).** Enforcement is complete in the core and holds for every
+caller on every platform. What is outstanding is **copy, not enforcement**: web and iOS
+carry their own narrow client-side pre-checks (`hasPendingRoleChange`, each filtering on
+the role-change kind specifically, so neither is stricter than the core rule) and surface a
+sentence; Android has no pre-check and would surface the core's `Error::Group` diagnostic.
+The refusal string is specified in
+[`docs/ux/proposal-based-membership.md`](../ux/proposal-based-membership.md) §6.
+
 ## Exporter labels (call-side)
 
 | Label | Length | Context | Source | Used for |

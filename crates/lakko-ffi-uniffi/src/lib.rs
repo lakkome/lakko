@@ -1049,6 +1049,14 @@ impl Group {
     /// `owner` and every `admins` entry must be a 32-byte Ed25519 signature
     /// public key. Returns the wire-encoded Proposal to publish; the epoch does
     /// not advance.
+    ///
+    /// **One role change at a time.** This FAILS while another role change —
+    /// including an ownership transfer — is already pending, because RFC 9420
+    /// admits at most one `GroupContextExtensions` proposal per commit, so a
+    /// second could not be swept. A pending add or remove does **not** block
+    /// it; only another role change does. To pre-empt the failure rather than
+    /// surface it, call [`Self::pending_proposals`] and look for a
+    /// `ProposalKind::RoleChange` — that is the same question the core asks.
     pub fn propose_group_roles(
         &self,
         identity: &Identity,

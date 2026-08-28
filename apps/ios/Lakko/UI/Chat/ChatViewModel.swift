@@ -101,6 +101,17 @@ public final class ChatViewModel: ObservableObject {
     /// ADR-0022 — `true` when the local member is the owner (only the owner sees
     /// the per-member promote / demote toggle).
     @Published public private(set) var isOwner: Bool = false
+
+    /// ADR-0045 — does this group route membership through proposals (i.e. does
+    /// it carry an ADR-0022 role table)? Gates `Leave group`, which has no route
+    /// through the core in a table-less group.
+    @Published public private(set) var usesProposalPath: Bool = false
+
+    /// ADR-0045 — feedback for a membership request that was accepted locally
+    /// and published. Distinct from ``membershipError`` because a request is not
+    /// an outcome: the change has NOT happened yet, and the copy must not
+    /// suggest it has.
+    @Published public private(set) var membershipNotice: String?
     /// The group's current role table (owner + admins), or `nil` for an open
     /// group — drives the per-member admin labelling.
     @Published public private(set) var roleTable: RoleTable?
@@ -640,6 +651,10 @@ public final class ChatViewModel: ObservableObject {
         membersPanelOpen.toggle()
         if membersPanelOpen {
             membershipError = nil
+            // A notice describes one action's outcome, so it must not outlive
+            // the panel that produced it: the pending row annotation is the
+            // durable signal, not this.
+            membershipNotice = nil
             refreshMembers()
         }
     }
@@ -650,6 +665,11 @@ public final class ChatViewModel: ObservableObject {
         let role = repository.ownRole(groupIdHex: groupIdHex)
         canManageMembers = role != .member
         isOwner = role == .owner
+        // ADR-0045 — whether this group routes membership through proposals at
+        // all. Read here rather than at each use so the `Leave group` gate and
+        // the action behind it see one answer from one roster refresh, instead
+        // of two reads that can disagree across a commit.
+        usesProposalPath = repository.usesProposalPath(groupIdHex: groupIdHex)
         roleTable = repository.groupRoles(groupIdHex: groupIdHex)
         // ADR-0027 (G-3) — refresh the pending external-join list alongside the
         // roster (the retained set is the source of truth).
@@ -798,6 +818,77 @@ public final class ChatViewModel: ObservableObject {
             } catch {
                 membershipError = error.localizedDescription
                 NSLog("onRemoveMember failed: %@", error.localizedDescription)
+            }
+        }
+    }
+
+    /// ADR-0045 — whether to offer `Leave group`, and whether it is live.
+    ///
+    /// One rule, two consumers: the sheet renders from this, and
+    /// ``onLeaveGroup()`` re-asks before publishing. A hidden control is not a
+    /// guarantee — `isOwner` is only as fresh as the last roster refresh — so
+    /// the action must not assume the gate it was drawn behind still holds.
+    var leaveAffordance: LeaveGroupAffordance {
+        leaveGroupAffordance(
+            usesProposalPath: usesProposalPath,
+            isOwner: isOwner,
+            ownLeaf: ownLeafIndex,
+            busy: membershipBusy,
+            requests: pendingRequests)
+    }
+
+    /// ADR-0045 — ask to leave the group.
+    ///
+    /// Reachable for the first time because of that ADR: naming this device's
+    /// OWN leaf in a Remove proposal needs no role, where ADR-0022 had recorded
+    /// self-leave as impossible because OpenMLS `CannotRemoveSelf` stops a
+    /// member committing their own departure. A proposal is not a commit, so
+    /// there is nothing to commit and nothing to refuse.
+    ///
+    /// Deliberately NOT routed through ``onRemoveMember(leafIndex:)``, whose
+    /// own-leaf guard is still correct for the direct-commit path a table-less
+    /// group takes.
+    ///
+    /// The caller is expected to have confirmed first: a published request
+    /// cannot be withdrawn — there is no wire withdraw, and evicting it locally
+    /// would leave it live in every peer's store — so the confirmation is the
+    /// last exit and this method is past it.
+    func onLeaveGroup() {
+        switch leaveAffordance {
+        case .hidden(let refusal):
+            // Reached only if the gate went stale between draw and tap. Answer
+            // in this feature's own vocabulary rather than letting the core's
+            // prose surface to a user who never asked about proposals.
+            membershipError = refusal.message
+            return
+        case .disabled:
+            // Busy, or we have already asked. Asking twice would put two
+            // identical Remove proposals into one sweep.
+            return
+        case .enabled:
+            break
+        }
+        guard let leaf = ownLeafIndex else { return }
+        membershipBusy = true
+        membershipError = nil
+        membershipNotice = nil
+        Task { @MainActor in
+            defer { membershipBusy = false }
+            do {
+                // The repository records the own-request observation and
+                // suppresses the echo itself, so unlike the web reference there
+                // is nothing to do here afterwards but re-read the roster —
+                // which must still contain us, annotated.
+                _ = try await repository.removeMemberFromGroup(
+                    groupIdHex: groupIdHex,
+                    leafIndex: leaf
+                )
+                membershipNotice =
+                    "Leave requested. It applies when an owner or an admin applies the change."
+                refreshMembers()
+            } catch {
+                membershipError = error.localizedDescription
+                NSLog("onLeaveGroup failed: %@", error.localizedDescription)
             }
         }
     }

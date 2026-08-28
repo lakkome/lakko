@@ -1713,3 +1713,274 @@ fn the_pending_set_is_capped_and_the_late_proposer_pays() {
     // Nothing already held was evicted to make room.
     assert_eq!(s.alice_g.pending_proposals().len(), CAP);
 }
+
+// ============================================================================
+// One role change at a time (ADR-0045 § What the client sprints found, item 5)
+// ============================================================================
+
+/// Every role table this suite toggles between, so the two tests below and
+/// their control cannot drift apart on what "a different role change" means.
+fn promote_charlie(s: &Scene) -> RoleTable {
+    RoleTable::new(pk32(&s.alice), vec![pk32(&s.bob), pk32(&s.charlie)])
+}
+
+fn demote_bob(s: &Scene) -> RoleTable {
+    RoleTable::new(pk32(&s.alice), vec![])
+}
+
+/// **The defect, reachable only with the guard removed.** Two role-table
+/// rewrites reach one member's pending set, and the sweep that ought to carry
+/// both cannot: RFC 9420 admits at most one `GroupContextExtensions` proposal
+/// per commit. This is the control for
+/// [`a_second_role_change_is_refused_while_one_is_pending`] — it builds the
+/// state the guard exists to make unreachable, by rolling the owner's provider
+/// back between the two proposals so the second is minted against a set the
+/// guard sees as empty, and records what a sweep over that state actually does.
+#[test]
+fn control_two_role_changes_in_one_pending_set_cannot_both_be_swept() {
+    let mut s = scene(0x2B);
+    let group_id = s.alice_g.group_id();
+    let snapshot = s.alice.snapshot_storage().expect("snapshot");
+
+    // Toggle one.
+    let first = s
+        .alice_g
+        .propose_group_roles(&s.alice, &promote_charlie(&s))
+        .expect("owner proposes the first role change");
+
+    // Roll the owner's provider back to before it, so the second toggle is
+    // minted from a device that has never seen the first — the shape the guard
+    // cannot reach, and the only way to build this state through the public API
+    // once the guard is in place.
+    s.alice.restore_storage(&snapshot).expect("restore");
+    let mut rolled = Group::load(&s.alice, &group_id)
+        .expect("load")
+        .expect("the group is present in the snapshot");
+    assert!(rolled.pending_proposals().is_empty());
+    // One filler handshake message first, so the second role change is framed at
+    // a generation bob has not already consumed for the first — an artefact of
+    // minting two proposals from one leaf at one epoch, not part of the property.
+    let charlie_leaf = leaf_of(&rolled, s.charlie.signature_public_key());
+    rolled
+        .propose_remove_member(&s.alice, charlie_leaf)
+        .expect("filler proposal");
+    let second = rolled
+        .propose_group_roles(&s.alice, &demote_bob(&s))
+        .expect("the rolled-back device proposes the second role change");
+
+    // An admin receives both. Both are authorised — the owner may rewrite the
+    // table — so both are stored.
+    for (label, bytes) in [("first", &first), ("second", &second)] {
+        let incoming = s
+            .bob_g
+            .process_incoming_verifying_roles(&s.bob, bytes)
+            .unwrap_or_else(|e| panic!("bob processes the {label} role change: {e:?}"));
+        let Incoming::Proposal(record) = incoming else {
+            panic!("expected a proposal for {label}");
+        };
+        assert!(record.stored, "the {label} role change must be stored");
+        assert_eq!(record.kind, ProposalKind::RoleChange);
+    }
+    assert_eq!(
+        s.bob_g.pending_proposals().len(),
+        2,
+        "the control must actually reach the two-role-change state",
+    );
+
+    // A sweep over that state must still land. Without the sweep-side half of
+    // the guard OpenMLS refuses the whole build with `TooManyGCEProposals` and,
+    // since the proposal store empties only when a commit is MERGED and every
+    // direct-commit path is closed while proposals are pending, this member's
+    // membership operations are dead for good — a permanent wedge, not a lost
+    // toggle. So: exactly one role change rides, everything else rides with it,
+    // and the epoch moves.
+    let epoch_before = s.bob_g.epoch();
+    let sweep = s
+        .bob_g
+        .commit_pending_proposals(&s.bob)
+        .expect("a sweep over two role changes must not wedge the group")
+        .expect("the sweep produces a commit");
+    let role_changes = sweep
+        .swept
+        .iter()
+        .filter(|r| r.kind == ProposalKind::RoleChange)
+        .count();
+    assert_eq!(
+        role_changes, 1,
+        "RFC 9420 admits one GroupContextExtensions proposal per commit",
+    );
+    assert_eq!(s.bob_g.epoch(), epoch_before + 1, "the group moved on");
+    assert!(
+        s.bob_g.pending_proposals().is_empty(),
+        "merging a commit empties the whole store, so the other change is gone \
+         and its author must re-propose",
+    );
+    assert!(
+        s.bob_g.group_roles().is_some(),
+        "the group still has a readable role table",
+    );
+}
+
+/// **The guard.** A second role change is refused while one is pending, so the
+/// state the control reaches is never built by a well-behaved device.
+#[test]
+fn a_second_role_change_is_refused_while_one_is_pending() {
+    let mut s = scene(0x2C);
+
+    let first = s
+        .alice_g
+        .propose_group_roles(&s.alice, &promote_charlie(&s))
+        .expect("the first role change lands");
+    assert_eq!(s.alice_g.pending_proposals().len(), 1);
+
+    let refused = s
+        .alice_g
+        .propose_group_roles(&s.alice, &demote_bob(&s))
+        .expect_err("a second role change must be refused while one is pending");
+    // The message is the client's raw material, so pin the two phrases it must
+    // keep: what was refused, and why now rather than never.
+    let message = format!("{refused}");
+    assert!(
+        message.contains("role-table change refused"),
+        "the refusal must name what it refused: {message}",
+    );
+    assert!(
+        message.contains("already pending"),
+        "the refusal must say it is a timing refusal, not an authority one: {message}",
+    );
+
+    // Nothing was published and nothing was stored: the set still holds exactly
+    // the one change, so no sweep can ever face the control's state.
+    assert_eq!(s.alice_g.pending_proposals().len(), 1);
+    assert_eq!(
+        s.alice_g.pending_proposals()[0].kind,
+        ProposalKind::RoleChange,
+    );
+
+    // And the one change still lands, unaltered.
+    s.bob_g
+        .process_incoming_verifying_roles(&s.bob, &first)
+        .expect("bob stores the first role change");
+    let sweep = s
+        .bob_g
+        .commit_pending_proposals(&s.bob)
+        .expect("bob sweeps")
+        .expect("the sweep produces a commit");
+    assert_eq!(sweep.swept.len(), 1);
+    let table = s
+        .bob_g
+        .group_roles()
+        .expect("role table survives the sweep");
+    assert_eq!(
+        table.admins().len(),
+        2,
+        "the swept table is the first one proposed",
+    );
+    assert!(table.can_administer(&pk32(&s.charlie)));
+
+    // Once swept, the next toggle is free again.
+    s.alice_g
+        .process_incoming_verifying_roles(&s.alice, &wire(sweep.commit))
+        .expect("alice applies the sweep");
+    s.alice_g
+        .propose_group_roles(&s.alice, &demote_bob(&s))
+        .expect("a role change is proposable again once the pending one is swept");
+}
+
+/// A pending **add** or **remove** composes into the same sweep perfectly well;
+/// only the `GroupContextExtensions` slot is exclusive. The guard must not
+/// widen into "no role change while anything is pending".
+#[test]
+fn a_pending_add_or_remove_does_not_block_a_role_change() {
+    let mut s = scene(0x2D);
+    let dave = Identity::from_seed(&[0x2Du8; 64]).expect("dave");
+
+    // An admin's add and a member's own departure, both pending on the owner.
+    let add = s
+        .bob_g
+        .propose_add_member_from_wire(&s.bob, &kp_wire(&dave))
+        .expect("bob proposes an add");
+    s.alice_g
+        .process_incoming_verifying_roles(&s.alice, &add)
+        .expect("alice stores the add");
+    let own = s.charlie_g.own_leaf_index();
+    let leaving = s
+        .charlie_g
+        .propose_remove_member(&s.charlie, own)
+        .expect("charlie proposes to leave");
+    s.alice_g
+        .process_incoming_verifying_roles(&s.alice, &leaving)
+        .expect("alice stores the departure");
+    assert_eq!(s.alice_g.pending_proposals().len(), 2);
+
+    // The role change still goes out, and all three compose into one commit.
+    s.alice_g
+        .propose_group_roles(&s.alice, &promote_charlie(&s))
+        .expect("an add and a remove must not block a role change");
+    let sweep = s
+        .alice_g
+        .commit_pending_proposals(&s.alice)
+        .expect("owner sweeps")
+        .expect("the sweep produces a commit");
+    assert_eq!(sweep.swept.len(), 3, "all three intents ride one commit");
+}
+
+/// A group with no ADR-0022 role table has no proposal path at all, so its
+/// pending set is permanently empty and the guard is a counted-zero no-op —
+/// every direct-commit caller (`DeviceGroup`, `PublisherGroup`, call groups)
+/// is untouched. Asserted rather than assumed, including that the refusal such
+/// a group *does* get names the pre-existing reason and not the new one.
+#[test]
+fn a_group_with_no_role_table_is_untouched_by_the_role_change_guard() {
+    let alice = Identity::from_seed(&[0x5Du8; 64]).expect("alice");
+    let mut g = Group::create_with_id(&alice, b"no-role-table").expect("create");
+    assert!(g.group_roles().is_none());
+
+    let refusal = g
+        .propose_group_roles(&alice, &RoleTable::new(pk32(&alice), vec![]))
+        .expect_err("a group with no role table has no proposal path");
+    let message = format!("{refusal}");
+    assert!(
+        message.contains("carries no role table"),
+        "the refusal must be the pre-existing one, not the new guard: {message}",
+    );
+
+    // ...and consecutive direct membership commits still work.
+    for who in [0x5Eu8, 0x5F] {
+        let newcomer = Identity::from_seed(&[who; 64]).expect("newcomer");
+        g.add_member_from_wire(&alice, &kp_wire(&newcomer))
+            .expect("the direct path is unchanged");
+    }
+    assert!(g.pending_proposals().is_empty());
+}
+
+/// Ownership transfer is the same role-table rewrite under another name, so it
+/// collides on the same exclusive slot — in both directions.
+#[test]
+fn ownership_transfer_and_a_role_change_exclude_each_other() {
+    let mut s = scene(0x2E);
+    let charlie_key = pk32(&s.charlie);
+
+    // A pending transfer blocks a role change.
+    s.alice_g
+        .propose_ownership_transfer(&s.alice, &charlie_key, OutgoingOwner::Admin)
+        .expect("owner proposes a transfer");
+    assert!(
+        s.alice_g
+            .propose_group_roles(&s.alice, &promote_charlie(&s))
+            .is_err(),
+        "a pending transfer must block a role change",
+    );
+
+    // And the other way round, on a fresh scene.
+    let mut t = scene(0x2F);
+    t.alice_g
+        .propose_group_roles(&t.alice, &promote_charlie(&t))
+        .expect("owner proposes a role change");
+    assert!(
+        t.alice_g
+            .propose_ownership_transfer(&t.alice, &pk32(&t.charlie), OutgoingOwner::Admin)
+            .is_err(),
+        "a pending role change must block a transfer",
+    );
+}

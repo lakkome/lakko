@@ -2259,21 +2259,71 @@ discipline seamed onto a direct-commit call site has to be re-seamed onto the sw
 and the ones that matter are the ones whose correctness argument mentions an
 epoch.**
 
-**5. Concurrent role changes became lossy, and neither document noticed.** A role
+**5. ~~Concurrent role changes became lossy~~ Concurrent role changes wedge membership,
+and neither document noticed — then this item understated what it had found.** A role
 change is a read-modify-write whose read is the committed role table and whose write
 is now a proposal. On the direct path the per-group lock sufficed — the first
 toggle's commit updated the table and the second read it. On the proposal path a
 proposal changes nothing until it is swept, so two toggles taken a moment apart both
 read the **same** committed table and each proposes a table carrying only its own
-change; RFC 9420 permits at most one `GroupContextExtensions` proposal per commit,
-so the sweep keeps one and **silently discards the other**. Serializing cannot fix
-it, because there is nothing for the second read to observe, and the client cannot
-repair it either — `ProposalKind::RoleChange` carries no payload, so it cannot read
-back what it proposed. Web and iOS **refuse** a second role change while one is
-pending and say so; **Android does not**, so a second concurrent toggle there still
-loses one silently (recorded in [§ Open questions](#open-questions)). The UX spec's
-"a second, different add composes into the same sweep" is true for adds and **false
-if generalised to role changes**.
+change. Serializing cannot fix that, because there is nothing for the second read to
+observe, and the client cannot repair it either — `ProposalKind::RoleChange` carries
+no payload, so it cannot read back what it proposed.
+
+~~RFC 9420 permits at most one `GroupContextExtensions` proposal per commit, so the
+sweep keeps one and **silently discards the other**.~~ **Corrected 2026-08-28, and
+this item stated the milder of the two faces.** RFC 9420 admits at most one
+`GroupContextExtensions` proposal per commit, and OpenMLS enforces that as a **hard
+validation failure**, not a silent selection: `validate_group_context_extensions_proposal`
+returns `TooManyGCEProposals` on the second one
+(`openmls-0.8.1`, `src/group/public_group/validation.rs`), and it is reached from
+`CommitBuilder::build` (`src/group/mls_group/commit_builder.rs`). So a pending set
+holding two role changes **cannot be swept at all**. The proposal store empties only
+when a commit is *merged*, and `refuse_if_proposals_pending` closes every direct-commit
+escape (add, remove, role-change, external-join approve, `self_update`) while anything
+is pending, so a committer holding both has **no way out**: its membership
+operations are dead. **Both faces are real, and this item named only the second.**
+Since both proposals travel the journal, the ordinary case is that both reach every
+candidate committer — and then **the whole group's membership is wedged**, escapable
+only if some committer's view happens to hold just one. The **asymmetric** case is the
+one described above: a committer holding only one sweeps, the merge empties everyone's
+store, and the other change is dropped group-wide. That silent discard is the *lucky*
+outcome, not the failure mode. Chat is unaffected in both, because
+`create_application_message` parks the pending set.
+
+**Closed in the core (2026-08-28), in two halves, and neither is redundant.**
+`Group::refuse_if_role_change_pending` refuses a second role change at propose time. It
+is placed **last** in `propose_group_roles` — after authority (`authorise_own_proposal`)
+and validity (`refuse_unenforceable_role_table`) — so a caller handed a broken table
+still learns *that* rather than "not now", and it counts only proposals classifying as
+`ProposalKind::RoleChange`, so a pending add, remove or leave does not block. `sweep_keeps`
+carries the other half: **at most one role change per sweep**, by the same
+exclusion-not-refusal mechanism its existing `role_change_survives` clause uses.
+**The sweep-side half is not made redundant by the propose-side guard**, and the reason is
+recorded here because a later hand will otherwise read it as duplicate and delete it: the
+guard cannot see a state that arises **legitimately**. A device that publishes a
+role-change proposal and then loses its own record of it before persisting — the ADR-0040
+crash window — proposes a second one in good faith, and every *peer* then holds two.
+Without the sweep-side bound those peers can never sweep again. The guard keeps a
+well-behaved device from building the set; the bound keeps a set that reached it anyway
+from wedging the group. Indexed as **C-65**.
+
+**Which sharpens "the client cannot repair it either" in a second way.** The repair has to
+be a **refusal before the second proposal exists**, because once it exists no client can do
+anything about it: it cannot withdraw a proposal, it cannot read back what it proposed,
+and — under the corrected reading — its committer cannot even sweep past it. That is the
+argument for putting the rule in the core rather than in three clients.
+
+~~Web and iOS **refuse** a second role change while one is pending and say so; **Android
+does not**, so a second concurrent toggle there still loses one silently.~~ **Stale as of
+the core fix.** The refusal now holds for **every** caller on every platform and cannot
+drift between them. What Android still lacks is **readable copy for the refusal**, not the
+refusal itself: it will surface the core's `Error::Group` diagnostic where web and iOS
+surface a sentence. That is the remaining client follow-up
+([§ Open questions](#open-questions)).
+
+The UX spec's "a second, different add composes into the same sweep" is true for adds and
+**false if generalised to role changes**.
 
 **6. The direct-commit refusal reaches the external-join path, and only S7 closes
 it.** `refuse_if_proposals_pending` (the `a90fa90` hardening) makes the direct and
@@ -2315,17 +2365,33 @@ that returns early on a **loss** swallows them anyway. iOS had this recorded as 
 `KNOWN CONSEQUENCE` comment in its own `adjudicate` and had shipped it, which is worse
 than not knowing — a defect annotated in place reads as a decision.
 
-**8. A row annotation that could never render.** UX §5.2 specifies `Waiting to leave.`
-for a member's own pending departure. Web and Android read a pending request's target
-straight off `ProposalKind::Remove`'s target field — which is `None` for a `Leave`,
-because RFC 9420 `SelfRemove` names no target at all and the removed leaf is the
-sender's own, exactly as `commit_effects` says. So the leave branch could never match
-and the copy was unreachable on two of three clients. Small in consequence and
-instructive in cause: **the core states the rule in a comment, the FFI expresses it as
-an absent field, and two independent clients read the absence as "no target" rather
-than as "the target is the sender"**. The type was honest and the reading was not. It
-was found only because iOS resolved it correctly and the mirror had to explain the
-discrepancy.
+**8. A mapping two clients read backwards — on a branch nothing reaches.** Web and
+Android resolved a pending request's target straight off `ProposalKind::Remove`'s
+target field, which is `None` for a `Leave`: RFC 9420 `SelfRemove` names no target at
+all and the removed leaf is the sender's own, exactly as `commit_effects` says. Both
+read that absence as *no target* rather than as *the target is the sender*, so their
+`leave` branch could never match. iOS resolved it correctly, and the mirror had to
+account for the discrepancy, which is the only reason it surfaced.
+
+**The severity was first recorded as "the `Waiting to leave.` copy never renders", and
+that is wrong** — the correction is kept rather than quietly edited, because the way it
+was got wrong is the instructive part. The copy renders, on the branch that actually
+carries a self-leave: `Group::propose_remove_member` always emits
+`ProposalKind::Remove { target_leaf }`, so a member leaving proposes the removal of
+its **own** leaf and folds as a `remove` whose target is populated, which
+`rowAnnotation` then reads as `Waiting to leave.` because the target is the reader.
+`ProposalKind::Leave` is **unreachable from the wire in Lakko**: a `SelfRemove` must be
+sent as a `PublicMessage`, and `Group::create` keeps the OpenMLS pure-ciphertext
+policy, so OpenMLS refuses to craft one — the core pins that refusal in
+`self_removal_is_gated_for_its_own_sender_and_refused_for_the_owner` precisely so that
+changing the wire-format policy (which would stop encrypting handshakes to the
+zero-trust DS) fails a named test and forces a look at this arm. So the mapping was
+wrong, the fix is right and is now unit-tested, and **no user ever lost anything by
+it**. The lesson is not about the mapping: reading the FFI's shape and the UX spec was
+enough to conclude the branch was dead, and it took reading the *core's* wire-format
+policy to learn that the branch is dead for an entirely different reason and that the
+feature worked all along. **A defect inferred from two layers is a hypothesis until the
+third layer is read.**
 
 ---
 
@@ -2572,11 +2638,18 @@ durability shape.
   open. Found and fixed during the client sprints, from both ends
   ([§ What the client sprints found](#what-the-client-sprints-found) item 4), and
   recorded here because it is a *class*, not an incident.
-- **Concurrent role changes are lossy where concurrent adds compose.** RFC 9420
-  permits one `GroupContextExtensions` proposal per commit, so a sweep silently
-  discards the second, and `ProposalKind::RoleChange` carries no payload for the
-  client to reconstruct from. Web and iOS refuse the second and say so; **Android
-  does not** ([§ Open questions](#open-questions)).
+- **Concurrent role changes do not compose where concurrent adds do — and the failure
+  is a wedge, not a loss.** RFC 9420 admits one `GroupContextExtensions` proposal per
+  commit, and OpenMLS enforces it as a hard build failure (`TooManyGCEProposals`), so a
+  pending set holding two cannot be swept **at all** — and since the store empties only
+  on a merge and `refuse_if_proposals_pending` closes the direct-commit escapes, every
+  committer that holds both has its membership operations wedged.
+  `ProposalKind::RoleChange` carries no payload for the client to reconstruct from.
+  ~~Web and iOS refuse the second and say so; **Android does not**.~~ **Closed in the
+  core 2026-08-28** by a propose-time refusal plus a sweep-side bound of one
+  (**C-65**); see [§ What the client sprints found](#what-the-client-sprints-found)
+  item 5. The remaining follow-up is client copy, not enforcement
+  ([§ Open questions](#open-questions)).
 - **Membership can wait indefinitely** when no candidate is running the app — a
   visible, honest wait replacing a silent fork, but still a behaviour that did not
   exist before, and one ownership transfer narrows rather than removes.
@@ -2797,15 +2870,28 @@ crypto review.**
   ADR. Everything S7 needs exists (the proposal store, the gate's deliberately
   separate external-join arm, the sweep); what it needs deciding is what `Approve`
   *means* once it stops meaning "added", which the UX spec §7 already drafts.
-- **Android does not refuse a second concurrent role change; web and iOS do.** The
-  loss is real and silent — RFC 9420 permits one `GroupContextExtensions` proposal
-  per commit, so the sweep keeps one and drops the other, and
-  `ProposalKind::RoleChange` carries no payload for the client to notice with.
-  `Group::propose_group_roles` does not refuse it either, so **the natural fix is
-  arguably the core rather than the third client**: a refusal there would hold for
-  every caller and could not drift between platforms, at the cost of a rule that is
-  about client ergonomics rather than protocol safety. Recorded as a decision, not
-  scheduled.
+- ~~**Android does not refuse a second concurrent role change; web and iOS do.**~~
+  **Closed 2026-08-28 in the core, and the call this bullet floated — "the natural fix
+  is arguably the core rather than the third client" — is the one that was taken.**
+  `Group::refuse_if_role_change_pending` refuses at propose time for every caller, and
+  `sweep_keeps` bounds a sweep to one role change, which the propose-side guard does not
+  cover because a peer can hold two **legitimately** (the ADR-0040 crash window). The
+  bullet was also **wrong about the consequence**, and in the reassuring direction: the
+  failure is not a silent loss but a **membership wedge** — OpenMLS refuses the whole
+  sweep with `TooManyGCEProposals` — see
+  [§ What the client sprints found](#what-the-client-sprints-found) item 5. Pinned as
+  **C-65**.
+- **All three clients should surface the new core refusal as human copy, not the core
+  diagnostic.** This is what replaces the bullet above. The refusal string is now in the
+  UX spec §6 table; Android has no client-side pre-check at all, so today it would show
+  the raw `Error::Group` text. **Checked while closing the entry, and it is the good
+  news:** web's `hasPendingRoleChange` (`apps/web/src/contacts/client.ts`) and iOS's
+  (`apps/ios/Lakko/Chat/ChatRepository.swift`) are **correctly narrow** — each filters the
+  pending set on the role-change kind specifically, so neither is stricter than the core
+  rule and neither refuses a legitimate toggle merely because an unrelated add or remove
+  is pending. **One residual worth fixing when the copy is done:** both clients' own doc
+  comments still describe the superseded keeps-one-discards-the-other mechanism, so the
+  correction above has to reach three files, not one.
 - **Android surfaces a received proposal as a timeline row, and never stamps an
   observation for one.** UX §10 treats a membership request as a panel signal, and
   web and iOS do; Android's `ChatClient` maps `ProcessedMessage.Proposal` to a

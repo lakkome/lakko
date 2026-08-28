@@ -288,17 +288,34 @@ A pending **role change** gets no row annotation — it cannot be attributed to 
   > old direct path the per-group lock sufficed, because the first toggle's *commit*
   > updated the table and the second read it. A **proposal** changes nothing until it is
   > swept, so two toggles a moment apart both read the same committed table and each
-  > proposes a table carrying only its own change — and RFC 9420 permits at most one
-  > `GroupContextExtensions` proposal per commit, so the sweep keeps one and **silently
-  > discards the other**. Serializing cannot fix it (there is nothing for the second read
-  > to observe) and the client cannot repair it (`ProposalKind::RoleChange` carries no
-  > payload, so it cannot read back what it proposed). The honest answer is to **refuse
-  > the second and say so**, which web and iOS do:
-  > `A role change is already waiting to apply. Wait for it to land, then try again.`
-  > The window is one sweep — the owner is rank 0 and sweeps immediately — so this is
-  > momentary in the ordinary case and a real wait only when the committer is absent,
-  > which is precisely when a silent loss would be worst. **Android does not carry the
-  > refusal**, so a second concurrent toggle there still loses one silently.
+  > proposes a table carrying only its own change. Serializing cannot fix it (there is
+  > nothing for the second read to observe) and the client cannot repair it
+  > (`ProposalKind::RoleChange` carries no payload, so it cannot read back what it
+  > proposed).
+  >
+  > **Re-amended 2026-08-28 — the consequence was understated.** RFC 9420 admits at most
+  > one `GroupContextExtensions` proposal per commit, and OpenMLS enforces that as a
+  > **hard failure** rather than ~~the sweep keeps one and **silently discards the
+  > other**~~ a silent selection: a pending set holding two **cannot be swept at all**,
+  > and because the store empties only when a commit is merged and a direct commit is
+  > refused while anything is pending, a committer holding both has its membership
+  > operations **wedged**. In the ordinary case both proposals reach every candidate
+  > committer, so the whole group's membership stalls; the "one is silently dropped"
+  > outcome is the *lucky* asymmetric case, not the failure mode. Either way, **the
+  > honest answer is the same** — refuse the second and say so — and as of 2026-08-28
+  > **the core itself refuses** (`Group::refuse_if_role_change_pending`, pinned as
+  > **C-65**), so the refusal now holds on all three platforms and cannot drift between
+  > them. The window is one sweep — the owner is rank 0 and sweeps immediately — so this
+  > is momentary in the ordinary case and a real wait only when the committer is absent,
+  > which is precisely when a silent loss would have been worst. ~~**Android does not
+  > carry the refusal**, so a second concurrent toggle there still loses one silently.~~
+  > **Stale:** what Android lacks is the *copy* in §6, not the refusal — without it the
+  > user sees the core's raw diagnostic.
+  >
+  > **The carve-out is narrow, and must stay narrow.** Only another **role change**
+  > blocks a role change; a pending add, remove or leave composes into the same sweep and
+  > must not disable the toggle. Ownership transfer is a role-table rewrite under another
+  > name, so it collides in both directions.
 
 ---
 
@@ -346,10 +363,38 @@ error. One string per core refusal, reused verbatim wherever it surfaces:
 | remove targets the owner | `The group owner cannot be removed.` |
 | owner self-remove / leave | `The group owner cannot leave the group.` |
 | role change, not owner | `Only the group owner can change admins.` |
+| role change, one already in flight | `A role change is already waiting to apply. Wait for it to land, then try again.` |
 | unsupported / unresolvable / no role table | `This change could not be requested.` |
 
 The last row is the fail-closed fallback. It must exist, must never leak an internal
 reason, and must never be reached in normal use.
+
+**The in-flight row is the odd one out, and its wording carries that.** Every other row
+is an **authorisation** refusal — permanent for this user, in this group, until something
+about their role changes — so its copy is a statement of fact with no invitation to
+retry. The in-flight row (`Group::refuse_if_role_change_pending`, added 2026-08-28,
+pinned as **C-65**) is an **availability** refusal: the user is fully authorised and the
+answer will be different in a moment, which is why it is the one string that ends by
+telling them to try again. Getting that distinction backwards in either direction is a
+real UX defect — an authorisation refusal inviting a retry sends the user in a loop, and
+a timing refusal phrased as a prohibition tells them they cannot do something they can.
+
+Three constraints on where it is shown:
+
+- It is a **synchronous, local** refusal like the rest of the table — the core refuses
+  before publishing, so nothing reaches the wire and nothing is left half-done.
+- It must **not** appear for a pending add, remove or leave. Only another role change
+  blocks a role change (§5). A client that disables the admin toggle whenever *anything*
+  is pending is stricter than the core and wrong.
+- The copy deliberately does **not** say "you already have one waiting", even though a
+  role change is owner-only and the core checks authority *before* this guard, so the
+  only person who can ever see this string is the owner and the blocking proposal is one
+  their own device authored. It may be one the device **no longer remembers** — the
+  ADR-0040 crash window, where a proposal was published and its local record lost — and
+  telling a user they did something they have no memory of doing is worse than stating
+  the group's state neutrally. Admins and members never see this string at all: they
+  cannot propose a role change in the first place, and the sweep-side bound (**C-65**) is
+  what covers them.
 
 **Delayed refusal.** A request can be refused *after* the fact — the requester was demoted
 while the request was in flight, so peers dropped it and it never landed. The requester
@@ -874,16 +919,24 @@ the list's real subject is *what S4-S6 must know that the ADR did not say*.
 6. **Typed refusal reasons on the FFI (§9.1).** Prose-matching `Error::Group` strings across
    three clients would work and would be wrong. Worth the small core change. **Still open,
    and the clients did the defensible thing rather than the wrong one:** none of them
-   built the six-string refusal table this spec specifies, precisely because mapping core
-   prose to fixed copy is the drift class the spec flags. So the table is unbuilt *and*
-   the FFI change it depends on is unmade — the two go together and neither should ship
-   without the other.
-7. **Android does not refuse a second concurrent role change** (§5.3). Web and iOS do, and
-   say so with the copy quoted there. The loss on Android is silent, which is the worst
-   available shape for it. Whether the fix belongs on the third client or in
-   `Group::propose_group_roles` — where it would hold for every caller and could not drift
-   between platforms — is a real choice, at the cost of putting a client-ergonomics rule
-   into the core.
+   built the ~~six~~ **seven**-string refusal table this spec specifies, precisely because
+   mapping core prose to fixed copy is the drift class the spec flags. So the table is
+   unbuilt *and* the FFI change it depends on is unmade — the two go together and neither
+   should ship without the other. **The seventh string (role change already in flight,
+   added 2026-08-28) sharpens the case rather than merely lengthening the table:** it is
+   the first *availability* refusal beside six authorisation ones, so a client mapping by
+   prose has to distinguish "you may not" from "not yet" on a substring match, and getting
+   that wrong flips a retry prompt onto a permanent prohibition or vice versa.
+7. ~~**Android does not refuse a second concurrent role change** (§5.3).~~ **Closed
+   2026-08-28 — in the core, which was the choice this item posed.**
+   `Group::refuse_if_role_change_pending` refuses at propose time for every caller, and
+   `sweep_keeps` bounds a sweep to one role change for the case the propose-side guard
+   cannot see (a peer holding two after the ADR-0040 crash window). Pinned as **C-65**.
+   The item also **understated the consequence**: the failure was not a silent loss but a
+   membership **wedge** — OpenMLS refuses the whole sweep — and the silent loss was the
+   lucky asymmetric case (§5.3). **What remains is copy, not enforcement:** Android has no
+   client-side pre-check, so it surfaces the core's raw diagnostic where web and iOS
+   surface the §6 string. That is item 6's problem now, not a separate one.
 
 ---
 

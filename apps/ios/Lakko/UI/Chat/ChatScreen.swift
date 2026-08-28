@@ -1084,6 +1084,11 @@ private struct AttachmentChip: View {
 private struct MembersSheet: View {
     @ObservedObject var viewModel: ChatViewModel
 
+    /// ADR-0045 (UX §6) — the `Leave group` confirmation. Local to the sheet:
+    /// it is a presentation concern with no bearing on the request, and nothing
+    /// outside this view may open it.
+    @State private var leaveConfirmPresented = false
+
     private var trimmedInput: String {
         viewModel.addMemberInput.trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -1103,10 +1108,27 @@ private struct MembersSheet: View {
                             Button("Add") { viewModel.onAddMember() }
                                 .disabled(viewModel.membershipBusy || trimmedInput.isEmpty)
                         }
+                    }
+                }
+                // ADR-0045 (UX §14) — the membership error/notice slot is
+                // UNGATED, and that is a fix rather than a layout choice. It
+                // used to live inside the `canManageMembers` `Add member`
+                // section, so a plain member's membership error was invisible.
+                // That was tolerable only while a plain member had no membership
+                // action at all; `Leave group` is one, so the old placement
+                // would have swallowed exactly the errors belonging to the users
+                // who can now act.
+                if viewModel.membershipError != nil || viewModel.membershipNotice != nil {
+                    Section {
                         if let err = viewModel.membershipError {
                             Text(err)
                                 .font(.footnote)
                                 .foregroundStyle(.red)
+                        }
+                        if let notice = viewModel.membershipNotice {
+                            Text(notice)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
                         }
                     }
                 }
@@ -1249,6 +1271,46 @@ private struct MembersSheet: View {
                         }
                     }
                 }
+                // ADR-0045 (UX §5 item 6) — `Leave group`: bottom of the panel,
+                // destructive, and HIDDEN for the owner. The owner's departure
+                // is refused by the core fail-closed (`set_group_roles` is
+                // owner-only, so an ownerless group could never appoint another
+                // admin again); that is a PRECONDITION rather than a dead end —
+                // transfer ownership, then leave as an ordinary member — but no
+                // client has a transfer affordance yet, so offering a control
+                // that always refuses would be worse than offering none.
+                if viewModel.leaveAffordance.isOffered {
+                    Section {
+                        Button(role: .destructive) {
+                            leaveConfirmPresented = true
+                        } label: {
+                            Text("Leave group")
+                        }
+                        // UX §5.3 — visible but disabled once we have asked.
+                        // Hiding it then would read as the permission having
+                        // vanished, where our own row's `Waiting to leave.`
+                        // annotation explains a disabled control.
+                        .disabled(viewModel.leaveAffordance != .enabled)
+                    }
+                }
+            }
+            // UX §3 / §6 — the confirmation is the LAST EXIT, not a courtesy: a
+            // published request cannot be withdrawn (there is no wire withdraw,
+            // and evicting it locally would leave it live in every peer's
+            // store). The body carries the one fact the user needs — that they
+            // remain in the group, receiving messages, until someone applies it.
+            .confirmationDialog(
+                "Leave this group?",
+                isPresented: $leaveConfirmPresented,
+                titleVisibility: .visible
+            ) {
+                Button("Leave", role: .destructive) { viewModel.onLeaveGroup() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text(
+                    "You will keep receiving messages until an owner or an admin applies "
+                        + "your request. You will need a new invite to rejoin."
+                )
             }
             .navigationTitle("Members")
             .navigationBarTitleDisplayMode(.inline)
