@@ -96,6 +96,11 @@ public final class ChatRepository: ObservableObject {
     /// so the UX quiet window can mean the same thing on every device.
     private let pendingRequestStore: PendingRequestStore
 
+    /// ADR-0045 UX §6.1.9 — the owner this device last observed, per group, so
+    /// an ownership CHANGE can be told apart from a FIRST observation. Nothing
+    /// here is load-bearing: losing it costs one notice, not a role.
+    private let lastObservedOwnerStore: LastObservedOwnerStore
+
     /// ADR-0045 S4b — when this device last emitted its own liveness beacon, per
     /// group. This device's OWN local clock, which is legitimate here and
     /// nowhere else in the beacon design: it governs only this device's send
@@ -160,7 +165,8 @@ public final class ChatRepository: ObservableObject {
         commitOutbox: CommitOutboxStore = CommitOutboxStore(),
         pushRouting: PushGroupRouting = PushGroupRouting(),
         beaconStore: BeaconObservationStore = BeaconObservationStore(),
-        pendingRequestStore: PendingRequestStore = PendingRequestStore()
+        pendingRequestStore: PendingRequestStore = PendingRequestStore(),
+        lastObservedOwnerStore: LastObservedOwnerStore = LastObservedOwnerStore()
     ) {
         self.chatClient = chatClient
         self.dsClient = dsClient
@@ -172,6 +178,7 @@ public final class ChatRepository: ObservableObject {
         self.pushRouting = pushRouting
         self.beaconStore = beaconStore
         self.pendingRequestStore = pendingRequestStore
+        self.lastObservedOwnerStore = lastObservedOwnerStore
         // SECURITY (nonce-reuse-on-crash) — wire the fail-closed MLS
         // ratchet persister into the ChatClient so EVERY application send
         // (chat / edit / delete / reaction / typing / read-receipt /
@@ -319,6 +326,11 @@ public final class ChatRepository: ObservableObject {
             // timings behind for a later session to fold.
             beaconStore.clearForAccount(accountIdB64: accountIdB64)
             pendingRequestStore.clearForAccount(accountIdB64: accountIdB64)
+            // ADR-0045 UX §6.1.9 — and no memory of who owned which group. It
+            // is a public role-table key rather than a secret, but a forgotten
+            // device that kept it would greet the next session with a
+            // "{name} made you the owner" notice about a change it never saw.
+            lastObservedOwnerStore.clearForAccount(accountIdB64: accountIdB64)
             // Phase 2a3f1 — drop the plaintext message log too.
             // The Keychain wrap key is shared across accounts
             // (per-installation, not per-account) so we leave
@@ -707,10 +719,12 @@ public final class ChatRepository: ObservableObject {
             // The direct commit below is unreachable for a role change (the
             // locked body already refuses a group with no table), so this is
             // not a fallback — it is the only route.
+            // UX §6, seventh row — the ONE string, defined once in
+            // `OwnershipTransfer.swift` and used by both C-65 pre-checks. This
+            // used to throw its own near-variant prose, which is precisely the
+            // drift class §12.6 exists to prevent.
             if hasPendingRoleChange(groupIdHex: groupIdHex) {
-                throw ChatError.argument(
-                    "a role change is already waiting to be applied for this group"
-                )
+                throw ChatError.argument(roleChangeAlreadyPendingMessage)
             }
             return try await proposeMemberAdminLocked(
                 groupIdHex: groupIdHex,
@@ -762,6 +776,123 @@ public final class ChatRepository: ObservableObject {
         }
         return try await publishProposal(
             record: record, groupIdHex: groupIdHex, proposalBytes: proposalBytes)
+    }
+
+    /// ADR-0045 UX §6.1 — hand the group's owner slot to another member.
+    ///
+    /// **Always the proposal arm, and there is no second one here.** The UniFFI
+    /// surface carries `transferOwnership` too, and this method deliberately
+    /// never reaches it, because for this flow the direct arm is *structurally
+    /// unreachable*: the UI gates the control on `isOwner`, which is read off
+    /// the role table (``ownRole(groupIdHex:)``), and
+    /// ``usesProposalPath(groupIdHex:)`` is the identical `groupRoles()` read. A
+    /// group with no role table has no owner, so `isOwner && !usesProposalPath`
+    /// cannot hold. That makes transfer the one membership action needing a
+    /// single arm rather than two, unlike add / remove / role change, each of
+    /// which carries a direct fallback for the table-less case. A table-less
+    /// group reaching here anyway is refused by the core, which is the right
+    /// place for it.
+    ///
+    /// Everything else mirrors ``setMemberAdmin(groupIdHex:memberSignaturePubkey:makeAdmin:)``
+    /// exactly, because a transfer **is** a role change — deliberately not a new
+    /// commit type, just the owner-only role-table rewrite with the owner slot
+    /// moved. So it inherits that path's discipline verbatim: the per-group
+    /// commit lock, the C-65 pre-check, no ADR-0040 outbox entry and no reset
+    /// region (a proposal advances no epoch, so there is nothing to roll back),
+    /// and a `.proposed` outcome the caller sweeps immediately.
+    ///
+    /// `newOwnerSignaturePubkey` is the successor's 32-byte Ed25519 signature
+    /// public key — the stable handle `Group.members()` reports and the role
+    /// table keys on — never a leaf index: OpenMLS hands a vacated leaf to the
+    /// next Add.
+    ///
+    /// `outgoing` decides what becomes of THIS device's own role and is
+    /// **required**. The core refuses to default it because either silent choice
+    /// is wrong in one direction, and UniFFI has no `Default` derive, so the
+    /// generated signature is mandatory; this one keeps the property rather than
+    /// handing back a defaulted argument the core deliberately withheld.
+    public func transferGroupOwnership(
+        groupIdHex: String,
+        newOwnerSignaturePubkey: Data,
+        outgoing: OutgoingOwner
+    ) async throws -> MembershipOutcome {
+        // ADR-0040 (G-35) — serialize against every other membership operation
+        // on this group, exactly as the sibling role-change path does.
+        try await withCommitLock(groupIdHex: groupIdHex) { [self] in
+            // C-65, and it collides in BOTH directions: a pending role change
+            // refuses a transfer, and a pending transfer refuses a role change.
+            // It falls out of `propose_ownership_transfer` delegating to
+            // `propose_group_roles` rather than being restated, which is the
+            // point. The UI disables the control with this same string as its
+            // reason once the blocking request is past the quiet window (UX
+            // §6.1.8's deliberate asymmetry with the admin toggles, which keep
+            // refuse-on-tap); this is the check for the window in which the
+            // control is still live.
+            if hasPendingRoleChange(groupIdHex: groupIdHex) {
+                throw ChatError.argument(roleChangeAlreadyPendingMessage)
+            }
+            return try await proposeOwnershipTransferLocked(
+                groupIdHex: groupIdHex,
+                newOwnerSignaturePubkey: newOwnerSignaturePubkey,
+                outgoing: outgoing)
+        }
+    }
+
+    /// The serialized body of
+    /// ``transferGroupOwnership(groupIdHex:newOwnerSignaturePubkey:outgoing:)``.
+    /// Runs only under ``withCommitLock(groupIdHex:_:)``; never call it directly.
+    private func proposeOwnershipTransferLocked(
+        groupIdHex: String,
+        newOwnerSignaturePubkey: Data,
+        outgoing: OutgoingOwner
+    ) async throws -> MembershipOutcome {
+        guard let identity = canonicalIdentity else {
+            throw ChatError.argument("ChatRepository not bootstrapped — call bootstrap() first")
+        }
+        guard let record = groups[groupIdHex] else {
+            throw ChatError.argument("no live Group handle for \(groupIdHex)")
+        }
+        let proposalBytes: Data
+        do {
+            proposalBytes = try record.group.proposeOwnershipTransfer(
+                identity: identity,
+                newOwner: newOwnerSignaturePubkey,
+                outgoing: outgoing
+            )
+        } catch {
+            throw ChatError.wrapped("proposeOwnershipTransfer failed", underlying: error)
+        }
+        return try await publishProposal(
+            record: record,
+            groupIdHex: groupIdHex,
+            proposalBytes: proposalBytes,
+            // UX §6.1.10 — the successor's key on OUR OWN observation record is
+            // the only thing that later tells this transfer from an ordinary
+            // promote, and it is what names the person in
+            // `Waiting to make {name} the owner.`
+            transferToB64: base64Encode(newOwnerSignaturePubkey))
+    }
+
+    /// ADR-0045 UX §6.1.9 — the owner signature key (base64) this device last
+    /// observed for `groupIdHex`, or `nil` when it never observed one. `nil` is
+    /// the fail-open case: a first observation is not a change.
+    public func lastObservedOwner(groupIdHex: String) -> String? {
+        guard let accountIdB64 = currentAccountIdB64,
+              let record = groups[groupIdHex] else { return nil }
+        return lastObservedOwnerStore.load(
+            accountIdB64: accountIdB64, groupIdB64: base64Encode(record.groupId))
+    }
+
+    /// ADR-0045 UX §6.1.9 — record the owner this device is observing now. The
+    /// caller must decide the notice FIRST, or the comparison would always be
+    /// against itself.
+    public func rememberObservedOwner(groupIdHex: String, ownerKeyB64: String) {
+        guard let accountIdB64 = currentAccountIdB64,
+              let record = groups[groupIdHex] else { return }
+        lastObservedOwnerStore.remember(
+            accountIdB64: accountIdB64,
+            groupIdB64: base64Encode(record.groupId),
+            ownerKeyB64: ownerKeyB64)
     }
 
     // ADR-0045 — the direct `setGroupRoles` commit body that used to live here
@@ -2440,10 +2571,18 @@ public final class ChatRepository: ObservableObject {
     /// with the commit paths is the point: a proposal advances no epoch, so a
     /// lost snapshot costs the local copy of a request the journal still holds,
     /// where a lost commit snapshot costs the device its place in the group.
+    ///
+    /// `transferToB64` (ADR-0045 UX §6.1.10) is supplied only by the ownership-
+    /// transfer path and is filed on the `role-change` observation alone. Keying
+    /// it on that one synthetic request key is exact rather than approximate:
+    /// C-65 permits at most one pending role change per group and the caller has
+    /// just checked there was none, so the only role change in this set is the
+    /// one we published a line ago.
     private func publishProposal(
         record: GroupRecord,
         groupIdHex: String,
-        proposalBytes: Data
+        proposalBytes: Data,
+        transferToB64: String? = nil
     ) async throws -> MembershipOutcome {
         persistSnapshotBestEffort()
         let publish: PublishResult
@@ -2469,12 +2608,14 @@ public final class ChatRepository: ObservableObject {
            let pending = try? record.group.pendingProposals() {
             let groupIdB64 = base64Encode(record.groupId)
             for proposal in pending where proposal.stored {
+                let key = proposalKey(proposal)
                 pendingRequestStore.record(
                     accountIdB64: accountIdB64,
                     groupIdB64: groupIdB64,
-                    key: proposalKey(proposal),
+                    key: key,
                     atMs: atMs,
-                    own: proposal.senderLeaf == (try? record.group.ownLeafIndex())
+                    own: proposal.senderLeaf == (try? record.group.ownLeafIndex()),
+                    transferToB64: key == "role-change" ? transferToB64 : nil
                 )
             }
         }

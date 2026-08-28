@@ -22,14 +22,21 @@ import Foundation
 ///
 /// ## Why this is a decision function rather than three `if`s in a view
 ///
-/// The same rule has **two consumers that must not disagree**: the control's
-/// visibility, and the action's own pre-check. A control that is merely hidden
-/// is not a guarantee — `isOwner` is re-read on a roster refresh, so a role
-/// change landing between a refresh and a tap would otherwise carry a request
-/// the core refuses into the core, and surface the core's own prose
-/// ("removal proposal refused: the group owner cannot be removed") to a user
-/// who never asked about leaves. Deciding once, here, keeps the offered state
-/// and the permitted state the same thing.
+/// A control that is merely not offered is not a guarantee — `isOwner` is only
+/// as fresh as the last roster refresh, so a role change landing between a
+/// refresh and a tap would otherwise carry a request the core refuses into the
+/// core, and surface the core's own prose ("removal proposal refused: the group
+/// owner cannot be removed") to a user who never asked about leaves. This
+/// function is the action's pre-check, stated once so it can be driven directly
+/// by a test.
+///
+/// Since UX §6.1 the *rendering* half moved to ``exitBlock(_:)`` in
+/// `OwnershipTransfer.swift`, which decides the whole exit block — the owner's
+/// `Transfer ownership` above a disabled `Leave group`, or a member's live
+/// `Leave group` alone. The split is deliberate rather than duplication: one
+/// module decides what the panel OFFERS, this one decides what the action
+/// PERMITS, and a layered defence is only a defence while neither is derived
+/// from the other.
 ///
 /// ## Why there is no `Cancel`, and therefore why the confirm matters
 ///
@@ -49,9 +56,26 @@ public enum LeaveGroupRefusal: Equatable {
     /// The owner cannot leave *while owner*: `set_group_roles` is owner-only, so
     /// an ownerless group could never appoint another admin again. This is a
     /// precondition rather than a dead end — transfer ownership, then leave as
-    /// an ordinary member — but no client has a transfer affordance yet, so the
-    /// honest surface is to hide the control rather than offer one that always
-    /// refuses.
+    /// an ordinary member.
+    ///
+    /// **The panel no longer HIDES the owner's control, and this arm no longer
+    /// decides that** (UX §6.1.1). It used to, and the reason was recorded here:
+    /// no client had a transfer affordance, so a control that always refuses was
+    /// worse than no control. `OwnershipTransfer.swift` built the affordance, so
+    /// the sentence and the code change together — ``exitBlock(_:)`` renders the
+    /// owner's `Leave group` present and DISABLED, carrying
+    /// ``leaveBlockedByOwnershipMessage``, directly below the
+    /// `Transfer ownership` that discharges it. A disabled control whose stated
+    /// reason names the action sitting above it is a signposted route, not a
+    /// refusal; hiding it now would leave an owner looking for the exit finding
+    /// nothing at all about leaving.
+    ///
+    /// What this arm still does is answer the ACTION when it is reached anyway
+    /// — a role change landing between a roster refresh and a tap — with this
+    /// feature's own vocabulary rather than the core's prose. The two layers are
+    /// deliberately independent: ``exitBlock(_:)`` decides what renders,
+    /// ``leaveGroupAffordance(usesProposalPath:isOwner:ownLeaf:busy:requests:)``
+    /// decides what is permitted, and neither is proof of the other.
     case ownerCannotLeave
     /// No role table (a legacy / open group), or this device's own leaf could
     /// not be resolved. The UX §6 fail-closed fallback: it must exist, must
@@ -89,11 +113,15 @@ public enum LeaveGroupAffordance: Equatable {
     }
 }
 
-/// The one rule: may this device offer `Leave group`, and is it actionable?
+/// The one rule: may this device ACT on `Leave group`, and is it actionable?
 ///
 /// Mirrors the web gate `usesProposalPath() && !isOwner() && ownLeaf() !== undefined`
-/// for visibility and `busy() || rowAnnotation(...) !== null` for the disabled
-/// state, so the three clients agree on when the control appears.
+/// plus `busy() || rowAnnotation(...) !== null`, so the three clients agree on
+/// when leaving is permitted. What the panel RENDERS is ``exitBlock(_:)``'s
+/// answer (UX §6.1.1) — the two agree by construction on every arm except the
+/// owner's, where the exit block shows the control disabled with a route out
+/// and this function still reports `.hidden(.ownerCannotLeave)` as the answer
+/// to a tap that got through anyway.
 ///
 /// The already-requested case is `disabled` rather than `hidden` for the same
 /// reason UX §5.3 keeps a pending row's `Remove` visible-but-disabled: hiding it

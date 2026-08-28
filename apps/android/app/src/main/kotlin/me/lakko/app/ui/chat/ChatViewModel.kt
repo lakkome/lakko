@@ -32,6 +32,7 @@ import me.lakko.app.contacts.AcceptedContactsStore
 import uniffi.lakko_ffi_uniffi.AttachmentRef
 import uniffi.lakko_ffi_uniffi.FfiCallSignalingBody
 import uniffi.lakko_ffi_uniffi.GroupMember
+import uniffi.lakko_ffi_uniffi.OutgoingOwner
 import uniffi.lakko_ffi_uniffi.Role
 import uniffi.lakko_ffi_uniffi.RoleTable
 import uniffi.lakko_ffi_uniffi.sfuPeerTag
@@ -432,6 +433,10 @@ public class ChatViewModel(
             // the panel that produced it: the pending row annotation is the
             // durable signal, not this.
             mutableMembershipNotice.value = null
+            // ADR-0045 §6.1.5 — and neither does a half-filled transfer step.
+            // Reopening the panel must not resume a confirmation the user walked
+            // away from with a successor already picked.
+            mutableTransferStepOpen.value = false
             refreshMembers()
         }
     }
@@ -456,6 +461,209 @@ public class ChatViewModel(
         mutablePendingRequests.value = visible
         mutablePendingNotice.value = me.lakko.app.chat.pendingNotice(visible)
         refreshJoinAttributions()
+        // ADR-0045 UX §6.1.9 — decided from the roster + role table just read,
+        // so a torn read says nothing rather than claiming a promotion.
+        refreshNewOwnerNotice()
+    }
+
+    // -----------------------------------------------------------------------
+    // ADR-0045 UX §6.1 — ownership transfer
+    //
+    // Every rule and every string lives in `me.lakko.app.chat.OwnershipTransfer`;
+    // what is here is the wiring that feeds it live group state, and what is in
+    // `MembersSheet` renders its verdicts.
+    // -----------------------------------------------------------------------
+
+    /** The roster's OWN identity treatment, in the roster's own order, as the
+     *  picker reads it. Built from [memberLabel] rather than re-derived, so the
+     *  picker and the members list cannot render the same person differently —
+     *  that is the one thing the user cross-checks. */
+    internal fun rosterViews(): List<me.lakko.app.chat.RosterEntryView> =
+        mutableMembers.value.map {
+            me.lakko.app.chat.RosterEntryView(
+                leafIndex = it.leafIndex,
+                signatureKeyB64 = me.lakko.app.chat.outboxB64(it.signaturePublicKey),
+                label = memberLabel(it),
+            )
+        }
+
+    /** This device's own signature key, base64 — resolved THROUGH the roster
+     *  rather than stored, so a leaf renumber cannot make it name someone
+     *  else. */
+    private fun ownSignatureKeyB64(): String? {
+        val leaf = ownLeafIndex() ?: return null
+        return rosterViews().firstOrNull { it.leafIndex == leaf }?.signatureKeyB64
+    }
+
+    private val mutableNewOwnerNotice: MutableStateFlow<me.lakko.app.chat.NewOwnerNotice?> =
+        MutableStateFlow(null)
+
+    /** ADR-0045 UX §6.1.9 — the once-per-transfer, dismissible notice telling
+     *  the NEW owner they are the new owner. `null` when there is nothing to
+     *  say, which is the overwhelmingly common case. */
+    public val newOwnerNotice: StateFlow<me.lakko.app.chat.NewOwnerNotice?> =
+        mutableNewOwnerNotice.asStateFlow()
+
+    /** Dismiss the §6.1.9 notice. It never comes back on its own: the owner it
+     *  reported has been remembered, so the next reading is not a change. */
+    public fun dismissNewOwnerNotice() {
+        mutableNewOwnerNotice.value = null
+    }
+
+    /**
+     * ADR-0045 UX §6.1.9 — tell the new owner, best-effort and fail-open.
+     *
+     * Nothing on the wire announces a transfer: the role table simply changes
+     * and every other device learns of it by re-reading. So this is a
+     * client-side INFERENCE from an observed change, and it is structurally
+     * unable to fire on a device that first observes the table already naming it
+     * owner — a fresh device, a restore, a first sync. Hence fail-open
+     * everywhere, and hence the notice must never be the only way a user learns
+     * their role; the panel's affordances stay the primary signal, exactly as
+     * they are for admin today.
+     *
+     * The notice is decided BEFORE the new owner is remembered, or the
+     * comparison would always be against itself. It then LIVES in the flow until
+     * dismissed rather than being recomputed: the very next refresh would see
+     * the remembered owner equal the current one and correctly return `null`, so
+     * a recomputed notice would vanish on the next poll.
+     */
+    private fun refreshNewOwnerNotice() {
+        val table = mutableRoleTable.value ?: return
+        val currentOwnerB64 = me.lakko.app.chat.outboxB64(table.owner)
+        val previous = repo.lastObservedOwner(groupIdHex)
+        // Resolved through the LIVE roster; `null` when the previous owner has
+        // left in a later commit (transfer and leave are necessarily separate
+        // ones).
+        val previousLabel = previous?.let { key ->
+            mutableMembers.value
+                .firstOrNull { me.lakko.app.chat.outboxB64(it.signaturePublicKey) == key }
+                ?.let { memberLabel(it) }
+        }
+        me.lakko.app.chat.newOwnerNotice(
+            lastObservedOwnerB64 = previous,
+            currentOwnerB64 = currentOwnerB64,
+            ownSignatureKeyB64 = ownSignatureKeyB64(),
+            previousOwnerLabel = previousLabel,
+        )?.let { mutableNewOwnerNotice.value = it }
+        repo.rememberObservedOwner(groupIdHex, currentOwnerB64)
+    }
+
+    private val mutableTransferStepOpen: MutableStateFlow<Boolean> = MutableStateFlow(false)
+    private val mutableTransferPick: MutableStateFlow<String?> = MutableStateFlow(null)
+    private val mutableTransferOutgoing: MutableStateFlow<OutgoingOwner> =
+        MutableStateFlow(me.lakko.app.chat.PRESELECTED_OUTGOING_OWNER)
+
+    /**
+     * ADR-0045 UX §6.1.5 — is the transfer step showing?
+     *
+     * It lives here rather than in the composable — unlike the `Leave group`
+     * confirmation, which is purely local — because [onTransferOwnership] must
+     * close it only once the proposal is actually published. A step that closed
+     * on tap would discard the picked successor and the role choice on every
+     * refusal, and the commonest refusal (the C-65 collision) is one the owner
+     * would want to retry unchanged a moment later.
+     */
+    public val transferStepOpen: StateFlow<Boolean> = mutableTransferStepOpen.asStateFlow()
+
+    /** The picked successor's SIGNATURE KEY (base64), or `null` for no pick yet
+     *  — which is what keeps the action disabled. Never a leaf index: OpenMLS
+     *  hands a vacated leaf to the next Add. */
+    public val transferPick: StateFlow<String?> = mutableTransferPick.asStateFlow()
+
+    /** §6.1.4 — what becomes of THIS device's role. Pre-selected, never
+     *  defaulted; see [me.lakko.app.chat.OUTGOING_OWNER_OPTIONS]. */
+    public val transferOutgoing: StateFlow<OutgoingOwner> = mutableTransferOutgoing.asStateFlow()
+
+    /** Open the transfer step. Resets both choices, so a step reopened after a
+     *  cancel never carries a stale successor, and clears the panel's transient
+     *  lines so an earlier action's message does not sit under a fresh
+     *  irreversibility warning. */
+    public fun openTransferStep() {
+        mutableMembershipError.value = null
+        mutableMembershipNotice.value = null
+        mutableTransferPick.value = null
+        mutableTransferOutgoing.value = me.lakko.app.chat.PRESELECTED_OUTGOING_OWNER
+        mutableTransferStepOpen.value = true
+    }
+
+    /** §6.1.5 — `Cancel` is a PRE-PUBLISH exit, and it is the last one. Nothing
+     *  here is a withdraw: once published, the proposal is in every member's
+     *  store and dies only when some commit lands. */
+    public fun cancelTransferStep() {
+        mutableTransferStepOpen.value = false
+    }
+
+    public fun setTransferPick(signatureKeyB64: String) {
+        mutableTransferPick.value = signatureKeyB64
+    }
+
+    public fun setTransferOutgoing(outgoing: OutgoingOwner) {
+        mutableTransferOutgoing.value = outgoing
+    }
+
+    /**
+     * ADR-0045 UX §6.1 — publish the ownership transfer, then sweep it.
+     *
+     * The shape is [onToggleAdmin]'s, deliberately and for its stated reason: a
+     * role change is owner-only and the owner is rank 0, so the sweep that
+     * follows is this same device and in practice the change is immediate. A
+     * transfer IS a role change — not a new commit type, just the owner-only
+     * role-table rewrite with the owner slot moved — so anything else here would
+     * be a second, differently-shaped route into membership.
+     *
+     * The sweep is driven from HERE rather than from the repository because
+     * `sweepIfCommitter` takes the same per-group lock the publish does and a
+     * `Mutex` is not reentrant; the two must run in turn, not nested.
+     *
+     * The outcome copy names the transferor's own new role only when the sweep
+     * actually committed: half the panel changes under them in one tap, and a
+     * request that has not landed must not claim it has.
+     *
+     * [outgoing] has no default. The core refuses to default it because either
+     * silent choice is wrong in one direction, and this signature keeps that
+     * property rather than undoing with a parameter default what the core
+     * protected with a type.
+     */
+    public fun onTransferOwnership(
+        successor: me.lakko.app.chat.TransferCandidate,
+        outgoing: OutgoingOwner,
+    ) {
+        if (mutableMembershipBusy.value) return
+        mutableMembershipBusy.value = true
+        mutableMembershipError.value = null
+        mutableMembershipNotice.value = null
+        viewModelScope.launch {
+            try {
+                val result = repo.transferGroupOwnership(
+                    groupIdHex,
+                    me.lakko.app.chat.outboxUnb64(successor.signatureKeyB64),
+                    outgoing,
+                )
+                // Closed only now — the proposal is on the wire, so there is
+                // nothing left to reconsider. A throw above leaves the step open
+                // with the pick and the role choice intact.
+                mutableTransferStepOpen.value = false
+                val swept = repo.sweepIfCommitter(groupIdHex)
+                val landed = result is me.lakko.app.chat.MembershipOutcome.Committed ||
+                    swept is me.lakko.app.chat.SweepOutcome.Committed
+                mutableMembershipNotice.value = me.lakko.app.chat.transferOutcomeNotice(
+                    outcome = if (landed) {
+                        me.lakko.app.chat.TransferOutcome.COMMITTED
+                    } else {
+                        me.lakko.app.chat.TransferOutcome.PROPOSED
+                    },
+                    successorLabel = successor.label,
+                    outgoing = outgoing,
+                )
+                refreshMembers()
+            } catch (e: Throwable) {
+                mutableMembershipError.value = e.message ?: e.toString()
+                android.util.Log.w("ChatViewModel", "onTransferOwnership failed", e)
+            } finally {
+                mutableMembershipBusy.value = false
+            }
+        }
     }
 
     /**

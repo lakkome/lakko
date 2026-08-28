@@ -33,6 +33,7 @@ import me.lakko.app.ds.DsClient
 import uniffi.lakko_ffi_uniffi.FfiException
 import uniffi.lakko_ffi_uniffi.Group
 import uniffi.lakko_ffi_uniffi.GroupMember
+import uniffi.lakko_ffi_uniffi.OutgoingOwner
 import uniffi.lakko_ffi_uniffi.Role
 import uniffi.lakko_ffi_uniffi.RoleTable
 import uniffi.lakko_ffi_uniffi.Identity
@@ -736,6 +737,31 @@ public class ChatRepository(
                 // than assumed, because `usesProposalPath` is the one predicate
                 // that decides this and it should be asked, not inferred.
                 if (usesProposalPath(record.group)) {
+                    // C-65 — the OTHER direction of the collision an ownership
+                    // transfer already pre-checks. A transfer IS a role-table
+                    // rewrite, so it occupies the same exclusive
+                    // `GroupContextExtensions` slot as this toggle and the two
+                    // exclude each other both ways. Without this arm an owner
+                    // who taps `Make admin` while their own transfer is waiting
+                    // gets the core's diagnostic naming two Rust functions —
+                    // the exact failure the seventh refusal string exists to
+                    // replace, reached from the one side nobody checked.
+                    //
+                    // A torn read is treated as "no", the same fail-open the
+                    // transfer path takes and for the same reason: the core is
+                    // the enforcement, and this check only chooses which
+                    // sentence the owner reads.
+                    val blocked = try {
+                        hasPendingRoleChange(record.group.pendingProposals())
+                    } catch (_: Throwable) {
+                        false
+                    }
+                    if (blocked) {
+                        throw ChatError(
+                            ROLE_CHANGE_ALREADY_PENDING,
+                            IllegalStateException("C-65: a role change is already pending"),
+                        )
+                    }
                     val proposalBytes = try {
                         record.group.proposeGroupRoles(identity, table.owner, admins)
                     } catch (e: FfiException) {
@@ -804,6 +830,124 @@ public class ChatRepository(
                     ackCommitBestEffort(entry.id, commitPublish.id, null)
                     publishThreadList()
                     MembershipOutcome.Committed(commitPublish.id, null) as MembershipOutcome
+                }
+            }
+            publishStep()
+        }
+    }
+
+    /**
+     * ADR-0045 UX §6.1 — hand the group's owner slot to another member.
+     *
+     * **Always the proposal arm, and there is no second one here.** The UniFFI
+     * surface carries `transferOwnership` too, and this method deliberately
+     * never reaches it, because for this flow the direct arm is *structurally
+     * unreachable*: the UI gates the control on `isOwner`, read off the role
+     * table ([ownRole]), and [usesProposalPath] is the identical `groupRoles()`
+     * read. A group with no role table has no owner, so
+     * `isOwner && !usesProposalPath` cannot hold. That makes transfer the one
+     * membership action needing a single arm rather than two, unlike add /
+     * remove / role change, each of which carries a direct fallback for the
+     * table-less case. A table-less group reaching here anyway is refused by the
+     * core, which is the right place for it.
+     *
+     * Everything else mirrors [setMemberAdmin]'s proposal arm exactly, because a
+     * transfer **is** a role change — deliberately not a new commit type, just
+     * the owner-only role-table rewrite with the owner slot moved. So it
+     * inherits that arm's discipline verbatim: the per-group lock, the provider
+     * lock over the provider-touching prefix only, **no outbox entry and no
+     * reset region** (a proposal advances no epoch, so there is nothing to roll
+     * back), and a [MembershipOutcome.Proposed] the caller sweeps immediately.
+     *
+     * The one thing beyond that arm's shape is the observation record's
+     * SUCCESSOR KEY (§6.1.10), which is the only thing that later distinguishes
+     * *our pending role change is a transfer* from *our pending role change is a
+     * promote* — `ProposalKind::RoleChange` carries no payload — and which is
+     * what names the person in `Waiting to make {name} the owner.`
+     *
+     * [newOwnerSignaturePubkey] is the successor's 32-byte Ed25519 signature
+     * public key — the stable handle [members] reports and the role table keys
+     * on — never a leaf index: OpenMLS hands a vacated leaf to the next Add.
+     *
+     * [outgoing] decides what becomes of THIS device's own role and is required.
+     * The core refuses to default it and the FFI carries that structurally (no
+     * `Default` on the generated enum), so this signature keeps the property by
+     * taking a plain non-nullable parameter with no default value.
+     *
+     * The immediate sweep is the CALLER's, not this method's: [sweepIfCommitter]
+     * takes the same per-group lock and a `Mutex` is not reentrant, so nesting
+     * it here would hang. The ViewModel calls the two in turn.
+     */
+    public suspend fun transferGroupOwnership(
+        groupIdHex: String,
+        newOwnerSignaturePubkey: ByteArray,
+        outgoing: OutgoingOwner,
+    ): MembershipOutcome {
+        val identity = canonicalIdentity.get()
+            ?: throw IllegalStateException(
+                "ChatRepository not bootstrapped — call bootstrap() first",
+            )
+        // G-37 — per-group lock spans the WHOLE op; the provider lock covers
+        // only the provider-touching prefix, so the publish runs outside it.
+        return groupLock(groupIdHex).withLock {
+            val publishStep = providerLock.withLock {
+                val record = groups[groupIdHex]
+                    ?: throw ChatError(
+                        "no live Group handle for $groupIdHex",
+                        IllegalStateException("missing group record"),
+                    )
+                // C-65, and it collides in BOTH directions: a pending role
+                // change refuses a transfer, and a pending transfer refuses a
+                // role change. It falls out of `propose_ownership_transfer`
+                // delegating to `propose_group_roles` rather than being
+                // restated, which is the point. The UI disables the control with
+                // this same string as its reason once the blocking request is
+                // past the quiet window (UX §6.1.8's deliberate asymmetry with
+                // the admin toggles, which keep refuse-on-tap); THIS is the
+                // check for the window in which the control is still live.
+                //
+                // A torn read is treated as "no", which lets the request through
+                // to the core's own authorisation rather than refusing on a
+                // transient provider failure — the core is the enforcement
+                // either way, and this check exists only to convert a message
+                // naming two Rust functions into one the owner can act on.
+                val blocked = try {
+                    hasPendingRoleChange(record.group.pendingProposals())
+                } catch (_: Throwable) {
+                    false
+                }
+                if (blocked) {
+                    throw ChatError(
+                        ROLE_CHANGE_ALREADY_PENDING,
+                        IllegalStateException("C-65: a role change is already pending"),
+                    )
+                }
+                val proposalBytes = try {
+                    record.group.proposeOwnershipTransfer(
+                        identity,
+                        newOwnerSignaturePubkey,
+                        outgoing,
+                    )
+                } catch (e: FfiException) {
+                    throw ChatError("proposeOwnershipTransfer failed", e)
+                }
+                // The proposal is now in this device's own pending store, which
+                // is provider state — persist so a relaunch does not lose a
+                // request the peers hold.
+                persistSnapshotBestEffort()
+                suspend {
+                    val publish = try {
+                        dsClient.publishGroup(record.groupId, proposalBytes)
+                    } catch (e: Throwable) {
+                        throw ChatError("DS publishGroup (ownership-transfer proposal) failed", e)
+                    }
+                    noteOwnRequestBestEffort(
+                        groupIdHex,
+                        "role-change",
+                        transferToB64 = outboxB64(newOwnerSignaturePubkey),
+                    )
+                    publishThreadList()
+                    MembershipOutcome.Proposed(publish.id) as MembershipOutcome
                 }
             }
             publishStep()
@@ -2819,6 +2963,16 @@ public class ChatRepository(
             } catch (_: Throwable) {
                 // best-effort
             }
+            // ADR-0045 §6.1.10 — and the last-observed-owner memory. A stale
+            // entry would make the NEXT account on this device read a role-table
+            // reading it never took as a change, and announce a promotion it did
+            // not witness — the one thing the §6.1.9 fail-open rule exists to
+            // prevent.
+            try {
+                lastObservedOwnerStore.clearForAccount(accountIdB64)
+            } catch (_: Throwable) {
+                // best-effort
+            }
             lastBeaconAtMs.clear()
             // ADR-0042 — wipe the push-routing secrets + the push_gid reverse
             // index. The secret is encrypted at rest, but a stale reverse-index
@@ -3174,8 +3328,18 @@ public class ChatRepository(
      * member's reading to agree with yet — the row's own timestamp arrives on
      * the next poll and, because the FIRST observation of a key wins, does not
      * overwrite this one.
+     *
+     * [transferToB64] (ADR-0045 §6.1.10) is supplied only by
+     * [transferGroupOwnership]: a role change carries no payload, so the
+     * successor's key on our own record is the only thing that later tells a
+     * transfer from a promote, and it is what names the person in
+     * `Waiting to make {name} the owner.`
      */
-    private fun noteOwnRequestBestEffort(groupIdHex: String, key: String) {
+    private fun noteOwnRequestBestEffort(
+        groupIdHex: String,
+        key: String,
+        transferToB64: String? = null,
+    ) {
         val accountIdB64 = currentAccountIdB64.get() ?: return
         try {
             recordPendingRequestObservation(
@@ -3185,10 +3349,46 @@ public class ChatRepository(
                 key = key,
                 atMs = System.currentTimeMillis(),
                 own = true,
+                transferToB64 = transferToB64,
             )
         } catch (cause: Throwable) {
             android.util.Log.w("ChatRepository", "pending request: note own failed", cause)
         }
+    }
+
+    /**
+     * ADR-0045 §6.1.10 — the last-observed-owner store, the second of the two
+     * local additions ownership transfer needs (the first, the successor key,
+     * rides on the pending-request observation above).
+     *
+     * Plain `SharedPreferences`: an owner signature key is already public inside
+     * the group. Same posture as [pendingRequestObservations] and
+     * [beaconObservations].
+     */
+    private val lastObservedOwnerStore: LastObservedOwnerStore by lazy {
+        SharedPrefsLastObservedOwnerStore(applicationContext)
+    }
+
+    /**
+     * The owner signature key (base64) this device last observed for
+     * [groupIdHex], or `null` when it never observed one.
+     *
+     * `null` is the FAIL-OPEN case and must stay one: the §6.1.9 new-owner
+     * notice is a client-side inference from a role-table CHANGE, and a device
+     * that first observes the table already naming it owner has witnessed no
+     * change to report.
+     */
+    internal fun lastObservedOwner(groupIdHex: String): String? {
+        val accountIdB64 = currentAccountIdB64.get() ?: return null
+        return lastObservedOwnerStore.load(accountIdB64, groupIdHex)
+    }
+
+    /** Record the owner this device is observing now. The caller decides the
+     *  §6.1.9 notice FIRST, so the decision always compares against the
+     *  PREVIOUS reading. */
+    internal fun rememberObservedOwner(groupIdHex: String, ownerKeyB64: String) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        lastObservedOwnerStore.save(accountIdB64, groupIdHex, ownerKeyB64)
     }
 
     /**

@@ -133,6 +133,28 @@ import {
   type PendingRequest,
   type ProposalRecordView,
 } from "../chat/pending-requests";
+// ADR-0045 UX §6.1 — ownership transfer, the owner's way out. Same split and
+// the same reason: every rule and every string lives in the plain module, this
+// file only renders what it decides.
+import {
+  NEW_OWNER_DISMISS,
+  OUTGOING_OWNER_OPTIONS,
+  PRESELECTED_OUTGOING_OWNER,
+  TRANSFER_IRREVERSIBLE_BODY,
+  TRANSFER_IRREVERSIBLE_HEADLINE,
+  TRANSFER_UNLOCKS_LEAVE,
+  exitBlock,
+  loadLastObservedOwner,
+  newOwnerNotice,
+  rememberObservedOwner,
+  transferActionLabel,
+  transferCandidates,
+  transferOutcomeNotice,
+  type ExitBlock,
+  type NewOwnerNotice,
+  type OutgoingOwnerChoice,
+  type TransferCandidate,
+} from "../chat/ownership-transfer";
 // ADR-0045 S4b — the committer liveness beacon. Same split as above: every
 // rule (the emit gate, the rank-at-verdict-time projection, the observation
 // store) lives in `chat/committer-beacon.ts` where it is host-testable, and
@@ -1671,12 +1693,19 @@ function ChatView(props: {
    * Reachable for the first time because of this ADR: naming your OWN leaf in a
    * Remove proposal needs no role, and ADR-0022's gate deliberately dropped the
    * self-remove branch as unreachable when a member could not commit their own
-   * departure. It stays HIDDEN for the owner, whose departure the core refuses
-   * fail-closed — an ownerless group could never appoint another admin, since a
-   * role change is owner-only. That is now a PRECONDITION rather than a dead
-   * end (transfer ownership first, then leave as an ordinary member), but the
-   * transfer flow is a separate UX pass, so offering the owner a control that
-   * always refuses would be worse than not offering one.
+   * departure.
+   *
+   * The core still refuses the OWNER's departure fail-closed — an ownerless
+   * group could never appoint another admin, since a role change is owner-only —
+   * but that is a PRECONDITION rather than a dead end, and as of UX §6.1 the
+   * route out of it exists: transfer ownership first, then leave as an ordinary
+   * member. So the owner's control is no longer HIDDEN but rendered disabled
+   * with its reason, directly below the `Transfer ownership` that discharges it
+   * (`exitBlock`). This handler is unreachable for the owner either way, and
+   * that gate is the role table rather than the local record of having asked:
+   * an owner is still the owner while their transfer is pending, and a
+   * `Leave group` that went live on publication would offer an action the core
+   * refuses and the cryptography does not support.
    */
   async function onLeaveGroup(): Promise<void> {
     const leaf = ownLeaf();
@@ -1718,8 +1747,13 @@ function ChatView(props: {
 
   /** Record that a request this device just published landed, so the quiet
    *  window can be measured from now and so the panel knows it is ours (the
-   *  UX §10 own-request visibility exception). */
-  function noteOwnRequest(key: string): void {
+   *  UX §10 own-request visibility exception).
+   *
+   *  `transferToB64` is supplied only by the ownership-transfer path (UX
+   *  §6.1.10): a role change carries no payload, so the successor's key on our
+   *  own record is the only thing that later tells a transfer from a promote,
+   *  and it is what names the person in `Waiting to make {name} the owner.` */
+  function noteOwnRequest(key: string, transferToB64?: string): void {
     const s = auth.state();
     if (s.kind !== "session") return;
     recordObservation(
@@ -1728,6 +1762,7 @@ function ChatView(props: {
       key,
       Date.now(),
       true,
+      transferToB64,
     );
     setPendingVersion(pendingVersion() + 1);
   }
@@ -1847,6 +1882,264 @@ function ChatView(props: {
     }
     return `Member #${leaf}`;
   };
+
+  // -------------------------------------------------------------------------
+  // ADR-0045 UX §6.1 — ownership transfer
+  //
+  // Every rule and every string lives in `chat/ownership-transfer.ts`; what is
+  // here is the wiring that feeds it live group state and renders its verdicts.
+  // -------------------------------------------------------------------------
+
+  /** The roster's OWN identity treatment, in the roster's own order, as the
+   *  picker reads it. Built here rather than in the module so the picker and
+   *  the members list cannot render the same person differently — that is the
+   *  one thing the user cross-checks. */
+  const rosterViews = createMemo(() =>
+    members().map((m) => {
+      const keyB64 = base64Encode(m.sigPubkey);
+      const name = acceptedByPubkey().get(keyB64);
+      return {
+        leafIndex: m.leafIndex,
+        signatureKeyB64: keyB64,
+        label:
+          name !== undefined && name.length > 0
+            ? name
+            : shortFingerprint(m.sigPubkey),
+      };
+    }),
+  );
+
+  /** The role table's owner key, base64. `undefined` for an open / legacy
+   *  group. */
+  const ownerKeyB64 = createMemo<string | undefined>(() => {
+    membersVersion();
+    try {
+      const o = props.entry.group.roleTableOwner() as Uint8Array | undefined;
+      return o === undefined ? undefined : base64Encode(o);
+    } catch {
+      return undefined;
+    }
+  });
+
+  /** The admin set as base64 keys. The panel's existing `adminPubkeys()` is
+   *  hex; the transfer surface keys on base64 throughout because that is what
+   *  the observation store and the accepted-contact map already use. */
+  const adminKeysB64 = createMemo<Set<string>>(() => {
+    membersVersion();
+    const set = new Set<string>();
+    try {
+      const flat = props.entry.group.roleTableAdmins() as Uint8Array;
+      for (let i = 0; i + 32 <= flat.length; i += 32) {
+        set.add(base64Encode(flat.slice(i, i + 32)));
+      }
+    } catch {
+      // open / legacy group with no role table — no admins.
+    }
+    return set;
+  });
+
+  /** This device's own signature key, base64 — resolved through the roster
+   *  rather than stored, so a leaf renumber cannot make it name someone else. */
+  const ownSignatureKeyB64 = createMemo<string | undefined>(() => {
+    const leaf = ownLeaf();
+    if (leaf === undefined) return undefined;
+    return rosterViews().find((m) => m.leafIndex === leaf)?.signatureKeyB64;
+  });
+
+  /** §6.1.3 — every member except the current owner, marked (never filtered)
+   *  for admin, in the roster's order. */
+  const transferPickerRows = createMemo<TransferCandidate[]>(() =>
+    transferCandidates(rosterViews(), ownerKeyB64(), adminKeysB64()),
+  );
+
+  /**
+   * §6.1.6 / §6.1.8 — the role change already waiting to apply, if any.
+   *
+   * `waiting` and not merely `pending` is the whole point: below the quiet
+   * window the control stays ENABLED and a second tap is refused by the
+   * client's C-65 pre-check. A request that is not yet rendered must not
+   * silently disable a control with nothing to explain it.
+   *
+   * The successor label is resolved through the LIVE roster HERE, at render
+   * time, never from a stored label: a successor who has since left degrades to
+   * the unnamed variant rather than to a name the roster no longer carries.
+   */
+  const waitingRoleChange = createMemo(() => {
+    const hit = pendingRequests().find(
+      (r) => r.kind === "role-change" && r.state === "waiting",
+    );
+    if (hit === undefined) return null;
+    const successor =
+      hit.transferToB64 === undefined
+        ? undefined
+        : rosterViews().find((m) => m.signatureKeyB64 === hit.transferToB64);
+    return {
+      // Our own PROMOTE is not our own transfer — see the module's doc on this
+      // field. Only a record carrying a successor key is a transfer.
+      ownTransfer: hit.own && hit.transferToB64 !== undefined,
+      successorLabel: successor?.label ?? null,
+    };
+  });
+
+  /** §6.1.1 — the exit block: which of the two role-disjoint controls this
+   *  reader gets, and why the other one is disabled. */
+  const exitBlockState = createMemo<ExitBlock>(() =>
+    exitBlock({
+      usesProposalPath: usesProposalPath(),
+      isOwner: isOwner(),
+      ownLeafKnown: ownLeaf() !== undefined,
+      candidateCount: transferPickerRows().length,
+      waitingRoleChange: waitingRoleChange(),
+      ownRemovalPending:
+        rowAnnotation(pendingRequests(), ownLeaf() ?? -1, ownLeaf()) !== null,
+    }),
+  );
+
+  /** The owner's arm of the exit block, or `null` for every other reader.
+   *  Split into two narrowed memos so the JSX can use `<Show>`'s accessor form
+   *  rather than casting a union inside the template. */
+  const ownerExit = createMemo(() => {
+    const block = exitBlockState();
+    return block.kind === "owner" ? block : null;
+  });
+  /** The non-owner's arm. Carries no `transfer` field at all — a member's
+   *  transfer is refused by the core and by every peer, and nothing they could
+   *  do would make it work, which is the case where "a control that always
+   *  refuses is worse than no control" still holds. */
+  const memberExit = createMemo(() => {
+    const block = exitBlockState();
+    return block.kind === "member" ? block : null;
+  });
+
+  // The transfer step's own state. Opening it is what §6.1.5 calls the
+  // confirmation — there is no second dialog behind it.
+  const [transferOpen, setTransferOpen] = createSignal(false);
+  /** The picked successor's signature key, base64 — never a leaf index, because
+   *  OpenMLS hands a vacated leaf to the next Add. */
+  const [transferPick, setTransferPick] = createSignal<string | null>(null);
+  const [transferOutgoing, setTransferOutgoing] = createSignal<OutgoingOwnerChoice>(
+    PRESELECTED_OUTGOING_OWNER,
+  );
+
+  const transferSelected = createMemo<TransferCandidate | undefined>(() => {
+    const pick = transferPick();
+    return pick === null
+      ? undefined
+      : transferPickerRows().find((r) => r.signatureKeyB64 === pick);
+  });
+  const transferAction = createMemo(() => transferActionLabel(transferSelected()));
+
+  function openTransferStep(): void {
+    setError(null);
+    setNotice(null);
+    setTransferPick(null);
+    setTransferOutgoing(PRESELECTED_OUTGOING_OWNER);
+    setTransferOpen(true);
+  }
+
+  /**
+   * §6.1 — publish the ownership transfer, then sweep it (ADR-0045).
+   *
+   * The shape is `onToggleAdmin`'s, deliberately and for its stated reason: a
+   * role change is owner-only and the owner is rank 0, so the sweep that
+   * follows is this same device and in practice the change is immediate. A
+   * transfer IS a role change — not a new commit type, just the owner-only
+   * role-table rewrite with the owner slot moved — so anything else here would
+   * be a second, differently-shaped route into membership.
+   *
+   * Two things beyond the toggle's shape. The observation record carries the
+   * SUCCESSOR'S KEY (§6.1.10), which is the only thing that later distinguishes
+   * *our pending role change is a transfer* from *our pending role change is a
+   * promote*. And the outcome copy names the transferor's own new role only
+   * when the sweep actually committed: half the panel changes under them in one
+   * tap, and a request that has not landed must not claim it has.
+   */
+  async function onTransferOwnership(): Promise<void> {
+    const successor = transferSelected();
+    if (successor === undefined) return;
+    const outgoing = transferOutgoing();
+    setError(null);
+    setNotice(null);
+    setBusy(true);
+    try {
+      const result = await contacts.transferGroupOwnership(
+        props.requireIdentity(),
+        props.entry.group,
+        base64Decode(successor.signatureKeyB64),
+        outgoing,
+      );
+      chat.markOwnPublishedCommit(
+        result.kind === "committed"
+          ? result.commitMessageId
+          : result.proposalMessageId,
+      );
+      if (result.kind === "proposed") {
+        noteOwnRequest("role-change", successor.signatureKeyB64);
+      }
+      setTransferOpen(false);
+      const swept = await sweepNow();
+      setMembersVersion(membersVersion() + 1);
+      const landed =
+        result.kind === "committed" || swept?.kind === "committed";
+      setNotice(
+        transferOutcomeNotice(
+          landed ? "committed" : "proposed",
+          successor.label,
+          outgoing,
+        ),
+      );
+      void refresh();
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /**
+   * §6.1.9 — tell the new owner, best-effort and fail-open.
+   *
+   * Nothing on the wire announces a transfer: the role table simply changes and
+   * every other device learns of it by re-reading. So this is a client-side
+   * INFERENCE from an observed change, and it is structurally unable to fire on
+   * a device that first observes the table already naming it owner — a fresh
+   * device, a restore, a first sync. Hence fail-open everywhere, and hence the
+   * notice must never be the only way a user learns their role; the panel's
+   * affordances stay the primary signal, exactly as they are for admin today.
+   *
+   * The notice is decided BEFORE the new owner is remembered, or the comparison
+   * would always be against itself. It then lives in a signal until dismissed,
+   * rather than being recomputed: the very next `membersVersion` bump would see
+   * the remembered owner equal the current one and correctly return `null`, so
+   * a recomputed notice would vanish on the next poll.
+   */
+  const [newOwnerBanner, setNewOwnerBanner] = createSignal<NewOwnerNotice | null>(
+    null,
+  );
+  createEffect(() => {
+    membersVersion();
+    const s = auth.state();
+    if (s.kind !== "session") return;
+    const current = ownerKeyB64();
+    if (current === undefined) return;
+    const groupIdB64 = base64Encode(props.entry.group.groupId);
+    const previous = loadLastObservedOwner(s.account.accountId, groupIdB64);
+    // Resolved through the live roster; `null` when the previous owner has left
+    // in a later commit (transfer and leave are necessarily separate ones).
+    const previousLabel =
+      previous === undefined
+        ? null
+        : (rosterViews().find((m) => m.signatureKeyB64 === previous)?.label ??
+          null);
+    const notice = newOwnerNotice(
+      previous,
+      current,
+      ownSignatureKeyB64(),
+      previousLabel,
+    );
+    if (notice !== null) setNewOwnerBanner(notice);
+    rememberObservedOwner(s.account.accountId, groupIdB64, current);
+  });
 
   /** ADR-0024 — the typing-indicator string, or `null` when nobody
    *  (other than us) is currently typing. For a 1×1 chat a bare
@@ -3887,6 +4180,61 @@ function ChatView(props: {
               </span>
             </div>
           </Show>
+          {/* ADR-0045 UX §6.1.9 — the new-owner notice. Rendered once,
+              dismissible, at panel level, announced POLITELY.
+
+              It is a client-side INFERENCE from an observed role-table change,
+              not a message: nothing on the wire announces a transfer. So it is
+              best-effort and fails open — a device that first observes the table
+              already naming it owner says nothing — and it must never be the
+              only way a user learns their role. The panel's affordances stay the
+              primary signal, exactly as they are for admin today.
+
+              Placed directly BELOW the pending notice so §5's "pending notice,
+              top of the panel, above everything" ordering stays literally
+              intact; the two are almost never present at the same moment. */}
+          <Show when={newOwnerBanner() !== null}>
+            <div
+              role="status"
+              aria-live="polite"
+              style={{
+                margin: "0 0 0.6rem 0",
+                padding: "0.4rem 0.5rem",
+                border: "1px solid var(--surface-border)",
+                "border-radius": "var(--radius-sm)",
+                background: "var(--surface-bg)",
+                display: "flex",
+                "flex-direction": "column",
+                gap: "0.2rem",
+              }}
+            >
+              <span style={{ "font-size": "0.8rem", color: "var(--surface-fg)" }}>
+                {newOwnerBanner()?.headline}
+              </span>
+              {/* The second line names the exit deliberately: it is the one
+                  sentence that stops the new owner from arriving where the old
+                  one was. */}
+              <span style={{ "font-size": "0.75rem", color: "var(--surface-muted)" }}>
+                {newOwnerBanner()?.body}
+              </span>
+              <button
+                type="button"
+                onClick={() => setNewOwnerBanner(null)}
+                style={{
+                  "font-size": "0.75rem",
+                  padding: "0.2rem 0.5rem",
+                  "border-radius": "var(--radius-sm)",
+                  border: "1px solid var(--surface-border)",
+                  background: "transparent",
+                  color: "var(--surface-fg)",
+                  cursor: "pointer",
+                  "align-self": "flex-start",
+                }}
+              >
+                {NEW_OWNER_DISMISS}
+              </button>
+            </div>
+          </Show>
           {/* ADR-0028 (G-3) — owner/admin "create invite link" affordance.
               Mints a /g/<slug> link conveying this group's id; a non-member
               opens it to request to join, approved via the pending list above.
@@ -4324,28 +4672,357 @@ function ChatView(props: {
               }}
             </For>
           </ul>
-          {/* ADR-0045 UX §5 — `Leave group`, bottom of the panel, destructive,
-              and HIDDEN for the owner (see `onLeaveGroup` for why that is a
-              precondition rather than a dead end). Only on the proposal path:
-              a legacy group's core has no self-remove route. */}
-          <Show when={usesProposalPath() && !isOwner() && ownLeaf() !== undefined}>
-            <div style={{ "margin-top": "0.6rem" }}>
-              <button
-                type="button"
-                disabled={busy() || rowAnnotation(pendingRequests(), ownLeaf() ?? -1, ownLeaf()) !== null}
-                onClick={() => void onLeaveGroup()}
+          {/* ADR-0045 UX §5 item 6 / §6.1.1 — THE EXIT BLOCK, bottom of the
+              panel. Exactly one of its two controls is ever live for a given
+              reader, because they are role-disjoint: the owner sees
+              `Transfer ownership` above a DISABLED `Leave group` carrying its
+              precondition, everyone else sees `Leave group` alone.
+
+              The owner's `Leave group` used to be HIDDEN, and this reverses
+              that — not because the old argument (a control that always refuses
+              is worse than no control) was wrong, but because it was right only
+              while transfer was unreachable. A disabled control whose reason
+              names the action directly above it is a signposted route, and it
+              is the same visible-but-disabled pattern §5.3 already uses for a
+              pending row's `Remove`. Hiding it now would leave an owner looking
+              for the exit finding nothing at all about leaving.
+
+              Only on the proposal path: a legacy group's core has no
+              self-remove route and no owner to transfer from. */}
+          <Show when={exitBlockState().kind !== "hidden"}>
+            <div
+              style={{
+                "margin-top": "0.6rem",
+                display: "flex",
+                "flex-direction": "column",
+                gap: "0.35rem",
+              }}
+            >
+              <Show when={ownerExit()}>
+                {(owner) => (
+                  <>
+                    {/* NOT destructive-styled at rest. Red would file it with
+                      `Remove` and `Leave group`, and an owner scanning for a
+                      way out should not have to read a warning colour to
+                      find one. Transfer is not a destruction; it is a
+                      handover that happens to be final, and finality is a
+                      property of the confirmation below, not of the button
+                      that opens it. */}
+                    <button
+                      type="button"
+                      disabled={busy() || !owner().transfer.enabled}
+                      title={owner().transfer.disabledReason ?? undefined}
+                      onClick={openTransferStep}
+                      style={{
+                        "font-size": "0.8rem",
+                        padding: "0.3rem 0.6rem",
+                        "border-radius": "var(--radius-sm)",
+                        border: "1px solid var(--surface-border)",
+                        background: "var(--surface-bg)",
+                        color: "var(--surface-fg)",
+                        cursor: "pointer",
+                        "align-self": "flex-start",
+                      }}
+                    >
+                      Transfer ownership
+                    </button>
+                    <Show when={owner().transfer.disabledReason !== null}>
+                      <span
+                        style={{
+                          "font-size": "0.7rem",
+                          color: "var(--surface-muted)",
+                        }}
+                      >
+                        {owner().transfer.disabledReason}
+                      </span>
+                    </Show>
+                    <button
+                      type="button"
+                      disabled
+                      style={{
+                        "font-size": "0.8rem",
+                        padding: "0.3rem 0.6rem",
+                        "border-radius": "var(--radius-sm)",
+                        border: "1px solid var(--surface-border)",
+                        background: "transparent",
+                        color: "var(--surface-muted)",
+                        "align-self": "flex-start",
+                      }}
+                    >
+                      Leave group
+                    </button>
+                    {/* The reason is part of the control's ACCESSIBLE
+                        description, not a decoration: a reader who cannot see
+                        the greyed button must still hear why. */}
+                    <span
+                      style={{
+                        "font-size": "0.7rem",
+                        color: "var(--surface-muted)",
+                      }}
+                    >
+                      {owner().leave.disabledReason}
+                    </span>
+                  </>
+                )}
+              </Show>
+              <Show when={memberExit()}>
+                {(member) => (
+                  <>
+                    <button
+                      type="button"
+                      disabled={busy() || !member().leave.enabled}
+                      onClick={() => void onLeaveGroup()}
+                      style={{
+                        "font-size": "0.8rem",
+                        padding: "0.3rem 0.6rem",
+                        "border-radius": "var(--radius-sm)",
+                        border: "1px solid var(--surface-border)",
+                        background: "transparent",
+                        color: "var(--danger, #c0392b)",
+                        cursor: "pointer",
+                        "align-self": "flex-start",
+                      }}
+                    >
+                      Leave group
+                    </button>
+                    <Show when={member().leave.disabledReason !== null}>
+                      <span
+                        style={{
+                          "font-size": "0.7rem",
+                          color: "var(--surface-muted)",
+                        }}
+                      >
+                        {member().leave.disabledReason}
+                      </span>
+                    </Show>
+                  </>
+                )}
+              </Show>
+            </div>
+          </Show>
+
+          {/* ADR-0045 UX §6.1.4 / §6.1.5 — the transfer step.
+
+              There is NO second dialog behind this, and that is the design
+              rather than a shortcut: this step IS the confirmation, which
+              happens to require two choices to be well-formed. Stacking an
+              `Are you sure?` on a modal that already asked two questions buys
+              friction of the kind that gets dismissed reflexively. What
+              replaces it is friction that cannot be discharged without reading
+              — the action names the person, is disabled until one is picked,
+              and uses the picked row's label verbatim.
+
+              Ordering inside the step is load-bearing: the irreversibility
+              statement sits ABOVE the role choice. Below it, the pre-selected
+              option would read as the safe one and the warning would read as
+              being about the other one. */}
+          <Show when={transferOpen()}>
+            <div
+              role="group"
+              aria-label="Transfer ownership"
+              style={{
+                "margin-top": "0.6rem",
+                padding: "0.5rem 0.6rem",
+                border: "1px solid var(--surface-border)",
+                "border-radius": "var(--radius-sm)",
+                background: "var(--surface-bg)",
+                display: "flex",
+                "flex-direction": "column",
+                gap: "0.5rem",
+              }}
+            >
+              <div style={{ display: "flex", "flex-direction": "column", gap: "0.2rem" }}>
+                <strong style={{ "font-size": "0.82rem", color: "var(--surface-fg)" }}>
+                  {TRANSFER_IRREVERSIBLE_HEADLINE}
+                </strong>
+                <span style={{ "font-size": "0.75rem", color: "var(--surface-muted)" }}>
+                  {TRANSFER_IRREVERSIBLE_BODY}
+                </span>
+              </div>
+
+              {/* §6.1.3 — every member except the owner, in the roster's own
+                  order, with a muted `Admin` MARKER rather than a filter. An
+                  admins-only picker is EMPTY in the commonest small group
+                  (owner plus one member, no admins ever appointed) — the exact
+                  dead end this feature exists to close, reappearing as a UI
+                  rule. The selection value is the 32-byte signature key. */}
+              <fieldset
                 style={{
-                  "font-size": "0.8rem",
-                  padding: "0.3rem 0.6rem",
-                  "border-radius": "var(--radius-sm)",
-                  border: "1px solid var(--surface-border)",
-                  background: "transparent",
-                  color: "var(--danger, #c0392b)",
-                  cursor: "pointer",
+                  border: "none",
+                  margin: 0,
+                  padding: 0,
+                  display: "flex",
+                  "flex-direction": "column",
+                  gap: "0.2rem",
                 }}
               >
-                Leave group
-              </button>
+                <legend
+                  style={{
+                    "font-size": "0.7rem",
+                    "text-transform": "uppercase",
+                    "letter-spacing": "0.04em",
+                    color: "var(--surface-muted)",
+                    padding: 0,
+                  }}
+                >
+                  New owner
+                </legend>
+                <For each={transferPickerRows()}>
+                  {(row) => (
+                    <label
+                      style={{
+                        display: "flex",
+                        "align-items": "center",
+                        gap: "0.4rem",
+                        "font-size": "0.8rem",
+                      }}
+                    >
+                      {/* UX §13 — a picker row announces the roster label plus
+                          `, admin` where the marker shows. The explicit
+                          `aria-label` is what keeps that a comma rather than the
+                          two spans running together. */}
+                      <input
+                        type="radio"
+                        name="lakko-transfer-successor"
+                        aria-label={row.isAdmin ? `${row.label}, admin` : row.label}
+                        value={row.signatureKeyB64}
+                        checked={transferPick() === row.signatureKeyB64}
+                        onChange={() => setTransferPick(row.signatureKeyB64)}
+                      />
+                      <span aria-hidden="true">{row.label}</span>
+                      {/* MARK, do not filter and do not sort. Who is already an
+                          admin is information the owner assigned and is worth
+                          having when choosing a successor; it is not a reason to
+                          hide anyone, and hoisting admins to the top would be a
+                          soft version of the filter §6.1.3 rejects. */}
+                      <Show when={row.isAdmin}>
+                        <span
+                          aria-hidden="true"
+                          style={{
+                            "font-size": "0.7rem",
+                            color: "var(--surface-muted)",
+                          }}
+                        >
+                          Admin
+                        </span>
+                      </Show>
+                    </label>
+                  )}
+                </For>
+              </fieldset>
+
+              {/* §6.1.4 — a real decision, pre-selected but never defaulted. A
+                  single-select control, NEVER a checkbox: a checkbox has an
+                  unstated default state and this has none. The core refuses to
+                  default it because either silent choice is wrong in one
+                  direction, and the UI must not undo with a layout choice what
+                  the core protected with a type. */}
+              <fieldset
+                style={{
+                  border: "none",
+                  margin: 0,
+                  padding: 0,
+                  display: "flex",
+                  "flex-direction": "column",
+                  gap: "0.3rem",
+                }}
+              >
+                <legend
+                  style={{
+                    "font-size": "0.7rem",
+                    "text-transform": "uppercase",
+                    "letter-spacing": "0.04em",
+                    color: "var(--surface-muted)",
+                    padding: 0,
+                  }}
+                >
+                  Your role afterwards
+                </legend>
+                <For each={OUTGOING_OWNER_OPTIONS}>
+                  {(opt) => (
+                    <label
+                      style={{
+                        display: "flex",
+                        "align-items": "flex-start",
+                        gap: "0.4rem",
+                        "font-size": "0.8rem",
+                      }}
+                    >
+                      <input
+                        type="radio"
+                        name="lakko-transfer-outgoing"
+                        value={opt.value}
+                        checked={transferOutgoing() === opt.value}
+                        onChange={() => setTransferOutgoing(opt.value)}
+                      />
+                      <span
+                        style={{
+                          display: "flex",
+                          "flex-direction": "column",
+                          gap: "0.1rem",
+                        }}
+                      >
+                        <span>{opt.label}</span>
+                        <span
+                          style={{
+                            "font-size": "0.7rem",
+                            color: "var(--surface-muted)",
+                          }}
+                        >
+                          {opt.consequence}
+                        </span>
+                      </span>
+                    </label>
+                  )}
+                </For>
+              </fieldset>
+
+              {/* Note APPLIED, not NOW: the transfer is a proposal, and
+                  asserting the exit is open before the commit lands would be
+                  the optimistic update §3 forbids. */}
+              <span style={{ "font-size": "0.72rem", color: "var(--surface-muted)" }}>
+                {TRANSFER_UNLOCKS_LEAVE}
+              </span>
+
+              <div style={{ display: "flex", gap: "0.4rem" }}>
+                <button
+                  type="button"
+                  disabled={busy() || !transferAction().enabled}
+                  onClick={() => void onTransferOwnership()}
+                  style={{
+                    "font-size": "0.8rem",
+                    padding: "0.3rem 0.6rem",
+                    "border-radius": "var(--radius-sm)",
+                    border: "1px solid var(--danger, #c0392b)",
+                    background: "transparent",
+                    color: "var(--danger, #c0392b)",
+                    cursor: "pointer",
+                  }}
+                >
+                  {transferAction().label}
+                </button>
+                {/* `Cancel` is a PRE-PUBLISH exit, and it is the last one.
+                    Nothing here is a withdraw: once the proposal is published it
+                    is in every member's store and dies only when some commit
+                    lands, so no client may offer a cancel afterwards —
+                    including, and especially, for a transfer. */}
+                <button
+                  type="button"
+                  disabled={busy()}
+                  onClick={() => setTransferOpen(false)}
+                  style={{
+                    "font-size": "0.8rem",
+                    padding: "0.3rem 0.6rem",
+                    "border-radius": "var(--radius-sm)",
+                    border: "1px solid var(--surface-border)",
+                    background: "transparent",
+                    color: "var(--surface-fg)",
+                    cursor: "pointer",
+                  }}
+                >
+                  Cancel
+                </button>
+              </div>
             </div>
           </Show>
         </section>

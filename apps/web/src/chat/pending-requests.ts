@@ -97,6 +97,22 @@ export interface PendingRequest {
   /** `true` when this device published it. Drives the UX §10 exception — a
    *  member always sees the status of a request they made themselves. */
   readonly own: boolean;
+  /**
+   * ADR-0045 UX §6.1.10 — base64 of the successor's signature key, on OUR OWN
+   * record only, for a `role-change` that is an ownership transfer.
+   *
+   * It does two jobs at once, and neither is available any other way. It is the
+   * only thing that distinguishes *our pending role change is a transfer* from
+   * *our pending role change is a promote* — `ProposalKind::RoleChange` carries
+   * no payload, so the core cannot tell them apart and {@link proposalKey}
+   * collapses every role change to the single key `role-change` — and it is
+   * what names the person in `Waiting to make {name} the owner.`
+   *
+   * The KEY is stored, never a label: the label is resolved through the LIVE
+   * roster at render time, so a successor who has since left degrades to the
+   * unnamed variant rather than to a stale name.
+   */
+  readonly transferToB64: string | undefined;
   /** `"pending"` below the quiet window (render nothing), `"waiting"` above it. */
   readonly state: "pending" | "waiting";
 }
@@ -174,6 +190,18 @@ export interface RequestObservation {
   readonly atMs: number;
   /** `true` when this device published the request. */
   readonly own: boolean;
+  /**
+   * ADR-0045 UX §6.1.10 — see {@link PendingRequest.transferToB64}.
+   *
+   * It lives HERE, on the observation record, rather than in a store of its
+   * own, and that is a correctness choice rather than tidiness: this store is
+   * pruned against the core's live pending set on every fold
+   * ({@link pruneObservations}), so a swept or superseded transfer takes its
+   * successor key with it. A separate store would have to re-derive that prune,
+   * and a stale key surviving it would make an unrelated LATER role change
+   * render `Waiting to make {name} the owner.` about somebody nobody proposed.
+   */
+  readonly transferToB64?: string;
 }
 
 /**
@@ -224,6 +252,9 @@ export function foldPendingRequests(
       senderLeaf: record.senderLeaf,
       observedAtMs: seen?.atMs,
       own: seen?.own ?? false,
+      // Only meaningful on our own record, and only for a role change — which
+      // is exactly where it is ever written.
+      transferToB64: seen?.transferToB64,
       state: requestState(seen?.atMs, nowMs, quietWindowMs),
     });
   }
@@ -343,7 +374,17 @@ export function loadObservations(
     const out = new Map<string, RequestObservation>();
     for (const [k, v] of Object.entries(parsed)) {
       if (typeof v?.atMs === "number" && typeof v?.own === "boolean") {
-        out.set(k, { atMs: v.atMs, own: v.own });
+        out.set(k, {
+          atMs: v.atMs,
+          own: v.own,
+          // ADR-0045 §6.1.10 — preserved through the round-trip, and validated
+          // the same way as the rest: anything that is not a string is simply
+          // absent, which degrades a pending transfer to its unnamed variant
+          // rather than losing the request.
+          ...(typeof v.transferToB64 === "string"
+            ? { transferToB64: v.transferToB64 }
+            : {}),
+        });
       }
     }
     return out;
@@ -380,6 +421,13 @@ function saveObservations(
  * exactly the wait the notice exists to surface. `own` is upgraded to `true`
  * if this device later publishes the same request, because the own-request
  * visibility exception must not be lost to arrival order.
+ *
+ * `transferToB64` (ADR-0045 §6.1.10) follows the same first-wins rule for the
+ * same reason: the successor belongs to the request that is actually pending,
+ * and only the device that published it can supply one. A later observation of
+ * the same key without one must not erase it — the receive loop observes its
+ * own request landing back off the journal, and that observation carries no
+ * successor.
  */
 export function recordObservation(
   accountIdB64: string,
@@ -387,12 +435,15 @@ export function recordObservation(
   key: string,
   atMs: number,
   own: boolean,
+  transferToB64?: string,
 ): void {
   const observations = loadObservations(accountIdB64, groupIdB64);
   const existing = observations.get(key);
+  const transferTo = existing?.transferToB64 ?? transferToB64;
   observations.set(key, {
     atMs: existing?.atMs ?? atMs,
     own: (existing?.own ?? false) || own,
+    ...(transferTo === undefined ? {} : { transferToB64: transferTo }),
   });
   saveObservations(accountIdB64, groupIdB64, observations);
 }

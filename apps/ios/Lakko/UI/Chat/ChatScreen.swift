@@ -1096,6 +1096,40 @@ private struct MembersSheet: View {
     var body: some View {
         NavigationStack {
             List {
+                // ADR-0045 UX §6.1.9 — tell the new owner, best-effort and
+                // fail-open. Nothing on the wire announces a transfer, so this
+                // is an inference from an observed role-table change and can
+                // never fire on a device that first sees the table already
+                // naming it owner. It must therefore never be the only way a
+                // user learns their role — the panel's affordances stay the
+                // primary signal, exactly as they are for admin today.
+                //
+                // §8 argues AGAINST telling someone they hold the committer
+                // duty, because it cannot be discharged. That argument does not
+                // carry here, and the difference is the whole reason: ownership
+                // CAN be discharged, by the flow directly below.
+                if let banner = viewModel.newOwnerBanner {
+                    Section {
+                        Text(banner.headline).font(.footnote)
+                        // The second line names the exit deliberately: it is the
+                        // one sentence that stops the new owner from arriving
+                        // where the old one was.
+                        Text(banner.body)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        Button(banner.dismiss) { viewModel.dismissNewOwnerNotice() }
+                    }
+                    // UX §13 asks for a POLITE, non-interrupting announcement.
+                    // SwiftUI has no `aria-live="polite"` equivalent: the only
+                    // announcement API is `AccessibilityNotification.Announcement`,
+                    // which speaks over whatever the user is reading — exactly
+                    // what §13 forbids. So the honest treatment is the one the
+                    // pending notice above already gets: a grouped container the
+                    // reader reaches in order, whose children stay individually
+                    // focusable so `Dismiss` is still a real button. Nothing
+                    // here claims a mechanism the platform does not have.
+                    .accessibilityElement(children: .contain)
+                }
                 // ADR-0022 — only owner/admin (or an open/legacy group) sees
                 // the add affordance; a plain member's add would be refused.
                 if viewModel.canManageMembers {
@@ -1271,15 +1305,61 @@ private struct MembersSheet: View {
                         }
                     }
                 }
-                // ADR-0045 (UX §5 item 6) — `Leave group`: bottom of the panel,
-                // destructive, and HIDDEN for the owner. The owner's departure
-                // is refused by the core fail-closed (`set_group_roles` is
-                // owner-only, so an ownerless group could never appoint another
-                // admin again); that is a PRECONDITION rather than a dead end —
-                // transfer ownership, then leave as an ordinary member — but no
-                // client has a transfer affordance yet, so offering a control
-                // that always refuses would be worse than offering none.
-                if viewModel.leaveAffordance.isOffered {
+                // ADR-0045 (UX §5 item 6 / §6.1.1) — THE EXIT BLOCK: bottom of
+                // the panel, one block whose meaning is *the exit*, with two
+                // ROLE-DISJOINT controls of which exactly one is ever live.
+                //
+                // The owner's `Leave group` used to be HIDDEN, and this reverses
+                // that — not because the old argument (a control that always
+                // refuses is worse than no control) was wrong, but because it
+                // was right only while transfer was unreachable. A disabled
+                // control whose reason names the action directly above it is a
+                // signposted route, and it is the same visible-but-disabled
+                // pattern §5.3 already uses for a pending row's `Remove`. Hiding
+                // it now would leave an owner looking for the exit finding
+                // nothing at all about leaving.
+                //
+                // `.hidden` only on the proposal path: a legacy group's core has
+                // no self-remove route and no owner to transfer from.
+                switch viewModel.exitBlockState {
+                case .hidden:
+                    EmptyView()
+                case .owner(let transfer, let leave):
+                    Section {
+                        // NOT destructive-styled at rest. Red would file it with
+                        // `Remove` and `Leave group`, and an owner scanning for
+                        // a way out should not have to read a warning colour to
+                        // find one. Transfer is not a destruction; it is a
+                        // handover that happens to be final, and finality is a
+                        // property of the step below, not of the control that
+                        // opens it.
+                        Button("Transfer ownership") { viewModel.openTransferStep() }
+                            .disabled(viewModel.membershipBusy || !transfer.enabled)
+                        if let reason = transfer.disabledReason {
+                            Text(reason)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        Button(role: .destructive) {
+                            // Unreachable — the control is disabled for as long
+                            // as this device is the owner. The action is left
+                            // wired rather than stubbed so the two arms of this
+                            // switch stay the same control in the same slot.
+                            leaveConfirmPresented = true
+                        } label: {
+                            Text("Leave group")
+                        }
+                        .disabled(true)
+                        // The reason is adjacent TEXT rather than a decoration:
+                        // a VoiceOver reader who cannot see the greyed control
+                        // must still hear why (UX §13).
+                        if let reason = leave.disabledReason {
+                            Text(reason)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                case .member(let leave):
                     Section {
                         Button(role: .destructive) {
                             leaveConfirmPresented = true
@@ -1290,9 +1370,22 @@ private struct MembersSheet: View {
                         // Hiding it then would read as the permission having
                         // vanished, where our own row's `Waiting to leave.`
                         // annotation explains a disabled control.
-                        .disabled(viewModel.leaveAffordance != .enabled)
+                        .disabled(viewModel.membershipBusy || !leave.enabled)
+                        if let reason = leave.disabledReason {
+                            Text(reason)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
+            }
+            // ADR-0045 UX §6.1.11 / §14 — the transfer step is a PUSHED
+            // destination inside the members sheet's own `NavigationStack`,
+            // never a sheet over a sheet: one modal surface owns the whole
+            // choice, because splitting it would put the warning and the button
+            // on different screens.
+            .navigationDestination(isPresented: $viewModel.transferStepOpen) {
+                TransferOwnershipStep(viewModel: viewModel)
             }
             // UX §3 / §6 — the confirmation is the LAST EXIT, not a courtesy: a
             // published request cannot be withdrawn (there is no wire withdraw,
@@ -1347,5 +1440,144 @@ private struct MembersSheet: View {
     /// is a non-member). Mirrors the roster's fingerprint posture.
     private static func shortFingerprint(_ data: Data) -> String {
         data.prefix(8).map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+/// ADR-0045 UX §6.1.4 / §6.1.5 — the ownership-transfer step.
+///
+/// **There is NO second dialog behind this, and that is the design rather than a
+/// shortcut**: this step IS the confirmation, which happens to require two
+/// choices to be well-formed. Stacking an `Are you sure?` on a surface that
+/// already asked two questions buys friction of the kind that gets dismissed
+/// reflexively, and a sheet over a sheet is idiomatic on none of the three
+/// platforms. What replaces it is friction that cannot be discharged without
+/// reading — the action names the person, is disabled until one is picked, and
+/// uses the picked row's label verbatim.
+///
+/// **Ordering inside the step is load-bearing**: the irreversibility statement
+/// sits ABOVE the role choice. Below it, the pre-selected option would read as
+/// the safe one and the warning would read as being about the other one. It is
+/// also what puts *"This cannot be undone"* ahead of the control that does it in
+/// VoiceOver's focus order (UX §13).
+private struct TransferOwnershipStep: View {
+    @ObservedObject var viewModel: ChatViewModel
+
+    var body: some View {
+        List {
+            Section {
+                Text(transferIrreversibleHeadline)
+                    .font(.footnote.weight(.semibold))
+                Text(transferIrreversibleBody)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            // §6.1.3 — every member except the owner, in the roster's own order,
+            // with a muted `Admin` MARKER rather than a filter. An admins-only
+            // picker is EMPTY in the commonest small group (owner plus one
+            // member, no admins ever appointed) — the exact dead end this
+            // feature exists to close, reappearing as a UI rule. The selection
+            // VALUE is the 32-byte signature key, never the leaf: OpenMLS hands
+            // a vacated leaf to the next Add.
+            Section("New owner") {
+                ForEach(viewModel.transferPickerRows) { row in
+                    Button {
+                        viewModel.transferPick = row.signatureKeyB64
+                    } label: {
+                        HStack {
+                            Text(row.label)
+                            if row.isAdmin {
+                                Text("Admin")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            if viewModel.transferPick == row.signatureKeyB64 {
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    // A single-select GROUP, not a list of buttons, and the row
+                    // announces the roster label plus `, admin` where the marker
+                    // shows (UX §13).
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(row.isAdmin ? "\(row.label), admin" : row.label)
+                    .accessibilityAddTraits(
+                        viewModel.transferPick == row.signatureKeyB64
+                            ? [.isButton, .isSelected] : .isButton)
+                }
+            }
+            // §6.1.4 — a real decision, pre-selected but never defaulted. A
+            // single-select control, NEVER a checkbox: a checkbox has an
+            // unstated default state and this has none. The core refuses to
+            // default it because either silent choice is wrong in one direction,
+            // and the UI must not undo with a layout choice what the core
+            // protected with a type.
+            Section("Your role afterwards") {
+                ForEach(outgoingOwnerOptions) { option in
+                    Button {
+                        viewModel.transferOutgoing = option.value
+                    } label: {
+                        HStack(alignment: .top) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(option.label)
+                                Text(option.consequence)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            if viewModel.transferOutgoing == option.value {
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("\(option.label). \(option.consequence)")
+                    .accessibilityAddTraits(
+                        viewModel.transferOutgoing == option.value
+                            ? [.isButton, .isSelected] : .isButton)
+                }
+            }
+            Section {
+                // Note APPLIED, not NOW: the transfer is a proposal, and
+                // asserting the exit is open before the commit lands would be
+                // the optimistic update §3 forbids.
+                Text(transferUnlocksLeaveMessage)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Button(role: .destructive) {
+                    viewModel.onTransferOwnership()
+                } label: {
+                    Text(viewModel.transferActionState.label)
+                }
+                .disabled(viewModel.membershipBusy || !viewModel.transferActionState.enabled)
+                if let err = viewModel.membershipError {
+                    Text(err)
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                }
+            }
+        }
+        .navigationTitle("Transfer ownership")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                if viewModel.membershipBusy {
+                    // §14's busy convention on this platform: a spinner plus
+                    // `disabled`, never an `-ing…` label in the button.
+                    ProgressView().controlSize(.small)
+                }
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                // `Cancel` is a PRE-PUBLISH exit, and it is the last one.
+                // Nothing here is a withdraw: once the proposal is published it
+                // is in every member's store and dies only when some commit
+                // lands, so no client may offer a cancel afterwards —
+                // including, and especially, for a transfer.
+                Button("Cancel") { viewModel.cancelTransferStep() }
+                    .disabled(viewModel.membershipBusy)
+            }
+        }
     }
 }

@@ -378,6 +378,63 @@ describe("ADR-0045 — the observation store", () => {
     expect(loadObservations("acct-b", GROUP).size).toBe(1);
   });
 
+  // ADR-0045 UX §6.1.10 — the successor's key on OUR OWN record. It is the only
+  // thing that tells `role-change` the transfer from `role-change` the promote,
+  // because `ProposalKind::RoleChange` carries no payload and `proposalKey`
+  // collapses both onto the one key.
+  it("carries the successor key on our own transfer record, and prunes it with the request", () => {
+    recordObservation(ACCOUNT, GROUP, "role-change", T0, true, "c3VjYw==");
+    expect(loadObservations(ACCOUNT, GROUP).get("role-change")?.transferToB64).toBe(
+      "c3VjYw==",
+    );
+    const { requests } = foldPendingRequests(
+      [record({ kind: "role-change", removeTargetLeaf: undefined })],
+      loadObservations(ACCOUNT, GROUP),
+      T0 + QUIET_WINDOW_MS,
+    );
+    expect(requests[0]?.transferToB64).toBe("c3VjYw==");
+    // A swept transfer takes its successor key with it — a stale key would make
+    // an unrelated LATER role change name somebody nobody proposed.
+    pruneObservations(ACCOUNT, GROUP, []);
+    expect(loadObservations(ACCOUNT, GROUP).get("role-change")).toBeUndefined();
+  });
+
+  it("a later observation of the same key does not erase the successor", () => {
+    // The receive loop observes our own request landing back off the journal,
+    // and that observation carries no successor. First-wins, like `atMs`.
+    recordObservation(ACCOUNT, GROUP, "role-change", T0, true, "c3VjYw==");
+    recordObservation(ACCOUNT, GROUP, "role-change", T0 + 60_000, false);
+    const seen = loadObservations(ACCOUNT, GROUP).get("role-change");
+    expect(seen?.transferToB64).toBe("c3VjYw==");
+    expect(seen?.own).toBe(true);
+  });
+
+  it("first-wins, so a second successor for the same key never overwrites", () => {
+    // C-65 permits exactly ONE pending role change per group and `proposalKey`
+    // collapses every role change onto the one key, so the FIRST record is the
+    // one that matches what the core actually holds. This pins the `??` order
+    // explicitly: the previous test cannot, because its second call supplies no
+    // successor and both orders agree there.
+    //
+    // Reaching this at all needs a torn `pendingProposals()` read to have let a
+    // second transfer past the client's C-65 pre-check, which is contrived —
+    // but the label must never name somebody the user did not pick for the
+    // request that is actually pending, and first-wins is what `atMs` already
+    // does for the same reason.
+    recordObservation(ACCOUNT, GROUP, "role-change", T0, true, "Zmlyc3Q=");
+    recordObservation(ACCOUNT, GROUP, "role-change", T0 + 60_000, true, "c2Vjb25k");
+    expect(loadObservations(ACCOUNT, GROUP).get("role-change")?.transferToB64).toBe(
+      "Zmlyc3Q=",
+    );
+  });
+
+  it("an ordinary promote records NO successor, so it is not read as a transfer", () => {
+    recordObservation(ACCOUNT, GROUP, "role-change", T0, true);
+    expect(
+      loadObservations(ACCOUNT, GROUP).get("role-change")?.transferToB64,
+    ).toBeUndefined();
+  });
+
   it("a corrupt row reads as empty rather than throwing", () => {
     globalThis.localStorage.setItem(
       `lakko.pending-requests.v1.${ACCOUNT}.${GROUP}`,

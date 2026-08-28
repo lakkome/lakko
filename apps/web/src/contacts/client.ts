@@ -100,6 +100,12 @@ import type { ActingCommitter } from "../chat/committer-beacon";
 // them the same way the poll does.
 import { toEvent } from "../chat/client";
 import type { IncomingChatEvent } from "../chat/client";
+// ADR-0045 UX §6 — the seventh refusal string, defined ONCE beside the rest of
+// the §6.1 copy. Both C-65 directions reuse it verbatim (a pending role change
+// refuses a transfer, a pending transfer refuses a role change), so a single
+// definition is what keeps the table at seven strings rather than drifting into
+// two near-identical ones.
+import { ROLE_CHANGE_ALREADY_PENDING } from "../chat/ownership-transfer";
 
 /** Optional wires the route layer hands to ContactsClient
  *  (Phase 1.16e6c2). See `ChatClientOptions` in
@@ -2518,11 +2524,7 @@ export class ContactsClient {
       // the ordinary case and a real, visible wait only when the committer is
       // absent, which is precisely when a silent loss would be worst.
       if (hasPendingRoleChange(group)) {
-        throw ContactsError.wrap(
-          new Error(
-            "A role change is already waiting to apply. Wait for it to land, then try again.",
-          ),
-        );
+        throw ContactsError.wrap(new Error(ROLE_CHANGE_ALREADY_PENDING));
       }
       let proposalBytes: Uint8Array;
       try {
@@ -2587,6 +2589,82 @@ export class ContactsClient {
       commitMessageId: commitPublish.id,
       welcomeMessageId: undefined,
     };
+  }
+
+  /**
+   * ADR-0045 UX §6.1 — hand the group's owner slot to another member.
+   *
+   * **Always the proposal arm, and there is no second one here.** The wasm
+   * surface carries `transferOwnership` too, and this method deliberately never
+   * reaches it, because for this flow the direct arm is *structurally
+   * unreachable*: the UI gates the control on `isOwner`, which is read off the
+   * role table (`Group.ownRole` → `group_roles()`), and `usesProposalPath` is
+   * the identical `group_roles()` read (`Group.roleTableOwner`). A group with no
+   * role table has no owner, so `isOwner && !usesProposalPath` cannot hold. That
+   * makes transfer the one membership action needing a single arm rather than
+   * two, unlike add / remove / role change, each of which carries a direct
+   * fallback for the table-less case. A table-less group reaching here anyway is
+   * refused by the core, which is the right place for it.
+   *
+   * Everything else mirrors {@link setMemberAdmin}'s proposal arm exactly,
+   * because a transfer **is** a role change — deliberately not a new commit
+   * type, just the owner-only role-table rewrite with the owner slot moved. So
+   * it inherits that arm's discipline verbatim: the per-group MLS lock, the
+   * C-65 pre-check, no outbox entry and no reset region (a proposal advances no
+   * epoch, so there is nothing to roll back), and a `proposed` outcome the
+   * caller sweeps immediately.
+   *
+   * `newOwnerSigPubkey` is the successor's 32-byte Ed25519 signature public key
+   * — the stable handle `Group.members()` reports and the role table keys on —
+   * never a leaf index: OpenMLS hands a vacated leaf to the next Add.
+   *
+   * `outgoing` decides what becomes of THIS device's own role and is required.
+   * The core refuses to default it and both FFI surfaces carry that structurally
+   * (wasm's `OutgoingOwner` discriminants start at `1`, so a missing argument
+   * throws rather than silently meaning `Admin`); this signature keeps the
+   * property by taking a required union rather than an optional argument.
+   */
+  async transferGroupOwnership(
+    identity: IdentitySecrets | null,
+    group: WasmGroup,
+    newOwnerSigPubkey: Uint8Array,
+    outgoing: "admin" | "member",
+  ): Promise<MembershipOutcome> {
+    const myIdentity = await this.resolveIdentity(identity);
+    const wasm = await loadWasm();
+    return withGroupMlsLock(base64Encode(group.groupId), async () => {
+      // C-65, and it collides in BOTH directions: a pending role change refuses
+      // a transfer, and a pending transfer refuses a role change. It falls out
+      // of `propose_ownership_transfer` delegating to `propose_group_roles`
+      // rather than being restated, which is the point. The UI disables the
+      // control with this string as its reason once the blocking request is past
+      // the quiet window (UX §6.1.8's deliberate asymmetry with the admin
+      // toggles, which keep refuse-on-tap); this is the check for the window in
+      // which the control is still live.
+      if (hasPendingRoleChange(group)) {
+        throw ContactsError.wrap(new Error(ROLE_CHANGE_ALREADY_PENDING));
+      }
+      let proposalBytes: Uint8Array;
+      try {
+        proposalBytes = group.proposeOwnershipTransfer(
+          myIdentity,
+          newOwnerSigPubkey,
+          outgoing === "admin"
+            ? wasm.OutgoingOwner.Admin
+            : wasm.OutgoingOwner.Member,
+        );
+      } catch (err) {
+        throw ContactsError.wrap(err);
+      }
+      await this.persistBestEffort();
+      let publish;
+      try {
+        publish = await this.ds.publishGroup(group.groupId, proposalBytes);
+      } catch (err) {
+        throw ContactsError.wrap(err);
+      }
+      return { kind: "proposed", proposalMessageId: publish.id };
+    });
   }
 
   /** ADR-0027 (G-3) — approve a pending external-join request (owner / admin

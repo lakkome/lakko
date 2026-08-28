@@ -9,18 +9,41 @@ S1+S2, `9a60ab3`), then the FFI (`c5c0788`), **ownership transfer** (`e780952`),
 (`94825ec` / `94da492`) — and then the clients: `1de5fe7` (web), `02f0037` (the
 beacon), `000d9f8` (the send lock), `1f230ab` (iOS + Android). **What this spec
 designed and the clients did NOT build** is listed once, here, so a reader does not
-have to reconstruct it from §11: the **ownership-transfer flow** (§11.6 — enumerated
+have to reconstruct it from §11: the **ownership-transfer flow** (~~§11.6 — enumerated
 and deliberately not designed, so this is a UX pass that has not happened rather than
-an implementation that skipped it), the **typed refusal-reason table** (§9.1 / §12.6 —
+an implementation that skipped it~~ — **designed 2026-08-28 in §6.1**, so it is now an
+implementation that has not happened rather than a pass; it remains the largest
+outstanding item and it is the precondition for an owner ever leaving a group), the
+**typed refusal-reason table** (§9.1 / §12.6 —
 the core still returns prose `Error::Group` strings, and mapping prose to fixed copy
 is the drift class this spec itself flags), the **committer-side failure surface** with
 its `Retry now` (§7 / §8 — as written it is gated on an "activation delay" belonging to
 the *staggered* variant the maintainer did not choose, so it is unimplementable as
 specified), and the **automatic re-request on supersession** (§7 — no client has the
-code; a superseded request is dropped and the user must ask again). One more, which is
+code; a superseded request is dropped and the user must ask again). ~~One more, which is
 a per-platform gap rather than a missing design: **`Leave group` shipped on web only**
 (§5, §12.3), so the member-facing half of what [ADR-0045] unlocked is reachable on one
-client of three.
+client of three.~~ **Closed — `c50bdd7` landed `Leave group` on both natives**, so the
+member-facing half is reachable on all three; what §6.1 changes about it is only the
+owner's arm.
+
+> **Revised 2026-08-28 — the ownership-transfer flow is designed (§6.1).** The one item
+> §11.6 enumerated and deliberately deferred is now specified end to end: the exit block
+> and its two role-disjoint controls, the member picker, the `OutgoingOwner` choice, the
+> irreversibility confirmation, and what `Leave group` becomes afterwards — plus four the
+> enumeration did not reach, each settled from the code rather than from preference. The
+> client drives **`proposeOwnershipTransfer` and never the direct arm**, which turns out
+> to be structurally unreachable for this flow (§6.1.2). The **C-65** collision surfaces
+> through §6's **existing seventh string in both directions**, so the table stays at
+> seven (§6.1.8). A pending transfer gets **the panel count and no row annotation**
+> (§6.1.6, derived from §5.2 / §10 / §11.5 rather than invented). And the **new owner is
+> told**, best-effort and fail-open, on the ground that §8's argument against surfacing
+> the committer duty does not carry to a duty that *can* be discharged (§6.1.9). Two
+> things settled earlier move: §5 item 6's panel order becomes an exit block, and the
+> owner's `Leave group` goes from **hidden to disabled-with-a-reason** — a deliberate
+> reversal of a decision that was correct only while the precondition was unreachable.
+> It needs **one local durable field and nothing on the FFI** (§9). **Nothing is built.**
+
 **Owner surface:** cross-platform (web SolidJS / iOS SwiftUI / Android Compose).
 **Pattern parent:** the existing members panel and its ADR-0027 `Join requests` section
 (`apps/web/src/routes/Chat.tsx` `<section aria-label="Members">`, iOS `MembersSheet` in
@@ -231,8 +254,17 @@ The members panel gains one notice and one section. Nothing moves; nothing is re
 3. **`Waiting to be added ({n})`** — new, owner/admin only, only when non-empty.
 4. Add-member form + invite link — existing, owner/admin only.
 5. Members list — existing, with new row annotations.
-6. **`Leave group`** — new, bottom, destructive styling, hidden for the owner.
-   **Built on web only** (2026-08-25); iOS and Android shipped items 1-5 and not this one.
+6. **The exit block** — new, bottom of the panel. Exactly one of its two
+   controls is ever live for a given reader, because they are role-disjoint
+   (§6.1.1): the owner sees **`Transfer ownership`** above a **disabled**
+   `Leave group`; everyone else sees **`Leave group`** alone, destructive
+   styling, live. ~~`Leave group` — new, bottom, destructive styling, hidden for
+   the owner. **Built on web only** (2026-08-25); iOS and Android shipped items
+   1-5 and not this one.~~ **Both halves of that are now stale.** `Leave group`
+   shipped on **all three** in `c50bdd7`; and it is no longer *hidden* for the
+   owner but *disabled with a stated reason*, which §6.1.1 argues is the
+   reversal of a decision that was correct only while transfer was unreachable.
+   `Transfer ownership` is designed in §6.1 and **built nowhere**.
 
 Requests-to-join stay above pending changes because they need a **decision**; pending
 changes need none.
@@ -344,13 +376,25 @@ reason must have, and it is the fact the old immediate-looking UI concealed.
 - Body: `You will keep receiving messages until an owner or an admin applies your request. You will need a new invite to rejoin.`
 - Buttons: `Leave` (destructive) / `Cancel`
 - Pending annotation on your own row: `Waiting to leave.`
-- The control is **hidden for the group owner** — the owner cannot leave *while owner*
+- The control is **not live for the group owner** — the owner cannot leave *while owner*
   (§11.6). ~~structurally and permanently, not transiently~~ — **that is no longer the
   right word.** Ownership transfer is built, so the owner's inability to leave is a
   **precondition, not a dead end**: transfer first, then leave as an ordinary member.
-  Hiding the control is still right for an owner who has not transferred (a control that
+  ~~Hiding the control is still right for an owner who has not transferred (a control that
   always refuses is worse than no control), but the hidden state now needs a way out —
-  which is the transfer flow this spec does not yet design (§11.6).
+  which is the transfer flow this spec does not yet design (§11.6).~~
+  **Amended 2026-08-28 — the transfer flow is designed (§6.1) and the hiding rule goes
+  with it.** *A control that always refuses is worse than no control* was right only
+  while the precondition was unreachable. It is reachable now and sits directly above,
+  so the owner's `Leave group` renders **disabled with the reason**
+  `Transfer ownership first — a group cannot be left without an owner.` — the same
+  visible-but-disabled-with-an-explanation pattern §5.3 already establishes. Hiding it
+  now would leave an owner looking for the exit finding nothing about leaving at all,
+  which is the defect, not the safeguard. **Built nowhere yet:** all three clients still
+  hide it (`leaveGroupAffordance` returns `.hidden(.ownerCannotLeave)`), and both native
+  modules say in their own doc comments that they hide it *because* no client has a
+  transfer affordance — so the reason is recorded in the code and the code changes with
+  the affordance.
 
 **Refusal copy.** The core authorises the requester locally *before* publishing, so an
 unauthorised request never reaches the wire and the user gets a synchronous, specific
@@ -406,6 +450,430 @@ authorisation and **now** fails. The user sees the same specific string, prefixe
 e.g. `Your earlier request was not applied. Only the group owner or an admin can remove members.`
 
 One string table, two entry points, no second vocabulary.
+
+### 6.1 Ownership transfer — the owner's way out
+
+**Why here rather than in a section of its own.** §6 is where every
+proposer-driven flow with a confirmation lives, and transfer is a third one
+beside `Remove` and `Leave`: it is authorised by the same gate, refused out of
+the same string table, and its entire purpose is to reach the control this
+section already describes as hidden. The two must be read together or neither
+makes sense. Numbering it `6.1` rather than inserting a top-level section is
+also deliberate and is a maintenance fact rather than a taste one — the seven
+sections after §6 are cross-referenced about thirty times inside this document
+and **by number** in the three clients' own source comments (`UX §5.3`,
+`UX §3 / §6`, `UX §5 item 6`, `UX §10`, `UX §11.5`, `§12.6`), so shifting them
+would silently invalidate every one of those in files this pass does not touch.
+
+**The one framing sentence.** The owner is the only person in a Lakko group who
+cannot leave it, and transfer is the only thing that changes that. Everything
+below follows from transfer being the **single irreversible action in the
+membership surface**: `Add`, `Remove`, `Leave` and an ordinary role change can
+all be asked for again, and this one cannot be asked back.
+
+#### 6.1.1 Where it lives: one exit block, two role-disjoint controls
+
+`Leave group` sits at the bottom of the panel and today is hidden for the owner
+(§5 item 6). `Transfer ownership` is owner-only. So **exactly one of the two is
+ever live for a given reader**, and they belong in one block at the panel's
+bottom whose meaning is *the exit*:
+
+- **Owner:** `Transfer ownership`, live, with `Leave group` **below it, present
+  and disabled**, carrying the reason
+  `Transfer ownership first — a group cannot be left without an owner.`
+- **Everyone else:** `Leave group` alone, live, exactly as §6 already specifies.
+  **No transfer control at all** — a non-owner's transfer is refused by the core
+  and by every peer, so the control would never work and nothing a member could
+  do would make it work. That is the case where *a control that always refuses is
+  worse than no control* still holds, and it is worth naming, because it is the
+  same sentence the owner's `Leave group` no longer satisfies.
+
+**This reverses §6's "hide it from the owner" decision, and the reason for the
+reversal is not that the argument was wrong.** It was right *while transfer was
+unreachable*: a control that always refuses is worse than no control. It has
+stopped being right now that the precondition is reachable and adjacent. A
+disabled control whose stated reason names an action sitting directly above it
+is not a control that always refuses — it is a signposted route, and it is the
+same visible-but-disabled-with-an-explanation pattern §5.3 already establishes
+for a pending row's `Remove` and that all three clients ship. The defect the
+reversal fixes is concrete: today an owner who wants to leave opens the members
+panel and finds **nothing at all about leaving**, and no amount of correctness
+elsewhere tells them the route.
+
+`Transfer ownership` is **not** destructive-styled at rest. Red would file it
+with `Remove` and `Leave group`, and the owner scanning for a way out should not
+have to read a warning colour to find one. Transfer is not a destruction; it is
+a handover that happens to be final, and finality is a property of the
+confirmation, not of the button that opens it. The confirmation's own primary
+action does carry each platform's destructive role (§6.1.5).
+
+**Panel position:** the exit block replaces item 6 of §5's panel order, below
+the members list, `Transfer ownership` first because it is the precondition and
+reads first.
+
+#### 6.1.2 Proposal, never direct commit — and the direct arm has no call site at all
+
+Both APIs exist (`transferOwnership`, `proposeOwnershipTransfer`). The clients
+must call **`proposeOwnershipTransfer`**, and the finding that settles it is
+stronger than a preference: **the direct arm is unreachable for this flow.**
+`isOwner` is read off the role table, and `usesProposalPath` is *"the group has
+a role table"* — the identical read, on all three clients. A group with no role
+table has no owner, so `isOwner && !usesProposalPath` cannot hold. The transfer
+control is gated on `isOwner`; therefore it never renders in a group that would
+take the direct path. **Transfer is the one membership action that needs a
+single arm rather than two**, unlike add, remove and role change, each of which
+carries a direct fallback for the table-less case.
+
+Four reasons it would still be the proposal path if the direct arm were
+reachable, in order of weight:
+
+1. **The branch rule is `usesProposalPath`, not "am I the owner".** All three
+   clients already branch that way for add, remove and role change. A transfer
+   branching on role instead would be a second, differently-gated route into
+   membership — precisely the permanent dual path [ADR-0045] forbids.
+2. **The direct path is refused in the *ordinary* state of a proposal-path
+   group.** `transfer_ownership` delegates to `set_group_roles`, which calls
+   `refuse_if_proposals_pending` — refused while **anything** is pending. The
+   proposal path delegates to `propose_group_roles`, refused only by another
+   *role change* (`refuse_if_role_change_pending`). Choosing the direct path
+   would make transfer the most fragile control in the panel, blocked by one
+   unrelated pending add, for no gain.
+3. **The latency the direct path appears to buy is not real.** The owner is rank
+   0, so the client's own post-publish sweep sweeps its own proposal — the shape
+   `onToggleAdmin` already uses, and for the reason its comment already gives:
+   *"a role change is owner-only and the owner is rank 0, so the sweep that
+   follows is the same device: in practice this is still immediate."*
+4. **A transfer is the worst commit in the system to lose a race with.** A
+   proposal that loses costs nothing; a direct commit that loses leaves its
+   eagerly-merged author holding a role table in which **they are not the
+   owner** — and no owner-only path back, because locally they are no longer the
+   owner. ADR-0040's outbox re-publishes, so the honest reading is *may be
+   permanent* rather than *is* — which is not a reason to reintroduce the loss
+   mode [ADR-0045] exists to remove, least of all for the one commit whose loss
+   is hardest to reason about.
+
+Everything downstream follows the established proposal shape: publish, sweep
+immediately, and let the outcome copy (§6.1.7) say which of the two happened.
+
+#### 6.1.3 The picker: every member, and the reason is a dead end rather than a preference
+
+**Offer every member except the current owner. Do not restrict to admins.**
+
+The core admits any member (`plan_ownership_transfer` refuses only a non-member
+and the current owner; `owner_survives` / **C-63** enforces the same on every
+peer), so an admins-only picker would be a rule the protocol does not have, and
+a narrower rule owes a reason. The candidate reason — *an admin is a
+proven-trusted successor* — does not survive contact with the commonest small
+group: **owner plus one member, no admins ever appointed**. There the
+admins-only picker is empty and the owner is stuck again. That is the dead end
+this whole feature exists to close, reappearing as a UI rule, and it settles the
+question. The wide picker also costs nothing the narrow one saves: an owner who
+wants an admin successor can promote first, and the transfer is owner-only,
+confirmed, and irreversible — the UI has no business second-guessing whom the
+owner trusts.
+
+**Mark, do not filter.** A picker row carries the roster's own identity
+treatment plus, for a current admin, a muted `Admin` marker. Who is already an
+admin is information the owner assigned and is worth having when choosing a
+successor; it is not a reason to hide anyone.
+
+**Keyed on the 32-byte Ed25519 signature public key, never the leaf index, never
+the label.** The selection *value* is that key, it is what
+`proposeOwnershipTransfer` takes, and it is what the role table keys on. OpenMLS
+hands a vacated leaf to the next Add, so a leaf-keyed selection can silently come
+to name someone else — the same reason ADR-0022 keyed the role table on the
+signature key and §4 compares on it.
+
+**Identity treatment: the roster's, reused rather than re-derived** — the
+accepted contact's display name when the key matches one, else the short
+fingerprint (web `displayName ?? shortFingerprint`, natives `memberLabel`). The
+label the user reads in the picker and the label they read on the roster must be
+produced by the same function, because whom they are naming is the one thing
+they will cross-check.
+
+**Order:** the roster's order, unchanged. Sorting admins to the top would be a
+soft version of the filter this section rejects.
+
+**Empty picker.** A group of one is reachable (everyone else left or was
+removed). The picker is never opened empty: `Transfer ownership` renders
+disabled with `There is no one else in this group to transfer it to.` That is
+an honest terminal state — there is no design that produces a successor out of
+an empty roster — and it is not the dead end §11.6 was about, since the owner
+of a one-person group is not being kept anywhere against their will.
+
+#### 6.1.4 The outgoing-owner choice: a real decision, pre-selected but never defaulted
+
+The core refuses to default this and says why: *either silent choice is wrong in
+one direction* — silently keeping admin leaves an unwanted administrator in a
+group the outgoing owner meant to walk away from, and silently dropping to plain
+member strips them, in one irreversible commit, of every power they had in a
+group they created. Both FFI surfaces carry that property structurally (no
+`Default` derive on uniffi; discriminants starting at `1` on wasm so a missing
+argument throws instead of silently meaning `Admin`). The UI must not undo with
+a layout choice what the core protected with a type.
+
+So: **two options, one pre-selected, each stating its own consequence** — a
+single-select control (radios, a segmented pair, whatever each platform reads as
+a choice), never a checkbox, because a checkbox has an unstated default state and
+this has none.
+
+- `Stay an admin` **(pre-selected)**
+  `You can still add and remove members. You can give this up later by asking the new owner.`
+- `Become a regular member`
+  `You give up every group power immediately. Only the new owner can give any of it back.`
+
+`Admin` is pre-selected for the core's stated reason and **not** because it
+preserves a way back — it does not, and no copy here may imply otherwise. It is
+the recoverable side of an unrecoverable action: shedding admin later is one
+ordinary role change the new owner can make, where the reverse mistake needs the
+same cooperation *and* costs the group an administrator in the meantime, at
+exactly the moment its leadership is changing hands.
+
+**Ordering inside the step is load-bearing:** the irreversibility statement
+(§6.1.5) sits **above** this choice, not below it. Below it, the pre-selected
+option reads as the safe one and the warning reads as being about the *other*
+one. Above it, both options are visibly downstream of a decision already made.
+
+#### 6.1.5 The irreversibility confirmation, and why the step *is* the confirmation
+
+This is the strongest claim in this document and the copy has to carry it
+without leaning on styling:
+
+> `This cannot be undone.`
+>
+> `Only an owner can change roles. Once you transfer this group you cannot take it back, you cannot restore your own owner role, and you cannot change your own role again unless the new owner does it for you.`
+
+All three clauses are literally true and none of them is rhetorical. Rewriting
+the role table is owner-only (`set_group_roles` / `propose_group_roles`), and
+the owner slot lives in that table — so after the commit the transferor is not
+the owner, cannot rewrite the table, and therefore cannot restore the slot,
+cannot take the group back, and cannot change even their **own** role without
+the new owner doing it for them. It is a stronger claim than any other confirm
+in this spec — `Remove` and `Leave` are both redoable — which is why it is
+stated as three specific losses rather than as an adjective.
+
+**There is no second dialog, and that is the design rather than a shortcut.**
+The transfer step is not a form that then confirms; it **is** the confirmation,
+which happens to require two choices to be well-formed. Stacking a native
+`Are you sure?` on top of a modal that already asked two questions buys friction
+of the worst kind — the kind that gets dismissed reflexively — and a
+modal-over-modal is idiomatic on none of the three platforms. What replaces it
+is friction that cannot be discharged without reading:
+
+- the action button **names the person**: `Make {name} the owner`;
+- it is **disabled until a member is selected**, so there is no default
+  successor and no path to the action that skips the picker;
+- the button's label uses the **picked row's label verbatim** — not a
+  re-formatted or re-shortened variant — because that is the string the user
+  cross-checks against the row they tapped.
+
+And one trailing line, because reaching the exit is usually the reason the owner
+is here at all and its absence invites a *did I need to do that?* doubt:
+
+> `Once the change is applied, you can leave the group like any other member.`
+
+Note *applied*, not *now*: the transfer is a proposal, and asserting the exit is
+open before the commit lands would be the optimistic update §3 forbids.
+
+**`Cancel` is a pre-publish exit, and it is the last one.** Nothing here is a
+withdraw. Once the proposal is published it is in every member's store and dies
+only when some commit lands (§3), so no client may offer a cancel afterwards —
+including for a transfer, and especially for a transfer.
+
+#### 6.1.6 While it is pending: panel notice yes, row annotation no
+
+A transfer is a `ProposalKind::RoleChange`. Every rule this document already
+states for a pending role change therefore applies to it unchanged, and the
+answers are derived from those rather than invented:
+
+- **Panel notice: yes, through the existing count.** No new copy. §5.1's two
+  lines are true of a pending transfer word for word.
+- **Row annotation: no.** §5.2 and §11.5: a role change carries no target, so it
+  cannot be attributed to a member. A client *could* annotate the successor's row
+  from its own record — and must not. Only the device that made the request could
+  render it, so it would appear on one device and not on the other owner/admin
+  devices reading the same pending set: a per-device fact rendered in the place
+  this panel reserves for group-level ones.
+- **`state` and the quiet window: unchanged.** A transfer swept by the owner's
+  own device lands inside the window and renders nothing, which is the ordinary
+  case and the right one.
+- **The store key: unchanged, and it agrees with the core by construction.** The
+  observation store already collapses every role change to the single key
+  `role-change`, and **C-65** permits exactly one pending role change per group.
+  One slot, one permitted request.
+
+**What the requester gets instead of an annotation** is a line on the control
+they touched, which is where §10's non-negotiable own-request exception is
+satisfied without asserting anything group-level. Past the quiet window,
+`Transfer ownership` is disabled and carries:
+
+- `Waiting to make {name} the owner.`
+- `Ownership transfer waiting to apply.` — when the successor can no longer be
+  resolved to a label (they left in the meantime).
+
+Resolved through the live roster **at render time**, never from a stored label —
+the rule `PendingRequests.kt` already states for a pending removal's target.
+
+**Below the quiet window the control stays enabled**, and a second tap is
+refused — by the client's own C-65 pre-check with the §6 string where one exists,
+by the core's own prose where it does not (§12.6). That is not an oversight; it
+is `leaveGroupAffordance`'s rule followed rather than re-litigated: *a request
+that is not yet rendered must not silently disable a control with nothing to
+explain it.* A gap of a few seconds in which a second tap gets a message is
+better than one in which it gets a dead button.
+
+#### 6.1.7 What the transferor sees afterwards, and what `Leave group` becomes
+
+The outcome uses the panel's existing notice slot and the shape the sibling
+actions already use:
+
+| Outcome | Copy |
+|---|---|
+| swept immediately, stayed admin | `{name} is now the group owner. You are still an admin.` |
+| swept immediately, became a member | `{name} is now the group owner. You are now a regular member.` |
+| published, not yet swept | `Ownership transfer requested. It applies when an owner or an admin applies the change.` |
+
+The first two name the transferor's own new role because **half the panel
+changes under them in one tap** — an owner who chose `Become a regular member`
+loses the add form, the invite block, every `Remove` and every admin toggle at
+once. §5.3's reasoning about a vanishing control applies with more force to a
+vanishing section. The third names **no** role, because nothing has changed yet;
+appending "you are now an admin" to a request that has not landed would be the
+optimistic-update lie in its purest form.
+
+**`Leave group` then becomes ordinary, and the transition is legible without
+being announced.** The exit block is always in the same place; what it offers
+changes with the reader's role. The moment the commit lands, the block's contents
+go from `Transfer ownership` above a disabled `Leave group` to a single, live
+`Leave group` — the same control, in the same slot, now working. Nothing has to
+say so.
+
+**And it must not turn live one instant early.** `Leave group` stays disabled
+for the transferor until the role table actually names someone else — read off
+`ownRole()` / the role table, never off the local record of having asked. An
+owner is still the owner while their transfer is pending; a `Leave group` that
+went live on publication would offer an action the core refuses and the
+cryptography does not support.
+
+#### 6.1.8 The C-65 collision, both ways — and §6's table needs no eighth string
+
+A transfer is a role-table rewrite, so it occupies the same exclusive
+`GroupContextExtensions` slot as a promote or demote and collides in both
+directions: a pending role change refuses a transfer, and a pending transfer
+refuses a role change (**C-65**; it falls out of `propose_ownership_transfer`
+delegating to `propose_group_roles` rather than being restated, which is the
+point).
+
+**§6's table already carries the right string for both directions** — the seventh
+row, added on 2026-08-28:
+
+> `A role change is already waiting to apply. Wait for it to land, then try again.`
+
+It is accurate in the transfer-blocked direction (the pending thing *is* a role
+change) and accurate in the role-change-blocked direction (a transfer *is* one).
+It is under-informative in the second — the owner knows they asked for a
+transfer and is told "a role change" — and it stays that way on purpose, for the
+reason §6 already gives about this exact string: the client cannot in general
+tell the two apart (`ProposalKind::RoleChange` carries no payload), the only
+person who can ever see it is the owner, and the blocking proposal may be one
+their own device **no longer remembers** after the ADR-0040 crash window.
+Telling a user they did something they have no memory of doing is worse than
+stating the group's state neutrally. **The table stays at seven strings** (§12.6).
+
+**One asymmetry to build deliberately.** The transfer control is **disabled**
+when a role change is pending, with that string as its disabled reason; the
+`Make admin` / `Remove admin` toggles keep today's refuse-on-tap behaviour. That
+is not inconsistency: a toggle is one tap and a refusal costs nothing, where the
+transfer control opens a multi-step choice, and making someone pick a successor
+and a role before telling them it was never going to be accepted is the worst
+version of this refusal.
+
+The strings introduced by this section for a disabled control —
+`Transfer ownership first — …`, `There is no one else …`,
+`Waiting to make {name} the owner.` — are **not** additions to §6's table. That
+table is one string per **core refusal**; these are local explanations of a
+disabled state and never reach the core. The distinction matters because §12.6's
+open item is about mapping core prose onto fixed copy, and none of these do that.
+
+**The fail-closed case.** The only way this device stops being the owner is by
+its own transfer landing — nobody else can rewrite the role table — so the
+"tapped transfer, no longer the owner" race is narrow (a peer admin swept our
+proposal and the panel has not refreshed). It needs no eighth string either:
+§6's designated fallback, `This change could not be requested.`, is exactly the
+row for something that must exist and must never be reached in normal use, and
+by the time the message is read the panel has refreshed and the control is gone.
+
+#### 6.1.9 What the new owner sees — a decision, with its cost stated
+
+Nothing on the wire announces a transfer; the role table simply changes, and
+every other device learns of it by re-reading. Today **no client announces any
+role change to its subject** — a promotion to admin is silent and the
+affordances simply appear (verified: no such copy exists on any of the three).
+So the null option is at least consistent.
+
+**Judgement, and it is a judgement rather than a finding: tell them, and keep it
+small.** §8 argues *against* telling someone they hold the committer duty,
+because it "cannot be declined, cannot be delegated and cannot be discharged by
+any action" — anxiety without agency. That argument does not transfer here, and
+the difference is the whole reason: **ownership can be discharged**, by exactly
+the flow this section designs. A duty with an exit is one the holder needs to
+know they hold, or the exit is unreachable for the same reason it was
+unreachable before this pass. Becoming an admin gains you buttons; becoming the
+owner gains you buttons, a duty, **and** a way out of the duty.
+
+**What it costs, stated plainly, because the mechanism is weaker than the copy
+sounds.** Any such notice is a **client-side inference from an observed
+role-table change, not a message**. It needs one durably remembered key per
+group (the last observed owner), and it is structurally unable to fire on a
+device that first observes the table already naming it owner — a fresh device, a
+restore, a first sync. So the rule is **fail-open**: no remembered previous
+owner, or a remembered one equal to the current, means say nothing. The notice is
+therefore best-effort and must never be the only way a user learns their role.
+The panel's affordances stay the primary signal, exactly as they are for admin
+today.
+
+Rendered once, dismissible, at panel level, announced politely (§13):
+
+- `{name} made you the owner of this group.` — when the previous owner still
+  resolves to a roster label. Naming them is sound rather than a guess: a role
+  change is owner-only and `owner_survives` forbids naming a non-member, so the
+  previous owner did author it.
+- `You are now the owner of this group.` — when they do not (they may have left
+  in a later commit; transfer and leave are necessarily separate ones).
+- Second line, both forms:
+  `You can add and remove members, change admins, and transfer ownership to someone else.`
+- Dismiss control: `Dismiss`.
+
+The second line names the exit deliberately. It is the one sentence that stops
+the new owner from arriving where the old one was.
+
+#### 6.1.10 What this needs that does not exist yet
+
+**Two fields on client-durable state, and nothing on the FFI.** Both FFI surfaces
+already carry `transferOwnership` / `proposeOwnershipTransfer` / `OutgoingOwner`
+(§9 item 6, landed in `6c77cd6`), `Group.members()` reports the signature key,
+and `groupRoles()` reports the owner and admin set. What is missing is local:
+the requester's own observation record must carry **the successor's signature
+key**, recorded at publish time (§9). It does two jobs at once — it is what
+distinguishes *our pending role change is a transfer* from *our pending role
+change is a promote*, and it is what names the person in
+`Waiting to make {name} the owner.` §9's field list already specifies a
+`proposedRoleTable` on that record and the built stores keep only `(atMs, own)`;
+the single key is the cheapest sufficient form.
+
+The second is the new-owner notice's (§6.1.9), and it is per-group rather than
+per-request: **the last observed owner signature key**, so a *change* can be
+distinguished from a *first observation*. Fail-open when absent.
+
+#### 6.1.11 Deliberately left open
+
+- **The container for the transfer step** on each platform (§14) — a shape, not
+  a widget, is specified; which container reads best inside an already-modal
+  members panel is a per-platform call.
+- **Whether the picker gets a search field.** Below some roster size it is
+  noise; above some size it is necessary. Neither threshold is knowable from
+  here, and the design works without one.
+- **Nothing about the flow is gated on either.**
 
 ---
 
@@ -617,6 +1085,22 @@ before the publish, surviving restart, purged on `applied` / `refused` and on `r
 applied-test compares on. **There is no `attempts` field** — nothing counts re-requests any
 more (§7), so persisting a count would be dead state that invites someone to cap on it.
 
+**Two additions for ownership transfer (§6.1.10), both local — the FFI needs nothing.**
+The built stores keep `requestKey -> (dsCreatedAt, own)` rather than the field list
+above, so both are stated against what exists:
+
+- **`transferTo`** — the successor's 32-byte signature key, on the requester's **own**
+  record only, written at publish time. It carries two jobs: it is the only thing that
+  distinguishes *our pending role change is a transfer* from *our pending role change is
+  a promote* (`ProposalKind::RoleChange` carries no payload, and the store collapses
+  every role change to the single key `role-change`), and it names the person in
+  `Waiting to make {name} the owner.` Resolved to a label through the live roster at
+  render time, never stored as a label.
+- **`lastObservedOwner`** — per `(account, group)` rather than per request: the last
+  observed owner signature key, so §6.1.9 can tell a *change* of owner from a *first
+  observation* of the table. **Fail-open** when absent — a fresh device, a restore or a
+  first sync must say nothing rather than claim a promotion it did not witness.
+
 **Timing constants** (§12 — must be measured, not guessed): `QUIET_WINDOW` (UI) and the
 protocol constants decision 2's chosen variant needs — **now settled as variant 1's beacon
 interval and freshness window, exposed on both FFI surfaces and CHOSEN rather than
@@ -751,7 +1235,13 @@ the list's real subject is *what S4-S6 must know that the ADR did not say*.
      plain member strips them, in one irreversible commit, of every power they had in a
      group they created.
 
-   **What is owed, and deliberately not designed here** (a follow-up UX pass owns it):
+   ~~**What is owed, and deliberately not designed here** (a follow-up UX pass owns
+   it):~~ **DESIGNED 2026-08-28 in §6.1 — the pass happened.** All five items below
+   are answered there, plus four the enumeration did not reach: which of the two
+   APIs a client drives (§6.1.2), what the C-65 collision surfaces in both
+   directions (§6.1.8), what a *pending* transfer renders (§6.1.6), and what the
+   receiving side sees (§6.1.9). **Still built nowhere.** The list is kept
+   unstruck because it is the checklist §6.1 is measured against:
 
    - the **affordance** — where transfer lives in the members panel, and how it relates
      to the `Leave group` control it unblocks;
@@ -770,8 +1260,12 @@ the list's real subject is *what S4-S6 must know that the ADR did not say*.
    - and what `Leave group` becomes for a former owner afterwards (it becomes ordinary,
      which is the point, but the transition needs to be legible).
 
-   The `Leave group` control therefore stays hidden for the owner (§6) until the transfer
-   flow ships — otherwise the owner is offered a way out with no way to reach it.
+   ~~The `Leave group` control therefore stays hidden for the owner (§6) until the transfer
+   flow ships — otherwise the owner is offered a way out with no way to reach it.~~
+   **Superseded by §6.1.1.** The premise held: an unreachable way out is worse than
+   none. Now that the route exists and sits directly above the control, the owner's
+   `Leave group` renders **disabled with the precondition named** rather than hidden.
+   It is still true that no client has built either half.
 
 7. **`N changes waiting to apply` is not committer-side data** (§8, deliberate departure).
 
@@ -894,16 +1388,24 @@ the list's real subject is *what S4-S6 must know that the ADR did not say*.
    ~~**Sequencing question that is the maintainer's:** whether that pass runs before S4-S6
    or alongside them.~~ **Answered by events: neither.** The client sprints did not build
    the transfer, so the owner dead-end is closed in `lakko-mls` and **still open in the
-   product** — an owner has no way to reach the control that would let them leave. This is
+   product** — an owner has no way to reach the control that would let them leave. ~~This is
    now the largest outstanding UX item in this spec, and it is a pass that has not happened
-   rather than an implementation that skipped it.
+   rather than an implementation that skipped it.~~ **The pass has now happened
+   (2026-08-28): §6.1.** So the item changes character rather than closing — it is no
+   longer a missing design, it is an **unbuilt** one, and it moves from the largest
+   outstanding *UX* item to the largest outstanding *client* item. Nothing about it
+   waits on the maintainer any more; §6.1.11 lists the two things it deliberately
+   leaves to implementation, and neither gates the flow.
 
-   **And a second, smaller gap appeared alongside it: `Leave group` itself shipped on
+   ~~**And a second, smaller gap appeared alongside it: `Leave group` itself shipped on
    WEB ONLY.** §5's panel order puts it at the bottom of the members panel on all three
    platforms; web has it (hidden for the owner, as specified), iOS and Android built the
    rest of the membership surface without it. So the member-facing half of what
    [ADR-0045] unlocked — naming your own leaf in a Remove proposal, which needs no role —
-   is reachable on one client of three.
+   is reachable on one client of three.~~ **CLOSED — `c50bdd7` landed it on both
+   natives**, each with its own `LeaveGroup` decision module mirroring the web gate, so
+   the member-facing half is now reachable on all three. What §6.1.1 changes about it is
+   only the owner's arm: hidden becomes disabled-with-a-reason.
 4. **Visibility (§10).** I recommend owner/admin only, plus your own request. The
    counter-argument — that a member deserves to know a change is coming — is a values
    position, and it is the maintainer's.
@@ -927,6 +1429,21 @@ the list's real subject is *what S4-S6 must know that the ADR did not say*.
    the first *availability* refusal beside six authorisation ones, so a client mapping by
    prose has to distinguish "you may not" from "not yet" on a substring match, and getting
    that wrong flips a retry prompt onto a permanent prohibition or vice versa.
+   **The count stays at seven — ownership transfer (§6.1) adds none**, which is worth
+   recording because it was not the expected answer. The seventh string covers the C-65
+   collision in **both** directions (§6.1.8), and the not-the-owner race lands on the
+   existing fail-closed fallback. The three new strings §6.1 does introduce explain a
+   **disabled control** and never reach the core, so they are outside this item's
+   subject entirely.
+   **A correction to this item's own claim, found while designing §6.1:** it says
+   Android "surfaces the core's raw diagnostic where web and iOS surface the §6
+   string". Only **web** carries the §6 string
+   (`apps/web/src/contacts/client.ts`); iOS has a pre-check but throws its own prose
+   (`"a role change is already waiting to be applied for this group"`,
+   `ChatRepository.swift`). So the table is unbuilt on **two** clients of three, in two
+   different ways — which sharpens rather than weakens the case: two hand-written
+   near-variants of one string is the drift this item exists to prevent, already
+   happening.
 7. ~~**Android does not refuse a second concurrent role change** (§5.3).~~ **Closed
    2026-08-28 — in the core, which was the choice this item posed.**
    `Group::refuse_if_role_change_pending` refuses at propose time for every caller, and
@@ -955,6 +1472,18 @@ the list's real subject is *what S4-S6 must know that the ADR did not say*.
   hue and never by a lone icon. A colour-blind or greyscale user loses nothing.
 - Destructive confirms follow each platform's native dialog so the destructive role is
   announced.
+- **Ownership transfer (§6.1).** The irreversibility statement precedes the action button
+  in focus order, so a screen-reader user reaches *"This cannot be undone"* before the
+  control that does it — the whole reason the step is one surface rather than a form
+  plus a dialog. The action button's accessible name is its visible label and therefore
+  already names the successor. Picker rows announce the roster label plus `, admin` where
+  the marker shows, and the picker is a single-select group, not a list of buttons. The
+  owner's disabled `Leave group` keeps its label, gains the disabled trait and has its
+  reason as adjacent text — the same rule this section already states for a disabled
+  `Remove`. The new-owner notice (§6.1.9) is announced **politely**, on the same
+  non-interrupting mechanism as the pending notice; it is informational and can arrive
+  while the roster is being read. **Irreversibility is carried by its text**, never by
+  the confirmation button's destructive colour, so a greyscale reader loses nothing.
 
 ---
 
@@ -978,6 +1507,20 @@ divergences, and each is forced.
   membership action; `Leave group` makes it a real defect. **The membership error slot must
   move out of the gated section on iOS.** Android already places it ungated; web renders it
   page-level below the panel and should host the new notice at panel top instead.
+  **FIXED (2026-08-25) — the slot is ungated on iOS**, and the source comment there
+  states this section's reason back verbatim. Left standing rather than struck because
+  the rule it establishes is what §6.1's outcome and refusal copy depends on: the notice
+  slot must render for a reader with no management rights.
+- **The transfer step's container is a shape, not a widget (§6.1.11).** One modal surface
+  owns the whole choice — picker, outgoing role, irreversibility, action — because
+  splitting it would put the warning and the button on different screens. Web: an in-page
+  dialog, matching the one that replaces `window.confirm`. iOS: a **pushed destination**
+  inside the members sheet's existing `NavigationStack`, never a sheet over a sheet.
+  Android: the members panel is already a full-width `Dialog`, so a second one stacks —
+  whether that reads acceptably or the step should expand inline within the existing
+  dialog is the one genuinely per-platform call here.
+- **Busy convention, unchanged and worth naming for this control**: web puts `Transferring…`
+  in the action button; iOS and Android use a spinner plus `disabled`.
 - **A refresh gap this spec depends on.** iOS re-reads `pendingJoins` on every poll while
   the panel is open (`sync(state:)`); Android refreshes only on panel-open and after an
   action. The pending set must refresh on **every** poll on all three — not to escalate a

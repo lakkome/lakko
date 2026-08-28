@@ -147,6 +147,26 @@ public final class ChatViewModel: ObservableObject {
     /// invite link" affordance), or `nil` before it is generated.
     @Published public private(set) var inviteLink: String?
 
+    // MARK: - ADR-0045 UX §6.1 ownership transfer
+
+    /// `true` while the transfer step is pushed onto the members sheet's
+    /// navigation stack. §14 pins the container: a PUSHED destination inside the
+    /// existing `NavigationStack`, never a sheet over a sheet.
+    @Published public var transferStepOpen: Bool = false
+    /// The picked successor's signature key, base64 — never a leaf index,
+    /// because OpenMLS hands a vacated leaf to the next Add. `nil` until the
+    /// owner picks, which is what keeps the action disabled (§6.1.5).
+    @Published public var transferPick: String?
+    /// The outgoing owner's own role afterwards. Pre-selected, never defaulted:
+    /// the core withholds a default because either silent choice is wrong in one
+    /// direction, and this only ever carries a value the user can see selected.
+    @Published public var transferOutgoing: OutgoingOwner = preselectedOutgoingOwner
+    /// ADR-0045 UX §6.1.9 — the new-owner notice, once, until dismissed. Held in
+    /// a stored property rather than recomputed: the very next refresh would see
+    /// the remembered owner equal the current one and correctly return `nil`, so
+    /// a recomputed notice would vanish on the next poll.
+    @Published public private(set) var newOwnerBanner: NewOwnerNotice?
+
     // MARK: - Wiring
 
     private let repository: ChatRepository
@@ -676,6 +696,11 @@ public final class ChatViewModel: ObservableObject {
         pendingJoins = repository.pendingExternalJoins(groupIdHex: groupIdHex)
         refreshPendingRequests()
         refreshJoinAttributions()
+        // ADR-0045 UX §6.1.9 — decided AFTER the roster + role table are fresh
+        // (it compares the table's owner against what we last saw) and after the
+        // pending set, so a transfer that has just been swept is judged on the
+        // state it produced rather than the state it replaced.
+        refreshNewOwnerNotice()
         // G-18 / ADR-0029 — a roster refresh follows every local
         // membership commit (add / remove / role / approve), any of which
         // advances the epoch. Rekey the active SFU call to the new epoch
@@ -891,6 +916,200 @@ public final class ChatViewModel: ObservableObject {
                 NSLog("onLeaveGroup failed: %@", error.localizedDescription)
             }
         }
+    }
+
+    // MARK: - ADR-0045 UX §6.1 ownership transfer
+
+    /// The roster's OWN identity treatment, in the roster's own order, as the
+    /// picker reads it. Built from ``memberLabel(_:)`` rather than a second
+    /// derivation, so the picker and the members list cannot render the same
+    /// person differently — that is the one thing the user cross-checks.
+    var rosterViews: [RosterEntryView] {
+        members.map {
+            RosterEntryView(
+                leafIndex: $0.leafIndex,
+                signatureKeyB64: base64Encode($0.signaturePublicKey),
+                label: memberLabel($0))
+        }
+    }
+
+    /// The role table's owner key, base64. `nil` for an open / legacy group.
+    var ownerKeyB64: String? {
+        roleTable.map { base64Encode($0.owner) }
+    }
+
+    /// The admin set as base64 keys, for the picker's muted `Admin` marker.
+    var adminKeysB64: Set<String> {
+        Set((roleTable?.admins ?? []).map { base64Encode($0) })
+    }
+
+    /// This device's own signature key, base64 — resolved through the roster
+    /// rather than stored, so a leaf renumber cannot make it name someone else.
+    var ownSignatureKeyB64: String? {
+        guard let leaf = ownLeafIndex else { return nil }
+        return rosterViews.first { $0.leafIndex == leaf }?.signatureKeyB64
+    }
+
+    /// §6.1.3 — every member except the current owner, marked (never filtered)
+    /// for admin, in the roster's order.
+    var transferPickerRows: [TransferCandidate] {
+        transferCandidates(rosterViews, ownerKeyB64: ownerKeyB64, adminKeysB64: adminKeysB64)
+    }
+
+    /// §6.1.6 / §6.1.8 — the role change already waiting to apply, if any.
+    ///
+    /// `.waiting` and not merely pending is the whole point: below the quiet
+    /// window the control stays ENABLED and a second tap is refused by the
+    /// repository's C-65 pre-check. A request that is not yet rendered must not
+    /// silently disable a control with nothing to explain it.
+    ///
+    /// The successor label is resolved through the LIVE roster HERE, at render
+    /// time, never from a stored label: a successor who has since left degrades
+    /// to the unnamed variant rather than to a name the roster no longer carries.
+    var waitingRoleChangeState: WaitingRoleChange? {
+        guard let hit = pendingRequests.first(where: {
+            $0.kind == .roleChange && $0.state == .waiting
+        }) else { return nil }
+        let successor = hit.transferToB64.flatMap { key in
+            rosterViews.first { $0.signatureKeyB64 == key }
+        }
+        return WaitingRoleChange(
+            // Our own PROMOTE is not our own transfer — only a record carrying a
+            // successor key is a transfer. A promote reporting itself as an
+            // ownership transfer would be a plain falsehood.
+            ownTransfer: hit.own && hit.transferToB64 != nil,
+            successorLabel: successor?.label)
+    }
+
+    /// §6.1.1 — the exit block: which of the two role-disjoint controls this
+    /// reader gets, and why the other one is disabled.
+    var exitBlockState: ExitBlock {
+        exitBlock(
+            ExitBlockInput(
+                usesProposalPath: usesProposalPath,
+                isOwner: isOwner,
+                ownLeafKnown: ownLeafIndex != nil,
+                candidateCount: transferPickerRows.count,
+                waitingRoleChange: waitingRoleChangeState,
+                ownRemovalPending: ownLeafIndex.map {
+                    rowAnnotation(pendingRequests, leafIndex: $0, ownLeaf: $0) != nil
+                } ?? false))
+    }
+
+    /// The picked successor, or `nil` while nothing is picked — which is what
+    /// keeps the action disabled (§6.1.5).
+    var transferSelected: TransferCandidate? {
+        guard let pick = transferPick else { return nil }
+        return transferPickerRows.first { $0.signatureKeyB64 == pick }
+    }
+
+    /// §6.1.5 — the action's label and whether it is live.
+    var transferActionState: (label: String, enabled: Bool) {
+        transferActionLabel(selected: transferSelected)
+    }
+
+    /// Open the transfer step. Resets the picker and re-applies the pre-selected
+    /// outgoing role, so a cancelled attempt never leaks its choices into the
+    /// next one.
+    func openTransferStep() {
+        membershipError = nil
+        membershipNotice = nil
+        transferPick = nil
+        transferOutgoing = preselectedOutgoingOwner
+        transferStepOpen = true
+    }
+
+    /// §6.1.5 — `Cancel` is a PRE-PUBLISH exit, and it is the last one. Nothing
+    /// here is a withdraw: once the proposal is published it is in every
+    /// member's store and dies only when some commit lands, so no client may
+    /// offer a cancel afterwards — including, and especially, for a transfer.
+    func cancelTransferStep() {
+        transferStepOpen = false
+        transferPick = nil
+    }
+
+    /// §6.1 — publish the ownership transfer, then sweep it (ADR-0045).
+    ///
+    /// The shape is ``onToggleAdmin(member:makeAdmin:)``'s, deliberately: a
+    /// transfer IS a role change — not a new commit type, just the owner-only
+    /// role-table rewrite with the owner slot moved — so anything else here
+    /// would be a second, differently-shaped route into membership.
+    ///
+    /// It sweeps EXPLICITLY rather than waiting for the poll tail, and that is
+    /// the one place it goes beyond the toggle. The reason is the outcome copy:
+    /// §6.1.7 names the transferor's own new role only when the change actually
+    /// landed, and a request that has not landed must not claim it has. The
+    /// owner is rank 0, so the sweep is this same device and in practice the
+    /// change is immediate.
+    func onTransferOwnership() {
+        guard let successor = transferSelected else { return }
+        guard !membershipBusy else { return }
+        let outgoing = transferOutgoing
+        membershipBusy = true
+        membershipError = nil
+        membershipNotice = nil
+        Task { @MainActor in
+            defer { membershipBusy = false }
+            guard let successorKey = base64Decode(successor.signatureKeyB64) else {
+                membershipError = "This change could not be requested."
+                return
+            }
+            do {
+                _ = try await repository.transferGroupOwnership(
+                    groupIdHex: groupIdHex,
+                    newOwnerSignaturePubkey: successorKey,
+                    outgoing: outgoing)
+                transferStepOpen = false
+                transferPick = nil
+                let swept = await repository.sweepIfCommitter(groupIdHex: groupIdHex)
+                let landed: Bool
+                if case .committed = swept { landed = true } else { landed = false }
+                membershipNotice = transferOutcomeNotice(
+                    outcome: landed ? .committed : .proposed,
+                    successorLabel: successor.label,
+                    outgoing: outgoing)
+                refreshMembers()
+            } catch {
+                membershipError = error.localizedDescription
+                NSLog("onTransferOwnership failed: %@", error.localizedDescription)
+            }
+        }
+    }
+
+    /// §6.1.9 — dismiss the new-owner notice. It is informational and must never
+    /// be the only way a user learns their role, so dismissing it loses nothing.
+    func dismissNewOwnerNotice() {
+        newOwnerBanner = nil
+    }
+
+    /// §6.1.9 — decide the new-owner notice, then record what we observed.
+    ///
+    /// Nothing on the wire announces a transfer: the role table simply changes
+    /// and every other device learns of it by re-reading. So this is a
+    /// client-side INFERENCE from an observed change, structurally unable to fire
+    /// on a device that first observes the table already naming it owner — a
+    /// fresh device, a restore, a first sync. Hence fail-open everywhere.
+    ///
+    /// The order is load-bearing: decide FIRST, remember SECOND, or the
+    /// comparison would always be against itself.
+    private func refreshNewOwnerNotice() {
+        guard let current = ownerKeyB64 else { return }
+        let previous = repository.lastObservedOwner(groupIdHex: groupIdHex)
+        // Resolved through the live roster; `nil` when the previous owner has
+        // left in a later commit (transfer and leave are necessarily separate
+        // ones).
+        let previousLabel = previous.flatMap { key in
+            rosterViews.first { $0.signatureKeyB64 == key }?.label
+        }
+        if let notice = newOwnerNotice(
+            lastObservedOwnerB64: previous,
+            currentOwnerB64: current,
+            ownSignatureKeyB64: ownSignatureKeyB64,
+            previousOwnerLabel: previousLabel
+        ) {
+            newOwnerBanner = notice
+        }
+        repository.rememberObservedOwner(groupIdHex: groupIdHex, ownerKeyB64: current)
     }
 
     /// Promote / demote a member as admin (owner only — the toggle is shown

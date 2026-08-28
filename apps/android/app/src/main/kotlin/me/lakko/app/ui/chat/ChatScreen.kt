@@ -33,6 +33,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
@@ -47,6 +48,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -65,6 +67,8 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardCapitalization
@@ -1371,6 +1375,231 @@ private fun LeaveGroupDialog(
     )
 }
 
+/**
+ * ADR-0045 (UX §6.1.9) — the new-owner notice.
+ *
+ * Rendered once, dismissible, at panel level, and announced politely (§13).
+ * Best-effort and FAIL-OPEN by construction: nothing on the wire announces a
+ * transfer, so this is a client-side inference from an observed role-table
+ * change, structurally unable to fire on a device that first observes the table
+ * already naming it owner. It must never be the only way a user learns their
+ * role — the panel's affordances stay the primary signal, exactly as they are
+ * for admin today.
+ */
+@Composable
+private fun NewOwnerNoticeCard(
+    notice: me.lakko.app.chat.NewOwnerNotice,
+    onDismiss: () -> Unit,
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.small,
+        color = MaterialTheme.colorScheme.surfaceVariant,
+    ) {
+        Column(modifier = Modifier.padding(10.dp)) {
+            Text(text = notice.headline, style = MaterialTheme.typography.bodyMedium)
+            // The second line names the exit deliberately: it is the one
+            // sentence that stops the new owner from arriving where the old one
+            // was.
+            Text(
+                text = notice.body,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            TextButton(onClick = onDismiss) { Text(notice.dismiss) }
+        }
+    }
+}
+
+/**
+ * ADR-0045 (UX §6.1.4 / §6.1.5) — the transfer step.
+ *
+ * ## The container, which §6.1.11 leaves to each platform
+ *
+ * An INLINE expansion inside the members `Dialog`, not a second `Dialog` on top
+ * of it. Android is the platform §6.1.11 flags as genuinely open, because unlike
+ * web's side panel the members panel here is already a full-width modal, so the
+ * obvious reading of "a step" — another `Dialog` — stacks two modals. Three
+ * things decided it against stacking:
+ *
+ * 1. §6.1.5's own argument against a second confirmation says a modal-over-modal
+ *    is idiomatic on none of the three platforms. It is written about an
+ *    `Are you sure?`, but the objection is to the stacking, and it does not stop
+ *    applying because the top modal happens to be useful.
+ * 2. **Adjacency is the whole of §6.1.1.** The disabled `Leave group` is a
+ *    signposted route *because* its reason names an action sitting directly
+ *    above it. A `Dialog` covers that block behind a scrim, so the user who
+ *    tapped `Transfer ownership` loses sight of the thing that sent them there
+ *    at the exact moment they are asked to commit to it.
+ * 3. The roster the owner has just read stays on screen, which matters because
+ *    the successor they are about to name is in it.
+ *
+ * The cost is height, and it is paid explicitly: the picker is bounded, and the
+ * caller shrinks the roster list while this is open, so the action button cannot
+ * be pushed off a small screen.
+ *
+ * ## The shape, which §6.1 does NOT leave open
+ *
+ * Irreversibility statement, then picker, then role choice, then the trailing
+ * "applied" line, then the action. **There is no second confirmation dialog** —
+ * this step IS the confirmation, which happens to require two choices to be
+ * well-formed. Stacking an `Are you sure?` on a step that already asked two
+ * questions buys friction of the kind that gets dismissed reflexively. What
+ * replaces it is friction that cannot be discharged without reading: the action
+ * names the person, is disabled until one is picked, and uses the picked row's
+ * label verbatim.
+ *
+ * **Ordering is load-bearing:** the irreversibility statement sits ABOVE the
+ * role choice. Below it, the pre-selected option would read as the safe one and
+ * the warning would read as being about the other one.
+ */
+@Composable
+private fun TransferOwnershipStep(
+    candidates: List<me.lakko.app.chat.TransferCandidate>,
+    pickedKeyB64: String?,
+    outgoing: uniffi.lakko_ffi_uniffi.OutgoingOwner,
+    busy: Boolean,
+    onPick: (String) -> Unit,
+    onOutgoing: (uniffi.lakko_ffi_uniffi.OutgoingOwner) -> Unit,
+    onCancel: () -> Unit,
+    onTransfer: (me.lakko.app.chat.TransferCandidate) -> Unit,
+) {
+    val selected = candidates.firstOrNull { it.signatureKeyB64 == pickedKeyB64 }
+    val action = me.lakko.app.chat.transferActionLabel(selected)
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.small,
+        color = MaterialTheme.colorScheme.surfaceVariant,
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Text(
+                text = me.lakko.app.chat.TRANSFER_IRREVERSIBLE_HEADLINE,
+                style = MaterialTheme.typography.titleSmall,
+            )
+            Text(
+                text = me.lakko.app.chat.TRANSFER_IRREVERSIBLE_BODY,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(10.dp))
+            Text(text = "New owner", style = MaterialTheme.typography.labelMedium)
+            // §6.1.3 — every member except the owner, in the roster's own order,
+            // with a muted `Admin` MARKER rather than a filter. An admins-only
+            // picker is EMPTY in the commonest small group (owner plus one
+            // member, no admins ever appointed) — the exact dead end this
+            // feature exists to close, reappearing as a UI rule. The selection
+            // value is the 32-byte signature key, never the leaf index.
+            LazyColumn(modifier = Modifier.heightIn(max = 180.dp)) {
+                items(candidates, key = { it.signatureKeyB64 }) { row ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .selectable(
+                                selected = pickedKeyB64 == row.signatureKeyB64,
+                                enabled = !busy,
+                                role = androidx.compose.ui.semantics.Role.RadioButton,
+                                onClick = { onPick(row.signatureKeyB64) },
+                            )
+                            // UX §13 — a picker row announces the roster label
+                            // plus `, admin` where the marker shows. The explicit
+                            // description is what keeps that a comma rather than
+                            // the two texts running together.
+                            .semantics(mergeDescendants = true) {
+                                contentDescription =
+                                    if (row.isAdmin) "${row.label}, admin" else row.label
+                            }
+                            .padding(vertical = 2.dp),
+                    ) {
+                        RadioButton(
+                            selected = pickedKeyB64 == row.signatureKeyB64,
+                            onClick = null,
+                            enabled = !busy,
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(text = row.label, style = MaterialTheme.typography.bodyMedium)
+                        // MARK, do not filter and do not sort. Who is already an
+                        // admin is information the owner assigned and is worth
+                        // having when choosing a successor; it is not a reason to
+                        // hide anyone, and hoisting admins to the top would be a
+                        // soft version of the filter §6.1.3 rejects.
+                        if (row.isAdmin) {
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                text = "Admin",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+            // §6.1.4 — a real decision, pre-selected but never defaulted. A
+            // single-select control, NEVER a checkbox: a checkbox has an unstated
+            // default state and this has none. The core refuses to default it
+            // because either silent choice is wrong in one direction, and the UI
+            // must not undo with a layout choice what the core protected with a
+            // type.
+            Text(text = "Your role afterwards", style = MaterialTheme.typography.labelMedium)
+            me.lakko.app.chat.OUTGOING_OWNER_OPTIONS.forEach { option ->
+                Row(
+                    verticalAlignment = Alignment.Top,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .selectable(
+                            selected = outgoing == option.value,
+                            enabled = !busy,
+                            role = androidx.compose.ui.semantics.Role.RadioButton,
+                            onClick = { onOutgoing(option.value) },
+                        )
+                        .padding(vertical = 2.dp),
+                ) {
+                    RadioButton(
+                        selected = outgoing == option.value,
+                        onClick = null,
+                        enabled = !busy,
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Column {
+                        Text(text = option.label, style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            text = option.consequence,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+            // Note APPLIED, not NOW: the transfer is a proposal, and asserting
+            // the exit is open before the commit lands would be the optimistic
+            // update §3 forbids.
+            Text(
+                text = me.lakko.app.chat.TRANSFER_UNLOCKS_LEAVE,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(8.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(
+                    onClick = { selected?.let(onTransfer) },
+                    enabled = !busy && action.enabled,
+                    colors = ButtonDefaults.textButtonColors(
+                        contentColor = MaterialTheme.colorScheme.error,
+                    ),
+                ) { Text(action.label) }
+                // `Cancel` is a PRE-PUBLISH exit, and it is the last one.
+                // Nothing here is a withdraw: once the proposal is published it
+                // is in every member's store and dies only when some commit
+                // lands, so no client may offer a cancel afterwards —
+                // including, and especially, for a transfer.
+                TextButton(onClick = onCancel, enabled = !busy) { Text("Cancel") }
+            }
+        }
+    }
+}
+
 @Composable
 private fun MembersSheet(viewModel: ChatViewModel) {
     val members by viewModel.members.collectAsStateWithLifecycle()
@@ -1386,12 +1615,69 @@ private fun MembersSheet(viewModel: ChatViewModel) {
     val joinAttributions by viewModel.joinAttributions.collectAsStateWithLifecycle()
     val inviteLink by viewModel.inviteLink.collectAsStateWithLifecycle()
     val notice by viewModel.membershipNotice.collectAsStateWithLifecycle()
+    val newOwner by viewModel.newOwnerNotice.collectAsStateWithLifecycle()
     val clipboard = LocalClipboardManager.current
     val ownLeaf = viewModel.ownLeafIndex()
     // ADR-0045 (UX §6) — the `Leave group` confirmation. Local to the sheet: it
     // is a presentation concern with no bearing on the request, and nothing
     // outside this composable may open it.
     var confirmingLeave by remember { mutableStateOf(false) }
+    // ADR-0045 (UX §6.1.5) — the transfer step. Unlike `confirmingLeave` above,
+    // this state lives in the VIEW MODEL, and the reason is the async path: the
+    // step must close only once the proposal is published, so a refusal — the
+    // C-65 collision most of all — leaves the picked successor and the role
+    // choice intact for a retry. The step IS the confirmation, so there is
+    // deliberately nothing behind it.
+    val transferOpen by viewModel.transferStepOpen.collectAsStateWithLifecycle()
+    val transferPick by viewModel.transferPick.collectAsStateWithLifecycle()
+    val transferOutgoing by viewModel.transferOutgoing.collectAsStateWithLifecycle()
+
+    // ADR-0045 UX §6.1 — the exit block's inputs, read as Compose state so the
+    // block recomposes when any of them moves.
+    val rosterViews = remember(members) { viewModel.rosterViews() }
+    val ownerKeyB64 = roleTable?.owner?.let { me.lakko.app.chat.outboxB64(it) }
+    val adminKeysB64 = roleTable?.admins?.map { me.lakko.app.chat.outboxB64(it) }?.toSet()
+        ?: emptySet()
+    val transferCandidates = remember(rosterViews, ownerKeyB64, adminKeysB64) {
+        me.lakko.app.chat.transferCandidates(rosterViews, ownerKeyB64, adminKeysB64)
+    }
+    // §6.1.6 / §6.1.8 — the role change already WAITING to apply, if any.
+    // `waiting` and not merely pending is the whole point: below the quiet window
+    // the control stays ENABLED and a second tap is refused by the repository's
+    // C-65 pre-check, because a request that is not yet rendered must not
+    // silently disable a control with nothing to explain it.
+    //
+    // The successor label is resolved through the LIVE roster HERE, at render
+    // time, never from a stored label: a successor who has since left degrades to
+    // the unnamed variant rather than to a name the roster no longer carries.
+    val waitingRoleChange = pendingRequests
+        .firstOrNull {
+            it.kind == me.lakko.app.chat.PendingRequestKind.ROLE_CHANGE &&
+                it.state == me.lakko.app.chat.RequestState.WAITING
+        }
+        ?.let { hit ->
+            me.lakko.app.chat.WaitingRoleChange(
+                // Our own PROMOTE is not our own transfer — only a record
+                // carrying a successor key is a transfer, because
+                // `ProposalKind::RoleChange` carries no payload and the two are
+                // otherwise indistinguishable.
+                ownTransfer = hit.own && hit.transferToB64 != null,
+                successorLabel = hit.transferToB64?.let { key ->
+                    rosterViews.firstOrNull { it.signatureKeyB64 == key }?.label
+                },
+            )
+        }
+    val exit = me.lakko.app.chat.exitBlock(
+        me.lakko.app.chat.ExitBlockInput(
+            usesProposalPath = roleTable != null,
+            isOwner = isOwner,
+            ownLeafKnown = ownLeaf != null,
+            candidateCount = transferCandidates.size,
+            waitingRoleChange = waitingRoleChange,
+            ownRemovalPending = ownLeaf != null &&
+                me.lakko.app.chat.rowAnnotation(pendingRequests, ownLeaf, ownLeaf) != null,
+        ),
+    )
 
     if (confirmingLeave) {
         LeaveGroupDialog(
@@ -1418,6 +1704,25 @@ private fun MembersSheet(viewModel: ChatViewModel) {
                     text = "Members (${members.size})",
                     style = MaterialTheme.typography.titleMedium,
                 )
+                // ADR-0045 (UX §6.1.9) — tell the new owner they are the new
+                // owner. Panel level, dismissible, rendered once.
+                //
+                // Placement DIVERGES from the web reference, which puts it
+                // directly below the pending notice "so §5's 'pending notice,
+                // top of the panel, above everything' ordering stays literally
+                // intact". That constraint does not bind here: this panel
+                // already renders the add form, the invite block, the action
+                // notice and the error ABOVE the pending notice, so §5's
+                // ordering is not intact on Android with or without this. What
+                // web was protecting — put it as high as it can go without
+                // displacing the pending notice — therefore lands it directly
+                // under the title, which is also above the add form and the
+                // invite block, i.e. above the very affordances that just
+                // appeared and that the notice exists to explain.
+                newOwner?.let {
+                    Spacer(Modifier.height(8.dp))
+                    NewOwnerNoticeCard(notice = it, onDismiss = viewModel::dismissNewOwnerNotice)
+                }
                 Spacer(Modifier.height(12.dp))
                 // ADR-0022 — only owner/admin (or an open/legacy group) sees the
                 // add affordance; a plain member's add would be refused by peers.
@@ -1596,7 +1901,13 @@ private fun MembersSheet(viewModel: ChatViewModel) {
                     }
                     Spacer(Modifier.height(12.dp))
                 }
-                LazyColumn(modifier = Modifier.heightIn(max = 360.dp)) {
+                // The roster gives up height while the transfer step is open, so
+                // the step's action button cannot be pushed off a small screen.
+                // The alternative — a second `Dialog` with its own scroll — is
+                // the stacking [TransferOwnershipStep]'s doc rejects.
+                LazyColumn(
+                    modifier = Modifier.heightIn(max = if (transferOpen) 140.dp else 360.dp),
+                ) {
                     items(members) { member ->
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
@@ -1654,39 +1965,109 @@ private fun MembersSheet(viewModel: ChatViewModel) {
                         }
                     }
                 }
-                // ADR-0045 (UX §5 item 6) — `Leave group`: bottom of the panel,
-                // destructive, and HIDDEN for the owner. The owner's departure is
-                // refused by the core fail-closed (`set_group_roles` is
-                // owner-only, so an ownerless group could never appoint another
-                // admin again); that is a PRECONDITION rather than a dead end —
-                // transfer ownership, then leave as an ordinary member — but no
-                // client has a transfer affordance yet, so offering a control
-                // that always refuses would be worse than offering none.
+                // ADR-0045 (UX §6.1.1) — THE EXIT BLOCK: one block at the
+                // panel's bottom whose meaning is *the exit*, holding two
+                // ROLE-DISJOINT controls of which exactly one is ever live.
                 //
-                // Computed here rather than read from `viewModel.leaveAffordance()`
-                // so the inputs are Compose state reads and the control
-                // recomposes when any of them changes; both call the one rule in
-                // `me.lakko.app.chat`.
-                val leave = me.lakko.app.chat.leaveGroupAffordance(
-                    usesProposalPath = roleTable != null,
-                    isOwner = isOwner,
-                    ownLeaf = ownLeaf,
-                    busy = busy,
-                    requests = pendingRequests,
-                )
-                if (leave !is me.lakko.app.chat.LeaveGroupAffordance.Hidden) {
-                    Spacer(Modifier.height(12.dp))
-                    TextButton(
-                        onClick = { confirmingLeave = true },
-                        // UX §5.3 — visible but disabled once we have asked.
-                        // Hiding it then would read as the permission having
-                        // vanished, where our own row's "Waiting to leave."
-                        // annotation explains a disabled control.
-                        enabled = leave is me.lakko.app.chat.LeaveGroupAffordance.Enabled,
-                        colors = ButtonDefaults.textButtonColors(
-                            contentColor = MaterialTheme.colorScheme.error,
-                        ),
-                    ) { Text("Leave group") }
+                // `Transfer ownership` is owner-only and comes FIRST, because it
+                // is the precondition and reads first. It is NOT
+                // destructive-styled at rest: red would file it with `Remove` and
+                // `Leave group`, and an owner scanning for a way out should not
+                // have to read a warning colour to find one. Transfer is not a
+                // destruction; it is a handover that happens to be final, and
+                // finality is a property of the confirmation below it, not of the
+                // button that opens it.
+                //
+                // The owner's `Leave group` used to be HIDDEN, and this reverses
+                // that — not because the old argument (a control that always
+                // refuses is worse than no control) was wrong, but because it was
+                // right only while transfer was unreachable. A disabled control
+                // whose reason names the action directly above it is a signposted
+                // route, and it is the same visible-but-disabled pattern §5.3
+                // already uses for a pending row's `Remove`. Hiding it now would
+                // leave an owner looking for the exit finding nothing at all
+                // about leaving.
+                //
+                // The block is computed above from Compose state reads so it
+                // recomposes; the rule itself lives in `me.lakko.app.chat` where
+                // the host suite can run it.
+                when (exit) {
+                    me.lakko.app.chat.ExitBlock.Hidden -> Unit
+                    is me.lakko.app.chat.ExitBlock.Owner -> {
+                        Spacer(Modifier.height(12.dp))
+                        TextButton(
+                            onClick = viewModel::openTransferStep,
+                            enabled = !busy && exit.transfer.enabled && !transferOpen,
+                        ) { Text("Transfer ownership") }
+                        // The reason is part of the control's description, not a
+                        // decoration: a reader who cannot see the greyed button
+                        // must still be told why.
+                        exit.transfer.disabledReason?.let {
+                            Text(
+                                text = it,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        TextButton(
+                            onClick = { },
+                            enabled = false,
+                            colors = ButtonDefaults.textButtonColors(
+                                contentColor = MaterialTheme.colorScheme.error,
+                            ),
+                        ) { Text("Leave group") }
+                        exit.leave.disabledReason?.let {
+                            Text(
+                                text = it,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                    is me.lakko.app.chat.ExitBlock.Member -> {
+                        Spacer(Modifier.height(12.dp))
+                        TextButton(
+                            onClick = { confirmingLeave = true },
+                            // UX §5.3 — visible but disabled once we have asked.
+                            // Hiding it then would read as the permission having
+                            // vanished, where our own row's "Waiting to leave."
+                            // annotation explains a disabled control.
+                            enabled = !busy && exit.leave.enabled,
+                            colors = ButtonDefaults.textButtonColors(
+                                contentColor = MaterialTheme.colorScheme.error,
+                            ),
+                        ) { Text("Leave group") }
+                        exit.leave.disabledReason?.let {
+                            Text(
+                                text = it,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+                // ADR-0045 (UX §6.1.4 / §6.1.5) — the transfer step, inline
+                // beneath the control that opened it. See
+                // [TransferOwnershipStep] for why it is not a second `Dialog`.
+                if (transferOpen && exit is me.lakko.app.chat.ExitBlock.Owner) {
+                    Spacer(Modifier.height(8.dp))
+                    TransferOwnershipStep(
+                        candidates = transferCandidates,
+                        pickedKeyB64 = transferPick,
+                        outgoing = transferOutgoing,
+                        busy = busy,
+                        onPick = viewModel::setTransferPick,
+                        onOutgoing = viewModel::setTransferOutgoing,
+                        onCancel = viewModel::cancelTransferStep,
+                        // The role choice is passed EXPLICITLY rather than read
+                        // back inside the action, so the required-argument
+                        // property the core protects with a type survives all
+                        // the way to the tap: there is no call site here that
+                        // can omit it.
+                        onTransfer = { successor ->
+                            viewModel.onTransferOwnership(successor, transferOutgoing)
+                        },
+                    )
                 }
                 Spacer(Modifier.height(12.dp))
                 Row(modifier = Modifier.fillMaxWidth()) {

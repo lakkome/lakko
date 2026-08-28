@@ -57,8 +57,22 @@ internal enum class LeaveGroupRefusal(val message: String) {
      * The owner cannot leave *while owner*: `set_group_roles` is owner-only, so
      * an ownerless group could never appoint another admin again. A precondition
      * rather than a dead end — transfer ownership, then leave as an ordinary
-     * member — but no client has a transfer affordance yet, so the honest
-     * surface is to hide the control rather than offer one that always refuses.
+     * member.
+     *
+     * **The route out now exists** ([OwnershipTransfer], UX §6.1), so the panel
+     * no longer HIDES the owner's control: [exitBlock] renders it present and
+     * disabled, carrying [LEAVE_BLOCKED_BY_OWNERSHIP], directly below the
+     * `Transfer ownership` that discharges it. That reverses this module's
+     * original reading, and not because the reading was wrong — *a control that
+     * always refuses is worse than no control* was right while transfer was
+     * unreachable, and stopped being right the moment the precondition became
+     * reachable and adjacent.
+     *
+     * This string survives the reversal because it is still the answer to a
+     * different question: not *what does the panel draw* but *what does the
+     * ACTION say if it is reached anyway*, which a stale gate can still do
+     * ([ChatViewModel.onLeaveGroup] re-asks here before publishing). §6 keeps
+     * one string per core refusal, and this is the core's.
      */
     OWNER_CANNOT_LEAVE("The group owner cannot leave the group."),
 
@@ -94,6 +108,21 @@ internal sealed interface LeaveGroupAffordance {
  * Mirrors the web gate `usesProposalPath() && !isOwner() && ownLeaf() !== undefined`
  * for visibility and `busy() || rowAnnotation(...) !== null` for the disabled
  * state, so the three clients agree on when the control appears.
+ *
+ * ## Its remaining consumer, after UX §6.1
+ *
+ * The PANEL no longer renders from this: [exitBlock] does, because the owner's
+ * `Leave group` is now present-and-disabled rather than hidden, and because the
+ * block it belongs to also has to decide the `Transfer ownership` beside it.
+ * What still renders from here is the ACTION's own pre-check in
+ * [ChatViewModel.onLeaveGroup] — a hidden or disabled control is not a
+ * guarantee, since `isOwner` is only as fresh as the last roster refresh.
+ *
+ * The two agree by construction on the case that matters: both gate the owner
+ * on the ROLE TABLE and never on the local record of having asked. An owner is
+ * still the owner while their transfer is pending, and a `Leave group` that went
+ * live on publication would offer an action the core refuses and the
+ * cryptography does not support.
  *
  * The already-requested case is [LeaveGroupAffordance.Disabled] rather than
  * hidden for the same reason UX §5.3 keeps a pending row's `Remove`

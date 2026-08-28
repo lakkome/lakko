@@ -111,6 +111,12 @@ import { deleteOutboxForAccount } from "../chat/commit-outbox";
 // ADR-0045 — the pending-request observation store follows the outbox's
 // hygiene: a prior session's request ages must never be read by a later one.
 import { clearObservationsForAccount } from "../chat/pending-requests";
+// ADR-0045 UX §6.1.10 — the per-group last-observed-owner memory the
+// new-owner notice compares against. Same recover / forgetDevice hygiene as
+// the commit outbox and the two observation stores beside it: a stale entry
+// on a re-signup would compare a fresh session against a previous account's
+// role table.
+import { clearLastObservedOwnerForAccount } from "../chat/ownership-transfer";
 // ADR-0045 S4b — the same hygiene for the committer-beacon observation
 // store: a stale beacon carried across a recover / forgetDevice would let
 // this device defer to a candidate it has no current evidence about.
@@ -2188,6 +2194,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           await deleteOutboxForAccount(accountIdB64);
           clearObservationsForAccount(accountIdB64);
           clearBeaconObservationsForAccount(accountIdB64);
+          clearLastObservedOwnerForAccount(accountIdB64);
         } catch (err) {
           // eslint-disable-next-line no-console
           console.warn("deleteOutboxForAccount during recover failed", err);
@@ -2623,6 +2630,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           await deleteOutboxForAccount(cached.accountIdB64);
           clearObservationsForAccount(cached.accountIdB64);
           clearBeaconObservationsForAccount(cached.accountIdB64);
+          clearLastObservedOwnerForAccount(cached.accountIdB64);
         } catch {
           // Ignore — same best-effort policy as above.
         }

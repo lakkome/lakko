@@ -75,6 +75,25 @@ public struct PendingRequest: Equatable, Identifiable {
     /// `true` when this device published it. Drives the UX §10 exception — a
     /// member always sees the status of a request they made themselves.
     public var own: Bool
+    /// ADR-0045 UX §6.1.10 — base64 of the successor's signature key, on OUR OWN
+    /// record only, for a `roleChange` that is an ownership transfer.
+    ///
+    /// It does two jobs at once, and neither is available any other way. It is
+    /// the only thing that distinguishes *our pending role change is a transfer*
+    /// from *our pending role change is a promote* — `ProposalKind.roleChange`
+    /// carries no payload, so the core cannot tell them apart and
+    /// ``proposalKey(_:)`` collapses every role change to the single key
+    /// `role-change` — and it is what names the person in
+    /// `Waiting to make {name} the owner.`
+    ///
+    /// The KEY is stored, never a label: the label is resolved through the LIVE
+    /// roster at render time, so a successor who has since left degrades to the
+    /// unnamed variant rather than to a stale name.
+    ///
+    /// Defaulted so the memberwise initializer stays callable without it: every
+    /// other kind of request has no successor, and a test that is not about
+    /// transfer should not have to say so.
+    public var transferToB64: String? = nil
     /// `.pending` below the quiet window (render nothing), `.waiting` above it.
     public var state: PendingRequestState
 
@@ -154,10 +173,22 @@ public struct RequestObservation: Equatable {
     public var atMs: Int64
     /// `true` when this device published the request.
     public var own: Bool
+    /// ADR-0045 UX §6.1.10 — see ``PendingRequest/transferToB64``.
+    ///
+    /// It lives HERE, on the observation record, rather than in a store of its
+    /// own, and that is a correctness choice rather than tidiness: this store is
+    /// pruned against the core's live pending set on every fold
+    /// (``PendingRequestStore/prune(accountIdB64:groupIdB64:liveKeys:)``), so a
+    /// swept or superseded transfer takes its successor key with it. A separate
+    /// store would have to re-derive that prune, and a stale key surviving it
+    /// would make an unrelated LATER role change render
+    /// `Waiting to make {name} the owner.` about somebody nobody proposed.
+    public var transferToB64: String?
 
-    public init(atMs: Int64, own: Bool) {
+    public init(atMs: Int64, own: Bool, transferToB64: String? = nil) {
         self.atMs = atMs
         self.own = own
+        self.transferToB64 = transferToB64
     }
 }
 
@@ -192,6 +223,9 @@ public func foldPendingRequests(
                 senderLeaf: record.senderLeaf,
                 observedAtMs: seen?.atMs,
                 own: seen?.own ?? false,
+                // Only meaningful on our own record, and only for a role change
+                // — which is exactly where it is ever written.
+                transferToB64: seen?.transferToB64,
                 state: requestState(
                     observedAtMs: seen?.atMs, nowMs: nowMs, quietWindowMs: quietWindowMs)
             )
@@ -319,7 +353,14 @@ public final class PendingRequestStore {
             guard let pair = value as? [String: Any],
                   let atMs = (pair["atMs"] as? NSNumber)?.int64Value,
                   let own = (pair["own"] as? NSNumber)?.boolValue else { continue }
-            out[key] = RequestObservation(atMs: atMs, own: own)
+            out[key] = RequestObservation(
+                atMs: atMs,
+                own: own,
+                // ADR-0045 §6.1.10 — preserved through the round-trip, and
+                // validated the same way as the rest: anything that is not a
+                // string is simply absent, which degrades a pending transfer to
+                // its unnamed variant rather than losing the request.
+                transferToB64: pair["transferTo"] as? String)
         }
         return out
     }
@@ -329,9 +370,16 @@ public final class PendingRequestStore {
         groupIdB64: String,
         _ observations: [String: RequestObservation]
     ) {
-        var raw: [String: [String: NSNumber]] = [:]
+        var raw: [String: [String: Any]] = [:]
         for (key, value) in observations {
-            raw[key] = ["atMs": NSNumber(value: value.atMs), "own": NSNumber(value: value.own)]
+            var entry: [String: Any] = [
+                "atMs": NSNumber(value: value.atMs),
+                "own": NSNumber(value: value.own),
+            ]
+            // Written only when present, so an ordinary add / remove / promote
+            // observation is the same three-key plist row it always was.
+            if let transferTo = value.transferToB64 { entry["transferTo"] = transferTo }
+            raw[key] = entry
         }
         defaults.set(raw, forKey: storeKey(accountIdB64: accountIdB64, groupIdB64: groupIdB64))
     }
@@ -345,18 +393,27 @@ public final class PendingRequestStore {
     /// upgraded to `true` if this device later publishes the same request,
     /// because the own-request visibility exception must not be lost to arrival
     /// order.
+    ///
+    /// `transferToB64` (ADR-0045 §6.1.10) follows the same first-wins rule for
+    /// the same reason: the successor belongs to the request that is actually
+    /// pending, and only the device that published it can supply one. A later
+    /// observation of the same key without one must not erase it — the receive
+    /// loop observes its own request landing back off the journal, and that
+    /// observation carries no successor.
     public func record(
         accountIdB64: String,
         groupIdB64: String,
         key: String,
         atMs: Int64,
-        own: Bool
+        own: Bool,
+        transferToB64: String? = nil
     ) {
         var observations = load(accountIdB64: accountIdB64, groupIdB64: groupIdB64)
         let existing = observations[key]
         observations[key] = RequestObservation(
             atMs: existing?.atMs ?? atMs,
-            own: (existing?.own ?? false) || own
+            own: (existing?.own ?? false) || own,
+            transferToB64: existing?.transferToB64 ?? transferToB64
         )
         save(accountIdB64: accountIdB64, groupIdB64: groupIdB64, observations)
     }

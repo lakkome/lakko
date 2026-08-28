@@ -94,6 +94,22 @@ public data class PendingRequest(
     /** `true` when this device published it. Drives the UX §10 exception — a
      *  member always sees the status of a request they made themselves. */
     val own: Boolean,
+    /**
+     * ADR-0045 UX §6.1.10 — base64 of the successor's signature key, on OUR OWN
+     * record only, for a `role-change` that is an ownership transfer.
+     *
+     * It does two jobs at once, and neither is available any other way. It is
+     * the only thing that distinguishes *our pending role change is a transfer*
+     * from *our pending role change is a promote* — `ProposalKind::RoleChange`
+     * carries no payload, so the core cannot tell them apart and [proposalKey]
+     * collapses every role change to the single key `role-change` — and it is
+     * what names the person in `Waiting to make {name} the owner.`
+     *
+     * The KEY is stored, never a label: the label is resolved through the LIVE
+     * roster at render time, so a successor who has since left degrades to the
+     * unnamed variant rather than to a stale name.
+     */
+    val transferToB64: String? = null,
     /** [RequestState.PENDING] below the quiet window (render nothing),
      *  [RequestState.WAITING] above it. */
     val state: RequestState,
@@ -168,6 +184,19 @@ internal data class RequestObservation(
     val atMs: Long,
     /** `true` when this device published the request. */
     val own: Boolean,
+    /**
+     * ADR-0045 UX §6.1.10 — see [PendingRequest.transferToB64].
+     *
+     * It lives HERE, on the observation record, rather than in a store of its
+     * own, and that is a correctness choice rather than tidiness: this store is
+     * pruned against the core's live pending set on every fold
+     * ([prunePendingRequestObservations]), so a swept or superseded transfer
+     * takes its successor key with it. A separate store would have to re-derive
+     * that prune, and a stale key surviving it would make an unrelated LATER
+     * role change render `Waiting to make {name} the owner.` about somebody
+     * nobody proposed.
+     */
+    val transferToB64: String? = null,
 )
 
 /** What [foldPendingRequests] produced. */
@@ -238,6 +267,9 @@ internal fun foldPendingRequests(
                 senderLeaf = record.senderLeaf,
                 observedAtMs = seen?.atMs,
                 own = seen?.own ?: false,
+                // Only meaningful on our own record, and only for a role
+                // change — which is exactly where it is ever written.
+                transferToB64 = seen?.transferToB64,
                 state = requestState(seen?.atMs, nowMs, quietWindowMs),
             ),
         )
@@ -359,6 +391,13 @@ internal interface PendingRequestStore {
  *
  * This is the deliberate OPPOSITE of [recordBeaconObservation], where the newest
  * stamp wins: there, recency is the signal.
+ *
+ * [transferToB64] (ADR-0045 §6.1.10) follows the same first-wins rule for the
+ * same reason: the successor belongs to the request that is actually pending,
+ * and only the device that published it can supply one. A later observation of
+ * the same key without one must not erase it — the receive loop observes its own
+ * request landing back off the journal, and that observation carries no
+ * successor.
  */
 internal fun recordPendingRequestObservation(
     store: PendingRequestStore,
@@ -367,6 +406,7 @@ internal fun recordPendingRequestObservation(
     key: String,
     atMs: Long,
     own: Boolean,
+    transferToB64: String? = null,
 ) {
     val observations = store.load(accountIdB64, groupIdHex)
     val existing = observations[key]
@@ -377,6 +417,7 @@ internal fun recordPendingRequestObservation(
             key to RequestObservation(
                 atMs = existing?.atMs ?: atMs,
                 own = (existing?.own ?: false) || own,
+                transferToB64 = existing?.transferToB64 ?: transferToB64,
             )
             ),
     )
@@ -403,9 +444,17 @@ internal fun prunePendingRequestObservations(
  * written as the Kotlin escape `\u0000`; a RAW NUL in the source would make git
  * classify this file as binary — ADR-0042 MEDIUM-3).
  *
- * Row value: `key|atMs|own` entries joined by newline. A request key is built
- * from base64 / decimal / fixed literals, none of which contain `|` or a
- * newline.
+ * Row value: `key|atMs|own|transferToB64` entries joined by newline. A request
+ * key is built from base64 / decimal / fixed literals, none of which contain `|`
+ * or a newline, and the standard-base64 successor key contains neither either.
+ *
+ * The fourth field (ADR-0045 §6.1.10) is written as the empty string when
+ * absent, which is every request that is not an ownership transfer this device
+ * published. A row in the previous three-field shape is simply DROPPED rather
+ * than up-converted: there is no deployment to migrate, and the cost of dropping
+ * one is bounded to the quiet window and the own-request marker of a request
+ * that happened to be in flight across an app upgrade — the request itself lives
+ * in the core's pending set and is untouched.
  *
  * Never throws: a corrupt or absent row reads as empty, which degrades the quiet
  * window to "render immediately" rather than losing the request. The request
@@ -469,7 +518,8 @@ internal class SharedPrefsPendingRequestStore(context: Context) : PendingRequest
 
         internal fun encodeRow(observations: Map<String, RequestObservation>): String =
             observations.entries.joinToString("\n") {
-                "${it.key}|${it.value.atMs}|${if (it.value.own) 1 else 0}"
+                "${it.key}|${it.value.atMs}|${if (it.value.own) 1 else 0}|" +
+                    (it.value.transferToB64 ?: "")
             }
 
         internal fun decodeRow(raw: String?): Map<String, RequestObservation> {
@@ -477,9 +527,16 @@ internal class SharedPrefsPendingRequestStore(context: Context) : PendingRequest
             val out = mutableMapOf<String, RequestObservation>()
             for (line in raw.split('\n')) {
                 val parts = line.split('|')
-                if (parts.size != 3) continue
+                if (parts.size != 4) continue
                 val at = parts[1].toLongOrNull() ?: continue
-                out[parts[0]] = RequestObservation(atMs = at, own = parts[2] == "1")
+                out[parts[0]] = RequestObservation(
+                    atMs = at,
+                    own = parts[2] == "1",
+                    // The empty string is the ABSENT successor, not an empty
+                    // one: a zero-length base64 key names nobody, and letting it
+                    // through would make `ownTransfer` true for a promote.
+                    transferToB64 = parts[3].takeIf { it.isNotEmpty() },
+                )
             }
             return out
         }
