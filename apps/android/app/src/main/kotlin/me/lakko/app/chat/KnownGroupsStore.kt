@@ -66,6 +66,19 @@ public class KnownGroupsStore(context: Context) {
         prefs.edit().putStringSet(keyFor(accountIdB64), current).apply()
     }
 
+    /**
+     * ADR-0045 UX §6.2.4 — drop ONE group from the set, so a chat the user
+     * deleted is not eagerly rebuilt by the next [ChatRepository.bootstrap].
+     *
+     * No-op when absent. Deliberately narrower than [clear], which is the
+     * whole-account `forgetDevice` wipe.
+     */
+    public fun remove(accountIdB64: String, groupIdHex: String) {
+        val current = load(accountIdB64).toMutableSet()
+        if (!current.remove(groupIdHex)) return
+        prefs.edit().putStringSet(keyFor(accountIdB64), current).apply()
+    }
+
     /** Wipe the entire set for [accountIdB64]. Called from
      *  `forgetDevice` — same posture as the
      *  `IdentitySnapshotStore.deleteSnapshot` wipe (per-account,

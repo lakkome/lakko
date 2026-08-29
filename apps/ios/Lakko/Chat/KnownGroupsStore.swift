@@ -97,6 +97,27 @@ public final class KnownGroupsStore {
         }
     }
 
+    /// ADR-0045 UX §6.2.4 — drop ONE group from the set.
+    ///
+    /// The `Delete this chat` path, and the only per-group removal there has
+    /// ever been here: everything else about this store is add-or-wipe-all,
+    /// because until a membership could END there was no group a device
+    /// stopped wanting to rehydrate. Written to **both** suites, unlike
+    /// ``add(accountIdB64:groupIdHex:)`` which writes to one — a row left in
+    /// `.standard` would be re-read by the fallback the moment the shared
+    /// suite is unavailable, resurrecting the deleted chat.
+    ///
+    /// No-op when absent.
+    public func remove(accountIdB64: String, groupIdHex: String) {
+        let key = Self.keyFor(accountIdB64)
+        for defaults in [sharedDefaults, standardDefaults].compactMap({ $0 }) {
+            guard let array = defaults.stringArray(forKey: key) else { continue }
+            let remaining = array.filter { $0 != groupIdHex }
+            if remaining.count == array.count { continue }
+            defaults.set(remaining.sorted(), forKey: key)
+        }
+    }
+
     /// Wipe the entire set for `accountIdB64` from **both** the shared
     /// suite and `.standard`. Called from
     /// ``ChatRepository/forgetDevice()`` — same posture as the

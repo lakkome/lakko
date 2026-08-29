@@ -101,6 +101,15 @@ public final class ChatRepository: ObservableObject {
     /// here is load-bearing: losing it costs one notice, not a role.
     private let lastObservedOwnerStore: LastObservedOwnerStore
 
+    /// ADR-0045 UX §6.2.3 — when this device published a self-targeted leave
+    /// request, per group. Deliberately NOT part of ``pendingRequestStore``:
+    /// that store is pruned against the core's live pending set on every fold,
+    /// and the sweep that removes us is exactly what empties that set, so the
+    /// poll batch carrying the eviction would destroy the only evidence that we
+    /// asked for it. Losing it costs the NARROWING, never the state — the
+    /// fallback string is true either way.
+    private let leaveRequestStore: LeaveRequestStore
+
     /// ADR-0045 S4b — when this device last emitted its own liveness beacon, per
     /// group. This device's OWN local clock, which is legitimate here and
     /// nowhere else in the beacon design: it governs only this device's send
@@ -166,7 +175,8 @@ public final class ChatRepository: ObservableObject {
         pushRouting: PushGroupRouting = PushGroupRouting(),
         beaconStore: BeaconObservationStore = BeaconObservationStore(),
         pendingRequestStore: PendingRequestStore = PendingRequestStore(),
-        lastObservedOwnerStore: LastObservedOwnerStore = LastObservedOwnerStore()
+        lastObservedOwnerStore: LastObservedOwnerStore = LastObservedOwnerStore(),
+        leaveRequestStore: LeaveRequestStore = LeaveRequestStore()
     ) {
         self.chatClient = chatClient
         self.dsClient = dsClient
@@ -179,6 +189,7 @@ public final class ChatRepository: ObservableObject {
         self.beaconStore = beaconStore
         self.pendingRequestStore = pendingRequestStore
         self.lastObservedOwnerStore = lastObservedOwnerStore
+        self.leaveRequestStore = leaveRequestStore
         // SECURITY (nonce-reuse-on-crash) — wire the fail-closed MLS
         // ratchet persister into the ChatClient so EVERY application send
         // (chat / edit / delete / reaction / typing / read-receipt /
@@ -331,6 +342,12 @@ public final class ChatRepository: ObservableObject {
             // device that kept it would greet the next session with a
             // "{name} made you the owner" notice about a change it never saw.
             lastObservedOwnerStore.clearForAccount(accountIdB64: accountIdB64)
+            // ADR-0045 UX §6.2.3 — and no memory of having asked to leave. It
+            // follows the same discipline as the three above, and it is the
+            // ONLY thing besides `Delete this chat` that discards the record:
+            // it is deliberately never pruned with the pending sweep, so an
+            // account reset has to take it explicitly.
+            leaveRequestStore.clearForAccount(accountIdB64: accountIdB64)
             // Phase 2a3f1 — drop the plaintext message log too.
             // The Keychain wrap key is shared across accounts
             // (per-installation, not per-account) so we leave
@@ -667,6 +684,130 @@ public final class ChatRepository: ObservableObject {
     public func epoch(groupIdHex: String) -> UInt64? {
         guard let record = groups[groupIdHex] else { return nil }
         return try? record.group.epoch()
+    }
+
+    /// ADR-0045 UX §6.2 — is this device still a member of `groupIdHex`?
+    ///
+    /// `nil` when there is no handle or the handle could not be read — which
+    /// ``membershipState(isActive:leaveRequestedAtMs:)`` reads as still a
+    /// member, deliberately: an unreadable group is not evidence of an
+    /// eviction, and this is a claim about FACT rather than about
+    /// cryptographic capability.
+    ///
+    /// This is the ONE signal there is. `processIncomingVerifyingRoles` returns
+    /// the same content-less `Commit` for a commit that removes our own leaf as
+    /// for any other, so nothing in the receive path announces it; and the
+    /// available inference (*no member record whose signature key is ours*)
+    /// rests on a leaf's signature key being the account's, which ADR-0022
+    /// names as an open follow-up. `Group.isActive()` is what OpenMLS itself
+    /// consults before refusing to encrypt, export or decrypt.
+    ///
+    /// **Never reason about this from the epoch.** After a self-removing commit
+    /// merges, `epoch()` reports N+1 over epoch-N secrets the merge's
+    /// `PublicState` branch never replaced.
+    public func isActive(groupIdHex: String) -> Bool? {
+        guard let record = groups[groupIdHex] else { return nil }
+        return readIsActive { try record.group.isActive() }
+    }
+
+    /// ADR-0045 UX §6.2.3 — when this device published a self-targeted leave
+    /// request for `groupIdHex`, or `nil` when it never did (or lost the
+    /// record). `nil` narrows to nothing: the copy falls back to the removed
+    /// form, which is true either way.
+    /// ADR-0045 UX §6.2 — the membership verdict for `groupIdHex`, read off the
+    /// LIVE handle right now.
+    ///
+    /// The repository's own gates use this rather than anything the UI holds:
+    /// a `@Published` mirror is refreshed by an observer, so it can still carry
+    /// its pre-batch value in the turn that immediately follows a poll — which
+    /// is exactly where the rotation fires.
+    func membershipStateNow(groupIdHex: String) -> MembershipState {
+        membershipState(
+            isActive: isActive(groupIdHex: groupIdHex),
+            leaveRequestedAtMs: leaveRequestedAt(groupIdHex: groupIdHex))
+    }
+
+    public func leaveRequestedAt(groupIdHex: String) -> Int64? {
+        guard let accountIdB64 = currentAccountIdB64,
+              let record = groups[groupIdHex] else { return nil }
+        return leaveRequestStore.load(
+            accountIdB64: accountIdB64, groupIdB64: base64Encode(record.groupId))
+    }
+
+    /// ADR-0045 UX §6.2.4 — `Delete this chat`.
+    ///
+    /// Reachable only once the membership has ended (the exit block's `ended`
+    /// arm), so this never removes a live conversation — and it re-checks that
+    /// here rather than trusting the control it was drawn behind, the same
+    /// layered-defence posture `leaveGroupAffordance` and `exitBlock` already
+    /// keep between them.
+    ///
+    /// **What it removes:** this group's entry in the per-account message log
+    /// (a read-modify-write on a store that already exists — the log is keyed
+    /// `{ groupIdHex -> PersistedGroup }` internally, so no new store is
+    /// needed), its pending-request observations, its durable leave record, and
+    /// its rows in the live group map and the known-groups registry.
+    ///
+    /// The last-observed-owner memory is deliberately LEFT: that store has only
+    /// an account-wide wipe, and calling it here would erase every OTHER
+    /// group's memory and greet the user with a spurious "{name} made you the
+    /// owner" notice in a group nothing happened in. A row for a group that no
+    /// longer exists is inert, and on the one path where it could ever be read
+    /// again — a rejoin under the same group id — it holds exactly the right
+    /// answer.
+    ///
+    /// **What it does NOT remove, which is why the confirmation body is exact
+    /// rather than sweeping:** the inactive MLS group stays in the provider
+    /// snapshot as inert bytes. `Group` exposes no delete, so a `Group::delete`
+    /// is a real (small) core follow-up rather than something this rides free.
+    /// The remnant is inert in the strong sense — it cannot send, decrypt,
+    /// export or process anything — but it is not nothing.
+    ///
+    /// The push subscription is already gone by this point: the §6.2.8
+    /// teardown retires it at the moment of the eviction, not at the moment of
+    /// the delete, so a user who never presses this button still stops being
+    /// woken.
+    ///
+    /// The REGISTRY rows go LAST, so a failure above leaves the chat reachable
+    /// rather than orphaning a transcript behind a row the user can no longer
+    /// open.
+    @discardableResult
+    public func deleteChat(groupIdHex: String) -> Bool {
+        guard let accountIdB64 = currentAccountIdB64,
+              let record = groups[groupIdHex] else { return false }
+        guard membershipEnded(membershipStateNow(groupIdHex: groupIdHex)) else { return false }
+        let groupIdB64 = base64Encode(record.groupId)
+        // The transcript first: it is the only thing here that is irreplaceable,
+        // so if anything is going to fail it should fail before the row that
+        // makes the chat reachable is gone.
+        _ = messageLogStore.deleteGroup(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        // Local bookkeeping for a group that no longer exists here. All three
+        // are best-effort by construction and none can fail the delete.
+        pendingRequestStore.prune(
+            accountIdB64: accountIdB64, groupIdB64: groupIdB64, liveKeys: [])
+        leaveRequestStore.clear(accountIdB64: accountIdB64, groupIdB64: groupIdB64)
+        // LAST, and in this order: the registry is what a relaunch rehydrates
+        // from, so dropping it after the live handle means a crash between the
+        // two leaves the chat present rather than half-gone.
+        groups.removeValue(forKey: groupIdHex)
+        knownGroupsStore.remove(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        state = state.with(threads: buildThreadList())
+        return true
+    }
+
+    /// ADR-0045 UX §6.2.3 — record that this device asked to leave.
+    ///
+    /// Called from the leave action at PUBLISH time, on both outcomes: a legacy
+    /// group with no role table takes the direct-commit path and evicts us in
+    /// the same call, so writing only on the `proposed` arm would lose exactly
+    /// the case that reaches the terminal state fastest. First-wins.
+    public func noteLeaveRequested(groupIdHex: String) {
+        guard let accountIdB64 = currentAccountIdB64,
+              let record = groups[groupIdHex] else { return }
+        leaveRequestStore.remember(
+            accountIdB64: accountIdB64,
+            groupIdB64: base64Encode(record.groupId),
+            atMs: Self.nowMs())
     }
 
     /// Roster of the live MLS group for `groupIdHex` — `(leafIndex,
@@ -2114,6 +2255,20 @@ public final class ChatRepository: ObservableObject {
               let record = groups[groupIdHex] else { return }
         let role = ownRole(groupIdHex: groupIdHex)
         let current = PushGroupRouting.memberSignatureKeys(group: record.group)
+        // ADR-0045 UX §6.2.8 item 3 — captured HERE, in the same synchronous
+        // region as the post-commit roster snapshot one line above, so the
+        // eviction and the shrink it caused are judged on the same commit. Both
+        // entry points (the poll's apply half and the committer sweep's tail)
+        // funnel through this one method, so there is exactly one place the two
+        // reads can be ordered together and this is it.
+        //
+        // Read off the live handle rather than any UI mirror, and it is worse
+        // than a no-op to get wrong: a `Remove` rewrites no `GroupContext`, so
+        // an evicted admin's role table still names it an admin, the diff sees
+        // a member depart (us), and the rotation mints a fresh secret,
+        // subscribes to a `push_gid` nobody will ever notify, retires the old
+        // one, and then throws at the broadcast — retrying on every chat-open.
+        let selfEvicted = readIsActive { try record.group.isActive() } == false
         Task { @MainActor [weak self] in
             guard let self else { return }
             await self.pushRouting.rotateIfMembershipShrank(
@@ -2130,6 +2285,7 @@ public final class ChatRepository: ObservableObject {
                     guard let group = self?.groups[groupIdHex]?.group else { return nil }
                     return PushGroupRouting.readGroupEpoch(group)
                 },
+                selfEvicted: selfEvicted,
                 broadcast: { [weak self] bytes in
                     guard let self else {
                         throw ChatError.argument("ChatRepository deallocated mid-broadcast")
@@ -2139,6 +2295,33 @@ public final class ChatRepository: ObservableObject {
                 }
             )
         }
+    }
+
+    /// ADR-0045 UX §6.2.8 item 5 — retire THIS device's own push subscription
+    /// for a group whose membership has ended.
+    ///
+    /// ADR-0043 recorded the evicted member's push-gw row as never deleted —
+    /// *"nobody else can delete it and no client has 'you were removed'
+    /// handling"* — so it went **inert** rather than away. This is that
+    /// handling, and it gives `retireOldPushGid` its third caller: the rotator
+    /// after it re-arms, every remaining member on a changed secret, and now
+    /// the ex-member itself. It closes the other half of G-36 residual 2 —
+    /// rotation stops the group notifying the old id; this stops the ex-member
+    /// being subscribed to anything at all.
+    ///
+    /// **The honest bound:** it needs this device to come online and run, so it
+    /// *complements* rotation and replaces nothing. A phone that is never
+    /// opened again keeps its row, exactly as before.
+    ///
+    /// Best-effort and never throws: `retireOldPushGid` is bounded and
+    /// swallows its own failures, and there is nothing here to unwind.
+    /// Returns `false` only when there was no secret to name the retiring id
+    /// from — which is done rather than failed, so the caller keeps its claim.
+    @discardableResult
+    func retireOwnPushSubscription(groupIdHex: String) async -> Bool {
+        guard let accountIdB64 = currentAccountIdB64 else { return false }
+        return await pushRouting.retireOwnSubscription(
+            accountIdB64: accountIdB64, groupIdHex: groupIdHex)
     }
 
     /// ADR-0042 — post a control envelope (a push-routing-secret
@@ -2231,6 +2414,30 @@ public final class ChatRepository: ObservableObject {
     ) async throws {
         guard canonicalIdentity != nil else { return }
         guard let record = groups[groupIdHex] else { return }
+        // ADR-0045 UX §6.2.8 item 1 — the poll must STOP for a group this
+        // device is no longer in, and stopping is not an optimisation.
+        // `unprotect_message` refuses on `!is_active()` before it looks at the
+        // message at all, and the refusal is not epoch-scoped, so every fetched
+        // row would raise `UseAfterEviction`, be swallowed by the per-message
+        // catch in `ChatClient.applyFetchedMessages`, and advance the cursor —
+        // one warning per row, forever, for a group that will never produce a
+        // readable byte again. A loop that logs a refusal per row per poll is
+        // indistinguishable from a bug.
+        //
+        // iOS is the MOST exposed of the three here rather than the least: this
+        // is a LONG poll driven by the screen's `.task`, so the swallowed-
+        // refusal loop is continuous rather than event-driven.
+        //
+        // A GATE rather than a disposal, because `pollGroup` is re-entered from
+        // many call sites (the screen's loop, the Refresh button, every
+        // membership action, the Welcome intake) and there is no single timer
+        // to invalidate. It also stops the tail sweep and the ADR-0040 outbox
+        // sweep, both of which publish commits an inactive group cannot make.
+        //
+        // The cursor is deliberately left where the last applied row put it
+        // (§6.2.13): it costs nothing, and whether a rejoin wants it reset is
+        // the rejoin path's question, not this one's.
+        if membershipEnded(membershipStateNow(groupIdHex: groupIdHex)) { return }
         // ADR-0040 (G-35) — sweep the durable pending-commit outbox ONCE per
         // group per session, BEFORE the first poll. Re-publishing a crashed
         // mid-window commit re-arms the own-echo filter for the re-published
@@ -2977,6 +3184,25 @@ public final class ChatRepository: ObservableObject {
         // Ed25519 key derivation the rank read costs. The gate there stays the
         // authority.
         guard foreground else { return .notForeground }
+        // ADR-0045 UX §6.2.8 item 2 — an evicted device must never beacon. A
+        // beacon means *able to sweep*, and this one can never sweep again: the
+        // envelope is an ordinary MLS application message and
+        // `createApplicationMessage` is refused for an inactive group, so the
+        // emit would throw on its own ticker every interval anyway.
+        //
+        // Note this is the SAME rule that keeps a backgrounded app from
+        // emitting, reached from the other direction: there the device could
+        // sweep and is not running; here it is running and never can. Placed
+        // directly beside that check for exactly that reason.
+        //
+        // The ticker is invalidated too (the view model's one-shot teardown),
+        // so this is belt and braces — but it is the half that is a GATE, and
+        // the gate is what makes a surviving timer harmless rather than merely
+        // unlikely. `.notACandidate` rather than a new verdict: this device is
+        // not a candidate to sweep, which is exactly what the fold means.
+        if membershipEnded(membershipStateNow(groupIdHex: groupIdHex)) {
+            return .notACandidate
+        }
         guard usesProposalPath(groupIdHex: groupIdHex) else { return .notACandidate }
         guard let identity = canonicalIdentity, let record = groups[groupIdHex] else {
             // This device cannot establish that it is a candidate, so it must
@@ -3637,11 +3863,26 @@ public struct ChatThread: Equatable {
     /// Cursor for the next ``ChatClient/pollMessages(identity:group:after:waitSecs:)``
     /// call.
     public let cursor: Int64
+    /// ADR-0045 UX §6.2.4 — has this device's own membership ended?
+    ///
+    /// Read off `Group.isActive()` when the thread snapshot is built, so the
+    /// chat list can render its one muted line and suppress the unread badge
+    /// without reaching for a live `Group` handle it does not hold. A torn read
+    /// reports `false` — an unreadable group is not evidence of an eviction —
+    /// and the state is TERMINAL, so a snapshot can never be stale in the
+    /// direction that matters.
+    public let membershipEnded: Bool
 
-    public init(groupIdHex: String, messages: [ChatMessage], cursor: Int64) {
+    public init(
+        groupIdHex: String,
+        messages: [ChatMessage],
+        cursor: Int64,
+        membershipEnded: Bool = false
+    ) {
         self.groupIdHex = groupIdHex
         self.messages = messages
         self.cursor = cursor
+        self.membershipEnded = membershipEnded
     }
 }
 
@@ -4057,7 +4298,11 @@ private final class GroupRecord {
         ChatThread(
             groupIdHex: DsClient.pseudonymHex(groupId),
             messages: messages,
-            cursor: cursor
+            cursor: cursor,
+            // ADR-0045 UX §6.2.4 — `nil` (a torn handle) reports `false`: an
+            // unreadable group is not evidence of an eviction, and this line
+            // is a claim about fact rather than about capability.
+            membershipEnded: readIsActive { try group.isActive() } == false
         )
     }
 

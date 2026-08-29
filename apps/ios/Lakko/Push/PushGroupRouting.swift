@@ -683,6 +683,45 @@ public final class PushGroupRouting {
         }
     }
 
+    /// ADR-0045 UX §6.2.8 item 5 — retire this device's OWN subscription for a
+    /// group whose membership has ended.
+    ///
+    /// The THIRD caller of ``retireOldPushGid(oldSecret:)``, and the one
+    /// ADR-0043 said could not exist: it recorded an evicted member's push-gw
+    /// row as *"never deleted — nobody else can delete it and no client has
+    /// 'you were removed' handling"*, so the row went **inert** rather than
+    /// away. This is that handling, and it closes the other half of G-36
+    /// residual 2 — rotation stops the group notifying the old id; this stops
+    /// the ex-member being subscribed to anything at all.
+    ///
+    /// Unlike the other two callers the retiring id is not a *superseded*
+    /// secret but the CURRENT one: nothing supersedes it, because this device
+    /// will never receive another rotation for this group. The stored row is
+    /// deliberately left in place — the message log and the group registry are
+    /// the `Delete this chat` path's business (§6.2.4), and a routing row with
+    /// no live subscription notifies nothing.
+    ///
+    /// Takes the routing chain, like every other read-then-write entry point:
+    /// the read of the stored secret and the route-row delete must not
+    /// interleave with a rotation that is still in flight from before the
+    /// eviction landed.
+    ///
+    /// Best-effort and never throws. Returns `false` when there was no
+    /// readable secret to name an id from — done rather than failed, since a
+    /// device that never held one was never subscribed under a `push_gid`.
+    @discardableResult
+    public func retireOwnSubscription(accountIdB64: String, groupIdHex: String) async -> Bool {
+        await withRoutingLock(accountIdB64: accountIdB64, groupIdHex: groupIdHex) {
+            [weak self] in
+            guard let self,
+                  let secret = self.store.getSecret(
+                    accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+            else { return false }
+            await self.retireOldPushGid(oldSecret: secret)
+            return true
+        }
+    }
+
     /// ADR-0043 — retire a SUPERSEDED `push_gid`: drop this device's push-gw
     /// subscription under it, then delete its reverse-index row.
     ///
@@ -1610,6 +1649,28 @@ public final class PushGroupRouting {
         /// A shrink, but this device is a plain member (or the group has no
         /// role table). Rotating is owner-or-admin only.
         case skipNotAuthorized
+        /// ADR-0045 UX §6.2.8 item 3 — the departing member is US. This
+        /// device's own membership has ended, so it must not rotate on its own
+        /// eviction.
+        ///
+        /// It would otherwise, and that is the FINDING rather than a
+        /// precaution: a `Remove` rewrites no `GroupContext`, so an evicted
+        /// admin's role table still names it an admin,
+        /// ``membershipRotationDecision(previousMemberKeys:currentMemberKeys:ownRole:selfEvicted:)``
+        /// sees a member depart and returns `.rotate` — and the rotation then
+        /// throws at the broadcast, because the envelope is an MLS application
+        /// message and `createApplicationMessage` is refused for an inactive
+        /// group. Worse than a no-op: the rotation mints a fresh secret,
+        /// subscribes this device to a brand-new `push_gid` nobody will ever
+        /// notify, retires the old one, and retries the throwing broadcast on
+        /// every chat-open.
+        ///
+        /// The doc on
+        /// ``rotateIfMembershipShrank(accountIdB64:groupIdHex:ownRole:previousMemberKeys:currentMemberKeys:mintEpoch:selfEvicted:broadcast:)``
+        /// reasons correctly about the device *performing* a removal (its
+        /// baseline is already post-removal, so it sees no shrink) and has no
+        /// case at all for the device *receiving its own*.
+        case skipSelfEvicted
     }
 
     /// Outcome of the rotation orchestration — the decision values plus what
@@ -1640,6 +1701,8 @@ public final class PushGroupRouting {
         case skipUnknownMembership
         /// See ``PushRotationDecision/skipNotAuthorized``.
         case skipNotAuthorized
+        /// See ``PushRotationDecision/skipSelfEvicted``.
+        case skipSelfEvicted
     }
 
     /// Stable per-member identities for the membership diff: the
@@ -1680,11 +1743,22 @@ public final class PushGroupRouting {
     ///     landed, or `nil` if unknown.
     ///   - currentMemberKeys: member keys observed AFTER, or `nil` if unknown.
     ///   - ownRole: this device's ADR-0022 role; `nil` = no role table.
+    ///   - selfEvicted: ADR-0045 UX §6.2.8 item 3 — has THIS device's own
+    ///     membership ended? Evaluated FIRST, ahead of the membership diff and
+    ///     ahead of the authority check, because a device that is out of the
+    ///     group has no business rotating whatever its stale role table says —
+    ///     and because the answer must not depend on which of three skip
+    ///     reasons happened to be checked first. Defaulted so every existing
+    ///     caller and every existing test reads exactly as it did; `false`
+    ///     means "not evicted", which is the pre-ADR-0045-§6.2 behaviour byte
+    ///     for byte.
     public nonisolated static func membershipRotationDecision(
         previousMemberKeys: [String]?,
         currentMemberKeys: [String]?,
-        ownRole: Role?
+        ownRole: Role?,
+        selfEvicted: Bool = false
     ) -> PushRotationDecision {
+        if selfEvicted { return .skipSelfEvicted }
         guard let before = previousMemberKeys, let after = currentMemberKeys else {
             return .skipUnknownMembership
         }
@@ -1872,16 +1946,22 @@ public final class PushGroupRouting {
         previousMemberKeys: [String]?,
         currentMemberKeys: [String]?,
         mintEpoch: @escaping @MainActor () -> UInt64?,
+        // ADR-0045 UX §6.2.8 item 3 — read from `Group.isActive()` in the SAME
+        // synchronous region the `currentMemberKeys` snapshot was taken in, so
+        // the eviction and the shrink it caused are judged on the same commit.
+        selfEvicted: Bool = false,
         broadcast: @escaping (Data) async throws -> Void
     ) async -> PushRotationOutcome {
         switch Self.membershipRotationDecision(
             previousMemberKeys: previousMemberKeys,
             currentMemberKeys: currentMemberKeys,
-            ownRole: ownRole
+            ownRole: ownRole,
+            selfEvicted: selfEvicted
         ) {
         case .skipNoShrink: return .skipNoShrink
         case .skipUnknownMembership: return .skipUnknownMembership
         case .skipNotAuthorized: return .skipNotAuthorized
+        case .skipSelfEvicted: return .skipSelfEvicted
         case .rotate:
             return await rotateSecret(
                 accountIdB64: accountIdB64, groupIdHex: groupIdHex, ownRole: ownRole,

@@ -2004,6 +2004,62 @@ impl Group {
         Ok(Zeroizing::new(secret))
     }
 
+    /// Whether this device is still a member of the group.
+    ///
+    /// `false` means a Commit that removed this device's own leaf has been
+    /// applied. RFC 9420 gives no way back: OpenMLS calls the resulting state
+    /// *"a terminal state that the group can not exit from"*, sets it inside
+    /// `merge_staged_commit` on `StagedCommit::self_removed()`, and **persists
+    /// it before merging** — so it survives a snapshot / restore round trip and
+    /// this accessor answers the same at launch as it did in the poll batch
+    /// that carried the removal. Re-joining is a new `Group` (a Welcome, or an
+    /// external commit), never this one.
+    ///
+    /// Nothing in the receive path signals the transition:
+    /// [`Self::process_incoming_verifying_roles`] returns the same content-less
+    /// [`Incoming::Commit`] for a commit that evicts this device as for any
+    /// other. **This accessor is the only signal.**
+    ///
+    /// # What still works, and what stops
+    ///
+    /// The asymmetry is the whole point, and it is why an evicted group should
+    /// stay readable in the UI while every action on it is withdrawn:
+    ///
+    /// * **Reads keep working, frozen forever.** [`Self::members`],
+    ///   [`Self::epoch`], [`Self::member_count`], [`Self::own_leaf_index`],
+    ///   [`Self::group_id`] and [`Self::group_roles`] all still answer, at the
+    ///   values the removing Commit produced. They will never change again.
+    /// * **Nothing further can be decrypted** — OpenMLS refuses
+    ///   `unprotect_message` on `!is_active()` before it inspects the message
+    ///   at all, so this is *not* epoch-scoped: application rows still sitting
+    ///   unfetched on the Delivery Service are unreadable even when they were
+    ///   sealed at an epoch whose keys this device still holds.
+    /// * **Sending and every exporter read fail.**
+    ///   [`Self::create_application_message`] and [`Self::export_secret`] both
+    ///   raise `UseAfterEviction`, which reaches beyond the composer: the
+    ///   per-call SFrame seed, the push routing-secret broadcast and the
+    ///   committer beacon are all one or the other.
+    /// * **The reported epoch moves while the secrets do not.** The merge takes
+    ///   OpenMLS's public-state branch, so [`Self::epoch`] reports N+1 over
+    ///   epoch-N secrets that were never replaced. Consult this accessor rather
+    ///   than reasoning from the epoch.
+    ///
+    /// # What a caller is expected to do with it
+    ///
+    /// Gate on it wherever the group is acted upon — disable the composer and
+    /// the membership affordances, stop polling, stop emitting beacons — and
+    /// keep rendering the history, which is still readable and still true. A
+    /// caller that instead infers membership from "my signature key is absent
+    /// from [`Self::members`]" gets the same answer today, but it is a
+    /// different claim: this reads the state the refusals themselves consult,
+    /// and it does not rest on a leaf's signature key being the account's
+    /// (ADR-0022 names the per-device-leaf split as an open follow-up, which
+    /// would break that inference silently).
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        self.inner.is_active()
+    }
+
     /// Local leaf index of `identity` in the group, if present.
     #[must_use]
     pub fn own_leaf_index(&self) -> LeafNodeIndex {

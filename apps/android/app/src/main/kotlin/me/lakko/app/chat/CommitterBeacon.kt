@@ -110,6 +110,14 @@ internal enum class BeaconEmitVerdict {
     /** The app is not foregrounded. See [beaconEmitVerdict]. */
     NOT_FOREGROUND,
 
+    /**
+     * ADR-0045 UX §6.2.8 item 2 — this device's own membership has ENDED, so it
+     * can never sweep again. Distinct from [NOT_A_CANDIDATE] because it is
+     * PERMANENT rather than a function of the current role table, and reported
+     * separately so a log line says which of the two it was.
+     */
+    MEMBERSHIP_ENDED,
+
     /** A beacon went out less than one interval ago. */
     THROTTLED,
 }
@@ -162,6 +170,9 @@ internal const val BEACON_TICK_MS: Long = 15_000L
  *   "no rank" — a `null` check and a `> 0` check are different questions.
  * @param throttle the FFI `shouldEmitBeacon`. Injected so the rule is the
  *   core's, and so a host test can drive this function without the `.so`.
+ * @param membershipEnded ADR-0045 UX §6.2.8 item 2 — this device's own
+ *   membership has ended. Checked FIRST, before the foreground gate; see the
+ *   body.
  */
 internal fun beaconEmitVerdict(
     ownRank: UInt?,
@@ -169,7 +180,17 @@ internal fun beaconEmitVerdict(
     lastEmittedAtMs: Long?,
     nowMs: Long,
     throttle: (UInt?, ULong?, ULong) -> Boolean,
+    membershipEnded: Boolean = false,
 ): BeaconEmitVerdict {
+    // ADR-0045 UX §6.2.8 item 2 — AHEAD of the foreground gate, because it is
+    // the permanent condition of the two and because the role table a `Remove`
+    // leaves behind still names an evicted admin an admin: `ownRank` would come
+    // back non-null and the throttle would happily say EMIT. The emit itself is
+    // an ordinary MLS application message, which `createApplicationMessage`
+    // refuses for an inactive group, so what this prevents is not a wrong
+    // beacon reaching peers but a throwing emit re-attempted on every tick,
+    // forever, for a group that will never accept one.
+    if (membershipEnded) return BeaconEmitVerdict.MEMBERSHIP_ENDED
     if (!foreground) return BeaconEmitVerdict.NOT_FOREGROUND
     val allowed = throttle(
         ownRank,

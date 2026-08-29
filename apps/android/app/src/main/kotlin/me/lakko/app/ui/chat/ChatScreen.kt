@@ -36,6 +36,7 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
@@ -67,10 +68,13 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
@@ -122,6 +126,13 @@ public fun ChatScreen(
     val listState = rememberLazyListState()
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+
+    // ADR-0045 UX §6.2 — has this device's own membership ended, and (if so)
+    // did it ask to go? Every rule and every string lives in
+    // `me.lakko.app.chat.MembershipEnded`; this screen renders its verdicts.
+    // The state is TERMINAL, so nothing here needs invalidating on a timer.
+    val membership by viewModel.membership.collectAsStateWithLifecycle()
+    val membershipEnded = me.lakko.app.chat.membershipEnded(membership)
 
     // 1.19c4 — preview-attachment sheet state. When the user
     // taps "Open" on an image chip we resolve the bytes off
@@ -188,6 +199,13 @@ public fun ChatScreen(
         // logout). Errors back off via [POLL_RETRY_BACKOFF_MS]
         // so we don't tight-loop against a 503.
         while (isActive) {
+            // ADR-0045 UX §6.2.8 item 1 — the poll STOPS for a group this
+            // device is no longer in. The repository gates `pollGroup` too,
+            // which is the authority; this loop must break as well because that
+            // gate makes the call return IMMEDIATELY, and a `while (isActive)`
+            // around an instant return is a spin, not a poll. Checked at the
+            // top so a membership that ends mid-window exits on the next pass.
+            if (viewModel.membershipEnded.value) break
             try {
                 viewModel.pollOnceLongPoll()
             } catch (_: Throwable) {
@@ -213,6 +231,16 @@ public fun ChatScreen(
     LaunchedEffect(lifecycleOwner) {
         lifecycleOwner.lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.RESUMED) {
             while (isActive) {
+                // ADR-0045 UX §6.2.8 item 2 — the ticker stops for good once
+                // this device's membership has ended, and it stays stopped
+                // across a resume because the flag lives in the view model
+                // rather than in this coroutine. A beacon means *able to
+                // sweep*, and an evicted device can never sweep again — the
+                // same rule that keeps a backgrounded device from emitting
+                // (which is what `repeatOnLifecycle` is), reached from the
+                // other direction: there the device could sweep and is not
+                // running; here it is running and never can.
+                if (!viewModel.beaconTickerRunning.value) break
                 viewModel.emitCommitterBeaconTick(foreground = true)
                 delay(me.lakko.app.chat.BEACON_TICK_MS)
             }
@@ -255,7 +283,14 @@ public fun ChatScreen(
         Header(
             groupIdHex = state.groupIdHex,
             refreshing = state.refreshing,
-            callActive = activeCall != null || activeSfuCall != null,
+            // ADR-0045 UX §6.2.8 item 4 / §6.2.11 — the call buttons are GONE
+            // once this device's membership has ended, not merely failing. The
+            // per-call SFrame seed comes from `exportSecret("lakko/call/v1", …)`
+            // and now raises, so they fail closed — which is correct, and is not
+            // enough: a call control asserts a live E2EE session, and there is
+            // not one. Folded into `callActive` because the two reasons to hide
+            // them are the same rendering decision.
+            callActive = activeCall != null || activeSfuCall != null || membershipEnded,
             onNavigateBack = onNavigateBack,
             onRefresh = viewModel::onRefreshClicked,
             // A group chat (>2 MLS members) routes through the
@@ -287,7 +322,7 @@ public fun ChatScreen(
         // presented as a Dialog while `membersPanelOpen` is true.
         val membersPanelOpen by viewModel.membersPanelOpen.collectAsStateWithLifecycle()
         if (membersPanelOpen) {
-            MembersSheet(viewModel = viewModel)
+            MembersSheet(viewModel = viewModel, onChatDeleted = onNavigateBack)
         }
 
         // G3-2-call-present — the inline banner now only
@@ -386,7 +421,11 @@ public fun ChatScreen(
                 .padding(horizontal = 12.dp),
         ) {
             if (state.messages.isEmpty()) {
-                EmptyTimelineHint()
+                // ADR-0045 UX §6.2 — the empty-timeline copy invites a send,
+                // and once the membership has ended that is an invitation the
+                // bar below can no longer accept. The terminal row carries the
+                // whole of what there is to say.
+                if (!membershipEnded) EmptyTimelineHint()
             } else {
                 LazyColumn(
                     state = listState,
@@ -441,30 +480,56 @@ public fun ChatScreen(
             }
         }
 
+        // ADR-0045 UX §6.2.5 — the terminal row.
+        //
+        // It goes in the TIMELINE, not in a banner, and §10 already says why:
+        // "only outcomes belong in the timeline" — and this is an outcome, one
+        // that happened at a definite point in the transcript. A row marks
+        // WHERE the history stops, survives scrollback, needs no dismissal
+        // state, and reuses the centred muted treatment system rows already
+        // have.
+        //
+        // It renders after the list rather than inside it because it is not a
+        // `ChatMessage`: nothing produced it on the wire (the removing commit
+        // returns the same content-less `Commit` as any other), and the state
+        // is terminal, so "after everything" is the only place it can be.
+        me.lakko.app.chat.terminalRow(membership)?.let { row ->
+            TerminalMembershipRow(row)
+        }
+
         // ADR-0024 — typing indicator just above the input bar.
         // Auto-hides when `typingText` is null (nobody typing /
         // auto-expired).
-        TypingIndicator(text = state.typingText)
+        //
+        // ADR-0045 UX §6.2.11 — and never on a dead group. No new typing signal
+        // can arrive (nothing decrypts any more), so what would render is
+        // whatever was in flight at the moment of the eviction: a live
+        // indicator over a conversation that has stopped.
+        TypingIndicator(text = if (membershipEnded) null else state.typingText)
 
-        Composer(
-            draft = state.draft,
-            sending = state.sending,
-            sendError = state.sendError,
-            pendingAttachments = state.pendingAttachments,
-            uploading = state.uploading,
-            uploadStage = state.uploadStage,
-            onDraftChange = viewModel::onDraftChange,
-            onSendClicked = viewModel::onSendClicked,
-            onFocusChanged = viewModel::onComposerFocusChanged,
-            onAttachClicked = {
-                // ACTION_OPEN_DOCUMENT — pick any MIME. The
-                // contract returns `Uri` per pick. Wildcard
-                // `*/*` keeps both photos + arbitrary files in
-                // the same flow.
-                pickFilesLauncher.launch(arrayOf("*/*"))
-            },
-            onRemoveAttachment = viewModel::onRemovePendingAttachment,
-        )
+        when (val slot = me.lakko.app.chat.composerState(membership, state.draft)) {
+            me.lakko.app.chat.ComposerSlot.Composer -> Composer(
+                draft = state.draft,
+                sending = state.sending,
+                sendError = state.sendError,
+                pendingAttachments = state.pendingAttachments,
+                uploading = state.uploading,
+                uploadStage = state.uploadStage,
+                onDraftChange = viewModel::onDraftChange,
+                onSendClicked = viewModel::onSendClicked,
+                onFocusChanged = viewModel::onComposerFocusChanged,
+                onAttachClicked = {
+                    // ACTION_OPEN_DOCUMENT — pick any MIME. The
+                    // contract returns `Uri` per pick. Wildcard
+                    // `*/*` keeps both photos + arbitrary files in
+                    // the same flow.
+                    pickFilesLauncher.launch(arrayOf("*/*"))
+                },
+                onRemoveAttachment = viewModel::onRemovePendingAttachment,
+            )
+
+            is me.lakko.app.chat.ComposerSlot.Withdrawn -> WithdrawnComposer(slot)
+        }
     }
 
     // Inline image preview — surfaced as a full-screen
@@ -1161,6 +1226,92 @@ private fun Composer(
     }
 }
 
+/**
+ * ADR-0045 UX §6.2.5 — the terminal timeline row.
+ *
+ * Two lines, the same shape as §5.1's pending notice: the fact, then the
+ * standing consequence. Centred and muted, matching the treatment system rows
+ * already have, and carried by TEXT rather than by hue or an icon.
+ *
+ * Announced POLITELY rather than assertively: it arrives unbidden, possibly
+ * mid-sentence, and interrupting someone to tell them they have been removed
+ * from a group is the wrong register for a fact they cannot act on.
+ */
+@Composable
+private fun TerminalMembershipRow(row: me.lakko.app.chat.TerminalRowCopy) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 24.dp, vertical = 8.dp)
+            .semantics { liveRegion = LiveRegionMode.Polite },
+    ) {
+        Text(
+            text = row.headline,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+        )
+        Text(
+            text = row.consequence,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+        )
+    }
+}
+
+/**
+ * ADR-0045 UX §6.2.5 — what stands where the composer was.
+ *
+ * **Replaced, not disabled, and the distinction is principled.** §5.3 argues a
+ * pending row's `Remove` must stay visible-but-disabled, because hiding it
+ * would read as the permission having vanished when it is merely suspended.
+ * The permission here has vanished, permanently and by design, so the rule
+ * inverts: disable while the state is TRANSIENT, remove when it is TERMINAL. A
+ * disabled Send button on a group you will never be in again is a control
+ * promising a future it does not have.
+ *
+ * The bar occupies the composer's own slot so the layout does not jump.
+ *
+ * **The unsent draft is preserved, and NOT in a text field.** The commit lands
+ * during a poll, which can be mid-sentence, and silently discarding what the
+ * user typed is a small data loss with no upside. But the obvious fix — leave
+ * the `OutlinedTextField` there, `enabled = false` — is wrong on exactly this
+ * platform: a disabled Compose text field is not selectable, so the user would
+ * see their words and be unable to copy them out. Hence a `SelectionContainer`
+ * around a plain `Text`, which is Compose's expression of the cross-platform
+ * shape §6.2.5 specifies: SELECTABLE, non-editable text.
+ */
+@Composable
+private fun WithdrawnComposer(slot: me.lakko.app.chat.ComposerSlot.Withdrawn) {
+    Column {
+        HorizontalDivider()
+        Column(modifier = Modifier.padding(12.dp)) {
+            if (slot.draft != null) {
+                Text(
+                    text = slot.draftLabel ?: me.lakko.app.chat.UNSENT_DRAFT_LABEL,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(2.dp))
+                SelectionContainer {
+                    Text(
+                        text = slot.draft,
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+            }
+            Text(
+                text = slot.notice,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
 @Composable
 private fun PendingAttachmentsTray(
     attachments: List<AttachmentRef>,
@@ -1368,6 +1519,42 @@ private fun LeaveGroupDialog(
                     contentColor = MaterialTheme.colorScheme.error,
                 ),
             ) { Text("Leave") }
+        },
+        dismissButton = {
+            TextButton(onClick = onCancel) { Text("Cancel") }
+        },
+    )
+}
+
+/**
+ * ADR-0045 (UX §6.2.4) — the `Delete this chat` confirmation.
+ *
+ * The only protection there is, which is why the body is exact rather than
+ * sweeping: **the messages really are gone, and the dead MLS handle is not.**
+ * `Group` exposes no delete, so the inactive group's state stays in the
+ * provider snapshot as inert bytes — inert in the strong sense (it cannot send,
+ * decrypt, export or process) but not nothing.
+ *
+ * Copy from [me.lakko.app.chat.DELETE_CHAT_TITLE] /
+ * [me.lakko.app.chat.DELETE_CHAT_BODY] rather than inline, so the three clients
+ * cannot drift on the one string that describes an irreversible deletion.
+ */
+@Composable
+private fun DeleteChatDialog(
+    onCancel: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onCancel,
+        title = { Text(me.lakko.app.chat.DELETE_CHAT_TITLE) },
+        text = { Text(me.lakko.app.chat.DELETE_CHAT_BODY) },
+        confirmButton = {
+            TextButton(
+                onClick = onDelete,
+                colors = ButtonDefaults.textButtonColors(
+                    contentColor = MaterialTheme.colorScheme.error,
+                ),
+            ) { Text("Delete") }
         },
         dismissButton = {
             TextButton(onClick = onCancel) { Text("Cancel") }
@@ -1601,7 +1788,12 @@ private fun TransferOwnershipStep(
 }
 
 @Composable
-private fun MembersSheet(viewModel: ChatViewModel) {
+private fun MembersSheet(
+    viewModel: ChatViewModel,
+    /** ADR-0045 UX §6.2.4 — invoked after `Delete this chat` has removed the
+     *  registry row, so the screen leaves a thread it can no longer open. */
+    onChatDeleted: () -> Unit,
+) {
     val members by viewModel.members.collectAsStateWithLifecycle()
     val input by viewModel.addMemberInput.collectAsStateWithLifecycle()
     val busy by viewModel.membershipBusy.collectAsStateWithLifecycle()
@@ -1631,6 +1823,12 @@ private fun MembersSheet(viewModel: ChatViewModel) {
     val transferOpen by viewModel.transferStepOpen.collectAsStateWithLifecycle()
     val transferPick by viewModel.transferPick.collectAsStateWithLifecycle()
     val transferOutgoing by viewModel.transferOutgoing.collectAsStateWithLifecycle()
+    // ADR-0045 UX §6.2 — has this device's membership ended?
+    val membershipEnded by viewModel.membershipEnded.collectAsStateWithLifecycle()
+    // ADR-0045 UX §6.2.4 — the `Delete this chat` confirmation. Local to the
+    // sheet, like `confirmingLeave`: it is a presentation concern, and nothing
+    // outside this composable may open it.
+    var confirmingDelete by remember { mutableStateOf(false) }
 
     // ADR-0045 UX §6.1 — the exit block's inputs, read as Compose state so the
     // block recomposes when any of them moves.
@@ -1676,6 +1874,11 @@ private fun MembersSheet(viewModel: ChatViewModel) {
             waitingRoleChange = waitingRoleChange,
             ownRemovalPending = ownLeaf != null &&
                 me.lakko.app.chat.rowAnnotation(pendingRequests, ownLeaf, ownLeaf) != null,
+            // §6.2.7 — beats every other arm. Distinct from
+            // `ownRemovalPending` above in the way that matters: that is a
+            // request in flight over a group we are still fully in, this is the
+            // terminal state after it landed.
+            membershipEnded = membershipEnded,
         ),
     )
 
@@ -1685,6 +1888,21 @@ private fun MembersSheet(viewModel: ChatViewModel) {
             onLeave = {
                 confirmingLeave = false
                 viewModel.onLeaveGroup()
+            },
+        )
+    }
+
+    if (confirmingDelete) {
+        DeleteChatDialog(
+            onCancel = { confirmingDelete = false },
+            onDelete = {
+                confirmingDelete = false
+                viewModel.onDeleteChat()
+                // Close the panel first, then leave the thread: the registry
+                // row is gone, so the screen behind this sheet no longer has
+                // anything to render.
+                viewModel.toggleMembersPanel()
+                onChatDeleted()
             },
         )
     }
@@ -1901,6 +2119,31 @@ private fun MembersSheet(viewModel: ChatViewModel) {
                     }
                     Spacer(Modifier.height(12.dp))
                 }
+                // ADR-0045 UX §6.2.7 — the roster STAYS, read-only, and carries
+                // one line saying so.
+                //
+                // It stays because it is the last thing you knew about who you
+                // were in a group with, it is genuinely informative next to a
+                // frozen transcript, and it is still readable: `members()` is a
+                // plain read of the public group with no state gate.
+                //
+                // The line is a statement about the LIST, not about any row in
+                // it, and that is load-bearing rather than stylistic. A
+                // `Remove` rewrites no `GroupContext`, so the role table is
+                // untouched and a removed admin's frozen roster still names
+                // them an admin — nothing here may present that as a live role.
+                // "Stopped updating" is the literal truth (the local view is
+                // frozen at the removing epoch and never moves again) rather
+                // than a euphemism for it, and it is deliberately neutral
+                // between having left and having been removed.
+                if (membershipEnded) {
+                    Text(
+                        text = me.lakko.app.chat.FROZEN_ROSTER_HEADER,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(6.dp))
+                }
                 // The roster gives up height while the transfer step is open, so
                 // the step's action button cannot be pushed off a small screen.
                 // The alternative — a second `Dialog` with its own scroll — is
@@ -1993,6 +2236,28 @@ private fun MembersSheet(viewModel: ChatViewModel) {
                 // the host suite can run it.
                 when (exit) {
                     me.lakko.app.chat.ExitBlock.Hidden -> Unit
+                    // ADR-0045 UX §6.2.4 / §6.2.7 — once the membership has
+                    // ended, both of the other controls are gone (one names a
+                    // group the reader is not in, the other is owner-only and
+                    // they are not) and the block holds `Delete this chat`
+                    // instead.
+                    //
+                    // This slot is the right home by §6.1.1's own argument: the
+                    // block's meaning is *the exit*, and once you are out the
+                    // only exit-shaped action left is closing the door behind
+                    // you. A permanently dead row with no action available is
+                    // its own defect — everything else about this state is "you
+                    // cannot", and this is the one thing they still can.
+                    me.lakko.app.chat.ExitBlock.Ended -> {
+                        Spacer(Modifier.height(12.dp))
+                        TextButton(
+                            onClick = { confirmingDelete = true },
+                            enabled = !busy,
+                            colors = ButtonDefaults.textButtonColors(
+                                contentColor = MaterialTheme.colorScheme.error,
+                            ),
+                        ) { Text(me.lakko.app.chat.DELETE_CHAT_CONTROL) }
+                    }
                     is me.lakko.app.chat.ExitBlock.Owner -> {
                         Spacer(Modifier.height(12.dp))
                         TextButton(

@@ -1596,7 +1596,24 @@ export type PushRotationDecision =
   | "skip-unknown-membership"
   /** A shrink, but this device is a plain member (or the group has no role
    *  table). Rotating is owner-or-admin only. */
-  | "skip-not-authorized";
+  | "skip-not-authorized"
+  /**
+   * ADR-0045 UX §6.2.8 item 3 — the departing member is US. This device's own
+   * membership has ended, so it must not rotate on its own eviction.
+   *
+   * It would otherwise, and that is the finding rather than a precaution: a
+   * `Remove` rewrites no `GroupContext`, so an evicted admin's role table
+   * still names it an admin, {@link membershipRotationDecision} sees a member
+   * depart and returns `"rotate"` — and the rotation then throws at the
+   * broadcast, because the envelope is an MLS application message and
+   * `createApplicationMessage` is refused for an inactive group.
+   *
+   * The doc on {@link rotatePushRoutingSecretIfMembershipShrank} reasons
+   * correctly about the device *performing* a removal (its baseline is already
+   * post-removal, so it sees no shrink) and has no case at all for the device
+   * *receiving its own*.
+   */
+  | "skip-self-evicted";
 
 /** Outcome of the rotation orchestration — the decision values plus what the
  *  IO half resolved to. */
@@ -1667,8 +1684,22 @@ export function membershipRotationDecision(args: {
   currentMemberKeys: readonly string[] | null;
   /** This device's ADR-0022 role. */
   ownRole: PushRotationRole;
+  /**
+   * ADR-0045 UX §6.2.8 item 3 — has THIS device's own membership ended?
+   *
+   * Evaluated FIRST, ahead of the membership diff and ahead of the authority
+   * check, because a device that is out of the group has no business rotating
+   * whatever its stale role table says — and because the answer must not
+   * depend on which of two skip reasons happened to be checked first.
+   *
+   * Optional so every existing caller and every existing test reads exactly as
+   * it did; absent means "not evicted", which is the pre-ADR-0045-§6.2
+   * behaviour byte for byte.
+   */
+  selfEvicted?: boolean;
 }): PushRotationDecision {
   const { previousMemberKeys: before, currentMemberKeys: after } = args;
+  if (args.selfEvicted === true) return "skip-self-evicted";
   if (before === null || after === null) return "skip-unknown-membership";
   // A first observation has no baseline to diff against.
   if (before.length === 0) return "skip-unknown-membership";
@@ -1948,11 +1979,16 @@ export async function rotatePushRoutingSecretIfMembershipShrank(args: {
   /** `memberSignatureKeys(group)` from AFTER. */
   currentMemberKeys: readonly string[] | null;
   broadcast: (envelopeBytes: Uint8Array) => Promise<void>;
+  /** ADR-0045 UX §6.2.8 item 3 — see {@link membershipRotationDecision}. Read
+   *  from `Group.isActive` on the SAME commit batch this diff was taken
+   *  around, so the eviction and the shrink it causes are judged together. */
+  selfEvicted?: boolean;
 }): Promise<PushRotationOutcome> {
   const decision = membershipRotationDecision({
     previousMemberKeys: args.previousMemberKeys,
     currentMemberKeys: args.currentMemberKeys,
     ownRole: args.ownRole,
+    ...(args.selfEvicted === undefined ? {} : { selfEvicted: args.selfEvicted }),
   });
   if (decision !== "rotate") return decision;
   return rotatePushRoutingSecret(

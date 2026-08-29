@@ -175,6 +175,37 @@ public object MessageLogStore {
         envelopeFile(context, accountIdB64).delete()
     }
 
+    /**
+     * ADR-0045 UX §6.2.4 — drop ONE group's transcript from this device.
+     *
+     * No client had a per-group history delete before: [deleteLog] and its
+     * `IdentitySnapshotStore` sibling are whole-ACCOUNT operations. But the log
+     * is a per-account blob keyed `{ groupIdHex -> PersistedGroup }`
+     * internally, so dropping one group's entry is a read-modify-write on a
+     * store that already exists rather than a new one.
+     *
+     * Returns `false` when there was nothing to drop (no envelope, an
+     * undecryptable one, or no entry for this group), so the caller can tell
+     * "deleted" from "there was nothing there" without a second read — and can
+     * skip the re-encrypt + write entirely.
+     *
+     * **What this does NOT remove, stated because the confirmation copy
+     * ([DELETE_CHAT_BODY]) is exact rather than sweeping:** the inactive MLS
+     * group stays in the provider snapshot as inert bytes. `Group` exposes no
+     * delete, so a `Group::delete` is a real (small) core follow-up rather than
+     * something this rides free. The remnant is inert in the strong sense — it
+     * cannot send, decrypt, export or process — but it is not nothing.
+     */
+    public fun deleteGroupFromLog(
+        context: Context,
+        accountIdB64: String,
+        groupIdHex: String,
+    ): Boolean {
+        val payload = getLog(context, accountIdB64) ?: return false
+        val next = withoutGroup(payload, groupIdHex) ?: return false
+        return putLog(context, accountIdB64, next)
+    }
+
     // -----------------------------------------------------------------
     // Internal
     // -----------------------------------------------------------------
@@ -221,6 +252,24 @@ public data class PersistedGroup(
     val cursor: Long,
     val messages: List<PersistedMessage>,
 )
+
+/**
+ * ADR-0045 UX §6.2.4 — the pure half of [MessageLogStore.deleteGroupFromLog].
+ *
+ * Kept separate from the IO so it is testable: the host suite has no Keystore
+ * and no `Context`, so [MessageLogStore.deleteGroupFromLog] cannot be, and this
+ * is where the rule that could actually be wrong lives.
+ *
+ * Returns `null` when [groupIdHex] was **absent**, so the caller can skip the
+ * re-encrypt + write entirely. Never mutates its input.
+ */
+public fun withoutGroup(
+    payload: MessageLogPayload,
+    groupIdHex: String,
+): MessageLogPayload? {
+    if (!payload.groups.containsKey(groupIdHex)) return null
+    return payload.copy(groups = payload.groups.filterKeys { it != groupIdHex })
+}
 
 @Serializable
 public data class PersistedMessage(

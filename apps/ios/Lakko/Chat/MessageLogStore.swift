@@ -164,6 +164,25 @@ public final class MessageLogStore {
         }
     }
 
+    /// ADR-0045 UX §6.2.4 — drop ONE group's transcript from this device.
+    ///
+    /// Returns `false` when there was nothing to drop (no row, an
+    /// undecryptable row, or no entry for this group), so the caller can tell
+    /// "deleted" from "there was nothing there" without a second read.
+    ///
+    /// **What this does NOT remove, stated because the confirmation copy is
+    /// exact rather than sweeping:** the inactive MLS group stays in the
+    /// provider snapshot as inert bytes. `Group` exposes no delete, so a
+    /// `Group::delete` is a real (small) core follow-up rather than something
+    /// this rides free. The remnant is inert in the strong sense — it cannot
+    /// send, decrypt, export or process — but it is not nothing.
+    public func deleteGroup(accountIdB64: String, groupIdHex: String) -> Bool {
+        guard let payload = getLog(accountIdB64: accountIdB64) else { return false }
+        guard let next = withoutGroup(payload, groupIdHex: groupIdHex) else { return false }
+        putLog(accountIdB64: accountIdB64, payload: next)
+        return true
+    }
+
     /// ADR-0041 Phase 1 — one-time, idempotent, **copy-not-move**
     /// migration of the log into the shared storage the NSE can read: the
     /// AES wrap key into the shared Keychain access group, and the
@@ -255,6 +274,33 @@ public struct MessageLogPayload: Codable, Equatable {
         self.version = version
         self.groups = groups
     }
+}
+
+/// ADR-0045 UX §6.2.4 — the pure half of a per-group history delete.
+///
+/// No client had one before: ``MessageLogStore/deleteLog(accountIdB64:)`` and
+/// its snapshot sibling are whole-ACCOUNT operations. But the log is a
+/// per-account blob keyed `{ groupIdHex -> PersistedGroup }` internally, so
+/// dropping one group's entry is a read-modify-write on a store that already
+/// exists rather than a new one.
+///
+/// Kept separate from the IO so it is testable: the store reads and writes an
+/// AES-wrapped file under a Keychain key, and this is where the rule that could
+/// actually be wrong lives.
+///
+/// Returns `nil` when the group was **absent**, so the caller can skip the
+/// re-encrypt + write entirely — not merely an optimisation, since a rewrite
+/// re-encrypts and rewrites the whole per-account envelope.
+///
+/// Never mutates its input.
+public func withoutGroup(
+    _ payload: MessageLogPayload,
+    groupIdHex: String
+) -> MessageLogPayload? {
+    guard payload.groups[groupIdHex] != nil else { return nil }
+    var groups = payload.groups
+    groups.removeValue(forKey: groupIdHex)
+    return MessageLogPayload(version: payload.version, groups: groups)
 }
 
 /// Per-group log slot. `cursor` is the DS journal cursor —

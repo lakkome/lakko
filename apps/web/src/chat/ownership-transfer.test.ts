@@ -100,6 +100,10 @@ function exitInput(over: Partial<ExitBlockInput> = {}): ExitBlockInput {
     candidateCount: 2,
     waitingRoleChange: null,
     ownRemovalPending: false,
+    // ADR-0045 UX §6.2.7 — the third exit-block state. These cases are all
+    // about a reader who is still IN the group; the ended arm is pinned in
+    // `membership-ended.test.ts`, beside the state that produces it.
+    membershipEnded: false,
     ...over,
   };
 }

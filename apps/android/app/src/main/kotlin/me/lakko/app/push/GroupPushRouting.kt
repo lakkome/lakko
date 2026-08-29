@@ -1464,6 +1464,27 @@ public object GroupPushRouting {
         /** A shrink, but this device is a plain member (or the group has no
          *  role table). Rotating is owner-or-admin only. */
         SKIP_NOT_AUTHORIZED,
+
+        /**
+         * ADR-0045 UX §6.2.8 item 3 — the departing member is US. This device's
+         * own membership has ended, so it must not rotate on its own eviction.
+         *
+         * It would otherwise, and that is the finding rather than a precaution:
+         * a `Remove` rewrites no `GroupContext`, so an evicted admin's role
+         * table still names it an admin, [membershipRotationDecision] sees a
+         * member depart and returns [ROTATE] — and the rotation then throws at
+         * the broadcast, because the envelope is an MLS application message and
+         * `createApplicationMessage` is refused for an inactive group. Worse
+         * than a no-op: before failing it would mint a new secret, subscribe
+         * under a brand-new `push_gid` nobody will ever notify, and retire the
+         * old one.
+         *
+         * The doc on [rotateIfMembershipShrank] reasons correctly about the
+         * device *performing* a removal (its baseline is already post-removal,
+         * so it sees no shrink) and has no case at all for the device
+         * *receiving its own*.
+         */
+        SKIP_SELF_EVICTED,
     }
 
     /** Outcome of the rotation orchestration — the decision values plus
@@ -1496,6 +1517,10 @@ public object GroupPushRouting {
          *  a stamp is worse than not rotating (the group keeps a working,
          *  ordered secret; only the eviction's re-key is deferred). */
         SKIP_UNKNOWN_EPOCH,
+
+        /** ADR-0045 UX §6.2.8 item 3 — this device's own membership has ended.
+         *  See [RotationDecision.SKIP_SELF_EVICTED]. */
+        SKIP_SELF_EVICTED,
     }
 
     /**
@@ -1549,6 +1574,53 @@ public object GroupPushRouting {
     }
 
     /**
+     * ADR-0045 UX §6.2.8 item 5 — retire THIS device's OWN push subscription
+     * because its membership in [groupIdHex] has ENDED.
+     *
+     * ADR-0043 recorded the evicted member's push-gw row as never deleted,
+     * because *"nobody else can delete it and no client has 'you were removed'
+     * handling"*: the endpoint deletes exactly the `(device, group)` row named
+     * in the request, and a client knows only its OWN device pseudonym, so the
+     * ex-member is the only party that can end its own wake stream. This is
+     * that handling, and it closes the other half of G-36 residual 2 — rotation
+     * stops the group notifying the old id; this stops the ex-member being
+     * subscribed to anything at all.
+     *
+     * **The honest bound:** it needs the evicted device to come online and run
+     * it, so it COMPLEMENTS the group's rotation and replaces nothing. A phone
+     * that is never opened again keeps its row, exactly as before.
+     *
+     * **Why it takes the lock.** It is the FIFTH entry point to the shared
+     * per-`(account, group)` serializing [routingLocks] entry, beside
+     * [receiveGated], [rotate], [ensure] and [redistribute], and the ADR-0044
+     * arc is explicit that the danger is an entry point that reads the row
+     * outside it: the read here decides WHICH gid gets unsubscribed, so a
+     * concurrent receive rewriting the row between the read and the
+     * unsubscribe would retire an id this device no longer holds and leave the
+     * one it does hold live. Nothing is written to the secret store, so this is
+     * the cheapest of the five.
+     *
+     * Returns `true` when the teardown is DONE — which includes holding no
+     * secret at all, since then nothing was ever subscribed under a `push_gid`
+     * for this group. `false` means "could not act yet" (an unreadable store),
+     * so the caller keeps the step owed and retries. Never throws:
+     * [retireOldPushGid] is itself bounded and swallows its own failures.
+     */
+    public suspend fun retireOwnSubscription(
+        accountIdB64: String,
+        groupIdHex: String,
+        ports: PushRoutingPorts,
+    ): Boolean = routingLock(accountIdB64, groupIdHex).withLock {
+        val stored = try {
+            ports.getRecord(groupIdHex)
+        } catch (_: Throwable) {
+            return@withLock false
+        } ?: return@withLock true
+        retireOldPushGid(stored.secret, ports)
+        true
+    }
+
+    /**
      * Pure decision core — did the membership SHRINK, and may this device
      * rotate? No IO, so the whole matrix is host-JVM unit-testable (the
      * [decideEnsureAction] / [decideAcceptReceivedSecret] precedent); a
@@ -1573,12 +1645,22 @@ public object GroupPushRouting {
      * @param previousMemberKeys member identities observed BEFORE the
      *   commits landed, or `null` when unknown (a torn `members()` read).
      * @param currentMemberKeys the same, observed AFTER.
+     * @param selfEvicted ADR-0045 UX §6.2.8 item 3 — has THIS device's own
+     *   membership ended? Evaluated FIRST, ahead of the membership diff and
+     *   ahead of the authority check, because a device that is out of the group
+     *   has no business rotating whatever its stale role table says — and
+     *   because the answer must not depend on which of two skip reasons
+     *   happened to be checked first. Optional so every existing caller and
+     *   every existing test reads exactly as it did; absent means "not
+     *   evicted", which is the pre-§6.2 behaviour byte for byte.
      */
     public fun membershipRotationDecision(
         previousMemberKeys: List<String>?,
         currentMemberKeys: List<String>?,
         ownRole: RotationRole,
+        selfEvicted: Boolean = false,
     ): RotationDecision {
+        if (selfEvicted) return RotationDecision.SKIP_SELF_EVICTED
         if (previousMemberKeys == null || currentMemberKeys == null) {
             return RotationDecision.SKIP_UNKNOWN_MEMBERSHIP
         }
@@ -1844,17 +1926,24 @@ public object GroupPushRouting {
         previousMemberKeys: List<String>?,
         currentMemberKeys: List<String>?,
         ports: PushRoutingPorts,
+        /** ADR-0045 UX §6.2.8 item 3 — see [membershipRotationDecision]. Read
+         *  from `Group.isActive()` in the SAME synchronous region the post-batch
+         *  roster snapshot is taken in, so the eviction and the shrink it causes
+         *  are judged on the same commit. */
+        selfEvicted: Boolean = false,
     ): RotationOutcome =
         when (
             membershipRotationDecision(
                 previousMemberKeys = previousMemberKeys,
                 currentMemberKeys = currentMemberKeys,
                 ownRole = ownRole,
+                selfEvicted = selfEvicted,
             )
         ) {
             RotationDecision.SKIP_NO_SHRINK -> RotationOutcome.SKIP_NO_SHRINK
             RotationDecision.SKIP_UNKNOWN_MEMBERSHIP -> RotationOutcome.SKIP_UNKNOWN_MEMBERSHIP
             RotationDecision.SKIP_NOT_AUTHORIZED -> RotationOutcome.SKIP_NOT_AUTHORIZED
+            RotationDecision.SKIP_SELF_EVICTED -> RotationOutcome.SKIP_SELF_EVICTED
             RotationDecision.ROTATE -> rotate(accountIdB64, groupIdHex, ownRole, ports)
         }
 

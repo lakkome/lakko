@@ -3677,4 +3677,74 @@ class GroupPushRoutingTest {
                 store.routes.toSet(),
             )
         }
+
+    // -----------------------------------------------------------------
+    // ADR-0045 UX §6.2.8 item 5 — the evicted device retires its OWN row
+    // -----------------------------------------------------------------
+
+    @Test
+    fun `an evicted device retires its own push_gid and drops the route row`() = runTest {
+        // ADR-0043 recorded this row as never deleted, because "nobody else can
+        // delete it and no client has 'you were removed' handling": the
+        // endpoint deletes exactly the `(device, group)` row named in the
+        // request and a client knows only its OWN device pseudonym. This IS
+        // that handling, and it closes the other half of G-36 residual 2.
+        val ports = FakePorts(account)
+        val gid = ports.derivePushGid(secretA)
+        ports.persist(groupHex, secretA, mintEpoch = 5uL, pushGid = gid, distributed = true)
+
+        val done = GroupPushRouting.retireOwnSubscription(account, groupHex, ports)
+
+        assertTrue("the step is done", done)
+        assertEquals(1, ports.unsubscribeCount)
+        assertEquals(hex(gid), hex(ports.unsubscribed.single()))
+        assertTrue("route row dropped", ports.routes.isEmpty())
+    }
+
+    @Test
+    fun `holding no secret is DONE rather than owed`() = runTest {
+        // Nothing was ever subscribed under a `push_gid` for this group, so
+        // there is nothing to retire — done, not failed, so the caller's
+        // teardown latch keeps its claim and does not retry forever.
+        val ports = FakePorts(account)
+        val done = GroupPushRouting.retireOwnSubscription(account, groupHex, ports)
+        assertTrue(done)
+        assertEquals(0, ports.unsubscribeCount)
+    }
+
+    @Test
+    fun `an unreadable store leaves the retire OWED so a later pass retries`() = runTest {
+        // The read decides WHICH gid gets unsubscribed, so a store this device
+        // cannot read is not "nothing to do" — it is "cannot act yet".
+        val inner = FakePorts(account)
+        val gid = inner.derivePushGid(secretA)
+        inner.persist(groupHex, secretA, mintEpoch = 5uL, pushGid = gid, distributed = true)
+
+        val done = GroupPushRouting.retireOwnSubscription(
+            account,
+            groupHex,
+            FlakyStore(Int.MAX_VALUE, inner),
+        )
+
+        assertFalse("the step stays owed", done)
+        assertEquals(0, inner.unsubscribeCount)
+        assertTrue("route row untouched", inner.routes.isNotEmpty())
+    }
+
+    @Test
+    fun `an unreachable push-gw still reports DONE, leaving an inert row`() = runTest {
+        // `retireOldPushGid` is bounded and swallows its own failure: the cost
+        // of a failed unsubscribe is a stale row that nothing notifies again,
+        // which is exactly the pre-ADR-0045 status quo. Reporting it as owed
+        // would have the teardown retry a network call on every membership
+        // emission for a group that is already inert.
+        val ports = FakePorts(account)
+        val gid = ports.derivePushGid(secretA)
+        ports.persist(groupHex, secretA, mintEpoch = 5uL, pushGid = gid, distributed = true)
+        ports.unsubscribeFails = true
+
+        assertTrue(GroupPushRouting.retireOwnSubscription(account, groupHex, ports))
+        assertEquals(1, ports.unsubscribeCount)
+        assertTrue("unsubscribe threw, so nothing was recorded", ports.unsubscribed.isEmpty())
+    }
 }

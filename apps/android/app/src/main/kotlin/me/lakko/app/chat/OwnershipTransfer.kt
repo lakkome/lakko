@@ -183,6 +183,21 @@ internal data class ExitBlockInput(
     val waitingRoleChange: WaitingRoleChange?,
     /** `true` when our own departure is already waiting to apply. */
     val ownRemovalPending: Boolean,
+    /**
+     * ADR-0045 UX §6.2.7 — has this device's own membership already **ended**?
+     *
+     * Distinct from [ownRemovalPending] in the way that matters: that one is a
+     * request in flight, over a group this device is still fully in; this one
+     * is the terminal state after the commit merged.
+     *
+     * Defaulted, unlike the web reference, which made the field required and
+     * updated its single call site. Here the type has one production call site
+     * (`MembersSheet`, which passes it explicitly) and a large existing test
+     * body that constructs it, so a default keeps that diff to zero — the same
+     * posture `membershipRotationDecision`'s `selfEvicted` takes for the same
+     * reason. `false` is the pre-§6.2 behaviour byte for byte.
+     */
+    val membershipEnded: Boolean = false,
 )
 
 /** A control that may be rendered disabled, carrying the reason why. */
@@ -217,6 +232,17 @@ internal sealed interface ExitBlock {
 
     /** `Leave group` alone. No transfer control — see the interface doc. */
     data class Member(val leave: GuardedControl) : ExitBlock
+
+    /**
+     * ADR-0045 UX §6.2.7 — this device's membership has ENDED. Both of the
+     * other controls are gone: one names a group the reader is not in, the
+     * other is owner-only and they are not. What the block holds instead is
+     * `Delete this chat` ([DELETE_CHAT_CONTROL]), which is the right tenant of
+     * this slot by §6.1.1's own argument — the block's meaning is *the exit*,
+     * and once you are out the only exit-shaped action left is closing the door
+     * behind you.
+     */
+    data object Ended : ExitBlock
 }
 
 /**
@@ -257,6 +283,13 @@ internal sealed interface ExitBlock {
  * REASON — which is what the user reads — flicker with an in-flight request.
  */
 internal fun exitBlock(input: ExitBlockInput): ExitBlock {
+    // ADR-0045 UX §6.2.7 — FIRST, ahead of every other arm including `Hidden`.
+    // A legacy group with no role table still evicts you by direct commit, and
+    // an owner cannot reach this state at all (the core refuses a `Remove`
+    // targeting the owner and refuses an owner's own leave), so ordering this
+    // after the `usesProposalPath` gate would silently withhold the one control
+    // that is still honest from exactly the groups that have no other exit.
+    if (input.membershipEnded) return ExitBlock.Ended
     if (!input.usesProposalPath || !input.ownLeafKnown) return ExitBlock.Hidden
 
     if (!input.isOwner) {

@@ -302,7 +302,14 @@ private fun ThreadRow(
                 // Phase 2a3e2c-followup — unread badge.
                 // Muted rows render a hollow ring; everyone
                 // else gets the accent fill.
-                if (unread > 0) {
+                //
+                // ADR-0045 UX §6.2.4 / §6.2.11 — the row goes QUIET once this
+                // device's membership has ended. An unread badge asserts a
+                // conversation that can still move, and this one cannot:
+                // nothing new will ever decrypt, so whatever count is standing
+                // is frozen at the moment of the eviction and would sit there
+                // for good.
+                if (unread > 0 && !thread.membershipEnded) {
                     val label = if (unread > 99) "99+" else unread.toString()
                     androidx.compose.foundation.layout.Box(
                         contentAlignment = Alignment.Center,
@@ -343,7 +350,42 @@ private fun ThreadRow(
                 }
             }
             Spacer(Modifier.height(4.dp))
-            if (lastMessage == null) {
+            // ADR-0045 UX §6.2.4 — the chat STAYS in the list and gains one
+            // muted line, in the same slot the last-message preview already
+            // uses.
+            //
+            // It stays because removing it would delete a transcript the user
+            // still has, with no warning, as a side effect of something
+            // somebody else did — the single worst thing in this design's
+            // reach. The row keeps its position, its label and its flags:
+            // `pinned` / `muted` / `archived` are deliberately untouched,
+            // because auto-archiving would be the client silently reorganising
+            // the user's list on their behalf, and archive is a decision, not a
+            // consequence.
+            //
+            // The line replaces the preview rather than sitting above it: the
+            // preview is the "what is happening here" slot, and the honest
+            // answer is now this. The transcript itself is one tap away and
+            // fully intact.
+            val endedLine = me.lakko.app.chat.chatListLine(
+                me.lakko.app.chat.membershipState(
+                    // Already folded by the repository, where the live handle
+                    // is: a torn read there answers "still a member".
+                    isActive = !thread.membershipEnded,
+                    // Not consulted — `chatListLine` returns the same string
+                    // either way. The left / removed distinction belongs in the
+                    // transcript's terminal row, where the durable record is
+                    // read; the list is a glance surface.
+                    leaveRequestedAtMs = null,
+                ),
+            )
+            if (endedLine != null) {
+                Text(
+                    text = endedLine,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else if (lastMessage == null) {
                 Text(
                     text = "No messages yet.",
                     style = MaterialTheme.typography.bodySmall,

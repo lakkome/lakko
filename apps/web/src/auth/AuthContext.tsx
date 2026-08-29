@@ -117,6 +117,7 @@ import { clearObservationsForAccount } from "../chat/pending-requests";
 // on a re-signup would compare a fresh session against a previous account's
 // role table.
 import { clearLastObservedOwnerForAccount } from "../chat/ownership-transfer";
+import { clearLeaveRequestedForAccount } from "../chat/membership-ended";
 // ADR-0045 S4b — the same hygiene for the committer-beacon observation
 // store: a stale beacon carried across a recover / forgetDevice would let
 // this device defer to a candidate it has no current evidence about.
@@ -2195,6 +2196,11 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           clearObservationsForAccount(accountIdB64);
           clearBeaconObservationsForAccount(accountIdB64);
           clearLastObservedOwnerForAccount(accountIdB64);
+          // ADR-0045 UX §6.2.3 — the durable `leaveRequestedAt` record follows
+          // the same discipline. It is never pruned with the pending sweep (it
+          // has to outlive it, by construction) so an account reset is the
+          // only thing that discards it besides `Delete this chat`.
+          clearLeaveRequestedForAccount(accountIdB64);
         } catch (err) {
           // eslint-disable-next-line no-console
           console.warn("deleteOutboxForAccount during recover failed", err);
@@ -2631,6 +2637,8 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           clearObservationsForAccount(cached.accountIdB64);
           clearBeaconObservationsForAccount(cached.accountIdB64);
           clearLastObservedOwnerForAccount(cached.accountIdB64);
+          // ADR-0045 UX §6.2.3 — see the recover path above.
+          clearLeaveRequestedForAccount(cached.accountIdB64);
         } catch {
           // Ignore — same best-effort policy as above.
         }

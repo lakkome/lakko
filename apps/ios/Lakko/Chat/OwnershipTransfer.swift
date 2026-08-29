@@ -179,6 +179,12 @@ public struct ExitBlockInput: Equatable {
     public var waitingRoleChange: WaitingRoleChange?
     /// `true` when our own departure is already waiting to apply.
     public var ownRemovalPending: Bool
+    /// ADR-0045 UX §6.2.7 — has this device's own membership already **ended**?
+    ///
+    /// Distinct from ``ExitBlockInput/ownRemovalPending`` in the way that
+    /// matters: that one is a request in flight, over a group this device is
+    /// still fully in; this one is the terminal state after the commit merged.
+    public var membershipEnded: Bool
 
     public init(
         usesProposalPath: Bool,
@@ -186,7 +192,8 @@ public struct ExitBlockInput: Equatable {
         ownLeafKnown: Bool,
         candidateCount: Int,
         waitingRoleChange: WaitingRoleChange?,
-        ownRemovalPending: Bool
+        ownRemovalPending: Bool,
+        membershipEnded: Bool = false
     ) {
         self.usesProposalPath = usesProposalPath
         self.isOwner = isOwner
@@ -194,6 +201,7 @@ public struct ExitBlockInput: Equatable {
         self.candidateCount = candidateCount
         self.waitingRoleChange = waitingRoleChange
         self.ownRemovalPending = ownRemovalPending
+        self.membershipEnded = membershipEnded
     }
 }
 
@@ -225,6 +233,13 @@ public enum ExitBlock: Equatable {
     case hidden
     case owner(transfer: GuardedControl, leave: GuardedControl)
     case member(leave: GuardedControl)
+    /// ADR-0045 UX §6.2.7 — this device's membership has ended. Both of the
+    /// other controls are gone: one names a group the reader is not in, the
+    /// other is owner-only and they are not. What the block holds instead is
+    /// `Delete this chat`, which is the right tenant of this slot by §6.1.1's
+    /// own argument — the block's meaning is *the exit*, and once you are out
+    /// the only exit-shaped action left is closing the door behind you.
+    case ended
 }
 
 /// Decide the exit block (§6.1.1).
@@ -257,6 +272,13 @@ public enum ExitBlock: Equatable {
 /// 3. **Someone else's waiting role change** is last, and is the transient case
 ///    the seventh string was written for.
 public func exitBlock(_ input: ExitBlockInput) -> ExitBlock {
+    // ADR-0045 UX §6.2.7 — FIRST, ahead of every other arm including `hidden`.
+    // A legacy group with no role table still evicts you by direct commit, and
+    // an owner cannot reach this state at all (the core refuses a `Remove`
+    // targeting the owner and refuses an owner's own leave), so ordering this
+    // after the `usesProposalPath` gate would silently withhold the one control
+    // that is still honest from exactly the groups that have no other exit.
+    if input.membershipEnded { return .ended }
     guard input.usesProposalPath, input.ownLeafKnown else { return .hidden }
 
     guard input.isOwner else {

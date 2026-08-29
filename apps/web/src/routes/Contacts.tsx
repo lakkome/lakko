@@ -40,6 +40,14 @@ import {
 import type { IncomingContactRequest, SendResult } from "../contacts/client";
 import { supersessionRefusedMessage } from "../contacts/supersession-message";
 import { useChats, type ActiveGroup } from "../chat/ChatContext";
+// ADR-0045 UX §6.2.4 — the chat-list row's muted line for a group this device
+// is no longer in. The rule and the string both live in the plain module; this
+// file only renders what it decides.
+import {
+  chatListLine,
+  membershipState,
+  readIsActive,
+} from "../chat/membership-ended";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
 import { groupIdHex as syncGroupIdHex } from "../devices/sync/state";
 import { loadMessageLog } from "../chat/message-log-store";
@@ -1262,6 +1270,31 @@ function ActiveGroupsPanel(props: {
     return items;
   };
 
+  /**
+   * ADR-0045 UX §6.2.4 — the chat-list row's one muted line, or `null` while
+   * the reader is still a member.
+   *
+   * Read straight off `Group.isActive`, with no memo in between and no
+   * invalidation of its own: this list re-renders on the same signals that
+   * drive it today, and the state it reports is TERMINAL, so there is no
+   * window in which a stale read matters. A torn handle reads as still a
+   * member — an unreadable group is not evidence of an eviction, and the copy
+   * this chooses is a claim about fact rather than about capability.
+   *
+   * The `left` / `removed` distinction deliberately does NOT reach this line
+   * (§6.2.4 gives it one string): the list is a glance surface and the
+   * distinction belongs in the transcript's terminal row, where the durable
+   * record is read.
+   */
+  const endedLine = (g: ActiveGroup): string | null =>
+    chatListLine(
+      membershipState({
+        isActive: readIsActive(g.group),
+        // Not consulted: `chatListLine` returns the same string either way.
+        leaveRequestedAtMs: undefined,
+      }),
+    );
+
   async function toggleFlag(
     g: ActiveGroup,
     field: "pinned" | "muted" | "archived",
@@ -1374,6 +1407,42 @@ function ActiveGroupsPanel(props: {
                       {g.group.memberCount === 1 ? "" : "s"} · seat #
                       {g.group.ownLeafIndex}
                     </div>
+                    {/* ADR-0045 UX §6.2.4 — the chat STAYS in the list and
+                        gains one muted line.
+
+                        It stays because removing it would delete a transcript
+                        the user still has, with no warning, as a side effect
+                        of something somebody else did — the single worst thing
+                        in this design's reach. The row keeps its position, its
+                        label and its flags: `pinned` / `muted` / `archived`
+                        are deliberately untouched, because auto-archiving
+                        would be the client silently reorganising the user's
+                        list on their behalf, and archive is a decision, not a
+                        consequence.
+
+                        Web has no secondary line on this row today, so it
+                        gains one rather than reusing one (both natives already
+                        have a last-message-preview slot). That is a
+                        per-platform IMPLEMENTATION difference, not a design
+                        divergence: the line, its wording and its muted
+                        treatment are identical everywhere. It joins the row's
+                        accessible label rather than becoming a separate stop.
+
+                        The row also goes QUIET — see the unread badge below,
+                        which is suppressed for the same reason: a badge
+                        asserts a conversation that can still move. */}
+                    <Show when={endedLine(g)}>
+                      {(line) => (
+                        <div
+                          style={{
+                            color: "var(--surface-muted)",
+                            "font-size": "0.85rem",
+                          }}
+                        >
+                          {line()}
+                        </div>
+                      )}
+                    </Show>
                   </div>
                   <div
                     style={{
@@ -1382,7 +1451,16 @@ function ActiveGroupsPanel(props: {
                       "align-items": "center",
                     }}
                   >
-                    <Show when={unreadFor(g.group.groupId) > 0}>
+                    {/* ADR-0045 UX §6.2.4 / §6.2.11 — the row goes QUIET. An
+                        unread badge asserts a conversation that can still
+                        move, and this one cannot: nothing new will ever
+                        decrypt, so whatever count is standing is frozen at the
+                        moment of the eviction and would sit there for good. */}
+                    <Show
+                      when={
+                        unreadFor(g.group.groupId) > 0 && endedLine(g) === null
+                      }
+                    >
                       <span
                         title={`${unreadFor(g.group.groupId)} unread`}
                         style={{

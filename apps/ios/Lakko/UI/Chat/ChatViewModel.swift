@@ -102,6 +102,44 @@ public final class ChatViewModel: ObservableObject {
     /// the per-member promote / demote toggle).
     @Published public private(set) var isOwner: Bool = false
 
+    // MARK: - ADR-0045 UX §6.2 — the end of your own membership
+
+    /// Is this device still a member of this group, and — if not — did it ask?
+    ///
+    /// The one signal there is. `processIncomingVerifyingRoles` returns the same
+    /// content-less `Commit` for a commit that removes our own leaf as for any
+    /// other, so nothing in the receive path announces it; `Group.isActive()` is
+    /// what OpenMLS itself consults before refusing to encrypt, export or
+    /// decrypt, and reading it is how this UI's gate becomes the same predicate
+    /// as the core's refusal rather than a re-derivation of it.
+    ///
+    /// Refreshed by ``refreshMembership()``, which every path a removing commit
+    /// can arrive on already calls: the repository-state sink (every poll) and
+    /// ``refreshMembers()`` (every membership action and every panel open).
+    /// The state is TERMINAL and survives a restart, so this answers the same at
+    /// launch as it did in the batch that carried the removal — there is no
+    /// transient window to debounce and nothing to re-check later.
+    @Published public private(set) var membership: MembershipState = .active
+
+    /// The standing gate the background disciplines consult (§6.2.8), and what
+    /// the screen reads to withdraw the composer, the call buttons and the
+    /// membership affordances.
+    public var membershipHasEnded: Bool { membershipEnded(membership) }
+
+    /// §6.2.5 — the two lines of the terminal timeline row, or `nil` while the
+    /// membership holds.
+    public var terminalRowCopy: TerminalRowCopy? { terminalRow(membership) }
+
+    /// §6.2.5 — what occupies the composer's slot. The draft is read live so a
+    /// commit landing mid-sentence preserves what was actually typed.
+    public var composerSlot: ComposerState { composerState(membership, draft: draft) }
+
+    /// §6.2.8 — which one-shot teardown steps have already been claimed. A
+    /// `Set` on the `@MainActor` view model rather than a lock, because
+    /// ``claimTeardownSteps(_:alreadyRun:)`` takes what it hands out in the same
+    /// synchronous call and the whole claim completes before the first `await`.
+    private var teardownClaimed: Set<EndedTeardownStep> = []
+
     /// ADR-0045 — does this group route membership through proposals (i.e. does
     /// it carry an ADR-0022 role table)? Gates `Leave group`, which has no route
     /// through the core in a table-less group.
@@ -309,6 +347,15 @@ public final class ChatViewModel: ObservableObject {
 
     private func startBeaconTicker() {
         guard beaconTicker == nil else { return }
+        // ADR-0045 UX §6.2.8 item 2 — and never re-arm it for a group this
+        // device has been evicted from. Without this the one-shot teardown is
+        // undone by the very next `.onAppear`: it invalidates the ticker, then
+        // `screenVisible = true` starts a fresh one, and because the step is
+        // already claimed nothing invalidates it again. The emit path is gated
+        // independently so no beacon would actually go out — but a timer that
+        // wakes forever to be told no is exactly the shape §6.2.8 item 1
+        // rejects for the poll.
+        guard !membershipHasEnded else { return }
         // The core makes the FIRST beacon of a session immediate, so fire once
         // now rather than waiting a whole tick to claim a duty this device is
         // ready to take.
@@ -362,6 +409,16 @@ public final class ChatViewModel: ObservableObject {
     /// Join button calls `CallSession.dial` (G3-1-prejoin-join).
     public func startCall(audio: Bool = true, video: Bool = false) {
         guard activeCall == nil else { return }
+        // ADR-0045 UX §6.2.8 item 4 / §6.2.11 — every exporter-backed
+        // affordance GOES once the membership has ended, and failing closed is
+        // not enough on its own. The per-call SFrame seed comes from
+        // `exportSecret("lakko/call/v1", …)`, which is gated on `is_active()`
+        // and now raises — so the call would refuse, correctly, and a control
+        // that always errors is exactly the shape §6.1.1 rejects. The stronger
+        // reason is §6.2.11: a call control asserts a live E2EE session, and
+        // there is not one. The toolbar hides the buttons; this is the layered
+        // half.
+        guard !membershipHasEnded else { return }
         _ = (audio, video)
         let callId = CallSession.mintCallId()
         let session = makeSession(callId: callId)
@@ -509,6 +566,8 @@ public final class ChatViewModel: ObservableObject {
     /// closed (NSLog + no call) on any missing prerequisite — SFU URL,
     /// session token, or call-key derivation.
     func startGroupCall(video: Bool = false) {
+        // ADR-0045 UX §6.2.8 item 4 — see `startCall(audio:video:)`.
+        guard !membershipHasEnded else { return }
         guard activeSfuCall == nil, activeCall == nil else { return }
         guard let base = SfuConfig.baseUrl else {
             NSLog("startGroupCall: SFU URL not configured (LakkoSfuUrl) — refusing")
@@ -681,10 +740,29 @@ public final class ChatViewModel: ObservableObject {
 
     /// Re-read the live MLS roster + the local member's role from the repository.
     func refreshMembers() {
+        // ADR-0045 UX §6.2 — FIRST, because every gate below depends on it.
+        // A panel open is one of the paths that can be the first thing to
+        // observe the terminal state (the poll that carried the commit may
+        // have landed while the sheet was closed).
+        refreshMembership()
         members = repository.members(groupIdHex: groupIdHex) ?? []
         let role = repository.ownRole(groupIdHex: groupIdHex)
-        canManageMembers = role != .member
-        isOwner = role == .owner
+        // ADR-0045 UX §6.2.7 — and NOBODY may manage members once their own
+        // membership has ended. Gating here rather than at each of the six
+        // render sites is deliberate: `Add member`, the invite block, every
+        // `Remove` and every admin toggle are all refused by the core for an
+        // inactive group, and one gate cannot be partly applied. Note the
+        // difference from role-gating, which hides what SOMEONE ELSE may do —
+        // this hides what nobody in this group may do any more.
+        canManageMembers = role != .member && !membershipHasEnded
+        // The owner cannot reach the terminal state at all (§6.2.9 — the core
+        // refuses a `Remove` targeting the owner and refuses an owner's own
+        // leave), so this conjunction is unreachable rather than load-bearing.
+        // It is written anyway for the reason the line above is: one gate
+        // cannot be partly applied, and the per-member admin toggle this flag
+        // drives would otherwise be the one membership control in the panel
+        // that survived on an argument about a different rule.
+        isOwner = role == .owner && !membershipHasEnded
         // ADR-0045 — whether this group routes membership through proposals at
         // all. Read here rather than at each use so the `Leave group` gate and
         // the action behind it see one answer from one roster refresh, instead
@@ -693,7 +771,7 @@ public final class ChatViewModel: ObservableObject {
         roleTable = repository.groupRoles(groupIdHex: groupIdHex)
         // ADR-0027 (G-3) — refresh the pending external-join list alongside the
         // roster (the retained set is the source of truth).
-        pendingJoins = repository.pendingExternalJoins(groupIdHex: groupIdHex)
+        pendingJoins = refreshedPendingJoins()
         refreshPendingRequests()
         refreshJoinAttributions()
         // ADR-0045 UX §6.1.9 — decided AFTER the roster + role table are fresh
@@ -716,10 +794,32 @@ public final class ChatViewModel: ObservableObject {
     /// action, so a request that was `pending` when the sheet opened has to be
     /// able to become `waiting` while it stays open.
     func refreshPendingRequests() {
+        // ADR-0045 UX §6.2.7 — the pending notice describes changes that will
+        // apply to a group that no longer contains us, and the annotations
+        // describe a roster that will never move again. Emptied at the SOURCE
+        // so the notice, the row annotations, `Waiting to be added` and the
+        // exit block's `waitingRoleChange` all fall silent together rather than
+        // one render site at a time.
+        if membershipHasEnded {
+            pendingRequests = []
+            return
+        }
         pendingRequests = visibleRequests(
             repository.pendingRequests(groupIdHex: groupIdHex),
             canManageMembers: canManageMembers
         )
+    }
+
+    /// ADR-0027 (G-3) — the core's retained external-join set, or empty once
+    /// this device's own membership has ended (§6.2.7).
+    ///
+    /// A queue this reader can no longer act on: approving needs `add_member`,
+    /// which the core refuses for an inactive group, so the section would be a
+    /// list of buttons that all fail. Gated in ONE helper because both call
+    /// sites (the panel refresh and the per-poll `sync`) would otherwise have
+    /// to remember it independently.
+    private func refreshedPendingJoins() -> [Data] {
+        membershipHasEnded ? [] : repository.pendingExternalJoins(groupIdHex: groupIdHex)
     }
 
     /// ADR-0045 S4a — the row annotation for one roster member, or `nil`.
@@ -879,6 +979,12 @@ public final class ChatViewModel: ObservableObject {
     /// would leave it live in every peer's store — so the confirmation is the
     /// last exit and this method is past it.
     func onLeaveGroup() {
+        // ADR-0045 UX §6.2.7 — `Leave group` names a group we are not in. The
+        // exit block already renders `Delete this chat` instead, so this is the
+        // layered half: a control that is merely not drawn is not a guarantee,
+        // and the core would answer a leave here with `UseAfterEviction` prose
+        // about proposals to a user who has already left.
+        guard !membershipHasEnded else { return }
         switch leaveAffordance {
         case .hidden(let refusal):
             // Reached only if the gate went stale between draw and tap. Answer
@@ -908,6 +1014,22 @@ public final class ChatViewModel: ObservableObject {
                     groupIdHex: groupIdHex,
                     leafIndex: leaf
                 )
+                // ADR-0045 UX §6.2.3 — the ONE thing that later tells
+                // `You left this group.` from `You are no longer a member of
+                // this group.`, and it has to be its own durable field rather
+                // than a read of the own-request observation the repository
+                // just wrote. That observation lives under `remove:{ownLeaf}`
+                // and is pruned the moment the core stops holding the request —
+                // which is exactly what the sweep that removes us does. The
+                // poll batch carrying the eviction therefore destroys the only
+                // evidence that we asked for it, and the order of those two
+                // steps is an implementation detail no test pins.
+                //
+                // Written on BOTH outcomes, `committed` included: a legacy
+                // group with no role table takes the direct path and evicts us
+                // in the same call. Fail-safe when absent — the fallback string
+                // is true either way.
+                repository.noteLeaveRequested(groupIdHex: groupIdHex)
                 membershipNotice =
                     "Leave requested. It applies when an owner or an admin applies the change."
                 refreshMembers()
@@ -993,7 +1115,12 @@ public final class ChatViewModel: ObservableObject {
                 waitingRoleChange: waitingRoleChangeState,
                 ownRemovalPending: ownLeafIndex.map {
                     rowAnnotation(pendingRequests, leafIndex: $0, ownLeaf: $0) != nil
-                } ?? false))
+                } ?? false,
+                // §6.2.7 — beats every other arm. Distinct from
+                // `ownRemovalPending` above in the way that matters: that is a
+                // request in flight over a group we are still fully in, this is
+                // the terminal state after it landed.
+                membershipEnded: membershipHasEnded))
     }
 
     /// The picked successor, or `nil` while nothing is picked — which is what
@@ -1358,13 +1485,88 @@ public final class ChatViewModel: ObservableObject {
         let thread = state.threads.first { $0.groupIdHex == groupIdHex }
         self.messages = thread?.messages ?? []
         self.threadKnown = thread != nil
+        // ADR-0045 UX §6.2 — every poll batch republishes the repository state,
+        // and a removing commit arrives on a poll like any other, so this is
+        // the one place that sees every path into the terminal state. It is a
+        // cheap synchronous read of a boolean the core already maintains.
+        refreshMembership()
         // ADR-0027 (G-3) — a poll may have retained a fresh external-join
         // request; refresh the pending list live while the members sheet is
         // open (cheap in-memory read of the group's retained set).
         if membersPanelOpen {
-            pendingJoins = repository.pendingExternalJoins(groupIdHex: groupIdHex)
+            pendingJoins = refreshedPendingJoins()
             refreshJoinAttributions()
         }
+    }
+
+    // MARK: - ADR-0045 UX §6.2 — detecting the end, and tearing down after it
+
+    /// Re-read the membership verdict off the live handle, and drive the
+    /// one-shot teardown when it has just become terminal.
+    ///
+    /// Idempotent and cheap, so it runs on every repository-state update and on
+    /// every roster refresh. The teardown is what makes it more than a getter,
+    /// and the discipline is in ``claimTeardownSteps(_:alreadyRun:)``: a step is
+    /// CLAIMED synchronously, before any suspension point, so a second call
+    /// arriving while the async half is still in flight gets nothing rather than
+    /// firing a concurrent duplicate. A step that FAILS is released so the next
+    /// pass retries it.
+    ///
+    /// Three of §6.2.8's five disciplines are not here, and that is deliberate
+    /// rather than an omission — they are standing GATES with nothing to
+    /// dispose, each consulting the state where it runs: the poll
+    /// (`ChatRepository.pollGroup`), the shrink rotation
+    /// (`membershipRotationDecision`'s `selfEvicted`) and the exporter-backed
+    /// call buttons (`ChatScreen`'s toolbar).
+    private func refreshMembership() {
+        membership = repository.membershipStateNow(groupIdHex: groupIdHex)
+        let owed = claimTeardownSteps(membership, alreadyRun: &teardownClaimed)
+        guard !owed.isEmpty else { return }
+        for step in owed {
+            switch step {
+            case .stopBeaconTicker:
+                // Belt and braces beside the gate inside
+                // `ChatRepository.emitCommitterBeaconIfDue`: the gate is what
+                // makes a surviving timer harmless, this is what stops the
+                // wasted wake. Local and infallible, so it never needs
+                // releasing.
+                stopBeaconTicker()
+            case .retirePushSubscription:
+                // The half ADR-0043 recorded as unclosable ("nobody else can
+                // delete it and no client has 'you were removed' handling").
+                // This IS that handling. Bounded and never throwing on the
+                // repository side; the claim was taken above, synchronously,
+                // BEFORE this `Task` — which is the whole point, since the
+                // caller re-runs on every roster change.
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    let retired = await self.repository.retireOwnPushSubscription(
+                        groupIdHex: self.groupIdHex)
+                    // `false` means there was no readable secret to name an id
+                    // from — done rather than failed, so the claim stands and
+                    // this does not spin.
+                    _ = retired
+                }
+            }
+        }
+    }
+
+    /// §6.2.4 — `Delete this chat`. Reachable only from the exit block's
+    /// `ended` arm, and the repository re-checks that itself rather than
+    /// trusting the control it was drawn behind.
+    ///
+    /// The caller is expected to have confirmed first: this is the ONE control
+    /// in this feature that destroys user data, on one confirmation, with no
+    /// undo and no export, so the dialog is the only protection there is and
+    /// this method is past it.
+    func onDeleteChat() -> Bool {
+        membershipError = nil
+        let deleted = repository.deleteChat(groupIdHex: groupIdHex)
+        if !deleted {
+            // Only reachable if the gate went stale between draw and tap.
+            membershipError = "This chat could not be deleted."
+        }
+        return deleted
     }
 
     // MARK: - Actions
@@ -1706,6 +1908,15 @@ public final class ChatViewModel: ObservableObject {
     /// timeline changes. The receipt broadcasts read-state to the group
     /// (a deliberate disclosure per the ADR).
     func maybePublishReadReceipt() {
+        // ADR-0045 UX §6.2 — a read receipt is an ordinary MLS application
+        // message, so it is refused for an inactive group exactly as a chat
+        // send is. §6.2.8's list does not name it because it has nothing to
+        // dispose, but it is the same rule reached from the same place: this
+        // fires on `.onAppear`, so without the gate every visit to a dead chat
+        // logs one `UseAfterEviction`. There is also nothing to report — the
+        // watermark it would broadcast can never reach a member who could use
+        // it.
+        guard !membershipHasEnded else { return }
         var highest: Int64 = -1
         for m in messages where m.messageId > 0 {
             if m.messageId > highest { highest = m.messageId }
@@ -1836,6 +2047,17 @@ public final class ChatViewModel: ObservableObject {
     /// `.task { … }` modifier in a `while !Task.isCancelled` loop.
     /// Silent (does NOT flip `refreshing`) so the spinner doesn't
     /// stay on for the full 30s long-poll window.
+    /// ADR-0045 UX §6.2.8 item 1 — should the screen's poll loop keep going?
+    ///
+    /// The repository's own gate is what stops the fetch, but on iOS that is
+    /// not enough on its own and the difference is a real defect rather than
+    /// tidiness: this loop is `while !Task.isCancelled { await
+    /// pollOnceLongPoll() }`, and `pollGroup` normally parks on a ~30 s long
+    /// poll. Once it returns IMMEDIATELY the loop would spin as fast as the
+    /// runtime allows, burning the CPU of the one platform whose poll is
+    /// continuous rather than event-driven. So the screen stops iterating too.
+    public var pollLoopShouldContinue: Bool { !membershipHasEnded }
+
     public func pollOnceLongPoll(waitSecs: Int = ChatViewModel.defaultLongPollSecs) async {
         do {
             try await repository.pollGroup(

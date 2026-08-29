@@ -238,3 +238,64 @@ export async function deleteMessageLog(accountIdB64: string): Promise<void> {
     db.close();
   }
 }
+
+/**
+ * ADR-0045 UX §6.2.4 — the pure half of a per-group history delete.
+ *
+ * No client had one before: {@link deleteMessageLog} and its `mls-store`
+ * sibling are whole-ACCOUNT operations. But the log is a per-account blob
+ * keyed `{ groupIdHex -> PersistedGroup }` internally, so dropping one group's
+ * entry is a read-modify-write on a store that already exists rather than a
+ * new one.
+ *
+ * Kept separate from the IO so it is testable: `vitest` runs in plain `node`
+ * with no IndexedDB, so {@link deleteGroupFromMessageLog} cannot be, and this
+ * is where the rule that could actually be wrong lives.
+ *
+ * Returns `null` when the group was **absent**, so the caller can skip the
+ * re-encrypt + write entirely. That is not just an optimisation: a rewrite
+ * publishes a `message-log-changed` event to every tab, and firing one for a
+ * no-op would have unread badges reload for nothing.
+ *
+ * Never mutates its input.
+ */
+export function withoutGroup(
+  payload: MessageLogPayload,
+  groupIdHex: string,
+): MessageLogPayload | null {
+  if (!Object.prototype.hasOwnProperty.call(payload.groups, groupIdHex)) {
+    return null;
+  }
+  const groups: { [k: string]: PersistedGroup } = {};
+  for (const [k, v] of Object.entries(payload.groups)) {
+    if (k !== groupIdHex) groups[k] = v;
+  }
+  return { version: payload.version, groups };
+}
+
+/**
+ * ADR-0045 UX §6.2.4 — drop one group's transcript from this device.
+ *
+ * Resolves `false` when there was nothing to drop (no row, an undecryptable
+ * row, or no entry for this group), so the caller can tell "deleted" from
+ * "there was nothing there" without a second read.
+ *
+ * **What this does NOT remove, stated because the confirmation copy is exact
+ * rather than sweeping:** the inactive MLS group stays in the provider
+ * snapshot as inert bytes. `Group` exposes no delete, so a `Group::delete` is
+ * a real (small) core follow-up rather than something this rides free. The
+ * remnant is inert in the strong sense — it cannot send, decrypt, export or
+ * process — but it is not nothing.
+ */
+export async function deleteGroupFromMessageLog(
+  accountIdB64: string,
+  deviceKey: CryptoKey,
+  groupIdHex: string,
+): Promise<boolean> {
+  const payload = await loadMessageLog(accountIdB64, deviceKey);
+  if (payload === null) return false;
+  const next = withoutGroup(payload, groupIdHex);
+  if (next === null) return false;
+  await saveMessageLog(accountIdB64, deviceKey, next);
+  return true;
+}

@@ -67,6 +67,7 @@ import Call from "./Call";
 import { DsClient } from "../ds/client";
 import { loadWasm as loadWasmForCalls } from "../wasm";
 import {
+  deleteGroupFromMessageLog,
   loadMessageLog,
   saveMessageLog,
   type MessageLogPayload,
@@ -109,10 +110,12 @@ import {
   readPushRotationRole,
   receivePushRoutingSecretGated,
   redistributeSecretToGroup,
+  retireOldPushGid,
   rotatePushRoutingSecret,
   rotatePushRoutingSecretIfMembershipShrank,
   type PushRotationOutcome,
 } from "../push/group-routing";
+import { getGroupRoutingSecretForAccount } from "../push/group-routing-store";
 // ADR-0045 (G-38 residual 1) — proposal-based membership. The committer sweep
 // lives in `chat/sweep.ts` and the panel's state rules in
 // `chat/pending-requests.ts`, both plain modules, because `vitest.config.ts`
@@ -166,6 +169,28 @@ import {
   recordBeaconObservation,
   type ActingCommitter,
 } from "../chat/committer-beacon";
+// ADR-0045 UX §6.2 — the end of your own membership. Same split, same reason:
+// the state derivation, every string, the composer's replacement, the durable
+// `leaveRequestedAt` record and the one-shot teardown list all live in the
+// plain module where they are executable; this file renders and drives them.
+import {
+  DELETE_CHAT_BODY,
+  DELETE_CHAT_CONTROL,
+  DELETE_CHAT_TITLE,
+  FROZEN_ROSTER_HEADER,
+  clearLeaveRequested,
+  composerState,
+  loadLeaveRequestedAt,
+  membershipEnded as membershipHasEnded,
+  claimTeardownSteps,
+  membershipState,
+  readIsActive,
+  recordLeaveRequested,
+  releaseTeardownStep,
+  terminalRow,
+  type EndedTeardownStep,
+  type MembershipState,
+} from "../chat/membership-ended";
 import {
   applyOp,
   editDeleteAuthorized,
@@ -1351,9 +1376,92 @@ function ChatView(props: {
   });
   // A plain member may not add / remove; everyone else (owner, admin, or an
   // open/legacy group where `ownRole` is `null`) may.
-  const canManageMembers = (): boolean => ownRole() !== "member";
+  //
+  // ADR-0045 UX §6.2.7 — and NOBODY may once their own membership has ended.
+  // Gating here rather than at each of the six render sites is deliberate:
+  // `Add member`, the invite block, every `Remove` and every admin toggle are
+  // all refused by the core for an inactive group, and one gate cannot be
+  // partly applied. Note the difference from role-gating, which hides what
+  // SOMEONE ELSE may do — this hides what nobody in this group may do any
+  // more.
+  //
+  // Defined as a function reading a memo, so the forward reference to
+  // `membershipEnded` is resolved at CALL time. Every caller is either a memo
+  // body or a render, both of which run after this component's setup.
+  const canManageMembers = (): boolean =>
+    ownRole() !== "member" && !membershipEnded();
   // ADR-0022 — only the owner may promote / demote admins.
   const isOwner = (): boolean => ownRole() === "owner";
+
+  /** Bumped whenever the pending set or its observations may have moved, so the
+   *  panel memos below re-read. Separate from `membersVersion` because a
+   *  proposal changes nothing about the roster. */
+  const [pendingVersion, setPendingVersion] = createSignal(0);
+  /** Ticks so a `pending` request matures into `waiting` without traffic. */
+  const [pendingClock, setPendingClock] = createSignal(Date.now());
+
+  /**
+   * ADR-0045 UX §6.2 — is this device still a member of this group?
+   *
+   * The one signal there is. `processIncomingVerifyingRoles` returns the same
+   * content-less `Commit` for a commit that removes our own leaf as for any
+   * other, so nothing in the receive path announces it; `Group.isActive` is
+   * what OpenMLS itself consults before refusing to encrypt, export or
+   * decrypt, and reading it is how the UI's gate becomes the same predicate as
+   * the core's refusal rather than a re-derivation of it.
+   *
+   * Invalidated on `membersVersion` (bumped after every poll and every sweep,
+   * which is every path a removing commit can arrive on) and on
+   * `pendingVersion` (bumped by `noteOwnRequest`, which is what writes the
+   * durable leave record the copy is narrowed by).
+   *
+   * The state is TERMINAL and survives a restart, so this answers the same at
+   * launch as it did in the batch that carried the removal — there is no
+   * transient window to debounce and nothing to re-check later.
+   */
+  const membership = createMemo<MembershipState>(() => {
+    membersVersion();
+    pendingVersion();
+    const s = auth.state();
+    return membershipState({
+      isActive: readIsActive(props.entry.group),
+      leaveRequestedAtMs:
+        s.kind === "session"
+          ? loadLeaveRequestedAt(
+              s.account.accountId,
+              base64Encode(props.entry.group.groupId),
+            )
+          : undefined,
+    });
+  });
+
+  /** The standing gate the four background disciplines consult (§6.2.8). Read
+   *  as a function rather than through the memo directly so a call site reads
+   *  as the question it is asking. */
+  const membershipEnded = (): boolean => membershipHasEnded(membership());
+
+  /** §6.2.5 — the bar that REPLACES the composer, or `null` while the
+   *  membership holds. Narrowed to the one variant the template renders, the
+   *  same split `ownerExit` / `memberExit` use, so the JSX can take `<Show>`'s
+   *  accessor form rather than casting a union inside the template. */
+  const composerWithdrawn = createMemo(() => {
+    const state = composerState(membership(), input());
+    return state.kind === "withdrawn" ? state : null;
+  });
+
+  /**
+   * The same question asked SYNCHRONOUSLY, off the live handle, with no memo
+   * in between.
+   *
+   * `membersVersion` is bumped by an effect, so the memo above can still hold
+   * its pre-batch value in the microtask that immediately follows a poll —
+   * which is exactly where the ADR-0043 rotation is fired. §6.2.8 item 3 says
+   * the eviction verdict must be evaluated on the SAME commit as the shrink it
+   * causes, and this is what makes that literal rather than approximate. An
+   * unreadable handle answers `false`, matching {@link membershipState}'s
+   * fail-toward-active direction.
+   */
+  const evictedNow = (): boolean => readIsActive(props.entry.group) === false;
 
   // The current admin set as hex sig-pubkey strings (re-read per
   // `membersVersion`) — drives the per-member "Make/Remove admin" label.
@@ -1390,6 +1498,10 @@ function ChatView(props: {
   // event is only the nudge that drives the membersVersion bump.
   const pendingJoins = createMemo<Uint8Array[]>(() => {
     membersVersion();
+    // ADR-0045 UX §6.2.7 — a queue this reader can no longer act on. Approving
+    // needs `add_member`, which the core refuses for an inactive group, so the
+    // section would be a list of buttons that all fail.
+    if (membershipEnded()) return [];
     try {
       const flat = props.entry.group.pendingExternalJoins();
       const out: Uint8Array[] = [];
@@ -1557,6 +1669,21 @@ function ChatView(props: {
     // answer `beaconEmitVerdict` gives below, reached before the Ed25519 key
     // derivation the rank read costs. The gate there stays the authority.
     if (!isForeground()) return;
+    // ADR-0045 UX §6.2.8 item 2 — an evicted device must never beacon. A
+    // beacon means *able to sweep*, and this one can never sweep again: the
+    // envelope is an ordinary MLS application message and
+    // `createApplicationMessage` is refused for an inactive group, so the emit
+    // would throw on its own ticker every interval anyway.
+    //
+    // Note this is the SAME rule that keeps a backgrounded tab from emitting,
+    // reached from the other direction: there the device could sweep and is
+    // not running; here it is running and never can. Placed beside that check
+    // for exactly that reason.
+    //
+    // The ticker is cleared too (`endedTeardown`), so this is belt and braces
+    // — but it is the half that is a GATE, and the gate is what makes a
+    // surviving timer harmless rather than merely unlikely.
+    if (membershipEnded()) return;
     if (!usesProposalPath()) return;
     const wasm = await loadWasmForCalls();
     let ownRank: number | undefined;
@@ -1635,6 +1762,11 @@ function ChatView(props: {
     const s = auth.state();
     if (s.kind === "session") {
       const after = memberSignatureKeys(props.entry.group);
+      // ADR-0045 UX §6.2.8 item 3 — captured synchronously alongside the
+      // post-sweep roster, so the eviction and the shrink it caused are judged
+      // on the same commit. A sweep can carry our own removal: an admin can
+      // sweep a `Leave` it proposed for itself.
+      const selfEvicted = evictedNow();
       void (async () => {
         await rotatePushRoutingSecretIfMembershipShrank({
           accountId: s.account.accountId,
@@ -1645,6 +1777,7 @@ function ChatView(props: {
           previousMemberKeys: before,
           currentMemberKeys: after,
           broadcast: broadcastToGroup,
+          selfEvicted,
         });
       })().catch((err: unknown) => {
         // eslint-disable-next-line no-console
@@ -1734,6 +1867,20 @@ function ChatView(props: {
         out.kind === "committed" ? out.commitMessageId : out.proposalMessageId,
       );
       if (out.kind === "proposed") noteOwnRequest(`remove:${leaf}`);
+      // ADR-0045 UX §6.2.3 — the ONE thing that later tells `You left this
+      // group.` from `You are no longer a member of this group.`, and it has
+      // to be its own durable field rather than a read of the observation
+      // `noteOwnRequest` just wrote. That observation lives under
+      // `remove:{ownLeaf}` and is pruned the moment the core stops holding the
+      // request — which is exactly what the sweep that removes us does. The
+      // poll batch carrying the eviction therefore destroys the only evidence
+      // that we asked for it, and the order of those two steps is an
+      // implementation detail no test pins.
+      //
+      // Written on BOTH arms, `committed` included: a legacy group with no
+      // role table takes the direct path and evicts us in the same call.
+      // Fail-safe when absent — the fallback string is true either way.
+      noteOwnLeaveRequested();
       setNotice(
         "Leave requested. It applies when an owner or an admin applies the change.",
       );
@@ -1767,12 +1914,80 @@ function ChatView(props: {
     setPendingVersion(pendingVersion() + 1);
   }
 
-  /** Bumped whenever the pending set or its observations may have moved, so the
-   *  panel memos below re-read. Separate from `membersVersion` because a
-   *  proposal changes nothing about the roster. */
-  const [pendingVersion, setPendingVersion] = createSignal(0);
-  /** Ticks so a `pending` request matures into `waiting` without traffic. */
-  const [pendingClock, setPendingClock] = createSignal(Date.now());
+  /**
+   * ADR-0045 UX §6.2.4 — `Delete this chat`.
+   *
+   * Reachable only once the membership has ended (the exit block's `ended`
+   * arm), so this never removes a live conversation.
+   *
+   * **What it removes:** this group's entry in the per-account message log
+   * (a read-modify-write on a store that already exists — the log is keyed
+   * `{ groupIdHex -> PersistedGroup }` internally, so no new store is needed),
+   * its pending-request observations, its durable leave record, and its row in
+   * the in-memory group registry.
+   *
+   * **What it does NOT remove, which is why the confirmation body is exact
+   * rather than sweeping:** the inactive MLS group stays in the provider
+   * snapshot as inert bytes. `Group` exposes no delete, so a `Group::delete`
+   * is a real (small) core follow-up rather than something this rides free.
+   * The remnant is inert in the strong sense — it cannot send, decrypt, export
+   * or process anything — but it is not nothing.
+   *
+   * The push subscription is already gone by this point: the §6.2.8 teardown
+   * retires it at the moment of the eviction, not at the moment of the delete,
+   * so a user who never presses this button still stops being woken.
+   */
+  async function onDeleteChat(): Promise<void> {
+    const s = auth.state();
+    if (s.kind !== "session") return;
+    // The confirmation is the only protection there is, so it states exactly
+    // what is destroyed rather than gesturing at it.
+    if (!window.confirm(`${DELETE_CHAT_TITLE}\n\n${DELETE_CHAT_BODY}`)) return;
+    const accountIdB64 = s.account.accountId;
+    const groupIdB64 = base64Encode(props.entry.group.groupId);
+    setError(null);
+    setBusy(true);
+    try {
+      const deviceKey = await getDeviceKey(accountIdB64);
+      if (deviceKey !== null) {
+        await deleteGroupFromMessageLog(
+          accountIdB64,
+          deviceKey,
+          groupIdHexForLog(),
+        );
+      }
+      // Local bookkeeping for a group that no longer exists here. Both are
+      // best-effort by construction and neither can fail the delete.
+      pruneObservations(accountIdB64, groupIdB64, []);
+      clearLeaveRequested(accountIdB64, groupIdB64);
+      // Drop the row from the registry LAST, so a failure above leaves the
+      // chat reachable rather than orphaning a transcript behind a row the
+      // user can no longer open.
+      chats.remove(groupIdB64);
+      props.onLeave();
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** ADR-0045 UX §6.2.3 — the durable `leaveRequestedAt` record. Deliberately
+   *  NOT folded into {@link noteOwnRequest}: that store is pruned against the
+   *  core's live pending set on every fold, and this must outlive the sweep
+   *  that empties it. */
+  function noteOwnLeaveRequested(): void {
+    const s = auth.state();
+    if (s.kind !== "session") return;
+    recordLeaveRequested(
+      s.account.accountId,
+      base64Encode(props.entry.group.groupId),
+      Date.now(),
+    );
+    setPendingVersion(pendingVersion() + 1);
+  }
+
+
 
   /** ADR-0045 — the live pending requests, joined from the core's retained set
    *  (the truth about WHAT is pending) and the local observation store (WHEN it
@@ -1784,6 +1999,13 @@ function ChatView(props: {
     const now = pendingClock();
     const s = auth.state();
     if (s.kind !== "session") return [];
+    // ADR-0045 UX §6.2.7 — the pending notice describes changes that will
+    // apply to a group that no longer contains us, and the annotations
+    // describe a roster that will never move again. Emptied at the SOURCE so
+    // the notice, the row annotations, `Waiting to be added` and the exit
+    // block's `waitingRoleChange` all fall silent together rather than one
+    // render site at a time.
+    if (membershipEnded()) return [];
     const groupIdB64 = base64Encode(props.entry.group.groupId);
     let records: ProposalRecordView[];
     try {
@@ -1802,6 +2024,7 @@ function ChatView(props: {
 
   const pendingRequestNotice = createMemo(() => pendingNotice(pendingRequests()));
   const pendingAdds = createMemo(() => waitingToBeAdded(pendingRequests()));
+
 
   /** The identity treatment for a pending add — an accepted contact's display
    *  name when we have one, else the short fingerprint, matching what the
@@ -1992,6 +2215,11 @@ function ChatView(props: {
       waitingRoleChange: waitingRoleChange(),
       ownRemovalPending:
         rowAnnotation(pendingRequests(), ownLeaf() ?? -1, ownLeaf()) !== null,
+      // §6.2.7 — beats every other arm. Distinct from `ownRemovalPending`
+      // above in the way that matters: that is a request in flight over a
+      // group we are still fully in, this is the terminal state after it
+      // landed.
+      membershipEnded: membershipEnded(),
     }),
   );
 
@@ -2435,6 +2663,24 @@ function ChatView(props: {
   }
 
   async function refresh(): Promise<void> {
+    // ADR-0045 UX §6.2.8 item 1 — the poll must STOP for a group this device
+    // is no longer in, and stopping is not an optimisation. `unprotect_message`
+    // refuses on `!is_active()` before it looks at the message at all, and the
+    // refusal is not epoch-scoped, so every fetched row would raise
+    // `UseAfterEviction`, be swallowed by the per-message catch in
+    // `ChatClient.applyPolledBatch`, and advance the cursor — one warning per
+    // row, forever, for a group that will never produce a readable byte again.
+    // A loop that logs a refusal per row per poll is indistinguishable from a
+    // bug.
+    //
+    // A GATE rather than a disposal, because `refresh` is re-entered from a
+    // dozen call sites (mount, the Refresh button, every membership action,
+    // the Welcome intake) and there is no single interval to clear.
+    //
+    // The cursor is deliberately left where the last applied row put it
+    // (§6.2.13): it costs nothing, and whether a rejoin wants it reset is the
+    // rejoin path's question, not this one's.
+    if (membershipEnded()) return;
     setError(null);
     setBusy(true);
     try {
@@ -2501,6 +2747,14 @@ function ChatView(props: {
           // Snapshot the post-poll roster synchronously, before the awaited
           // role read lets another poll advance the group.
           const currentMemberKeys = memberSignatureKeys(props.entry.group);
+          // ADR-0045 UX §6.2.8 item 3 — and this is the site the finding was
+          // about. Snapshotted here, in the same synchronous region as the
+          // roster, because `membershipRotationDecision` would otherwise see a
+          // member depart (us), read `ownRole` from the UNTOUCHED role table —
+          // a `Remove` rewrites no `GroupContext` — and return "rotate", after
+          // which the broadcast throws. Read off the live handle rather than
+          // the memo, which an effect has not refreshed yet at this point.
+          const selfEvicted = evictedNow();
           void (async () => {
             await rotatePushRoutingSecretIfMembershipShrank({
               accountId: s.account.accountId,
@@ -2509,6 +2763,7 @@ function ChatView(props: {
               previousMemberKeys: membersBeforePoll,
               currentMemberKeys,
               broadcast: broadcastToGroup,
+              selfEvicted,
             });
           })().catch((err) => {
             // eslint-disable-next-line no-console
@@ -2813,6 +3068,75 @@ function ChatView(props: {
     void emitBeaconIfDue();
   }, BEACON_TICK_MS);
   onCleanup(() => clearInterval(beaconTick));
+
+  /**
+   * ADR-0045 UX §6.2.8 — the ONE-SHOT half of the teardown.
+   *
+   * Three of §6.2.8's five disciplines are standing GATES with nothing to
+   * dispose — the poll (`refresh`), the shrink rotation
+   * (`membershipRotationDecision`'s `selfEvicted`) and the exporter-backed
+   * call buttons — and each consults `membershipEnded()` where it runs. These
+   * two have an effect to fire, and firing an effect more than once is what
+   * the latch prevents: this runs inside a `createEffect`, which re-runs on
+   * every roster change for reasons that have nothing to do with the
+   * eviction.
+   *
+   * `claimTeardownSteps` is what decides; this only performs. It CLAIMS what
+   * it hands out, synchronously, rather than marking each step done when it
+   * finishes — because the push retire is async, and marking it after the
+   * await leaves a window in which this effect re-runs, reads the step as
+   * still owed, and fires a second concurrent unsubscribe. A step that FAILS
+   * is released so the next re-run retries it.
+   */
+  const teardownDone = new Set<EndedTeardownStep>();
+  createEffect(() => {
+    const owed = claimTeardownSteps(membership(), teardownDone);
+    if (owed.length === 0) return;
+    for (const step of owed) {
+      if (step === "stop-beacon-ticker") {
+        // Belt and braces beside the gate inside `emitBeaconIfDue`: the gate
+        // is what makes a surviving timer harmless, this is what stops the
+        // wasted wake. Local and infallible, so it never needs releasing.
+        clearInterval(beaconTick);
+        continue;
+      }
+      // `retire-push-subscription` — the half ADR-0043 recorded as unclosable
+      // ("nobody else can delete it and no client has 'you were removed'
+      // handling"). This IS that handling. `retireOldPushGid` already does
+      // exactly the right three things — derive the gid, unsubscribe this
+      // device, drop the reverse-index row — bounded and never throwing.
+      //
+      // The honest bound: it needs this device to be online and running, so it
+      // COMPLEMENTS the group's own rotation and replaces nothing. A phone
+      // that is never opened again keeps its row, exactly as before.
+      const s = auth.state();
+      if (s.kind !== "session") {
+        // Nothing to unsubscribe on behalf of. Release the claim so a later
+        // re-run, once a session exists, picks it up.
+        releaseTeardownStep(teardownDone, step);
+        continue;
+      }
+      const accountId = s.account.accountId;
+      const groupIdB64 = base64Encode(props.entry.group.groupId);
+      void (async () => {
+        try {
+          const secret = await getGroupRoutingSecretForAccount(
+            accountId,
+            groupIdB64,
+          );
+          // No secret means nothing was ever subscribed under a `push_gid` for
+          // this group, so there is nothing to retire — done, not failed, so
+          // the claim stands.
+          if (secret !== null) await retireOldPushGid(secret);
+        } catch (err) {
+          // Released so the next re-run retries it.
+          releaseTeardownStep(teardownDone, "retire-push-subscription");
+          // eslint-disable-next-line no-console
+          console.warn("ADR-0045 push subscription teardown failed", err);
+        }
+      })();
+    }
+  });
 
   /**
    * Encrypt + upload an iterable of files sequentially (so a
@@ -3792,10 +4116,21 @@ function ChatView(props: {
             {busy() ? "Refreshing…" : "Refresh"}
           </button>
           {/* Phase 3a8 — call button. Visible whenever no
-              call is active in this thread. */}
+              call is active in this thread.
+
+              ADR-0045 UX §6.2.8 item 4 — and GONE once this device's
+              membership has ended. The per-call SFrame seed comes from
+              `exportSecret("lakko/call/v1", …)`, which is gated on
+              `is_active()` and now raises, so the button fails closed — which
+              is correct, and is not enough. A button that always errors is the
+              shape §6.1.1 rejects, and §6.2.11 forbids any live indicator on a
+              dead group for a stronger reason: a call control asserts a live
+              E2EE session, and there is not one. */}
           <Show
             when={
-              (callState() === "idle" || callState() === "done") && !sfuActive()
+              (callState() === "idle" || callState() === "done") &&
+              !sfuActive() &&
+              !membershipEnded()
             }
           >
             <button
@@ -4534,6 +4869,34 @@ function ChatView(props: {
               </ul>
             </div>
           </Show>
+          {/* ADR-0045 UX §6.2.7 — the roster stays, READ-ONLY, and carries one
+              line saying so.
+
+              It stays because it is the last thing you knew about who you were
+              in a group with, it is genuinely informative next to a frozen
+              transcript, and it is still readable: `members()` is a plain read
+              of the public group with no state gate.
+
+              The line is a statement about the LIST, not about any row in it,
+              and that is load-bearing rather than stylistic. A `Remove`
+              rewrites no `GroupContext`, so the role table is untouched and a
+              removed admin's frozen roster still names them an admin — nothing
+              here may present that as a live role. "Stopped updating" is the
+              literal truth (the local view is frozen at the removing epoch and
+              never moves again) rather than a euphemism for it, and it is
+              deliberately neutral between having left and having been
+              removed. */}
+          <Show when={membershipEnded()}>
+            <p
+              style={{
+                margin: "0 0 0.4rem 0",
+                "font-size": "0.75rem",
+                color: "var(--surface-muted)",
+              }}
+            >
+              {FROZEN_ROSTER_HEADER}
+            </p>
+          </Show>
           <ul
             style={{
               "list-style": "none",
@@ -4698,6 +5061,43 @@ function ChatView(props: {
                 gap: "0.35rem",
               }}
             >
+              {/* ADR-0045 UX §6.2.4 / §6.2.7 — once the membership has ended,
+                  both of the other controls are gone (one names a group the
+                  reader is not in, the other is owner-only and they are not)
+                  and the block holds `Delete this chat` instead.
+
+                  This slot is the right home by §6.1.1's own argument: the
+                  block's meaning is *the exit*, and once you are out the only
+                  exit-shaped action left is closing the door behind you. A
+                  permanently dead row with no action available is its own
+                  defect — everything else about this state is "you cannot",
+                  and this is the one thing they still can.
+
+                  It is also the ONE control in this whole design that destroys
+                  user data on request. Everything else in §6.2 removes a claim
+                  the UI should not have been making; this removes a transcript
+                  that exists nowhere else, on one confirmation, with no undo
+                  and no export. The confirmation says so in as many words, and
+                  that is the only protection there is. */}
+              <Show when={exitBlockState().kind === "ended"}>
+                <button
+                  type="button"
+                  disabled={busy()}
+                  onClick={() => void onDeleteChat()}
+                  style={{
+                    "font-size": "0.8rem",
+                    padding: "0.3rem 0.6rem",
+                    "border-radius": "var(--radius-sm)",
+                    border: "1px solid var(--surface-border)",
+                    background: "transparent",
+                    color: "var(--danger, #c0392b)",
+                    cursor: "pointer",
+                    "align-self": "flex-start",
+                  }}
+                >
+                  {DELETE_CHAT_CONTROL}
+                </button>
+              </Show>
               <Show when={ownerExit()}>
                 {(owner) => (
                   <>
@@ -5040,7 +5440,13 @@ function ChatView(props: {
               padding: "1rem 0",
             }}
           >
-            No messages yet. Send the first one below.
+            {/* ADR-0045 UX §6.2 — the empty-timeline copy invites a send, and
+                once the membership has ended that is an invitation the
+                composer below can no longer accept. The terminal row that
+                follows carries the whole of what there is to say. */}
+            <Show when={!membershipEnded()}>
+              No messages yet. Send the first one below.
+            </Show>
           </p>
         }
       >
@@ -5089,6 +5495,45 @@ function ChatView(props: {
             )}
           </For>
         </ol>
+      </Show>
+
+      {/* ADR-0045 UX §6.2.5 — the terminal row.
+
+          It goes in the TIMELINE, not in a banner, and §10 already says why:
+          "only outcomes belong in the timeline" — and this is an outcome, one
+          that happened at a definite point in the transcript. A row marks
+          WHERE the history stops, survives scrollback, needs no dismissal
+          state, and reuses the centred muted treatment system rows already
+          have.
+
+          It renders after the list rather than inside it because it is not a
+          `TimelineRow`: nothing produced it on the wire (the removing commit
+          returns the same content-less `Commit` as any other), and the state
+          is terminal, so "after everything" is the only place it can be.
+
+          Announced POLITELY, once. It arrives unbidden, possibly mid-sentence,
+          and interrupting someone to tell them they have been removed from a
+          group is the wrong register for a fact they cannot act on. Carried by
+          TEXT, never by hue or an icon. */}
+      <Show when={terminalRow(membership())}>
+        {(row) => (
+          <div
+            role="status"
+            aria-live="polite"
+            style={{
+              "font-size": "0.8rem",
+              color: "var(--surface-muted)",
+              "text-align": "center",
+              padding: "0.75rem 0.5rem 0.25rem 0.5rem",
+              display: "flex",
+              "flex-direction": "column",
+              gap: "0.2rem",
+            }}
+          >
+            <span>{row().headline}</span>
+            <span>{row().consequence}</span>
+          </div>
+        )}
       </Show>
 
       {/* 1.19c2 — pending-attachments tray. Renders above the
@@ -5175,8 +5620,13 @@ function ChatView(props: {
 
       {/* ADR-0024 — typing indicator. Sits just above the compose
           bar; auto-hides when nobody is typing (the memo returns
-          null) and after the ~6 s expiry sweep. */}
-      <Show when={typingIndicator() !== null}>
+          null) and after the ~6 s expiry sweep.
+
+          ADR-0045 UX §6.2.11 — and never on a dead group. No new typing
+          signal can arrive (nothing decrypts any more), so what would render
+          is whatever was in flight at the moment of the eviction: a live
+          indicator over a conversation that has stopped. */}
+      <Show when={typingIndicator() !== null && !membershipEnded()}>
         <div
           style={{
             "font-size": "0.8rem",
@@ -5191,6 +5641,83 @@ function ChatView(props: {
         </div>
       </Show>
 
+      {/* ADR-0045 UX §6.2.5 — the composer is REPLACED, not disabled.
+
+          §5.3 argues a pending row's `Remove` must stay visible-but-disabled,
+          because hiding it would read as the permission having vanished when
+          it is merely suspended. The permission here has vanished, permanently
+          and by design, so the rule inverts: disable while the state is
+          TRANSIENT, remove when it is TERMINAL. A disabled Send button on a
+          group you will never be in again is a control promising a future it
+          does not have.
+
+          The bar sits in the composer's own slot so the layout does not jump,
+          and it is STATIC TEXT inside that region rather than a live region or
+          a focus stop — so a screen-reader user reaching the place they type
+          hears why they cannot, rather than discovering an absence. */}
+      <Show when={composerWithdrawn()}>
+        {(bar) => (
+          <div
+            style={{
+              display: "flex",
+              "flex-direction": "column",
+              gap: "0.4rem",
+              "padding-top": "0.5rem",
+              "border-top": "1px solid var(--surface-border)",
+            }}
+          >
+            {/* The unsent draft, preserved because the commit can land
+                mid-sentence and silently discarding what the user typed is a
+                small data loss with no upside.
+
+                `readonly`, never `disabled`: this is the web expression of the
+                cross-platform shape §6.2.5 specifies — SELECTABLE,
+                non-editable text. A disabled control that contains the user's
+                own words is a control that shows them and withholds them, and
+                on iOS and Android a disabled field is not selectable at all,
+                which is why the spec names a shape rather than a widget. It
+                must stay reachable by keyboard and by assistive technology,
+                which `readonly` is and `disabled` is not. */}
+            <Show when={bar().draft !== null}>
+              <label
+                style={{
+                  display: "flex",
+                  "flex-direction": "column",
+                  gap: "0.2rem",
+                }}
+              >
+                <span
+                  style={{
+                    "font-size": "0.7rem",
+                    "text-transform": "uppercase",
+                    "letter-spacing": "0.04em",
+                    color: "var(--surface-muted)",
+                  }}
+                >
+                  {bar().draftLabel}
+                </span>
+                <input
+                  type="text"
+                  readonly
+                  value={bar().draft ?? ""}
+                  style={{
+                    flex: 1,
+                    background: "transparent",
+                    color: "var(--surface-fg)",
+                  }}
+                />
+              </label>
+            </Show>
+            <span
+              style={{ "font-size": "0.8rem", color: "var(--surface-muted)" }}
+            >
+              {bar().notice}
+            </span>
+          </div>
+        )}
+      </Show>
+
+      <Show when={!membershipEnded()}>
       <form
         onSubmit={onSend}
         style={{
@@ -5253,6 +5780,7 @@ function ChatView(props: {
           Send
         </button>
       </form>
+      </Show>
     </div>
   );
 }

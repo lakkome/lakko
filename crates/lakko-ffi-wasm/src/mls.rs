@@ -1354,6 +1354,39 @@ impl Group {
         Ok(secret.to_vec())
     }
 
+    /// Whether this device is still a member of the group.
+    ///
+    /// `false` means a Commit removing this device's own leaf has been applied.
+    /// The state is **terminal** — RFC 9420 offers no way back, and it survives
+    /// a snapshot / restore, so this answers the same at launch as it did in
+    /// the poll batch that carried the removal. Rejoining is a new `Group`.
+    ///
+    /// Nothing in the receive path signals the transition:
+    /// `processIncomingVerifyingRoles` returns the same content-less `Commit`
+    /// for a removing commit as for any other. **This is the only signal.**
+    ///
+    /// Once it is `false`, reads still answer (`members`, `epoch`,
+    /// `memberCount`, `ownLeafIndex`, `groupId`, `groupRoles`) but are frozen
+    /// at the removing epoch and will never move again, while
+    /// `createApplicationMessage`, `exportSecret` and every further decrypt
+    /// throw — including for rows still sitting unfetched on the DS, since the
+    /// refusal is not epoch-scoped.
+    ///
+    /// The UI gates on it: withdraw the composer and the membership
+    /// affordances, stop polling and stop emitting beacons, and keep rendering
+    /// the history, which is still readable. Prefer this over inferring
+    /// membership from `members()` — the inference rests on a leaf signature
+    /// key being the account key, which ADR-0022's per-device-leaf follow-up
+    /// would break silently.
+    #[wasm_bindgen(getter, js_name = isActive)]
+    pub fn is_active(&self) -> Result<bool, JsError> {
+        let g = self
+            .inner
+            .lock()
+            .map_err(|_| JsError::new("internal lock poisoned"))?;
+        Ok(g.is_active())
+    }
+
     /// Local leaf index of the calling identity.
     #[wasm_bindgen(getter, js_name = ownLeafIndex)]
     pub fn own_leaf_index(&self) -> Result<u32, JsError> {
@@ -4225,6 +4258,61 @@ mod tests {
             .commit_pending_proposals_core(&alice)
             .unwrap()
             .is_none());
+    }
+
+    /// `isActive` crosses the wasm-bindgen boundary and tracks the eviction.
+    ///
+    /// The core property — that the accessor and the roster inference never
+    /// disagree — is pinned in `lakko-mls`'s `group_membership_state` suite;
+    /// what this asserts is the **wiring**, because the failure mode of a
+    /// wrongly-plumbed accessor is a composer that stays enabled on a dead
+    /// group, which is exactly the gap it exists to close.
+    #[test]
+    fn is_active_tracks_an_eviction_across_the_ffi_boundary() {
+        let ((alice, alice_g), (bob, bob_g), (charlie, charlie_g)) = adr0045_trio();
+
+        assert!(alice_g.is_active().unwrap(), "the owner starts active");
+        assert!(charlie_g.is_active().unwrap(), "a member starts active");
+
+        // Charlie leaves: a member may always propose its own removal. It does
+        // not re-process its own proposal — OpenMLS refuses an own message, and
+        // `proposeRemoveMember` already queued it locally.
+        let charlie_leaf = charlie_g.own_leaf_index().unwrap();
+        let leave = charlie_g
+            .propose_remove_member_core(&charlie, charlie_leaf)
+            .unwrap();
+        alice_g
+            .process_incoming_verifying_roles(&alice, &leave)
+            .unwrap();
+        bob_g
+            .process_incoming_verifying_roles(&bob, &leave)
+            .unwrap();
+
+        let sweep = alice_g
+            .commit_pending_proposals_core(&alice)
+            .unwrap()
+            .expect("a pending removal must produce a commit");
+
+        charlie_g
+            .process_incoming_verifying_roles(&charlie, &sweep.commit_bytes)
+            .unwrap();
+        bob_g
+            .process_incoming_verifying_roles(&bob, &sweep.commit_bytes)
+            .unwrap();
+
+        assert!(
+            !charlie_g.is_active().unwrap(),
+            "the evicted device must read inactive through the FFI",
+        );
+        assert!(
+            alice_g.is_active().unwrap() && bob_g.is_active().unwrap(),
+            "the survivors must stay active",
+        );
+        // The asymmetry the UI depends on: reads still answer on a dead group.
+        // (The matching "and sends fail" half is asserted in `lakko-mls` and on
+        // the UniFFI surface — here a `JsError` cannot be constructed off-wasm,
+        // which is why the sibling tests reach for the `_core` variants.)
+        assert_eq!(charlie_g.member_count().unwrap(), 2);
     }
 
     /// The wasm flattening puts each variant's payload behind its **own**

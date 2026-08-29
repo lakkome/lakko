@@ -11,7 +11,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import me.lakko.app.chat.AttachmentBridge
@@ -72,6 +74,85 @@ public class ChatViewModel(
     private val composer: MutableStateFlow<ComposerState> =
         MutableStateFlow(ComposerState())
 
+    // -------------------------------------------------------------
+    // ADR-0045 UX §6.2 — the end of your own membership
+    //
+    // Every rule and every string lives in `me.lakko.app.chat.MembershipEnded`;
+    // what is here is the wiring that feeds it live group state, the gates that
+    // consult it, and the driver for the one-shot teardown it decides.
+    // -------------------------------------------------------------
+
+    /**
+     * §6.2.3 — the durable `leaveRequestedAt` stamp, cached.
+     *
+     * Only THIS device ever writes it (at leave-publish), so a read at
+     * construction plus a re-read after [onLeaveGroup] is complete — there is
+     * no third party that can make it appear. Cached rather than re-read per
+     * emission because it is a `SharedPreferences` hit on a path that runs on
+     * every repository update.
+     */
+    private var leaveRequestedAtMs: Long? = repo.leaveRequestedAt(groupIdHex)
+
+    private val mutableMembership: MutableStateFlow<me.lakko.app.chat.MembershipState> =
+        MutableStateFlow(
+            me.lakko.app.chat.membershipState(
+                isActive = repo.isGroupActive(groupIdHex),
+                leaveRequestedAtMs = leaveRequestedAtMs,
+            ),
+        )
+
+    /**
+     * §6.2 — is this device still a member, and (if not) did it ask to go?
+     *
+     * `internal` because [me.lakko.app.chat.MembershipState] is, which is the
+     * same posture the sibling rule modules take: the RULES are module-private
+     * and the composable in this module renders them.
+     *
+     * The state is TERMINAL and survives a restart, so this answers the same at
+     * launch as it did in the batch that carried the removal — there is no
+     * transient window to debounce and nothing to re-check later.
+     */
+    internal val membership: StateFlow<me.lakko.app.chat.MembershipState> =
+        mutableMembership.asStateFlow()
+
+    /** §6.2 — the standing gate. Public because the screen's poll loop and its
+     *  header consult it; the narrowing (left vs removed) stays in
+     *  [membership]. */
+    public val membershipEnded: StateFlow<Boolean> =
+        mutableMembership
+            .map { me.lakko.app.chat.membershipEnded(it) }
+            .stateIn(
+                scope = viewModelScope,
+                started = SharingStarted.Eagerly,
+                initialValue = me.lakko.app.chat.membershipEnded(mutableMembership.value),
+            )
+
+    private val mutableBeaconTickerRunning: MutableStateFlow<Boolean> =
+        MutableStateFlow(true)
+
+    /**
+     * §6.2.8 item 2 — the beacon ticker's own run flag.
+     *
+     * The ticker lives in the composable (it is `repeatOnLifecycle`-scoped,
+     * which IS this platform's foreground gate), so the teardown cannot cancel
+     * a job it does not own. It flips this instead and the ticker breaks out.
+     * The emit path is gated independently
+     * ([me.lakko.app.chat.BeaconEmitVerdict.MEMBERSHIP_ENDED]), so this stops
+     * the wasted wake while the gate is what makes a surviving ticker harmless.
+     */
+    public val beaconTickerRunning: StateFlow<Boolean> =
+        mutableBeaconTickerRunning.asStateFlow()
+
+    /**
+     * §6.2.8 — claims each one-shot step BEFORE its first suspension point.
+     *
+     * See [me.lakko.app.chat.EndedTeardownLatch] for why the claim needs a real
+     * lock on this platform: the retire suspends into `Dispatchers.IO` and the
+     * collector below can be re-entered while it is in flight, so "exactly
+     * once" has to be decided synchronously rather than on completion.
+     */
+    private val teardownLatch = me.lakko.app.chat.EndedTeardownLatch()
+
     private val derived: MutableStateFlow<ChatScreenUiState> =
         MutableStateFlow(buildState(repo.state.value, composer.value))
 
@@ -101,6 +182,28 @@ public class ChatViewModel(
         viewModelScope.launch {
             repo.state.collect { repoState ->
                 derived.value = buildState(repoState, composer.value)
+                // ADR-0045 UX §6.2 — re-read the core's own membership
+                // predicate after every repository emission. Nothing in the
+                // receive path announces the transition
+                // (`processIncomingVerifyingRoles` returns the same
+                // content-less `Commit` for a removing commit as for any
+                // other), so this is the only place it can be noticed.
+                refreshMembership()
+            }
+        }
+        // ADR-0045 UX §6.2.8 — the one-shot half of the teardown. Driven off
+        // the membership flow rather than off the repository's, so it runs once
+        // on the transition; the latch makes a re-run harmless either way.
+        viewModelScope.launch {
+            mutableMembership.collect { state ->
+                me.lakko.app.chat.runEndedTeardown(
+                    state = state,
+                    latch = teardownLatch,
+                    stopBeaconTicker = { mutableBeaconTickerRunning.value = false },
+                    retirePushSubscription = {
+                        repo.retirePushSubscriptionAfterEviction(groupIdHex)
+                    },
+                )
             }
         }
         viewModelScope.launch {
@@ -441,23 +544,71 @@ public class ChatViewModel(
         }
     }
 
+    /**
+     * ADR-0045 UX §6.2 — re-read the core's own membership predicate.
+     *
+     * `Group.isActive()` is the variable `createApplicationMessage`,
+     * `exportSecret` and `unprotect_message` each consult before refusing, so a
+     * composer withdrawn on it is withdrawn for the reason the send would have
+     * failed. A torn read answers "still a member", which is the status quo
+     * rather than a false claim the user cannot check.
+     */
+    private fun refreshMembership() {
+        mutableMembership.value = me.lakko.app.chat.membershipState(
+            isActive = repo.isGroupActive(groupIdHex),
+            leaveRequestedAtMs = leaveRequestedAtMs,
+        )
+    }
+
     /** Re-read the live MLS roster from the repository. */
     public fun refreshMembers() {
+        // ADR-0045 UX §6.2.7 — decided FIRST, because every gate below depends
+        // on it and reading the roster does not change the answer.
+        refreshMembership()
+        val ended = membershipEnded.value
         mutableMembers.value = repo.members(groupIdHex) ?: emptyList()
         val role = repo.ownRole(groupIdHex)
-        mutableCanManageMembers.value = role != Role.MEMBER
-        mutableIsOwner.value = role == Role.OWNER
+        // ADR-0045 UX §6.2.7 — and NOBODY may manage members once their own
+        // membership has ended. `Add member`, the invite link, every `Remove`
+        // and every admin toggle are all refused by the core for an inactive
+        // group, and one gate cannot be partly applied. Note the difference
+        // from role-gating, which hides what SOMEONE ELSE may do — this hides
+        // what nobody in this group may do any more.
+        mutableCanManageMembers.value = role != Role.MEMBER && !ended
+        // §6.2.7 — and the owner-only admin toggle goes with it. Defence in
+        // depth rather than a reachable case: §6.2.9 establishes that a sitting
+        // owner cannot reach this state at all (`authorise` refuses a `Remove`
+        // targeting the owner and refuses an owner's own leave). But `isOwner`
+        // gates a control independently of `canManageMembers`, and a gate that
+        // is only correct because of a property proved somewhere else is a gate
+        // that breaks silently when that property moves.
+        mutableIsOwner.value = role == Role.OWNER && !ended
         mutableRoleTable.value = repo.groupRoles(groupIdHex)
         // ADR-0027 (G-3) — refresh the pending external-join list alongside the
         // roster (the retained set is the source of truth).
-        mutablePendingJoins.value = repo.pendingExternalJoins(groupIdHex)
+        //
+        // §6.2.7 — emptied once the membership has ended: approving needs
+        // `add_member`, which the core refuses for an inactive group, so the
+        // section would be a list of buttons that all fail.
+        mutablePendingJoins.value =
+            if (ended) emptyList() else repo.pendingExternalJoins(groupIdHex)
         // ADR-0045 — and the pending MEMBERSHIP requests, gated by the UX §10
         // visibility rule. Read after the role above, so a just-changed role is
         // reflected in what this member is allowed to see.
-        val visible = me.lakko.app.chat.visibleRequests(
-            repo.pendingMembershipRequests(groupIdHex),
-            mutableCanManageMembers.value,
-        )
+        //
+        // §6.2.7 — emptied at the SOURCE once the membership has ended, so the
+        // notice, the row annotations, `Waiting to be added` and the exit
+        // block's `waitingRoleChange` all fall silent together rather than one
+        // render site at a time. The pending set describes changes that will
+        // apply to a group that no longer contains us.
+        val visible = if (ended) {
+            emptyList()
+        } else {
+            me.lakko.app.chat.visibleRequests(
+                repo.pendingMembershipRequests(groupIdHex),
+                mutableCanManageMembers.value,
+            )
+        }
         mutablePendingRequests.value = visible
         mutablePendingNotice.value = me.lakko.app.chat.pendingNotice(visible)
         refreshJoinAttributions()
@@ -865,6 +1016,22 @@ public class ChatViewModel(
                 // unlike the web reference there is nothing to do here afterwards
                 // but re-read the roster — which must still contain us, annotated.
                 repo.removeMemberFromGroup(groupIdHex, leaf)
+                // ADR-0045 UX §6.2.3 — the ONE thing that later tells
+                // "You left this group." from "You are no longer a member of
+                // this group.", and it has to be its own durable field rather
+                // than a read of the observation the repository just wrote.
+                // That observation lives under `remove:{ownLeaf}` and is pruned
+                // the moment the core stops holding the request — which is
+                // exactly what the sweep that removes us does. The poll batch
+                // carrying the eviction therefore destroys the only evidence
+                // that we asked for it, and the order of those two steps is an
+                // implementation detail no test pins.
+                //
+                // Written AFTER the publish returns: an unpublished request is
+                // not a leave. Fail-safe when absent — the fallback string is
+                // true either way.
+                repo.noteOwnLeaveRequested(groupIdHex)
+                leaveRequestedAtMs = repo.leaveRequestedAt(groupIdHex)
                 mutableMembershipNotice.value =
                     "Leave requested. It applies when an owner or an admin applies the change."
                 refreshMembers()
@@ -875,6 +1042,28 @@ public class ChatViewModel(
                 mutableMembershipBusy.value = false
             }
         }
+    }
+
+    /**
+     * ADR-0045 UX §6.2.4 — `Delete this chat`.
+     *
+     * Reachable only from the exit block's `Ended` arm, so this never removes a
+     * live conversation. It is also the ONE control in this whole design that
+     * destroys user data on request: everything else in §6.2 removes a claim
+     * the UI should not have been making, this removes a transcript that exists
+     * nowhere else, on one confirmation, with no undo and no export. The
+     * confirmation says so in as many words, and that is the only protection
+     * there is.
+     *
+     * Synchronous, so the caller can navigate away on the next line: the
+     * repository's work is local (a message-log rewrite plus four
+     * `SharedPreferences` rows) and the push subscription is already gone by
+     * this point — the §6.2.8 teardown retires it at the moment of the
+     * eviction, not at the moment of the delete, so a user who never presses
+     * this button still stops being woken.
+     */
+    public fun onDeleteChat() {
+        repo.deleteEndedChat(groupIdHex)
     }
 
     /**
@@ -1733,6 +1922,18 @@ public class ChatViewModel(
     public suspend fun pollOnceLongPoll(waitSecs: Int = DEFAULT_LONG_POLL_SECS) {
         repo.pollGroup(groupIdHex, waitSecs = waitSecs)
     }
+
+    /**
+     * ADR-0045 UX §6.2.8 item 4 — may this screen offer a call?
+     *
+     * The per-call SFrame seed comes from `exportSecret("lakko/call/v1", …)`,
+     * which is gated on `is_active()` and now raises, so the button fails
+     * closed — which is correct, and is not enough. A button that always errors
+     * is the shape §6.1.1 rejects, and §6.2.11 forbids any live indicator on a
+     * dead group for a stronger reason: a call control asserts a live E2EE
+     * session, and there is not one.
+     */
+    public fun callsAvailable(): Boolean = !membershipEnded.value
 
     public companion object {
         /** DS long-poll budget — same value as

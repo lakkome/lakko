@@ -25,7 +25,38 @@ a per-platform gap rather than a missing design: **`Leave group` shipped on web 
 (§5, §12.3), so the member-facing half of what [ADR-0045] unlocked is reachable on one
 client of three.~~ **Closed — `c50bdd7` landed `Leave group` on both natives**, so the
 member-facing half is reachable on all three; what §6.1 changes about it is only the
-owner's arm.
+owner's arm. **And a third designed-not-built item joins the list as of 2026-08-28:
+what happens when your own membership ends (§6.2)** — the moment `Leave group` and every
+`Remove` both arrive at, which no client handles on any platform.
+
+> **Revised 2026-08-28 (second pass) — the end of your own membership is designed
+> (§6.2).** `Leave group` shipped on all three and nothing anywhere handles the commit
+> that grants it. The removing commit merges, OpenMLS marks the group **`Inactive` —
+> its own terminal state, from which "the group can not exit"** — and every client
+> carries on: the chat stays in the list, the composer stays enabled, `Leave group` is
+> still offered on a group you have left, and the user's first news is a failed send.
+> The pass settles it from the library rather than from preference. **The decisive
+> finding is that the local view freezes**: `unprotect_message` refuses on
+> `!is_active()` before it looks at anything, so no further message can ever be
+> processed — which makes every roster inference sound, makes the history question
+> answerable (locally stored plaintext stays; anything still on the DS is unreachable
+> **forever**, including old-epoch rows), and makes the shape of the UI fall out of a
+> single asymmetry: **everything about the group is still readable and nothing about it
+> is still doable.** Hence the chat stays with a muted row line, the transcript stays
+> whole, and the composer is **replaced rather than disabled** — the §5.3
+> visible-but-disabled rule holds for a *transient* refusal and inverts for a terminal
+> one. Four things the brief did not reach: the record that distinguishes *left* from
+> *removed* is **destroyed by the same poll pass that raises the question**, so it needs
+> its own durable field; the neutral string turns out to be the *removed* string, so the
+> lost-record case degrades to something still true; **five background disciplines keep
+> running against the dead group** and fail quietly, one of which (the ADR-0043 shrink
+> rotation) actively reaches `rotate` because a `Remove` leaves the role table untouched;
+> and tearing down the device's own push subscription **closes the other half of G-36
+> residual 2**, the one ADR-0043 recorded as unclosable because *"no client has 'you were
+> removed' handling"*. It needs **one read-only core accessor (`is_active`) on both FFI
+> surfaces, one local durable field, and nothing else** — and it is buildable without the
+> accessor, which is why that is a recommendation and not a blocker (§6.2.2). **Nothing
+> is built.**
 
 > **Revised 2026-08-28 — the ownership-transfer flow is designed (§6.1).** The one item
 > §11.6 enumerated and deliberately deferred is now specified end to end: the exit block
@@ -54,11 +85,15 @@ section shape). `docs/adr/` holds decisions, `docs/security/` holds invariants a
 neither is edited here.
 
 > **This spec was written after the core, not before it.** That is the debt, and §11
-> records precisely what it cost: **twelve** places where the built core contradicts or
+> records precisely what it cost: **thirteen** places where the built core contradicts or
 > omits what [ADR-0045] decision 5 assumed the UI would have. Items 9 and 10 were added on
 > 2026-08-20 and items 11 and 12 on 2026-08-24; none was caught by the spec's own writing —
 > they came out of later core sprints, which is the debt compounding rather than being paid
-> down.
+> down. **Item 13 (2026-08-28) is the exception and the worst of them**, because it came
+> out of neither the core nor a sprint: it is a whole state — the target's view of a
+> membership change — that decision 5 never asked about and that this spec did not
+> notice it was not asking about either, through three client sprints and a second
+> design pass, until `Leave group` made the target and the requester the same person.
 
 > **Revised 2026-08-25 against the three client sprints.** The spec is now measurable
 > against code rather than against intent, and it comes out well: §4's state table,
@@ -265,9 +300,22 @@ The members panel gains one notice and one section. Nothing moves; nothing is re
    owner but *disabled with a stated reason*, which §6.1.1 argues is the
    reversal of a decision that was correct only while transfer was unreachable.
    `Transfer ownership` is designed in §6.1 and **built nowhere**.
+   **A third state, designed 2026-08-28 in §6.2.7:** once the reader's own
+   membership has ended, both controls are gone — one names a group they are
+   not in, the other is owner-only and they are not — and the block holds
+   `Delete this chat` instead, which by §6.1.1's own argument is the right
+   tenant of a slot whose meaning is *the exit*.
 
 Requests-to-join stay above pending changes because they need a **decision**; pending
 changes need none.
+
+**One further state governs the whole list, not any item in it.** When the reader's
+own membership has ended (§6.2.7), items 1-4 are gone — every one of them is either
+an action the core now refuses or a queue the reader can no longer act on — item 5
+remains as a read-only frozen roster under its own header line, and item 6 is as
+above. That is the only condition under which sections disappear rather than being
+role-gated, and the difference is that role-gating hides what someone else may do
+while this hides what nobody in this group may do any more.
 
 ### 5.1 The pending notice (exact copy)
 
@@ -875,6 +923,541 @@ distinguished from a *first observation*. Fail-open when absent.
   here, and the design works without one.
 - **Nothing about the flow is gated on either.**
 
+### 6.2 When your own membership ends — the state no client handles
+
+**Why here, and the numbering fact first.** §6.1 nested rather than inserted a
+top-level section because the seven sections after §6 are cross-referenced by
+number from the three clients' own source comments, so renumbering them would
+silently invalidate references in files a design pass does not touch. That
+constraint has not changed, so this nests for the same reason. It belongs beside
+§6.1 for a second reason too: §6 is where every membership flow's *end to end*
+lives, and this section is the end of exactly two of them. §6 designs the moment
+you ask to leave; §6.1 designs the moment an owner hands the group on so they
+can. **Neither designs the moment it lands** — and it lands the same way whether
+you asked or somebody else did.
+
+**The gap, stated plainly.** The commit removing your own leaf arrives on an
+ordinary poll, merges, and the group goes permanently dead in the MLS core.
+Every client then carries on as though nothing happened: the chat stays in the
+list, the composer stays enabled, the members panel keeps offering `Leave group`
+on a group you have already left, and the first thing the user learns is that
+sending fails. Verified on all three (`apps/web/src/chat/client.ts:863`,
+`apps/ios/Lakko/Chat/ChatClient.swift:376`,
+`apps/android/.../chat/ChatClient.kt:366` — each applies the commit and each
+one's composer gates only on *sending / uploading / empty draft*:
+`Chat.tsx:5236-5251`, `ChatScreen.swift:496-517`, `ChatScreen.kt:1127-1148`).
+Web has the same hole, so the two natives mirrored an absence rather than
+inventing a behaviour — which is the same shape as the `Leave group` gap
+`c50bdd7` closed, and it is why this is one design and not three.
+
+#### 6.2.1 What the core actually does — established, not assumed
+
+Everything below is read off `openmls-0.8.1` and `crates/lakko-mls`, because the
+design's sharpest question (is the history readable?) has an answer that only
+the library can give.
+
+`Group::process_incoming_verifying_roles` runs its ADR-0022/0045 gate and then
+calls `merge_staged_commit` (`group.rs:1597-1599`). OpenMLS checks
+`staged_commit.self_removed()` first and, when it is true, sets
+`group_state = Inactive`, **persists that state**, and merges
+(`processing.rs:270-276`). The merge takes the `PublicState` branch
+(`staged_commit.rs:445-451`): the public tree and the group context advance, and
+**nothing else does** — no new epoch secrets, no new message secrets, because
+the commit's path could not be decrypted for a leaf that is no longer there
+(`staged_commit.rs:277-289`). Lakko returns the same content-less
+`Incoming::Commit` it returns for every other commit (`group.rs:1600`). **There
+is no signal in the return value at all.**
+
+Seven consequences follow, and they are what the design has to be honest about:
+
+1. **The state is terminal and OpenMLS says so** — *"a terminal state that the
+   group can not exit from"* (`mls_group/mod.rs:160-164`). Not a mode, not a
+   degradation.
+2. **It survives a restart.** `write_group_state` is called before the merge and
+   `MlsGroup::load` reads it back (`mod.rs:440,454`), so a snapshot taken after
+   the merge restores an inactive group. A crash *between* merge and snapshot
+   restores an active one, which re-fetches the same commit from the journal and
+   re-applies it — idempotent, and the same ADR-0040 shape the outbox already
+   assumes.
+3. **The local view is frozen, permanently.** `unprotect_message` refuses on
+   `!is_active()` before it looks at anything else (`processing.rs:154-158`), so
+   no further message of any kind can be processed. The roster, the epoch and
+   the role table stop at the values that commit produced and never move again.
+   This is what makes every inference in §6.2.2 sound, and it is the single most
+   load-bearing fact in this section.
+4. **Nothing new can be decrypted — including old rows you had not fetched
+   yet.** The refusal in (3) is not epoch-scoped; it is a gate on the whole
+   entry point. A device that was offline across its own removal fetches the
+   batch, decrypts everything up to the commit, and then cannot decrypt one byte
+   more, *including* application rows that were sealed at an epoch it still
+   holds keys for. Whatever was on the DS and unread at the moment the commit is
+   applied is unreadable forever.
+5. **Sending fails, and so does every exporter.** `create_message` gates on
+   `is_operational()` (`mod.rs:778-784`) and `export_secret` gates on
+   `is_active()` explicitly (`exporting.rs:34-44`); both raise
+   `UseAfterEviction`. That is not only the composer — it is the per-call SFrame
+   seed (`export_secret("lakko/call/v1", …)`), the ADR-0042/0044 routing-secret
+   broadcast and the ADR-0045 beacon, all of which are ordinary application
+   messages or exporter reads.
+6. **The reported epoch moves while the secrets do not.** `epoch()` reads the
+   merged public context and reports N+1, while `group_epoch_secrets` is still
+   the epoch-N object the `PublicState` branch never replaced. `is_active` is
+   the only thing standing between that and a live footgun, which is a reason to
+   consult it rather than re-derive around it (§6.2.2).
+7. **Reads still work.** `members()`, `epoch()`, `member_count()`,
+   `own_leaf_index()`, `group_id()` and `group_roles()` are all plain reads of
+   the public group with no state gate (`group.rs:2009-2062`,
+   `public_group/mod.rs:382`). So the panel can still render a roster; it is
+   simply a roster that will never change.
+
+**Note (7) with (5) together, because the pair is the design.** After the
+removal the client can still *read* everything about the group and can no longer
+*do* anything with it. That asymmetry is not a limitation to work around — it is
+precisely the shape of the correct UI, and it is why the answer to "keep the
+history?" is yes and the answer to "keep the composer?" is no.
+
+#### 6.2.2 The signal: `is_active`, and why the available inference is not enough
+
+**`is_active` is now exposed on three surfaces of the four.** It was on none of
+them when this section was written: `MlsGroup::is_active()` existed
+(`mod.rs:308`) and `crates/lakko-mls`, `crates/lakko-ffi-uniffi`,
+`crates/lakko-ffi-wasm` and `crates/lakko-ffi-extension` contained **no
+occurrence of it at all** — not the two comments this paragraph first claimed,
+which was a miscount. `Group::is_active()` and `isActive` on the uniffi and wasm
+surfaces landed with the implementation of this section, pinned by
+`crates/lakko-mls/tests/group_membership_state.rs`, whose test is deliberately
+*not* "the accessor is false after removal" — that tests OpenMLS — but **"the
+accessor and the roster inference below agree on every eviction path"**, which is
+what makes replacing the inference safe and what will fail the day ADR-0022's
+Phase-2b per-device leaves stop a leaf key from being the account key.
+
+**`crates/lakko-ffi-extension` deliberately did not get it**, and the reason is
+worth keeping so it is not re-litigated. That crate is the slim decrypt-only
+surface for the iOS notification extension, and its behaviour is already correct
+by construction: `unprotect_message` refuses, the row is skipped, the generic
+banner shows. Adding the accessor would let that process form a membership
+verdict the app has not formed, about a state **C-59 structurally forbids it from
+persisting** — it has no `snapshot_storage` at all — and the only thing the
+verdict would newly enable, suppressing or rewording a notification, is a product
+decision this section places on the chat screen. Minimal surface is that crate's
+whole discipline; every symbol in it is justified individually against the NSE
+budget and the audit surface.
+
+**An inference is available today and it is sound.** By §6.2.1(3) the tree is
+frozen at the removing epoch, so *"no member record whose `signature_public_key`
+is ours"* cannot be wrong by later drift — there is no later. Its two obvious
+hazards both fail to bite: OpenMLS hands a vacated leaf to the next Add, but no
+later Add can ever reach this device's tree; and comparing on the leaf index
+rather than the key would be unsound in general, which is why the comparison is
+on the key, exactly as ADR-0022's role table and §4's applied-test already are.
+So **the design is buildable with no core change at all**, and that has to be
+said before recommending one.
+
+**Recommend the accessor anyway.** Three reasons, in order of weight:
+
+1. **The gate and the refusal should be the same predicate.** `is_active` is not
+   a fact *about* the group state, it *is* the group state — the variable
+   `create_message`, `export_secret` and `unprotect_message` each consult before
+   refusing. A composer disabled because `is_active()` is false is disabled for
+   the reason the send would have failed. A composer disabled because a key
+   comparison came out empty is disabled because three clients each computed
+   that it should be, which is a different claim wearing the same clothes.
+2. **The inference has one genuine hole and the accessor does not.** It rests on
+   a leaf's signature key being the account's signature key — true today, and
+   named in ADR-0022 as an open follow-up (*"the Phase-2b per-device-leaf
+   device→account resolution"*). The day that lands, the inference breaks
+   silently and in the dangerous direction, and it breaks in three places at
+   once. `is_active` is about *this handle*, not about key equality, and is
+   immune to it.
+3. **It is the drift class this document keeps naming.** Three hand-written
+   copies of one membership predicate is what ADR-0044's
+   `push_routing_secret_is_newer` was written to prevent, and §12.6 is still
+   open about the same class in the refusal table.
+
+**The cost, stated so it is not sold cheap.** One `#[must_use] pub fn
+is_active(&self) -> bool` on `Group` delegating to `self.inner.is_active()`, plus
+one accessor on each FFI surface in lock-step. It touches `crates/lakko-mls`, so
+**invariant #3 engages** — an ADR reference and a property test — but in its
+mildest possible form: it adds no state, no transition, no wire byte and no
+branch to any existing path; it reads a field OpenMLS already maintains. The
+property test that earns its place is not *"is_active is false after a removing
+commit"* (that tests OpenMLS) but *"the accessor and the roster inference agree
+on every path that reaches an eviction"*, so the day they stop agreeing, CI says
+so rather than a user.
+
+**Not recommended: surfacing who removed you.** It is available — every
+proposal's author leaf is in hand inside `authorise_role_commit`
+(`group.rs:2237-2252`, `qp.sender()`), and `process_incoming_gated` already
+proves the removed-leaf machinery can be surfaced (`group.rs:1941-1954`). It is
+declined because the copy does not need it (§6.2.3), because the committer is
+not necessarily the proposer so a naive read would name the wrong person, and
+because naming the remover is a feature with its own argument to win — in a
+group where a removal was a safety action, it is not obviously the kind thing to
+do. Declining it keeps the invariant-#3 surface at one read-only boolean.
+
+#### 6.2.3 Left or removed — the answer is local, and the record holding it is destroyed by the event that raises the question
+
+**The wire cannot answer it as things stand.** A leave is a plain `Remove`
+naming your own leaf, not RFC 9420 `SelfRemove` — all three clients route
+`Leave group` through `removeMemberFromGroup` / `propose_remove_member`
+(`group.rs:985`, `Chat.tsx:1728`, `ChatViewModel.swift:907`). So the removing
+commit looks *identical* in both cases and the only discriminator is the
+proposal's author, which §6.2.2 declines to surface.
+
+**The client already knows, and it knows it locally.** A device that asked to
+leave wrote its own observation record under the key `remove:{ownLeaf}` with
+`own: true` at publish time (`Chat.tsx:1736`, and the native twins record it in
+the repository). That is the answer, needs no core change, and is right for the
+case that matters.
+
+**And here is the part that is easy to get wrong, because the failure is
+silent.** That record is pruned by the same pass that makes the question
+askable. The observation store's whole discipline is to drop an observation once
+the core no longer holds the request (§7, and the built prune runs inside the
+pending-requests memo) — and the sweep that removes you is exactly what empties
+the core's pending set. So the poll batch that carries your eviction also
+destroys the only evidence that you asked for it, and the order in which those
+two happen is an implementation detail that no test currently pins.
+
+**So the flag must be its own durable field, not a read of the pending store.**
+One boolean (or a timestamp, which is strictly more useful and no more
+expensive) per `(account, group)`, written at the moment a self-targeted leave
+is *published*, never pruned by the pending sweep, and discarded only with the
+group record itself. §9's field list gains it.
+
+**The neutral string is the removed string, which is why one string suffices
+when the flag is absent.** "You are no longer a member of this group" is true of
+someone who left as well as someone who was removed; "you left this group" is
+true of only one. So the *fallback* is the removed form and the *narrowing* is
+the one we apply only on positive evidence — which inverts the usual reflex to
+treat the neutral case as a special case. A device that lost the flag (the
+ADR-0040 crash window, a reinstall, a restore) therefore degrades to a sentence
+that is still true, never to one that is wrong.
+
+- Left, with the flag: `You left this group.`
+- Removed, or the flag is absent: `You are no longer a member of this group.`
+
+**And nothing here says who.** Not because the information is unobtainable, but
+because a client that names a remover it inferred is one bad inference away from
+a serious accusation, and because §5.1's discipline — *state inaction, name
+nobody, blame nobody* — is the same discipline whether the news is a wait or an
+ending.
+
+#### 6.2.4 The chat stays in the list, and gains the one control still honest
+
+**It stays.** Removing it would delete a transcript the user still has, with no
+warning, as a side effect of something somebody else did — which is the single
+worst thing in this whole design's reach. The row keeps its position, keeps its
+label, and gains a muted secondary line in the same slot the natives already use
+for the last-message preview (`ChatListScreen.swift:269`,
+`ChatListScreen.kt:347`) and §5.2 already uses for pending annotations:
+
+- `You are no longer a member.`
+
+On web the row has no secondary line today (`routes/Contacts.tsx`, the
+`Active MLS groups` list is label plus flag toggles), so it gains one rather
+than reusing one — which is a per-platform *implementation* difference and not a
+design divergence: the line, its wording and its muted treatment are identical
+everywhere.
+
+**And the row goes quiet.** No unread badge, no typing indicator, no live
+anything — those all assert a conversation that can still move. The existing
+flags (`pinned` / `muted` / `archived`) are **not touched**: auto-archiving would
+be the client silently reorganising the user's list on their behalf, and archive
+is a decision, not a consequence.
+
+**The one control that is still honest is a deliberate delete.** A permanently
+dead row with no action available is its own defect — the user is left holding a
+thread they can neither use nor tidy away. Everything else about this state is
+"you cannot"; removing the thread is the one thing they still can. It lives in
+the members panel's **exit block** (§5 item 6), which is the right slot by its
+own §6.1.1 argument: that block's meaning is *the exit*, and once you are out
+the only exit-shaped action left is closing the door behind you. `Transfer
+ownership` and `Leave group` are both gone from it by then, so it is empty
+otherwise.
+
+- Control: `Delete this chat` (destructive styling)
+- Title: `Delete this chat?`
+- Body: `This removes the conversation and its messages from this device. There is no copy anywhere else and this cannot be undone.`
+- Buttons: `Delete` (destructive) / `Cancel`
+
+That body is exact rather than sweeping, and the precision is load-bearing:
+**the messages really are gone, and the dead MLS handle is not.** No client has
+a per-group history delete today — web's `deleteMessageLog` /
+`deleteMlsSnapshot` are whole-account operations
+(`chat/message-log-store.ts:231`, `chat/mls-store.ts:308`) — but the message log
+is a per-account blob keyed `{ groupIdHex → … }` internally, so dropping one
+group's entry is a read-modify-write on a store that exists, not a new one. The
+MLS remnant is different: `Group` exposes no delete, so the inactive group's
+state stays in the provider snapshot as inert bytes. It is inert in the strong
+sense — it cannot send, cannot decrypt, cannot export, cannot process — but it
+is not nothing, and a `Group::delete` is a real (small) core follow-up rather
+than something this rides free. §6.2.12 lists it as such.
+
+**If this arc has to be smaller, this control is the part to drop.** Everything
+else in §6.2 removes a lie; the delete removes an annoyance. Dropping it leaves
+a dead row with no exit — a defect, and not a dishonesty — and nothing else in
+the design depends on it.
+
+#### 6.2.5 The composer, the terminal row, and the draft it was holding
+
+**The fact goes in the timeline, not in a banner, and §10 already says why.**
+*"Only outcomes belong in the timeline"* — and this is an outcome, one that
+happened at a definite point in the transcript. A terminal system row marks
+*where* the history stops, survives scrollback, needs no dismissal state, and
+reuses the centred muted treatment system rows already have
+(`Chat.tsx:5293-5305`). Two lines, the same shape as §5.1's notice: the fact,
+then the standing consequence.
+
+- Line 1: §6.2.3's string — `You left this group.` or
+  `You are no longer a member of this group.`
+- Line 2: `The messages you already received are still here. No new ones will arrive.`
+
+**The composer is replaced, not disabled, and that distinction is principled.**
+§5.3 argues a pending row's `Remove` must stay *visible but disabled*, because
+hiding it would read as the permission having vanished when it is merely
+suspended. The permission here has vanished, permanently and by design. So the
+rule is: **disable while the state is transient, remove when it is terminal** —
+and a disabled Send button on a group you will never be in again is a control
+promising a future it does not have. In its place, a static bar in the same slot
+so the layout does not jump:
+
+- `You can no longer send messages to this group.`
+
+**The unsent draft is preserved, and it is not preserved in an input.** The
+commit lands during a poll, which can be mid-sentence, and silently discarding
+what the user typed is a small data loss with no upside. But the obvious fix —
+leaving the text field there, disabled — is wrong on two of three platforms: a
+disabled `TextField` on iOS and a disabled `OutlinedTextField` on Android are
+not selectable, so the user can see their words and cannot get them out. The
+cross-platform shape is therefore **selectable, non-editable text**, not a
+disabled field, rendered above the bar and only when the draft was non-empty:
+
+- Muted label: `Unsent draft`
+- Then the text itself, selectable, verbatim.
+
+Which widget expresses *selectable non-editable text* is §14's business
+(`readonly` on web, `.textSelection(.enabled)` on iOS, `SelectionContainer` on
+Compose). The shape is not.
+
+#### 6.2.6 The history: yours, complete to the moment, and never longer again
+
+**It stays, and it costs nothing to keep it, because it was never MLS state.**
+Each client persists decrypted plaintext in its own store — web
+`chat/message-log-store.ts` (an IndexedDB blob under the device root key) and
+its documented iOS / Android mirrors — precisely because *"MLS state survived
+via the snapshot store but its forward-secret chain keys could not re-decrypt
+the already-consumed wire bytes"* (`message-log-store.ts:14-18`). That store is
+independent of `is_active`, so nothing about eviction touches it. Keeping the
+transcript readable is not a concession; it is the status quo, and deleting it
+would have been the special case.
+
+**And the honest half.** By §6.2.1(4), what is on the DS and not yet fetched is
+unreachable forever — not "later", not "on the next sync". A device that was
+offline across its own removal ends up with a transcript that stops earlier than
+another device's would have, and there is no mechanism, now or later, that
+closes that gap. **The design does not mention it**, and that is a deliberate
+choice rather than an oversight: the user cannot tell how much they are missing,
+no client can tell them (the rows are opaque), and a line saying "some messages
+may be missing" would be an anxiety with no remedy and no way to check. Line 2
+of the terminal row is written to be true either way — *the messages you already
+received are still here* claims exactly what is claimed and no more. The
+residual is recorded in §15 for the maintainer, not in the UI for the user.
+
+#### 6.2.7 The members panel becomes a frozen roster
+
+Every control in the panel is now either impossible or meaningless, and they go
+for one reason each rather than as a block: `Add member`, the invite link, every
+`Remove` and every admin toggle are refused by the core; `Leave group` names a
+group you are not in; `Transfer ownership` is owner-only and you are not; the
+`Join requests` and `Waiting to be added` sections describe a queue you can no
+longer act on; and the pending notice describes changes that will apply to a
+group that no longer contains you.
+
+**The roster itself stays, read-only.** It is the last thing you knew about who
+you were in a group with, it is genuinely informative next to a frozen
+transcript, and by §6.2.1(7) it is still readable. What it must not do is read
+as current, so it carries one line at the top of the list, in the past tense the
+state actually has:
+
+- `This list stopped updating when your membership ended.`
+
+That sentence is deliberately neutral between the two cases for §6.2.3's reason,
+and *"stopped updating"* is the literal truth of §6.2.1(3) rather than a
+euphemism for it.
+
+**The exit block is not empty**: it holds `Delete this chat` (§6.2.4).
+
+**One thing the roster still shows that it should not be read as.** The role
+table is untouched by a `Remove` — a removal rewrites no `GroupContext` — so a
+removed admin's frozen roster still names them an admin. Nothing in the UI may
+present that as a live role, which is one more reason the header line is a
+statement about the *list* rather than about any row in it.
+
+#### 6.2.8 What must stop, and what must be torn down
+
+This is the part with no visible surface and the highest chance of being missed,
+because everything in it currently *keeps running against a dead group* and
+fails quietly.
+
+1. **The poll loop must stop for this group.** Otherwise every fetched row
+   raises `UseAfterEviction`, is swallowed by the existing per-message catch
+   (`client.ts:868`, `ChatClient.swift:380`, `ChatClient.kt:367`) and advances
+   the cursor — one warning per row, forever, for a group that will never
+   produce a readable byte again. Stopping is not an optimisation; a loop that
+   logs a refusal per row per poll is indistinguishable from a bug.
+2. **The beacon emitter must stop.** It fires on its own ticker every interval
+   (`Chat.tsx:2813`), composes a beacon and broadcasts it as an application
+   message — which now throws. A candidate that cannot commit must not claim it
+   can, and §11.11's rule that a beacon must mean *able to sweep* is exactly the
+   claim an evicted device would be making. Note this is the **same rule** that
+   keeps a backgrounded device from emitting (§8, C-59), reached from the other
+   direction: there the device could sweep and is not running, here it is
+   running and can never sweep again.
+3. **The ADR-0043 shrink rotation must be suppressed, and it will not suppress
+   itself.** `membershipRotationDecision` sees a member depart (us) and reads
+   `ownRole` from the **untouched** role table, so an evicted admin's device
+   returns `"rotate"` (`push/group-routing.ts:1674-1681`) and then fails on the
+   broadcast. The function's own doc says the removing device *"does NOT come
+   through here"* because its baseline is already post-removal — true of the
+   device performing a removal, and **not** true of the device receiving its
+   own. The eviction verdict must be evaluated on the same commit and
+   short-circuit the rotation.
+4. **Every exporter-backed affordance must go, not merely fail.** The group-call
+   button derives `export_secret("lakko/call/v1", …)`, which now raises. It
+   fails closed, which is correct, but a button that always errors is the shape
+   §6.1.1 rejects: it goes.
+5. **The push subscription must be torn down, and this is the interesting
+   one.** ADR-0043 records that an evicted member's push-gw row *"is never
+   deleted — nobody else can delete it and no client has 'you were removed'
+   handling"*, so it goes **inert** rather than away. This design is that
+   handling. The evicted device can delete its own row, and the primitive
+   already exists and already does exactly the right three things:
+   `retireOldPushGid(secret)` derives the gid, unsubscribes this device and
+   drops the reverse-index entry, bounded and never throwing
+   (`push/group-routing.ts:476-500`). **This closes the other half of G-36
+   residual 2** — rotation stops the group notifying the old id; this stops the
+   ex-member being subscribed to anything at all. **The honest bound:** it needs
+   the evicted device to come online and run it, so it *complements* rotation
+   and replaces nothing; a device that never runs again keeps its row, exactly
+   as before.
+
+None of the five has a user-visible surface, and all five are things a client
+does silently or not at all. They are listed here rather than in §14 because
+they are one consequence of one state change, and splitting them across
+platforms is how four of them get built and one does not.
+
+#### 6.2.9 The owner cannot reach this state, and the boundary is one commit wide
+
+Confirmed in the core rather than assumed: `authorise` refuses a `Remove`
+targeting the owner and refuses an owner's own `Leave` /
+`SelfRemove` (`group_proposals.rs:223-224`, and the test
+`"the owner must not be able to leave via SelfRemove either"` at
+`group_proposals.rs:545`). So for a sitting owner this whole section is
+unreachable, and — worth saying once, because it is the reassuring half of
+ADR-0022's dead end — **an owner can never lose their own group.**
+
+The boundary is sharper than "after a transfer". A transfer and a removal cannot
+ride in one commit: the removal is authorised against the **pre-merge** table,
+in which the transferor is still the owner, so it is refused. The former owner
+therefore becomes removable exactly one commit after their transfer lands, and
+not before. Nothing in the UI depends on that, but it is the difference between
+"you are safe until you hand over" and "you are safe until the moment you hand
+over", and only the second is true.
+
+#### 6.2.10 Rejoining: nothing is offered, and not because it is impossible
+
+**Mechanically it is possible and it is even clean.** A re-add produces a
+Welcome; `join_from_welcome` builds a fresh `MlsGroup` and writes it under the
+same `GroupId`, overwriting the inactive state (`group.rs:374-390`), and the
+registry's `add` is documented as *"insert (or replace)"*
+(`ChatContext.tsx:110`). The local message log is keyed on the group id and was
+never touched, so a rejoined group comes back with its old transcript attached
+and its new epoch's messages appended after the terminal row. That is a good
+property and it is worth knowing it is there. **Unestablished:** whether each
+client's Welcome-intake path actually tolerates an existing entry for that group
+id, or whether the terminal row is then stranded mid-transcript. Neither was
+tested and neither should be guessed at; §6.2.13 lists it.
+
+**No affordance is offered anyway.** Not a `Request to rejoin`, not a
+`Ask to be invited again`, not a hint that either exists. Three reasons:
+
+1. **There is no channel.** Rejoining runs through a new invite or a `/g/` link
+   from someone still inside, and the removed member has neither. A control that
+   depends on somebody else's action is a control that mostly does nothing.
+2. **It is technically craftable and should still not be built.** A removed
+   device does know the `group_id`, and `epoch_of_message` reads an epoch off
+   public framing without decrypting — so an external-join proposal *could* be
+   minted. That would put a stranger's join request into the admin's pending
+   list of a group that just removed them, which is the one place a UI must not
+   help.
+3. **The leave path has already said the true thing.** §6's leave confirmation
+   carries `You will need a new invite to rejoin.` before the fact, which is
+   where a user can act on it. Repeating it afterwards adds nothing; saying it
+   for the first time to someone who was *removed* would be advice the product
+   cannot support and, in a safety removal, advice it should not give.
+
+#### 6.2.11 What this must not do
+
+- **No optimistic transition.** The state flips when the commit merges and the
+  core reports it, never when a leave request is published. Between the two you
+  are still fully in the group — still receiving, still decrypting — and §3's
+  argument against an optimistic `Remove` is the same argument pointed at
+  yourself. Until then the row annotation is §5.2's `Waiting to leave.` and
+  nothing else changes.
+- **No undo, no cancel, no "rejoin".** §3 already forbids the first two for a
+  published request; §6.2.10 declines the third.
+- **No claim about who.** §6.2.3.
+- **No silent deletion of anything** — not the thread, not the transcript, not
+  the user's list flags. The only deletion is the confirmed one they ask for.
+- **No live indicator on a dead group** — no unread badge, no typing, no E2EE
+  pill, no call button, no "last seen". Each of those asserts a live E2EE
+  session, and there is not one. This is the honesty corollary to invariant #4
+  in its plainest form: the cryptography does not support the claim, so the UI
+  does not make it.
+
+#### 6.2.12 What this needs that does not exist yet
+
+**One core accessor plus its two FFI mirrors, one durable field, and one
+follow-up.**
+
+- **`Group::is_active()` -> `bool`**, plus `isActive` on uniffi and wasm in
+  lock-step (§6.2.2). Invariant #3, in its mildest form. **The design is
+  buildable without it** on the roster inference, which is why it is a
+  recommendation and not a blocker.
+- **`leaveRequestedAt`** on client-durable state, per `(account, group)`,
+  written when a self-targeted leave is published and **not** pruned with the
+  pending observation (§6.2.3, §9). It is the only thing that tells *left* from
+  *removed*, and the pending store cannot hold it because the eviction empties
+  the pending store.
+- **A per-group history delete**, if §6.2.4's control is built: a read-modify-
+  write on the existing per-account message-log blob on each client. No new
+  store, no FFI.
+- **`Group::delete`** — a genuine core follow-up, not part of this arc: without
+  it a deleted chat leaves an inert MLS group in the provider snapshot. Named so
+  it is not discovered later as a surprise.
+
+**Nothing else.** No new wire format, no server change, no schema migration, no
+new event on the receive path — the eviction is derived from state the core
+already has at the moment it already reports a commit.
+
+#### 6.2.13 Deliberately left open
+
+- **Whether a rejoin re-attaches cleanly to the old transcript** (§6.2.10). The
+  MLS half is established; each client's Welcome-intake path against an existing
+  entry is not. Nothing in this design depends on the answer — the terminal row
+  is correct either way, and at worst it is a stale row mid-transcript in a
+  situation that is already an improvement on today.
+- **What the poll cursor should be when polling stops** (§6.2.8 item 1).
+  Leaving it where the last applied row put it is the obvious answer and costs
+  nothing; whether a rejoin then wants it reset is the rejoin path's question,
+  not this one's.
+- **Whether the chat list mirrors `Delete this chat` into its own per-row menu.**
+  The members panel's exit block is the canonical home and one home avoids
+  drift; a client that already has a per-row menu may mirror it, and none is
+  required to.
+- **Nothing about the state is gated on any of the three.**
+
 ---
 
 ## 7. Failure and liveness states
@@ -1074,6 +1657,30 @@ open:** the typed refusal reason in item 1, and `QUIET_WINDOW` (§12.1).
    the sweep *trigger* consumes these constants — and **that trigger is not built**: no
    client emits a beacon or folds a verdict yet, so the constants are exposed and unused.
 
+8. **`isActive()` -> `bool` on `Group`, both surfaces in lock-step** (added 2026-08-28,
+   §6.2.2). The one thing the FFI cannot answer today is *am I still a member of this
+   group* — `MlsGroup::is_active()` exists in OpenMLS
+   (`openmls-0.8.1/src/group/mls_group/mod.rs:309`) and `is_active` appears nowhere in
+   `crates/lakko-mls`, `crates/lakko-ffi-uniffi`, `crates/lakko-ffi-wasm` or
+   `crates/lakko-ffi-extension` outside two comments about `create_message`'s gate.
+   **Unlike items 1-7 this one is a recommendation, not a prerequisite:** the roster
+   inference (own signature key absent from `members()`) is available today and is
+   sound, because a removed group's local view is frozen. What the accessor buys is
+   that the UI's gate becomes the same predicate the core's refusal uses rather than a
+   re-derivation of it, that the one hole in the inference closes (it rests on a leaf
+   key being the account key — ADR-0022's named Phase-2b follow-up would break that
+   silently, in three clients at once), and that the predicate lives in Rust once
+   rather than being hand-written three times, which is item 6's own drift argument.
+   Cost: a `#[must_use]` delegating accessor plus two one-line FFI mirrors. It engages
+   **invariant #3** — an ADR reference and a property test — in the mildest form the
+   invariant has: no state, no transition, no wire byte, no branch on an existing path.
+   The property test worth writing is not *"`is_active` is false after a removing
+   commit"* (that tests OpenMLS) but *"the accessor and the roster inference agree on
+   every path that reaches an eviction"*. **Deliberately NOT asked for:** the removing
+   commit's proposal author, which would tell *removed* from *left* on the wire. It is
+   available (`group.rs:2237-2252`) and §6.2.3 gets the same answer from a local record
+   instead, so the invariant-#3 surface stays at one read-only boolean.
+
 **Client-durable state (per platform, not FFI).** A per-`(account, group)` pending-request
 record, sibling to ADR-0040's commit outbox and subject to the same discipline: written
 before the publish, surviving restart, purged on `applied` / `refused` and on `recover` /
@@ -1100,6 +1707,26 @@ above, so both are stated against what exists:
   observed owner signature key, so §6.1.9 can tell a *change* of owner from a *first
   observation* of the table. **Fail-open** when absent — a fresh device, a restore or a
   first sync must say nothing rather than claim a promotion it did not witness.
+
+**One addition for the end of your own membership (§6.2.3), also local, and it cannot
+be folded into the record above.**
+
+- **`leaveRequestedAt`** — per `(account, group)`, written when a **self-targeted**
+  leave is published, and the one thing that tells *"you left"* from *"you are no
+  longer a member"*. It is a separate field rather than a read of the pending-request
+  store **because the pending store cannot hold it**: the observation for a leave lives
+  under the key `remove:{ownLeaf}`, and every client prunes an observation once the
+  core no longer holds the request — which is exactly what the sweep that removes you
+  does. The poll pass that carries the eviction therefore destroys the only evidence
+  the user asked for it, and the order of those two steps is an implementation detail
+  no test pins. So the flag is **written at publish, never pruned with the pending
+  sweep, and discarded only with the group record itself**. A timestamp rather than a
+  boolean costs nothing and is strictly more useful.
+
+  **Fail-safe when absent**, and the direction is the point: the fallback string is the
+  *removed* one, which is true of someone who left as well, so a device that lost the
+  field (the ADR-0040 crash window, a reinstall, a restore) degrades to a sentence that
+  is still correct rather than to one that is wrong.
 
 **Timing constants** (§12 — must be measured, not guessed): `QUIET_WINDOW` (UI) and the
 protocol constants decision 2's chosen variant needs — **now settled as variant 1's beacon
@@ -1155,7 +1782,11 @@ original tally against [ADR-0045] decision 5. **Items 9 and 10 came out of two c
 sprints that landed after this spec was written** — the staged-sweep rollback and
 ownership transfer — and are not decision-5 contradictions at all: they are
 obligations and gaps the client work inherits. They are kept in the same list because
-the list's real subject is *what S4-S6 must know that the ADR did not say*.
+the list's real subject is *what S4-S6 must know that the ADR did not say*. **Item 13
+came out of no sprint at all** — it is a state decision 5 never considered, found by
+asking what the *target* of a membership change sees rather than the requester, and it
+is the one entry on this list that the spec could have caught by its own writing at any
+point in the last three months and did not.
 
 1. **`refused`, as described, is unreachable — and the requester could not see it anyway.**
    Decision 5 defines it as "the proposer's role changed between proposing and the sweep, so
@@ -1353,6 +1984,46 @@ the list's real subject is *what S4-S6 must know that the ADR did not say*.
     discipline applies to it verbatim: it licenses "a candidate is active", never "this
     person is online", and no copy may imply the stronger claim.
 
+13. **The core reports an eviction to nobody, and the client keeps running against the
+    corpse.** Added 2026-08-28 with §6.2, and it is the largest of these in blast radius
+    because it is a whole missing state rather than a missing field. Decision 5 designs
+    membership as something the *requester* watches; it never asks what the **target**
+    sees, and `Leave group` made the target and the requester the same person. When the
+    removing commit lands, `process_incoming_verifying_roles` merges it and returns the
+    same content-less `Incoming::Commit` it returns for every other commit
+    (`group.rs:1600`), while OpenMLS silently moves the group to its terminal `Inactive`
+    state (`processing.rs:270-276`). **There is no signal in the return value, and no
+    accessor on either FFI surface that would answer the question another way**
+    (§9 item 8). Two consequences the ADR did not budget:
+
+    * **The state has to be derived, and the derivation is not obvious.** §4's
+      applied-test already compares roster membership on signature keys, so the
+      inference costs nothing new — but its soundness rests on a fact nobody would
+      think to check, that a removed group's local view is **frozen for good**
+      (`unprotect_message` refuses on `!is_active()`, `processing.rs:154-158`), so
+      no later Add can renumber a leaf out from under it. §6.2.2 recommends the
+      accessor anyway and says plainly that it buys robustness rather than
+      capability.
+    * **Five things keep running and fail quietly** (§6.2.8): the poll loop logs one
+      swallowed refusal per row forever, the beacon emitter throws on its own ticker,
+      the group-call button's exporter throws, the push subscription is left live, and
+      the ADR-0043 shrink rotation **reaches `rotate`** — because a `Remove` rewrites
+      no `GroupContext`, so the evicted device's own role table still names it an
+      admin (`push/group-routing.ts:1674-1681`). That last one is the sharpest: the
+      function's doc reasons correctly about the device *performing* a removal and has
+      no case for the device *receiving its own*.
+
+    Two smaller findings ride along. **The record that tells *left* from *removed* is
+    destroyed by the pass that raises the question** (§6.2.3, §9) — the leave
+    observation is pruned when the core stops holding the request, and the sweep that
+    evicts you is what stops it. And **tearing down the evicted device's own push
+    subscription closes the half of G-36 residual 2 that ADR-0043 recorded as
+    unclosable**: that ADR concluded the ex-member's push-gw row *"is never deleted —
+    nobody else can delete it and no client has 'you were removed' handling"*, and
+    `retireOldPushGid` already does exactly the right three things
+    (`push/group-routing.ts:476-500`). The bound is honest — it needs the evicted
+    device to run again, so it complements rotation rather than replacing it.
+
 ---
 
 ## 12. Open — needs the maintainer
@@ -1454,6 +2125,29 @@ the list's real subject is *what S4-S6 must know that the ADR did not say*.
    lucky asymmetric case (§5.3). **What remains is copy, not enforcement:** Android has no
    client-side pre-check, so it surfaces the core's raw diagnostic where web and iOS
    surface the §6 string. That is item 6's problem now, not a separate one.
+8. **`Group::is_active()` on both FFI surfaces (§6.2.2 / §9 item 8).** The one core
+   change §6.2 asks for, and the only reason it needs the maintainer is that it touches
+   `crates/lakko-mls` and therefore engages **invariant #3**. It is the mildest form
+   that invariant takes — a `#[must_use]` read-only delegation to a field OpenMLS
+   already maintains, no state, no transition, no wire byte, no branch on an existing
+   path — and **§6.2 is buildable without it**, on a roster inference that is sound
+   today. So this is genuinely a choice rather than a blocker, and the case for it is
+   robustness plus honesty-of-reason rather than capability: it makes the UI's gate and
+   the core's refusal the same predicate, and it closes the inference's one hole (a
+   leaf key ceasing to be the account key, which is ADR-0022's own named Phase-2b
+   follow-up and would break three clients silently and simultaneously). **Recommend
+   taking it.** The related change §6.2.2 *declines* — surfacing the removing
+   proposal's author, which would tell *removed* from *left* on the wire — is not on
+   this list, because §6.2.3 answers the same question locally and no maintainer
+   decision is owed.
+
+   **A second, smaller core follow-up rides on one optional part of §6.2.** If
+   `Delete this chat` (§6.2.4) is built, a `Group::delete` is eventually owed too:
+   without it a deleted chat leaves an inert MLS group in the provider snapshot. It is
+   not urgent (the remnant cannot send, decrypt, export or process anything) and it is
+   named so nobody discovers it later as a surprise. **§6.2.4 also flags itself as the
+   one droppable part of that section** — dropping it leaves a dead row with no exit,
+   which is a defect and not a dishonesty, where everything else in §6.2 removes a lie.
 
 ---
 
@@ -1484,6 +2178,24 @@ the list's real subject is *what S4-S6 must know that the ADR did not say*.
   non-interrupting mechanism as the pending notice; it is informational and can arrive
   while the roster is being read. **Irreversibility is carried by its text**, never by
   the confirmation button's destructive colour, so a greyscale reader loses nothing.
+- **The end of your own membership (§6.2).** The terminal timeline row is announced
+  **politely**, once, on the same non-interrupting mechanism as everything else here —
+  it arrives unbidden, possibly mid-sentence, and interrupting someone to tell them
+  they have been removed from a group is the wrong register for a fact they cannot act
+  on. The composer's replacement bar is **static text inside the composer's own
+  region**, not a live region and not a focus stop, so a screen-reader user reaching
+  the place they type hears why they cannot rather than discovering an absence; it is
+  the direct analogue of this section's disabled-`Remove` rule, one step further along.
+  The preserved unsent draft (§6.2.5) must be **reachable and selectable by keyboard
+  and by assistive technology**, which is the whole reason the design specifies
+  selectable non-editable text rather than a disabled field — a disabled control that
+  contains the user's own words is a control that shows them and withholds them. The
+  chat-list row's `You are no longer a member.` joins the row's accessible label rather
+  than becoming a separate stop, exactly as §5.2's annotations do. **Nothing in this
+  state is carried by colour or by an icon**: the row line, the bar and the terminal
+  row are all text, so a greyscale or icon-blind reader loses nothing, and the
+  `Delete this chat` confirmation follows each platform's native destructive dialog so
+  the destructive role is announced rather than inferred from red.
 
 ---
 
@@ -1528,6 +2240,22 @@ divergences, and each is forced.
   sweeping commit, and a panel that refreshes only on open would go on showing a request
   that has already applied. That is §3's honesty rule in reverse, and it is the worse
   direction to get wrong.
+- **The one place §6.2 forces a per-platform divergence, and it is not the one you
+  would guess.** Every string, state and transition in §6.2 is identical everywhere.
+  What differs is the *preserved unsent draft*: the obvious implementation — leave the
+  text field in place, disabled — works on web and is wrong on both natives, because a
+  disabled SwiftUI `TextField` and a disabled Compose `OutlinedTextField` are not
+  selectable, so the user can read their words and cannot copy them out. The spec
+  therefore names a **shape** — selectable, non-editable text — and each platform picks
+  the widget: `readonly` (not `disabled`) on web, `Text` with `.textSelection(.enabled)`
+  on iOS, `SelectionContainer` on Compose. The same distinction is why §6.2.5 replaces
+  the composer rather than disabling it.
+- **A per-platform teardown list rather than a per-platform look (§6.2.8).** The five
+  things that must stop when a membership ends are one consequence of one state change,
+  and they are written as one list on purpose: they live in five different files on each
+  client (the poll loop, the beacon ticker, the push-rotation trigger, the call-button
+  gate, the push subscription), which is exactly the shape where four get built on each
+  platform and a different fifth is missed on each.
 
 ---
 
@@ -1551,6 +2279,29 @@ divergences, and each is forced.
 - **The removal warning window (§10) is new and permanent.** No UI choice removes it.
 - **Two devices, one account** (G-38 residual 2) derive the same rank and cannot be
   separated by this design. Out of scope here, unchanged by anything above.
+- **A device offline across its own removal loses the tail of its history, silently and
+  permanently** (§6.2.1 item 4, §6.2.6). `unprotect_message` refuses on `!is_active()`
+  before it looks at the message, so the refusal is not epoch-scoped: rows still on the
+  DS at the moment the removing commit is applied cannot be decrypted afterwards even
+  when the device still holds the keys for their epoch. Nothing closes this — not a
+  retry, not a resync, not a later feature — and the user cannot tell how much they are
+  missing. **The design deliberately does not say so**, because a "some messages may be
+  missing" line is an anxiety with no remedy and no way to check, and because the copy
+  is written to claim only what is claimed (*the messages you already received are still
+  here*). Flagged here for the maintainer rather than surfaced there for the user, and
+  that is a judgement rather than a finding.
+- **An evicted device that never runs again keeps its push-gw row** (§6.2.8 item 5).
+  The teardown closes G-36 residual 2's other half only for a device that comes back
+  online; a phone that is thrown away, wiped or simply never opened again stays
+  subscribed to an id nothing notifies. That is strictly better than today and it is
+  not a fix — rotation remains the load-bearing half, and this remains best-effort.
+- **`Delete this chat` is the one control in this document that destroys user data on
+  request** (§6.2.4). Everything else here removes a claim the UI should not have been
+  making; this removes a transcript that exists nowhere else, on one confirmation, with
+  no undo and no export. The confirmation says so in as many words, and that is the only
+  protection there is. If the maintainer would rather the answer to a dead row be
+  *archive it* than *delete it*, §6.2.4 is written to be droppable without leaving
+  anything dishonest behind.
 
 ---
 

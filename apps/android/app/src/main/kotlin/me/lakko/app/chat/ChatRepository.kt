@@ -9,6 +9,7 @@ import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -16,6 +17,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import me.lakko.app.push.DevicePushId
 import me.lakko.app.push.GroupPushRouting
 import me.lakko.app.push.NativePushRoutingPorts
@@ -63,6 +65,11 @@ import uniffi.lakko_ffi_uniffi.loadGroup
  * worst-case chat-list latency from `waitSecs * N` to `waitSecs * ceil(N / 3)`.
  */
 private const val POLL_ALL_CONCURRENCY: Int = 3
+
+/** Seconds-to-millis, for the one place a long-poll budget has to be honoured
+ *  without an actual long poll behind it (ADR-0045 UX §6.2.8 item 1 — every
+ *  group on this device has ended, so there is nothing to hold open). */
+private const val MILLIS_PER_SECOND: Long = 1_000L
 
 /**
  * In-memory + on-disk state holder for the user's MLS chats.
@@ -2686,6 +2693,12 @@ public class ChatRepository(
         identity: Identity,
         previousMemberKeys: List<String>?,
         currentMemberKeys: List<String>?,
+        /** ADR-0045 UX §6.2.8 item 3 — captured by the CALLER, synchronously,
+         *  beside the post-batch roster snapshot, so the eviction and the
+         *  shrink it caused are judged on the same commit. Passed rather than
+         *  read here because this body runs on [pushScope], by which time
+         *  another batch may have landed. */
+        selfEvicted: Boolean,
     ) {
         val role = rotationRole(group, identity)
         pushScope.launch {
@@ -2697,6 +2710,7 @@ public class ChatRepository(
                     previousMemberKeys = previousMemberKeys,
                     currentMemberKeys = currentMemberKeys,
                     ports = pushRoutingPorts(groupIdHex, group, identity),
+                    selfEvicted = selfEvicted,
                 )
             } catch (_: Throwable) {
                 // best-effort — push is a UX nicety
@@ -2739,6 +2753,29 @@ public class ChatRepository(
     public suspend fun pollGroup(groupIdHex: String, waitSecs: Int = 0) {
         val identity = canonicalIdentity.get() ?: return
         val record = groups[groupIdHex] ?: return
+
+        // ADR-0045 UX §6.2.8 item 1 — the poll must STOP for a group this
+        // device is no longer in, and stopping is not an optimisation.
+        // `unprotect_message` refuses on `!is_active()` before it looks at the
+        // message at all, and the refusal is NOT epoch-scoped, so every fetched
+        // row would raise `UseAfterEviction`, be swallowed by the per-message
+        // catch in [ChatClient.applyFetchedMessages], and advance the cursor —
+        // one warning per row, forever, for a group that will never produce a
+        // readable byte again. A loop that logs a refusal per row per poll is
+        // indistinguishable from a bug, and this platform is the most exposed
+        // of the three: it LONG-polls, so the loop is continuous rather than
+        // event-driven.
+        //
+        // A GATE rather than a disposal, because `pollGroup` is re-entered from
+        // the chat screen's long-poll loop, the Refresh button, the chat list's
+        // `pollAllGroups` and every membership action, and there is no single
+        // job to cancel. It also gates the tail sweep below, which an evicted
+        // device has no business running either.
+        //
+        // The cursor is deliberately left where the last applied row put it
+        // (§6.2.13): it costs nothing, and whether a rejoin wants it reset is
+        // the rejoin path's question, not this one's.
+        if (readIsActive { record.group.isActive() } == false) return
 
         // G-37 — the DS long poll (30 s on the live chat screen) used to be
         // awaited INSIDE the single repository-wide mutex. An open chat screen
@@ -2838,12 +2875,23 @@ public class ChatRepository(
             //
             // Owner-or-admin only, a no-op on growth, on an unchanged roster,
             // and on a torn snapshot. Fire-and-forget.
+            //
+            // ADR-0045 UX §6.2.8 item 3 — and this is the site the finding was
+            // about. `selfEvicted` is snapshotted in the SAME synchronous
+            // region as the post-batch roster, so the eviction and the shrink
+            // it caused are judged on the same commit. Without it
+            // `membershipRotationDecision` sees a member depart (us), reads
+            // `ownRole` from the UNTOUCHED role table — a `Remove` rewrites no
+            // `GroupContext` — and returns ROTATE, after which the device mints
+            // a secret nobody will ever be notified under and the broadcast
+            // throws.
             rotatePushRoutingIfShrankBestEffort(
                 groupIdHex = groupIdHex,
                 group = record.group,
                 identity = identity,
                 previousMemberKeys = membersBeforePoll,
                 currentMemberKeys = memberSignatureKeysOrNull(record.group),
+                selfEvicted = readIsActive { record.group.isActive() } == false,
             )
             publishThreadList()
         }
@@ -2888,8 +2936,20 @@ public class ChatRepository(
         // Snapshot the keys under the map's own monitor — `groups` is a
         // `synchronizedMap`, whose iterators are NOT self-synchronising.
         val groupIds = synchronized(groups) { groups.keys.toList() }
+        // ADR-0045 UX §6.2.8 item 1 — filtered HERE as well as gated inside
+        // [pollGroup], and the reason is a spin rather than a duplicate check:
+        // the chat-list screen drives this in `while (isActive) { … }` and
+        // relies on the long poll for its cadence, so a fleet of groups this
+        // device has all been removed from would return instantly, forever.
+        // Filtering first lets the empty case take one honest long-poll-shaped
+        // pause instead.
+        val active = groupIds.filter { isGroupActive(it) != false }
+        if (active.isEmpty()) {
+            if (waitSecs > 0) delay(waitSecs.toLong() * MILLIS_PER_SECOND)
+            return
+        }
         runPollAllGroups(
-            groupIds = groupIds,
+            groupIds = active,
             concurrency = POLL_ALL_CONCURRENCY,
         ) { groupIdHex ->
             pollGroup(groupIdHex, waitSecs = waitSecs)
@@ -2970,6 +3030,16 @@ public class ChatRepository(
             // prevent.
             try {
                 lastObservedOwnerStore.clearForAccount(accountIdB64)
+            } catch (_: Throwable) {
+                // best-effort
+            }
+            // ADR-0045 UX §6.2.3 — and the durable `leaveRequestedAt` records.
+            // They follow the same per-account reset discipline as the stores
+            // above; they are never pruned with the pending sweep (they have to
+            // outlive it, by construction), so this and `Delete this chat` are
+            // the only two things that discard them.
+            try {
+                leaveRecords.clearForAccount(accountIdB64)
             } catch (_: Throwable) {
                 // best-effort
             }
@@ -3369,6 +3439,179 @@ public class ChatRepository(
         SharedPrefsLastObservedOwnerStore(applicationContext)
     }
 
+    // -----------------------------------------------------------------
+    // ADR-0045 UX §6.2 — the end of your own membership
+    //
+    // Every rule and every string lives in `MembershipEnded.kt`, where the host
+    // suite can run them; what is here is the wiring that feeds them live group
+    // state and performs the teardown they decide.
+    // -----------------------------------------------------------------
+
+    /**
+     * §6.2.3 / §9 — the durable `leaveRequestedAt` record.
+     *
+     * A separate store rather than a field on [pendingRequestObservations],
+     * and the reason is that the failure would be silent: the observation for
+     * a leave lives under `remove:{ownLeaf}` and
+     * [prunePendingRequestObservations] drops it the moment the core stops
+     * holding the request — which is exactly what the sweep that removes us
+     * does. The poll batch carrying the eviction would therefore destroy the
+     * only evidence that we asked for it.
+     */
+    private val leaveRecords: LeaveRecordStore by lazy {
+        SharedPrefsLeaveRecordStore(applicationContext)
+    }
+
+    /**
+     * §6.2.2 — is this device still a member of [groupIdHex]?
+     *
+     * `null` when there is no live record for the id or the handle could not be
+     * read; [membershipState] treats that as still-a-member, because an
+     * unreadable handle is not evidence of an eviction.
+     *
+     * Safe off [providerLock]: `is_active()` is a field read on the in-memory
+     * group state that touches no provider storage, and the FFI `Group` guards
+     * it with its own `Mutex`.
+     */
+    public fun isGroupActive(groupIdHex: String): Boolean? {
+        val record = groups[groupIdHex] ?: return null
+        return readIsActive { record.group.isActive() }
+    }
+
+    /**
+     * §6.2.3 — the stamp at which this device published a self-targeted leave
+     * for [groupIdHex], or `null`.
+     *
+     * `null` is the FAIL-SAFE case and the direction is the point: the fallback
+     * copy is the *removed* one, which is true of someone who left as well, so
+     * a device that lost the record (the ADR-0040 crash window, a reinstall, a
+     * restore) degrades to a sentence that is still correct rather than to one
+     * that is wrong.
+     */
+    public fun leaveRequestedAt(groupIdHex: String): Long? {
+        val accountIdB64 = currentAccountIdB64.get() ?: return null
+        return loadLeaveRequestedAt(leaveRecords, accountIdB64, groupIdHex)
+    }
+
+    /**
+     * §6.2.3 — record that this device published a self-targeted leave.
+     *
+     * Deliberately NOT folded into [noteOwnRequestBestEffort]: that store is
+     * pruned against the core's live pending set on every fold, and this must
+     * outlive the sweep that empties it. Written at PUBLISH, never pruned with
+     * the pending sweep, and discarded only with the group record itself
+     * ([deleteEndedChat]) or the account ([forgetDevice]). First stamp wins.
+     */
+    public fun noteOwnLeaveRequested(groupIdHex: String) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        recordLeaveRequested(
+            store = leaveRecords,
+            accountIdB64 = accountIdB64,
+            groupIdHex = groupIdHex,
+            atMs = System.currentTimeMillis(),
+        )
+    }
+
+    /**
+     * §6.2.8 item 5 — retire THIS device's push subscription for a group it is
+     * no longer in.
+     *
+     * ADR-0043 recorded the evicted member's push-gw row as never deleted
+     * because *"nobody else can delete it and no client has 'you were removed'
+     * handling"*. This is that handling: the endpoint deletes exactly the
+     * `(device, group)` row named in the request and a client knows only its
+     * OWN device pseudonym, so the ex-member is the only party that can end its
+     * own wake stream. It closes the other half of G-36 residual 2 — rotation
+     * stops the group notifying the old id; this stops the ex-member being
+     * subscribed to anything at all.
+     *
+     * **The honest bound:** it needs this device to come online and run it, so
+     * it COMPLEMENTS the group's rotation and replaces nothing. A phone that is
+     * never opened again keeps its row, exactly as before.
+     *
+     * Returns `true` when the teardown is DONE — which includes holding no
+     * secret at all, since then nothing was ever subscribed under a `push_gid`
+     * for this group. `false` means "could not act yet", and the caller keeps
+     * the step owed. [GroupPushRouting.retireOwnSubscription] takes the shared
+     * per-`(account, group)` routing lock (it is the fifth entry point to it)
+     * and never throws.
+     */
+    public suspend fun retirePushSubscriptionAfterEviction(groupIdHex: String): Boolean {
+        val identity = canonicalIdentity.get() ?: return false
+        val record = groups[groupIdHex] ?: return false
+        val accountIdB64 = currentAccountIdB64.get() ?: return false
+        // On IO, like every other push leg (`pushScope` is `Dispatchers.IO`
+        // "because both legs are network-heavy"). AWAITED rather than launched
+        // fire-and-forget, unlike its siblings, because the caller's teardown
+        // latch releases the step on failure and cannot do that without the
+        // answer — and the disk read + push-gw round-trip inside must not run
+        // on the caller's Main-confined collector.
+        return withContext(Dispatchers.IO) {
+            GroupPushRouting.retireOwnSubscription(
+                accountIdB64 = accountIdB64,
+                groupIdHex = groupIdHex,
+                ports = pushRoutingPorts(groupIdHex, record.group, identity),
+            )
+        }
+    }
+
+    /**
+     * §6.2.4 — `Delete this chat`.
+     *
+     * Removes this group's transcript from the message log, its pending-request
+     * observations, its durable leave record, its known-groups entry and its
+     * in-memory record. The REGISTRY row goes LAST, so a failure above leaves
+     * the chat reachable rather than orphaning a transcript behind a row the
+     * user can no longer open.
+     *
+     * **What it does NOT remove, which is why [DELETE_CHAT_BODY] is exact
+     * rather than sweeping:** the inactive MLS group stays in the provider
+     * snapshot as inert bytes. `Group` exposes no delete, so a `Group::delete`
+     * is a real (small) core follow-up rather than something this rides free.
+     *
+     * The push subscription is already gone by this point: the §6.2.8 teardown
+     * retires it at the moment of the eviction, not at the moment of the
+     * delete, so a user who never presses this button still stops being woken.
+     */
+    public fun deleteEndedChat(groupIdHex: String) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        try {
+            MessageLogStore.deleteGroupFromLog(applicationContext, accountIdB64, groupIdHex)
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "ADR-0045 delete chat: message log", cause)
+        }
+        try {
+            prunePendingRequestObservations(
+                store = pendingRequestObservations,
+                accountIdB64 = accountIdB64,
+                groupIdHex = groupIdHex,
+                liveKeys = emptyList(),
+            )
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "ADR-0045 delete chat: observations", cause)
+        }
+        try {
+            leaveRecords.clear(accountIdB64, groupIdHex)
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "ADR-0045 delete chat: leave record", cause)
+        }
+        try {
+            knownGroupsStore.remove(accountIdB64, groupIdHex)
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "ADR-0045 delete chat: known groups", cause)
+        }
+        // LAST, and only after everything above had its chance: dropping the
+        // registry row is what makes the chat unreachable, so it must not
+        // happen while a transcript is still behind it.
+        val removed = synchronized(groups) { groups.remove(groupIdHex) }
+        try {
+            removed?.group?.close()
+        } catch (_: Throwable) {
+            // best-effort — releasing the Rust-side Arc must not fail a delete.
+        }
+        publishThreadList()
+    }
+
     /**
      * The owner signature key (base64) this device last observed for
      * [groupIdHex], or `null` when it never observed one.
@@ -3594,6 +3837,15 @@ public class ChatRepository(
             lastEmittedAtMs = lastBeaconAtMs[groupIdHex],
             nowMs = System.currentTimeMillis(),
             throttle = { rank, last, now -> uniffi.lakko_ffi_uniffi.shouldEmitBeacon(rank, last, now) },
+            // ADR-0045 UX §6.2.8 item 2 — an evicted device must never beacon.
+            // The role table a `Remove` leaves behind still names an evicted
+            // admin an admin, so `ownRank` above came back non-null and the
+            // throttle would say EMIT; the gate is what stops a throwing emit
+            // being retried on every tick. The ticker is stopped too (the
+            // §6.2.8 one-shot teardown), so this is belt and braces — but it is
+            // the half that is a GATE, and the gate is what makes a surviving
+            // ticker harmless rather than merely unlikely.
+            membershipEnded = readIsActive { record.group.isActive() } == false,
         )
         if (verdict != BeaconEmitVerdict.EMIT) return verdict.name
         // Stamped BEFORE the send, so a publish that is slow or that fails
@@ -3665,12 +3917,19 @@ public class ChatRepository(
         // Remove among it means the evicted member still derives the current
         // push_gid. Started strictly AFTER the merge + publish, so the new
         // secret is sealed at the post-removal epoch. Fire-and-forget.
+        //
+        // ADR-0045 UX §6.2.8 item 3 — a sweep CAN carry our own removal: an
+        // admin can sweep a `Leave` it proposed for itself, and an owner-rank
+        // committer sweeps whatever is pending including a `Remove` naming it.
+        // Captured beside the post-sweep roster for the same reason as on the
+        // poll path.
         rotatePushRoutingIfShrankBestEffort(
             groupIdHex = groupIdHex,
             group = record.group,
             identity = identity,
             previousMemberKeys = membersBefore,
             currentMemberKeys = providerLock.withLock { memberSignatureKeysOrNull(record.group) },
+            selfEvicted = readIsActive { record.group.isActive() } == false,
         )
         // ADR-0042 — a swept ADD needs the current routing secret, exactly as
         // the direct add path re-broadcasts it. No-op when this device holds
@@ -4015,9 +4274,14 @@ public class ChatRepository(
     /** Snapshot the per-group state into the public StateFlow.
      *  Called after every mutation. */
     private fun publishThreadList() {
-        val threads = synchronized(groups) {
-            groups.values.map { it.toThread() }
-        }
+        // ADR-0045 UX §6.2 — the record snapshot is taken under the map's
+        // monitor and PROJECTED outside it. `toThread` now touches the `Group`
+        // handle (for `isActive`), and while that read is short and takes only
+        // the handle's own `Mutex`, blocking on it while holding the `groups`
+        // monitor would stall every unrelated lookup behind whatever MLS call
+        // happens to hold the handle.
+        val records = synchronized(groups) { groups.values.toList() }
+        val threads = records.map { it.toThread() }
         mutableState.update { it.copy(threads = threads) }
     }
 
@@ -4054,6 +4318,18 @@ public data class ChatThread(
      *  renders "Read" on its OWN message once every OTHER member's
      *  watermark `>=` that message's id. */
     val readUpToByLeaf: Map<UInt, Long> = emptyMap(),
+    /**
+     * ADR-0045 UX §6.2 — `true` once this device's own membership has ENDED
+     * (`Group.isActive()` is false). Terminal and survives a restart.
+     *
+     * Read off the live handle in [GroupRecord.toThread] rather than tracked as
+     * an event, because nothing in the receive path announces the transition:
+     * `processIncomingVerifyingRoles` returns the same content-less `Commit`
+     * for a commit that removes our own leaf as for any other. A torn read
+     * answers `false` — an unreadable handle is not evidence of an eviction
+     * (see [membershipState]).
+     */
+    val membershipEnded: Boolean = false,
 )
 
 /** One message in a [ChatThread].
@@ -4501,6 +4777,12 @@ private class GroupRecord(
         cursor = cursor,
         typingLeaves = activeTypingLeaves(),
         readUpToByLeaf = readUpToSnapshot(),
+        // ADR-0045 UX §6.2 — safe to read here, unlike `members()`: OpenMLS
+        // `is_active()` is a field read on the in-memory group state and
+        // touches no provider storage, and the FFI `Group` guards it with its
+        // own `Mutex`. So this is the one group-handle read [toThread] can make
+        // outside the repository's `providerLock`.
+        membershipEnded = readIsActive { group.isActive() } == false,
     )
 
     /** Read-only snapshot for the persistence layer. */

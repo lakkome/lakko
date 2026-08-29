@@ -64,7 +64,12 @@ public struct ChatScreen: View {
             messagesList
             // ADR-0024 — typing indicator, just above the input bar.
             // Auto-hides when nobody is typing (the VM nils the text).
-            if let typing = viewModel.typingIndicatorText {
+            //
+            // ADR-0045 UX §6.2.11 — and never on a dead group. No new typing
+            // signal can arrive (nothing decrypts any more), so what would
+            // render is whatever was in flight at the moment of the eviction:
+            // a live indicator over a conversation that has stopped.
+            if let typing = viewModel.typingIndicatorText, !viewModel.membershipHasEnded {
                 HStack(spacing: 6) {
                     Text(typing)
                         .font(.caption)
@@ -143,6 +148,16 @@ public struct ChatScreen: View {
             // Phase 3a9 — audio Call button. Hidden when a call
             // overlay is up (the overlay carries the
             // Accept / Decline / Hang up affordances).
+            //
+            // ADR-0045 UX §6.2.8 item 4 — and GONE once this device's
+            // membership has ended. The per-call SFrame seed comes from
+            // `exportSecret("lakko/call/v1", …)`, which is gated on
+            // `is_active()` and now raises, so the button fails closed — which
+            // is correct, and is not enough. A button that always errors is the
+            // shape §6.1.1 rejects, and §6.2.11 forbids any live indicator on a
+            // dead group for a stronger reason: a call control asserts a live
+            // E2EE session, and there is not one.
+            if !viewModel.membershipHasEnded {
             ToolbarItem(placement: .navigationBarTrailing) {
                 Button {
                     // A group chat (>2 members) routes through the SFU
@@ -160,7 +175,8 @@ public struct ChatScreen: View {
             // Video-call button — starts the call with the local
             // camera published (`config.video`). Group chats publish
             // SFrame-sealed video through the SFU; a 1×1 chat opens a
-            // P2P video call.
+            // P2P video call. Withdrawn with its sibling above once the
+            // membership has ended (§6.2.8 item 4).
             ToolbarItem(placement: .navigationBarTrailing) {
                 Button {
                     if viewModel.isGroupChat {
@@ -173,9 +189,13 @@ public struct ChatScreen: View {
                 }
                 .disabled(viewModel.activeCall != nil || viewModel.activeSfuCall != nil)
             }
+            }
         }
         .sheet(isPresented: $viewModel.membersPanelOpen) {
-            MembersSheet(viewModel: viewModel)
+            // ADR-0045 UX §6.2.4 — a deleted chat's row is gone from the
+            // registry, so the screen it was opened from has nothing left to
+            // show. Route back the same way the Back button does.
+            MembersSheet(viewModel: viewModel, onDeleted: onBack)
         }
         .task {
             // Continuous foreground polling. SwiftUI's `.task`
@@ -183,7 +203,13 @@ public struct ChatScreen: View {
             // appear + cancels automatically on disappear. Mirror
             // of the Compose `LaunchedEffect(Unit) { while
             // (isActive) }` pattern from Android 1.15e7.
-            while !Task.isCancelled {
+            // ADR-0045 UX §6.2.8 item 1 — and stop entirely once this device's
+            // membership has ended. The repository refuses the fetch, so
+            // `pollOnceLongPoll` would return IMMEDIATELY instead of parking on
+            // its ~30 s long poll, and this loop would spin. The condition is
+            // checked before each iteration rather than only once, because the
+            // eviction can land on a poll this loop itself drove.
+            while !Task.isCancelled, viewModel.pollLoopShouldContinue {
                 await viewModel.pollOnceLongPoll()
                 await Task.yield()
             }
@@ -343,6 +369,40 @@ public struct ChatScreen: View {
                             .id(message.messageId)
                         }
                     }
+                    // ADR-0045 UX §6.2.5 — the terminal row.
+                    //
+                    // It goes in the TIMELINE, not in a banner, and §10 already
+                    // says why: "only outcomes belong in the timeline" — and
+                    // this is an outcome, one that happened at a definite point
+                    // in the transcript. A row marks WHERE the history stops,
+                    // survives scrollback and needs no dismissal state.
+                    //
+                    // It renders after the list rather than inside it because
+                    // it is not a `ChatMessage`: nothing produced it on the
+                    // wire (the removing commit returns the same content-less
+                    // `Commit` as any other), and the state is terminal, so
+                    // "after everything" is the only place it can be.
+                    //
+                    // Carried by TEXT, never by hue or an icon, and never
+                    // announced over what the reader is doing: it arrives
+                    // unbidden, possibly mid-sentence, and interrupting someone
+                    // to tell them they have been removed from a group is the
+                    // wrong register for a fact they cannot act on. SwiftUI's
+                    // only announcement API speaks over the reader, so the
+                    // honest treatment is a grouped element they reach in
+                    // order — the same choice the new-owner notice made.
+                    if let row = viewModel.terminalRowCopy {
+                        VStack(spacing: 4) {
+                            Text(row.headline)
+                            Text(row.consequence)
+                        }
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.top, 8)
+                        .accessibilityElement(children: .combine)
+                    }
                 }
                 .padding(16)
             }
@@ -362,7 +422,13 @@ public struct ChatScreen: View {
     @ViewBuilder
     private var emptyHint: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if viewModel.threadKnown {
+            // ADR-0045 UX §6.2 — the empty-timeline copy invites a send, and
+            // once the membership has ended that is an invitation the composer
+            // below can no longer accept. The terminal row that follows carries
+            // the whole of what there is to say.
+            if viewModel.membershipHasEnded {
+                EmptyView()
+            } else if viewModel.threadKnown {
                 Text("Say hi 👋")
                     .font(.body)
                     .foregroundStyle(.secondary)
@@ -459,8 +525,70 @@ public struct ChatScreen: View {
         }
     }
 
+    /// ADR-0045 UX §6.2.5 — the composer is REPLACED, not disabled, once this
+    /// device's membership has ended.
+    ///
+    /// §5.3 argues a pending row's `Remove` must stay visible-but-disabled,
+    /// because hiding it would read as the permission having vanished when it
+    /// is merely suspended. The permission here has vanished, permanently and
+    /// by design, so the rule inverts: disable while the state is TRANSIENT,
+    /// replace when it is TERMINAL. A disabled Send button on a group you will
+    /// never be in again is a control promising a future it does not have.
     @ViewBuilder
     private var composer: some View {
+        switch viewModel.composerSlot {
+        case .composer:
+            liveComposer
+        case .withdrawn(let notice, let draft, let draftLabel):
+            withdrawnComposer(notice: notice, draft: draft, draftLabel: draftLabel)
+        }
+    }
+
+    /// The bar that occupies the composer's own slot so the layout does not
+    /// jump. Static text inside that region rather than a live announcement, so
+    /// a VoiceOver user reaching the place they type hears why they cannot,
+    /// rather than discovering an absence.
+    @ViewBuilder
+    private func withdrawnComposer(
+        notice: String,
+        draft: String?,
+        draftLabel: String?
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            // The unsent draft, preserved because the commit can land
+            // mid-sentence and silently discarding what the user typed is a
+            // small data loss with no upside.
+            //
+            // `Text` + `.textSelection(.enabled)`, NEVER a disabled `TextField`:
+            // this is the iOS expression of the cross-platform shape §6.2.5
+            // specifies — SELECTABLE, non-editable text. A disabled SwiftUI
+            // `TextField` is not selectable at all, so the user would see their
+            // own words and be unable to copy them out, which is exactly why
+            // the spec names a shape rather than a widget. The treatment
+            // matches the invite-link row in the members sheet, which is
+            // already selectable-not-editable for the same reason.
+            if let draft, let draftLabel {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(draftLabel)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text(draft)
+                        .font(.footnote)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            Text(notice)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(12)
+        .background(Color(.systemBackground))
+    }
+
+    @ViewBuilder
+    private var liveComposer: some View {
         VStack(spacing: 8) {
             if let err = viewModel.sendError {
                 Text(err)
@@ -1089,6 +1217,17 @@ private struct MembersSheet: View {
     /// outside this view may open it.
     @State private var leaveConfirmPresented = false
 
+    /// ADR-0045 UX §6.2.4 — the `Delete this chat` confirmation. Separate state
+    /// from the leave confirmation rather than a shared flag, because the two
+    /// controls are never offered at the same time and sharing one would make
+    /// that an assumption rather than a fact.
+    @State private var deleteConfirmPresented = false
+
+    /// What the screen does after the chat is gone: the row it was reached from
+    /// no longer exists, so staying on it would leave the user looking at a
+    /// thread the registry has forgotten. Supplied by the presenting screen.
+    var onDeleted: () -> Void = {}
+
     private var trimmedInput: String {
         viewModel.addMemberInput.trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -1258,6 +1397,30 @@ private struct MembersSheet: View {
                         }
                     }
                 }
+                // ADR-0045 UX §6.2.7 — the roster stays, READ-ONLY, and carries
+                // one line saying so.
+                //
+                // It stays because it is the last thing you knew about who you
+                // were in a group with, it is genuinely informative next to a
+                // frozen transcript, and it is still readable: `members()` is a
+                // plain read of the public group with no state gate.
+                //
+                // The line is a statement about the LIST, not about any row in
+                // it, and that is load-bearing rather than stylistic. A
+                // `Remove` rewrites no `GroupContext`, so the role table is
+                // untouched and a removed admin's frozen roster still names
+                // them an admin — nothing here may present that as a live role.
+                // "Stopped updating" is the literal truth (the local view is
+                // frozen at the removing epoch and never moves again) rather
+                // than a euphemism for it, and it is deliberately neutral
+                // between having left and having been removed.
+                if viewModel.membershipHasEnded {
+                    Section {
+                        Text(frozenRosterHeader)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
                 Section(memberCountLabel) {
                     ForEach(viewModel.members, id: \.leafIndex) { member in
                         HStack {
@@ -1324,6 +1487,33 @@ private struct MembersSheet: View {
                 switch viewModel.exitBlockState {
                 case .hidden:
                     EmptyView()
+                // ADR-0045 UX §6.2.4 / §6.2.7 — once the membership has ended,
+                // both of the other controls are gone (one names a group the
+                // reader is not in, the other is owner-only and they are not)
+                // and the block holds `Delete this chat` instead.
+                //
+                // This slot is the right home by §6.1.1's own argument: the
+                // block's meaning is *the exit*, and once you are out the only
+                // exit-shaped action left is closing the door behind you. A
+                // permanently dead row with no action available is its own
+                // defect — everything else about this state is "you cannot",
+                // and this is the one thing they still can.
+                //
+                // It is also the ONE control in this whole design that destroys
+                // user data on request. Everything else in §6.2 removes a claim
+                // the UI should not have been making; this removes a transcript
+                // that exists nowhere else, on one confirmation, with no undo
+                // and no export. The confirmation says so in as many words, and
+                // that is the only protection there is.
+                case .ended:
+                    Section {
+                        Button(role: .destructive) {
+                            deleteConfirmPresented = true
+                        } label: {
+                            Text(deleteChatControl)
+                        }
+                        .disabled(viewModel.membershipBusy)
+                    }
                 case .owner(let transfer, let leave):
                     Section {
                         // NOT destructive-styled at rest. Red would file it with
@@ -1404,6 +1594,31 @@ private struct MembersSheet: View {
                     "You will keep receiving messages until an owner or an admin applies "
                         + "your request. You will need a new invite to rejoin."
                 )
+            }
+            // ADR-0045 UX §6.2.4 — the body is exact rather than sweeping, and
+            // the precision is load-bearing: the messages really are gone, and
+            // the dead MLS handle is not. `Group` exposes no delete, so the
+            // inactive group's state stays in the provider snapshot as inert
+            // bytes — inert in the strong sense (it cannot send, decrypt,
+            // export or process) but not nothing.
+            .confirmationDialog(
+                deleteChatTitle,
+                isPresented: $deleteConfirmPresented,
+                titleVisibility: .visible
+            ) {
+                Button("Delete", role: .destructive) {
+                    // Close the sheet and leave the thread only when the delete
+                    // actually landed; a refusal leaves the panel open with the
+                    // error slot filled, rather than dropping the user out of a
+                    // chat that is still there.
+                    if viewModel.onDeleteChat() {
+                        viewModel.membersPanelOpen = false
+                        onDeleted()
+                    }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text(deleteChatBody)
             }
             .navigationTitle("Members")
             .navigationBarTitleDisplayMode(.inline)

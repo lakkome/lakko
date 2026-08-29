@@ -266,13 +266,30 @@ private struct ThreadRow: View {
                             .foregroundStyle(.secondary)
                     }
                 }
-                Text(lastMessagePreview)
+                // ADR-0045 UX §6.2.4 — the chat STAYS in the list and gains one
+                // muted line, in the slot the last-message preview already
+                // occupies (§5.2 uses the same slot for pending annotations).
+                //
+                // It stays because removing it would delete a transcript the
+                // user still has, with no warning, as a side effect of
+                // something somebody else did — the single worst thing in this
+                // design's reach. The row keeps its position, its label and its
+                // flags: `pinned` / `muted` / `archived` are deliberately
+                // untouched, because auto-archiving would be the client
+                // silently reorganising the user's list on their behalf, and
+                // archive is a decision, not a consequence.
+                Text(endedLine ?? lastMessagePreview)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
             Spacer()
-            if unread > 0 {
+            // ADR-0045 UX §6.2.4 / §6.2.11 — the row goes QUIET. An unread
+            // badge asserts a conversation that can still move, and this one
+            // cannot: nothing new will ever decrypt, so whatever count is
+            // standing is frozen at the moment of the eviction and would sit
+            // there for good.
+            if unread > 0, endedLine == nil {
                 // Pill badge. Muted threads render a hollow
                 // ring instead of the filled accent fill so a
                 // muted-but-unread row still surfaces a hint
@@ -296,6 +313,19 @@ private struct ThreadRow: View {
         .padding(.vertical, 4)
         .contentShape(Rectangle())
         .opacity(flags?.archived == true ? 0.6 : 1)
+    }
+
+    /// ADR-0045 UX §6.2.4 — the ended line, or `nil` while the reader is still
+    /// a member.
+    ///
+    /// The `left` / `removed` distinction deliberately does NOT reach this line
+    /// (§6.2.4 gives it one string): the list is a glance surface and the
+    /// distinction belongs in the transcript's terminal row, where the durable
+    /// record is read. Passing `nil` for the record here is therefore not a
+    /// shortcut — ``chatListLine(_:)`` returns the same string either way.
+    private var endedLine: String? {
+        chatListLine(
+            membershipState(isActive: !thread.membershipEnded, leaveRequestedAtMs: nil))
     }
 
     private var lastMessagePreview: String {
