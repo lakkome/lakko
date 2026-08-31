@@ -8,9 +8,16 @@ import SwiftUI
 ///
 /// A non-member opens an owner's `https://lakko.me/g/<slug>` link; this screen
 /// decodes + verifies the `GroupInviteCapability`, posts an external-join
-/// proposal (ADR-0027) to the group journal, and polls until an admin approves
-/// and the rendezvous Welcome lands, then surfaces "Joined". The link conveys
-/// only the `group_id`; the admin approval gate is the security boundary.
+/// proposal (ADR-0027) to the group journal, and polls until the rendezvous
+/// Welcome lands, then surfaces "Joined". The link conveys only the `group_id`;
+/// the admin approval gate is the security boundary.
+///
+/// **The wait is TWO-stage since ADR-0045 S7, and the copy says so.** An
+/// admin's approve no longer admits anyone by itself: it publishes an `Add`
+/// proposal, and the rendezvous appears only once a committer sweeps that
+/// proposal into a commit — a step ADR-0045 decision 2 gives no deadline. So
+/// this poll spans both stages, and promising immediacy here would be the
+/// optimistic-update lie the UX spec forbids.
 @MainActor
 public final class JoinGroupLandingViewModel: ObservableObject {
     /// Local FSM. `requesting` → `waiting` (poll loop) → `joined` / `failed`.
@@ -107,7 +114,8 @@ public struct JoinGroupLandingScreen: View {
             case .requesting:
                 ProgressView("Sending request…")
             case .waiting:
-                ProgressView("Waiting for an admin to approve…")
+                ProgressView(
+                    "Waiting for an admin to approve, then for the change to be applied…")
             case .joined:
                 Text("Joined! You can find the group in your chats.")
                     .multilineTextAlignment(.center)

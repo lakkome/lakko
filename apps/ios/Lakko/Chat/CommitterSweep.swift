@@ -144,6 +144,18 @@ public struct SweepDurableEntry: Equatable {
     public var commitB64: String
     public var welcomeEnvelopeB64: String?
     public var welcomeMailboxesB64: [String]
+    /// ADR-0045 S7 — the wrapped `WelcomeRendezvous` bytes, one per member this
+    /// sweep adds, to publish to the GROUP JOURNAL.
+    ///
+    /// A list of whole envelopes rather than a list of addresses, because
+    /// unlike the mailbox fan-out — one Welcome envelope sent to N pseudonyms —
+    /// a rendezvous BINDS the added member's signature key into its own bytes,
+    /// so every recipient gets different bytes.
+    ///
+    /// Recorded here, before any publish, for the same reason the mailboxes
+    /// are: a restart must re-publish the very bytes this sweep computed rather
+    /// than recompute them from a roster that has since moved on.
+    public var welcomeRendezvousB64: [String]
     /// The DS id of the published commit, recorded alongside the welcomes-owed
     /// marker. Diagnostics only — it is carried so the eventual ack can name the
     /// commit it belongs to rather than inventing one. `nil` until the verdict
@@ -155,12 +167,14 @@ public struct SweepDurableEntry: Equatable {
         commitB64: String,
         welcomeEnvelopeB64: String? = nil,
         welcomeMailboxesB64: [String] = [],
+        welcomeRendezvousB64: [String] = [],
         commitMessageId: Int64? = nil
     ) {
         self.id = id
         self.commitB64 = commitB64
         self.welcomeEnvelopeB64 = welcomeEnvelopeB64
         self.welcomeMailboxesB64 = welcomeMailboxesB64
+        self.welcomeRendezvousB64 = welcomeRendezvousB64
         self.commitMessageId = commitMessageId
     }
 }
@@ -371,6 +385,18 @@ public struct SweepPorts {
     /// Wrap the raw Welcome in the stranger-inbox envelope the recipient's
     /// mailbox poll expects (`wrapEnvelope(kind: .welcome, body:)`).
     public var wrapWelcome: (Data) -> Data
+    /// ADR-0045 S7 — wrap the raw Welcome into the `WelcomeRendezvous` envelope
+    /// the group journal carries (`wrapWelcomeRendezvous(joinerSignatureKey:welcome:)`).
+    ///
+    /// Needed because an added member may have arrived through a `/g/` invite
+    /// link, and such a joiner polls the GROUP JOURNAL for a rendezvous matching
+    /// its own signature key — it has no mailbox relationship with this group
+    /// and never looks at one. Since S7 the approve is an ordinary `Add`
+    /// proposal, indistinguishable on the wire from adding a contact, so the
+    /// sweep CANNOT tell which of its adds came from a link — and making them
+    /// distinguishable would undo the property that makes S7 sound. It
+    /// therefore wraps one per added key, origin-blind.
+    public var wrapRendezvous: (Data, Data) throws -> Data
     /// Echo-suppress a row this device published, so its own next poll drops it
     /// instead of hitting `CannotDecryptOwnMessage`.
     public var markOwnPublished: (Int64) -> Void
@@ -395,6 +421,7 @@ public struct SweepPorts {
         cursor: SweepCursorRef,
         welcomeMailbox: @escaping (Data) throws -> Data,
         wrapWelcome: @escaping (Data) -> Data,
+        wrapRendezvous: @escaping (Data, Data) throws -> Data,
         markOwnPublished: @escaping (Int64) -> Void,
         persist: @escaping () -> Void,
         persistApplied: @escaping () throws -> Void
@@ -406,6 +433,7 @@ public struct SweepPorts {
         self.cursor = cursor
         self.welcomeMailbox = welcomeMailbox
         self.wrapWelcome = wrapWelcome
+        self.wrapRendezvous = wrapRendezvous
         self.markOwnPublished = markOwnPublished
         self.persist = persist
         self.persistApplied = persistApplied
@@ -748,12 +776,22 @@ private func publishAndAdjudicate(
             for key in staged.addedSignatureKeys {
                 mailboxes.append(base64Encode(try ports.welcomeMailbox(key)))
             }
+            // ADR-0045 S7 — one rendezvous per added key, from the SAME Welcome.
+            // The keys come from the staged commit's own `swept()`, so this
+            // addresses exactly the members the commit adds.
+            var rendezvous: [String] = []
+            if let welcome = staged.welcome {
+                for key in staged.addedSignatureKeys {
+                    rendezvous.append(base64Encode(try ports.wrapRendezvous(key, welcome)))
+                }
+            }
             let wrapped = staged.welcome.map { ports.wrapWelcome($0) }
             let fresh = SweepDurableEntry(
                 id: ports.outbox.newEntryId(),
                 commitB64: base64Encode(staged.commit),
                 welcomeEnvelopeB64: wrapped.map { base64Encode($0) },
-                welcomeMailboxesB64: mailboxes
+                welcomeMailboxesB64: mailboxes,
+                welcomeRendezvousB64: rendezvous
             )
             try ports.outbox.record(fresh)
             entry = fresh
@@ -814,7 +852,7 @@ private func publishAndAdjudicate(
     // publishing now is correct with or without it, and refusing to publish
     // because a bookkeeping write failed would manufacture the very ghost member
     // this records against.
-    if entry.welcomeEnvelopeB64 != nil {
+    if entry.welcomeEnvelopeB64 != nil || !entry.welcomeRendezvousB64.isEmpty {
         do {
             try ports.outbox.markWelcomesOwed(entry.id, commitMessageId)
         } catch {
@@ -941,12 +979,19 @@ private func publishWelcomes(
     ports: SweepPorts,
     entry: SweepDurableEntry
 ) async throws -> [Int64] {
-    guard let welcomeB64 = entry.welcomeEnvelopeB64,
-          let bytes = base64Decode(welcomeB64) else { return [] }
     var ids: [Int64] = []
-    for mailboxB64 in entry.welcomeMailboxesB64 {
-        guard let pseudonym = base64Decode(mailboxB64) else { continue }
-        ids.append(try await ports.journal.publishMailbox(pseudonym, bytes))
+    if let welcomeB64 = entry.welcomeEnvelopeB64, let bytes = base64Decode(welcomeB64) {
+        for mailboxB64 in entry.welcomeMailboxesB64 {
+            guard let pseudonym = base64Decode(mailboxB64) else { continue }
+            ids.append(try await ports.journal.publishMailbox(pseudonym, bytes))
+        }
+    }
+    // ADR-0045 S7 — then the group-journal rendezvous, one per added key. A
+    // `/g/` joiner reads only this; a contact added the ordinary way reads only
+    // the mailbox. The sweep publishes both because it cannot tell them apart.
+    for rendezvousB64 in entry.welcomeRendezvousB64 {
+        guard let bytes = base64Decode(rendezvousB64) else { continue }
+        ids.append(try await ports.journal.publishGroup(bytes))
     }
     return ids
 }

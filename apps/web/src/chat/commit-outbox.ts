@@ -6,8 +6,7 @@
  *
  * ## Why this exists
  *
- * The four group-membership commit paths (add / remove / role-change /
- * external-join-approve) each run: core create-commit (which eagerly merges
+ * The four group-membership commit paths (add / remove / role-change) each run: core create-commit (which eagerly merges
  * epoch N -> N+1 in the in-memory OpenMLS provider) -> publish the commit (and,
  * for add / approve, a Welcome / rendezvous) to the Delivery Service -> persist
  * the N+1 snapshot best-effort. A crash — or a swallowed persist failure — in the
@@ -56,8 +55,15 @@
 
 import { OUTBOX_STORE, awaitTx, openMlsDb } from "./mls-store";
 
-/** The re-publish destination of an entry's second artifact. */
-export type SecondArtifactKind = "welcome" | "rendezvous";
+/**
+ * The re-publish destination of a DIRECT-path entry's second artifact.
+ *
+ * One member since ADR-0045 S7. The external-join approve used to write a
+ * `"rendezvous"` entry riding the group journal; it is a proposal now, so it
+ * commits nothing, records nothing, and the sweep owns every rendezvous
+ * (`chat/sweep.ts`).
+ */
+export type SecondArtifactKind = "welcome";
 
 /**
  * One durable pending-commit record. The primary key is `id` (a random hex
@@ -78,16 +84,14 @@ export interface PendingCommitEntry {
   targetEpoch: string;
   /** base64 of the EXACT commit wire-bytes the core create-commit produced. */
   commitB64: string;
-  /** base64 of the second artifact's EXACT publishable wire-bytes — for
-   *  `"welcome"` the `wrapEnvelope(KIND_WELCOME, welcome)` mailbox envelope, for
-   *  `"rendezvous"` the `wrapWelcomeRendezvous(...)` group-journal bytes. Absent
-   *  for remove / role (they publish only the commit). */
+  /** base64 of the second artifact's EXACT publishable wire-bytes — the
+   *  `wrapEnvelope(KIND_WELCOME, welcome)` mailbox envelope. Absent for
+   *  remove / role (they publish only the commit). */
   secondArtifactB64?: string;
   /** Discriminates the second artifact's re-publish destination. */
   secondArtifactKind?: SecondArtifactKind;
-  /** base64 of the recipient mailbox pseudonym — the `ds.publishMailbox` target
-   *  for a `"welcome"` second artifact. Absent for `"rendezvous"` (that rides the
-   *  group journal, addressed by `groupId`). */
+  /** base64 of the recipient mailbox pseudonym — the `ds.publishMailbox`
+   *  target for the second artifact. Absent when there is no second artifact. */
   secondArtifactMailboxB64?: string;
   /**
    * ADR-0045 — this entry belongs to a STAGED sweep, so its commit is on the
@@ -133,6 +137,17 @@ export interface PendingCommitEntry {
    * under a single Welcome. Empty when the sweep carried no add.
    */
   welcomeMailboxesB64?: string[];
+  /**
+   * ADR-0045 S7 — the sweep's group-journal `WelcomeRendezvous` envelopes, one
+   * per member the sweep adds.
+   *
+   * Whole envelopes rather than addresses, because a rendezvous binds the added
+   * member's signature key into its own bytes — so unlike the single Welcome
+   * envelope fanned out to N mailboxes above, every recipient gets different
+   * bytes. Recorded before any publish so a restart re-publishes exactly what
+   * this sweep computed. Empty when the sweep carried no add.
+   */
+  welcomeRendezvousB64?: string[];
   /** `false` until BOTH artifacts have (re)published. An un-acked entry is swept
    *  on restart / group-open. */
   acked: boolean;

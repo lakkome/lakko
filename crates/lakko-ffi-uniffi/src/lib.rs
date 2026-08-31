@@ -506,10 +506,15 @@ pub struct WelcomeRendezvous {
     pub welcome: Vec<u8>,
 }
 
-/// Wrap an approved joiner's Welcome into a rendezvous envelope the admin posts
-/// to the group journal (ADR-0027 Phase 3). `joiner_signature_key` is the
-/// approved proposal ref; `welcome` is the `AddMember.welcome` from
-/// `approveExternalJoin`.
+/// Wrap an approved joiner's Welcome into a rendezvous envelope the sweeping
+/// device posts to the group journal (ADR-0027 Phase 3). `joiner_signature_key`
+/// is the added member's signature key; `welcome` is the `StagedSweep.welcome`
+/// the ADR-0045 sweep produced (or, on a `PublisherGroup`, the
+/// `AddMember.welcome` from its direct `approveExternalJoin`).
+///
+/// **A sweep cannot tell which of its adds came from a `/g/` link** — that is
+/// what makes an approval indistinguishable from an ordinary add, and it is
+/// deliberate — so the caller wraps one envelope per added key, origin-blind.
 ///
 /// # Errors
 ///
@@ -817,8 +822,9 @@ impl Identity {
     /// A non-member crafts an external Add proposal for a group's current
     /// `group_id` + `epoch` (learned out-of-band via a join ticket). The
     /// returned wire bytes are posted to the group journal; an owner/admin
-    /// approves via `Group.approveExternalJoin`, producing a Welcome the joiner
-    /// opens via `Group.joinFromWelcome`. The proposal embeds a fresh KeyPackage
+    /// approves via `Group.approveExternalJoin`, and whichever device then
+    /// sweeps produces the Welcome the joiner opens via
+    /// `Group.joinFromWelcome`. The proposal embeds a fresh KeyPackage
     /// whose private keys persist in this identity's provider, so the SAME
     /// identity must later open the Welcome.
     pub fn create_external_join_proposal(
@@ -974,24 +980,39 @@ impl Group {
         Ok(group::encode_message(&commit)?)
     }
 
-    /// Approve a retained external-join proposal — adds the joiner to the group
-    /// (ADR-0027, G-3). `proposal_ref` is the joiner's signature key from a
+    /// Approve a retained external-join request — **proposes** adding the
+    /// joiner (ADR-0027 G-3, on the ADR-0045 proposal path since S7).
+    /// `proposal_ref` is the joiner's signature key from a
     /// `ProcessedMessage::ExternalJoinProposal` or
-    /// [`Self::pending_external_joins`]. Role-gated to owner/admin (fail-closed
-    /// on a group with a role table); returns the Commit to broadcast + the
-    /// joiner's Welcome to deliver to them.
+    /// [`Self::pending_external_joins`].
+    ///
+    /// **Returns the wire-encoded Proposal to publish — not a Commit, and no
+    /// Welcome.** The epoch does not advance; the Welcome is produced by
+    /// whichever device sweeps this into a commit
+    /// ([`Self::commit_pending_proposals`] / [`Self::stage_pending_proposals`],
+    /// whose `welcome` the sweeping device posts as a `WelcomeRendezvous` for
+    /// each added key). That is the whole of S7: two admins approving two
+    /// joiners against one epoch used to eagerly merge two commits and fork the
+    /// group; now they compose into one sweep.
+    ///
+    /// The approval goes on the wire as an ordinary admin-authored `Add` — the
+    /// admin's own MLS-authenticated signature *is* the approval — so it is
+    /// indistinguishable from adding a contact and needs no new authorisation
+    /// channel. The joiner's own external proposal is still never stored and
+    /// never committed: a stranger with a `/g/` link may only ask.
+    ///
+    /// Role-gated to owner/admin, locally and again by every peer. A refused
+    /// approve emits nothing and leaves the request pending, so it can be
+    /// retried. A group with no role table has no committer and is refused —
+    /// see [`PublisherGroup::approve_external_join`], whose return type differs
+    /// because its outcome does.
     pub fn approve_external_join(
         &self,
         identity: &Identity,
         proposal_ref: Vec<u8>,
-    ) -> Result<AddMember, FfiError> {
+    ) -> Result<Vec<u8>, FfiError> {
         let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
-        let MemberAddition { commit, welcome } =
-            g.approve_external_join(&identity.inner, &proposal_ref)?;
-        Ok(AddMember {
-            commit: group::encode_message(&commit)?,
-            welcome: group::encode_message(&welcome)?,
-        })
+        Ok(g.approve_external_join(&identity.inner, &proposal_ref)?)
     }
 
     /// Reject a retained external-join proposal — discards it locally without
@@ -1265,10 +1286,11 @@ impl Group {
     /// Incoming messages are unaffected.
     ///
     /// Every eager path leaves this `false` — [`Self::add_member_from_wire`],
-    /// [`Self::remove_member`], [`Self::set_group_roles`],
-    /// [`Self::approve_external_join`] and [`Self::commit_pending_proposals`]
-    /// all merge before they return — which is why a rollback here can never
-    /// reach a path that never had one.
+    /// [`Self::remove_member`], [`Self::set_group_roles`] and
+    /// [`Self::commit_pending_proposals`] all merge before they return — which
+    /// is why a rollback here can never reach a path that never had one.
+    /// [`Self::approve_external_join`] left that list with ADR-0045 S7: it
+    /// merges nothing, because it commits nothing.
     pub fn has_staged_sweep(&self) -> Result<bool, FfiError> {
         let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
         Ok(g.has_staged_sweep())
@@ -1794,17 +1816,24 @@ impl PublisherGroup {
         Ok(g.inner().pending_external_joins())
     }
 
-    /// ADR-0028 OQ3 — approve a retained co-publisher external-join (role-gated
-    /// owner/admin); returns the Commit + the joiner's Welcome.
+    /// ADR-0028 OQ3 — approve a retained co-publisher external-join; returns
+    /// the Commit + the joiner's Welcome, as it always has.
+    ///
+    /// **This is the direct approve, and this is the only type it survives on**
+    /// (ADR-0045 S7). A PublisherGroup carries no ADR-0022 role table, so it has
+    /// no committer to sweep a proposal, and ADR-0045 leaves such a group on
+    /// direct commits. The return type is the difference and it is deliberate:
+    /// [`Group::approve_external_join`] hands back proposal bytes and no
+    /// Welcome, this hands back a merged Commit and a Welcome to deliver now,
+    /// and neither can be used where the other is expected.
     pub fn approve_external_join(
         &self,
         identity: &Identity,
         proposal_ref: Vec<u8>,
     ) -> Result<AddMember, FfiError> {
         let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
-        let MemberAddition { commit, welcome } = g
-            .inner_mut()
-            .approve_external_join(&identity.inner, &proposal_ref)?;
+        let MemberAddition { commit, welcome } =
+            g.approve_external_join(&identity.inner, &proposal_ref)?;
         Ok(AddMember {
             commit: group::encode_message(&commit)?,
             welcome: group::encode_message(&welcome)?,
@@ -4252,6 +4281,119 @@ mod tests {
         let charlie_g = Group::join_from_welcome(add_charlie.welcome, &charlie).unwrap();
 
         ((alice, alice_g), (bob, bob_g), (charlie, charlie_g))
+    }
+
+    /// ADR-0045 **S7** across the UniFFI boundary: `approveExternalJoin` hands
+    /// back a **Proposal**, not a Commit, and the Welcome the joiner needs comes
+    /// out of the sweep instead.
+    ///
+    /// This is the shape every client mirror is built from, so it is asserted
+    /// on the FFI types rather than inferred from the core: the return value is
+    /// bytes a caller publishes, the epoch does not move, and the joiner opens
+    /// the Welcome the *sweep* produced.
+    #[test]
+    fn approving_an_external_join_yields_a_proposal_and_the_sweep_yields_the_welcome() {
+        let ((alice, alice_g), (bob, bob_g), _charlie) = adr0045_trio();
+        let dave = Identity::new("dave".into()).unwrap();
+
+        // A stranger asks, against the group's current epoch.
+        let request = dave
+            .create_external_join_proposal(alice_g.group_id().unwrap(), alice_g.epoch().unwrap())
+            .unwrap();
+        let seen = alice_g
+            .process_incoming_verifying_roles(&alice, request)
+            .unwrap();
+        let ProcessedMessage::ExternalJoinProposal {
+            joiner_signature_key,
+        } = seen
+        else {
+            panic!("expected an ExternalJoinProposal, got {seen:?}");
+        };
+        assert_eq!(
+            alice_g.pending_external_joins().unwrap(),
+            vec![joiner_signature_key.clone()],
+        );
+
+        // The approve is a proposal: bytes to publish, and no epoch advance.
+        let epoch_before = alice_g.epoch().unwrap();
+        let approval = alice_g
+            .approve_external_join(&alice, joiner_signature_key)
+            .unwrap();
+        assert!(!approval.is_empty());
+        assert_eq!(alice_g.epoch().unwrap(), epoch_before);
+        assert_eq!(alice_g.pending_proposals().unwrap().len(), 1);
+
+        // On the wire it is an ordinary admin-authored Add: bob's receipt gate
+        // stores it and cannot tell it came from a `/g/` link.
+        let received = bob_g
+            .process_incoming_verifying_roles(&bob, approval)
+            .unwrap();
+        let ProcessedMessage::Proposal { record } = received else {
+            panic!("expected a Proposal, got {received:?}");
+        };
+        assert!(record.stored);
+        assert!(matches!(record.kind, ProposalKind::Add { .. }));
+
+        // The sweep is what produces the Welcome.
+        let sweep = alice_g
+            .commit_pending_proposals(&alice)
+            .unwrap()
+            .expect("a commit was produced");
+        assert_eq!(sweep.swept.len(), 1);
+        let welcome = sweep
+            .welcome
+            .expect("a sweep carrying an Add has a Welcome");
+        let dave_g = Group::join_from_welcome(welcome, &dave).unwrap();
+        assert_eq!(dave_g.epoch().unwrap(), epoch_before + 1);
+        assert!(alice_g.pending_external_joins().unwrap().is_empty());
+    }
+
+    /// ADR-0045 S7 — a plain member's approve emits nothing at all, rather than
+    /// a proposal its peers happen to drop.
+    #[test]
+    fn a_plain_member_cannot_approve_an_external_join() {
+        let (_alice, _bob, (charlie, charlie_g)) = adr0045_trio();
+        // `Group::create` seeds the owner-only role table, so charlie — added
+        // afterwards and never promoted — is a plain member.
+        assert!(matches!(
+            charlie_g.own_role(&charlie).unwrap(),
+            Some(Role::Member)
+        ));
+
+        let dave = Identity::new("dave".into()).unwrap();
+        let request = dave
+            .create_external_join_proposal(
+                charlie_g.group_id().unwrap(),
+                charlie_g.epoch().unwrap(),
+            )
+            .unwrap();
+        let seen = charlie_g
+            .process_incoming_verifying_roles(&charlie, request)
+            .unwrap();
+        let ProcessedMessage::ExternalJoinProposal {
+            joiner_signature_key,
+        } = seen
+        else {
+            panic!("expected an ExternalJoinProposal, got {seen:?}");
+        };
+
+        let epoch = charlie_g.epoch().unwrap();
+        assert!(
+            charlie_g
+                .approve_external_join(&charlie, joiner_signature_key.clone())
+                .is_err(),
+            "a plain member must not approve",
+        );
+        assert_eq!(charlie_g.epoch().unwrap(), epoch);
+        assert!(
+            charlie_g.pending_proposals().unwrap().is_empty(),
+            "a refused approve must publish no proposal and store none",
+        );
+        assert_eq!(
+            charlie_g.pending_external_joins().unwrap(),
+            vec![joiner_signature_key],
+            "and must leave the request for an admin",
+        );
     }
 
     /// ADR-0045 end to end across the UniFFI boundary: the owner **proposes**

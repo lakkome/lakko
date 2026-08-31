@@ -170,9 +170,16 @@ final class CommitterSweepTests: XCTestCase {
                     return journal.rowsAfter[after] ?? []
                 },
                 publishGroup: { bytes in
-                    group.log.append("publish:commit")
+                    // 0xCE is what the model's `wrapRendezvous` stamps; the next
+                    // byte is the key it was addressed to, so an assertion can
+                    // name WHICH joiner each envelope is for.
+                    let isRendezvous = bytes.first == 0xCE
+                    let kind = isRendezvous
+                        ? "rendezvous:\(String(format: "%02x", bytes.dropFirst().first ?? 0))"
+                        : "commit"
+                    group.log.append("publish:\(isRendezvous ? "rendezvous" : "commit")")
                     if let err = journal.publishThrows { throw err }
-                    journal.published.append(("commit", bytes))
+                    journal.published.append((kind, bytes))
                     journal.nextId += 1
                     return journal.nextId
                 },
@@ -224,6 +231,9 @@ final class CommitterSweepTests: XCTestCase {
             ),
             welcomeMailbox: { key in key.prefix(8) },
             wrapWelcome: { Data([0xE0]) + $0 },
+            wrapRendezvous: { key, welcome in
+                Data([0xCE, key.first ?? 0]) + welcome
+            },
             markOwnPublished: { _ in },
             persist: {},
             // The FAIL-CLOSED persist the verdict apply runs before it advances
@@ -247,7 +257,9 @@ final class CommitterSweepTests: XCTestCase {
             return XCTFail("rank 0 with a pending proposal and an empty journal must sweep, got \(outcome)")
         }
         XCTAssertEqual(addedCount, 1)
-        XCTAssertEqual(welcomeIds.count, 1)
+        // ADR-0045 S7 — two ids per added member: the mailbox Welcome AND the
+        // group-journal `WelcomeRendezvous` a `/g/` joiner polls for.
+        XCTAssertEqual(welcomeIds.count, 2)
         XCTAssertEqual(h.group.epoch, 6, "a merged sweep lands at the epoch the peers reached")
         XCTAssertFalse(h.group.staged, "no verdict may be left owed")
         XCTAssertEqual(h.outbox.acked, ["entry-1"])
@@ -266,7 +278,8 @@ final class CommitterSweepTests: XCTestCase {
         XCTAssertEqual(
             h.log,
             ["fetch", "stage", "record", "publish:commit", "fetch",
-             "merge", "welcomes-owed", "publish:welcome", "ack"],
+             "merge", "welcomes-owed", "publish:welcome",
+             "publish:rendezvous", "ack"],
             "obligation 4 orders record -> publish -> verdict -> merge, and obligation 2 puts "
             + "the Welcome strictly after the merge — with the durable welcomes-owed marker "
             + "in between, so a fan-out that fails is still retryable"
@@ -348,7 +361,10 @@ final class CommitterSweepTests: XCTestCase {
             id: "owed-1",
             commitB64: base64Encode(Data([0xC0, 0x05])),
             welcomeEnvelopeB64: base64Encode(Data([0xE0, 0x11])),
-            welcomeMailboxesB64: [base64Encode(Data([0x09]))]
+            welcomeMailboxesB64: [base64Encode(Data([0x09]))],
+            // ADR-0045 S7 — a real entry always carries this (it is computed and
+            // recorded with the mailboxes, before any publish), so the fixture does too.
+            welcomeRendezvousB64: [base64Encode(Data([0xCE, 0xAA, 0x11]))]
         )
 
         let outcome = try await resolveOwedVerdict(h.ports)
@@ -363,7 +379,8 @@ final class CommitterSweepTests: XCTestCase {
         )
         XCTAssertEqual(
             h.log,
-            ["publish:commit", "fetch", "merge", "welcomes-owed", "publish:welcome", "ack"],
+            ["publish:commit", "fetch", "merge", "welcomes-owed", "publish:welcome",
+             "publish:rendezvous", "ack"],
             "the re-publish is idempotent (peers at N+1 drop the duplicate as wrong-epoch) and "
             + "NO second durable record is written — the entry already exists"
         )
@@ -825,7 +842,7 @@ final class CommitterSweepTests: XCTestCase {
         guard case .welcomesRepublished(let ids, let addedCount) = outcome else {
             return XCTFail("a settled verdict still owing its Welcome must retry it, got \(outcome)")
         }
-        XCTAssertEqual(ids.count, 1)
+        XCTAssertEqual(ids.count, 2, "the mailbox Welcome AND the journal rendezvous")
         XCTAssertEqual(addedCount, 1)
         XCTAssertEqual(h.journal.published.filter { $0.kind == "welcome" }.count, 1)
         XCTAssertEqual(h.outbox.acked, ["entry-1"], "acked, so nothing is owed any more")
@@ -844,7 +861,9 @@ final class CommitterSweepTests: XCTestCase {
         }
         // The verdict is already known — the retry must not stage, publish a
         // second commit, or apply another row to re-read the journal order.
-        XCTAssertEqual(Array(h.log.dropFirst(before)), ["publish:welcome", "ack"])
+        XCTAssertEqual(
+            Array(h.log.dropFirst(before)),
+            ["publish:welcome", "publish:rendezvous", "ack"])
         XCTAssertEqual(h.journal.published.filter { $0.kind == "commit" }.count, 1)
     }
 
@@ -873,7 +892,8 @@ final class CommitterSweepTests: XCTestCase {
         XCTAssertEqual(
             h.log,
             ["fetch", "stage", "record", "publish:commit", "fetch",
-             "merge", "welcomes-owed", "publish:welcome", "ack"]
+             "merge", "welcomes-owed", "publish:welcome",
+             "publish:rendezvous", "ack"]
         )
     }
 
@@ -969,4 +989,91 @@ final class CommitterSweepTests: XCTestCase {
         )
         return ports
     }
+    // MARK: - ADR-0045 S7: a WelcomeRendezvous per added key
+
+    /// S7 moved the external-join approve onto the proposal path, and the
+    /// `/g/` joiner's rendezvous moved with it. That joiner is not a member
+    /// and never reads a mailbox — it polls the GROUP JOURNAL, matching a
+    /// rendezvous envelope against its own signature key — so a sweep that
+    /// publishes only the mailbox fan-out leaves an approved joiner
+    /// permanently unable to join a group that already holds it as a member.
+    func testTheSweepPostsARendezvousForEveryAdd() async throws {
+        let h = makeHarness()
+        h.group.addedKeys = [
+            Data(repeating: 0xA1, count: 32),
+            Data(repeating: 0xA2, count: 32),
+        ]
+
+        _ = try await runCommitterSweep(h.ports)
+
+        // Two adds -> two mailbox welcomes AND two journal rendezvous. The
+        // sweep cannot tell which add came from a `/g/` link — that
+        // indistinguishability is what makes S7 sound — so it posts for both,
+        // origin-blind.
+        XCTAssertEqual(
+            h.journal.published.map(\.kind),
+            ["commit", "welcome", "welcome", "rendezvous:a1", "rendezvous:a2"]
+        )
+    }
+
+    /// A rendezvous published on a commit that then LOSES would let a joiner
+    /// open into a state no other member holds — the three-party fork ADR-0045
+    /// names as strictly worse than the two-party one.
+    func testTheRendezvousWaitsForTheVerdictExactlyLikeTheWelcome() async throws {
+        let h = makeHarness()
+        // The stand-down re-read (before staging) must see an EMPTY journal or
+        // the sweep never stages; the verdict read (after publishing) carries
+        // the foreign commit that takes the order from us.
+        var call = 0
+        let ports = swapFetch(h) { _ in
+            call += 1
+            if call == 1 { return [] }
+            return [
+                SweepJournalRow(
+                    id: 50, payload: Data([FakeGroup.foreignCommitTag]), createdAt: "t-50")
+            ]
+        }
+
+        let outcome = try await runCommitterSweep(ports)
+
+        guard case .lost = outcome else {
+            return XCTFail("a foreign commit below ours must lose the order, got \(outcome)")
+        }
+        XCTAssertEqual(h.journal.published.map(\.kind), ["commit"])
+    }
+
+    /// The rendezvous is recorded durably WITH the Welcome, so a restart
+    /// publishes the very bytes the first attempt computed rather than
+    /// recomputing them from a roster that has since moved on.
+    func testARestartRepublishesTheRendezvousToo() async throws {
+        let h = makeHarness()
+        h.journal.welcomePublishThrows = StubError()
+        do {
+            _ = try await runCommitterSweep(h.ports)
+            return XCTFail("the mailbox fan-out was set to fail")
+        } catch {}
+        XCTAssertEqual(h.journal.published.map(\.kind), ["commit"])
+
+        h.journal.welcomePublishThrows = nil
+        let outcome = try await resolveOwedWelcomes(h.ports)
+
+        guard case .welcomesRepublished = outcome else {
+            return XCTFail("the fan-out was owed, got \(outcome)")
+        }
+        XCTAssertEqual(
+            h.journal.published.map(\.kind),
+            ["commit", "welcome", "rendezvous:aa"]
+        )
+    }
+
+    /// A remove / role sweep carries no add, so it must post no rendezvous.
+    func testASweepWithNoAddPostsNoRendezvous() async throws {
+        let h = makeHarness()
+        h.group.welcome = nil
+
+        _ = try await runCommitterSweep(h.ports)
+
+        XCTAssertEqual(h.journal.published.map(\.kind), ["commit"])
+    }
+
 }

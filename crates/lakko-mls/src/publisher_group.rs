@@ -95,7 +95,7 @@
 //! → the channel seed survives.
 
 use crate::error::{Error, Result};
-use crate::group::{Group, GROUP_ID_LEN};
+use crate::group::{Group, MemberAddition, GROUP_ID_LEN};
 use crate::identity::Identity;
 
 /// MLS-exporter domain-separation label for channel content
@@ -456,6 +456,40 @@ impl PublisherGroup {
         self.inner.self_update(identity)
     }
 
+    /// Approve a retained co-publisher external-join request (ADR-0028 OQ3),
+    /// returning the Commit to broadcast + the joiner's Welcome.
+    ///
+    /// **This is the direct-commit approve, and this type is the only place it
+    /// survives ADR-0045 S7.** A PublisherGroup is built by
+    /// [`Group::create_with_id`], which deliberately seeds no ADR-0022 role
+    /// table — so it has no owner, no admin set and therefore no committer to
+    /// sweep a proposal. ADR-0045 leaves such a group on direct commits rather
+    /// than inventing a committer for it, and the fork S7 closes is not
+    /// reachable here for the same reason it is not closable: there is no
+    /// designated committer to elect. The publisher fan-out already serialises
+    /// on the channel owner.
+    ///
+    /// The **type** is the difference, and it is deliberate: this returns a
+    /// [`MemberAddition`] — a commit that has already merged, with a Welcome to
+    /// hand the joiner now — where [`Group::approve_external_join`] returns
+    /// proposal bytes and no Welcome at all. A caller cannot confuse the two,
+    /// because neither result can be used where the other is expected.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::Group`] when the underlying group unexpectedly carries a
+    /// role table (fail-closed: the direct route must never be available where
+    /// a committer exists), when no retained request matches `proposal_ref`,
+    /// when that joiner is already a member, or on any OpenMLS-side failure.
+    pub fn approve_external_join(
+        &mut self,
+        identity: &Identity,
+        proposal_ref: &[u8],
+    ) -> Result<MemberAddition> {
+        self.inner
+            .approve_external_join_directly(identity, proposal_ref)
+    }
+
     /// Borrow the underlying [`Group`] for the rare caller
     /// who needs the full MLS surface (membership ops,
     /// application messages between publishers, etc.).
@@ -799,7 +833,6 @@ mod tests {
             other => panic!("expected ExternalJoinProposal, got {other:?}"),
         };
         let addition = alice_pg
-            .inner_mut()
             .approve_external_join(&alice, &bob_joiner_key)
             .expect("approve");
         let welcome_bytes = encode_message(&addition.welcome).expect("encode welcome");

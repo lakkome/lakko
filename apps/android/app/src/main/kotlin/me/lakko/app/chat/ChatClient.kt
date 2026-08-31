@@ -734,9 +734,13 @@ internal fun toEvent(
             systemKind = SystemKind.Commit,
             createdAt = createdAt,
         )
-        is ProcessedMessage.Proposal -> IncomingChatEvent.System(
+        is ProcessedMessage.Proposal -> IncomingChatEvent.MembershipProposal(
+            // ADR-0045 UX §10 — a PANEL signal carrying its record, never a
+            // content-less system row. The record is what makes an
+            // observation possible at all: `proposalKey` needs the kind and
+            // its target, and without a key there is nothing to stamp.
             messageId = messageId,
-            systemKind = SystemKind.Proposal,
+            record = processed.record,
             createdAt = createdAt,
         )
         is ProcessedMessage.ExternalJoinProposal -> IncomingChatEvent.ExternalJoinRequest(
@@ -903,8 +907,12 @@ public sealed interface IncomingChatEvent {
         val createdAt: String,
     ) : IncomingChatEvent
 
-    /** Commit / proposal / external-join-proposal frame. MLS
-     *  state advanced, no user-visible bytes. */
+    /** Commit / external-join-proposal frame. MLS state advanced, no
+     *  user-visible bytes.
+     *
+     *  A membership *proposal* is deliberately NOT one of these any more —
+     *  ADR-0045 UX §10: it *"stops being a **timeline** row and becomes a
+     *  **panel** signal"*. See [MembershipProposal]. */
     public data class System(
         val messageId: Long,
         val systemKind: SystemKind,
@@ -966,6 +974,37 @@ public sealed interface IncomingChatEvent {
             return result
         }
     }
+
+    /**
+     * ADR-0045 UX §10 — a membership *request* another member published: an
+     * MLS proposal the receipt gate has already judged, retained (or refused)
+     * by the core's own pending set.
+     *
+     * **Never a timeline bubble**, and the reason is stronger than tidiness.
+     * §10: *"A request is not something that happened to the group; it is an
+     * intent that may never take effect. Writing 'Alice asked to remove Bob'
+     * into a permanent, mutually-visible transcript is both the §10 leak and a
+     * durable record of an intent that the system may discard a second
+     * later."* The members sheet renders it instead, role-gated, and
+     * `Group.pendingProposals()` stays the source of truth for *what* is
+     * pending — this event carries *when it landed*, which the core cannot
+     * know and only the DS row can say.
+     *
+     * A `record.stored == false` record is the receipt gate's refusal reported
+     * as data rather than as a throw (a proposal advances no state, so
+     * dropping it unstored *is* the refusal). It is surfaced, and recorded
+     * nowhere.
+     *
+     * Equality is the generated `ProposalRecord`'s, which for an `Add` holds a
+     * `ByteArray` and so compares by reference. Nothing folds these by value —
+     * [me.lakko.app.chat.ChatRepository.consumeEvents] dispatches on the type
+     * — and tests assert on fields rather than on whole-event equality.
+     */
+    public data class MembershipProposal(
+        val messageId: Long,
+        val record: uniffi.lakko_ffi_uniffi.ProposalRecord,
+        val createdAt: String,
+    ) : IncomingChatEvent
 
     /** ADR-0042 — a push-routing-secret distribution envelope: an
      *  in-group MLS application message carrying the 32-byte
@@ -1046,10 +1085,18 @@ public sealed interface IncomingChatEvent {
     ) : IncomingChatEvent
 }
 
-/** Kind discriminator for [IncomingChatEvent.System]. */
+/**
+ * Kind discriminator for [IncomingChatEvent.System].
+ *
+ * There is deliberately no `Proposal` entry. `System` is the only variant
+ * [me.lakko.app.chat.ChatRepository.consumeEvents] turns into a
+ * [ChatMessage], so an enum that cannot name a proposal is the strongest
+ * available statement of ADR-0045 UX §10's rule — a membership request cannot
+ * reach the transcript by any route, including one a later change adds
+ * without reading §10. See [IncomingChatEvent.MembershipProposal].
+ */
 public enum class SystemKind {
     Commit,
-    Proposal,
     ExternalJoinProposal,
 }
 
@@ -1098,31 +1145,3 @@ public class ChatClientArgError(message: String) : IllegalArgumentException(mess
 public class ChatError(message: String, cause: Throwable) :
     RuntimeException(message, cause)
 
-/**
- * ADR-0045 — a direct membership commit was asked for while this group still
- * holds pending proposals, so the core would refuse it.
- *
- * This is a USER-FACING state, not a programmer error: under ADR-0045 a
- * non-empty pending set is the ordinary condition between any member's request
- * and the next committer sweep. It is its own type rather than a [ChatError] for
- * two reasons — a test can assert on it by identity instead of by prose, and the
- * core's own refusal string (which names `commit_pending_proposals` /
- * `stage_pending_proposals`, two Rust entry points no user can call) can never
- * reach the screen through it.
- *
- * Its [message] IS the user-facing copy, so the existing
- * `catch (e: Throwable) { membershipError = e.message }` path renders it
- * verbatim. The copy follows `docs/ux/proposal-based-membership.md` §5.1: it
- * states inaction, names no person, and implies no deadline — ADR-0045
- * decision 2 deliberately gives a pending request none. It is byte-identical to
- * the iOS `ChatError.membershipChangesPendingCopy`.
- */
-public class MembershipChangesPendingException :
-    RuntimeException(MEMBERSHIP_CHANGES_PENDING_COPY)
-
-/** The one string for [MembershipChangesPendingException], exposed so a test can
- *  pin it without re-typing it (a second copy is how the two platforms would
- *  drift apart). */
-public const val MEMBERSHIP_CHANGES_PENDING_COPY: String =
-    "Other membership changes are waiting to apply, so this request cannot be approved yet. " +
-        "They are applied by the group owner or an admin, and this will work once they have."

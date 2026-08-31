@@ -256,6 +256,65 @@ final class MembershipEndedTests: XCTestCase {
         }
     }
 
+    // MARK: - §6.2.5 the per-message action menu, on the composer's predicate
+
+    /// §6.2.5's rule reached from the other end. Edit / Delete / React each
+    /// compose an application message, and `createApplicationMessage` gates on
+    /// `is_operational()`, so on a dead group all three are refused —
+    /// permanently, for the same reason and at the same instant as Send. A
+    /// greyed React item that can never become live again is the shape §5.3
+    /// reserves for a permission that is merely suspended.
+    func testThePerMessageMenuIsWithdrawnOnceTheMembershipHasEnded() {
+        XCTAssertEqual(messageActionsState(ended), .withdrawn)
+        XCTAssertEqual(
+            messageActionsState(membershipState(isActive: false, leaveRequestedAtMs: 5)),
+            .withdrawn)
+        XCTAssertEqual(
+            messageActionsState(membershipState(isActive: true, leaveRequestedAtMs: nil)),
+            .available)
+    }
+
+    /// This is the point of the pair, not a restatement of the case above. The
+    /// menu and the composer are refused by the SAME core gate, so they must
+    /// never disagree about whether this group is writable — and the way two
+    /// gates over one predicate drift is that somebody later adds a condition
+    /// to one of them. Enumerating every state and asserting the equivalence is
+    /// what catches that; asserting each in isolation would not.
+    ///
+    /// The equivalence is worth MORE on iOS than on the other two clients,
+    /// because iOS already carried a second, quieter version of the defect: the
+    /// view model's `react` / `beginEdit` / `deleteMessage` each guarded on
+    /// `membershipHasEnded` and returned, so the menu opened, offered three
+    /// actions and silently answered none of them.
+    func testTheMenuAnswersTheComposersQuestionSoTheTwoCannotDrift() {
+        let states: [MembershipState] = [
+            membershipState(isActive: true, leaveRequestedAtMs: nil),
+            membershipState(isActive: nil, leaveRequestedAtMs: nil),
+            membershipState(isActive: false, leaveRequestedAtMs: nil),
+            membershipState(isActive: false, leaveRequestedAtMs: 5),
+        ]
+        for state in states {
+            let composerLive: Bool
+            if case .composer = composerState(state, draft: "draft") {
+                composerLive = true
+            } else {
+                composerLive = false
+            }
+            let actionsLive = messageActionsState(state) == .available
+            XCTAssertEqual(actionsLive, composerLive, "disagreed about \(state)")
+        }
+    }
+
+    /// Same direction as ``membershipState(isActive:leaveRequestedAtMs:)``'s
+    /// own rule and for the same reason: a torn handle is not evidence of an
+    /// eviction, and withdrawing the menu on one would hide working controls on
+    /// a group the user is still in.
+    func testTheMenuDoesNotFailClosedOnAnUnreadableHandle() {
+        XCTAssertEqual(
+            messageActionsState(membershipState(isActive: nil, leaveRequestedAtMs: 5)),
+            .available)
+    }
+
     // MARK: - §6.2.4 / §6.2.7 the chat row and the frozen roster
 
     func testTheChatListRowGainsOneMutedLineAndNothingElse() {

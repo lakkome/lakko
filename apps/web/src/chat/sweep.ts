@@ -206,6 +206,20 @@ export interface SweepDurableEntry {
   readonly welcomeEnvelopeB64: string | undefined;
   readonly welcomeMailboxesB64: readonly string[];
   /**
+   * ADR-0045 S7 — the wrapped `WelcomeRendezvous` bytes, one per member this
+   * sweep adds, to publish to the GROUP JOURNAL.
+   *
+   * A list of whole envelopes rather than a list of addresses, because unlike
+   * the mailbox fan-out — one Welcome envelope sent to N pseudonyms — a
+   * rendezvous BINDS the added member's signature key into its own bytes, so
+   * every recipient gets different bytes.
+   *
+   * Recorded here, before any publish, for the same reason the mailboxes are:
+   * a restart must re-publish the very bytes this sweep computed rather than
+   * recompute them from a roster that has since moved on.
+   */
+  readonly welcomeRendezvousB64: readonly string[];
+  /**
    * The DS id of the published commit, recorded alongside the welcomes-owed
    * marker. Diagnostics only — it is carried so the eventual ack can name the
    * commit it belongs to rather than inventing one. Absent until the verdict
@@ -299,6 +313,20 @@ export interface SweepPorts {
   /** Wrap the raw Welcome in the stranger-inbox envelope the recipient's
    *  mailbox poll expects (`wrapEnvelope(KIND_WELCOME, welcome)`). */
   wrapWelcome(welcome: Uint8Array): Uint8Array;
+  /**
+   * ADR-0045 S7 — wrap the raw Welcome into the `WelcomeRendezvous` envelope
+   * the group journal carries (`wrapWelcomeRendezvous(signatureKey, welcome)`).
+   *
+   * Needed because an added member may have arrived through a `/g/` invite
+   * link, and such a joiner polls the GROUP JOURNAL for a rendezvous matching
+   * its own signature key — it has no mailbox relationship with this group and
+   * never looks at one. Since S7 the approve is an ordinary `Add` proposal,
+   * indistinguishable on the wire from adding a contact, the sweep CANNOT tell
+   * which of its adds came from a link, and making them distinguishable would
+   * undo the property that makes S7 sound. So it wraps one per added key,
+   * origin-blind.
+   */
+  wrapRendezvous(signatureKey: Uint8Array, welcome: Uint8Array): Uint8Array;
   /** Echo-suppress a row this device published, so its own next poll drops it
    *  instead of hitting `CannotDecryptOwnMessage`. */
   markOwnPublished(messageId: number): void;
@@ -645,11 +673,21 @@ async function publishAndAdjudicate(
     );
     const wrapped =
       staged.welcome === undefined ? undefined : ports.wrapWelcome(staged.welcome);
+    // ADR-0045 S7 — one rendezvous per added key, from the SAME Welcome. The
+    // keys come from `swept()`, which reports what the staged commit really
+    // carries, so this addresses exactly the members the commit adds.
+    const rendezvous =
+      staged.welcome === undefined
+        ? []
+        : staged.addedSignatureKeys.map((k) =>
+            ports.encodeB64(ports.wrapRendezvous(k, staged.welcome as Uint8Array)),
+          );
     entry = {
       id: ports.outbox.newEntryId(),
       commitB64: ports.encodeB64(staged.commit),
       welcomeEnvelopeB64: wrapped === undefined ? undefined : ports.encodeB64(wrapped),
       welcomeMailboxesB64: mailboxes,
+      welcomeRendezvousB64: rendezvous,
     };
     try {
       await ports.outbox.record(entry);
@@ -700,7 +738,7 @@ async function publishAndAdjudicate(
   // publishing now is correct with or without it, and refusing to publish
   // because a bookkeeping write failed would manufacture the very ghost member
   // this records against.
-  if (entry.welcomeEnvelopeB64 !== undefined) {
+  if (entry.welcomeEnvelopeB64 !== undefined || entry.welcomeRendezvousB64.length > 0) {
     try {
       await ports.outbox.markWelcomesOwed(entry.id, commitMessageId);
     } catch (err) {
@@ -818,11 +856,18 @@ async function publishWelcomes(
   ports: SweepPorts,
   entry: SweepDurableEntry,
 ): Promise<number[]> {
-  if (entry.welcomeEnvelopeB64 === undefined) return [];
-  const bytes = ports.decodeB64(entry.welcomeEnvelopeB64);
   const ids: number[] = [];
-  for (const mailboxB64 of entry.welcomeMailboxesB64) {
-    ids.push(await ports.journal.publishMailbox(ports.decodeB64(mailboxB64), bytes));
+  if (entry.welcomeEnvelopeB64 !== undefined) {
+    const bytes = ports.decodeB64(entry.welcomeEnvelopeB64);
+    for (const mailboxB64 of entry.welcomeMailboxesB64) {
+      ids.push(await ports.journal.publishMailbox(ports.decodeB64(mailboxB64), bytes));
+    }
+  }
+  // ADR-0045 S7 — then the group-journal rendezvous, one per added key. A
+  // `/g/` joiner reads only this; a contact added the ordinary way reads only
+  // the mailbox. The sweep publishes both because it cannot tell them apart.
+  for (const rendezvousB64 of entry.welcomeRendezvousB64) {
+    ids.push(await ports.journal.publishGroup(ports.decodeB64(rendezvousB64)));
   }
   return ids;
 }

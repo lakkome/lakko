@@ -78,8 +78,15 @@ import kotlinx.serialization.json.Json
  * recover / forgetDevice ([deleteForAccount]).
  */
 
-/** The re-publish destination of an entry's second artifact. `null` = the entry
- *  carries only a commit (remove / role-change paths). */
+/**
+ * The re-publish destination of a DIRECT-path entry's second artifact. `null` =
+ * the entry carries only a commit (remove / role-change paths).
+ *
+ * One member since ADR-0045 S7. The external-join approve used to write a
+ * `RENDEZVOUS` entry riding the group journal; it is a proposal now, so it
+ * commits nothing, records nothing, and the sweep owns every rendezvous
+ * ([runCommitterSweep]).
+ */
 @Serializable
 public enum class SecondArtifactKind {
     /** A Welcome — re-published to the new member's mailbox
@@ -87,10 +94,6 @@ public enum class SecondArtifactKind {
      *  Never echoes back to the committer, so the sweep does NOT re-arm the echo
      *  filter for it. */
     WELCOME,
-
-    /** A `WelcomeRendezvous` — re-published to the group journal
-     *  (`DsClient.publishGroup`, addressed by [PendingCommitEntry.groupId]). */
-    RENDEZVOUS,
 }
 
 /**
@@ -116,7 +119,7 @@ public data class PendingCommitEntry(
     val commitB64: String,
     /** base64 of the second artifact's EXACT publishable wire-bytes — for
      *  [SecondArtifactKind.WELCOME] the `wrapEnvelope(KIND_WELCOME, welcome)`
-     *  mailbox envelope, for [SecondArtifactKind.RENDEZVOUS] the
+     *  mailbox envelope; before ADR-0045 S7 also the
      *  `wrapWelcomeRendezvous(...)` group-journal bytes. `null` for remove /
      *  role (they publish only the commit). */
     val secondArtifactB64: String? = null,
@@ -182,6 +185,18 @@ public data class PendingCommitEntry(
      * Empty for a direct-path entry and for a sweep that added nobody.
      */
     val sweepWelcomeMailboxesB64: List<String> = emptyList(),
+    /**
+     * ADR-0045 S7 — a sweep's group-journal `WelcomeRendezvous` envelopes, one
+     * per member the sweep adds.
+     *
+     * Whole envelopes rather than addresses, because a rendezvous binds the
+     * added member's signature key into its own bytes — so unlike the single
+     * Welcome envelope fanned out to N mailboxes above, every recipient gets
+     * different bytes. Recorded before any publish so a restart re-publishes
+     * exactly what this sweep computed. Empty for a direct-path entry and for a
+     * sweep that added nobody.
+     */
+    val sweepWelcomeRendezvousB64: List<String> = emptyList(),
 )
 
 /** The reconciliation verdict for one un-acked entry read on the restart sweep. */
@@ -360,15 +375,14 @@ internal fun <T> withPrePersistReset(reset: () -> Unit, prelude: () -> T): T {
  *     re-publish FAILURE (offline DS) leaves the entry (no [onAck]) for the next
  *     sweep.
  *
- * The second-artifact re-publish only re-arms the echo filter for a RENDEZVOUS
- * (rides the group journal — the committer re-fetches it); a WELCOME goes to the
- * new member's mailbox and never echoes back to the committer.
+ * The second-artifact re-publish never re-arms the echo filter: since ADR-0045
+ * S7 the only direct-path second artifact is a WELCOME, which goes to the new
+ * member's mailbox and never echoes back to the committer.
  */
 internal suspend fun sweepPendingCommitEntries(
     entries: List<PendingCommitEntry>,
     currentEpoch: ULong,
     republishCommit: suspend (ByteArray) -> Long,
-    republishRendezvous: suspend (ByteArray) -> Long,
     republishWelcome: suspend (mailbox: ByteArray, bytes: ByteArray) -> Long,
     markOwnPublished: (Long) -> Unit,
     onAck: suspend (id: String, commitMessageId: Long, secondMessageId: Long?) -> Unit,
@@ -386,23 +400,20 @@ internal suspend fun sweepPendingCommitEntries(
                     // CannotDecryptOwnMessage. Suppress it on the very next poll.
                     markOwnPublished(newCommitId)
 
+                    // ADR-0045 S7 — a direct-path second artifact is now ALWAYS
+                    // a mailbox Welcome. The rendezvous arm this loop used to
+                    // carry belonged to the external-join approve, which no
+                    // longer commits and therefore writes no entry at all; the
+                    // sweep owns every rendezvous ([runCommitterSweep], one per
+                    // added key).
                     var secondMessageId: Long? = null
                     val second = entry.secondArtifactB64
-                    if (second != null) {
-                        when (entry.secondArtifactKind) {
-                            SecondArtifactKind.WELCOME -> {
-                                val mailboxB64 = entry.secondArtifactMailboxB64
-                                if (mailboxB64 != null) {
-                                    secondMessageId = republishWelcome(
-                                        decodeB64(mailboxB64),
-                                        decodeB64(second),
-                                    )
-                                }
-                            }
-                            SecondArtifactKind.RENDEZVOUS ->
-                                secondMessageId = republishRendezvous(decodeB64(second))
-                            null -> {}
-                        }
+                    val mailboxB64 = entry.secondArtifactMailboxB64
+                    if (second != null && mailboxB64 != null) {
+                        secondMessageId = republishWelcome(
+                            decodeB64(mailboxB64),
+                            decodeB64(second),
+                        )
                     }
                     onAck(entry.id, newCommitId, secondMessageId)
                 } catch (_: Throwable) {

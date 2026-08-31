@@ -134,6 +134,20 @@ public final class ChatViewModel: ObservableObject {
     /// commit landing mid-sentence preserves what was actually typed.
     public var composerSlot: ComposerState { composerState(membership, draft: draft) }
 
+    /// ADR-0045 UX §6.2.5 — whether a message still carries Edit / Delete /
+    /// React. The composer's own question, answered by the same predicate: all
+    /// three ops compose an application message, so all three die with Send.
+    ///
+    /// This replaces a weaker shape rather than adding to it. `react`,
+    /// `beginEdit` and `deleteMessage` each already guarded on
+    /// `membershipHasEnded` and returned — so the menu opened, offered three
+    /// actions and silently answered none of them, which is a worse lie than
+    /// failing loudly: the user cannot tell a swallowed action from a slow one.
+    /// Those guards stay as the backstop; this is what stops the offer.
+    public var messageActionsAvailable: Bool {
+        messageActionsState(membership) == .available
+    }
+
     /// §6.2.8 — which one-shot teardown steps have already been claimed. A
     /// `Set` on the `@MainActor` view model rather than a lock, because
     /// ``claimTeardownSteps(_:alreadyRun:)`` takes what it hands out in the same
@@ -1266,14 +1280,22 @@ public final class ChatViewModel: ObservableObject {
         }
     }
 
-    /// ADR-0027 (G-3) — approve a pending external-join request (owner/admin
-    /// only). Drives the role-gated approve (fail-closed in the core),
-    /// broadcasts the commit + posts the wrapped Welcome rendezvous, then
-    /// refreshes the roster + pending list. Fail-closed on error.
+    /// ADR-0027 (G-3), on the ADR-0045 proposal path since S7 — approve a
+    /// pending external-join request (owner/admin only). Publishes ONE
+    /// artifact, an ordinary admin-authored `Add` proposal; there is no commit,
+    /// no epoch advance and no Welcome here. The joiner is admitted when a
+    /// committer sweeps the proposal, which is what posts the
+    /// `WelcomeRendezvous` they are polling for — and ADR-0045 decision 2 gives
+    /// that step no deadline, so the notice must not promise it has happened.
+    ///
+    /// The sweep is attempted immediately so the common single-admin case still
+    /// reads as "tap, done"; when this device is standing down it simply does
+    /// not fire, and the copy says so. Fail-closed on error.
     func onApproveJoin(proposalRef: Data) {
         guard !membershipBusy else { return }
         membershipBusy = true
         membershipError = nil
+        membershipNotice = nil
         Task { @MainActor in
             defer { membershipBusy = false }
             do {
@@ -1281,6 +1303,13 @@ public final class ChatViewModel: ObservableObject {
                     groupIdHex: groupIdHex,
                     proposalRef: proposalRef
                 )
+                let swept = await repository.sweepIfCommitter(groupIdHex: groupIdHex)
+                if case .committed = swept {
+                    membershipNotice = "Join approved. They have been added to the group."
+                } else {
+                    membershipNotice =
+                        "Join approved. They join when an owner or an admin applies the change."
+                }
                 refreshMembers()
             } catch {
                 membershipError = error.localizedDescription

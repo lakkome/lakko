@@ -1088,18 +1088,32 @@ public class ChatViewModel(
     }
 
     /**
-     * ADR-0027 (G-3) — approve a pending external-join request (owner/admin
-     * only). Drives the role-gated approve (fail-closed in the core), broadcasts
-     * the commit + posts the wrapped Welcome rendezvous, then refreshes the
-     * roster + pending list. Fail-closed on error.
+     * ADR-0027 (G-3), on the ADR-0045 proposal path since S7 — approve a pending
+     * external-join request (owner/admin only). Publishes ONE artifact, an
+     * ordinary admin-authored `Add` proposal; there is no commit, no epoch
+     * advance and no Welcome here. The joiner is admitted when a committer
+     * sweeps the proposal, which is what posts the `WelcomeRendezvous` they are
+     * polling for — and ADR-0045 decision 2 gives that step no deadline, so the
+     * notice must not promise it has happened.
+     *
+     * The sweep is attempted immediately so the common single-admin case still
+     * reads as "tap, done"; when this device is standing down it simply does not
+     * fire, and the copy says so. Fail-closed on error.
      */
     public fun onApproveJoin(proposalRef: ByteArray) {
         if (mutableMembershipBusy.value) return
         mutableMembershipBusy.value = true
         mutableMembershipError.value = null
+        mutableMembershipNotice.value = null
         viewModelScope.launch {
             try {
                 repo.approveExternalJoin(groupIdHex, proposalRef)
+                val swept = repo.sweepIfCommitter(groupIdHex)
+                mutableMembershipNotice.value = if (swept is me.lakko.app.chat.SweepOutcome.Committed) {
+                    "Join approved. They have been added to the group."
+                } else {
+                    "Join approved. They join when an owner or an admin applies the change."
+                }
                 refreshMembers()
             } catch (e: Throwable) {
                 mutableMembershipError.value = e.message ?: e.toString()

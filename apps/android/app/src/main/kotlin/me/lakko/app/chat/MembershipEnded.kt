@@ -60,7 +60,7 @@ import android.content.SharedPreferences
  * 2. An unknown / torn `isActive` reads as **active**, never as ended.
  *
  * Both are argued at [membershipState]. The measured discrimination evidence —
- * 31 deliberate regressions, each RUN and each recorded with its observed
+ * 32 deliberate regressions, each RUN and each recorded with its observed
  * failure — lives in `MembershipEndedTest`'s own header.
  */
 
@@ -319,7 +319,7 @@ internal sealed interface ComposerSlot {
  * been.
  */
 internal fun composerState(state: MembershipState, draft: String): ComposerSlot {
-    if (state !is MembershipState.Ended) return ComposerSlot.Composer
+    if (!membershipEnded(state)) return ComposerSlot.Composer
     val worthKeeping = draft.isNotBlank()
     return ComposerSlot.Withdrawn(
         notice = COMPOSER_WITHDRAWN,
@@ -327,6 +327,36 @@ internal fun composerState(state: MembershipState, draft: String): ComposerSlot 
         draftLabel = if (worthKeeping) UNSENT_DRAFT_LABEL else null,
     )
 }
+
+/** Whether the per-message action menu is offered at all. */
+internal enum class MessageActions { AVAILABLE, WITHDRAWN }
+
+/**
+ * Decide the per-message action menu — Edit, Delete, React (§6.2.5's rule,
+ * reached from the other end).
+ *
+ * **Withdrawn, not disabled, and it is the composer's own question.** All three
+ * actions compose an MLS application message, so all three are refused by
+ * `createApplicationMessage`'s `is_operational()` gate — the *same* gate, at
+ * the *same* instant, for the *same* permanent reason as Send. §5.3's
+ * visible-but-disabled rule is for a permission that is merely *suspended*; a
+ * greyed React item on a group that can never become live again is a control
+ * promising a future it does not have, which is exactly the shape §6.2.5
+ * rejects for the composer.
+ *
+ * **Why a function here and not a `&&` at the call site.** Two gates over one
+ * predicate drift when somebody later adds a condition to one of them, and the
+ * drift is silent in both directions: an ungated menu offers three actions that
+ * cannot work, and an over-gated one hides working controls. Both this and
+ * [composerState] therefore route through [membershipEnded], and the test
+ * enumerates every state and asserts they agree.
+ *
+ * **What this does NOT withdraw is the information.** A reaction *chip* is
+ * rendered content — part of the frozen transcript §6.2.6 keeps whole — so the
+ * counts stay. What goes is the affordance that would toggle one.
+ */
+internal fun messageActionsState(state: MembershipState): MessageActions =
+    if (membershipEnded(state)) MessageActions.WITHDRAWN else MessageActions.AVAILABLE
 
 // ---------------------------------------------------------------------------
 // §6.2.8 — the one-shot half of the teardown

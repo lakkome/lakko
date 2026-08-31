@@ -355,6 +355,9 @@ public struct ChatScreen: View {
                             MessageRow(
                                 message: message,
                                 ownIdentity: viewModel.ownIdentity,
+                                // ADR-0045 UX §6.2.5 — the same predicate the
+                                // composer is gated on, a few lines below.
+                                actionsAvailable: viewModel.messageActionsAvailable,
                                 // ADR-0024 — "Sent" / "Read" check on
                                 // our own messages, derived from the
                                 // other members' read watermarks.
@@ -841,6 +844,12 @@ private struct MessageRow: View {
     /// used to highlight the reaction chips this user contributed. Never
     /// their MLS leaf: a leaf is reassigned to the next member added.
     let ownIdentity: MemberIdentity?
+    /// ADR-0045 UX §6.2.5 — whether Edit / Delete / React are offered at all.
+    /// `false` once this device's membership has ended: all three compose an
+    /// application message, so all three are refused by the same core gate that
+    /// refuses Send. Passed in rather than read here so the row stays a pure
+    /// renderer of what `MembershipEnded.swift` decided.
+    let actionsAvailable: Bool
     /// ADR-0024 — read state for our OWN outgoing messages
     /// ("Sent" / "Read"). `nil` for incoming / system rows and
     /// pre-ack outgoing rows (no check rendered).
@@ -863,14 +872,16 @@ private struct MessageRow: View {
     /// already deleted (the receive-side author gate is the real
     /// enforcement — this is just the affordance).
     private var canEditOrDelete: Bool {
-        message.direction == .outgoing
+        actionsAvailable
+            && message.direction == .outgoing
             && message.messageId > 0
             && !message.deleted
     }
 
     /// React is offered on any non-system message with an id.
     private var canReact: Bool {
-        message.direction != .system
+        actionsAvailable
+            && message.direction != .system
             && message.messageId > 0
             && !message.deleted
     }
@@ -998,42 +1009,55 @@ private struct MessageRow: View {
     /// ADR-0023 — reaction chips under the bubble. Each chip is
     /// `emoji ×count`; tapping a chip the local user contributed
     /// toggles it back off (re-sends the same emoji op).
+    ///
+    /// ADR-0045 UX §6.2.5 — a chip carries BOTH a fact and an affordance, and
+    /// the two separate here: the count is transcript, which §6.2.6 keeps
+    /// whole, while tapping it is the React op, which dies with Send. So once
+    /// the membership has ended the chip renders as static content rather than
+    /// as a `Button`. Not `.disabled`, for the same reason the composer is
+    /// replaced rather than disabled.
     @ViewBuilder
     private var reactionChips: some View {
         HStack(spacing: 4) {
             ForEach(message.reactionSummary(own: ownIdentity)) { tally in
-                Button {
-                    onReact(tally.emoji)
-                } label: {
-                    HStack(spacing: 2) {
-                        Text(tally.emoji).font(.caption)
-                        if tally.count > 1 {
-                            Text("\(tally.count)")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(
-                        tally.reactedByMe
-                            ? Color.accentColor.opacity(0.18)
-                            : Color(.secondarySystemBackground)
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 10)
-                            .stroke(
-                                tally.reactedByMe
-                                    ? Color.accentColor.opacity(0.6)
-                                    : Color.clear,
-                                lineWidth: 1
-                            )
-                    )
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                if actionsAvailable {
+                    Button { onReact(tally.emoji) } label: { chipLabel(tally) }
+                        .buttonStyle(.plain)
+                } else {
+                    chipLabel(tally)
                 }
-                .buttonStyle(.plain)
             }
         }
+    }
+
+    /// The chip's content, shared by the interactive and the frozen arm so the
+    /// two cannot come to look different.
+    private func chipLabel(_ tally: ReactionTally) -> some View {
+        HStack(spacing: 2) {
+            Text(tally.emoji).font(.caption)
+            if tally.count > 1 {
+                Text("\(tally.count)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(
+            tally.reactedByMe
+                ? Color.accentColor.opacity(0.18)
+                : Color(.secondarySystemBackground)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(
+                    tally.reactedByMe
+                        ? Color.accentColor.opacity(0.6)
+                        : Color.clear,
+                    lineWidth: 1
+                )
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 
     /// ADR-0024 — the "Sent" / "Read" receipt label under an own
@@ -1217,6 +1241,13 @@ private struct MembersSheet: View {
     /// it is a presentation concern with no bearing on the request, and nothing
     /// outside this view may open it.
     @State private var leaveConfirmPresented = false
+
+    /// ADR-0045 (UX §6) — the `Remove this member?` confirmation, holding the
+    /// leaf awaiting it. A nullable leaf rather than a `Bool` beside a
+    /// separately-stored target, because the confirmation names WHICH member:
+    /// two pieces of state that must agree is how a confirmation ends up
+    /// removing somebody the user did not look at.
+    @State private var removeConfirmLeaf: UInt32?
 
     /// ADR-0045 UX §6.2.4 — the `Delete this chat` confirmation. Separate state
     /// from the leave confirmation rather than a shared flag, because the two
@@ -1459,7 +1490,11 @@ private struct MembersSheet: View {
                             if viewModel.canManageMembers,
                                 viewModel.ownLeafIndex != member.leafIndex {
                                 Button(role: .destructive) {
-                                    viewModel.onRemoveMember(leafIndex: member.leafIndex)
+                                    // ADR-0045 UX §6 — the confirmation is the
+                                    // LAST exit: a published request cannot be
+                                    // withdrawn, and a direct commit lands at
+                                    // once. Never remove on a single tap.
+                                    removeConfirmLeaf = member.leafIndex
                                 } label: {
                                     Text("Remove")
                                 }
@@ -1583,6 +1618,36 @@ private struct MembersSheet: View {
             // and evicting it locally would leave it live in every peer's
             // store). The body carries the one fact the user needs — that they
             // remain in the group, receiving messages, until someone applies it.
+            // ADR-0045 UX §6 — the same idiom as `Leave this group?` directly
+            // below, deliberately: the two sit in the same panel and a user
+            // reading one after the other should be answering the same kind of
+            // question. The copy comes from `removeMemberConfirmation` rather
+            // than being inlined, so the three clients cannot drift on the
+            // sentence that tells a user whether the person they are removing
+            // can still read their messages. The body is ABSENT on a
+            // direct-commit group, where that sentence would be false.
+            .confirmationDialog(
+                removeMemberTitle,
+                isPresented: Binding(
+                    get: { removeConfirmLeaf != nil },
+                    set: { if !$0 { removeConfirmLeaf = nil } }
+                ),
+                titleVisibility: .visible
+            ) {
+                Button(removeMemberConfirmLabel, role: .destructive) {
+                    if let leaf = removeConfirmLeaf {
+                        removeConfirmLeaf = nil
+                        viewModel.onRemoveMember(leafIndex: leaf)
+                    }
+                }
+                Button(removeMemberCancelLabel, role: .cancel) { removeConfirmLeaf = nil }
+            } message: {
+                if let body = removeMemberConfirmation(
+                    usesProposalPath: viewModel.usesProposalPath
+                ).body {
+                    Text(body)
+                }
+            }
             .confirmationDialog(
                 "Leave this group?",
                 isPresented: $leaveConfirmPresented,

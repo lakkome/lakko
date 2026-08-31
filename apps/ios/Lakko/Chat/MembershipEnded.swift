@@ -53,7 +53,7 @@ import Foundation
 /// the merge's `PublicState` branch never replaced. **Never infer membership
 /// from the epoch.** ``readIsActive(_:)`` is the only signal.
 ///
-/// ## Which rules here actually discriminate (MEASURED — 21 probes were run)
+/// ## Which rules here actually discriminate (MEASURED — 22 probes were run)
 ///
 /// Each rule below was re-broken as a deliberate regression AFTER the feature
 /// was green, `xcodebuild test -only-testing:LakkoTests/MembershipEndedTests`
@@ -216,6 +216,19 @@ import Foundation
 ///        testTheChatListLineSaysTheSameThingWhetherYouLeftOrWereRemoved :
 ///          XCTAssertEqual failed: ("Optional("You left this group.")") is not
 ///          equal to ("Optional("You are no longer a member.")")
+///
+/// 22. **``messageActionsState(_:)`` always returns `.available`** — the defect
+///     it closes, the per-message menu still offered on a dead group:
+///
+///        testThePerMessageMenuIsWithdrawnOnceTheMembershipHasEnded :
+///          XCTAssertEqual failed: ("available") is not equal to ("withdrawn")
+///        testTheMenuAnswersTheComposersQuestionSoTheTwoCannotDrift :
+///          XCTAssertEqual failed: ("true") is not equal to ("false") -
+///          disagreed about ended(left: false)
+///
+///     The second is the one that matters: it is the equivalence with
+///     ``composerState(_:draft:)``, so a menu that stops agreeing with the
+///     composer fails whichever of the two was changed.
 
 // MARK: - Copy (§6.2) — one definition each, so the view cannot drift from it
 
@@ -430,6 +443,47 @@ public func composerState(_ state: MembershipState, draft: String) -> ComposerSt
         notice: composerWithdrawnMessage,
         draft: worthKeeping ? draft : nil,
         draftLabel: worthKeeping ? unsentDraftLabel : nil)
+}
+
+/// Whether the per-message action menu is offered at all.
+public enum MessageActions: Equatable {
+    case available
+    case withdrawn
+}
+
+/// Decide the per-message action menu — Edit, Delete, React (§6.2.5's rule,
+/// reached from the other end).
+///
+/// **Withdrawn, not disabled, and it is the composer's own question.** All
+/// three actions compose an MLS application message, so all three are refused
+/// by `createApplicationMessage`'s `is_operational()` gate — the *same* gate,
+/// at the *same* instant, for the *same* permanent reason as Send. §5.3's
+/// visible-but-disabled rule is for a permission that is merely *suspended*; a
+/// greyed React item on a group that can never become live again is a control
+/// promising a future it does not have, which is exactly the shape §6.2.5
+/// rejects for the composer.
+///
+/// **Why a function here and not a `&&` at the call site.** Two gates over one
+/// predicate drift when somebody later adds a condition to one of them, and the
+/// drift is silent in both directions: an ungated menu offers three actions
+/// that cannot work, and an over-gated one hides working controls. Both this
+/// and ``composerState(_:draft:)`` therefore route through
+/// ``membershipEnded(_:)``, and the test enumerates every state and asserts
+/// they agree.
+///
+/// **iOS had a second, worse shape than the other two clients**, and it is
+/// worth naming because it looks like the problem was already solved: the view
+/// model's `react` / `beginEdit` / `deleteMessage` each already carried a
+/// `guard !membershipHasEnded else { return }`, so the ops did not throw — they
+/// silently did *nothing*. A menu that opens, offers three actions and answers
+/// none of them is a worse lie than one that fails loudly, because the user has
+/// no way to tell a swallowed action from a slow one.
+///
+/// **What this does NOT withdraw is the information.** A reaction *chip* is
+/// rendered content — part of the frozen transcript §6.2.6 keeps whole — so the
+/// counts stay. What goes is the affordance that would toggle one.
+public func messageActionsState(_ state: MembershipState) -> MessageActions {
+    membershipEnded(state) ? .withdrawn : .available
 }
 
 // MARK: - §6.2.8 the one-shot half of the teardown

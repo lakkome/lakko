@@ -312,8 +312,17 @@ function model(opts: {
         return journal.filter((r) => r.id > after);
       },
       publishGroup: async (bytes) => {
-        published.push(`group:${bytes[0] === COMMIT ? "commit" : "other"}`);
-        order.push("publish");
+        // 0xcc is what the model's `wrapRendezvous` stamps; byte 1 is the key
+        // it was addressed to, so the assertions can name WHICH joiner each
+        // envelope is for rather than only counting them.
+        const label =
+          bytes[0] === COMMIT
+            ? "commit"
+            : bytes[0] === 0xcc
+              ? `rendezvous:${(bytes[1] ?? 0).toString(16)}`
+              : "other";
+        published.push(`group:${label}`);
+        order.push(label === "commit" ? "publish" : "publish-rendezvous");
         const id = (nextId += 1);
         journal.push({ id, payload: bytes, createdAt: `t-${id}` });
         // Splice the racing rows in at ids BELOW ours, the way the DS would
@@ -371,6 +380,7 @@ function model(opts: {
     },
     welcomeMailbox: (k) => new Uint8Array([0xbb, k[0] ?? 0]),
     wrapWelcome: (w) => new Uint8Array([0xee, ...w]),
+    wrapRendezvous: (k, w) => new Uint8Array([0xcc, k[0] ?? 0, ...w]),
     markOwnPublished: (id) => order.push(`own:${id}`),
     persist: async () => {
       order.push("persist");
@@ -587,7 +597,11 @@ describe("ADR-0045 — obligation 2: the Welcome waits for the verdict", () => {
     expect(m.order.lastIndexOf("fetch>0")).toBeLessThan(
       m.order.indexOf("publish-welcome"),
     );
-    expect(m.published).toEqual(["group:commit", "mailbox:welcome"]);
+    expect(m.published).toEqual([
+      "group:commit",
+      "mailbox:welcome",
+      "group:rendezvous:a1",
+    ]);
   });
 
   it("the Welcome is NOT published before the verdict — and never at all on a LOSS", async () => {
@@ -646,6 +660,9 @@ describe("ADR-0045 — obligation 1: a restart finishes an owed verdict", () => 
     commitB64: Buffer.from(frame(COMMIT, 6, 0x5e)).toString("base64"),
     welcomeEnvelopeB64: Buffer.from([0xee, 0x01]).toString("base64"),
     welcomeMailboxesB64: [Buffer.from([0xbb, 0xa1]).toString("base64")],
+    // ADR-0045 S7 — a real entry always carries this (it is computed and
+    // recorded with the mailboxes, before any publish), so the fixture does too.
+    welcomeRendezvousB64: [Buffer.from([0xcc, 0xa1, 0x01]).toString("base64")],
   };
 
   it("re-publishes idempotently, re-adjudicates, and merges when it won", async () => {
@@ -658,7 +675,11 @@ describe("ADR-0045 — obligation 1: a restart finishes an owed verdict", () => 
     expect(m.staged()).toBe(false);
     // The Welcome the ORIGINAL run held back is published now — after the
     // verdict, exactly as it would have been the first time.
-    expect(m.published).toEqual(["group:commit", "mailbox:welcome"]);
+    expect(m.published).toEqual([
+      "group:commit",
+      "mailbox:welcome",
+      "group:rendezvous:a1",
+    ]);
   });
 
   it("runCommitterSweep routes an owed verdict rather than staging a second sweep", async () => {
@@ -763,7 +784,11 @@ describe("ADR-0045 — a Welcome that failed AFTER the merge is still owed", () 
     const out = await runCommitterSweep(m.ports);
 
     expect(out.kind).toBe("welcomes-republished");
-    expect(m.published).toEqual(["group:commit", "mailbox:welcome"]);
+    expect(m.published).toEqual([
+      "group:commit",
+      "mailbox:welcome",
+      "group:rendezvous:a1",
+    ]);
     // Acked, so nothing is owed any more.
     expect(m.entries().size).toBe(0);
     expect(m.welcomesOwed().size).toBe(0);
@@ -779,10 +804,18 @@ describe("ADR-0045 — a Welcome that failed AFTER the merge is still owed", () 
     const out = await resolveOwedWelcomes(m.ports);
 
     expect(out.kind).toBe("welcomes-republished");
-    expect(m.published).toEqual(["group:commit", "mailbox:welcome"]);
+    expect(m.published).toEqual([
+      "group:commit",
+      "mailbox:welcome",
+      "group:rendezvous:a1",
+    ]);
     // The verdict is already known — the retry must not stage, publish a
     // second commit, or apply another row to re-read the journal order.
-    expect(m.order.slice(before)).toEqual(["publish-welcome", "ack"]);
+    expect(m.order.slice(before)).toEqual([
+      "publish-welcome",
+      "publish-rendezvous",
+      "ack",
+    ]);
     expect(m.published.filter((p) => p === "group:commit")).toHaveLength(1);
   });
 
@@ -834,6 +867,7 @@ describe("ADR-0045 — a Welcome that failed AFTER the merge is still owed", () 
           commitB64: Buffer.from(frame(COMMIT, 6, 0x5e)).toString("base64"),
           welcomeEnvelopeB64: Buffer.from([0xee, 0x01]).toString("base64"),
           welcomeMailboxesB64: [Buffer.from([0xbb, 0xa1]).toString("base64")],
+          welcomeRendezvousB64: [Buffer.from([0xcc, 0xa1, 0x01]).toString("base64")],
         },
       },
     });
@@ -881,7 +915,11 @@ describe("ADR-0045 — a Welcome that failed AFTER the merge is still owed", () 
     const out = await runCommitterSweep(m.ports);
 
     expect(out.kind).toBe("committed");
-    expect(m.published).toEqual(["group:commit", "mailbox:welcome"]);
+    expect(m.published).toEqual([
+      "group:commit",
+      "mailbox:welcome",
+      "group:rendezvous:a1",
+    ]);
     expect(m.order).toContain("ack");
     // Acked in the same run, so the marker never survives a healthy sweep.
     expect(m.entries().size).toBe(0);
@@ -898,7 +936,11 @@ describe("ADR-0045 — a Welcome that failed AFTER the merge is still owed", () 
     const out = await runCommitterSweep(m.ports);
 
     expect(out.kind).toBe("committed");
-    expect(m.published).toEqual(["group:commit", "mailbox:welcome"]);
+    expect(m.published).toEqual([
+      "group:commit",
+      "mailbox:welcome",
+      "group:rendezvous:a1",
+    ]);
   });
 });
 
@@ -1084,6 +1126,7 @@ describe("ADR-0045 — the verdict apply must not swallow the rows it consumes",
       commitB64: Buffer.from(frame(COMMIT, 6, 0x5e)).toString("base64"),
       welcomeEnvelopeB64: undefined,
       welcomeMailboxesB64: [],
+      welcomeRendezvousB64: [],
     };
     const m = model({
       rank: 0,
@@ -1097,5 +1140,76 @@ describe("ADR-0045 — the verdict apply must not swallow the rows it consumes",
 
     expect(out.kind).toBe("committed");
     expect(m.surfaced).toEqual(["chat#50@t-50"]);
+  });
+});
+
+describe("ADR-0045 S7 — the sweep owes a WelcomeRendezvous per added key", () => {
+  // S7 moved the external-join approve off its own direct commit and onto the
+  // proposal path, which moved the `/g/` joiner's rendezvous with it. The
+  // joiner is not a member and never polls a mailbox it was told about
+  // out-of-band — it polls the GROUP JOURNAL, matching a rendezvous envelope
+  // against its own signature key — so a sweep that publishes only the mailbox
+  // fan-out leaves an approved joiner permanently unable to join, with the
+  // group already holding it as a member.
+  const A1 = new Uint8Array(32).fill(0xa1);
+  const A2 = new Uint8Array(32).fill(0xa2);
+
+  it("posts one rendezvous to the group journal for EVERY add, alongside the mailboxes", async () => {
+    const m = model({ rank: 0, pending: 2, epoch: 6, adds: [A1, A2] });
+
+    const out = await runCommitterSweep(m.ports);
+
+    expect(out.kind).toBe("committed");
+    // Two adds -> two mailbox welcomes AND two journal rendezvous. The sweep
+    // cannot tell which add came from a `/g/` link — that indistinguishability
+    // is what makes S7 sound — so it posts for both, origin-blind.
+    expect(m.published).toEqual([
+      "group:commit",
+      "mailbox:welcome",
+      "mailbox:welcome",
+      "group:rendezvous:a1",
+      "group:rendezvous:a2",
+    ]);
+  });
+
+  it("holds the rendezvous back until the verdict, exactly like the Welcome", async () => {
+    // A rendezvous published on a commit that then LOSES would let a joiner
+    // open into a state no other member holds — the three-party fork ADR-0045
+    // names as strictly worse than the two-party one.
+    const m = model({ rank: 0, pending: 1, epoch: 6, adds: [A1] });
+    m.raceRows.push(row(50, COMMIT, 6, 0xfa));
+
+    const out = await runCommitterSweep(m.ports);
+
+    expect(out.kind).toBe("lost");
+    expect(m.published).toEqual(["group:commit"]);
+  });
+
+  it("a restart that owes the fan-out re-publishes the rendezvous too", async () => {
+    // The rendezvous is durably recorded WITH the Welcome, so the retry
+    // publishes the very bytes the first attempt computed — nothing is
+    // recomputed from a roster that has since moved on.
+    const m = model({ rank: 0, pending: 1, epoch: 6, adds: [A1] });
+    m.failWelcomePublish(true);
+    await expect(runCommitterSweep(m.ports)).rejects.toThrow(/DS unreachable/);
+    expect(m.published).toEqual(["group:commit"]);
+
+    m.failWelcomePublish(false);
+    const out = await resolveOwedWelcomes(m.ports);
+
+    expect(out.kind).toBe("welcomes-republished");
+    expect(m.published).toEqual([
+      "group:commit",
+      "mailbox:welcome",
+      "group:rendezvous:a1",
+    ]);
+  });
+
+  it("a sweep carrying no add posts no rendezvous at all", async () => {
+    const m = model({ rank: 0, pending: 1, epoch: 6, adds: [] });
+
+    await runCommitterSweep(m.ports);
+
+    expect(m.published).toEqual(["group:commit"]);
   });
 });

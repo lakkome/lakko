@@ -30,10 +30,10 @@ import java.util.concurrent.atomic.AtomicInteger
  *
  * ## Which of these discriminate
  *
- * 31 deliberate regressions were introduced one at a time, `testDebugUnitTest`
+ * 32 deliberate regressions were introduced one at a time, `testDebugUnitTest`
  * was RUN against each, the failure recorded, and the probe reverted. The
  * messages below are quoted verbatim from those runs, not predicted. Every one
- * of the 31 produced at least one failure; the count in brackets is how many
+ * of the 32 produced at least one failure; the count in brackets is how many
  * tests went red.
  *
  *  1. `membershipState` answers `Active` on `isActive == false` — the eviction
@@ -109,6 +109,13 @@ import java.util.concurrent.atomic.AtomicInteger
  * 30. The delete confirmation body is made sweeping rather than exact [1].
  * 31. The frozen-roster header is made a claim about the ROWS rather than the
  *     LIST [1].
+ * 32. `messageActionsState` always returns `AVAILABLE` — the defect it closes,
+ *     the per-message menu still offered on a dead group [2]:
+ *     `expected:<WITHDRAWN> but was:<AVAILABLE>` and
+ *     `disagreed about Ended(left=false) expected:<false> but was:<true>`.
+ *     The second is the one that matters: it is the equivalence with
+ *     `composerState`, so a menu that stops agreeing with the composer fails
+ *     whichever of the two was changed.
  */
 class MembershipEndedTest {
 
@@ -386,6 +393,56 @@ class MembershipEndedTest {
             assertNull(draft, slot.draft)
             assertNull(draft, slot.draftLabel)
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // §6.2.5 — the per-message action menu, on the composer's own predicate
+    // -----------------------------------------------------------------------
+
+    @Test
+    fun `the per-message menu is WITHDRAWN once the membership has ended`() {
+        // §6.2.5's rule reached from the other end. Edit / Delete / React each
+        // compose an application message, and `createApplicationMessage` gates
+        // on `is_operational()`, so on a dead group all three are refused —
+        // permanently, for the same reason and at the same instant as Send. A
+        // greyed React item that can never become live again is the shape §5.3
+        // reserves for a permission that is merely suspended.
+        assertEquals(MessageActions.WITHDRAWN, messageActionsState(endedRemoved()))
+        assertEquals(MessageActions.WITHDRAWN, messageActionsState(endedLeft()))
+        assertEquals(MessageActions.AVAILABLE, messageActionsState(active()))
+    }
+
+    @Test
+    fun `the menu answers the composer's question, so the two cannot drift`() {
+        // This is the point of the pair, not a restatement of the case above.
+        // The menu and the composer are refused by the SAME core gate, so they
+        // must never disagree about whether this group is writable — and the
+        // way two gates over one predicate drift is that somebody later adds a
+        // condition to one of them. Enumerating every state and asserting the
+        // equivalence is what catches that; asserting each in isolation is not.
+        val states = listOf(
+            active(),
+            membershipState(isActive = null, leaveRequestedAtMs = null),
+            endedRemoved(),
+            endedLeft(),
+        )
+        for (state in states) {
+            val composerLive = composerState(state, "draft") is ComposerSlot.Composer
+            val actionsLive = messageActionsState(state) == MessageActions.AVAILABLE
+            assertEquals("disagreed about $state", composerLive, actionsLive)
+        }
+    }
+
+    @Test
+    fun `the menu does not fail closed on an unreadable handle`() {
+        // Same direction as `membershipState`'s own rule and for the same
+        // reason: a torn handle is not evidence of an eviction, and
+        // withdrawing the menu on one would hide working controls on a group
+        // the user is still in.
+        assertEquals(
+            MessageActions.AVAILABLE,
+            messageActionsState(membershipState(isActive = null, leaveRequestedAtMs = 5L)),
+        )
     }
 
     // -----------------------------------------------------------------------

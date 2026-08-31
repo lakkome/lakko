@@ -423,6 +423,64 @@ internal fun recordPendingRequestObservation(
     )
 }
 
+/**
+ * ADR-0045 UX §4 — stamp a proposal ANOTHER member published, with the DS
+ * row's own timestamp.
+ *
+ * This is the receive-side half of [recordPendingRequestObservation], and
+ * before it existed there was none: the only production caller stamped OUR
+ * OWN requests. A request arriving from a peer therefore carried no
+ * observation, [requestState] read `observedAtMs == null`, and by its own
+ * documented rule that means `WAITING` **immediately** — so §4's quiet window,
+ * which exists precisely so a request that resolves in milliseconds never
+ * flashes an annotation, silently never applied to any request the reader did
+ * not make themselves. Which is every request an admin ever sees.
+ *
+ * Two refusals, both returning `false` rather than guessing:
+ *
+ *   * **`stored == false`.** The receipt gate refused the proposal, so no
+ *     sweep will ever commit it and it is not a pending request. Recording it
+ *     would leave residue in a store that is otherwise pruned against the live
+ *     set.
+ *   * **[atMs] is `null`** — the DS timestamp could not be parsed. Falling
+ *     back to the local clock is worse than not stamping: an unstamped request
+ *     renders `WAITING` immediately, which is merely eager, while a
+ *     locally-stamped one silently reintroduces exactly the clock skew the DS
+ *     timestamp exists to remove. *"`age` is measured against the DS row
+ *     timestamp, never a local clock … every member reads the identical value
+ *     for the identical row."*
+ *
+ * `own` is hard-coded `false`, and the first-wins rule in
+ * [recordPendingRequestObservation] is what makes that safe: the receive loop
+ * also observes OUR OWN proposal echoing back off the journal, and the `own`
+ * flag is upgraded monotonically, so the echo cannot clear §10's
+ * non-negotiable own-request exception.
+ *
+ * Takes millis rather than the ISO string so the rule stays free of
+ * `java.time` and reachable from a host unit test; the repository parses.
+ *
+ * @return whether an observation was written.
+ */
+internal fun recordReceivedProposalObservation(
+    store: PendingRequestStore,
+    accountIdB64: String,
+    groupIdHex: String,
+    record: ProposalRecord,
+    atMs: Long?,
+): Boolean {
+    if (!record.stored) return false
+    if (atMs == null) return false
+    recordPendingRequestObservation(
+        store = store,
+        accountIdB64 = accountIdB64,
+        groupIdHex = groupIdHex,
+        key = proposalKey(record),
+        atMs = atMs,
+        own = false,
+    )
+    return true
+}
+
 /** Drop every observation whose request is no longer in the core's pending set —
  *  swept, superseded, or the group moved. */
 internal fun prunePendingRequestObservations(

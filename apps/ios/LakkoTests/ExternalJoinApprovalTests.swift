@@ -167,7 +167,15 @@ final class ExternalJoinApprovalTests: XCTestCase {
     /// Owner A + admin B (the device under test) + member D, plus a stranger C
     /// whose external-join request is waiting, and one pending Remove proposal
     /// from the owner already applied on B.
+    private func makeMemberRepo() async throws -> Fixture {
+        try await makeRepo(promoteToAdmin: false)
+    }
+
     private func makeAdminRepo() async throws -> Fixture {
+        try await makeRepo(promoteToAdmin: true)
+    }
+
+    private func makeRepo(promoteToAdmin: Bool) async throws -> Fixture {
         ScriptedDsURLProtocol.reset()
 
         let ownerSeed = Data(repeating: 0x11, count: 32)
@@ -191,9 +199,11 @@ final class ExternalJoinApprovalTests: XCTestCase {
         // owner's beacon and acts without one.
         let ownerKey = try owner.signaturePublicKey()
         let adminKey = try admin.signaturePublicKey()
-        let roleCommit = try ownerGroup.setGroupRoles(
-            identity: owner, owner: ownerKey, admins: [adminKey])
-        _ = try adminGroup.processIncomingVerifyingRoles(identity: admin, bytes: roleCommit)
+        if promoteToAdmin {
+            let roleCommit = try ownerGroup.setGroupRoles(
+                identity: owner, owner: ownerKey, admins: [adminKey])
+            _ = try adminGroup.processIncomingVerifyingRoles(identity: admin, bytes: roleCommit)
+        }
 
         let groupId = try ownerGroup.groupId()
         let groupIdHex = DsClient.pseudonymHex(groupId)
@@ -203,9 +213,9 @@ final class ExternalJoinApprovalTests: XCTestCase {
             "the fixture must leave both devices at one epoch, or the seeded rows "
             + "would be dropped as wrong-epoch and the whole suite would pass vacuously")
         XCTAssertEqual(
-            try adminGroup.ownCommitterRank(identity: admin), 1,
+            try adminGroup.ownCommitterRank(identity: admin), promoteToAdmin ? 1 : nil,
             "the device under test must be an ADMIN — rank 0 (the owner) short-circuits "
-            + "the acting-committer fold to `act` and could never exercise the refusal")
+            + "the acting-committer fold to `act` — or, for the refusal case, a plain member")
 
         // Row 1 — the owner's Remove proposal. This is what makes the pending
         // set non-empty on the admin.
@@ -288,11 +298,13 @@ final class ExternalJoinApprovalTests: XCTestCase {
         // Proves BOTH halves of the precondition in one assertion: the sweep got
         // past its `nothingPending` short-circuit (so a proposal really is
         // pending) AND this device is standing down rather than acting.
-        let stoodDown = await repo.sweepIfCommitter(groupIdHex: groupIdHex)
-        XCTAssertEqual(
-            stoodDown, .deferred(rank: 1, toRank: 0),
-            "the fixture must leave a pending proposal on a device that is NOT the acting "
-            + "committer; anything else means the state under test was never reached")
+        if promoteToAdmin {
+            let stoodDown = await repo.sweepIfCommitter(groupIdHex: groupIdHex)
+            XCTAssertEqual(
+                stoodDown, .deferred(rank: 1, toRank: 0),
+                "the fixture must leave a pending proposal on a device that is NOT the acting "
+                + "committer; anything else means the state under test was never reached")
+        }
 
         return Fixture(
             repo: repo,
@@ -313,85 +325,113 @@ final class ExternalJoinApprovalTests: XCTestCase {
         ScriptedDsURLProtocol.reset()
     }
 
-    // MARK: - (1) The drain: an acting committer approves through a pending set
+    // MARK: - (1) ADR-0045 S7 — the approve is a PROPOSAL
 
-    /// THE DISCRIMINATING CASE. With the owner's beacon aged out, this admin is
-    /// the acting committer, so the drain clears the pending set and the approve
-    /// goes through. Without the drain the core refuses and this throws.
-    func testApproveDrainsThePendingSetWhenThisDeviceIsTheActingCommitter() async throws {
+    /// THE HEADLINE. The approve publishes exactly ONE artifact — an ordinary
+    /// admin-authored `Add` proposal — advances no epoch, and records nothing
+    /// in the ADR-0040 outbox, because a proposal makes nothing durable that a
+    /// crash could strand.
+    ///
+    /// The fixture is unchanged from the pre-S7 suite and that is the point:
+    /// this device is an ADMIN standing down behind the owner's live beacon,
+    /// with a pending Remove proposal it cannot sweep. Before S7 that state
+    /// made `Approve` fail outright; now it is simply irrelevant.
+    func testApprovingAnExternalJoinPublishesOneProposalAndAdvancesNoEpoch() async throws {
         let fx = try await makeAdminRepo()
         defer { tearDown(fx) }
 
-        // The owner went quiet. Nothing else about the group changes — same
-        // pending proposal, same waiting request, same roster.
-        fx.beaconStore.clearForAccount(accountIdB64: fx.accountIdB64)
+        let epochBefore = try XCTUnwrap(fx.repo.epoch(groupIdHex: fx.groupIdHex))
+        let rowsBefore = ScriptedDsURLProtocol.rowCount
 
-        let commitId: Int64
-        do {
-            commitId = try await fx.repo.approveExternalJoin(
-                groupIdHex: fx.groupIdHex,
-                proposalRef: fx.joinerKey
-            )
-        } catch {
-            // Reported here rather than left to propagate so the discrimination
-            // is legible: without the drain this is the core's own refusal.
-            XCTFail("the approve must go through once the drain has cleared the "
-                    + "pending set, but it threw: \(error)")
-            return
-        }
+        let proposalId = try await fx.repo.approveExternalJoin(
+            groupIdHex: fx.groupIdHex,
+            proposalRef: fx.joinerKey
+        )
 
-        XCTAssertGreaterThan(commitId, 0, "the approve must have reached the DS")
+        XCTAssertGreaterThan(proposalId, 0, "the approve must have reached the DS")
+        XCTAssertEqual(
+            ScriptedDsURLProtocol.rowCount - rowsBefore, 1,
+            "S7 publishes ONE artifact: a proposal. The pre-S7 path published a commit AND a "
+            + "WelcomeRendezvous; the rendezvous belongs to the sweep now")
+        XCTAssertEqual(
+            fx.repo.epoch(groupIdHex: fx.groupIdHex), epochBefore,
+            "a proposal advances no epoch — that is the whole of S7")
+        XCTAssertTrue(
+            CommitOutboxStore(rootDir: fx.outboxDir).loadUnacked(
+                accountIdB64: fx.accountIdB64, groupIdB64: fx.groupIdB64).isEmpty,
+            "a proposal is not a commit, so it leaves the ADR-0040 outbox entirely")
         XCTAssertTrue(
             fx.repo.pendingExternalJoins(groupIdHex: fx.groupIdHex).isEmpty,
             "an approved request must leave the pending list")
     }
 
-    // MARK: - (2) The surviving refusal reads as human copy
+    // MARK: - (2) The pending set no longer blocks an approve
 
-    /// The drain is not always able to clear the set: this admin is standing
-    /// down behind the owner's live beacon, so nothing drains and the approve
-    /// still cannot commit. What the admin must see is a sentence, not the
-    /// core's diagnostic.
-    func testApproveRefusesInHumanCopyWhenTheDrainCannotClearThePendingSet() async throws {
+    /// The pre-check that gated `Approve` on an empty pending set is gone with
+    /// the direct commit it guarded. Under ADR-0045 a pending proposal is the
+    /// NORMAL state, so an admin deferring to a live owner could essentially
+    /// never approve.
+    ///
+    /// This device is standing down behind the owner's beacon and holds a
+    /// pending Remove, so nothing it can do would drain the set — and the
+    /// approve must succeed anyway, without sweeping.
+    func testApproveComposesWithAPendingProposalAndNeverSweeps() async throws {
         let fx = try await makeAdminRepo()
         defer { tearDown(fx) }
 
         // The owner is still beaconing — re-recorded because the fixture's own
-        // verification sweep is the last thing to have read it, and a stale
-        // observation here would silently turn this into case (1).
+        // verification sweep is the last thing to have read it.
         fx.beaconStore.record(
             accountIdB64: fx.accountIdB64,
             groupIdB64: fx.groupIdB64,
             senderKeyB64: fx.ownerKeyB64,
             atMs: nowMs()
         )
+        let epochBefore = try XCTUnwrap(fx.repo.epoch(groupIdHex: fx.groupIdHex))
+
+        _ = try await fx.repo.approveExternalJoin(
+            groupIdHex: fx.groupIdHex,
+            proposalRef: fx.joinerKey
+        )
+
+        XCTAssertEqual(
+            fx.repo.epoch(groupIdHex: fx.groupIdHex), epochBefore,
+            "the approve must not have swept anything — it is a proposal, not a drain")
+        let stillDeferring = await fx.repo.sweepIfCommitter(groupIdHex: fx.groupIdHex)
+        XCTAssertEqual(
+            stillDeferring, .deferred(rank: 1, toRank: 0),
+            "and this device must still be standing down, with its own approval pending too")
+    }
+
+    // MARK: - (3) A refused approve leaves the request pending
+
+    /// The core keeps the retained request on a refusal so the admin can
+    /// retry; the client must not turn that into a publish or a silent drop.
+    /// A plain member's approve is the reachable refusal.
+    func testARefusedApprovePublishesNothingAndLeavesTheRequestPending() async throws {
+        let fx = try await makeMemberRepo()
+        defer { tearDown(fx) }
+
+        let rowsBefore = ScriptedDsURLProtocol.rowCount
+        let epochBefore = try XCTUnwrap(fx.repo.epoch(groupIdHex: fx.groupIdHex))
 
         do {
             _ = try await fx.repo.approveExternalJoin(
                 groupIdHex: fx.groupIdHex,
                 proposalRef: fx.joinerKey
             )
-            XCTFail("the approve must not succeed while this device cannot commit")
+            XCTFail("a plain member must not be able to approve")
             return
-        } catch let error as ChatError {
-            guard case .membershipChangesPending = error else {
-                XCTFail("expected the typed pending-changes refusal, got \(error)")
-                return
-            }
-            let shown = error.localizedDescription
-            XCTAssertEqual(shown, ChatError.membershipChangesPendingCopy)
-            // The point of the whole case: none of the core's vocabulary reaches
-            // the screen.
-            for leak in [
-                "commit_pending_proposals",
-                "stage_pending_proposals",
-                "membership proposal(s) are pending",
-                "ADR-0045",
-            ] {
-                XCTAssertFalse(
-                    shown.contains(leak),
-                    "user-facing copy must not contain the developer string '\(leak)'")
-            }
-        }
+        } catch {}
+
+        XCTAssertEqual(
+            ScriptedDsURLProtocol.rowCount, rowsBefore,
+            "a refused approve must publish nothing")
+        XCTAssertEqual(fx.repo.epoch(groupIdHex: fx.groupIdHex), epochBefore)
+        XCTAssertEqual(
+            fx.repo.pendingExternalJoins(groupIdHex: fx.groupIdHex).count, 1,
+            "the request must survive so the admin can retry — discarding it would lose a "
+            + "stranger's request nobody can get back")
     }
+
 }

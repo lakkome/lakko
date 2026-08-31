@@ -70,15 +70,18 @@ import Security
 /// clobber another. The store is tiny (one entry per in-flight commit; cleared
 /// on ack).
 
-/// The re-publish destination of an entry's second artifact (ADR-0040, G-35).
+/// The re-publish destination of a DIRECT-path entry's second artifact
+/// (ADR-0040, G-35).
+///
+/// One case since ADR-0045 S7. The external-join approve used to write a
+/// `.rendezvous` entry riding the group journal; it is a proposal now, so it
+/// commits nothing, records nothing, and the sweep owns every rendezvous
+/// (`Chat/CommitterSweep.swift`).
 public enum SecondArtifactKind: String, Codable, Equatable {
     /// A Welcome envelope -> the new member's mailbox (`publishMailbox`), the
     /// add path. Addressed by the recipient pseudonym in
     /// `PendingCommitEntry/secondArtifactMailboxB64`.
     case welcome
-    /// A `WelcomeRendezvous` -> the group journal (`publishGroup`), the
-    /// external-join-approve path. Rides the same journal as the commit.
-    case rendezvous
 }
 
 /// One durable pending-commit record (ADR-0040, G-35). Mirror of the web
@@ -98,16 +101,14 @@ public struct PendingCommitEntry: Codable, Equatable {
     public var targetEpoch: String
     /// base64 of the EXACT commit wire-bytes the core create-commit produced.
     public var commitB64: String
-    /// base64 of the second artifact's EXACT publishable wire-bytes — for
-    /// `.welcome` the `wrapEnvelope(.welcome, welcome)` mailbox envelope, for
-    /// `.rendezvous` the `wrapWelcomeRendezvous(...)` group-journal bytes. `nil`
-    /// for remove / role (they publish only the commit).
+    /// base64 of the second artifact's EXACT publishable wire-bytes — the
+    /// `wrapEnvelope(.welcome, welcome)` mailbox envelope. `nil` for remove /
+    /// role (they publish only the commit).
     public var secondArtifactB64: String?
     /// Discriminates the second artifact's re-publish destination.
     public var secondArtifactKind: SecondArtifactKind?
     /// base64 of the recipient mailbox pseudonym — the `publishMailbox` target
-    /// for a `.welcome` second artifact. `nil` for `.rendezvous` (it rides the
-    /// group journal, addressed by `groupId`).
+    /// for the second artifact. `nil` when there is no second artifact.
     public var secondArtifactMailboxB64: String?
     /// ADR-0045 — `true` while this entry belongs to a STAGED sweep whose
     /// journal verdict has not been read yet.
@@ -142,6 +143,15 @@ public struct PendingCommitEntry: Codable, Equatable {
     /// where the direct add path has exactly one destination
     /// (``secondArtifactMailboxB64``, which stays untouched for that path).
     public var welcomeMailboxesB64: [String]?
+    /// ADR-0045 S7 — the sweep's group-journal `WelcomeRendezvous` envelopes,
+    /// one per member the sweep adds.
+    ///
+    /// Whole envelopes rather than addresses, because a rendezvous binds the
+    /// added member's signature key into its own bytes — so unlike the single
+    /// Welcome envelope fanned out to N mailboxes above, every recipient gets
+    /// different bytes. Recorded before any publish so a restart re-publishes
+    /// exactly what this sweep computed. Empty when the sweep carried no add.
+    public var welcomeRendezvousB64: [String]?
     /// `false` until BOTH artifacts have (re)published. An un-acked entry is
     /// swept on the first `pollGroup` of a session.
     public var acked: Bool
@@ -161,6 +171,7 @@ public struct PendingCommitEntry: Codable, Equatable {
         sweepVerdictPending: Bool? = nil,
         sweepWelcomesOwed: Bool? = nil,
         welcomeMailboxesB64: [String]? = nil,
+        welcomeRendezvousB64: [String]? = nil,
         acked: Bool = false,
         commitMessageId: Int64? = nil,
         secondMessageId: Int64? = nil
@@ -176,6 +187,7 @@ public struct PendingCommitEntry: Codable, Equatable {
         self.sweepVerdictPending = sweepVerdictPending
         self.sweepWelcomesOwed = sweepWelcomesOwed
         self.welcomeMailboxesB64 = welcomeMailboxesB64
+        self.welcomeRendezvousB64 = welcomeRendezvousB64
         self.acked = acked
         self.commitMessageId = commitMessageId
         self.secondMessageId = secondMessageId
@@ -197,6 +209,15 @@ public struct NewCommitEntry: Equatable {
     public var sweepVerdictPending: Bool?
     /// ADR-0045 — see ``PendingCommitEntry/welcomeMailboxesB64``.
     public var welcomeMailboxesB64: [String]?
+    /// ADR-0045 S7 — the sweep's group-journal `WelcomeRendezvous` envelopes,
+    /// one per member the sweep adds.
+    ///
+    /// Whole envelopes rather than addresses, because a rendezvous binds the
+    /// added member's signature key into its own bytes — so unlike the single
+    /// Welcome envelope fanned out to N mailboxes above, every recipient gets
+    /// different bytes. Recorded before any publish so a restart re-publishes
+    /// exactly what this sweep computed. Empty when the sweep carried no add.
+    public var welcomeRendezvousB64: [String]?
 
     public init(
         id: String,
@@ -207,7 +228,8 @@ public struct NewCommitEntry: Equatable {
         secondArtifactKind: SecondArtifactKind? = nil,
         secondArtifactMailboxB64: String? = nil,
         sweepVerdictPending: Bool? = nil,
-        welcomeMailboxesB64: [String]? = nil
+        welcomeMailboxesB64: [String]? = nil,
+        welcomeRendezvousB64: [String]? = nil
     ) {
         self.id = id
         self.groupId = groupId
@@ -218,6 +240,7 @@ public struct NewCommitEntry: Equatable {
         self.secondArtifactMailboxB64 = secondArtifactMailboxB64
         self.sweepVerdictPending = sweepVerdictPending
         self.welcomeMailboxesB64 = welcomeMailboxesB64
+        self.welcomeRendezvousB64 = welcomeRendezvousB64
     }
 }
 
@@ -298,6 +321,7 @@ public final class CommitOutboxStore {
             secondArtifactMailboxB64: entry.secondArtifactMailboxB64,
             sweepVerdictPending: entry.sweepVerdictPending,
             welcomeMailboxesB64: entry.welcomeMailboxesB64,
+            welcomeRendezvousB64: entry.welcomeRendezvousB64,
             acked: false
         )
         try putEntryDurable(accountIdB64: accountIdB64, entry: full)

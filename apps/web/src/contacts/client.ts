@@ -622,6 +622,7 @@ function sweepPortsFor(
           commitB64: entry.commitB64,
           sweepVerdictPending: true,
           welcomeMailboxesB64: [...entry.welcomeMailboxesB64],
+          welcomeRendezvousB64: [...entry.welcomeRendezvousB64],
         };
         if (entry.welcomeEnvelopeB64 !== undefined) {
           next.secondArtifactB64 = entry.welcomeEnvelopeB64;
@@ -678,6 +679,12 @@ function sweepPortsFor(
     welcomeMailbox: (signatureKey) =>
       wasm.IdentityPseudonym.fromIdentity(signatureKey).asBytes(),
     wrapWelcome: (welcome) => wrapEnvelope(KIND_WELCOME, welcome),
+    // ADR-0045 S7 — the group-journal half of the fan-out. An external joiner
+    // approved through a `/g/` link polls the journal for this and nothing
+    // else; the sweep cannot tell which adds those are, so it wraps one per
+    // added key.
+    wrapRendezvous: (signatureKey, welcome) =>
+      wasm.wrapWelcomeRendezvous(signatureKey, welcome),
     markOwnPublished,
     persist,
     persistApplied,
@@ -711,6 +718,7 @@ function toSweepEntry(row: PendingCommitEntry): SweepDurableEntry {
     commitB64: row.commitB64,
     welcomeEnvelopeB64: row.secondArtifactB64,
     welcomeMailboxesB64: row.welcomeMailboxesB64 ?? [],
+    welcomeRendezvousB64: row.welcomeRendezvousB64 ?? [],
   };
   // Built without assigning `undefined` (exactOptionalPropertyTypes).
   if (row.commitMessageId !== undefined) {
@@ -1074,24 +1082,22 @@ export class ContactsClient {
         // CannotDecryptOwnMessage. Suppress it on the very next poll.
         markOwnPublished(commitPub.id);
 
+        // ADR-0045 S7 — a direct-path second artifact is now ALWAYS a mailbox
+        // Welcome. The rendezvous arm this loop used to carry belonged to the
+        // external-join approve, which no longer commits and therefore writes
+        // no entry at all; the sweep owns every rendezvous now
+        // (`chat/sweep.ts`, one per added key).
         let secondMessageId: number | undefined;
-        if (entry.secondArtifactB64 !== undefined) {
+        if (
+          entry.secondArtifactB64 !== undefined &&
+          entry.secondArtifactMailboxB64 !== undefined
+        ) {
+          // Welcome -> the new member's mailbox (NOT this device's group
+          // journal), so no echo re-arm — the committer never re-fetches it.
           const secondBytes = base64Decode(entry.secondArtifactB64);
-          if (
-            entry.secondArtifactKind === "welcome" &&
-            entry.secondArtifactMailboxB64 !== undefined
-          ) {
-            // Welcome -> the new member's mailbox (NOT this device's group
-            // journal), so no echo re-arm — the committer never re-fetches it.
-            const pseudonym = base64Decode(entry.secondArtifactMailboxB64);
-            const pub2 = await this.ds.publishMailbox(pseudonym, secondBytes);
-            secondMessageId = pub2.id;
-          } else {
-            // Rendezvous -> the group journal. Existing members / the committer
-            // drop it (not an MLS message) via their receive loop's catch.
-            const pub2 = await this.ds.publishGroup(groupIdBytes, secondBytes);
-            secondMessageId = pub2.id;
-          }
+          const pseudonym = base64Decode(entry.secondArtifactMailboxB64);
+          const pub2 = await this.ds.publishMailbox(pseudonym, secondBytes);
+          secondMessageId = pub2.id;
         }
         await this.ackCommitBestEffort(entry.id, commitPub.id, secondMessageId);
       } catch (err) {
@@ -2745,143 +2751,64 @@ export class ContactsClient {
     });
   }
 
-  /** ADR-0027 (G-3) — approve a pending external-join request (owner / admin
-   *  only). `proposalRef` is the joiner's leaf signature key surfaced by an
-   *  `externalJoinRequest` event or `group.pendingExternalJoins()`. Drives the
-   *  MLS approve — which role-gates internally (fail-closed: a non-owner/admin
-   *  caller is refused before any state moves) and reuses the audited
-   *  `add_member`, so it returns `{ commit, welcome }` just like a normal add.
-   *  Step 1: broadcast the commit to the group journal so every existing member
-   *  advances its epoch and admits the joiner. Step 2: wrap the Welcome in a
-   *  `WelcomeRendezvous` envelope keyed on `proposalRef` and post THAT to the
-   *  same journal — the not-yet-member joiner (which knows the group_id because
-   *  it sent its proposal there) polls the journal, matches the envelope to its
-   *  own signature key, and opens the inner Welcome. Existing members skip the
-   *  rendezvous entry: it is not an MLS message, so their receive loop's
-   *  `processIncoming` rejects it and the loop drops it (the DS stores it opaque
-   *  — invariant #2). The caller registers the returned `commitMessageId` with
-   *  `ChatClient.markOwnPublishedCommit` to suppress the sender's own echo. */
+  /**
+   * ADR-0027 (G-3), on the ADR-0045 proposal path since **S7** — approve a
+   * pending external-join request (owner / admin only).
+   *
+   * `proposalRef` is the joiner's leaf signature key surfaced by an
+   * `externalJoinRequest` event or `group.pendingExternalJoins()`.
+   *
+   * ## One artifact, and no epoch
+   *
+   * The core publishes an ordinary admin-authored `Add` **proposal** carrying
+   * the joiner's retained KeyPackage — the admin's own MLS-authenticated
+   * signature *is* the approval — so this posts exactly one thing to the group
+   * journal and the epoch does not move. Everything the old direct-commit
+   * shape needed is therefore gone: no Welcome to compute here, no
+   * `WelcomeRendezvous` to post here, and no ADR-0040 outbox entry, because a
+   * proposal makes nothing durable that a crash could strand.
+   *
+   * The joiner's Welcome — and its `WelcomeRendezvous` — is produced by
+   * whichever device later sweeps this proposal into a commit. See
+   * `chat/sweep.ts`: that sweep posts one rendezvous per added key, blind to
+   * which of them came from a link.
+   *
+   * ## No pre-drain
+   *
+   * The old path had to sweep the pending set first, because the direct commit
+   * it used was refused while anything was pending. That dead end is gone: an
+   * approve is now a proposal like any other and composes with whatever else is
+   * waiting.
+   *
+   * A refusal (wrong role, a full pending set) throws and leaves the request
+   * pending in the core, so the Approve affordance stays and can be retried.
+   */
   async approveExternalJoin(
     identity: IdentitySecrets | null,
     group: WasmGroup,
     proposalRef: Uint8Array,
-    // ADR-0045 — supplied so the approve can drain the pending proposal set
-    // first; see the comment inside. Optional so the ADR-0028 co-publisher
-    // caller, whose `PublisherGroup` carries no role table and can therefore
-    // never hold a proposal, is unaffected.
-    sweepFirst?: {
-      cursor: SweepCursorRef;
-      markOwnPublished: (messageId: number) => void;
-      actingCommitter: (ownRank: number) => Promise<ActingCommitter>;
-      /** ADR-0045 — the timeline events of every row that drain's verdict
-       *  applied. The drain moves the shared cursor, so these are rows the poll
-       *  will never fetch again. */
-      onSweptEvent: (event: IncomingChatEvent) => void;
-    },
-  ): Promise<{ commitMessageId: number; welcomeMessageId: number }> {
-    const wasm = await loadWasm();
+  ): Promise<{ kind: "proposed"; proposalMessageId: number }> {
     const myIdentity = await this.resolveIdentity(identity);
 
-    // ADR-0045 — an external join keeps its own path (converging it onto the
-    // sweep is S7), but it can no longer simply commit: the core REFUSES a
-    // direct commit while anything is pending, because the OpenMLS entry point
-    // it is built on would sweep the whole pending set alongside the one add it
-    // was asked for. Two live failure modes followed from that, and both are
-    // this ADR's own hazard through the back door — a commit that
-    // `owner_survives` refuses on every peer while its eagerly-merging author
-    // sits alone at N+1, and an admin asking to add one member adding two, with
-    // the single Welcome routed to only one of them.
-    //
-    // So: sweep the pending set first (this device is the committer, or the
-    // sweep is a no-op), THEN approve. The two take the group lock in turn
-    // rather than nesting, because the lock is non-reentrant.
-    if (sweepFirst !== undefined && usesProposalPath(group)) {
-      await this.sweepIfCommitter(
-        identity,
-        group,
-        sweepFirst.cursor,
-        sweepFirst.markOwnPublished,
-        sweepFirst.actingCommitter,
-        sweepFirst.onSweptEvent,
-      );
-    }
-
-    // SERIALIZED per group — `approveExternalJoin` reuses the audited
-    // `add_member` and eager-merges N -> N+1 like the other three.
-    return withGroupMlsLock(base64Encode(group.groupId), async () =>
-      this.approveExternalJoinLocked(wasm, myIdentity, group, proposalRef),
-    );
-  }
-
-  /** The serialized body of {@link approveExternalJoin}. Runs under
-   *  `withGroupMlsLock`; never call it directly. */
-  private async approveExternalJoinLocked(
-    wasm: Wasm,
-    myIdentity: WasmIdentity,
-    group: WasmGroup,
-    proposalRef: Uint8Array,
-  ): Promise<{ commitMessageId: number; welcomeMessageId: number }> {
-    let added;
-    try {
-      added = group.approveExternalJoin(myIdentity, proposalRef);
-    } catch (err) {
-      throw ContactsError.wrap(err);
-    }
-    // ADR-0040 (G-35) + F1 — from just after the eager-merge above through the
-    // successful atomic persist is ONE fail-closed region. The core
-    // `approveExternalJoin` reused the audited `add_member` and eager-merged epoch
-    // N -> N+1, so ANY throw before the publish — the rendezvous-artifact
-    // computation (`wrapWelcomeRendezvous`, which CAN throw) OR the persist itself
-    // — must reset the in-memory group back to the durable N snapshot before
-    // aborting; otherwise a later same-session commit builds on the un-published
-    // N+1 and strands the WHOLE group ("device-ahead"). Compute the rendezvous (the
-    // second artifact, riding the same group journal as the commit) UP-FRONT so the
-    // outbox entry holds both artifacts, then persist the entry + the N+1 snapshot
-    // in ONE atomic write, FAIL-CLOSED. A throw ABORTS: no publish, group reset to
-    // N. Publish stays OUTSIDE this region (a publish failure must NOT reset — the
-    // durable entry is re-published idempotently by `sweepPendingCommits`).
-    let groupIdBytes: Uint8Array;
-    let rendezvous: Uint8Array;
-    let entryId: string;
-    try {
-      groupIdBytes = group.groupId;
-      rendezvous = wasm.wrapWelcomeRendezvous(proposalRef, added.welcome);
-      entryId = newOutboxEntryId();
-      await this.persistCommitOrThrow({
-        id: entryId,
-        groupId: base64Encode(groupIdBytes),
-        targetEpoch: group.epoch.toString(),
-        commitB64: base64Encode(added.commit),
-        secondArtifactB64: base64Encode(rendezvous),
-        secondArtifactKind: "rendezvous",
-      });
-    } catch (err) {
-      await this.resetGroupAfterPersistAbort(group);
-      throw ContactsError.wrap(err);
-    }
-
-    // Publish artifact 1 — the commit so every existing member admits the joiner.
-    let commitPublish;
-    try {
-      commitPublish = await this.ds.publishGroup(groupIdBytes, added.commit);
-    } catch (err) {
-      throw ContactsError.wrap(err);
-    }
-
-    // Publish artifact 2 — the wrapped Welcome rendezvous to the same journal.
-    let welcomePublish;
-    try {
-      welcomePublish = await this.ds.publishGroup(groupIdBytes, rendezvous);
-    } catch (err) {
-      throw ContactsError.wrap(err);
-    }
-
-    await this.ackCommitBestEffort(entryId, commitPublish.id, welcomePublish.id);
-
-    return {
-      commitMessageId: commitPublish.id,
-      welcomeMessageId: welcomePublish.id,
-    };
+    // SERIALIZED per group, like every other path that reads group state and
+    // writes a snapshot — a proposal grows the pending set, so two approves
+    // taken at once are still a read-modify-write on the same MLS store.
+    return withGroupMlsLock(base64Encode(group.groupId), async () => {
+      let proposalBytes: Uint8Array;
+      try {
+        proposalBytes = group.approveExternalJoin(myIdentity, proposalRef);
+      } catch (err) {
+        throw ContactsError.wrap(err);
+      }
+      await this.persistBestEffort();
+      let publish;
+      try {
+        publish = await this.ds.publishGroup(group.groupId, proposalBytes);
+      } catch (err) {
+        throw ContactsError.wrap(err);
+      }
+      return { kind: "proposed" as const, proposalMessageId: publish.id };
+    });
   }
 
   /** ADR-0027 (G-3) — reject a pending external-join request. Local-only: drops

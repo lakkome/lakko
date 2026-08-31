@@ -8,8 +8,16 @@
  * `https://lakko.me/g/<slug>` link, decodes + verifies the
  * `GroupInviteCapability`, and requests to join. "Request to join" posts an MLS
  * external-join proposal (ADR-0027) to the group journal; an owner/admin
- * approves it from their members panel, which posts a `WelcomeRendezvous` this
- * page polls for and opens to land the joiner in the group.
+ * approves it from their members panel; and — since ADR-0045 S7 — whichever
+ * device is the acting committer then sweeps that approval into a commit and
+ * posts the `WelcomeRendezvous` this page polls for and opens.
+ *
+ * That last step is why the wait is TWO-stage and the copy says so. Approval no
+ * longer admits anyone by itself: it publishes an `Add` proposal, and ADR-0045
+ * decision 2 gives the sweep that commits it no deadline, so a request can sit
+ * approved-but-not-yet-admitted for as long as no candidate committer is
+ * running. Promising immediacy here would be the optimistic-update lie the UX
+ * spec forbids.
  *
  * The link conveys only the `group_id` — it authorizes nobody; the admin
  * approval gate is the security boundary. Public route (anonymous visitors land
@@ -92,8 +100,10 @@ export default function JoinGroup() {
         },
       );
       setPhase("waiting");
-      // Poll the journal for the admin's approval (the WelcomeRendezvous). The
-      // poll keeps running until a Welcome arrives or the page unmounts.
+      // Poll the journal for the rendezvous. ADR-0045 S7: an admin's approve
+      // publishes a proposal, and the rendezvous appears only once a committer
+      // sweeps it — so this poll spans both stages and keeps running until a
+      // Welcome arrives or the page unmounts.
       pollTimer = window.setInterval(() => {
         void (async () => {
           try {
@@ -152,7 +162,10 @@ export default function JoinGroup() {
             <p>Sending request…</p>
           </Show>
           <Show when={phase() === "waiting"}>
-            <p>Request sent. Waiting for an admin to approve…</p>
+            <p>
+              Request sent. Waiting for an admin to approve, then for the
+              change to be applied to the group.
+            </p>
           </Show>
           <Show when={phase() === "joined"}>
             <p>Joined! Opening chat…</p>

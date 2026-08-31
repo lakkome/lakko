@@ -36,6 +36,7 @@ import {
   loadLeaveRequestedAt,
   membershipEnded,
   membershipState,
+  messageActionsState,
   pendingTeardownSteps,
   readIsActive,
   recordLeaveRequested,
@@ -314,6 +315,64 @@ describe("the composer", () => {
       expect(state.draft).toBeNull();
       expect(state.draftLabel).toBeNull();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §6.2.5 — the per-message action menu, gated on the composer's own predicate
+// ---------------------------------------------------------------------------
+
+describe("the per-message action menu", () => {
+  const states = [
+    membershipState({ isActive: true, leaveRequestedAtMs: undefined }),
+    membershipState({ isActive: undefined, leaveRequestedAtMs: undefined }),
+    membershipState({ isActive: false, leaveRequestedAtMs: undefined }),
+    membershipState({ isActive: false, leaveRequestedAtMs: 1_000 }),
+  ];
+
+  it("is WITHDRAWN once the membership has ended, not disabled", () => {
+    // §6.2.5's rule reached from the other end: disable while the state is
+    // transient, REMOVE when it is terminal. Edit / Delete / React each
+    // compose an application message and `create_message` gates on
+    // `is_operational()`, so on a dead group all three are refused —
+    // permanently, for the same reason and at the same instant as Send. A
+    // greyed React button that can never become live again is the shape §5.3
+    // reserves for a permission that is merely suspended.
+    const ended = membershipState({
+      isActive: false,
+      leaveRequestedAtMs: undefined,
+    });
+    expect(messageActionsState(ended)).toBe("withdrawn");
+    expect(
+      messageActionsState(
+        membershipState({ isActive: true, leaveRequestedAtMs: undefined }),
+      ),
+    ).toBe("available");
+  });
+
+  it("answers the composer's question, so the two cannot drift apart", () => {
+    // This is the point of the describe, not a restatement of the case above.
+    // The menu and the composer are refused by the SAME core gate, so they
+    // must never disagree about whether this group is writable — and the way
+    // two gates on one predicate drift is that somebody later adds a condition
+    // to one of them. Enumerating every state and asserting the equivalence is
+    // what catches that; asserting each in isolation would not.
+    for (const state of states) {
+      const composerLive = composerState(state, "draft").kind === "composer";
+      const actionsLive = messageActionsState(state) === "available";
+      expect(actionsLive).toBe(composerLive);
+    }
+  });
+
+  it("does not fail closed on an unreadable handle", () => {
+    // Same direction as `membershipState`'s own rule and for the same reason:
+    // a torn handle is not evidence of an eviction, and withdrawing the menu
+    // on one would hide working controls on a group the user is still in.
+    expect(
+      messageActionsState(
+        membershipState({ isActive: undefined, leaveRequestedAtMs: 5 }),
+      ),
+    ).toBe("available");
   });
 });
 

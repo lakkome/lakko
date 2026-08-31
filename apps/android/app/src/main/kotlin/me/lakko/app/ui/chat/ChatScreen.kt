@@ -438,6 +438,11 @@ public fun ChatScreen(
                         MessageRow(
                             msg = msg,
                             ownIdentity = ownIdentity,
+                            // ADR-0045 UX §6.2.5 — the same predicate the
+                            // composer is gated on, two `when`s below.
+                            actionsAvailable = me.lakko.app.chat.messageActionsState(
+                                membership,
+                            ) == me.lakko.app.chat.MessageActions.AVAILABLE,
                             // ADR-0024 — read-state inputs (own
                             // bubbles render "Sent" / "Read").
                             otherMembers = otherMembers,
@@ -708,6 +713,13 @@ private fun CallOverlay(
 private fun MessageRow(
     msg: ChatMessage,
     ownIdentity: me.lakko.app.chat.MemberIdentity?,
+    /** ADR-0045 UX §6.2.5 — whether Edit / Delete / React are offered at all.
+     *  `false` once this device's membership has ended: all three compose an
+     *  application message, so all three are refused by the same core gate
+     *  that refuses Send. Threaded down rather than read here so the bubble
+     *  stays a pure renderer of what `MembershipEnded.kt` decided. */
+    actionsAvailable: Boolean,
+
     /** ADR-0024 — live roster minus self; read-state inputs. Keyed on the
      *  member's signature key, never the MLS leaf. */
     otherMembers: Set<me.lakko.app.chat.MemberIdentity>,
@@ -726,6 +738,7 @@ private fun MessageRow(
             Bubble(
                 msg = msg,
                 ownIdentity = ownIdentity,
+                actionsAvailable = actionsAvailable,
                 isOwn = true,
                 // ADR-0024 — own bubble: compute the read tick.
                 readState = ownReadStateFor(
@@ -751,6 +764,7 @@ private fun MessageRow(
             Bubble(
                 msg = msg,
                 ownIdentity = ownIdentity,
+                actionsAvailable = actionsAvailable,
                 isOwn = false,
                 // Incoming bubbles never show our read state.
                 readState = OwnReadState.None,
@@ -808,6 +822,13 @@ private fun Bubble(
     /** ADR-0023 — our own signature key, for the own-reaction highlight. */
     ownIdentity: me.lakko.app.chat.MemberIdentity?,
     isOwn: Boolean,
+    /** ADR-0045 UX §6.2.5 — whether Edit / Delete / React are offered at all.
+     *  `false` once this device's membership has ended: all three compose an
+     *  application message, so all three are refused by the same core gate
+     *  that refuses Send. Threaded down rather than read here so the bubble
+     *  stays a pure renderer of what `MembershipEnded.kt` decided. */
+    actionsAvailable: Boolean,
+
     /** ADR-0024 — read state for an OWN bubble ([OwnReadState.None]
      *  for incoming / un-acked rows). Renders a "Sent" / "Read"
      *  line under the bubble. */
@@ -840,7 +861,10 @@ private fun Bubble(
                 modifier = Modifier
                     .widthIn(max = 280.dp)
                     .then(
-                        if (hasId && !msg.deleted) {
+                        // ADR-0045 UX §6.2.5 — no long press once the
+                        // membership has ended: the menu it opens offers
+                        // three ops the core now refuses, permanently.
+                        if (actionsAvailable && hasId && !msg.deleted) {
                             Modifier.combinedClickable(
                                 onClick = {},
                                 onLongClick = {
@@ -947,10 +971,16 @@ private fun Bubble(
         // ADR-0023 — reaction chips with counts under the bubble.
         // Tapping a chip we contributed toggles it off.
         if (!msg.deleted && msg.reactions.isNotEmpty()) {
+            // A chip carries BOTH a fact and an affordance, and §6.2.5
+            // separates them: the count is transcript, which §6.2.6 keeps
+            // whole, while tapping it is the React op, which dies with Send.
+            // So the chips stay and stop being tappable — not greyed, for the
+            // same reason the composer is replaced rather than disabled.
             ReactionChips(
                 reactions = msg.reactions,
                 ownIdentity = ownIdentity,
-                onToggle = { emoji -> if (hasId) onReact(emoji) },
+                onToggle = { emoji -> if (actionsAvailable && hasId) onReact(emoji) },
+                interactive = actionsAvailable,
             )
         }
 
@@ -986,6 +1016,9 @@ private fun ReactionChips(
     reactions: List<me.lakko.app.chat.Reaction>,
     ownIdentity: me.lakko.app.chat.MemberIdentity?,
     onToggle: (String) -> Unit,
+    /** ADR-0045 UX §6.2.5 — `false` once the membership has ended: the chip
+     *  still renders its count and stops being a control. */
+    interactive: Boolean = true,
 ) {
     // Aggregate by emoji preserving first-seen order; track whether WE are in
     // each bucket — by signature key, so a newcomer taking a slot we once held
@@ -1014,10 +1047,14 @@ private fun ReactionChips(
                     MaterialTheme.colorScheme.surfaceVariant
                 },
                 contentColor = MaterialTheme.colorScheme.onSurface,
-                modifier = Modifier.combinedClickable(
-                    onClick = { onToggle(emoji) },
-                    onLongClick = {},
-                ),
+                modifier = if (interactive) {
+                    Modifier.combinedClickable(
+                        onClick = { onToggle(emoji) },
+                        onLongClick = {},
+                    )
+                } else {
+                    Modifier
+                },
             ) {
                 Text(
                     text = "$emoji $count",
@@ -1027,6 +1064,44 @@ private fun ReactionChips(
             }
         }
     }
+}
+
+/**
+ * ADR-0045 UX §6 — the `Remove this member?` confirmation.
+ *
+ * Same idiom as [LeaveGroupDialog] deliberately: the two sit in the same panel
+ * and a user reading one after the other should be answering the same kind of
+ * question. The copy comes from `me.lakko.app.chat.removeMemberConfirmation`
+ * rather than being inlined, so the three clients cannot drift on the sentence
+ * that tells a user whether the person they are removing can still read their
+ * messages.
+ *
+ * The body is absent on a direct-commit group, where §6's sentence would be
+ * false — see the module for why it is dropped rather than reworded.
+ */
+@Composable
+private fun RemoveMemberDialog(
+    usesProposalPath: Boolean,
+    onCancel: () -> Unit,
+    onRemove: () -> Unit,
+) {
+    val copy = me.lakko.app.chat.removeMemberConfirmation(usesProposalPath)
+    AlertDialog(
+        onDismissRequest = onCancel,
+        title = { Text(copy.title) },
+        text = copy.body?.let { body -> { Text(body) } },
+        confirmButton = {
+            TextButton(
+                onClick = onRemove,
+                colors = ButtonDefaults.textButtonColors(
+                    contentColor = MaterialTheme.colorScheme.error,
+                ),
+            ) { Text(copy.confirmLabel) }
+        },
+        dismissButton = {
+            TextButton(onClick = onCancel) { Text(copy.cancelLabel) }
+        },
+    )
 }
 
 /** ADR-0023 — the pre-filled edit dialog (Save / Cancel). */
@@ -1832,6 +1907,12 @@ private fun MembersSheet(
     // sheet, like `confirmingLeave`: it is a presentation concern, and nothing
     // outside this composable may open it.
     var confirmingDelete by remember { mutableStateOf(false) }
+    // ADR-0045 (UX §6) — the `Remove this member?` confirmation, holding the
+    // leaf awaiting it. Local to the sheet like `confirmingLeave`, and a
+    // nullable leaf rather than a boolean because the confirmation names WHICH
+    // member: a shared boolean plus a separately-stored target is how a
+    // confirmation ends up removing somebody the user did not look at.
+    var confirmingRemove by remember { mutableStateOf<UInt?>(null) }
 
     // ADR-0045 UX §6.1 — the exit block's inputs, read as Compose state so the
     // block recomposes when any of them moves.
@@ -1891,6 +1972,17 @@ private fun MembersSheet(
             onLeave = {
                 confirmingLeave = false
                 viewModel.onLeaveGroup()
+            },
+        )
+    }
+
+    confirmingRemove?.let { leaf ->
+        RemoveMemberDialog(
+            usesProposalPath = roleTable != null,
+            onCancel = { confirmingRemove = null },
+            onRemove = {
+                confirmingRemove = null
+                viewModel.onRemoveMember(leaf)
             },
         )
     }
@@ -2200,7 +2292,11 @@ private fun MembersSheet(
                             // (owner / admin / open group) and not our own leaf.
                             if (canManage && ownLeaf != member.leafIndex) {
                                 TextButton(
-                                    onClick = { viewModel.onRemoveMember(member.leafIndex) },
+                                    // ADR-0045 UX §6 — the confirmation is the
+                                    // LAST exit: a published request cannot be
+                                    // withdrawn, and a direct commit lands at
+                                    // once. Never remove on a single tap.
+                                    onClick = { confirmingRemove = member.leafIndex },
                                     // UX §5.3 — a member with a pending removal keeps
                                     // Remove VISIBLE but DISABLED. Hiding it would read
                                     // as the permission having vanished; the annotation

@@ -33,7 +33,14 @@ import me.lakko.app.chat.ChatRepository
 /**
  * ADR-0028 (G-3) — drives the `/g/<slug>` group join-ticket landing. Decodes +
  * verifies the capability, posts an external-join proposal (ADR-0027), and
- * polls until an admin approves and the rendezvous Welcome lands.
+ * polls until the rendezvous Welcome lands.
+ *
+ * **The wait is TWO-stage since ADR-0045 S7, and the copy says so.** An admin's
+ * approve no longer admits anyone by itself: it publishes an `Add` proposal, and
+ * the rendezvous appears only once a committer sweeps that proposal into a
+ * commit — a step ADR-0045 decision 2 gives no deadline. So this poll spans both
+ * stages, and promising immediacy here would be the optimistic-update lie the UX
+ * spec forbids.
  */
 public class JoinGroupLandingViewModel(
     private val repository: ChatRepository,
@@ -121,7 +128,7 @@ public fun JoinGroupLandingScreen(
             is JoinGroupLandingViewModel.State.Waiting -> {
                 CircularProgressIndicator()
                 Spacer(Modifier.height(8.dp))
-                Text("Waiting for an admin to approve…")
+                Text("Waiting for an admin to approve, then for the change to be applied…")
             }
             is JoinGroupLandingViewModel.State.Joined -> {
                 Text("Joined! You can find the group in your chats.")

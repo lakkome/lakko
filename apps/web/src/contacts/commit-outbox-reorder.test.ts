@@ -31,24 +31,19 @@ vi.mock("../chat/commit-outbox", () => ({
   loadUnacked: (...a: unknown[]) => loadUnacked(...(a as [])),
 }));
 
-// `approveExternalJoin` computes the rendezvous via `loadWasm().wrapWelcomeRendezvous`
-// and `addMemberToGroup` computes the Welcome pseudonym via
-// `loadWasm().IdentityPseudonym.fromIdentity(...).asBytes()`. Stub them so the
-// reorder is exercised without the real wasm core. The `hoisted` flags let a test
+// `addMemberToGroup` computes the Welcome pseudonym via
+// `loadWasm().IdentityPseudonym.fromIdentity(...).asBytes()`. Stub it so the
+// reorder is exercised without the real wasm core. The `hoisted` flag lets a test
 // force the ARTIFACT-COMPUTE (not the persist) to throw AFTER the eager-merge —
 // the ADR-0040 F1 pre-persist residual — so we can assert the reset still fires.
+//
+// ADR-0045 S7 removed the second such artifact: the external-join approve no
+// longer computes a `WelcomeRendezvous` here, because it no longer commits.
 const hoisted = vi.hoisted(() => ({
-  wrapRendezvousThrows: false,
   fromIdentityThrows: false,
 }));
 vi.mock("../wasm", () => ({
   loadWasm: async () => ({
-    wrapWelcomeRendezvous: (ref: Uint8Array, welcome: Uint8Array): Uint8Array => {
-      if (hoisted.wrapRendezvousThrows) {
-        throw new Error("wrapWelcomeRendezvous failed (artifact compute)");
-      }
-      return new Uint8Array([0xff, ...ref.slice(0, 2), ...welcome]);
-    },
     IdentityPseudonym: {
       fromIdentity: (_pk: Uint8Array) => ({
         asBytes: (): Uint8Array => {
@@ -103,10 +98,6 @@ function mockGroup(order: string[], opts: { roleTable?: boolean } = {}): WasmGro
       return new Uint8Array([4, 5, 6]);
     }),
     pendingProposals: vi.fn(() => []),
-    approveExternalJoin: vi.fn((_id: unknown, _ref: Uint8Array) => {
-      order.push("create");
-      return { commit: new Uint8Array([7, 7]), welcome: new Uint8Array([8, 8]) };
-    }),
   };
   if (opts.roleTable === true) {
     base["roleTableOwner"] = vi.fn(() => new Uint8Array(32).fill(1));
@@ -147,7 +138,6 @@ function makeClient(
 
 afterEach(() => {
   vi.clearAllMocks();
-  hoisted.wrapRendezvousThrows = false;
   hoisted.fromIdentityThrows = false;
 });
 
@@ -238,52 +228,6 @@ describe("ADR-0040 — commit path persist-before-publish (fail-closed)", () => 
     expect(markAcked).not.toHaveBeenCalled();
   });
 
-  it("approveExternalJoin (two-artifact): a persist FAILURE aborts BEFORE either publish", async () => {
-    const order: string[] = [];
-    const publishGroup = vi.fn(async () => {
-      order.push("publish");
-      return { id: 1, createdAt: "t" };
-    });
-    const client = makeClient(order, { publishGroup }, async () => {
-      throw new Error("quota exceeded");
-    });
-
-    await expect(
-      client.approveExternalJoin(
-        null,
-        mockGroup(order, { roleTable: true }),
-        new Uint8Array(32).fill(3),
-      ),
-    ).rejects.toBeInstanceOf(ContactsError);
-
-    // Neither the commit nor the rendezvous reached the DS — the entry (holding
-    // BOTH) failed to persist, so nothing publishes.
-    expect(publishGroup).not.toHaveBeenCalled();
-    expect(order).toEqual(["create", "persist"]);
-  });
-
-  it("approveExternalJoin: publishes BOTH artifacts and acks with both ids on success", async () => {
-    const order: string[] = [];
-    let n = 100;
-    const publishGroup = vi.fn(async () => {
-      order.push("publish");
-      return { id: (n += 1), createdAt: "t" };
-    });
-    const client = makeClient(order, { publishGroup }, async () => {});
-
-    const res = await client.approveExternalJoin(
-      null,
-      mockGroup(order, { roleTable: true }),
-      new Uint8Array(32).fill(3),
-    );
-
-    // create -> persist -> publish(commit) -> publish(rendezvous).
-    expect(order).toEqual(["create", "persist", "publish", "publish"]);
-    expect(publishGroup).toHaveBeenCalledTimes(2);
-    expect(res.commitMessageId).toBe(101);
-    expect(res.welcomeMessageId).toBe(102);
-    expect(markAcked).toHaveBeenCalledWith(expect.any(String), 101, 102);
-  });
 });
 
 describe("ADR-0040 — restart sweep re-publishes + re-arms the echo filter", () => {
@@ -385,42 +329,6 @@ describe("ADR-0040 — restart sweep re-publishes + re-arms the echo filter", ()
     // back to the committer's group poll.
     expect(rearmed).toEqual([600]);
     expect(markAcked).toHaveBeenCalledWith("e2", 600, 601);
-  });
-
-  it("re-publishes an approve-style entry: commit + rendezvous both to the journal", async () => {
-    const commitBytes = new Uint8Array([3, 3]);
-    const rendezvous = new Uint8Array([4, 4, 4, 4]);
-    loadUnacked.mockResolvedValueOnce([
-      {
-        id: "e3",
-        accountId: "acct",
-        groupId: groupIdB64,
-        targetEpoch: "6",
-        commitB64: base64Encode(commitBytes),
-        secondArtifactB64: base64Encode(rendezvous),
-        secondArtifactKind: "rendezvous",
-        acked: false,
-      },
-    ] as unknown[]);
-
-    let n = 700;
-    const publishGroup = vi.fn(async () => ({ id: (n += 1), createdAt: "t" }));
-    const publishMailbox = vi.fn(async () => ({ id: 0, createdAt: "t" }));
-    const client = new ContactsClient(
-      {} as unknown as DiscoveryClient,
-      { publishGroup, publishMailbox } as unknown as DsClient,
-      {},
-    );
-    const rearmed: number[] = [];
-
-    await client.sweepPendingCommits(sweepGroup(), (id) => rearmed.push(id));
-
-    expect(publishGroup).toHaveBeenCalledTimes(2);
-    expect(publishMailbox).not.toHaveBeenCalled();
-    // Only the commit id is echo re-armed (the rendezvous benign-drops in the
-    // receive loop's catch either way).
-    expect(rearmed).toEqual([701]);
-    expect(markAcked).toHaveBeenCalledWith("e3", 701, 702);
   });
 
   it("leaves the entry un-acked when the re-publish fails (offline DS)", async () => {
@@ -618,120 +526,11 @@ describe("ADR-0040 F1 — reset the in-memory group on a commit persist-abort", 
     expect(g.epoch()).toBe(6n);
   });
 
-  it("approveExternalJoin (two-artifact): a persist failure resets the group before either publish", async () => {
-    let epoch = 5n;
-    const group = {
-      get groupId(): Uint8Array {
-        return GID;
-      },
-      get epoch(): bigint {
-        return epoch;
-      },
-      approveExternalJoin: vi.fn((_id: unknown, _ref: Uint8Array) => {
-        epoch += 1n; // eager merge N -> N+1
-        return {
-          commit: new Uint8Array([7, 7]),
-          welcome: new Uint8Array([8, 8]),
-        };
-      }),
-    } as unknown as WasmGroup;
-
-    const publishGroup = vi.fn(async () => ({ id: 1, createdAt: "t" }));
-    const abortHookGids: string[] = [];
-    const client = new ContactsClient(
-      {} as unknown as DiscoveryClient,
-      { publishGroup } as unknown as DsClient,
-      {
-        identityProvider: () => IDENTITY_TOKEN,
-        onPersistWithCommit: async () => {
-          throw new Error("quota exceeded");
-        },
-        onCommitPersistAbort: async (gid) => {
-          abortHookGids.push(gid);
-          epoch = 5n;
-        },
-      },
-    );
-
-    await expect(
-      client.approveExternalJoin(null, group, new Uint8Array(32).fill(3)),
-    ).rejects.toBeInstanceOf(ContactsError);
-
-    // Reset fired; epoch rolled back to N; NEITHER artifact reached the DS.
-    expect(abortHookGids).toEqual([GID_B64]);
-    expect(epoch).toBe(5n);
-    expect(publishGroup).not.toHaveBeenCalled();
-  });
-
   // The F1 pre-persist RESIDUAL: in the two-artifact paths, code between the
   // eager-merge and the persist can ALSO throw (the Welcome-envelope / rendezvous
   // computation). Before the widened reset region it aborted WITHOUT a reset,
   // leaving the group ahead at the un-published N+1. These two tests force the
   // ARTIFACT-COMPUTE (not the persist) to throw and assert the reset still fires.
-
-  it("approveExternalJoin: the rendezvous compute throws AFTER the merge -> epoch rolls back to N; the retry builds on N, not the poisoned N+1", async () => {
-    const N = 5n;
-    let epoch = N;
-    const group = {
-      get groupId(): Uint8Array {
-        return GID;
-      },
-      get epoch(): bigint {
-        return epoch;
-      },
-      approveExternalJoin: vi.fn((_id: unknown, _ref: Uint8Array) => {
-        epoch += 1n; // eager merge N -> N+1
-        return {
-          commit: new Uint8Array([7, 7]),
-          welcome: new Uint8Array([8, 8]),
-        };
-      }),
-    } as unknown as WasmGroup;
-
-    const publishGroup = vi.fn(async () => ({ id: 1, createdAt: "t" }));
-    const abortHookGids: string[] = [];
-    const persistTargetEpochs: string[] = [];
-    const client = new ContactsClient(
-      {} as unknown as DiscoveryClient,
-      { publishGroup } as unknown as DsClient,
-      {
-        identityProvider: () => IDENTITY_TOKEN,
-        onPersistWithCommit: async (e) => {
-          persistTargetEpochs.push((e as { targetEpoch: string }).targetEpoch);
-        },
-        onCommitPersistAbort: async (gid) => {
-          abortHookGids.push(gid);
-          epoch = N;
-        },
-      },
-    );
-
-    // Op A — the merge advances 5 -> 6, then `wrapWelcomeRendezvous` throws
-    // BEFORE the persist runs (the exact residual). The op must STILL reset to N.
-    hoisted.wrapRendezvousThrows = true;
-    await expect(
-      client.approveExternalJoin(null, group, new Uint8Array(32).fill(3)),
-    ).rejects.toBeInstanceOf(ContactsError);
-
-    expect(abortHookGids).toEqual([GID_B64]);
-    expect(epoch).toBe(N); // rolled back off the poisoned N+1
-    expect(publishGroup).not.toHaveBeenCalled();
-    // The throw was BEFORE the persist, so the persist never ran.
-    expect(persistTargetEpochs).toEqual([]);
-
-    // Op B — the user retries in the SAME session with the artifact compute
-    // healthy. It must build on the reset N (5) and eager-merge 5 -> 6, NOT 6 -> 7.
-    hoisted.wrapRendezvousThrows = false;
-    const res = await client.approveExternalJoin(
-      null,
-      group,
-      new Uint8Array(32).fill(3),
-    );
-    expect(epoch).toBe(6n);
-    expect(persistTargetEpochs).toEqual(["6"]); // N+1 of the reset N, not "7"
-    expect(publishGroup).toHaveBeenCalledTimes(2); // commit + rendezvous
-    expect(res.commitMessageId).toBe(1);
-  });
 
   it("addMemberToGroup: the Welcome-artifact compute throws AFTER the merge -> epoch rolls back to N; neither artifact reaches the DS", async () => {
     const N = 5n;

@@ -109,6 +109,16 @@
  *
  *    An `Unsent draft` block containing three spaces is furniture pretending
  *    to be data.
+ *
+ * 9. **`messageActionsState` always returns `available`** — i.e. the defect it
+ *    closes, the per-message menu still offered on a dead group:
+ *
+ *        AssertionError: expected 'available' to be 'withdrawn'
+ *        AssertionError: expected true to be false // Object.is equality
+ *
+ *    Two tests go red, and the second is the one that matters: it is the
+ *    equivalence with {@link composerState}, so a menu that stops agreeing
+ *    with the composer fails whichever of the two was changed.
  */
 
 // ---------------------------------------------------------------------------
@@ -357,7 +367,7 @@ export function composerState(
   state: MembershipState,
   draft: string,
 ): ComposerState {
-  if (state.kind !== "ended") return { kind: "composer" };
+  if (!membershipEnded(state)) return { kind: "composer" };
   const worthKeeping = draft.trim().length > 0;
   return {
     kind: "withdrawn",
@@ -365,6 +375,38 @@ export function composerState(
     draft: worthKeeping ? draft : null,
     draftLabel: worthKeeping ? UNSENT_DRAFT_LABEL : null,
   };
+}
+
+/** Whether the per-message action menu is offered at all. */
+export type MessageActionsState = "available" | "withdrawn";
+
+/**
+ * Decide the per-message action menu — Edit, Delete, React (§6.2.5's rule,
+ * reached from the other end).
+ *
+ * **Withdrawn, not disabled, and it is the composer's own question.** All
+ * three actions compose an MLS application message, so all three are refused
+ * by `create_message`'s `is_operational()` gate — the *same* gate, at the
+ * *same* instant, for the *same* permanent reason as Send. §5.3's
+ * visible-but-disabled rule is for a permission that is merely *suspended*; a
+ * greyed React button on a group that can never become live again is a
+ * control promising a future it does not have, which is exactly the shape
+ * §6.2.5 rejects for the composer.
+ *
+ * **Why this is a function here and not an `&&` at the call site.** Two gates
+ * over one predicate drift when somebody later adds a condition to one of
+ * them, and the drift is silent in both directions: an ungated menu offers
+ * three actions that cannot work, and an over-gated one hides working
+ * controls. Both this and {@link composerState} therefore route through
+ * {@link membershipEnded}, and the test enumerates every state and asserts
+ * they agree.
+ *
+ * **What this does NOT withdraw is the information.** A reaction *chip* is
+ * rendered content — part of the frozen transcript §6.2.6 keeps whole — so
+ * the counts stay. What goes is the affordance that would toggle one.
+ */
+export function messageActionsState(state: MembershipState): MessageActionsState {
+  return membershipEnded(state) ? "withdrawn" : "available";
 }
 
 // ---------------------------------------------------------------------------

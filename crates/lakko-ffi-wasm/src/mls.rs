@@ -166,8 +166,9 @@ impl Identity {
     /// A non-member crafts an external Add proposal for a group's current
     /// `group_id` + `epoch` (learned out-of-band via a join ticket). The
     /// returned wire bytes are posted to the group journal; an owner/admin
-    /// approves via `Group.approveExternalJoin`, producing a Welcome the joiner
-    /// opens via `Group.joinFromWelcome`. The proposal embeds a fresh KeyPackage
+    /// approves via `Group.approveExternalJoin`, and whichever device then
+    /// sweeps produces the Welcome the joiner opens via
+    /// `Group.joinFromWelcome`. The proposal embeds a fresh KeyPackage
     /// whose private keys persist in this identity's provider, so the SAME
     /// identity must later open the Welcome.
     #[wasm_bindgen(js_name = createExternalJoinProposal)]
@@ -796,27 +797,42 @@ impl Group {
         })
     }
 
-    /// Approve a retained external-join proposal — adds the joiner to the group
-    /// (ADR-0027, G-3). `proposal_ref` is the joiner's signature key from a
+    /// Approve a retained external-join request — **proposes** adding the
+    /// joiner (ADR-0027 G-3, on the ADR-0045 proposal path since S7).
+    /// `proposal_ref` is the joiner's signature key from a
     /// `ProcessedMessage.externalJoinSignatureKey` or `pendingExternalJoins`.
-    /// Role-gated to owner/admin; returns the Commit + the joiner's Welcome.
+    ///
+    /// **Returns the wire-encoded Proposal to publish — not a Commit, and no
+    /// Welcome.** The epoch does not advance; the Welcome is produced by
+    /// whichever device sweeps this into a commit (`commitPendingProposals` /
+    /// `stagePendingProposals`, whose `welcome` the sweeping device posts as a
+    /// `WelcomeRendezvous` for each added key). That is the whole of S7: two
+    /// admins approving two joiners against one epoch used to eagerly merge two
+    /// commits and fork the group; now they compose into one sweep.
+    ///
+    /// The approval goes on the wire as an ordinary admin-authored `Add` — the
+    /// admin's own MLS-authenticated signature *is* the approval — so it is
+    /// indistinguishable from adding a contact and needs no new authorisation
+    /// channel. The joiner's own external proposal is still never stored and
+    /// never committed: a stranger with a `/g/` link may only ask.
+    ///
+    /// Role-gated to owner/admin, locally and again by every peer. A refused
+    /// approve emits nothing and leaves the request pending, so it can be
+    /// retried. A group with no role table has no committer and is refused —
+    /// see `PublisherGroup.approveExternalJoin`, whose return type differs
+    /// because its outcome does.
     #[wasm_bindgen(js_name = approveExternalJoin)]
     pub fn approve_external_join(
         &self,
         identity: &Identity,
         proposal_ref: &[u8],
-    ) -> Result<AddMember, JsError> {
+    ) -> Result<Vec<u8>, JsError> {
         let mut g = self
             .inner
             .lock()
             .map_err(|_| JsError::new("internal lock poisoned"))?;
-        let MemberAddition { commit, welcome } = g
-            .approve_external_join(&identity.inner, proposal_ref)
-            .map_err(mls_err)?;
-        Ok(AddMember {
-            commit_bytes: group::encode_message(&commit).map_err(mls_err)?,
-            welcome_bytes: group::encode_message(&welcome).map_err(mls_err)?,
-        })
+        g.approve_external_join(&identity.inner, proposal_ref)
+            .map_err(mls_err)
     }
 
     /// Reject a retained external-join proposal — discards it locally without
@@ -1193,10 +1209,11 @@ impl Group {
     /// Incoming messages are unaffected.
     ///
     /// Every eager path leaves this `false` — [`Self::add_member`],
-    /// [`Self::remove_member`], [`Self::set_group_roles`],
-    /// [`Self::approve_external_join`] and [`Self::commit_pending_proposals`]
-    /// all merge before they return — which is why a rollback here can never
-    /// reach a path that never had one.
+    /// [`Self::remove_member`], [`Self::set_group_roles`] and
+    /// [`Self::commit_pending_proposals`] all merge before they return — which
+    /// is why a rollback here can never reach a path that never had one.
+    /// [`Self::approve_external_join`] left that list with ADR-0045 S7: it
+    /// merges nothing, because it commits nothing.
     #[wasm_bindgen(js_name = hasStagedSweep)]
     pub fn has_staged_sweep(&self) -> Result<bool, JsError> {
         self.has_staged_sweep_core().map_err(|m| JsError::new(&m))
@@ -1837,8 +1854,16 @@ impl PublisherGroup {
         Ok(g.inner().pending_external_joins().concat())
     }
 
-    /// ADR-0028 OQ3 — approve a retained co-publisher external-join (role-gated
-    /// owner/admin); returns the Commit + the joiner's Welcome.
+    /// ADR-0028 OQ3 — approve a retained co-publisher external-join; returns
+    /// the Commit + the joiner's Welcome, as it always has.
+    ///
+    /// **This is the direct approve, and this is the only type it survives on**
+    /// (ADR-0045 S7). A PublisherGroup carries no ADR-0022 role table, so it has
+    /// no committer to sweep a proposal, and ADR-0045 leaves such a group on
+    /// direct commits. The return type is the difference and it is deliberate:
+    /// `Group.approveExternalJoin` hands back proposal bytes and no Welcome,
+    /// this hands back a merged Commit and a Welcome to deliver now, and neither
+    /// can be used where the other is expected.
     #[wasm_bindgen(js_name = approveExternalJoin)]
     pub fn approve_external_join(
         &self,
@@ -1850,7 +1875,6 @@ impl PublisherGroup {
             .lock()
             .map_err(|_| JsError::new("internal lock poisoned"))?;
         let MemberAddition { commit, welcome } = g
-            .inner_mut()
             .approve_external_join(&identity.inner, proposal_ref)
             .map_err(mls_err)?;
         Ok(AddMember {
@@ -4186,6 +4210,67 @@ mod tests {
         ((alice, alice_g), (bob, bob_g), (charlie, charlie_g))
     }
 
+    /// ADR-0045 **S7** across the wasm-bindgen boundary: `approveExternalJoin`
+    /// hands back a **Proposal**, not a Commit, and the Welcome the joiner
+    /// needs comes out of the sweep instead.
+    ///
+    /// This is the shape the web client is built from, so it is asserted on the
+    /// wasm types rather than inferred from the core.
+    ///
+    /// Only the success path is exercised: the wasm-bindgen `JsError`
+    /// constructor panics under `cargo test` (off-wasm target), so the
+    /// plain-member refusal is pinned in `lakko-mls` and in the UniFFI mirror
+    /// instead — the same split the rest of this suite already lives with.
+    #[test]
+    fn approving_an_external_join_yields_a_proposal_and_the_sweep_yields_the_welcome() {
+        let ((alice, alice_g), (bob, bob_g), _charlie) = adr0045_trio();
+        let dave = Identity::new("dave").unwrap();
+
+        // A stranger asks, against the group's current epoch.
+        let request = dave
+            .create_external_join_proposal(&alice_g.group_id().unwrap(), alice_g.epoch().unwrap())
+            .unwrap();
+        let seen = alice_g
+            .process_incoming_verifying_roles(&alice, &request)
+            .unwrap();
+        assert_eq!(seen.kind(), "ExternalJoinProposal");
+        let joiner_key = seen
+            .external_join_signature_key()
+            .expect("the joiner's signature key");
+        assert_eq!(alice_g.pending_external_joins().unwrap(), joiner_key);
+
+        // The approve is a proposal: bytes to publish, and no epoch advance.
+        let epoch_before = alice_g.epoch().unwrap();
+        let approval = alice_g.approve_external_join(&alice, &joiner_key).unwrap();
+        assert!(!approval.is_empty());
+        assert_eq!(alice_g.epoch().unwrap(), epoch_before);
+        assert_eq!(alice_g.pending_proposals_core().unwrap().len(), 1);
+
+        // On the wire it is an ordinary admin-authored Add: bob's receipt gate
+        // stores it and cannot tell it came from a `/g/` link.
+        let received = bob_g
+            .process_incoming_verifying_roles(&bob, &approval)
+            .unwrap();
+        assert_eq!(received.kind(), "Proposal");
+        let record = received.proposal().expect("kind Proposal carries a record");
+        assert!(record.stored());
+        assert_eq!(record.kind(), "add");
+
+        // The sweep is what produces the Welcome.
+        let swept = alice_g
+            .commit_pending_proposals_core(&alice)
+            .unwrap()
+            .expect("a commit was produced");
+        assert_eq!(swept.swept_records.len(), 1);
+        let welcome = swept
+            .welcome_bytes
+            .clone()
+            .expect("an add sweep carries a welcome");
+        let dave_g = Group::join_from_welcome(&welcome, &dave).unwrap();
+        assert_eq!(dave_g.epoch().unwrap(), epoch_before + 1);
+        assert!(alice_g.pending_external_joins().unwrap().is_empty());
+    }
+
     /// ADR-0045 end to end across the wasm-bindgen boundary: the owner
     /// **proposes** an add (epoch unchanged), a peer receives it as a stored
     /// `ProposalRecord`, the owner sweeps it into one commit, and the peer
@@ -5177,10 +5262,16 @@ mod tests {
     // tests already pin.
 }
 
-/// Wrap an approved external joiner's Welcome into a rendezvous envelope the
-/// admin posts to the group journal (ADR-0027 Phase 3, G-3). `welcome` is the
-/// `AddMember.welcomeBytes` from `approveExternalJoin`; `joinerSignatureKey` is
-/// the approved proposal ref.
+/// Wrap an added member's Welcome into a rendezvous envelope the sweeping
+/// device posts to the group journal (ADR-0027 Phase 3, G-3).
+/// `joinerSignatureKey` is the added member's signature key; `welcome` is the
+/// `StagedSweep.welcomeBytes` the ADR-0045 sweep produced (or, on a
+/// `PublisherGroup`, the `AddMember.welcomeBytes` from its direct
+/// `approveExternalJoin`).
+///
+/// **A sweep cannot tell which of its adds came from a `/g/` link** — that is
+/// what makes an approval indistinguishable from an ordinary add, and it is
+/// deliberate — so the caller wraps one envelope per added key, origin-blind.
 #[wasm_bindgen(js_name = wrapWelcomeRendezvous)]
 pub fn wrap_welcome_rendezvous(
     joiner_signature_key: &[u8],

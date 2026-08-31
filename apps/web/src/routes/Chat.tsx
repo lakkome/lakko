@@ -185,6 +185,7 @@ import {
   membershipEnded as membershipHasEnded,
   claimTeardownSteps,
   membershipState,
+  messageActionsState,
   readIsActive,
   recordLeaveRequested,
   releaseTeardownStep,
@@ -192,6 +193,7 @@ import {
   type EndedTeardownStep,
   type MembershipState,
 } from "../chat/membership-ended";
+import { removeMemberConfirmation } from "../chat/remove-member-confirm";
 import {
   applyOp,
   editDeleteAuthorized,
@@ -1461,6 +1463,13 @@ function ChatView(props: {
     const state = composerState(membership(), input());
     return state.kind === "withdrawn" ? state : null;
   });
+
+  /** §6.2.5 — whether a message still carries Edit / Delete / React. The same
+   *  question the composer asks, answered by the same predicate: all three ops
+   *  compose an application message, so all three die with Send. */
+  const messageActionsAvailable = createMemo(
+    () => messageActionsState(membership()) === "available",
+  );
 
   /**
    * The same question asked SYNCHRONOUSLY, off the live handle, with no memo
@@ -3507,10 +3516,16 @@ function ChatView(props: {
     // line is not a nicety — it is the one fact a user removing someone for a
     // safety reason must have, and the fact the old immediate-looking UI
     // concealed.
-    const confirmBody = usesProposalPath()
-      ? "Remove this member?\n\nThey will keep receiving messages until an owner or an admin applies the change."
-      : `Remove this member (leaf #${leafIndex})?`;
-    if (!window.confirm(confirmBody)) {
+    const confirm = removeMemberConfirmation({
+      usesProposalPath: usesProposalPath(),
+    });
+    if (
+      !window.confirm(
+        confirm.body === null
+          ? confirm.title
+          : `${confirm.title}\n\n${confirm.body}`,
+      )
+    ) {
       return;
     }
     setError(null);
@@ -3669,45 +3684,36 @@ function ChatView(props: {
     }
   }
 
-  // ADR-0027 (G-3) — approve a pending external-join request (owner / admin
-  // only). Drives the MLS approve (role-gated in the core, fail-closed),
-  // broadcasts the resulting commit so every member admits the joiner, posts
-  // the wrapped Welcome rendezvous to the journal for the joiner to open, then
-  // suppresses the sender's own echo + refreshes the members panel.
+  // ADR-0027 (G-3), on the ADR-0045 proposal path since S7 — approve a pending
+  // external-join request (owner / admin only). The approve publishes ONE
+  // artifact: an ordinary admin-authored `Add` proposal. No commit, no epoch
+  // advance, and no Welcome here — the joiner's Welcome (and the
+  // `WelcomeRendezvous` it opens) is produced by whichever device sweeps the
+  // proposal, which may be another admin and has no deadline.
   async function onApproveJoin(proposalRef: Uint8Array): Promise<void> {
     setError(null);
     setNotice(null);
     setBusy(true);
     try {
-      // ADR-0045 — an external join keeps its own direct-commit path (folding
-      // it into the sweep is S7), but a direct commit is REFUSED while anything
-      // is pending, so the approve drains the pending set first. Handing the
-      // cursor + echo hook in is what lets that drain be a real sweep rather
-      // than a no-op.
-      // ADR-0045 — that drain is a real sweep, so its verdict consumes journal
-      // rows and moves the shared cursor over them. They go to the same
-      // consumer the poll uses, or they are lost.
-      const sweptByDrain: IncomingChatEvent[] = [];
-      const result = await contacts
-        .approveExternalJoin(
-          props.requireIdentity(),
-          props.entry.group,
-          proposalRef,
-          {
-            cursor: { read: () => cursor(), advance: (to) => setCursor(to) },
-            markOwnPublished: (id) => chat.markOwnPublishedCommit(id),
-            actingCommitter: actingCommitterNow,
-            onSweptEvent: (event) => sweptByDrain.push(event),
-          },
-        )
-        .finally(() => {
-          if (sweptByDrain.length > 0) consumeEvents(sweptByDrain);
-        });
-      chat.markOwnPublishedCommit(result.commitMessageId);
+      const result = await contacts.approveExternalJoin(
+        props.requireIdentity(),
+        props.entry.group,
+        proposalRef,
+      );
+      chat.markOwnPublishedCommit(result.proposalMessageId);
+      // ADR-0045 — the same bookkeeping every other membership request gets:
+      // the quiet window is measured against the DS row, and this device knows
+      // the request is its own.
+      noteOwnRequest(`add:${base64Encode(proposalRef)}`);
+      // If this device is the acting committer the sweep runs now, so the
+      // common single-admin case still reads as "tap, done".
+      const swept = await sweepNow();
       setMemberCount(props.entry.group.memberCount);
       setMembersVersion(membersVersion() + 1);
       setNotice(
-        `Join approved (commit #${result.commitMessageId}, welcome #${result.welcomeMessageId}).`,
+        swept?.kind === "committed"
+          ? "Join approved. They have been added to the group."
+          : "Join approved. They join when an owner or an admin applies the change.",
       );
       void refresh();
     } catch (err) {
@@ -4703,10 +4709,13 @@ function ChatView(props: {
             </div>
           </Show>
           {/* ADR-0027 (G-3) — pending external-join requests. Owner / admin
-              only (same gate as add / remove). Each row offers Approve (drives
-              the MLS approve + posts the commit & Welcome rendezvous) or Reject
-              (drops the retained proposal locally). Hidden when there are no
-              pending requests. */}
+              only (same gate as add / remove). Each row offers Approve (ADR-0045
+              S7: publishes ONE `Add` proposal; the joiner is admitted when a
+              committer sweeps it) or Reject (drops the retained request
+              locally). A request whose joiner has since landed disappears on
+              its own — the core filters it out of `pendingExternalJoins()` on
+              every read — so this list retires its own rows with no message
+              saying so. Hidden when empty. */}
           <Show when={canManageMembers() && pendingJoins().length > 0}>
             <div
               style={{
@@ -5531,6 +5540,7 @@ function ChatView(props: {
                 }}
                 onCloseReactPicker={() => setReactPickerId(null)}
                 onReact={onReact}
+                actionsAvailable={messageActionsAvailable()}
               />
             )}
           </For>
@@ -5856,6 +5866,12 @@ function TimelineBubble(props: {
   onOpenReactPicker: (messageId: number) => void;
   onCloseReactPicker: () => void;
   onReact: (messageId: number, emoji: string) => void | Promise<void>;
+  /** ADR-0045 UX §6.2.5 — whether Edit / Delete / React are offered at all.
+   *  `false` once this device's membership has ended: all three compose an
+   *  application message, so all three are refused by the same core gate that
+   *  refuses Send. Threaded as a prop rather than read here so the two bubble
+   *  components stay pure renderers of what `membership-ended.ts` decided. */
+  actionsAvailable: boolean;
 }): JSX.Element {
   // System rows + call signaling never carry an op overlay.
   if (props.row.kind === "incoming") {
@@ -5983,6 +5999,12 @@ function ChatBubbleBody(props: {
   onOpenReactPicker: (messageId: number) => void;
   onCloseReactPicker: () => void;
   onReact: (messageId: number, emoji: string) => void | Promise<void>;
+  /** ADR-0045 UX §6.2.5 — whether Edit / Delete / React are offered at all.
+   *  `false` once this device's membership has ended: all three compose an
+   *  application message, so all three are refused by the same core gate that
+   *  refuses Send. Threaded as a prop rather than read here so the two bubble
+   *  components stay pure renderers of what `membership-ended.ts` decided. */
+  actionsAvailable: boolean;
 }): JSX.Element {
   const isIncoming = props.tone === "incoming";
   // The live overlay for this message (reactive). `undefined`
@@ -6141,40 +6163,64 @@ function ChatBubbleBody(props: {
           }}
         >
           <For each={reactionEntries()}>
-            {(re) => (
-              <button
-                type="button"
-                title={re.mine ? "Remove your reaction" : "React"}
-                onClick={() => {
-                  if (props.messageId !== undefined) {
-                    void props.onReact(props.messageId, re.emoji);
-                  }
-                }}
-                style={{
-                  display: "inline-flex",
-                  "align-items": "center",
-                  gap: "0.2rem",
-                  padding: "0.05rem 0.4rem",
-                  "font-size": "0.8rem",
-                  cursor: "pointer",
-                  "border-radius": "999px",
-                  border: re.mine
-                    ? "1px solid var(--accent)"
-                    : "1px solid var(--surface-border)",
-                  background: re.mine
-                    ? "var(--accent-soft, rgba(99,102,241,0.18))"
-                    : isIncoming
-                      ? "var(--surface-bg)"
-                      : "rgba(255,255,255,0.15)",
-                  color: "inherit",
-                }}
-              >
-                <span>{re.emoji}</span>
-                <span style={{ "font-size": "0.72rem", opacity: 0.85 }}>
-                  {re.count}
-                </span>
-              </button>
-            )}
+            {(re) => {
+              // The chip carries BOTH a fact and an affordance, and §6.2.5
+              // separates them: the count is transcript — part of the history
+              // §6.2.6 keeps whole — while tapping it is the React op, which
+              // dies with Send. So once the membership has ended the chip
+              // renders as static text rather than as a button. It is not
+              // rendered disabled, for the same reason the composer is not:
+              // a greyed control on a group you will never be in again
+              // promises a future it does not have.
+              const chipStyle = {
+                display: "inline-flex",
+                "align-items": "center",
+                gap: "0.2rem",
+                padding: "0.05rem 0.4rem",
+                "font-size": "0.8rem",
+                "border-radius": "999px",
+                border: re.mine
+                  ? "1px solid var(--accent)"
+                  : "1px solid var(--surface-border)",
+                background: re.mine
+                  ? "var(--accent-soft, rgba(99,102,241,0.18))"
+                  : isIncoming
+                    ? "var(--surface-bg)"
+                    : "rgba(255,255,255,0.15)",
+                color: "inherit",
+              } as const;
+              // A FUNCTION, not a stored element: Solid's JSX creates the
+              // DOM node where it is evaluated, so a single shared node placed
+              // in both branches would be MOVED between them rather than
+              // duplicated. Each branch builds its own.
+              const chipBody = (): JSX.Element => (
+                <>
+                  <span>{re.emoji}</span>
+                  <span style={{ "font-size": "0.72rem", opacity: 0.85 }}>
+                    {re.count}
+                  </span>
+                </>
+              );
+              return (
+                <Show
+                  when={props.actionsAvailable}
+                  fallback={<span style={chipStyle}>{chipBody()}</span>}
+                >
+                  <button
+                    type="button"
+                    title={re.mine ? "Remove your reaction" : "React"}
+                    onClick={() => {
+                      if (props.messageId !== undefined) {
+                        void props.onReact(props.messageId, re.emoji);
+                      }
+                    }}
+                    style={{ ...chipStyle, cursor: "pointer" }}
+                  >
+                    {chipBody()}
+                  </button>
+                </Show>
+              );
+            }}
           </For>
         </div>
       </Show>
@@ -6223,10 +6269,21 @@ function ChatBubbleBody(props: {
       </div>
 
       {/* Per-message action menu — gated on the message having a
-          DS messageId (the op references its target by id). The
-          hover-revealed strip carries React on any message, plus
-          Edit + Delete on our own. Inline-edit mode hides it. */}
-      <Show when={props.messageId !== undefined && !isEditing() && !isDeleted()}>
+          DS messageId (the op references its target by id) and on
+          the membership still holding (ADR-0045 UX §6.2.5: Edit /
+          Delete / React each compose an application message, so
+          all three die with Send — the menu is WITHDRAWN, not
+          disabled). The hover-revealed strip carries React on any
+          message, plus Edit + Delete on our own. Inline-edit mode
+          hides it. */}
+      <Show
+        when={
+          props.actionsAvailable &&
+          props.messageId !== undefined &&
+          !isEditing() &&
+          !isDeleted()
+        }
+      >
         <div
           class="lakko-msg-actions"
           style={{
@@ -6281,8 +6338,10 @@ function ChatBubbleBody(props: {
         </div>
       </Show>
 
-      {/* Emoji picker popover. */}
-      <Show when={pickerOpen()}>
+      {/* Emoji picker popover. Gated on the same predicate as the strip that
+          opens it, so a picker left open when the eviction commit lands
+          mid-poll closes with it rather than floating over a dead group. */}
+      <Show when={props.actionsAvailable && pickerOpen()}>
         <div
           style={{
             position: "absolute",

@@ -36,6 +36,7 @@ import uniffi.lakko_ffi_uniffi.FfiException
 import uniffi.lakko_ffi_uniffi.Group
 import uniffi.lakko_ffi_uniffi.GroupMember
 import uniffi.lakko_ffi_uniffi.OutgoingOwner
+import uniffi.lakko_ffi_uniffi.ProposalRecord
 import uniffi.lakko_ffi_uniffi.Role
 import uniffi.lakko_ffi_uniffi.RoleTable
 import uniffi.lakko_ffi_uniffi.Identity
@@ -1395,15 +1396,42 @@ public class ChatRepository(
     }
 
     /**
-     * ADR-0027 (G-3) — approve a pending external-join request (owner/admin only;
-     * the core role-gates it, fail-closed). Drives the MLS approve (reuses the
-     * audited add path -> Commit + Welcome), broadcasts the commit to the group
-     * journal (own-marked for echo suppression), then wraps the Welcome in a
-     * WelcomeRendezvous keyed on the joiner signature key and posts it to the
-     * SAME journal — the not-yet-member joiner polls the journal, matches the
-     * envelope to its own key, and opens the inner Welcome. Existing members skip
-     * the rendezvous entry (it is not an MLS message, so their receive loop drops
-     * it). Returns the commit's DS message id.
+     * ADR-0027 (G-3), on the ADR-0045 proposal path since **S7** — approve a
+     * pending external-join request (owner/admin only; the core role-gates it,
+     * fail-closed).
+     *
+     * ## One artifact, and no epoch
+     *
+     * The core publishes an ordinary admin-authored `Add` **proposal** carrying
+     * the joiner's retained KeyPackage — the admin's own MLS-authenticated
+     * signature *is* the approval — so this posts exactly one thing to the group
+     * journal and the epoch does not move. Everything the old direct-commit
+     * shape needed is therefore gone: no Welcome to compute here, no
+     * `WelcomeRendezvous` to post here, and no ADR-0040 outbox entry, because a
+     * proposal makes nothing durable that a crash could strand.
+     *
+     * The joiner's Welcome — and its `WelcomeRendezvous` — is produced by
+     * whichever device later sweeps this proposal into a commit. See
+     * [runCommitterSweep]: that sweep posts one rendezvous per added key, blind
+     * to which of them came from a link.
+     *
+     * ## No pre-drain, and no pending-set refusal
+     *
+     * Both are gone with the direct commit they existed for, and with them the
+     * whole [runApproveExternalJoin] seam that sequenced them. The core's
+     * `refuse_if_proposals_pending` no longer guards this path, so an approve
+     * composes with whatever else is waiting — which matters, because under
+     * ADR-0045 a non-empty pending set is the ORDINARY state and an admin
+     * standing down behind a live owner could otherwise essentially never
+     * approve.
+     *
+     * A refusal throws and leaves the request pending in the core, so the
+     * Approve affordance stays and can be retried.
+     *
+     * G-37 — the per-group lock spans the whole op; the provider lock covers
+     * only the provider-touching prefix, so the publish runs outside it.
+     *
+     * @return the proposal's DS message id.
      */
     public suspend fun approveExternalJoin(
         groupIdHex: String,
@@ -1413,159 +1441,32 @@ public class ChatRepository(
             ?: throw IllegalStateException(
                 "ChatRepository not bootstrapped — call bootstrap() first",
             )
-        // ADR-0045 — an external join keeps its own direct-commit path (folding
-        // it into the sweep is S7), but it can no longer simply commit: the core
-        // REFUSES a direct commit while ANY proposal is pending, because the
-        // OpenMLS entry point the approve is built on would sweep the whole
-        // pending set alongside the one add it was asked for. Under ADR-0045 a
-        // non-empty pending set is the ORDINARY state between any member's
-        // request and the next sweep, so without this the Approve button fails
-        // for every admin whenever anything at all is waiting.
-        //
-        // The whole ordering — drain, then the two locks, then the pending
-        // re-read, then the commit — lives in [runApproveExternalJoin], where a
-        // host test can run it. The reason the drain must stay outside both
-        // locks (a kotlinx `Mutex` is not reentrant, so nesting the sweep inside
-        // them HANGS) is documented there and proven by a test that runs the
-        // inverted shape against a timeout.
-        //
-        // The drain is called unconditionally rather than behind a
-        // `usesProposalPath` gate (the iOS shape): reading that predicate is a
-        // provider read, so gating would cost an extra `providerLock` region to
-        // avoid one the sweep's own prelude takes anyway — and that prelude asks
-        // the identical question (`ownCommitterRank() == null` for a group with
-        // no role table) and returns `NotCommitter` without touching the network.
-        // Different structure, identical observable behaviour.
-        //
-        // G-37 — per-group lock spans the WHOLE op; the provider lock covers
-        // only the provider-touching prefix, so both publishes run outside it.
-        return runApproveExternalJoin(
-            drain = { sweepIfCommitter(groupIdHex) },
-            lock = groupLock(groupIdHex),
-            providerLock = providerLock,
-            // ADR-0045 — the surviving refusal, in human words. The drain does
-            // not always clear the set: it is a no-op when this device is not the
-            // acting committer (a better-placed candidate beaconed recently), and
-            // a poll can store a fresh proposal in the window between it and the
-            // lock. Either way the core's `refuse_if_proposals_pending` would
-            // throw next, and its message names two Rust functions — so this asks
-            // the SAME question first and lets the caller answer it in copy the
-            // admin can act on.
-            //
-            // This is the identical predicate, not an approximation:
-            // `Group::pending_proposals()` maps `inner.pending_proposals()` one
-            // for one, which is exactly what the core counts. And it cannot be
-            // out-of-date by the time the core runs: this read and the core call
-            // are both non-suspending and sit in the SAME `providerLock` region
-            // with no suspension point between them, so nothing can interleave
-            // and the core can never reach that refusal after this passed.
-            pendingProposalCount = {
+        return groupLock(groupIdHex).withLock {
+            val (groupId, proposalBytes) = providerLock.withLock {
                 val record = groups[groupIdHex]
                     ?: throw ChatError(
                         "no live Group handle for $groupIdHex",
                         IllegalStateException("missing group record"),
                     )
-                try {
-                    record.group.pendingProposals().size
-                } catch (e: Throwable) {
-                    // A torn read is treated as "nothing pending" so the core
-                    // stays the authority: it would refuse anyway, and guessing
-                    // the other way would refuse an approve that could proceed.
-                    android.util.Log.w("ChatRepository", "ADR-0045 pending-proposal read failed", e)
-                    0
-                }.also {
-                    // The reason stays visible to a developer; only the
-                    // user-facing string changes.
-                    if (it > 0) {
-                        android.util.Log.w(
-                            "ChatRepository",
-                            "ADR-0045: external join approve refused — $it membership " +
-                                "proposal(s) still pending after the drain (this device is not " +
-                                "the acting committer, or a poll stored one in the window)",
-                        )
-                    }
-                }
-            },
-        ) {
-            val record = groups[groupIdHex]
-                ?: throw ChatError(
-                    "no live Group handle for $groupIdHex",
-                    IllegalStateException("missing group record"),
-                )
-            // 1. create-commit — reuses the audited add path, eager-merges N -> N+1.
-            val addResult = try {
-                record.group.approveExternalJoin(identity, proposalRef)
-            } catch (e: FfiException) {
-                throw ChatError("approveExternalJoin failed", e)
-            }
-            // Compute the second artifact (the rendezvous) UP-FRONT so the outbox
-            // entry can hold both artifacts (two-artifact coverage). The
-            // rendezvous rides the SAME group journal as the commit.
-            //
-            // 2. ADR-0040 (G-35) — durable pending-commit outbox: persist the
-            //    entry (commit + rendezvous, BOTH artifacts) THEN the N+1
-            //    snapshot, BOTH fail-closed, BEFORE any publish. A throw aborts
-            //    the op (no publish); the restart sweep re-publishes both. See
-            //    [sweepPendingCommits].
-            //
-            // ADR-0040 F1 residual (lakko-security) — reset-guard the WHOLE
-            // pre-persist region (wrapWelcomeRendezvous + entry build): any throw
-            // here runs AFTER the eager merge (N -> N+1) and BEFORE
-            // runCrashSafeCommit, and would else strand the in-memory group at the
-            // un-published N+1. No outbox entry exists yet -> reset the group
-            // DIRECTLY. See [withPrePersistReset].
-            val (rendezvous, entry) = withPrePersistReset(
-                reset = { resetGroupToDurableSnapshotOrThrow(groupIdHex) },
-            ) {
-                val rendezvous = try {
-                    uniffi.lakko_ffi_uniffi.wrapWelcomeRendezvous(proposalRef, addResult.welcome)
+                val bytes = try {
+                    record.group.approveExternalJoin(identity, proposalRef)
                 } catch (e: FfiException) {
-                    throw ChatError("wrapWelcomeRendezvous failed", e)
+                    throw ChatError("approveExternalJoin failed", e)
                 }
-                val entry = PendingCommitEntry(
-                    id = newOutboxEntryId(),
-                    accountId = requireAccountId(),
-                    groupId = outboxB64(record.groupId),
-                    targetEpoch = record.group.epoch().toString(),
-                    commitB64 = outboxB64(addResult.commit),
-                    secondArtifactB64 = outboxB64(rendezvous),
-                    secondArtifactKind = SecondArtifactKind.RENDEZVOUS,
-                )
-                Pair(rendezvous, entry)
+                // Best-effort, like every other propose path: a proposal
+                // advances no epoch, so a snapshot that does not land costs a
+                // re-fetch of a journal row, never a desync.
+                persistSnapshotBestEffort()
+                Pair(record.groupId, bytes)
             }
-            prepareCrashSafeCommit(
-                persistEntryOrThrow = { CommitOutboxStore.putEntry(applicationContext, entry) },
-                persistSnapshotOrThrow = { persistSnapshotDurableOrThrow() },
-                // ADR-0040 F1 (lakko-security) — on a fail-closed persist-abort,
-                // reset the eager-merged in-memory group (N+1) back to the durable
-                // snapshot (N) so a subsequent same-session commit builds on N, not
-                // the unpublished N+1. Fires ONLY on the persist-abort, never on a
-                // publish failure (that commit is durably recorded — the sweep
-                // re-publishes it). See [onCommitPersistAbort].
-                onPersistAbort = { onCommitPersistAbort(groupIdHex, entry.id) },
-            )
-            // Returning normally means BOTH durable writes landed, so the
-            // commit is now safe to put on the wire — the ADR-0040 §2 ordering,
-            // unchanged, just expressed across the lock release.
-            suspend {
-                // 3. publish artifact 1 (commit) so every existing member
-                //    admits the joiner, then artifact 2 (the rendezvous).
-                val commitPublish = try {
-                    dsClient.publishGroup(record.groupId, addResult.commit)
-                } catch (e: Throwable) {
-                    throw ChatError("DS publishGroup (approve commit) failed", e)
-                }
-                chatClient.markOwnPublishedCommit(commitPublish.id)
-                val rendezvousPublish = try {
-                    dsClient.publishGroup(record.groupId, rendezvous)
-                } catch (e: Throwable) {
-                    throw ChatError("DS publishGroup (Welcome rendezvous) failed", e)
-                }
-                // 4. both artifacts on the wire -> ack (best-effort).
-                ackCommitBestEffort(entry.id, commitPublish.id, rendezvousPublish.id)
-                publishThreadList()
-                commitPublish.id
+            val publish = try {
+                dsClient.publishGroup(groupId, proposalBytes)
+            } catch (e: Throwable) {
+                throw ChatError("DS publishGroup (approve proposal) failed", e)
             }
+            chatClient.markOwnPublishedCommit(publish.id)
+            publishThreadList()
+            publish.id
         }
     }
 
@@ -2841,6 +2742,15 @@ public class ChatRepository(
                 callSignalingSink = { payload ->
                     callSignalingSink?.invoke(groupIdHex, payload)
                 },
+                membershipProposalSink = { proposal, createdAt ->
+                    // ADR-0045 UX §4 / §10 — stamp a PEER's request with the DS
+                    // row's own timestamp. Without this the observation store
+                    // held only our own requests, so `requestState` read
+                    // `observedAtMs == null` for everyone else's and reported
+                    // WAITING immediately — the quiet window never applied to
+                    // the requests an admin actually sees.
+                    recordReceivedProposalBestEffort(groupIdHex, proposal, createdAt)
+                },
                 committerBeaconSink = { senderLeaf, createdAt ->
                     // ADR-0045 S4b — inside the poll's provider critical
                     // section, which is where the `Group` handle is safe to
@@ -3476,6 +3386,45 @@ public class ChatRepository(
     }
 
     /**
+     * ADR-0045 UX §4 — stamp a proposal a PEER published, with the DS row's own
+     * timestamp.
+     *
+     * The counterpart to [noteOwnRequestBestEffort], and the asymmetry between
+     * the two is the point: an own request is stamped from the local clock
+     * because there is no other member's reading to agree with yet, while a
+     * received one MUST carry the DS row's server-assigned time, so every
+     * member measures the same request from the same instant. Because the first
+     * observation of a key wins, the two never fight — our own request's echo
+     * arriving off the journal cannot overwrite the local stamp, and cannot
+     * clear the `own` flag §10's visibility exception rests on.
+     *
+     * Best-effort throughout: a store failure costs the quiet window, never the
+     * request, which lives in the core's pending set either way.
+     */
+    private fun recordReceivedProposalBestEffort(
+        groupIdHex: String,
+        proposal: ProposalRecord,
+        createdAt: String,
+    ) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        try {
+            recordReceivedProposalObservation(
+                store = pendingRequestObservations,
+                accountIdB64 = accountIdB64,
+                groupIdHex = groupIdHex,
+                record = proposal,
+                // The SAME parser the typing fold uses, not a second one:
+                // two hand-rolled DS-timestamp readers in one file is the
+                // drift class that makes one surface silently disagree with
+                // another about when a row landed.
+                atMs = GroupRecord.parseIsoMillis(createdAt),
+            )
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "pending request: note peer failed", cause)
+        }
+    }
+
+    /**
      * ADR-0045 §6.1.10 — the last-observed-owner store, the second of the two
      * local additions ownership transfer needs (the first, the successor key,
      * rides on the pending-request observation above).
@@ -4074,6 +4023,15 @@ public class ChatRepository(
                             callSignalingSink = { payload ->
                                 callSignalingSink?.invoke(groupIdHex, payload)
                             },
+                            membershipProposalSink = { proposal, createdAt ->
+                                // The sweep's own apply pass consumes rows the
+                                // poll will never fetch again, so a proposal
+                                // that landed below our commit is stamped here
+                                // or nowhere.
+                                recordReceivedProposalBestEffort(
+                                    groupIdHex, proposal, createdAt,
+                                )
+                            },
                             pushRoutingSecretSink = { secret, mintEpoch, senderLeaf ->
                                 receivePushRoutingSecretBestEffort(
                                     record.group,
@@ -4164,6 +4122,7 @@ public class ChatRepository(
                                         ?.let { SecondArtifactKind.WELCOME },
                                     isSweep = true,
                                     sweepWelcomeMailboxesB64 = entry.welcomeMailboxesB64,
+                                    sweepWelcomeRendezvousB64 = entry.welcomeRendezvousB64,
                                 ),
                             )
                         },
@@ -4220,6 +4179,7 @@ public class ChatRepository(
                                     commitB64 = it.commitB64,
                                     welcomeEnvelopeB64 = it.secondArtifactB64,
                                     welcomeMailboxesB64 = it.sweepWelcomeMailboxesB64,
+                                    welcomeRendezvousB64 = it.sweepWelcomeRendezvousB64,
                                     commitMessageId = it.commitMessageId,
                                 )
                             }
@@ -4259,6 +4219,13 @@ public class ChatRepository(
                     .use { it.asBytes() }
             },
             wrapWelcome = { welcome -> wrapEnvelope(KIND_WELCOME, welcome) },
+            // ADR-0045 S7 — the group-journal half of the fan-out. An external
+            // joiner approved through a `/g/` link polls the journal for this and
+            // nothing else; the sweep cannot tell which adds those are, so it
+            // wraps one per added key.
+            wrapRendezvous = { key, welcome ->
+                uniffi.lakko_ffi_uniffi.wrapWelcomeRendezvous(key, welcome)
+            },
             markOwnPublished = { id -> chatClient.markOwnPublishedCommit(id) },
             // `persistSnapshotBestEffort` calls `Identity.snapshotStorage()`,
             // which serialises the WHOLE provider — every group at once — so it
@@ -4368,7 +4335,6 @@ public class ChatRepository(
                 entries = entries,
                 currentEpoch = currentEpoch,
                 republishCommit = { commit -> dsClient.publishGroup(record.groupId, commit).id },
-                republishRendezvous = { bytes -> dsClient.publishGroup(record.groupId, bytes).id },
                 republishWelcome = { mailbox, bytes -> dsClient.publishMailbox(mailbox, bytes).id },
                 markOwnPublished = { id -> chatClient.markOwnPublishedCommit(id) },
                 onAck = { id, commitId, secondId -> ackCommitBestEffort(id, commitId, secondId) },
@@ -4729,6 +4695,7 @@ private class GroupRecord(
         callSignalingSink: ((ByteArray) -> Unit)? = null,
         pushRoutingSecretSink: ((ByteArray, ULong, UInt?) -> Unit)? = null,
         committerBeaconSink: ((UInt?, String) -> Unit)? = null,
+        membershipProposalSink: ((ProposalRecord, String) -> Unit)? = null,
     ) {
         for (event in events) {
             when (event) {
@@ -4794,6 +4761,21 @@ private class GroupRecord(
                     // leaf the gate needs, and — ADR-0044 — the MINTER's
                     // `mint_epoch` the gate orders it by.
                     pushRoutingSecretSink?.invoke(event.secret, event.mintEpoch, event.senderLeaf)
+                }
+                is IncomingChatEvent.MembershipProposal -> {
+                    // ADR-0045 UX §10 — a membership REQUEST another member
+                    // published. Not a timeline row: a request is an intent the
+                    // system may discard a second later, and the members sheet
+                    // renders it role-gated from `Group.pendingProposals()`,
+                    // which stays the source of truth for WHAT is pending.
+                    //
+                    // What the sink adds is WHEN it landed, which the core
+                    // cannot know: the DS row's server-assigned timestamp, the
+                    // same value every member reads for the same row. Without
+                    // it `requestState` sees no observation and reads WAITING
+                    // immediately, so §4's quiet window never applies to a
+                    // peer's request — which is every request an admin sees.
+                    membershipProposalSink?.invoke(event.record, event.createdAt)
                 }
                 is IncomingChatEvent.CommitterBeacon -> {
                     // ADR-0045 decision 2 — a committer-liveness beacon. Not a
@@ -4956,7 +4938,6 @@ private class GroupRecord(
 
     private fun systemRowText(kind: SystemKind): String = when (kind) {
         SystemKind.Commit -> "[mls commit]"
-        SystemKind.Proposal -> "[mls proposal]"
         SystemKind.ExternalJoinProposal -> "[mls external join]"
     }
 

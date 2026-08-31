@@ -126,45 +126,6 @@ class CommitOutboxTest {
     // -----------------------------------------------------------------
 
     @Test
-    fun `un-acked entry at a matching epoch is re-published and echo re-armed`() = runBlocking {
-        val rendezvous = byteArrayOf(9, 9, 9)
-        val e = entry(
-            targetEpoch = "5",
-            commit = byteArrayOf(1, 2, 3),
-            secondArtifact = rendezvous,
-            secondKind = SecondArtifactKind.RENDEZVOUS,
-        )
-        var republishedCommit: ByteArray? = null
-        var republishedRendezvous: ByteArray? = null
-        val ownPublished = mutableListOf<Long>()
-        var ackedId: String? = null
-        var ackedCommitId: Long? = null
-        var ackedSecondId: Long? = null
-        var discarded = false
-
-        sweepPendingCommitEntries(
-            entries = listOf(e),
-            currentEpoch = 5uL,
-            republishCommit = { bytes -> republishedCommit = bytes; 100L },
-            republishRendezvous = { bytes -> republishedRendezvous = bytes; 101L },
-            republishWelcome = { _, _ -> fail("welcome path must not run for a rendezvous entry") },
-            markOwnPublished = { id -> ownPublished.add(id) },
-            onAck = { id, commitId, secondId ->
-                ackedId = id; ackedCommitId = commitId; ackedSecondId = secondId
-            },
-            onDiscard = { discarded = true },
-        )
-
-        assertArrayEquals("commit bytes re-published verbatim", byteArrayOf(1, 2, 3), republishedCommit)
-        assertArrayEquals("rendezvous bytes re-published verbatim", rendezvous, republishedRendezvous)
-        assertEquals("echo filter re-armed for the re-published commit id", listOf(100L), ownPublished)
-        assertEquals("e1", ackedId)
-        assertEquals(100L, ackedCommitId)
-        assertEquals(101L, ackedSecondId)
-        assertFalse("a re-published entry is acked, not discarded", discarded)
-    }
-
-    @Test
     fun `add-path welcome entry re-publishes to the mailbox — commit echo re-armed`() = runBlocking {
         val welcome = byteArrayOf(7, 7)
         val mailbox = byteArrayOf(0xA, 0xB)
@@ -178,23 +139,38 @@ class CommitOutboxTest {
         var welcomeMailbox: ByteArray? = null
         var welcomeBytes: ByteArray? = null
         val ownPublished = mutableListOf<Long>()
+        var ackedId: String? = null
+        var ackedCommitId: Long? = null
+        var ackedSecondId: Long? = null
+        var discarded = false
+        var republishedCommit: ByteArray? = null
 
         sweepPendingCommitEntries(
             entries = listOf(e),
             currentEpoch = 3uL,
-            republishCommit = { _ -> 200L },
-            republishRendezvous = { _ -> fail("rendezvous path must not run for a welcome entry") },
+            republishCommit = { bytes -> republishedCommit = bytes; 200L },
             republishWelcome = { mb, bytes -> welcomeMailbox = mb; welcomeBytes = bytes; 201L },
             markOwnPublished = { id -> ownPublished.add(id) },
-            onAck = { _, _, _ -> },
-            onDiscard = { fail("must not discard a matching-epoch entry") },
+            onAck = { id, commitId, secondId ->
+                ackedId = id; ackedCommitId = commitId; ackedSecondId = secondId
+            },
+            onDiscard = { discarded = true },
         )
 
+        assertArrayEquals("commit bytes re-published verbatim", byteArrayOf(4, 5), republishedCommit)
         assertArrayEquals(mailbox, welcomeMailbox)
         assertArrayEquals(welcome, welcomeBytes)
         // Only the COMMIT re-arms the echo filter — the welcome goes to the new
         // member's mailbox and never echoes back to the committer.
         assertEquals(listOf(200L), ownPublished)
+        // ADR-0045 S7 — these three moved here from the deleted RENDEZVOUS case.
+        // The property (a matching-epoch entry is re-published and ACKED with
+        // both ids, never discarded) is still live; only its vehicle died, since
+        // a mailbox Welcome is now the ONLY second artifact a direct path writes.
+        assertEquals("e1", ackedId)
+        assertEquals(200L, ackedCommitId)
+        assertEquals(201L, ackedSecondId)
+        assertFalse("a re-published entry is acked, not discarded", discarded)
     }
 
     // -----------------------------------------------------------------
@@ -213,7 +189,6 @@ class CommitOutboxTest {
                 entries = listOf(e),
                 currentEpoch = 4uL, // torn: snapshot rolled back to N (< N+1)
                 republishCommit = { _ -> published = true; 1L },
-                republishRendezvous = { _ -> published = true; 2L },
                 republishWelcome = { _, _ -> published = true; 3L },
                 markOwnPublished = { id -> ownPublished.add(id) },
                 onAck = { _, _, _ -> fail("a torn-write orphan must not be acked") },

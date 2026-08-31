@@ -299,6 +299,21 @@ fn a_by_value_proposal_is_still_judged_against_the_committer() {
 /// non-member must NEVER be swept implicitly. It is retained on the ADR-0027
 /// side channel that requires an explicit admin approve, and never enters the
 /// MLS proposal store the sweep consumes.
+///
+/// **The assertion this test used to make no longer says what it says.** It
+/// proved the property with `pending_proposals().is_empty()` after an unrelated
+/// member proposal had been swept — but since ADR-0045 S7 an approve *is* a
+/// proposal, so the store legitimately holds Adds that originate from
+/// external-join requests, and store-emptiness would be a claim about the
+/// scenario rather than about the rule. The rule is split into the two halves
+/// that still hold and are still measurable:
+///
+/// 1. here — the stranger's Add is quarantined, never stored, and never swept
+///    **however long the group runs and whatever else it is doing**;
+/// 2. `a_planted_external_join_add_is_still_excluded_by_the_sweep`
+///    (`src/group.rs`, where the `#[cfg(test)]` adversary seam lives) — a
+///    `NewMemberProposal`-sender Add planted **directly into the store** is
+///    still excluded by the sweep filter.
 #[test]
 fn sweep_never_includes_an_external_join_add() {
     let mut s = scene(0x08);
@@ -331,7 +346,9 @@ fn sweep_never_includes_an_external_join_add() {
     assert!(!is_member(&s.alice_g, &stranger));
 
     // Belt and braces: a legitimate member proposal alongside it is swept, and
-    // the stranger still does not get in.
+    // the stranger still does not get in. Note the assertion is on `swept`, not
+    // on store emptiness: what must be true is that the commit carried exactly
+    // one proposal and it was not the stranger's.
     let dave = Identity::from_seed(&[0xD8u8; 64]).expect("dave");
     let proposal = s
         .bob_g
@@ -347,6 +364,22 @@ fn sweep_never_includes_an_external_join_add() {
         .expect("commit produced");
     assert_eq!(sweep.swept.len(), 1, "only the member proposal is swept");
     assert!(is_member(&s.alice_g, &dave));
+    assert!(!is_member(&s.alice_g, &stranger));
+
+    // And it is still quarantined afterwards: an epoch advance settles nothing
+    // about a request nobody decided.
+    assert_eq!(
+        s.alice_g.pending_external_joins().len(),
+        1,
+        "the stranger is still only *asking*",
+    );
+    assert!(
+        s.alice_g
+            .commit_pending_proposals(&s.alice)
+            .expect("a second sweep")
+            .is_none(),
+        "and a later sweep does not pick it up either",
+    );
     assert!(!is_member(&s.alice_g, &stranger));
 }
 
@@ -2132,4 +2165,188 @@ fn a_departing_admins_sweep_is_rescued_and_its_commit_lands_on_every_peer() {
         !s.bob_g.is_active(),
         "and bob's own group is now inactive, which is what leaving means",
     );
+}
+
+// ============================================================================
+// ADR-0045 S7 — external joins converge onto the proposal store and the sweep
+// ============================================================================
+
+/// **The fork S7 closes.** Two admins, each holding a different stranger's
+/// external-join request, approve against the *same* epoch. Under ADR-0027's
+/// direct-commit approve both eagerly merged their own N->N+1 commit, the DS
+/// journal ordered one first, and the loser sat at an epoch nobody else
+/// reached — silently and permanently. Under S7 an approval is a **proposal**,
+/// so neither advances, both compose into one committer's sweep, and every
+/// member lands on one epoch holding both joiners.
+#[test]
+fn two_admins_approving_two_joiners_compose_into_one_sweep() {
+    let mut s = scene(0x30);
+    let dave = Identity::from_seed(&[0xD3u8; 64]).expect("dave");
+    let erin = Identity::from_seed(&[0xE3u8; 64]).expect("erin");
+    let epoch = s.alice_g.epoch();
+    assert_eq!(s.bob_g.epoch(), epoch, "the scene starts in lock-step");
+
+    // Two strangers ask to join, each against the SAME epoch.
+    let dave_req = dave
+        .create_external_join_proposal(&s.alice_g.group_id(), epoch)
+        .expect("dave asks to join");
+    let erin_req = erin
+        .create_external_join_proposal(&s.bob_g.group_id(), epoch)
+        .expect("erin asks to join");
+    s.alice_g
+        .process_incoming_verifying_roles(&s.alice, &dave_req)
+        .expect("alice sees dave's request");
+    s.bob_g
+        .process_incoming_verifying_roles(&s.bob, &erin_req)
+        .expect("bob sees erin's request");
+
+    // Two admins approve concurrently, each against epoch N.
+    let approve_a = s
+        .alice_g
+        .approve_external_join(&s.alice, dave.signature_public_key())
+        .expect("the owner approves dave");
+    let approve_b = s
+        .bob_g
+        .approve_external_join(&s.bob, erin.signature_public_key())
+        .expect("the admin approves erin");
+
+    // NEITHER device advanced: an approval is not epoch-advancing.
+    assert_eq!(
+        s.alice_g.epoch(),
+        epoch,
+        "approving must not advance the approver's epoch",
+    );
+    assert_eq!(
+        s.bob_g.epoch(),
+        epoch,
+        "approving must not advance the approver's epoch",
+    );
+    assert!(!is_member(&s.alice_g, &dave));
+    assert!(!is_member(&s.bob_g, &erin));
+
+    // Each approval is an ordinary admin-authored Add on the wire: every peer's
+    // receipt gate retains it, and none can tell it came from a `/g/` link.
+    // (Each approver already holds its own; it is the other's that travels.)
+    let retains = |g: &mut Group, id: &Identity, approval: &[u8], who: &str| match g
+        .process_incoming_verifying_roles(id, approval)
+        .unwrap_or_else(|e| panic!("{who} takes the approval: {e}"))
+    {
+        Incoming::Proposal(record) => {
+            assert!(record.stored, "{who} must retain it: {record:?}");
+        },
+        other => panic!("{who} expected a Proposal, got {other:?}"),
+    };
+    retains(&mut s.alice_g, &s.alice, &approve_b, "alice");
+    retains(&mut s.bob_g, &s.bob, &approve_a, "bob");
+    retains(&mut s.charlie_g, &s.charlie, &approve_a, "charlie");
+    retains(&mut s.charlie_g, &s.charlie, &approve_b, "charlie");
+    for (g, who) in [
+        (&s.alice_g, "alice"),
+        (&s.bob_g, "bob"),
+        (&s.charlie_g, "charlie"),
+    ] {
+        assert_eq!(g.pending_proposals().len(), 2, "{who} holds both approvals");
+    }
+
+    // The acting committer — rank 0, the owner — sweeps both into ONE commit.
+    assert_eq!(s.alice_g.own_committer_rank(&s.alice), Some(0));
+    let sweep = s
+        .alice_g
+        .commit_pending_proposals(&s.alice)
+        .expect("the owner sweeps")
+        .expect("a commit was produced");
+    assert_eq!(
+        sweep.swept.len(),
+        2,
+        "two concurrent approvals compose into one commit: {:?}",
+        sweep.swept,
+    );
+
+    // Every member applies that one commit and lands in lock-step, holding
+    // BOTH joiners — the state the direct-approve path could not reach, where
+    // each device kept only the joiner it had admitted itself.
+    let commit = wire(sweep.commit);
+    for (g, id, who) in [
+        (&mut s.bob_g, &s.bob, "bob"),
+        (&mut s.charlie_g, &s.charlie, "charlie"),
+    ] {
+        g.process_incoming_verifying_roles(id, &commit)
+            .unwrap_or_else(|e| panic!("{who} applies the sweep: {e}"));
+    }
+    for (g, who) in [
+        (&s.alice_g, "alice"),
+        (&s.bob_g, "bob"),
+        (&s.charlie_g, "charlie"),
+    ] {
+        assert_eq!(g.epoch(), epoch + 1, "{who} is at the one shared epoch");
+        assert!(is_member(g, &dave), "{who} holds dave");
+        assert!(is_member(g, &erin), "{who} holds erin");
+    }
+
+    // And the joiners land on the SAME epoch from the sweep's single Welcome.
+    let welcome = wire(sweep.welcome.expect("the sweep carries a Welcome"));
+    for joiner in [&dave, &erin] {
+        let joined = Group::join_from_welcome(&welcome, joiner).expect("a joiner joins");
+        assert_eq!(joined.epoch(), epoch + 1);
+        assert_eq!(joined.members().len(), 5);
+    }
+}
+
+/// ADR-0045 S7 — the request is settled for **every** admin once the joiner
+/// lands, not only for the one whose approve consumed it.
+///
+/// Approving used to add the joiner immediately, so the approver's own queue
+/// was the only one that could go stale. S7 splits the decision from the epoch
+/// advance, so a second admin holding its own copy of the same request would go
+/// on offering it after the joiner was already a member — and would produce an
+/// `Add` colliding with a staying member. Membership is the settlement signal:
+/// authenticated group state, observed identically by every device.
+#[test]
+fn a_landed_joiner_is_reaped_from_every_admins_queue() {
+    let mut s = scene(0x32);
+    let dave = Identity::from_seed(&[0xD5u8; 64]).expect("dave");
+
+    // BOTH admins see the same request — which is the ordinary case: it is
+    // broadcast to the group journal.
+    let req = dave
+        .create_external_join_proposal(&s.alice_g.group_id(), s.alice_g.epoch())
+        .expect("dave asks to join");
+    for (g, id) in [(&mut s.alice_g, &s.alice), (&mut s.bob_g, &s.bob)] {
+        g.process_incoming_verifying_roles(id, &req)
+            .expect("an admin sees the request");
+    }
+    assert_eq!(s.alice_g.pending_external_joins().len(), 1);
+    assert_eq!(s.bob_g.pending_external_joins().len(), 1);
+
+    // Alice approves; alice sweeps; bob applies the commit.
+    let approval = s
+        .alice_g
+        .approve_external_join(&s.alice, dave.signature_public_key())
+        .expect("alice approves");
+    s.bob_g
+        .process_incoming_verifying_roles(&s.bob, &approval)
+        .expect("bob takes alice's approval");
+    let sweep = s
+        .alice_g
+        .commit_pending_proposals(&s.alice)
+        .expect("sweep")
+        .expect("a commit");
+    s.bob_g
+        .process_incoming_verifying_roles(&s.bob, &wire(sweep.commit))
+        .expect("bob applies it");
+    assert!(is_member(&s.bob_g, &dave));
+
+    // Bob's queue is settled without any message saying so.
+    assert!(
+        s.bob_g.pending_external_joins().is_empty(),
+        "a joiner who has landed is no longer a pending request on any admin",
+    );
+    // And a stale tap is refused rather than proposing a doomed duplicate Add.
+    assert!(
+        s.bob_g
+            .approve_external_join(&s.bob, dave.signature_public_key())
+            .is_err(),
+        "approving a joiner who is already a member must be refused",
+    );
+    assert!(s.bob_g.pending_proposals().is_empty());
 }

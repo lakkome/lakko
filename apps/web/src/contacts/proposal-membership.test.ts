@@ -104,6 +104,11 @@ vi.mock("../wasm", () => ({
     // (call signaling, the push-routing secret, the committer beacon) all
     // short-circuit on the first byte or the length before touching wasm, so
     // this is the only export they need.
+    // Present so the PRE-S7 approve path would run to completion here rather
+    // than dying on a missing mock — the S7 assertions below have to fail on
+    // what the path DOES, not on the double.
+    wrapWelcomeRendezvous: (ref: Uint8Array, welcome: Uint8Array): Uint8Array =>
+      new Uint8Array([0xcc, ref[0] ?? 0, ...welcome]),
     parseBodyEnvelope: (bytes: Uint8Array) => ({
       kind: "chat",
       text: new TextDecoder().decode(bytes),
@@ -156,6 +161,7 @@ function fakeGroup(opts: {
   roleTable: boolean;
   rank?: number | undefined;
   pending?: number;
+  approveThrows?: boolean;
 }): Fake {
   const order: string[] = [];
   let epoch = 6n;
@@ -205,6 +211,22 @@ function fakeGroup(opts: {
         pending += 1;
         return new Uint8Array([0xab]);
       }),
+      // ADR-0045 S7 — the approve is a proposal now: bytes to publish, the
+      // pending set grows, and the epoch deliberately does NOT move. A double
+      // that still returned `{ commit, welcome }` would make every assertion
+      // below vacuous.
+      approveExternalJoin: vi.fn((_id: unknown, ref: Uint8Array) => {
+        if (opts.approveThrows === true) {
+          throw new Error("external join approve refused: not owner or admin");
+        }
+        order.push("approveExternalJoin");
+        pending += 1;
+        return new Uint8Array([0xac, ref[0] ?? 0]);
+      }),
+      rejectExternalJoin: vi.fn(() => {
+        order.push("rejectExternalJoin");
+      }),
+      pendingExternalJoins: vi.fn(() => new Uint8Array(0)),
       ownCommitterRank: () => opts.rank,
       hasStagedSweep: () => staged,
       stagePendingProposals: vi.fn(() => {
@@ -631,5 +653,67 @@ describe("ADR-0045 — the verdict apply surfaces the rows it consumes", () => {
     // lie. The verdict is unaffected.
     expect(swept.kind).toBe("committed");
     expect(surfaced).toEqual([]);
+  });
+});
+
+
+describe("ADR-0045 S7 — approving an external join is a PROPOSAL", () => {
+  const REF = new Uint8Array(32).fill(0xd1);
+
+  it("publishes exactly ONE artifact, advances no epoch, and records no outbox entry", async () => {
+    // THE headline. Before S7 this path eager-merged N -> N+1, published a
+    // commit AND a rendezvous, and wrote a two-artifact ADR-0040 outbox entry
+    // to make that durable. All three are gone: a proposal advances nothing,
+    // so there is nothing to make durable and nothing to roll back.
+    const order: string[] = [];
+    const f = fakeGroup({ gid: freshGid(), roleTable: true, rank: 0 });
+    const c = client(order, ds(order));
+
+    const out = await c.approveExternalJoin(null, f.group, REF);
+
+    expect(out).toEqual({ kind: "proposed", proposalMessageId: 101 });
+    expect(f.epoch()).toBe(6n);
+    expect(order.filter((o) => o === "publish")).toHaveLength(1);
+    expect(order).not.toContain("record");
+    expect(f.pending()).toBe(1);
+  });
+
+  it("does not drain the pending set first — an approve composes with what is pending", async () => {
+    // The pre-check that gated an approve on an empty pending set is gone with
+    // the direct commit it guarded. Under ADR-0045 a pending proposal is the
+    // NORMAL state, so an admin deferring to a live owner could essentially
+    // never approve.
+    const order: string[] = [];
+    const f = fakeGroup({ gid: freshGid(), roleTable: true, rank: 1, pending: 2 });
+    const c = client(order, ds(order));
+
+    const out = await c.approveExternalJoin(null, f.group, REF);
+
+    expect(out.kind).toBe("proposed");
+    expect(order).not.toContain("stage");
+    expect(order).not.toContain("merge");
+    expect(f.epoch()).toBe(6n);
+  });
+
+  it("a refused approve publishes nothing and consumes nothing", async () => {
+    // The core keeps the request pending on a refusal so the admin can retry;
+    // the client must not turn that into a publish, an outbox entry, or a
+    // local reject that would discard a stranger's request nobody can get back.
+    const order: string[] = [];
+    const f = fakeGroup({
+      gid: freshGid(),
+      roleTable: true,
+      rank: undefined,
+      approveThrows: true,
+    });
+    const c = client(order, ds(order));
+
+    await expect(c.approveExternalJoin(null, f.group, REF)).rejects.toThrow(
+      /not owner or admin/,
+    );
+    expect(order).not.toContain("publish");
+    expect(order).not.toContain("record");
+    expect(order).not.toContain("rejectExternalJoin");
+    expect(f.epoch()).toBe(6n);
   });
 });

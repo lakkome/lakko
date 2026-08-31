@@ -14,14 +14,21 @@
 //! - [`Group::export_secret`] — derive a key for non-MLS uses (SFrame, etc.)
 //!
 //! Membership changes come in two shapes. The **direct-commit** shape
-//! ([`Group::add_member`], [`Group::remove_member`], [`Group::set_group_roles`],
-//! [`Group::approve_external_join`]) is the original one and is destined to go
-//! (ADR-0045). The **proposal** shape that replaces it is
-//! [`Group::propose_add_member`] / [`Group::propose_remove_member`] /
-//! [`Group::propose_group_roles`], with one designated owner-or-admin — see
+//! ([`Group::add_member`], [`Group::remove_member`], [`Group::set_group_roles`])
+//! is the original one and is destined to go (ADR-0045). The **proposal** shape
+//! that replaces it is [`Group::propose_add_member`] /
+//! [`Group::propose_remove_member`] / [`Group::propose_group_roles`] /
+//! [`Group::approve_external_join`], with one designated owner-or-admin — see
 //! [`crate::group_roles::committer_rank`] — turning the pending set into a
 //! single Commit via [`Group::commit_pending_proposals`]. The authorisation
 //! rule both shapes are judged by lives in [`crate::group_proposals`].
+//!
+//! Since ADR-0045 **S7** the external-join approve is on the proposal side, and
+//! it is the last membership path to move: a role-enabled group has no
+//! direct-commit route into its own membership at all. The direct approve
+//! survives only where a role table — and therefore a committer — cannot exist,
+//! reachable as [`crate::PublisherGroup::approve_external_join`] and nowhere
+//! else.
 //!
 //! Ownership moves with [`Group::transfer_ownership`] /
 //! [`Group::propose_ownership_transfer`] (ADR-0022's deferred follow-up), which
@@ -794,11 +801,19 @@ impl Group {
         let key_package = add.key_package().clone();
         let joiner_signature_key = key_package.leaf_node().signature_key().as_slice().to_vec();
 
+        // ADR-0045 S7 — reap first, so a request whose joiner has since landed
+        // frees the slot it was occupying instead of holding it to the cap.
+        self.reap_joined_external_joins();
+
         let already_pending = self
             .pending_external_joins
             .iter()
             .any(|p| p.joiner_signature_key == joiner_signature_key);
-        if !already_pending && self.pending_external_joins.len() < MAX_PENDING_EXTERNAL_JOINS {
+        let already_a_member = self.joiner_is_already_a_member(&joiner_signature_key);
+        if !already_pending
+            && !already_a_member
+            && self.pending_external_joins.len() < MAX_PENDING_EXTERNAL_JOINS
+        {
             self.pending_external_joins.push(PendingExternalJoin {
                 joiner_signature_key: joiner_signature_key.clone(),
                 key_package,
@@ -809,59 +824,204 @@ impl Group {
         })
     }
 
+    /// `true` when `signature_key` already sits in this group's roster.
+    fn joiner_is_already_a_member(&self, signature_key: &[u8]) -> bool {
+        self.members()
+            .iter()
+            .any(|m| m.signature_public_key.as_slice() == signature_key)
+    }
+
+    /// Drop every retained external-join request whose joiner has since become
+    /// a member (ADR-0045 S7).
+    ///
+    /// **Why this became necessary.** Under ADR-0027 an approve added the
+    /// joiner immediately, so the only device that ever held a stale request
+    /// was one whose own approve had just consumed it. S7 splits the decision
+    /// from the epoch advance: admin A approves, some other committer sweeps,
+    /// and the joiner lands as a member on **every** device — including admin
+    /// B, whose own retained copy of the same request (it received the same
+    /// external proposal) nothing has ever removed, because
+    /// [`Self::reject_external_join`] is local-only and no message says "this
+    /// one is settled".
+    ///
+    /// Membership is that message. The roster is authenticated group state
+    /// every member observes identically, so "is this joiner in the group" is a
+    /// question every device answers the same way and at the same epoch, with
+    /// no new wire artifact and nothing to authorise.
+    ///
+    /// Approving a stale request would not be unsafe — it is an ordinary
+    /// authorised `Add` that `sweep_keeps` clause 3 excludes for colliding with
+    /// a staying member — but it would occupy a slot in every member's pending
+    /// set until the next sweep, and it would show the admin a request that is
+    /// no longer a request.
+    fn reap_joined_external_joins(&mut self) {
+        let members = self.members();
+        self.pending_external_joins.retain(|p| {
+            !members
+                .iter()
+                .any(|m| m.signature_public_key == p.joiner_signature_key)
+        });
+    }
+
     /// The signature key of every external-join proposal currently awaiting a
     /// decision (ADR-0027). Each is the handle for
     /// [`approve_external_join`](Self::approve_external_join) /
     /// [`reject_external_join`](Self::reject_external_join).
+    ///
+    /// A joiner that has since become a member is **never** listed, whichever
+    /// device's sweep admitted them — see [`Self::reap_joined_external_joins`].
+    /// The filter, rather than the reap, is what makes that a guarantee: it is
+    /// the only read, so it cannot be reached by a path that forgot to reap.
     #[must_use]
     pub fn pending_external_joins(&self) -> Vec<Vec<u8>> {
+        let members = self.members();
         self.pending_external_joins
             .iter()
+            .filter(|p| {
+                !members
+                    .iter()
+                    .any(|m| m.signature_public_key == p.joiner_signature_key)
+            })
             .map(|p| p.joiner_signature_key.clone())
             .collect()
     }
 
-    /// Approve a retained external-join proposal — adds the joiner to the group
-    /// (ADR-0027, G-3). `proposal_ref` is the joiner's signature key from
+    /// The retained KeyPackage for `proposal_ref`, cloned so the caller can
+    /// attempt an approve without consuming the request.
+    ///
+    /// **The request survives a failed approve.** Both approve paths look up
+    /// here, act, and only remove the entry once the act succeeded — so a
+    /// refusal (wrong role, a full pending set, an OpenMLS-side failure) leaves
+    /// the admin able to retry rather than silently discarding a stranger's
+    /// request nobody can get back.
+    fn pending_external_join_key_package(&self, proposal_ref: &[u8]) -> Result<KeyPackage> {
+        if self.joiner_is_already_a_member(proposal_ref) {
+            return Err(Error::Group(
+                "external join approve refused: that joiner is already a member of this group"
+                    .into(),
+            ));
+        }
+        self.pending_external_joins
+            .iter()
+            .find(|p| p.joiner_signature_key == proposal_ref)
+            .map(|p| p.key_package.clone())
+            .ok_or_else(|| Error::Group("no pending external join for that key".into()))
+    }
+
+    /// Discard the retained request for `proposal_ref`. Idempotent.
+    fn drop_pending_external_join(&mut self, proposal_ref: &[u8]) {
+        self.pending_external_joins
+            .retain(|p| p.joiner_signature_key != proposal_ref);
+    }
+
+    /// Approve a retained external-join request — **proposes** adding the
+    /// joiner (ADR-0027 G-3, converged onto the ADR-0045 proposal path by S7).
+    /// `proposal_ref` is the joiner's signature key from
     /// [`Incoming::ExternalJoinProposal`] / [`pending_external_joins`](Self::pending_external_joins).
     ///
-    /// **Role-gated** (ADR-0022): on a group carrying a role table only an owner
-    /// or admin may approve; a non-admin is refused with no commit produced
-    /// (fail-closed, invariant #4). A legacy group with no table stays open.
-    /// Approving reuses the audited [`add_member`](Self::add_member) path —
-    /// committing the joiner's external `Add` is equivalent to adding their
-    /// KeyPackage — so it returns the in-group Commit + the joiner's Welcome;
-    /// peers re-verify the resulting `Add`'s committer role on receipt
-    /// (`process_incoming_verifying_roles`), so a forged local approve cannot
-    /// take effect on them either.
+    /// Returns the wire-encoded **Proposal** to publish to the group journal.
+    /// The epoch does not advance and there is no Welcome yet: the Welcome is
+    /// produced by whichever device sweeps this into a commit
+    /// ([`Self::commit_pending_proposals`] / [`Self::stage_pending_proposals`]).
+    ///
+    /// # What the approval *is*, after S7
+    ///
+    /// The admin's decision is expressed as an **`Add` proposal the admin
+    /// itself authors**, carrying the joiner's retained KeyPackage. The
+    /// joiner's own external proposal is still never stored and never
+    /// committed — the same structural property ADR-0027 rested on — so a
+    /// stranger holding a `/g/` link may still only *ask*.
+    ///
+    /// That indistinguishability from an ordinary admin add is the point, and
+    /// it is what makes S7 possible at all. ADR-0045 decision 4's own
+    /// recommendation was the opposite — store the stranger's proposal in the
+    /// MLS store and give the sweep filter a second arm admitting it once an
+    /// admin has "marked it approved" — and that does not survive contact with
+    /// the rest of the design, three ways. The mark is device-local, so a
+    /// **different** admin's sweep could not see it; every peer's commit gate
+    /// would refuse the resulting commit, because a `NewMemberProposal` sender
+    /// resolves to no member and [`crate::group_proposals::authorise`] refuses
+    /// every kind in that case, and the only evidence available to relax that
+    /// is "an admin committed it" — which is precisely the auto-admit ADR-0045
+    /// forbids; and merging the two stores would let any stranger with a link
+    /// consume the member pending set, which is a denial-of-membership
+    /// primitive handed to non-members. Authoring the `Add` puts the approval
+    /// on the wire as an MLS-authenticated artifact instead, judged by the one
+    /// existing rule, with no new authorisation channel.
+    ///
+    /// **Role-gated** exactly as before, and by the same rule as every other
+    /// add: [`crate::group_proposals::authorise`] admits an `Add` from an owner
+    /// or admin only, enforced locally here and again by every peer's receipt
+    /// gate and commit gate. A refused approve produces no proposal and leaves
+    /// the request pending (fail-closed, invariant #4).
+    ///
+    /// **A pending membership proposal no longer blocks an approve.** It used
+    /// to — `refuse_if_proposals_pending` guarded the direct commit this
+    /// replaces — and under ADR-0045 a pending proposal is the normal state, so
+    /// an admin deferring to a live owner could essentially never approve.
     ///
     /// # Errors
     ///
-    /// [`Error::Group`] if the caller is not owner/admin, if a member proposal
-    /// is pending (see [`Self::refuse_if_proposals_pending`] — checked here
-    /// rather than only inside [`Self::add_member`] so a refusal does not
-    /// consume the retained request), if no pending proposal matches
-    /// `proposal_ref`, or on an OpenMLS add failure.
+    /// [`Error::Group`] when the group carries no role table (it has no
+    /// committer, so a proposal published into it would never be swept — use
+    /// [`crate::PublisherGroup::approve_external_join`], the only such group
+    /// that receives external-join requests), when this device's role does not
+    /// authorise an add, when the pending set is full, when no retained request
+    /// matches `proposal_ref`, when that joiner is already a member, or on any
+    /// OpenMLS-side failure.
     pub fn approve_external_join(
         &mut self,
         identity: &Identity,
         proposal_ref: &[u8],
+    ) -> Result<Vec<u8>> {
+        self.role_table_or_refuse("external join approve")?;
+        let key_package = self.pending_external_join_key_package(proposal_ref)?;
+        let proposal = self
+            .propose_add_member(identity, key_package)
+            .map_err(|e| Error::Group(format!("external join approve refused: {e}")))?;
+        // Only now. The decision has been made and is on its way to the wire;
+        // a refusal above left the request where it was.
+        self.drop_pending_external_join(proposal_ref);
+        Ok(proposal)
+    }
+
+    /// Approve a retained external-join request as a **direct commit**, for a
+    /// group that has no role table and therefore no committer to sweep a
+    /// proposal (ADR-0045 S7).
+    ///
+    /// `pub(crate)` and reachable from exactly one place —
+    /// [`crate::PublisherGroup::approve_external_join`] — so the direct route
+    /// exists only where the proposal route cannot. It is not a fallback: it
+    /// **refuses** a group that carries a role table rather than quietly
+    /// direct-committing into one that has a committer, which would be the
+    /// second ungated route into membership ADR-0045 names as the hazard
+    /// rebuilt under a prudent name.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Group`] when the group carries a role table, when no retained
+    /// request matches `proposal_ref`, when that joiner is already a member, or
+    /// on any OpenMLS-side add failure.
+    pub(crate) fn approve_external_join_directly(
+        &mut self,
+        identity: &Identity,
+        proposal_ref: &[u8],
     ) -> Result<MemberAddition> {
-        self.refuse_if_proposals_pending("external join approve")?;
-        if let Some(table) = self.group_roles() {
-            if !table.can_administer(identity.signature_public_key()) {
-                return Err(Error::Group(
-                    "external join approve refused: not owner or admin".into(),
-                ));
-            }
+        if self.group_roles().is_some() {
+            return Err(Error::Group(
+                "direct external join approve refused: this group carries a role table, so it \
+                 has a committer — approve it as a proposal instead (ADR-0045 S7)"
+                    .into(),
+            ));
         }
-        let pos = self
-            .pending_external_joins
-            .iter()
-            .position(|p| p.joiner_signature_key == proposal_ref)
-            .ok_or_else(|| Error::Group("no pending external join for that key".into()))?;
-        let pending = self.pending_external_joins.remove(pos);
-        self.add_member(identity, pending.key_package)
+        // A counted-zero no-op here (a table-less group's receipt gate stores
+        // nothing), kept for the same reason every other direct path keeps it:
+        // the guard belongs to the shape, not to the group.
+        self.refuse_if_proposals_pending("external join approve")?;
+        let key_package = self.pending_external_join_key_package(proposal_ref)?;
+        let addition = self.add_member(identity, key_package)?;
+        self.drop_pending_external_join(proposal_ref);
+        Ok(addition)
     }
 
     /// Reject a retained external-join proposal — discards it locally without
@@ -3342,6 +3502,33 @@ impl Group {
             .map_err(|e| Error::Group(format!("ungated_store: {e:?}")))
     }
 
+    /// **Adversary.** Store a non-member's **external-join** Add straight into
+    /// the MLS proposal store the sweep consumes — the one thing
+    /// [`Group::retain_external_join`] structurally never does.
+    ///
+    /// The shipped receive path routes an `ExternalJoinProposalMessage` to the
+    /// Lakko-side quarantine and nowhere near `store_pending_proposal`, so this
+    /// is the only way to reach the state where a sweep is *offered* a
+    /// stranger's Add. It exists so the exclusion can be measured rather than
+    /// argued from the absence of a code path.
+    fn ungated_store_external_join(&mut self, identity: &Identity, bytes: &[u8]) -> Result<()> {
+        let mls_in = decode_message(bytes)?;
+        let protocol = mls_in
+            .try_into_protocol_message()
+            .map_err(|e| Error::Message(format!("not a protocol message: {e:?}")))?;
+        let processed = self
+            .inner
+            .process_message(&identity.provider, protocol)
+            .map_err(|e| Error::Message(format!("process_message: {e:?}")))?;
+        let ProcessedMessageContent::ExternalJoinProposalMessage(qp) = processed.into_content()
+        else {
+            return Err(Error::Group("not an external join proposal".into()));
+        };
+        self.inner
+            .store_pending_proposal(identity.provider.storage(), *qp)
+            .map_err(|e| Error::Group(format!("ungated_store_external_join: {e:?}")))
+    }
+
     /// **Adversary.** Remove a member the way [`Group::remove_member`] did
     /// before the ADR-0045 review's HIGH-1 guard: straight into OpenMLS's
     /// `remove_members`, which builds with `consume_proposal_store` at its
@@ -5627,7 +5814,9 @@ mod external_join_tests {
 
     #[test]
     fn owner_approves_external_join_adds_joiner() {
-        // Open group (no role table) — approve is allowed for any member.
+        // `Group::create` seeds the ADR-0022 role table with the creator as
+        // owner, so this is a role-enabled group and (since ADR-0045 S7) the
+        // approve is a proposal the owner then sweeps.
         let alice = Identity::from_seed(&[0xA0u8; 64]).expect("alice");
         let mut alice_g = Group::create(&alice).expect("create");
         let dave = Identity::from_seed(&[0xD0u8; 64]).expect("dave");
@@ -5642,15 +5831,40 @@ mod external_join_tests {
         );
         assert_eq!(alice_g.pending_external_joins(), vec![dave_pk.clone()]);
 
-        alice_g
+        let epoch = alice_g.epoch();
+        let proposal = alice_g
             .approve_external_join(&alice, &dave_pk)
             .expect("approve");
+        assert!(
+            !proposal.is_empty(),
+            "the approve emits a proposal to publish"
+        );
+        assert_eq!(
+            alice_g.epoch(),
+            epoch,
+            "an approve is a proposal: it must not advance the epoch",
+        );
+        assert!(
+            !alice_g
+                .members()
+                .iter()
+                .any(|m| m.signature_public_key == dave_pk),
+            "dave is not a member until somebody sweeps",
+        );
+        assert_eq!(alice_g.pending_proposals().len(), 1);
+
+        // The owner sweeps its own approval into a commit.
+        let sweep = alice_g
+            .commit_pending_proposals(&alice)
+            .expect("sweep")
+            .expect("a commit was produced");
+        assert!(sweep.welcome.is_some(), "the sweep carries dave's Welcome");
         assert!(
             alice_g
                 .members()
                 .iter()
                 .any(|m| m.signature_public_key == dave_pk),
-            "dave should be a member after approve",
+            "dave should be a member after the sweep",
         );
         assert!(alice_g.pending_external_joins().is_empty());
     }
@@ -5727,7 +5941,8 @@ mod external_join_tests {
         bob_g.process_incoming(&bob, &prop).expect("bob processes");
         assert_eq!(bob_g.pending_external_joins(), vec![dave_pk.clone()]);
 
-        // Role-gated: a plain member is refused, no commit produced.
+        // Role-gated: a plain member is refused, and nothing is produced.
+        let epoch = bob_g.epoch();
         assert!(
             bob_g.approve_external_join(&bob, &dave_pk).is_err(),
             "a non-admin must not approve an external join",
@@ -5737,14 +5952,40 @@ mod external_join_tests {
             .members()
             .iter()
             .any(|m| m.signature_public_key == dave_pk));
+        // ADR-0045 S7 — the refusal must be a refusal, not a proposal peers
+        // happen to drop. Asserting only "dave is not a member" would pass for
+        // a bug that emitted an unauthorised Add and relied on every peer's
+        // receipt gate to catch it: the local store would hold it, the pending
+        // set would be occupied, and this device would offer it to its own
+        // sweep.
+        assert_eq!(
+            bob_g.epoch(),
+            epoch,
+            "no epoch advance on a refused approve"
+        );
+        assert!(
+            bob_g.pending_proposals().is_empty(),
+            "a refused approve must publish no proposal and store none",
+        );
+        // And the request survives, so an admin can still act on it.
+        assert_eq!(
+            bob_g.pending_external_joins(),
+            vec![dave_pk],
+            "a refused approve must not consume the retained request",
+        );
     }
 
     /// Full G-3 loop, in-process: a non-member crafts an external-join proposal
-    /// via the public joiner API, an admin approves it, the resulting Welcome
-    /// rides a [`crate::WelcomeRendezvous`] envelope, and the joiner matches it
-    /// by its own signature key + opens the inner Welcome — landing as a member
-    /// at the post-approve epoch. Proves the joiner side closes the loop
-    /// end-to-end (ADR-0027 G-3).
+    /// via the public joiner API, an admin approves it, **a committer sweeps
+    /// the approval into a commit** (ADR-0045 S7), the resulting Welcome rides
+    /// a [`crate::WelcomeRendezvous`] envelope, and the joiner matches it by its
+    /// own signature key + opens the inner Welcome — landing as a member at the
+    /// post-sweep epoch. Proves the joiner side closes the loop end-to-end
+    /// (ADR-0027 G-3).
+    ///
+    /// The sweep step is load-bearing rather than ceremonial: delete it and the
+    /// Welcome the rendezvous carries does not exist, because an approve no
+    /// longer produces one.
     #[test]
     fn joiner_api_full_loop_proposes_approves_joins_via_rendezvous() {
         let alice = Identity::from_seed(&[0xA9u8; 64]).expect("alice");
@@ -5758,22 +5999,45 @@ mod external_join_tests {
             .create_external_join_proposal(&alice_g.group_id(), alice_g.epoch())
             .expect("dave proposal");
 
-        // Admin side: surface + approve.
+        // Admin side: surface + approve. The approve is a PROPOSAL now.
         let incoming = alice_g.process_incoming(&alice, &prop).expect("process");
         assert!(
             matches!(&incoming, Incoming::ExternalJoinProposal { joiner_signature_key }
                 if *joiner_signature_key == dave_pk),
             "got {incoming:?}",
         );
-        let add = alice_g
+        let epoch_at_approve = alice_g.epoch();
+        let approval = alice_g
             .approve_external_join(&alice, &dave_pk)
             .expect("approve");
+        assert!(!approval.is_empty());
+        assert_eq!(
+            alice_g.epoch(),
+            epoch_at_approve,
+            "the approve advances nothing",
+        );
 
-        // Transport: wrap the Welcome in a rendezvous envelope (what the admin
-        // posts to the group journal).
+        // Committer side: the acting committer sweeps the approval into one
+        // commit, and THAT is what produces the Welcome.
+        let sweep = alice_g
+            .commit_pending_proposals(&alice)
+            .expect("sweep")
+            .expect("a commit was produced");
+        assert_eq!(sweep.swept.len(), 1, "the sweep carried the approval");
+        assert!(
+            matches!(&sweep.swept[0].kind, ProposalKind::Add { signature_key } if *signature_key == dave_pk),
+            "and it is dave's Add: {:?}",
+            sweep.swept[0].kind,
+        );
+        let welcome = sweep
+            .welcome
+            .expect("a sweep carrying an Add has a Welcome");
+
+        // Transport: wrap the Welcome in a rendezvous envelope (what the
+        // sweeping device posts to the group journal).
         let envelope = crate::WelcomeRendezvous {
             joiner_signature_key: dave_pk.clone(),
-            welcome: encode_message(&add.welcome).expect("encode welcome"),
+            welcome: encode_message(&welcome).expect("encode welcome"),
         }
         .encode()
         .expect("encode rendezvous");
@@ -5804,6 +6068,265 @@ mod external_join_tests {
                 .any(|m| m.signature_public_key == dave_pk),
             "dave should be in alice's roster after approve",
         );
+    }
+
+    // ========================================================================
+    // ADR-0045 S7 — the external-join approve on the proposal path
+    // ========================================================================
+
+    /// **The half of the old `sweep_never_includes_an_external_join_add` that
+    /// the store-emptiness assertion can no longer carry.**
+    ///
+    /// Under S7 the pending store legitimately holds the admin's Add, so
+    /// "nothing is pending" no longer says anything about the stranger. The
+    /// property that must survive is narrower and sharper: a `NewMemberProposal`
+    /// sender is excluded by the sweep filter **even when it is already sitting
+    /// in the store**, which is the state the shipped receive path structurally
+    /// never reaches — so it is planted here through the `#[cfg(test)]`
+    /// adversary seam.
+    ///
+    /// The exclusion is not a dedicated arm. It falls out of where authorship
+    /// is resolved: an external sender maps to no member leaf, so
+    /// [`crate::group_proposals::authorise`] has no `Proposer` and refuses every
+    /// kind. That is deliberately the only copy of the rule — a second,
+    /// external-join-shaped arm beside it would be a place for the two to
+    /// disagree — so it is measured here rather than duplicated.
+    #[test]
+    fn a_planted_external_join_add_is_still_excluded_by_the_sweep() {
+        let alice = Identity::from_seed(&[0xAAu8; 64]).expect("alice");
+        let mut alice_g = Group::create(&alice).expect("create");
+        let stranger = Identity::from_seed(&[0xEAu8; 64]).expect("stranger");
+        let stranger_pk = pk(&stranger);
+
+        let external = external_join_proposal(&stranger, &alice_g.group_id(), alice_g.epoch());
+
+        // Plant it where the shipped path never puts it.
+        alice_g
+            .ungated_store_external_join(&alice, &external)
+            .expect("adversary plants the stranger's Add in the MLS store");
+
+        // The plant landed — otherwise this test would pass vacuously.
+        let pending = alice_g.pending_proposals();
+        assert_eq!(pending.len(), 1, "the adversary's plant is in the store");
+        assert_eq!(
+            pending[0].sender_leaf, None,
+            "and its sender resolves to no member leaf, which is the whole point",
+        );
+        assert!(matches!(pending[0].kind, ProposalKind::Add { .. }));
+
+        // The owner sweeps. Nothing is committed and nobody is admitted.
+        assert!(
+            alice_g
+                .commit_pending_proposals(&alice)
+                .expect("sweep")
+                .is_none(),
+            "a sweep must not admit a stranger it was handed directly",
+        );
+        assert!(
+            !alice_g
+                .members()
+                .iter()
+                .any(|m| m.signature_public_key == stranger_pk),
+            "the stranger must not be a member",
+        );
+    }
+
+    /// **Control for the test above.** With the sweep filter replaced by
+    /// OpenMLS's own `|_| true` — which is exactly what
+    /// `commit_to_pending_proposals` hardcodes, and what ADR-0045 rejects — the
+    /// very same planted Add **does** admit the stranger.
+    ///
+    /// Without this the exclusion could be passing for the wrong reason (the
+    /// plant failing to land, openmls refusing to commit an external proposal
+    /// at all), and the assertion "the stranger is not a member" would be
+    /// unfalsifiable.
+    #[test]
+    fn control_an_unfiltered_sweep_admits_the_planted_stranger() {
+        let alice = Identity::from_seed(&[0xA6u8; 64]).expect("alice");
+        let mut alice_g = Group::create(&alice).expect("create");
+        let stranger = Identity::from_seed(&[0xE6u8; 64]).expect("stranger");
+        let stranger_pk = pk(&stranger);
+
+        let external = external_join_proposal(&stranger, &alice_g.group_id(), alice_g.epoch());
+        alice_g
+            .ungated_store_external_join(&alice, &external)
+            .expect("plant");
+
+        alice_g
+            .ungated_sweep(&alice)
+            .expect("an unfiltered sweep commits everything it is offered");
+        assert!(
+            alice_g
+                .members()
+                .iter()
+                .any(|m| m.signature_public_key == stranger_pk),
+            "the control must reproduce the hazard: an unfiltered sweep lets the stranger in",
+        );
+    }
+
+    /// ADR-0045 S7 — a stranger's own external-join Add never reaches the MLS
+    /// proposal store at all, whichever receive path processes it. This is the
+    /// load-bearing layer the exclusion above is only the second line of.
+    #[test]
+    fn a_strangers_own_add_never_enters_the_proposal_store() {
+        let stranger = Identity::from_seed(&[0xEBu8; 64]).expect("stranger");
+        for (tag, gated) in [(0xABu8, false), (0xACu8, true)] {
+            let alice = Identity::from_seed(&[tag; 64]).expect("alice");
+            let mut alice_g = Group::create(&alice).expect("create");
+            let external = external_join_proposal(&stranger, &alice_g.group_id(), alice_g.epoch());
+            let incoming = if gated {
+                alice_g.process_incoming_verifying_roles(&alice, &external)
+            } else {
+                alice_g.process_incoming(&alice, &external)
+            }
+            .expect("process the stranger's request");
+            assert!(matches!(incoming, Incoming::ExternalJoinProposal { .. }));
+            assert_eq!(
+                alice_g.pending_external_joins().len(),
+                1,
+                "it is quarantined for an explicit decision (gated={gated})",
+            );
+            assert!(
+                alice_g.pending_proposals().is_empty(),
+                "and never in the swept store (gated={gated})",
+            );
+        }
+    }
+
+    /// ADR-0045 S7 — a group with no role table has no committer, so a proposal
+    /// published into it would never be swept. `Group::approve_external_join`
+    /// refuses it rather than quietly direct-committing; the direct route lives
+    /// on `PublisherGroup`, and its **return type** is what tells the two
+    /// apart.
+    #[test]
+    fn a_table_less_group_refuses_the_proposal_approve_and_keeps_the_direct_one() {
+        use crate::publisher_group::{ChannelId, PublisherGroup, CHANNEL_ID_LEN};
+
+        let alice = Identity::from_seed(&[0xADu8; 64]).expect("alice");
+        let cid = ChannelId::try_from_slice(&[0x77u8; CHANNEL_ID_LEN]).expect("channel id");
+        let mut pg = PublisherGroup::create(&alice, &cid).expect("publisher group");
+        assert!(
+            pg.inner().group_roles().is_none(),
+            "a PublisherGroup carries no role table, which is why it keeps direct commits",
+        );
+
+        let bob = Identity::from_seed(&[0xBDu8; 64]).expect("bob");
+        let bob_pk = pk(&bob);
+        let req = external_join_proposal(&bob, &pg.group_id(), pg.epoch());
+        pg.inner_mut()
+            .process_incoming(&alice, &req)
+            .expect("process bob's request");
+
+        // The proposal path is refused, by name.
+        let refusal = pg
+            .inner_mut()
+            .approve_external_join(&alice, &bob_pk)
+            .map(|_| ())
+            .expect_err("a table-less group has no committer");
+        assert!(
+            refusal.to_string().contains("no role table"),
+            "the refusal must say why: {refusal}",
+        );
+        assert!(pg.inner().pending_proposals().is_empty());
+
+        // And the group's SHAPE is diagnosed ahead of the request lookup: a
+        // caller on the wrong entry point must be told which entry point is
+        // wrong, not that its perfectly valid ref is unknown. This is what the
+        // explicit `role_table_or_refuse` at the top of the proposal approve
+        // buys — `propose_add_member` would refuse a table-less group too, but
+        // only after the lookup had already failed for an unrelated reason.
+        let misdirected = pg
+            .inner_mut()
+            .approve_external_join(&alice, b"not a pending request")
+            .map(|_| ())
+            .expect_err("still refused");
+        assert!(
+            misdirected.to_string().contains("no role table"),
+            "the group's shape must be diagnosed before the request lookup: {misdirected}",
+        );
+
+        // The direct path works, and hands back a Commit + a Welcome.
+        let addition = pg
+            .approve_external_join(&alice, &bob_pk)
+            .expect("the direct approve is the one that survives here");
+        let welcome = encode_message(&addition.welcome).expect("encode welcome");
+        Group::join_from_welcome(&welcome, &bob).expect("bob joins from the Welcome");
+        assert!(pg.inner().pending_external_joins().is_empty());
+    }
+
+    /// ADR-0045 S7 — and the direct approve refuses a group that *does* carry a
+    /// role table, so it can never become a second ungated route into the
+    /// membership of a group that has a committer (fail-closed, invariant #4).
+    #[test]
+    fn the_direct_approve_refuses_a_group_that_has_a_committer() {
+        let alice = Identity::from_seed(&[0xAEu8; 64]).expect("alice");
+        let mut alice_g = Group::create(&alice).expect("create");
+        let dave = Identity::from_seed(&[0xDEu8; 64]).expect("dave");
+        let dave_pk = pk(&dave);
+        let req = external_join_proposal(&dave, &alice_g.group_id(), alice_g.epoch());
+        alice_g.process_incoming(&alice, &req).expect("process");
+
+        let epoch = alice_g.epoch();
+        let refusal = alice_g
+            .approve_external_join_directly(&alice, &dave_pk)
+            .map(|_| ())
+            .expect_err("the direct approve must refuse a role-enabled group");
+        assert!(
+            refusal.to_string().contains("role table"),
+            "the refusal must say why: {refusal}",
+        );
+        assert_eq!(alice_g.epoch(), epoch, "and touch nothing");
+        assert_eq!(
+            alice_g.pending_external_joins(),
+            vec![dave_pk],
+            "and leave the request where it was",
+        );
+    }
+
+    /// ADR-0045 S7 — a pending membership proposal no longer blocks an approve.
+    ///
+    /// It used to: the direct approve was guarded by
+    /// `refuse_if_proposals_pending`, and under ADR-0045 a pending proposal is
+    /// the *normal* state, so an admin deferring to a live owner could
+    /// essentially never approve. The two are now the same kind of thing and
+    /// compose into one sweep.
+    #[test]
+    fn an_approve_is_no_longer_blocked_by_a_pending_membership_proposal() {
+        let alice = Identity::from_seed(&[0xAFu8; 64]).expect("alice");
+        let mut alice_g = Group::create(&alice).expect("create");
+        let bob = Identity::from_seed(&[0xBFu8; 64]).expect("bob");
+        let dave = Identity::from_seed(&[0xDFu8; 64]).expect("dave");
+        let dave_pk = pk(&dave);
+
+        // Something ordinary is already pending.
+        alice_g
+            .propose_add_member_from_wire(&alice, &kp_wire(&bob))
+            .expect("alice proposes adding bob");
+        assert_eq!(alice_g.pending_proposals().len(), 1);
+
+        // A stranger asks, and the owner approves anyway.
+        let req = external_join_proposal(&dave, &alice_g.group_id(), alice_g.epoch());
+        alice_g.process_incoming(&alice, &req).expect("process");
+        alice_g
+            .approve_external_join(&alice, &dave_pk)
+            .expect("an approve must not be blocked by a pending proposal");
+        assert_eq!(alice_g.pending_proposals().len(), 2);
+
+        // Both land in one commit.
+        let sweep = alice_g
+            .commit_pending_proposals(&alice)
+            .expect("sweep")
+            .expect("a commit was produced");
+        assert_eq!(sweep.swept.len(), 2, "the add and the approval compose");
+        for id in [&bob, &dave] {
+            assert!(
+                alice_g
+                    .members()
+                    .iter()
+                    .any(|m| m.signature_public_key == pk(id)),
+                "both joined",
+            );
+        }
     }
 
     /// ADR-0028 §3 — a non-member can read a group's current epoch from the
