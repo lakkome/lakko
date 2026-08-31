@@ -2028,6 +2028,33 @@ point in the last three months and did not.
 
 ## 12. Open — needs the maintainer
 
+0. **Two silent outcomes the security review created, both needing copy this spec does
+   not have.** Recorded first because they are the only items here that a user can hit
+   today without knowing it.
+
+   **A duplicate `Add` is now excluded with no refusal shown.** Two admins independently
+   inviting the same person is ordinary, and before the fix it made the sweep unbuildable
+   and froze the group's membership permanently — so excluding one is unambiguously
+   right. But the author of the excluded request sees exactly what §5 promises for a
+   request that *is* pending: `requested`, and then nothing. The request is gone from
+   every store when the commit merges, so no annotation expires and no refusal appears.
+   This is the same class as the already-accepted role-change drop, and it is **not**
+   fixable by naming a reason: `CreateCommitError` carries no proposal reference on any
+   variant, so a client can know a request was not carried and never why. What is
+   buildable is the *observation* — diff `pendingProposals()` before the sweep against
+   `ProposalCommit::swept` — so the honest copy would say a change was not applied and
+   invite a retry, without claiming to know the cause. Needs a string.
+
+   **The deferred `membership change pending` surface now has a second state.** It was
+   drafted for one — the sweep's verdict is unread — and there is now `welcomes-owed`:
+   the commit won and merged, and the invitation to the new member has not reached the
+   wire yet. The states differ in what the user should expect. An unread verdict may
+   still resolve either way; an owed Welcome has already succeeded for everyone *except*
+   the person who was added, who is in the roster and cannot read anything. Whether the
+   second is worth surfacing at all is a real question — it retries on every sweep and
+   usually resolves in one — but if it is, the copy must not imply the change failed.
+
+
 1. **The timing constants.** `QUIET_WINDOW` (UI) plus the protocol constants
    [ADR-0045] decision 2's chosen variant needs. The ADR says pick them from a measurement,
    and it is right. **The protocol half is now settled but NOT measured:** variant 1's

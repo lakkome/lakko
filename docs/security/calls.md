@@ -3872,6 +3872,14 @@ candidate does not claim to be one).
 
 ### C-65: At most one role-table change may be in flight in a group at a time
 
+> **Generalised by [C-66](#c-66-a-group-must-never-lose-the-ability-to-change-its-own-membership).**
+> This entry is the first instance of a rule the `lakko-security` review of ADR-0045
+> later found to be open-ended: *a sweep over an authorised pending set must always be
+> buildable*. C-65's ceiling is named by the RFC and can therefore be enumerated; the
+> general case cannot, which is why C-66 backs the enumeration with an exclusion search.
+> Nothing in C-65 changes — its propose-time guard and its sweep-side bound are the
+> first two of the fifteen conditions C-66 enumerates.
+
 [ADR-0045](../adr/0045-remote-commit-epoch-fork.md), extending
 [ADR-0022](../adr/0022-group-admin-roles.md). ADR-0022 carries a group's `RoleTable` in
 the authenticated `0xFF02` GroupContext extension, so **changing a role means rewriting
@@ -4095,3 +4103,305 @@ See [`known-gaps.md`](./known-gaps.md) — call-side gaps:
   ROADMAP 3c8). If it ever lands, the recording client
   joins as a regular participant with its own MLS leaf, so
   no break to C-1..C-10.
+
+### C-66: A group must never lose the ability to change its own membership
+
+[ADR-0045](../adr/0045-remote-commit-epoch-fork.md), from the `lakko-security` review
+of that arc. **C-65 is the first instance of this rule; this entry is the rule.** Both
+say the same thing about two different doors into one room, and they are indexed
+separately only because C-65's door is a named RFC ceiling while this one is open-ended
+by construction.
+
+**The class.** A role-table group administers itself: a request becomes a proposal, and
+one owner-or-admin sweeps the pending set into a commit. Two properties keep that loop
+alive, and neither is a confidentiality or integrity property — they are indexed for the
+same reason C-63 is, because the state they prevent is one **the group cannot recover
+from inside the protocol**. There is no operator to call, no key escrow, no
+administrative override: a group that cannot change its membership is a group whose
+composition is frozen for the lifetime of its data, while chat keeps working so nothing
+announces it.
+
+**(1) The owner's response is admissible at any pending-set occupancy.** The cap
+(`MAX_PENDING_PROPOSALS`) refused *every* proposal once full, including the owner's own
+`Remove` and `RoleChange`; `refuse_if_proposals_pending` closes every direct-commit
+escape; and nothing in the crate discards a proposal. So a member with add authority
+could fill the set and thereby take away the owner's ability to remove them, demote
+them, or clear the set — with the only exit, sweeping, **committing the flooder's
+payload**, after which they refill it. `Group::pending_capacity` therefore admits a
+small reserve past the cap to a proposal `group_proposals::is_owner_response`
+recognises: authored by the **owner**, kind `Remove` or `RoleChange`. The same function
+is consumed by `authorise_own_proposal` and by the peers' `gate_incoming_proposal`, and
+that shared use is load-bearing rather than tidy — if the two disagreed, the owner would
+publish a response its peers refuse to retain and then sweep a commit they answer with
+`InvalidCommit(MissingProposal)`.
+
+**It grants nothing.** `authorise` still runs, unchanged, afterwards; the reserve only
+decides *when the set is too full to accept a request*, never *who may make one*.
+Authorship is the MLS-authenticated sender leaf resolved against the pre-merge roster,
+so it cannot be claimed by anyone else, and `Add` is deliberately **not** a response, so
+the owner cannot inflate the group's own bound through the one kind a flood is made of.
+
+**The mis-triage is part of the record, because the reasoning will recur.** This was
+first dismissed as strictly weaker than a capability the role already holds — an admin
+can simply remove everyone. That is wrong, and the error is a general one:
+**capabilities compose, and the composition is not the sum of its parts.** Removing
+members is loud, attributable and repairable, because the owner demotes the admin and
+adds the members back. Filling the pending set removes the **means of repair**, which is
+a strictly stronger capability reached through a strictly weaker-looking act. Any
+argument of the form *"they could already do something worse"* has to check whether the
+worse thing leaves the response intact.
+
+A per-sender sub-cap was considered and rejected: it bounds one principal's share while
+the cap stays global, so several colluding admins still reach it. It delivers a
+probability where the property needed is *never*.
+
+**(2) A sweep over an authorised pending set must always be buildable.** If
+`CommitBuilder::build` hard-fails, the sweep is not a lost round: the proposal store
+empties only on a **merged** commit, the direct paths are refused while proposals pend,
+and nothing discards — so the failure is permanent. `create_application_message` parks
+the pending set, so **chat keeps working over a membership that can never change
+again**, which is what makes this invisible rather than merely bad.
+
+**One proposal is enough, and one of its causes is the passage of time.** An `Add`
+naming someone already in the group, or two admins independently inviting the same
+person — which is exactly the concurrent composition ADR-0045 exists to make safe —
+fails with `DuplicateSignatureKey`. Fifteen conditions are enumerated in `sweep_keeps`
+across three families: the single `GroupContextExtensions` slot (C-65), key uniqueness
+across signature, encryption and init keys, and the added leaf's admissibility to *this*
+group (capabilities, required capabilities, leaf extensions, credential types, and
+**KeyPackage lifetime**). That last one settles the argument on its own: ADR-0045
+decision 2 gives a request **no deadline**, so a proposal need only wait long enough and
+the group freezes with nobody having done anything at all.
+
+**The enumeration cannot be the whole answer, and the fallback is the actual
+invariant.** Fifteen conditions is a mirror of a rule set this crate does not own; an
+openmls upgrade adds a sixteenth and the freeze returns. So when the build still
+refuses, `narrow_sweep_by_exclusion` offers each candidate in turn and keeps it only if
+the selection still builds, then re-offers the rejects once. **It does not need to know
+why a proposal is uncommittable — only which one**, which is what makes it robust
+against rules nobody has written yet. It is bounded by `2 x candidates + 1` builds and
+terminates structurally: two flat loops over a finite list, no fixpoint, no recursion.
+When every candidate is uncommittable the result is **no commit**, never an
+epoch-advancing empty one, and the store is left as it was — which is not a wedge,
+because the next committable proposal clears it.
+
+Three properties of the search that a later hand will otherwise get wrong. **Additive
+selection, not leave-one-out**: leave-one-out is cheaper for exactly one offender and
+needs a fresh round per offender, and when the cause is unknown the single-offender case
+is precisely the one that cannot be assumed. **The second pass is load-bearing**: a
+`Remove` and the re-`Add` of the same signature key are only committable **together**,
+and one pass drops half the pair and silently evicts the member. **Each trial selection
+re-asks `owner_survives`**: dropping an `Add` can strand a role change naming that person
+owner, which openmls — knowing nothing of role tables — builds happily and every peer
+then refuses, trading a local freeze for a fork.
+
+**The search is deterministic per device and deliberately not device-independent.**
+*Can I commit this* is a question about the committer, which the live case that first
+exercised the fallback proves: an admin proposing its **own** departure wedges its own
+sweep with `CannotRemoveSelf`, while any other candidate commits it fine. Two committers
+may therefore stage different subsets of one pending set; ADR-0045's journal ordering
+already arbitrates that, the loser abandons, and because a merged commit clears the whole
+store a proposal dropped by either search is dropped everywhere and its author
+re-proposes.
+
+**What this does NOT do.** It does not identify *why* a proposal was excluded —
+`CreateCommitError` carries no `ProposalRef`, leaf index or signature key on any variant,
+so a client learns only that a request was not carried (by diffing `pending_proposals`
+against `ProposalCommit::swept`) and never the reason; naming one would mean inventing
+it. It does not enforce two conditions: whether **every existing member's** capabilities
+accept a joiner's credential type (openmls exposes a member's credential but not its
+capabilities, and it is a property of the group rather than of the proposal), and the
+commit path's own encryption-key uniqueness (generated inside `build`, invisible to a
+proposal filter). It does not recover a group already wedged by a build rule this
+enumeration and this search both fail to route around — the search is a strong general
+answer, not a proof.
+
+**Tests** (`crates/lakko-mls/tests/group_proposals.rs` and the in-crate
+`proposal_gate_tests`): `a_flood_of_admin_adds_never_takes_away_the_owners_response` and
+`the_reserve_is_the_owners_alone_and_only_for_a_response` for (1);
+`the_pending_set_is_still_bounded_by_the_sum_of_the_two_caps` for the bound;
+`a_single_add_of_an_existing_member_cannot_wedge_the_sweep`,
+`a_capability_deficient_add_cannot_wedge_the_sweep` and
+`an_add_whose_key_package_has_expired_cannot_wedge_the_sweep` for the enumeration;
+`the_fallback_rescues_a_wedge_the_enumeration_cannot_see`,
+`a_pair_that_is_only_committable_together_survives_the_wrong_store_order`,
+`the_exclusion_search_never_leaves_the_group_without_an_owner` and
+`a_wholly_uncommittable_set_yields_no_commit_and_no_wedge` for the search;
+`an_ordinary_sweep_costs_exactly_one_build` for the good path. Invariants **#2**
+(unchanged — no wire format, no server surface), **#3** (a `crates/lakko-mls`
+state-machine change under ADR-0045; property-tested, **external crypto review still
+owed**), **#4** (fail-closed in the direction that matters: an undecidable proposal is
+dropped, because wrongly keeping one freezes the group permanently while wrongly
+dropping one costs a re-request), **#5** (unchanged).
+
+### C-67: Durable bookkeeping must never claim more progress than actually landed
+
+[ADR-0045](../adr/0045-remote-commit-epoch-fork.md), from the `lakko-security` review of
+that arc, and the receive-side counterpart to
+[ADR-0040](../adr/0040-durable-pending-commit-outbox.md)'s committer-side rule. Two
+findings, one rule: a durable marker that says *this is done* while the thing it names is
+not done is worse than no marker, because every recovery path branches on it and each one
+then declines to help.
+
+**(1) No membership commit may be acked while an artifact it authorised is still
+unpublished.** ADR-0045 obligation 5 says the Welcome is published only after the
+verdict, which is an **ordering** rule and is correct. What it did not say is that the
+committer must **record that the verdict settled, before attempting the fan-out**. A
+Welcome publish that failed *after* the commit had won and merged was unrecoverable in
+the ordinary case: the next tail sweep finds no staged sweep (it merged) and no pending
+proposals (the merge consumed them); the restart path's owed-verdict resolver finds
+nothing owed for the same reason; and the legacy re-publish loop skips the entry. The
+added member sits in every roster with every subsequent message encrypted to their leaf,
+and can never construct group state — a **ghost member**, repairable only by another
+admin removing and re-adding them.
+
+**The general rule is worth more than the fix: the merge is not the end of the sweep's
+obligations.** An artifact still owed after the epoch-advancing step needs its **own
+durable name**, because the state every recovery path keys on is gone by the time it is
+owed. The two-state entry lifecycle (verdict-owed → acked) becomes three
+(verdict-owed → welcomes-owed → acked), with the middle marker written between the merge
+and the fan-out and read by a new resolver that re-publishes **without re-adjudicating**
+— the verdict is already in.
+
+Two properties of that marker. **Pre-verdict ordering is guarded twice**: it is written
+strictly after the merge and its persist, so it *is* the durable statement "the verdict
+said WON" and a pre-verdict restart finds a staged sweep and no marker; and the resolver
+additionally refuses whenever a staged sweep exists, **before reading the store at all**,
+so even a marker present out of order cannot put a Welcome on the wire ahead of a
+verdict. **A failed marker write is deliberately non-fatal**: the verdict is already in,
+so publishing is correct with or without it, and aborting the fan-out on a bookkeeping
+failure would *manufacture* the ghost member it exists to prevent.
+
+Idempotency is established rather than assumed: `StagedWelcome::into_group` deletes the
+init KeyPackage, so a duplicate arriving after a successful join cannot be staged, and
+every client's mailbox handler already catches and skips a failed `joinFromWelcome`.
+
+**(2) The journal cursor may lag the durable MLS state, but must never lead it.** ADR-0045
+made a receiver's **durable proposal store** a precondition for applying a later
+by-reference commit — `group_proposals.rs` relies on that deliberately as a boundary,
+which is right for a *refused* proposal and fatal for a *lost* one. Three facts composed:
+the receive-path snapshot write was best-effort and swallowed failures; the cursor lives
+in a **different store that no transaction can span** (two IndexedDB databases on web,
+separate files on both natives); and the poll advanced the cursor before processing the
+row. One swallowed write, or a crash between the two, and the device restores an MLS
+state without the proposal and a cursor past it. The commit referencing it throws
+`MissingProposal`, is logged and skipped, **the cursor advances past that too**, and the
+device sits at epoch N forever while the group is at N+1, with every later message
+undecryptable. It is still a member, so C-59's membership accessor cannot see it;
+recovery is being removed and re-added.
+
+**The asymmetry is the whole rule, and it is why ordering suffices where atomicity is
+impossible.** Cursor **behind** the state is benign and self-healing: rows are re-fetched,
+already-applied ones are rejected as wrong-epoch and skipped exactly as the poll already
+skips them, an already-stored proposal is de-duplicated by `ProposalRef`, and the cursor
+catches up. Cursor **ahead** is permanent. So: persist fail-closed first, advance second,
+hold the cursor when the write does not land. Merging the two stores was considered and
+rejected — impossible on the natives at any price, expensive on web, and it would buy
+only *equality* where lagging is already safe.
+
+**A row that changed durable state is any row handed to the core, not any row that
+applied cleanly.** `process_message` decrypts and ratchets **before** the role gate can
+refuse a commit or the receipt gate can drop a proposal, so a throw is no evidence of a
+clean state. Echo-suppressed rows never reach the core and are correctly excluded.
+
+**The infinite-retry trap is avoided because the two failures are distinguishable**, and
+they are different operations at different points in the batch: a receive throw is
+per-row and skipped as before with the cursor advancing, while a persist throw is
+device-wide and holds. So a permanently undecryptable row can never wedge the poll. A
+persist that never succeeds does stall the cursor, and that is the correct side: the same
+failure already fail-closes the send path, so such a device is already non-functional for
+writes, and advancing would be the strand.
+
+The ADR-0045 sweep's verdict apply advances the same cursor over rows it applied and
+obeys the same rule through its own fail-closed persist port, distinct from the
+merge-path persist because the two want opposite things from a failure.
+
+**What this does NOT do.** It does not make the two stores atomic, so the state may be
+*ahead* of the cursor after a crash — deliberately, that being the benign direction. It
+leaves one degraded corner: a persist fails, the debounced message-log write lands with
+the old cursor and the new rows, then the process dies, and on restart the rolled-back
+MLS state re-decrypts those rows and appends them again — a duplicate timeline row,
+cosmetic, and strictly better than the permanent strand it replaces. And it is a client
+discipline, not a core-enforced fact: `crates/lakko-mls` cannot see either store.
+
+**Tests:** `apps/web/src/chat/receive-durability.test.ts`,
+`apps/ios/LakkoTests/ReceiveDurabilityTests.swift`,
+`apps/android/.../chat/ReceiveDurabilityTest.kt` for (2), each reproducing the strand
+before the fix and pinning that no interleaving can leave the cursor ahead; the
+welcomes-owed path in each platform's committer-sweep suite for (1). Invariants **#1**
+/ **#2** (unchanged — durable markers are local bookkeeping; nothing new reaches the
+server), **#3** (no `lakko-mls` change; this is entirely client discipline over the
+audited receive path), **#4** (fail-closed: the persist aborts rather than the cursor
+advancing, and a marker-write failure never aborts a publish the verdict already
+authorised), **#5** (unchanged).
+
+### C-68: An author is a signature key resolved at receipt, never a leaf index
+
+[ADR-0023](../adr/0023-message-edit-delete-reactions.md), corrected by the
+`lakko-security` review of [ADR-0045](../adr/0045-remote-commit-epoch-fork.md). ADR-0023
+gates an edit or a delete on the op's sender being the target message's original author —
+the one rule that stops a member rewriting or erasing somebody else's words. All three
+clients implemented that comparison on a raw **MLS leaf index**, and OpenMLS hands a
+**vacated leaf to the next member added**.
+
+**ADR-0045 is what made it cheap rather than what made it possible.** A remove and an add
+compose into **one commit**, so the whole sequence lands in a single poll batch: remove
+Bob, add Dave, and Dave — now holding Bob's old leaf — edits and deletes Bob's history,
+and every client applies it. No crash, no race, no malice from the server, no modified
+client. On both natives it was **permanent**, because the leaf was persisted with the
+message; on web it was session-scoped only because the author was not persisted at all,
+which was a Phase-2 deferral that happened to narrow the window rather than a defence.
+
+**The same shape, twice more.** Reactions were attributed to the sender leaf and toggled
+on the `(reactor, emoji)` pair, so a newcomer at a vacated leaf could un-react on the
+departed member's behalf — and all three clients independently measured that the damage
+is worse than a mis-toggle: removing the last reactor prunes the set, so the chip
+**disappears entirely**. Read-receipt watermarks are a per-sender map never reset on a
+membership change, so a newcomer **inherits** the departed member's watermark and the UI
+reports messages as read by someone who never saw them.
+
+**The fix is not "compare keys". It is "compare keys resolved at receipt, in the epoch
+the row arrived".** That second half is load-bearing and each client pins it with a
+permanent contrast test: a batch carrying the removal *and* the add would resolve an
+epoch-N message against the N+1 roster, which **is** the impersonation, reintroduced
+under a key comparison that looks correct. The resolution therefore happens per message,
+inside the batch loop, one line after the receive call returns — never in a view model,
+never hoisted out of the loop for speed. There are **two** receive paths that build
+timeline events (the poll and the ADR-0045 sweep's verdict apply) and both resolve
+identically; on iOS the event builder takes the group and resolves internally, so there is
+no resolver a call site can get wrong.
+
+**A torn roster read resolves to nothing and the gate refuses.** So does a stored message
+that carries no author. There is no fallback of the form *this row is outgoing, so assume
+our current key* — it would invent an author the store never recorded.
+
+**The wider point, which is why this is indexed rather than filed as a bug.** Every module
+built after ADR-0023 keys on the signature public key, and several name leaf reuse in a
+comment as the reason: the ADR-0022 role table, ADR-0045's `committer_rank` and beacon
+observation store, the ADR-0042/0044 push-routing authority gate, ADR-0043's
+membership-shrink diff, ADR-0027's external-join set. The convention is right and is held
+everywhere it was applied. **ADR-0023 predates it and was never revisited when the
+convention formed** — conventions do not retroactively fix code written before them, and
+nothing in the repository was looking for the gap. What remains leaf-keyed anywhere is
+either epoch-scoped by construction (a `Remove` proposal's target, an SFrame KID whose
+key space rotates with the epoch) or a transient intent inside one epoch.
+
+**What this does NOT do.** It does not authenticate the author cryptographically at
+render time — the binding is made once, at receipt, from the MLS-authenticated sender
+leaf, and stored; a client that corrupts its own store corrupts its own attribution. It
+does not repair history stored under the old shape: a pre-existing row decodes with no
+author and the gate **refuses for everyone**, including the genuine author, which is the
+safe direction and is asserted rather than assumed on all three clients. And it does not
+make reactions authenticated — any member may react; the key only ensures a reaction is
+attributed to, and togglable by, the member who cast it.
+
+**Tests:** `apps/web/src/chat/author-identity.test.ts`,
+`apps/ios/LakkoTests/AuthorIdentityTests.swift`,
+`apps/android/.../chat/AuthorIdentityTest.kt` — each reproducing the impersonation before
+the fix with edit and delete asserted **separately**, each carrying the resolve-late
+contrast, and each pinning that a pre-existing stored row fails closed rather than
+misattributing. Invariants **#1** / **#2** (unchanged — the signature key is already
+public and already in the MLS snapshot beside the message store; nothing new reaches the
+server), **#3** (no `lakko-mls` change; the core already surfaced the sender leaf and the
+roster), **#4** (fail-closed at every unknown: a torn roster, an unresolvable sender, an
+authorless stored row), **#5** (unchanged).

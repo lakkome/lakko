@@ -1427,6 +1427,24 @@ ADR before the sprint landed.** Both are discharged on all three clients, and
 [§ Consequences](#consequences) records how; the point of stating them here is that
 they are obligations a later refactor can drop, not facts the core enforces.
 
+**Two more were added by the security review, and they are listed here rather than
+only in that section because this is where a client author looks.** Both are stated
+in full as items 14 and 15 of
+[§ What the security review found](#what-the-security-review-found):
+
+- **An artifact still owed after the merge needs its own durable name.** The
+  Welcome-after-the-verdict rule below is an *ordering* rule and stays exactly as
+  written; what it was missing is that the committer must **record that the verdict
+  settled** before attempting the fan-out. Otherwise a failed publish is
+  unrecoverable, because the merge has already cleared every signal the recovery
+  paths branch on.
+- **The receiver has obligations too, and this ADR had never stated any.** It
+  enumerates what a *committer* owes and is silent on the other side — yet the arc
+  made a receiver's durable proposal store a precondition for applying a later
+  by-reference commit. The rule is that **the journal cursor may lag the durable
+  MLS state but must never lead it**: persist fail-closed first, advance the cursor
+  second, hold it when the write does not land.
+
 - **A staged sweep freezes that group's own membership operations.** OpenMLS's
   `is_operational()` returns `MlsGroupStateError::PendingCommit` while a commit
   is staged, and it guards `add_members`, `remove_members`, `self_update`,
@@ -1839,16 +1857,35 @@ guard is shown to discriminate rather than merely asserted.
 #### The pending set is bounded: a cap of 64 and a `ProposalRef` dedup
 
 **Rated MEDIUM by the same review, and reachable with the stock API by a plain
-member.** `authorise` deliberately leaves a plain member two kinds it can emit
+member.** `authorise` deliberately left a plain member two kinds it could emit
 without any role: removing its **own** leaf (that is how leaving works) and
-`Update` (RFC 9420 §12.1.2 replaces only the sender's own leaf node, so it
-confers no authority). Nothing stopped one member emitting the same departure N
-times: the ratchet refuses only a byte-identical replay, while N fresh
+`Update` (RFC 9420 §12.1.2 replaces only the sender's own leaf node, so — the
+reasoning went — it confers no authority). Nothing stopped one member emitting the
+same departure N times: the ratchet refuses only a byte-identical replay, while N fresh
 encryptions of one plaintext proposal all decrypt to the same `ProposalRef`, and
 `ProposalStore::add` is a bare push with no de-duplication of its own. Since
 decision 2 gives a request **no deadline**, the set is otherwise bounded by
 nothing but a committer eventually noticing — and the park above makes its size a
 per-message cost paid by **every member**, not only by the proposer.
+
+**The `Update` half of that sentence was the hole, and this paragraph is where it
+was written down.** Two things it did not consider, both found by the security
+review and recorded as items 10 and 11 of
+[§ What the security review found](#what-the-security-review-found). First,
+"confers no authority" is true of the *proposal type* and false of its *effect*:
+openmls does not bind an Update's leaf node to the sender's existing signature key,
+so a member can rotate its own key out from under the role table, and
+`commit_effects` discards `Update` entirely so `owner_survives` never sees it.
+Second, the bound below does not bind it — the dedup collapses a **byte-identical**
+repeat, and every Update carries a fresh encryption key, hence a distinct
+`ProposalRef`. So the one kind this paragraph named as harmless was the one kind
+the cap could not hold. `Update` is now refused outright in `authorise`, which
+costs nothing because Lakko emits none.
+
+The same reasoning under-read `Remove`, in the other direction: the dedup does
+collapse repeats of one target, but one admin can name every *other* member, and
+those are distinct content. So the cap is reachable by `Remove` and by `Add` as
+well — see item 11 for why reaching it mattered far more than this section assumed.
 
 Two bounds, mirroring ADR-0027's sibling `MAX_PENDING_EXTERNAL_JOINS` queue:
 
@@ -2192,12 +2229,23 @@ ceasing to be atomic.** The direct path advanced the epoch inside one call; the
 proposal path splits it into propose, sweep and adjudicate, and each of those six is
 something that used to sit inside that atomic step and now spans it.
 
-The last two are a different kind, and how they were found is the point. Items 7 and
-8 were surfaced not by writing the sweep but by **mirroring it onto a second
-platform** — a defect that reads as correct in one implementation becomes visible
-the moment a second author has to reproduce its behaviour and cannot. Both were
-present in the web reference, both had shipped, and neither was recorded anywhere.
-That is the argument for mirroring attentively rather than transliterating.
+Items 7 and 8 are a different kind, and how they were found is the point. They were
+surfaced not by writing the sweep but by **mirroring it onto a second platform** — a
+defect that reads as correct in one implementation becomes visible the moment a
+second author has to reproduce its behaviour and cannot. Both were present in the
+web reference, both had shipped, and neither was recorded anywhere. That is the
+argument for mirroring attentively rather than transliterating.
+
+Items 9 to 15 are a **third** kind: they were found by the `lakko-security` review
+this ADR had owed since its first sprint, which returned **REQUEST CHANGES**. They
+are grouped separately below, under
+[§ What the security review found](#what-the-security-review-found), because the
+lesson they carry is not the atomicity one. Three of them are HIGH, one is a
+confirmed impersonation — and the thing worth saying about all seven together is
+that **not one of them needed an attacker, and four needed nobody at all**: a
+network blip, a stale roster, two admins doing the ordinary thing, or simply enough
+time passing. A review that had run six sprints earlier would have cost less than
+the seven fixes did.
 
 **1. The verdict's open question was wrong, and wrong in the dangerous direction.**
 [§ Open questions](#open-questions) asked whether `epoch_of_message` should gain a
@@ -2392,6 +2440,156 @@ enough to conclude the branch was dead, and it took reading the *core's* wire-fo
 policy to learn that the branch is dead for an entirely different reason and that the
 feature worked all along. **A defect inferred from two layers is a hypothesis until the
 third layer is read.**
+
+## What the security review found
+
+The `lakko-security` pass this ADR names as a precondition for its own Accepted
+status finally ran against `9a60ab3 → 8763f3e` and returned **REQUEST CHANGES**:
+three HIGH findings plus a confirmed impersonation. All seven are closed in
+`c50bdd7`, `0274fa7`, `8763f3e` and `5b2b654`. They are recorded here rather than
+only in commit messages for the same reason the eight above are — each is a rule a
+later hand can break — and with one addition: **several of them were first
+mis-triaged, and the mis-triage is part of the record.** A reader who sees only the
+conclusion will re-derive the wrong reasoning.
+
+**9. An author was a leaf index, and leaves are reused.** ADR-0023's author-only
+gate — only a message's original author may edit or delete it — compared a raw MLS
+leaf index, and OpenMLS hands a vacated leaf to the next Add. This ADR is what made
+it cheap: a Remove and an Add compose into **one commit**, so the whole sequence
+lands in a single poll batch. Remove Bob, add Dave, and Dave rewrites and deletes
+Bob's history. On both natives it was permanent, because the leaf was on disk.
+Reactions and read-receipt watermarks had the identical shape, and all three
+clients independently measured that the reaction damage is worse than a
+mis-toggle: removing the last reactor prunes the set, so the chip **disappears**.
+
+The fix is not "compare keys" — it is **compare keys resolved at receipt, in the
+epoch the row arrived**. A late resolve reintroduces the impersonation exactly,
+because a batch carrying the removal and the add would resolve an epoch-N message
+against the N+1 roster; all three clients carry a permanent contrast test that
+pins it. **The wider point:** every module built after ADR-0023 — the role table,
+the committer rank, the beacon store, the push-routing gate, the shrink diff —
+keys on the signature public key, and several name leaf reuse in a comment as the
+reason. ADR-0023 predates that convention and was never revisited when the
+convention formed. Conventions do not retroactively fix the code written before
+them.
+
+**10. `Update` proposals were a hole in two directions at once.** `authorise`
+accepted `ProposalKind::Update` from any member and `commit_effects` discarded it,
+so [`owner_survives`](#never-leave-the-group-without-an-owner-in-it) could not see
+it — and openmls does not bind an Update's leaf node to the sender's *existing*
+key, so a member can rotate their own leaf's signature key out from under the role
+table. Separately, each Update carries a fresh encryption key and therefore a
+distinct `ProposalRef`, which defeats the receipt gate's dedup, so 64 of them fill
+the pending set. Both closed by refusing `Update` outright in `authorise`, which
+costs nothing: Lakko emits none, and `self_update` — which **is** live, in the
+channel rotation path, contrary to the review's own note — drives its rotation
+through the UpdatePath rather than a proposal, measured rather than argued.
+
+**11. A full pending set took away the owner's means of response, and calling that
+"weaker than what an admin already holds" was wrong.** The cap refused *any*
+proposal at 64, including the owner's own `Remove` and `RoleChange`; the direct
+paths were already refused by `refuse_if_proposals_pending`; and nothing can
+discard a proposal. So a flooding admin locked the owner out of removing them,
+demoting them, or clearing the queue — and the only exit, sweeping, **committed the
+flooder's 64 adds**, after which they re-flood.
+
+The first triage dismissed this as strictly weaker than a capability the role
+already has, since an admin can simply remove everyone. That is the error worth
+recording: **capabilities compose, and the composition is not the sum.** Removing
+people is loud, attributable and repairable — the owner demotes the admin and adds
+them back. Filling the queue removes the *means of repair*, which is a different
+thing and strictly stronger. Closed with a small reserve of slots past the cap,
+admissible only to a proposal `is_owner_response` recognises: authored by the
+owner, kind `Remove` or `RoleChange`. It grants nothing — `authorise` still runs
+afterwards, unchanged — it only decides when the set is too full to accept a
+request. A per-sender sub-cap was rejected because it delivers a probability where
+the property needed is "never": several malicious admins still reach the cap.
+
+**12. An unbuildable sweep is a permanent, invisible, group-wide membership
+freeze — and one cause of it is the passage of time.** If `CommitBuilder::build`
+hard-fails, it is not a lost round: the proposal store empties only on a *merged*
+commit, every direct commit is refused while proposals pend, and nothing discards.
+Meanwhile `create_application_message` parks the pending set, so **chat keeps
+working and the group looks healthy** while its membership can never change again.
+
+One proposal is enough. An `Add` naming someone already in the group, or two admins
+independently inviting the same person — which is precisely the concurrent
+composition this ADR exists to make safe — hard-fails with `DuplicateSignatureKey`.
+Fifteen build conditions are now enumerated in `sweep_keeps`, and the one that
+settles the argument is **KeyPackage expiry**: decision 2 gives a request no
+deadline, so a proposal need only wait long enough and the group freezes with
+nobody having done anything at all.
+
+**13. The enumeration cannot be the whole answer, so it is backed by an exclusion
+search.** Fifteen conditions is a mirror of a rule set this crate does not own; an
+openmls upgrade adds a sixteenth and the freeze returns. So when the build still
+refuses, `narrow_sweep_by_exclusion` offers candidates one at a time and keeps each
+only if the selection still builds, then re-offers the rejects once. **It does not
+need to know why a proposal is uncommittable — only which one**, which is what
+makes it robust against rules nobody has written yet.
+
+It earned itself immediately, on a case the enumeration does not catch and arguably
+should not: **an admin proposing its own departure wedges its own sweep**
+(`CannotRemoveSelf`). That is ordinary traffic this ADR introduced — leaving *is*
+"the member proposes it and someone else commits it" — and the proposal is not
+defective, it is simply not committable *by that device*. Three things the build
+found that the design did not: additive selection beats leave-one-out because the
+cheap single-offender case is exactly the one you cannot assume when the cause is
+unknown; the second pass is load-bearing, because a `Remove` and the re-`Add` of
+one key are only committable **together** and one pass silently evicts the member;
+and each trial selection must re-ask `owner_survives`, because dropping an `Add`
+can strand a role change naming that person owner — which openmls, knowing nothing
+of role tables, will build happily and every peer will then refuse, trading a local
+freeze for a fork. Cost measured, not asserted: 137 build attempts at the cap, and
+215 ms in release on the expensive shape, once.
+
+The search is deterministic per device and **deliberately not** device-independent
+— "can I commit this" is a question about the committer, which the departing-admin
+case proves. Two committers may therefore stage different subsets; the journal
+ordering already arbitrates that, the loser abandons, and since a merged commit
+clears the whole store a proposal dropped by either search is dropped everywhere
+and its author re-proposes.
+
+**14. The merge is not the end of the sweep's obligations.** A Welcome fan-out that
+failed *after* the commit had won and merged was unrecoverable: the next tail sweep
+finds no staged sweep and no pending proposals, the restart path finds no owed
+verdict, and the legacy loop skips the entry. The added member sits in every
+roster, has every message encrypted to their leaf, and can never construct group
+state — repairable only by another admin removing and re-adding them.
+
+Obligation 2 as this ADR states it is an **ordering** rule — publish the Welcome
+only after the verdict — and that half is right and unchanged. What was missing is
+its second half: **record that the verdict settled, before you try.** The general
+rule, worth stating because it will recur: an artifact still owed after the
+epoch-advancing step needs its own durable name, because the state every recovery
+path branches on is gone by the time it is owed. A three-state entry lifecycle
+(verdict-owed → welcomes-owed → acked) replaces the two-state one. Note also that
+the obvious fix — clearing the verdict flag — would have made two clients **worse**,
+handing the entry to a loop that publishes no Welcome and then acks, destroying the
+record.
+
+**15. This ADR states the committer's obligations and never states the receiver's.**
+That omission is the gap the last finding came through. The arc made a receiver's
+*durable proposal store* a precondition for applying a later by-reference commit —
+`group_proposals.rs` relies on it as a boundary — but the receive-path snapshot
+write was best-effort and swallowed failures, the cursor lives in a **different
+store that no transaction can span**, and the poll advanced the cursor before
+processing. One swallowed write and the device restores an MLS state without the
+proposal and a cursor past it; the commit referencing it throws `MissingProposal`,
+is skipped, the cursor advances past that too, and the device sits at epoch N
+forever while the group is at N+1. It is still a member, so `is_active()` cannot
+see it.
+
+The rule is now that **the journal cursor may lag the durable MLS state, but never
+lead it** — persist fail-closed first, advance second, hold on failure. The
+asymmetry is what makes it work rather than atomicity: cursor-behind is
+self-healing, since re-fetched rows are rejected as wrong-epoch and skipped exactly
+as the poll already skips them, while cursor-ahead is permanent. Making the two
+stores one was considered and rejected — it is impossible on the natives at any
+price and expensive on web, and it would only buy *equality* where ordering already
+suffices. ADR-0040 solved this same shape for the committer with an atomic write;
+the receiver's answer is an ordering rule, and it is one rule on three platforms
+rather than one platform's stronger guarantee.
 
 ---
 

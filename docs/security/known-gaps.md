@@ -3853,6 +3853,47 @@ what a confidentiality guarantee rested on.
 
 ### G-38: Two membership commits could be in flight to the DS at once → inverted journal order → device-ahead — **serialized on web + iOS + Android and the local poll-vs-commit interleave closed on all three (2026-08); the remote-commit epoch fork is CLOSED for the member membership paths by ADR-0045 and REMAINS OPEN for the external-join path**
 
+> **The closure had seven holes of its own, all now closed, and that is the honest
+> headline of this gap.** The `lakko-security` review ADR-0045 names as a precondition
+> for its own Accepted status finally ran and returned **REQUEST CHANGES**: three HIGH
+> findings plus a confirmed impersonation, all recorded in
+> [ADR-0045 § What the security review found](../adr/0045-remote-commit-epoch-fork.md#what-the-security-review-found)
+> and indexed as **C-66**, **C-67** and **C-68**. What matters for this gap's severity
+> is that **none of the seven needed an attacker, and four needed nobody at all** — a
+> network blip, a stale roster, two admins doing the ordinary thing, or simply enough
+> time passing. A mechanism that closes a fork by splitting an atomic operation buys
+> that closure with a larger surface of *partial* states, and this is what that cost
+> looked like when it was finally counted.
+>
+> **Residuals, stated rather than buried:**
+>
+> - **The build-condition enumeration is a mirror of a rule set Lakko does not own.**
+>   Fifteen conditions are enumerated; an openmls upgrade can add a sixteenth. That is
+>   precisely why C-66 backs it with an exclusion search that needs no knowledge of the
+>   rules — but the search is a strong general answer, not a proof, and a build failure
+>   it cannot route around would still wedge a group.
+> - **Two build conditions are left unenforced**, both deliberately: whether every
+>   *existing* member's capabilities accept a joiner's credential type (a property of
+>   the group, and openmls exposes no member capabilities), and the commit path's own
+>   encryption-key uniqueness (generated inside `build`, invisible to a proposal filter).
+> - **A proposal dropped by the exclusion search reports no reason.** `CreateCommitError`
+>   carries no `ProposalRef`, leaf index or signature key on any variant, so a client can
+>   tell an author *your request was not carried* and never why. Naming a reason would
+>   mean inventing one.
+> - **A latent `SelfRemove` wedge is armed by a wire-format-policy change.**
+>   `ProposalType::SelfRemove` is not a default type and no Lakko leaf advertises it, so
+>   a stored one would fail every build with `UnsupportedProposalType`. It is
+>   structurally unreachable today in both directions — openmls refuses to emit one under
+>   the pure-ciphertext policy, and an inbound `PublicMessage` is refused before the
+>   receipt gate — and the existing named test that pins that refusal is what would fail
+>   on the day someone changes the policy.
+> - **One degraded corner can duplicate a timeline row** (C-67): a persist fails, the
+>   debounced message-log write lands with the old cursor and the new rows, then the
+>   process dies. Cosmetic, and strictly better than the permanent strand it replaces.
+> - **The external crypto review ADR-0045 also requires has still not happened.** The
+>   `lakko-security` pass is one of the two preconditions; the other is outstanding, and
+>   the surface it would review grew again with these seven fixes.
+
 **Get the mechanism right, because the obvious statement of it is wrong.** The hazard
 is **not** "two commits built on the same epoch". On all three clients the
 create-commit region has no suspension point, so a second operation correctly reads
