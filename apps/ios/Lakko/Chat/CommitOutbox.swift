@@ -120,6 +120,23 @@ public struct PendingCommitEntry: Codable, Equatable {
     /// Optional so an entry written before ADR-0045 decodes as `nil` = a plain
     /// direct-path commit, which is what it is.
     public var sweepVerdictPending: Bool?
+    /// ADR-0045 — this sweep's verdict is SETTLED (its commit won and merged)
+    /// and the only thing it still owes is the Welcome fan-out.
+    ///
+    /// Set in one durable write at the moment of the merge, which is what keeps
+    /// obligation 2 intact: the flag IS the durable statement "the verdict said
+    /// WON", so an entry that has not reached a verdict never carries it and a
+    /// pre-verdict restart therefore cannot be talked into publishing a Welcome.
+    ///
+    /// ``sweepVerdictPending`` stays set alongside it, deliberately — that flag
+    /// is what marks the entry as a SWEEP entry, and the ADR-0040 legacy
+    /// re-publish loop skips on it. Clearing it would hand a welcome-owed entry
+    /// to a loop that re-publishes the commit, finds no singular
+    /// ``secondArtifactMailboxB64``, publishes no Welcome at all, and then ACKS
+    /// — destroying the record. The two are read together:
+    /// `sweepVerdictPending && !sweepWelcomesOwed` is verdict-owed,
+    /// `sweepWelcomesOwed` is fan-out-owed.
+    public var sweepWelcomesOwed: Bool?
     /// ADR-0045 — base64 mailbox pseudonyms for EVERY member a staged sweep
     /// adds. One sweep commit can carry several adds under a single Welcome,
     /// where the direct add path has exactly one destination
@@ -142,6 +159,7 @@ public struct PendingCommitEntry: Codable, Equatable {
         secondArtifactKind: SecondArtifactKind? = nil,
         secondArtifactMailboxB64: String? = nil,
         sweepVerdictPending: Bool? = nil,
+        sweepWelcomesOwed: Bool? = nil,
         welcomeMailboxesB64: [String]? = nil,
         acked: Bool = false,
         commitMessageId: Int64? = nil,
@@ -156,6 +174,7 @@ public struct PendingCommitEntry: Codable, Equatable {
         self.secondArtifactKind = secondArtifactKind
         self.secondArtifactMailboxB64 = secondArtifactMailboxB64
         self.sweepVerdictPending = sweepVerdictPending
+        self.sweepWelcomesOwed = sweepWelcomesOwed
         self.welcomeMailboxesB64 = welcomeMailboxesB64
         self.acked = acked
         self.commitMessageId = commitMessageId
@@ -341,6 +360,37 @@ public final class CommitOutboxStore {
         if let secondMessageId = secondMessageId { entry.secondMessageId = secondMessageId }
         guard let encoded = try? JSONEncoder().encode(entry) else { return }
         try? encoded.write(to: url, options: .atomic)
+    }
+
+    /// ADR-0045 — flip a sweep entry from *verdict owed* to *Welcome fan-out
+    /// owed*, recording the DS id its commit published under, in ONE atomic
+    /// file write so it is never half-applied.
+    ///
+    /// THROWS on failure. The caller treats that as non-fatal: the marker only
+    /// buys a retry, and the Welcome it guards is correct to publish either way.
+    ///
+    /// A no-op when the entry is already gone (a concurrent ack / discard raced
+    /// us).
+    public func markWelcomesOwed(
+        accountIdB64: String,
+        id: String,
+        commitMessageId: Int64
+    ) throws {
+        guard let dir = accountDir(accountIdB64) else {
+            throw CommitOutboxStoreError.unavailable(
+                "no application-support directory to record the owed Welcome fan-out"
+            )
+        }
+        let url = dir.appendingPathComponent("\(id).json")
+        guard let data = try? Data(contentsOf: url),
+              var entry = try? JSONDecoder().decode(PendingCommitEntry.self, from: data)
+        else {
+            return
+        }
+        entry.sweepWelcomesOwed = true
+        entry.commitMessageId = commitMessageId
+        let encoded = try JSONEncoder().encode(entry)
+        try encoded.write(to: url, options: .atomic)
     }
 
     /// Delete an entry by id. Best-effort, no-op when absent.

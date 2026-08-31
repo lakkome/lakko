@@ -1714,6 +1714,65 @@ fn the_pending_set_is_capped_and_the_late_proposer_pays() {
     assert_eq!(s.alice_g.pending_proposals().len(), CAP);
 }
 
+/// The regression guard for refusing [`ProposalKind::Update`].
+///
+/// Rotating your own leaf is legitimate and stays available: `self_update`
+/// drives the rotation through the commit's `UpdatePath`
+/// (openmls `CommitBuilder::leaf_node_parameters`) and composes **no** proposal,
+/// so the peer-verified commit gate sees a commit carrying nothing and merges
+/// it. The refusal removes only the ability to ask *somebody else* to commit
+/// your rotation.
+///
+/// This is the test that fails loudly if that ever stops being true — if a
+/// future openmls, or a change here, made `self_update` inline an `Update`
+/// proposal, the gate would now refuse the commit on **every peer** and the
+/// rotating member would fork itself off the group. That would be silent
+/// without this test: nothing else in the suite asserts that a rotation in a
+/// role-enabled group is applied by its peers.
+#[test]
+fn self_update_still_rotates_a_leaf_in_a_role_enabled_group() {
+    let mut s = scene(0x2B);
+    let before = s.bob_g.epoch();
+
+    let rotation = s.bob_g.self_update(&s.bob).expect("bob rotates its leaf");
+
+    for (g, id, who) in [
+        (&mut s.alice_g, &s.alice, "the owner"),
+        (&mut s.charlie_g, &s.charlie, "a plain member"),
+    ] {
+        let incoming = g
+            .process_incoming_verifying_roles(id, &rotation)
+            .unwrap_or_else(|e| panic!("{who} must apply an admin's leaf rotation: {e}"));
+        assert!(
+            matches!(incoming, Incoming::Commit),
+            "a rotation is a commit, not a proposal: {incoming:?}",
+        );
+        assert_eq!(g.epoch(), before + 1);
+    }
+    assert_eq!(s.bob_g.epoch(), before + 1);
+    assert!(
+        s.alice_g.pending_proposals().is_empty(),
+        "a rotation must leave nothing pending behind it",
+    );
+
+    // The group is still fully operational for its peers afterwards.
+    let dave = Identity::from_seed(&[0x2Bu8; 64]).expect("dave");
+    let proposal = s
+        .bob_g
+        .propose_add_member_from_wire(&s.bob, &kp_wire(&dave))
+        .expect("bob proposes an add at the rotated epoch");
+    s.alice_g
+        .process_incoming_verifying_roles(&s.alice, &proposal)
+        .expect("alice stores it");
+    let sweep = s
+        .alice_g
+        .commit_pending_proposals(&s.alice)
+        .expect("sweep")
+        .expect("one commit");
+    assert_eq!(sweep.swept.len(), 1);
+    assert!(is_member(&s.alice_g, &dave));
+}
+
 // ============================================================================
 // One role change at a time (ADR-0045 § What the client sprints found, item 5)
 // ============================================================================
@@ -1982,5 +2041,95 @@ fn ownership_transfer_and_a_role_change_exclude_each_other() {
             .propose_ownership_transfer(&t.alice, &pk32(&t.charlie), OutgoingOwner::Admin)
             .is_err(),
         "a pending role change must block a transfer",
+    );
+}
+
+/// **A departing admin's own sweep must still land, on every peer.**
+///
+/// ADR-0045 made leaving reachable as "the member proposes it and an admin
+/// commits", but OpenMLS forbids a committer from removing its own leaf
+/// (`CreateCommitError::CannotRemoveSelf`, raised inside `CommitBuilder::build`
+/// once the proposals have been applied to the diff). So the departing admin's
+/// OWN sweep used to fail outright — and since a pending proposal also closes
+/// every direct-commit path, that device's membership operations were frozen
+/// for as long as it was the acting committer, with chat still working over the
+/// top of it.
+///
+/// The sweep filter does not enumerate this, and should not: the proposal is
+/// not defective, it is simply not committable *by this device*. The
+/// last-resort exclusion search is what finds that out.
+///
+/// The half that matters here and cannot be seen from inside one device: the
+/// rescued commit is an ordinary commit that every peer accepts.
+#[test]
+fn a_departing_admins_sweep_is_rescued_and_its_commit_lands_on_every_peer() {
+    let mut s = scene(0x30);
+    let dave = Identity::from_seed(&[0xD0u8; 64]).expect("dave");
+    let bob_leaf = leaf_of(&s.bob_g, s.bob.signature_public_key());
+
+    // bob (admin) asks to leave, and in the same round asks for dave.
+    let leave = s
+        .bob_g
+        .propose_remove_member(&s.bob, bob_leaf)
+        .expect("an admin may always ask to leave");
+    let add = s
+        .bob_g
+        .propose_add_member_from_wire(&s.bob, &kp_wire(&dave))
+        .expect("an admin may ask to add somebody");
+    for (g, id) in [(&mut s.alice_g, &s.alice), (&mut s.charlie_g, &s.charlie)] {
+        g.process_incoming_verifying_roles(id, &leave)
+            .expect("peer takes the departure request");
+        g.process_incoming_verifying_roles(id, &add)
+            .expect("peer takes the add request");
+    }
+
+    // bob is the acting committer and sweeps its own pending set.
+    let swept = s
+        .bob_g
+        .commit_pending_proposals(&s.bob)
+        .expect("the departing admin's own sweep must still be buildable")
+        .expect("something is swept");
+    assert_eq!(
+        swept.swept.len(),
+        1,
+        "dave's add lands; bob's own departure is not committable BY BOB",
+    );
+
+    // ...and the commit is ordinary: every peer applies it.
+    let commit = wire(swept.commit);
+    for (g, id) in [(&mut s.alice_g, &s.alice), (&mut s.charlie_g, &s.charlie)] {
+        g.process_incoming_verifying_roles(id, &commit)
+            .expect("peer applies the rescued commit");
+        assert!(is_member(g, &dave), "dave joined on this peer");
+        assert!(is_member(g, &s.bob), "and bob is still here");
+    }
+    assert_eq!(s.alice_g.epoch(), s.bob_g.epoch());
+    assert_eq!(s.charlie_g.epoch(), s.bob_g.epoch());
+
+    // The exclusion is not a refusal: bob re-asks and a DIFFERENT committer
+    // enacts the very same departure.
+    let leave_again = s
+        .bob_g
+        .propose_remove_member(&s.bob, leaf_of(&s.bob_g, s.bob.signature_public_key()))
+        .expect("bob asks again");
+    s.alice_g
+        .process_incoming_verifying_roles(&s.alice, &leave_again)
+        .expect("alice takes it");
+    let owner_sweep = s
+        .alice_g
+        .commit_pending_proposals(&s.alice)
+        .expect("the owner sweeps")
+        .expect("something is swept");
+    assert_eq!(owner_sweep.swept.len(), 1, "bob's departure, this time");
+    assert!(
+        !is_member(&s.alice_g, &s.bob),
+        "bob is gone from the owner's roster",
+    );
+    s.bob_g
+        .process_incoming_verifying_roles(&s.bob, &wire(owner_sweep.commit))
+        .expect("bob applies its own eviction");
+    assert!(
+        !s.bob_g.is_active(),
+        "and bob's own group is now inactive, which is what leaving means",
     );
 }

@@ -1067,9 +1067,14 @@ public final class ChatViewModel: ObservableObject {
 
     /// This device's own signature key, base64 — resolved through the roster
     /// rather than stored, so a leaf renumber cannot make it name someone else.
-    var ownSignatureKeyB64: String? {
-        guard let leaf = ownLeafIndex else { return nil }
-        return rosterViews.first { $0.leafIndex == leaf }?.signatureKeyB64
+    ///
+    /// Read from the LIVE group rather than from the published ``members``
+    /// snapshot, because ADR-0023 gave it a second job: it is the identity the
+    /// own-reaction highlight and the "read by every other member" exclusion
+    /// compare against, and those must not go blank between roster refreshes.
+    /// One rule, and it is the same one the receive and send paths use.
+    var ownSignatureKeyB64: MemberIdentity? {
+        repository.ownSignatureKeyB64(groupIdHex: groupIdHex)
     }
 
     /// §6.1.3 — every member except the current owner, marked (never filtered)
@@ -1610,10 +1615,13 @@ public final class ChatViewModel: ObservableObject {
 
     // MARK: - ADR-0023 — edit / delete / reactions
 
-    /// The local member's MLS leaf in this group (the roster
-    /// resolver already exposes it). Used to highlight reaction
-    /// chips the local user contributed.
-    var ownLeaf: UInt32? { ownLeafIndex }
+    /// The local member's IDENTITY in this group. Used to highlight the
+    /// reaction chips the local user contributed.
+    ///
+    /// Not the leaf it used to be: a leaf compared against a stored reactor
+    /// starts matching whoever was added into our slot after we left it, so the
+    /// highlight would light on a stranger's reaction.
+    var ownIdentity: MemberIdentity? { ownSignatureKeyB64 }
 
     /// The message currently open in the edit sheet (`nil` when
     /// closed). Drives the SwiftUI `.sheet` presentation; the
@@ -1702,33 +1710,45 @@ public final class ChatViewModel: ObservableObject {
     /// DS `created_at` is older than this is ignored on receive (a full
     /// journal re-download would otherwise resurrect stale typing); and
     /// a displayed "typing…" auto-clears this long after the last fresh
-    /// `true` from that leaf.
-    private static let typingExpirySecs: TimeInterval = 6
+    /// `true` from that member. Defined once in ``PresenceOps``.
+    private static let typingExpirySecs: TimeInterval = PresenceOps.typingExpiry
 
     /// Throttle for the OUTGOING `{ typing: true }` — we publish at
     /// most one per window while the user is actively editing. A
     /// 30 s burst is then ~7 tiny journal rows.
-    private static let typingSendThrottleSecs: TimeInterval = 4
+    private static let typingSendThrottleSecs: TimeInterval = PresenceOps.typingSendThrottle
 
-    /// Receive-side ephemeral typing state: senderLeaf → the local
-    /// receive time of that leaf's last fresh `typing: true`. A leaf
+    /// Receive-side ephemeral typing state: member identity → the local
+    /// receive time of that member's last fresh `typing: true`. A member
     /// is shown "typing…" while its entry is within
     /// ``typingExpirySecs``; an explicit `false` removes it at once.
     /// NEVER persisted — pure in-memory session state.
-    private var typingLeaves: [UInt32: Date] = [:]
+    ///
+    /// Keyed on the signature key, not the leaf: OpenMLS hands a vacated leaf
+    /// to the next member added, so a leaf key let a newcomer inherit the
+    /// departed member's typing state and let one member's stop clear
+    /// another's. Self-healing in ~6 s, unlike the watermark below — but real
+    /// while it lasts, and one rule is easier to keep right than two.
+    private var typingMembers: PresenceOps.TypingMap = [:]
 
-    /// Receive-side monotone read watermark: senderLeaf → the highest
-    /// messageId that leaf has reported reading. Advance-only (a lower
+    /// Receive-side monotone read watermark: member identity → the highest
+    /// messageId that member has reported reading. Advance-only (a lower
     /// value never overwrites a higher one), so a re-sync replay of an
     /// old receipt is idempotent. Session state, not persisted.
-    @Published private(set) var readWatermarks: [UInt32: Int64] = [:]
+    ///
+    /// Keyed on the signature key for the reason above, sharpened: this map is
+    /// monotone and is never reset on a membership change, so a leaf key handed
+    /// a departed member's ENTIRE read history to whoever took their slot, and
+    /// ``readState(of:)`` then reported messages as read by someone who had
+    /// never seen them.
+    @Published private(set) var readWatermarks: PresenceOps.ReadWatermarkMap = [:]
 
-    /// The set of leaves currently shown as typing, recomputed from
-    /// ``typingLeaves`` on every change / expiry tick. Drives the
-    /// indicator string. Excludes our own leaf defensively (we never
+    /// The members currently shown as typing, recomputed from
+    /// ``typingMembers`` on every change / expiry tick. Drives the
+    /// indicator string. Excludes ourselves defensively (we never
     /// publish our own `true` to ourselves, but the poll echo guard is
     /// belt-and-braces).
-    @Published private(set) var typingLeavesNow: [UInt32] = []
+    @Published private(set) var typingMembersNow: [MemberIdentity] = []
 
     /// Repeating timer that expires stale typing entries (~1 Hz). Armed
     /// lazily on the first inbound `true`, invalidated on teardown.
@@ -1750,51 +1770,38 @@ public final class ChatViewModel: ObservableObject {
     /// thread (dispatched from the repository's `chatStatusSink`).
     private func handleChatStatus(_ status: ChatStatusEvent) {
         switch status {
-        case .typing(let senderLeaf, let isTyping, let createdAt):
+        case .typing(let sender, let isTyping, let createdAt):
             // Drop our own echo defensively (the DS doesn't dedupe).
-            if let own = ownLeafIndex, senderLeaf == own { return }
-            guard isTyping else {
-                // Explicit stop — clear immediately.
-                typingLeaves[senderLeaf] = nil
-                recomputeTypingNow()
-                return
-            }
-            // STALE-IGNORE (re-sync replay guard): drop a `true` whose
-            // DS row is older than the expiry window.
-            if let rowDate = Self.parseDsTimestamp(createdAt),
-               Date().timeIntervalSince(rowDate) > Self.typingExpirySecs {
-                return
-            }
-            typingLeaves[senderLeaf] = Date()
-            armTypingExpiryTimer()
+            if let own = ownSignatureKeyB64, sender == own { return }
+            let before = typingMembers
+            typingMembers = PresenceOps.foldTyping(
+                typingMembers,
+                sender: sender,
+                isTyping: isTyping,
+                rowDate: Self.parseDsTimestamp(createdAt),
+                now: Date()
+            )
+            guard typingMembers != before else { return }
+            if isTyping { armTypingExpiryTimer() }
             recomputeTypingNow()
-        case .readReceipt(let senderLeaf, let upTo):
-            if let own = ownLeafIndex, senderLeaf == own { return }
+        case .readReceipt(let sender, let upTo):
+            if let own = ownSignatureKeyB64, sender == own { return }
             // MONOTONE — advance only.
-            let current = readWatermarks[senderLeaf] ?? -1
-            if upTo > current {
-                readWatermarks[senderLeaf] = upTo
-            }
+            readWatermarks = PresenceOps.foldReadWatermark(
+                readWatermarks, sender: sender, upTo: upTo)
         }
     }
 
-    /// Recompute the live typing-leaf list from ``typingLeaves``,
+    /// Recompute the live typing list from ``typingMembers``,
     /// dropping any entry past the expiry window, and publish it.
     private func recomputeTypingNow() {
         let now = Date()
-        var live: [UInt32] = []
-        for (leaf, stamp) in typingLeaves {
-            if now.timeIntervalSince(stamp) <= Self.typingExpirySecs {
-                live.append(leaf)
-            } else {
-                typingLeaves[leaf] = nil
-            }
+        typingMembers = PresenceOps.pruneTyping(typingMembers, now: now)
+        let live = PresenceOps.activeTypers(typingMembers, now: now)
+        if live != typingMembersNow {
+            typingMembersNow = live
         }
-        live.sort()
-        if live != typingLeavesNow {
-            typingLeavesNow = live
-        }
-        if typingLeaves.isEmpty {
+        if typingMembers.isEmpty {
             typingExpiryTimer?.invalidate()
             typingExpiryTimer = nil
         }
@@ -1814,30 +1821,35 @@ public final class ChatViewModel: ObservableObject {
     /// when nobody is typing. 1×1 → bare "typing…"; one named member →
     /// "<name> is typing…"; multiple → "Several people are typing…".
     var typingIndicatorText: String? {
-        let leaves = typingLeavesNow
-        guard !leaves.isEmpty else { return nil }
-        if leaves.count > 1 {
+        let typers = typingMembersNow
+        guard !typers.isEmpty else { return nil }
+        if typers.count > 1 {
             return "Several people are typing…"
         }
-        let leaf = leaves[0]
+        let who = typers[0]
         // 1×1 chats (2 members) read as a bare "typing…" — naming the
         // sole peer adds nothing.
         if !isGroupChat {
             return "typing…"
         }
-        if let name = displayName(forLeaf: leaf) {
+        if let name = displayName(for: who) {
             return "\(name) is typing…"
         }
         return "typing…"
     }
 
-    /// Resolve a leaf index to the human label the roster uses (a
+    /// Resolve a member identity to the human label the roster uses (a
     /// matched contact's chosen name, else a short key fingerprint).
-    /// `nil` when the leaf isn't in the current roster.
-    private func displayName(forLeaf leaf: UInt32) -> String? {
-        guard let member = members.first(where: { $0.leafIndex == leaf })
-            ?? repository.members(groupIdHex: groupIdHex)?
-                .first(where: { $0.leafIndex == leaf })
+    /// `nil` when that member isn't in the current roster.
+    ///
+    /// Keyed on the identity rather than the leaf so a member who left cannot
+    /// be relabelled with the name of whoever took their slot.
+    private func displayName(for identity: MemberIdentity) -> String? {
+        let roster = members.isEmpty
+            ? (repository.members(groupIdHex: groupIdHex) ?? [])
+            : members
+        guard let member = roster.first(
+            where: { base64Encode($0.signaturePublicKey) == identity })
         else { return nil }
         for c in AcceptedContactsStore.load()
         where c.request.fromPubkey == member.signaturePublicKey {
@@ -1946,19 +1958,26 @@ public final class ChatViewModel: ObservableObject {
             return nil
         }
         // Every OTHER member must have read up to this id. The roster
-        // includes ourselves; exclude our own leaf. An empty "others"
+        // includes ourselves; exclude our own identity. An empty "others"
         // set (a solo group) reads as Sent.
+        //
+        // The roster is the CURRENT membership, so a departed member's stale
+        // watermark is never consulted, and a newcomer — who has reported
+        // nothing — holds this at Sent until they genuinely catch up. Keyed on
+        // the identity: under a leaf key the newcomer arrived already holding
+        // the departed member's watermark and this reported Read.
         let roster = members.isEmpty
             ? (repository.members(groupIdHex: groupIdHex) ?? [])
             : members
-        let own = ownLeafIndex
-        let others = roster.filter { $0.leafIndex != own }
+        let rosterIdentities = roster.map { base64Encode($0.signaturePublicKey) }
+        let others = rosterIdentities.filter { $0 != ownSignatureKeyB64 }
         guard !others.isEmpty else { return .sent }
-        for member in others {
-            let wm = readWatermarks[member.leafIndex] ?? -1
-            if wm < message.messageId { return .sent }
-        }
-        return .read
+        return PresenceOps.isReadByEveryOther(
+            watermarks: readWatermarks,
+            messageId: message.messageId,
+            roster: rosterIdentities,
+            own: ownSignatureKeyB64
+        ) ? .read : .sent
     }
 
     /// Parse a DS ISO-8601 timestamp (with or without fractional

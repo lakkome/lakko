@@ -10,6 +10,8 @@
 
 use openmls::group::{GroupEpoch, GroupId};
 use openmls::messages::external_proposals::JoinProposal;
+#[cfg(test)]
+use openmls::prelude::{Capabilities, ExtensionType, Lifetime};
 use openmls::prelude::{KeyPackage, KeyPackageIn};
 use openmls_rust_crypto::MemoryStorage;
 use tls_codec::{Deserialize as _, Serialize as _};
@@ -80,6 +82,114 @@ impl Identity {
         )
         .map_err(|e| Error::Group(format!("external join proposal: {e:?}")))?;
         crate::group::encode_message(&msg)
+    }
+}
+
+// ============================================================================
+// The adversary half of the sweep filter's property tests.
+//
+// `Identity::create_key_package` always advertises the Lakko capability set, so
+// nothing in this crate can mint the KeyPackage a hostile or simply
+// differently-built client would publish. The `#[cfg(test)]` helpers below are
+// that client: they call the SAME `KeyPackage::builder()` this crate uses and
+// only weaken what the leaf advertises, which is exactly the freedom RFC 9420
+// gives any conformant implementation.
+//
+// Nothing about such a KeyPackage is malformed — it verifies, it round-trips,
+// and `KeyPackageIn::validate` accepts it, because "can this leaf live in THAT
+// group" is a question only the group can ask. That is precisely why the answer
+// has to be given at sweep time.
+// ============================================================================
+
+#[cfg(test)]
+impl Identity {
+    /// **Adversary.** Mint a KeyPackage whose leaf advertises support for no
+    /// custom extension type at all — in particular not the ADR-0022 role table
+    /// (`0xFF02`) every Lakko conversation group carries in its GroupContext.
+    ///
+    /// Adding it would make `CommitBuilder::build` fail with
+    /// `ProposalValidationError::InsufficientCapabilities` on every committer.
+    pub(crate) fn key_package_without_extension_capabilities(&self) -> Result<KeyPackage> {
+        self.key_package_with_capabilities(Capabilities::new(
+            None,
+            Some(&[self.ciphersuite]),
+            Some(&[]),
+            None,
+            None,
+        ))
+    }
+
+    /// **Adversary.** Mint a KeyPackage whose leaf advertises the Lakko
+    /// extension set but **not the group's ciphersuite**, which
+    /// `validate_leaf_node_capabilities` refuses with
+    /// `LeafNodeValidationError::CiphersuiteNotInCapabilities`.
+    pub(crate) fn key_package_without_ciphersuite_capability(&self) -> Result<KeyPackage> {
+        self.key_package_with_capabilities(Capabilities::new(
+            None,
+            // An empty ciphersuite list, so the group's own suite is absent.
+            Some(&[]),
+            Some(&[
+                ExtensionType::Unknown(crate::device_group::DEVICE_POLICY_EXTENSION_TYPE),
+                ExtensionType::Unknown(crate::group_roles::ROLE_EXTENSION_TYPE),
+            ]),
+            None,
+            None,
+        ))
+    }
+
+    /// **Adversary.** Mint a KeyPackage whose leaf advertises no credential type
+    /// at all, so it can satisfy neither its own credential
+    /// (`validate_locally`) nor the existing members' (`valn0104`).
+    pub(crate) fn key_package_without_credential_capability(&self) -> Result<KeyPackage> {
+        self.key_package_with_capabilities(Capabilities::new(
+            None,
+            Some(&[self.ciphersuite]),
+            Some(&[
+                ExtensionType::Unknown(crate::device_group::DEVICE_POLICY_EXTENSION_TYPE),
+                ExtensionType::Unknown(crate::group_roles::ROLE_EXTENSION_TYPE),
+            ]),
+            None,
+            Some(&[]),
+        ))
+    }
+
+    /// **Not an adversary at all — just time.** Mint an otherwise ordinary
+    /// KeyPackage whose lifetime has already run out.
+    ///
+    /// `Lifetime::new(0)` sets `not_after` to the current second, and
+    /// `Lifetime::is_valid` requires `now < not_after` strictly, so this is
+    /// expired the moment it is built. It stands in for the case that needs no
+    /// hostility whatsoever: ADR-0045 gives a request no deadline, so a
+    /// perfectly good KeyPackage can expire while its proposal waits.
+    pub(crate) fn expired_key_package(&self) -> Result<KeyPackage> {
+        let bundle = KeyPackage::builder()
+            .leaf_node_capabilities(crate::device_group::lakko_leaf_capabilities(
+                self.ciphersuite,
+            ))
+            .key_package_lifetime(Lifetime::new(0))
+            .build(
+                self.ciphersuite,
+                &self.provider,
+                &self.signature_keys,
+                self.credential.clone(),
+            )
+            .map_err(|e| Error::KeyPackage(format!("{e:?}")))?;
+        Ok(bundle.key_package().clone())
+    }
+
+    /// Shared tail: mint a KeyPackage with a caller-chosen capability set,
+    /// otherwise identical to [`Identity::create_key_package`].
+    fn key_package_with_capabilities(&self, capabilities: Capabilities) -> Result<KeyPackage> {
+        let bundle = KeyPackage::builder()
+            .leaf_node_capabilities(capabilities)
+            .build(
+                self.ciphersuite,
+                &self.provider,
+                &self.signature_keys,
+                self.credential.clone(),
+            )
+            .map_err(|e| Error::KeyPackage(format!("{e:?}")))?;
+        Ok(bundle.key_package().clone())
     }
 }
 

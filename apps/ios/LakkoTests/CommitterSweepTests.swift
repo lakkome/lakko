@@ -72,6 +72,9 @@ final class CommitterSweepTests: XCTestCase {
         var stageThrows: Error?
         var welcome: Data? = Data([0x11, 0x22])
         var addedKeys: [Data] = [Data(repeating: 0xAA, count: 32)]
+        /// Set to make the verdict apply's FAIL-CLOSED snapshot write fail —
+        /// the swallowed-filesystem-error shape that used to strand the device.
+        var persistAppliedThrows: Error?
     }
 
     private final class FakeJournal {
@@ -80,6 +83,9 @@ final class CommitterSweepTests: XCTestCase {
         var rowsAfter: [Int64: [SweepJournalRow]] = [:]
         var fetchThrows: Error?
         var publishThrows: Error?
+        /// Set to make the mailbox fan-out fail (a transient DS blip); clear it
+        /// again to model the retry after a restart.
+        var welcomePublishThrows: Error?
         var nextId: Int64 = 70
         var published: [(kind: String, bytes: Data)] = []
     }
@@ -87,7 +93,11 @@ final class CommitterSweepTests: XCTestCase {
     private final class FakeOutbox {
         var recorded: [SweepDurableEntry] = []
         var owed: SweepDurableEntry?
+        /// The durable welcomes-owed marker: an entry whose VERDICT settled and
+        /// whose mailbox fan-out is all that remains.
+        var owedWelcomes: SweepDurableEntry?
         var recordThrows: Error?
+        var markWelcomesOwedThrows: Error?
         var acked: [String] = []
         var discarded: [String] = []
     }
@@ -168,6 +178,7 @@ final class CommitterSweepTests: XCTestCase {
                 },
                 publishMailbox: { _, bytes in
                     group.log.append("publish:welcome")
+                    if let err = journal.welcomePublishThrows { throw err }
                     journal.published.append(("welcome", bytes))
                     journal.nextId += 1
                     return journal.nextId
@@ -181,15 +192,30 @@ final class CommitterSweepTests: XCTestCase {
                     outbox.recorded.append(entry)
                     outbox.owed = entry
                 },
-                findOwed: { outbox.owed },
+                // The real store's condition, verbatim: a SWEEP entry whose
+                // welcomes are NOT yet owed. Once the verdict settles the entry
+                // stops being the verdict finder's business.
+                findOwed: { outbox.owedWelcomes == nil ? outbox.owed : nil },
+                markWelcomesOwed: { id, commitMessageId in
+                    group.log.append("welcomes-owed")
+                    if let err = outbox.markWelcomesOwedThrows { throw err }
+                    guard var entry = outbox.owed, entry.id == id else { return }
+                    entry.commitMessageId = commitMessageId
+                    outbox.owed = entry
+                    outbox.owedWelcomes = entry
+                },
+                findOwedWelcomes: { outbox.owedWelcomes },
                 ack: { id, _, _ in
                     group.log.append("ack")
                     outbox.acked.append(id)
+                    outbox.owed = nil
+                    outbox.owedWelcomes = nil
                 },
                 discard: { id in
                     group.log.append("discard")
                     outbox.discarded.append(id)
                     outbox.owed = nil
+                    outbox.owedWelcomes = nil
                 }
             ),
             cursor: SweepCursorRef(
@@ -199,7 +225,14 @@ final class CommitterSweepTests: XCTestCase {
             welcomeMailbox: { key in key.prefix(8) },
             wrapWelcome: { Data([0xE0]) + $0 },
             markOwnPublished: { _ in },
-            persist: {}
+            persist: {},
+            // The FAIL-CLOSED persist the verdict apply runs before it advances
+            // the shared cursor. Distinct from `persist` above because it must
+            // THROW.
+            persistApplied: {
+                if let err = group.persistAppliedThrows { throw err }
+                group.log.append("persist-applied")
+            }
         )
         return Harness(group: group, journal: journal, outbox: outbox, ports: ports)
     }
@@ -232,9 +265,11 @@ final class CommitterSweepTests: XCTestCase {
         // than the two-party one this mechanism exists to close.
         XCTAssertEqual(
             h.log,
-            ["fetch", "stage", "record", "publish:commit", "fetch", "merge", "publish:welcome", "ack"],
+            ["fetch", "stage", "record", "publish:commit", "fetch",
+             "merge", "welcomes-owed", "publish:welcome", "ack"],
             "obligation 4 orders record -> publish -> verdict -> merge, and obligation 2 puts "
-            + "the Welcome strictly after the merge"
+            + "the Welcome strictly after the merge — with the durable welcomes-owed marker "
+            + "in between, so a fan-out that fails is still retryable"
         )
     }
 
@@ -263,7 +298,14 @@ final class CommitterSweepTests: XCTestCase {
         }
         XCTAssertEqual(
             h.log,
-            ["fetch", "stage", "record", "publish:commit", "fetch", "apply", "abandon", "discard"],
+            // `persist-applied` sits between the apply and the abandon: the
+            // verdict apply advances the shared cursor over the rows it
+            // consumed, so it must durably write them first (see
+            // `Chat/DurableCursor.swift`).
+            [
+                "fetch", "stage", "record", "publish:commit", "fetch", "apply",
+                "persist-applied", "abandon", "discard",
+            ],
             "a lost sweep abandons and DISCARDS its entry — re-publishing a commit whose "
             + "proposals the winner already swept is what the discard prevents"
         )
@@ -321,7 +363,7 @@ final class CommitterSweepTests: XCTestCase {
         )
         XCTAssertEqual(
             h.log,
-            ["publish:commit", "fetch", "merge", "publish:welcome", "ack"],
+            ["publish:commit", "fetch", "merge", "welcomes-owed", "publish:welcome", "ack"],
             "the re-publish is idempotent (peers at N+1 drop the duplicate as wrong-epoch) and "
             + "NO second durable record is written — the entry already exists"
         )
@@ -612,6 +654,86 @@ final class CommitterSweepTests: XCTestCase {
         XCTAssertEqual(cursorValue, 40, "the cursor must not move past our own commit")
     }
 
+    /// The verdict apply advances the SAME cursor the poll drives, over rows the
+    /// poll will never fetch again — so it is subject to the same ordering rule,
+    /// and for the same ADR-0045 reason: a PROPOSAL applied here but never
+    /// written to disk, with the cursor already past it, makes the commit that
+    /// carries it by reference permanently unappliable. The device sits at epoch
+    /// N while the group moves on, silently.
+    ///
+    /// MEASURED — with the `gate.commit(...)` wrapper in `adjudicate` reverted
+    /// to the bare `ports.cursor.advance(lastApplied)` it replaced:
+    ///
+    ///     testTheVerdictHoldsTheCursorWhenItsSnapshotWriteFails, XCTAssertEqual
+    ///     failed: ("51") is not equal to ("40") - the cursor must not pass rows
+    ///     whose snapshot write did not land
+    func testTheVerdictHoldsTheCursorWhenItsSnapshotWriteFails() async throws {
+        var cursorValue: Int64 = 40
+        let h = makeHarness()
+        h.group.persistAppliedThrows = StubError()
+        var call = 0
+        var ports = swapFetch(h) { _ in
+            call += 1
+            return call == 1 ? [] : [
+                SweepJournalRow(id: 50, payload: Data([0xA0]), createdAt: "t-50"),
+                SweepJournalRow(id: 51, payload: Data([0xA1]), createdAt: "t-51"),
+            ]
+        }
+        ports.cursor = SweepCursorRef(read: { cursorValue }, advance: { cursorValue = $0 })
+
+        let outcome = try await runCommitterSweep(ports)
+
+        // The verdict is still read — the epoch comparison is in memory and
+        // unaffected — so a storage failure never turns a won sweep into a lost
+        // one.
+        if case .committed = outcome {} else {
+            XCTFail("a storage failure must not change the verdict, got \(outcome)")
+        }
+        // The rows still reach the timeline: they were decrypted, they are real.
+        XCTAssertEqual(h.group.surfaced, ["row#50@t-50", "row#51@t-51"])
+        XCTAssertEqual(
+            cursorValue, 40,
+            "the cursor must not pass rows whose snapshot write did not land"
+        )
+    }
+
+    /// ...and the write comes FIRST on the happy path. Order, not merely
+    /// presence: `persist-applied` sits between the last apply and the merge.
+    func testTheVerdictAdvancesTheCursorOnlyAfterTheSnapshotWriteLands() async throws {
+        var cursorValue: Int64 = 40
+        let h = makeHarness()
+        var call = 0
+        var ports = swapFetch(h) { _ in
+            call += 1
+            return call == 1 ? [] : [
+                SweepJournalRow(id: 50, payload: Data([0xA0]), createdAt: "t-50"),
+            ]
+        }
+        ports.cursor = SweepCursorRef(read: { cursorValue }, advance: { cursorValue = $0 })
+
+        _ = try await runCommitterSweep(ports)
+
+        XCTAssertEqual(cursorValue, 50)
+        let applied = try XCTUnwrap(
+            h.log.firstIndex(of: "apply"), "the apply must have happened: \(h.log)"
+        )
+        let persisted = try XCTUnwrap(
+            h.log.firstIndex(of: "persist-applied"),
+            "the durable write must have happened: \(h.log)"
+        )
+        XCTAssertTrue(
+            persisted > applied,
+            "the durable write must precede the cursor advance: \(h.log)"
+        )
+    }
+
+    /// A verdict that applied NOTHING neither persists nor touches the cursor.
+    func testAVerdictThatAppliedNothingPersistsNothing() async throws {
+        let h = makeHarness()
+        _ = try await runCommitterSweep(h.ports)
+        XCTAssertFalse(h.log.contains("persist-applied"))
+    }
+
     /// A LOSING sweep still surfaces the rows it applied.
     ///
     /// Losing the ORDER says nothing about the rows below our commit: they were
@@ -663,6 +785,166 @@ final class CommitterSweepTests: XCTestCase {
             return XCTFail("an application message moves no epoch, so the owed verdict WON, got \(outcome)")
         }
         XCTAssertEqual(h.group.surfaced, ["row#50@t-50"])
+    }
+
+    // MARK: - A Welcome that failed AFTER the merge is still owed
+
+    /// Drive the harness into the exact shape the finding describes: the commit
+    /// won, the merge and the persist both landed, and only the mailbox fan-out
+    /// failed. Aborts the calling test if the fan-out somehow did not throw.
+    private func ghostMemberState(
+        _ h: Harness,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async -> Bool {
+        h.journal.welcomePublishThrows = StubError()
+        do {
+            _ = try await runCommitterSweep(h.ports)
+            XCTFail("the Welcome fan-out was supposed to fail", file: file, line: line)
+            return false
+        } catch {
+            return true
+        }
+    }
+
+    func testAWelcomeThatFailedAfterTheMergeIsRepublished() async throws {
+        // THE headline. Before the fix nothing retried: the merge had already
+        // cleared `hasStagedSweep()` AND emptied the pending set, which are the
+        // two signals `runCommitterSweep` and `resolveOwedVerdict` branch on, so
+        // both reported an idle group while the added member sat in every peer's
+        // roster, addressed by every later message, unable to ever join.
+        let h = makeHarness()
+        guard await ghostMemberState(h) else { return }
+        XCTAssertEqual(h.group.epoch, 6, "the commit won and merged — that must stand")
+        XCTAssertEqual(h.journal.published.filter { $0.kind == "welcome" }.count, 0)
+
+        // The DS comes back; the next sweep runs.
+        h.journal.welcomePublishThrows = nil
+        let outcome = try await runCommitterSweep(h.ports)
+
+        guard case .welcomesRepublished(let ids, let addedCount) = outcome else {
+            return XCTFail("a settled verdict still owing its Welcome must retry it, got \(outcome)")
+        }
+        XCTAssertEqual(ids.count, 1)
+        XCTAssertEqual(addedCount, 1)
+        XCTAssertEqual(h.journal.published.filter { $0.kind == "welcome" }.count, 1)
+        XCTAssertEqual(h.outbox.acked, ["entry-1"], "acked, so nothing is owed any more")
+    }
+
+    func testTheRestartSeamFinishesAnOwedWelcomeWithoutReadjudicating() async throws {
+        let h = makeHarness()
+        guard await ghostMemberState(h) else { return }
+        h.journal.welcomePublishThrows = nil
+        let before = h.log.count
+
+        let outcome = try await resolveOwedWelcomes(h.ports)
+
+        guard case .welcomesRepublished = outcome else {
+            return XCTFail("the restart seam must finish an owed fan-out, got \(outcome)")
+        }
+        // The verdict is already known — the retry must not stage, publish a
+        // second commit, or apply another row to re-read the journal order.
+        XCTAssertEqual(Array(h.log.dropFirst(before)), ["publish:welcome", "ack"])
+        XCTAssertEqual(h.journal.published.filter { $0.kind == "commit" }.count, 1)
+    }
+
+    func testAFailedWelcomeDoesNotRollTheMergedCommitBack() async throws {
+        // The commit won the order and peers are at N+1. Undoing the merge here
+        // would strand this device below the group.
+        let h = makeHarness()
+        guard await ghostMemberState(h) else { return }
+
+        XCTAssertEqual(h.group.epoch, 6)
+        XCTAssertFalse(h.group.staged)
+        XCTAssertTrue(h.log.contains("merge"))
+        XCTAssertFalse(h.log.contains("abandon"))
+        XCTAssertNotNil(h.outbox.owedWelcomes, "the marker is what makes the retry possible")
+        XCTAssertTrue(h.outbox.acked.isEmpty, "an un-published Welcome must never ack")
+    }
+
+    func testTheOwedWelcomeMarkerIsWrittenAfterTheMergeAndBeforeTheFanOut() async throws {
+        // The ordering that keeps obligation 2 intact: the marker IS the durable
+        // statement "the verdict said WON", so recording it any earlier would
+        // let a pre-verdict restart publish a Welcome for a commit that then
+        // lost — the three-party fork.
+        let h = makeHarness()
+        _ = try await runCommitterSweep(h.ports)
+
+        XCTAssertEqual(
+            h.log,
+            ["fetch", "stage", "record", "publish:commit", "fetch",
+             "merge", "welcomes-owed", "publish:welcome", "ack"]
+        )
+    }
+
+    func testAPreVerdictRestartNeverPublishesTheWelcome() async throws {
+        // A staged sweep owes a VERDICT, not a Welcome. `resolveOwedWelcomes`
+        // must refuse it outright rather than read the entry's mailboxes, or the
+        // obligation-2 ordering collapses on the restart path.
+        let h = makeHarness()
+        h.group.staged = true
+        h.outbox.owed = SweepDurableEntry(
+            id: "entry-owed",
+            commitB64: Data([0xC0, 0x05]).base64EncodedString(),
+            welcomeEnvelopeB64: Data([0xE0, 0x11]).base64EncodedString(),
+            welcomeMailboxesB64: [Data(repeating: 0xAA, count: 8).base64EncodedString()]
+        )
+        // Belt to that braces: even with the marker wrongly present, a staged
+        // sweep wins and the Welcome waits.
+        h.outbox.owedWelcomes = h.outbox.owed
+
+        let outcome = try await resolveOwedWelcomes(h.ports)
+
+        XCTAssertEqual(outcome, .noWelcomesOwed)
+        XCTAssertEqual(h.journal.published.count, 0)
+        XCTAssertTrue(h.group.staged)
+    }
+
+    func testADuplicateWelcomeRepublishIsANoOp() async throws {
+        // The first fan-out may actually have landed and only the ack failed, so
+        // a retry can put a second identical Welcome in the joiner's mailbox.
+        // That is inert: `StagedWelcome::into_group` deletes the joiner's
+        // KeyPackage bundle (openmls-0.8.1 `group/mls_group/creation.rs`), so the
+        // second copy cannot be staged and every client's mailbox handler catches
+        // and skips it. On THIS side the ack clears the marker, so nothing
+        // re-publishes a third time.
+        let h = makeHarness()
+        guard await ghostMemberState(h) else { return }
+        h.journal.welcomePublishThrows = nil
+
+        _ = try await resolveOwedWelcomes(h.ports)
+        let again = try await resolveOwedWelcomes(h.ports)
+
+        XCTAssertEqual(again, .noWelcomesOwed)
+        XCTAssertEqual(h.journal.published.filter { $0.kind == "welcome" }.count, 1)
+    }
+
+    func testASweepWithNoAddOwesNoWelcome() async throws {
+        // A remove / role sweep has no Welcome, so it must not pay for a marker
+        // write and must leave nothing behind for a restart to chase.
+        let h = makeHarness()
+        h.group.welcome = nil
+        _ = try await runCommitterSweep(h.ports)
+
+        XCTAssertFalse(h.log.contains("welcomes-owed"))
+        XCTAssertNil(h.outbox.owedWelcomes)
+        let outcome = try await resolveOwedWelcomes(h.ports)
+        XCTAssertEqual(outcome, .noWelcomesOwed)
+    }
+
+    func testAFailedMarkerWriteStillPublishesTheWelcomeNow() async throws {
+        // The marker only buys a RETRY. The verdict is already in, so refusing
+        // to publish because the bookkeeping write failed would MANUFACTURE the
+        // ghost member this whole branch exists to prevent.
+        let h = makeHarness()
+        h.outbox.markWelcomesOwedThrows = StubError()
+
+        let outcome = try await runCommitterSweep(h.ports)
+
+        guard case .committed = outcome else {
+            return XCTFail("a failed marker write must not abort the fan-out, got \(outcome)")
+        }
+        XCTAssertEqual(h.journal.published.filter { $0.kind == "welcome" }.count, 1)
     }
 
     // MARK: - Helpers

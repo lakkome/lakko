@@ -68,6 +68,20 @@
 //! and the by-value case is byte-for-byte the pre-ADR-0045 ADR-0022 rule, which
 //! is why every direct-commit path keeps behaving exactly as it did.
 //!
+//! # What "authorise" is asked, and what it is not
+//!
+//! The rule answers *may this member ask the group for this?* — but two of the
+//! six kinds are refused for **everyone**, and neither refusal is a permission
+//! judgement. [`ProposalKind::Unsupported`] is refused because Lakko cannot say
+//! what it would do; [`ProposalKind::Update`] is refused because of what it
+//! *would* do — it can rotate the very signature key [`RoleTable`] is keyed on,
+//! which no per-proposal permission check could make safe, and it is the one
+//! kind whose `ProposalRef` is fresh on every emission, which is what let a
+//! plain member flood the pending set. Both are recorded in full on
+//! [`authorise`]. This is the reason `authorise` returns a **named** error per
+//! refusal rather than a bare `bool`: the two facts a caller needs — *who may*
+//! and *what may* — arrive through the same door and must stay tellable apart.
+//!
 //! # The one rule that is not per-proposal
 //!
 //! [`owner_survives`] judges a commit as a whole: it must not leave the group
@@ -122,8 +136,10 @@ pub enum ProposalKind {
     /// The sender leaves the group — RFC 9420 `SelfRemove`, which structurally
     /// targets the sender's own leaf and can name no other.
     Leave,
-    /// The sender rotates its own leaf node. Targets only the sender by RFC
-    /// 9420, so it confers no authority over anyone else.
+    /// The sender rotates its own leaf node. **Always refused** — see
+    /// [`authorise`] for why "targets only the sender" is not the same as
+    /// "harmless", and [`crate::Group::self_update`] for the direct path that
+    /// rotates a leaf without one.
     Update,
     /// Rewrite the GroupContext extensions — in Lakko, the ADR-0022 role table.
     RoleChange,
@@ -222,7 +238,7 @@ fn leaf_is_owner(table: &RoleTable, members: &[MemberRecord], leaf: u32) -> bool
 /// | [`ProposalKind::Remove`] of any other leaf | owner or admin |
 /// | [`ProposalKind::Leave`] by the **owner** | nobody — transfer first (see below) |
 /// | [`ProposalKind::Leave`] by anyone else | anyone |
-/// | [`ProposalKind::Update`] | anyone (targets only the sender's own leaf) |
+/// | [`ProposalKind::Update`] | nobody — see below |
 /// | [`ProposalKind::RoleChange`] | the owner only |
 /// | [`ProposalKind::Unsupported`] | nobody |
 ///
@@ -258,6 +274,52 @@ fn leaf_is_owner(table: &RoleTable, members: &[MemberRecord], leaf: u32) -> bool
 ///   transferor is still the owner, so the `Leave` half is refused. Two rounds
 ///   is also the honest ordering: the transfer must be durable before its
 ///   author departs.
+///
+/// # Why an `Update` is refused outright
+///
+/// An `Update` looks like the one proposal that could not possibly need a role:
+/// RFC 9420 §12.1.2 says it replaces the **sender's own** leaf node and can name
+/// no other. That reading is what this arm used to encode, and it is wrong twice
+/// over — once on what an Update *does*, and once on what a *retained* Update
+/// costs.
+///
+/// * **It rotates the key the role table is keyed on.** [`RoleTable`] names
+///   32-byte Ed25519 **signature** keys, and openmls 0.8.1 does not bind an
+///   Update's leaf node to the sender's *existing* one:
+///   `UpdateProposalIn::validate` verifies the leaf against the signature key
+///   carried **inside** it, `validate_update_proposals` still carries an
+///   explicit `TODO: #133 … according to Sec. 13.2`, and
+///   `validate_key_uniqueness` collects signature keys from `Add` proposals
+///   only. So a member can swap its own leaf's signature key for one the table
+///   has never heard of. If that member is the owner — or is being made owner
+///   by a [`ProposalKind::RoleChange`] riding in the same sweep — the owner slot
+///   then names a key no leaf holds, which is [`owner_survives`]' terminal
+///   state and is **unrepairable**, because a role change is owner-only. And
+///   `owner_survives` cannot see it coming: [`commit_effects`] has no field for
+///   "this leaf's signature key changed", and giving it one would mean
+///   reimplementing the leaf-node binding openmls has left open.
+/// * **It is the one kind de-duplication cannot bound.** Every Update carries a
+///   freshly generated leaf node, so N of them hash to N distinct
+///   `ProposalRef`s. The dedup in [`crate::Group::gate_incoming_proposal`]
+///   collapses a repeated self-removal precisely because a repeat is
+///   byte-identical; it has nothing to collapse here. A **plain member** could
+///   therefore fill every peer's pending set to its cap with stock proposals no
+///   modified client is needed to emit, after which every membership operation
+///   in the group — add, remove, role change, external-join approve — is refused
+///   until somebody sweeps, and the flood resumes immediately afterwards.
+///
+/// **Nothing legitimate is lost.** `lakko-mls` emits no Update proposal on any
+/// path and neither FFI surface exposes one; the way a Lakko member rotates its
+/// leaf is [`crate::Group::self_update`], which drives the rotation through the
+/// commit's `UpdatePath` (openmls `CommitBuilder::leaf_node_parameters`) and
+/// composes **no** proposal at all — a committer may not carry its own Update
+/// even in stock openmls (`filter_proposals` drops it; `validate_update_proposals`
+/// refuses it as `CommitterIncludedOwnUpdate`). So this refusal removes the
+/// ability to ask *somebody else* to commit your rotation, and nothing else.
+///
+/// It is deliberately **not** folded into [`ProposalKind::Unsupported`]: an
+/// Update is supported and refused on purpose, and a refusal a developer cannot
+/// attribute is its own defect.
 ///
 /// # Errors
 ///
@@ -305,9 +367,17 @@ pub(crate) fn authorise(
                 ));
             }
         },
-        // An Update replaces only the sender's own leaf node (RFC 9420 §12.1.2),
-        // so it confers no authority over any other member.
-        ProposalKind::Update => {},
+        // Refused for everyone, including the owner. See the section above:
+        // an Update can rotate the very signature key `table` is keyed on, and
+        // it is the one kind whose ProposalRef is fresh every time, so it is
+        // also the one a plain member can flood the pending set with.
+        ProposalKind::Update => {
+            return Err(Error::Group(
+                "leaf-update proposal refused: an Update can rotate the signature key the role \
+                 table is keyed on, and Lakko rotates a leaf with self_update instead"
+                    .into(),
+            ));
+        },
         ProposalKind::RoleChange => {
             if !is_owner {
                 return Err(Error::Group(
@@ -322,6 +392,69 @@ pub(crate) fn authorise(
         },
     }
     Ok(())
+}
+
+/// `true` when this proposal is the group **owner** exercising its authority
+/// over the group's membership structure — a `Remove` or a `RoleChange` it
+/// authored itself.
+///
+/// # The escalation this exists to close
+///
+/// The pending set is bounded ([`crate::group::MAX_PENDING_PROPOSALS`]), and the
+/// bound is enforced without regard to who is asking: at the cap
+/// `Group::authorise_own_proposal` refuses **every** proposal, the owner's
+/// included, and `Group::refuse_if_proposals_pending` refuses every direct
+/// commit. Nothing anywhere discards a pending proposal without committing it.
+/// Composed, a member who can fill the set takes away the owner's ability to
+/// remove them, to demote them, and to discard what they filed.
+///
+/// [`crate::group::MAX_PENDING_PROPOSALS`] used to argue that this was harmless
+/// for the one ask that can still fill the set — `Add`, whose fresh KeyPackage
+/// defeats de-duplication — on the ground that it needs owner-or-admin, "a role
+/// that can already remove every member, so filling this set is strictly weaker
+/// than what it already holds". **That reasoning is wrong, and the shape of the
+/// error is worth keeping.** It compared the two capabilities and missed that
+/// they compose: mass removal is loud, attributable and repairable — the owner
+/// re-adds — whereas filling the pending set removes the *response*. The only
+/// exit was to sweep, which enacts the flood and leaves the floodgate holder
+/// free to re-flood at once. A capability that takes away the answer to itself
+/// is an escalation, not a weaker sibling. `Remove` reaches the same place by a
+/// second route: a repeat naming one target de-duplicates, but one member may
+/// name every *other* member, so in a large group an admin can fill the set with
+/// removals nothing collapses.
+///
+/// # The rule
+///
+/// A response is admitted past the ordinary cap, into a reserve that only the
+/// owner can spend ([`crate::group::MAX_RESERVED_OWNER_RESPONSES`]). Three
+/// properties make that safe:
+///
+/// * **It grants nothing.** The owner may already remove a member and rewrite
+///   the role table; ADR-0022's gate is untouched and still runs afterwards, so
+///   this only decides *when the set is too full to accept a request*, never
+///   *who may make one*. A proposal that reaches the reserve and is then refused
+///   by [`authorise`] is still refused.
+/// * **The reserve cannot be spent by anyone else.** Authorship is the
+///   MLS-authenticated sender leaf resolved against the pre-merge roster, so an
+///   attacker cannot present itself as the owner; and `Add` is deliberately not
+///   a response, so the owner cannot inflate the group's own bound through it.
+/// * **The bound stays finite.** Capacity moves from one constant to two, and
+///   the hard ceiling is their sum.
+///
+/// Both cap sites — the local courtesy check and the peers' receipt gate — must
+/// ask this identical question, or the owner would publish a response its peers
+/// refuse to retain and then sweep a commit they cannot resolve. That is why the
+/// predicate is written down here, once, beside the rule it qualifies.
+pub(crate) fn is_owner_response(
+    table: &RoleTable,
+    proposer: Option<Proposer<'_>>,
+    kind: &ProposalKind,
+) -> bool {
+    let Some(proposer) = proposer else {
+        return false;
+    };
+    table.is_owner(proposer.pubkey)
+        && matches!(kind, ProposalKind::Remove { .. } | ProposalKind::RoleChange)
 }
 
 /// What a set of proposals would do to the group's membership and to its role
@@ -381,10 +514,35 @@ pub(crate) fn commit_effects<'a>(
                     None => effects.role_table_would_vanish = true,
                 }
             },
+            // Neither can appear in a set this summary is trusted over:
+            // `authorise` refuses both at all three of its call sites, so an
+            // Update never reaches the pending store, never survives the sweep
+            // filter, and never rides a commit a peer merges. That matters,
+            // because there is no honest arm to write here — an Update changes
+            // a leaf's signature key, which is exactly the field
+            // `owner_survives` matches on, and `CommitEffects` has nowhere to
+            // record it. Keeping one out of every commit is the fix; see
+            // `authorise`.
             ProposalKind::Update | ProposalKind::Unsupported => {},
         }
     }
     effects
+}
+
+impl CommitEffects {
+    /// The leaves this set of proposals removes, including a `SelfRemove`'s own
+    /// sender leaf.
+    ///
+    /// The sweep filter needs it to decide whether an `Add` collides with a
+    /// signature key the group already holds: RFC 9420 requires the added keys
+    /// to be unique against the roster the commit *produces*, so a key belonging
+    /// to a member the same commit removes does **not** collide (openmls
+    /// `validate_key_uniqueness` seeds its sets from `full_leaf_members()`
+    /// filtered by the commit's remove proposals). A rule that ignored the
+    /// removals would drop a legitimate remove-and-re-add.
+    pub(crate) fn removed_leaves(&self) -> &[u32] {
+        &self.removed_leaves
+    }
 }
 
 /// The role table a `GroupContextExtensions` proposal would install, or `None`
@@ -556,11 +714,26 @@ mod tests {
         assert!(authorise(&t, &m, Some(proposer(1, &admin)), &ProposalKind::RoleChange).is_err());
     }
 
+    /// An Update is refused for **every** role, owner included. It is not a
+    /// permission question: an Update can rotate the signature key the role
+    /// table is keyed on, and being the owner is no reason to be allowed to walk
+    /// out of the table.
     #[test]
-    fn update_is_open_to_any_member() {
+    fn update_is_refused_for_every_role() {
         let (t, m) = fixture();
-        let member = pk(3);
-        assert!(authorise(&t, &m, Some(proposer(2, &member)), &ProposalKind::Update).is_ok());
+        for (leaf, key) in [(0u32, pk(1)), (1, pk(2)), (2, pk(3))] {
+            let err = authorise(&t, &m, Some(proposer(leaf, &key)), &ProposalKind::Update)
+                .expect_err("an Update must be refused at every role");
+            let text = format!("{err}");
+            assert!(
+                text.contains("leaf-update"),
+                "the refusal must name itself, got {text:?}",
+            );
+            assert!(
+                !text.contains("unsupported"),
+                "an Update is refused on purpose, not for being unrecognised: {text:?}",
+            );
+        }
     }
 
     #[test]
@@ -578,6 +751,55 @@ mod tests {
         assert!(authorise(&t, &m, None, &add_kind()).is_err());
         assert!(authorise(&t, &m, None, &ProposalKind::Update).is_err());
         assert!(authorise(&t, &m, None, &ProposalKind::Leave).is_err());
+    }
+
+    /// The reserve predicate, in full. Only the owner, and only for the two
+    /// kinds that ARE the response to somebody filling the pending set.
+    ///
+    /// Every `false` here is load-bearing. An admin is the attacker in the
+    /// escalation this closes, so a reserve it could spend would be no reserve;
+    /// `Add` is what the flood is made of, so admitting the owner's own past the
+    /// cap would let the owner inflate the group's bound; and an unresolvable
+    /// sender is refused for the same fail-closed reason [`authorise`] refuses
+    /// it.
+    #[test]
+    fn only_the_owners_removal_and_role_change_claim_the_reserve() {
+        let (t, _m) = fixture();
+        let owner = pk(1);
+        let admin = pk(2);
+        let member = pk(3);
+        let remove = ProposalKind::Remove { target_leaf: 2 };
+
+        assert!(is_owner_response(&t, Some(proposer(0, &owner)), &remove));
+        assert!(is_owner_response(
+            &t,
+            Some(proposer(0, &owner)),
+            &ProposalKind::RoleChange
+        ));
+
+        for (label, kind) in [
+            ("add", add_kind()),
+            ("leave", ProposalKind::Leave),
+            ("update", ProposalKind::Update),
+            ("unsupported", ProposalKind::Unsupported),
+        ] {
+            assert!(
+                !is_owner_response(&t, Some(proposer(0, &owner)), &kind),
+                "the owner's {label} is not a response",
+            );
+        }
+        for (label, key, leaf) in [("admin", admin, 1u32), ("member", member, 2)] {
+            for kind in [remove.clone(), ProposalKind::RoleChange] {
+                assert!(
+                    !is_owner_response(&t, Some(proposer(leaf, &key)), &kind),
+                    "an {label} claims no reserve for {kind:?}",
+                );
+            }
+        }
+        assert!(
+            !is_owner_response(&t, None, &remove),
+            "an unresolvable sender claims no reserve",
+        );
     }
 
     #[test]

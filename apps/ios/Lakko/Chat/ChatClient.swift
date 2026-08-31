@@ -353,6 +353,7 @@ public final class ChatClient {
     ) -> PollMessagesResult {
         var events: [IncomingChatEvent] = []
         var cursor = after
+        var touchedMlsState = false
         for message in raw.messages {
             cursor = message.id
 
@@ -363,6 +364,9 @@ public final class ChatClient {
                 continue
             }
 
+            // Marked BEFORE the call, not after — see
+            // ``PollMessagesResult/touchedMlsState``.
+            touchedMlsState = true
             let processed: ProcessedMessage
             do {
                 // ADR-0022 — the CHAT receive loop enforces the group-admin
@@ -379,14 +383,23 @@ public final class ChatClient {
                 )
             } catch {
                 // Bad frame, wrong epoch, malformed wire, OR a role-unauthorized
-                // commit refused by the gate. Drop + advance the cursor.
+                // commit refused by the gate. Drop + advance the cursor —
+                // deliberately: a row that can never apply must not be able to
+                // wedge the poll, and only a PERSIST failure holds the cursor.
+                // The two are distinguishable because they are different
+                // operations at different points in the batch.
                 continue
             }
             events.append(
                 Self.toEvent(
                     messageId: message.id,
                     createdAt: message.createdAt,
-                    processed: processed
+                    processed: processed,
+                    // ADR-0023 — the roster is read HERE, one line after the
+                    // apply, because that is the epoch this row decrypted at.
+                    // A leaf resolved any later can name whoever was added into
+                    // a vacated slot since.
+                    group: group
                 )
             )
         }
@@ -394,7 +407,8 @@ public final class ChatClient {
         return PollMessagesResult(
             events: events,
             cursor: cursor,
-            hasMore: raw.hasMore
+            hasMore: raw.hasMore,
+            touchedMlsState: touchedMlsState
         )
     }
 
@@ -412,16 +426,57 @@ public final class ChatClient {
 
     // MARK: - ProcessedMessage → IncomingChatEvent
 
+    /// ADR-0023 — **the production entry point**, and the reason it exists
+    /// rather than every caller passing its own resolver.
+    ///
+    /// There are exactly TWO receive paths — this client's poll, and the
+    /// ADR-0045 committer sweep's verdict apply in `ChatRepository`, which
+    /// consumes journal rows the poll will never fetch again — and they must
+    /// resolve authorship identically, or which path happened to reach a row
+    /// decides who its author is. Handing each a closure left that agreement to
+    /// two call sites keeping the same rule; taking the `Group` instead leaves
+    /// them nothing to disagree about, so the poll's tests cover the sweep's
+    /// resolution too. The closure form below stays for the classification
+    /// tests, which drive the arms without a live group.
+    ///
+    /// Callers must pass the SAME `Group` handle they just applied the row
+    /// through, on the line after applying it: that is the one moment the
+    /// roster is the epoch's roster.
+    static func toEvent(
+        messageId: Int64,
+        createdAt: String,
+        processed: ProcessedMessage,
+        group: Group
+    ) -> IncomingChatEvent {
+        toEvent(
+            messageId: messageId,
+            createdAt: createdAt,
+            processed: processed,
+            resolveSender: { AuthorIdentity.resolve(group: group, leafIndex: $0) }
+        )
+    }
+
     /// Internal rather than private so `LakkoTests` can drive the
     /// classification chain against a real ``ProcessedMessage`` and real
     /// FFI-composed envelopes. Reimplementing the chain in a test double is
     /// the failure mode this avoids: a double whose parse THROWS on binary
     /// input where the real ``parseBodyEnvelope(bytes:)`` DEGRADES would make
     /// the service-envelope tests pass with the filter arms deleted.
+    ///
+    /// `resolveSender` maps an MLS leaf index to the member's signature key
+    /// against the group's roster AS IT STANDS NOW. Both callers invoke this
+    /// immediately after `processIncomingVerifyingRoles` returned, which is the
+    /// one moment "now" is the epoch the message was sealed at — an Application
+    /// frame only decrypts at the current epoch, and a Commit that renumbers
+    /// leaves is a separate journal row applied before or after, never during.
+    /// Resolving later, from a stored leaf, is what lets a member added into a
+    /// departed member's vacated leaf inherit that member's authorship. See
+    /// ``AuthorIdentity``.
     static func toEvent(
         messageId: Int64,
         createdAt: String,
-        processed: ProcessedMessage
+        processed: ProcessedMessage,
+        resolveSender: (UInt32) -> MemberIdentity?
     ) -> IncomingChatEvent {
         switch processed {
         case .application(let data, let senderLeaf):
@@ -474,6 +529,16 @@ public final class ChatClient {
                     createdAt: createdAt
                 )
             }
+            // ADR-0023 — the identity that leaf names, resolved HERE because
+            // here is where the roster is the one the message was sealed
+            // under. Every downstream attribution reads this, never the leaf.
+            //
+            // Below the three service-envelope sniffs on purpose: those carry
+            // the leaf onward and resolve it themselves against the role table
+            // they each need, so resolving for them would be a wasted roster
+            // read. It is still the same synchronous region, hence still the
+            // same epoch.
+            let senderKey = senderLeaf.flatMap(resolveSender)
             // ADR-0023: feed the application bytes through the
             // structured ``parseBodyEnvelope(bytes:)`` surface,
             // which branches a plain chat message from an
@@ -495,7 +560,7 @@ public final class ChatClient {
                     messageId: messageId,
                     text: parsed.text,
                     attachments: parsed.attachments,
-                    senderLeaf: senderLeaf,
+                    senderKey: senderKey,
                     createdAt: createdAt
                 )
             case .edit:
@@ -505,7 +570,7 @@ public final class ChatClient {
                     target: parsed.target ?? 0,
                     text: parsed.text,
                     emoji: nil,
-                    senderLeaf: senderLeaf,
+                    senderKey: senderKey,
                     createdAt: createdAt
                 )
             case .delete:
@@ -515,7 +580,7 @@ public final class ChatClient {
                     target: parsed.target ?? 0,
                     text: "",
                     emoji: nil,
-                    senderLeaf: senderLeaf,
+                    senderKey: senderKey,
                     createdAt: createdAt
                 )
             case .reaction:
@@ -525,7 +590,7 @@ public final class ChatClient {
                     target: parsed.target ?? 0,
                     text: "",
                     emoji: parsed.emoji,
-                    senderLeaf: senderLeaf,
+                    senderKey: senderKey,
                     createdAt: createdAt
                 )
             case .typing:
@@ -538,7 +603,7 @@ public final class ChatClient {
                     target: 0,
                     text: "",
                     emoji: nil,
-                    senderLeaf: senderLeaf,
+                    senderKey: senderKey,
                     createdAt: createdAt
                 )
             case .readReceipt:
@@ -551,7 +616,7 @@ public final class ChatClient {
                     target: parsed.target ?? 0,
                     text: "",
                     emoji: nil,
-                    senderLeaf: senderLeaf,
+                    senderKey: senderKey,
                     createdAt: createdAt
                 )
             }
@@ -666,16 +731,26 @@ public struct SendMessageResult: Equatable {
 public enum IncomingChatEvent: Equatable {
     /// Application-data message (user-visible chat row).
     ///
-    /// ADR-0023: now carries the original author's MLS leaf
-    /// index (`senderLeaf`). `nil` for a frame whose sender
-    /// leaf the FFI couldn't surface (a control message, an
-    /// external sender) — such a message can never be a valid
-    /// edit / delete target.
+    /// ADR-0023: carries the original author's IDENTITY — their signature
+    /// public key, base64, resolved from the MLS sender leaf against the roster
+    /// of the epoch this message decrypted at. This is what the author-only
+    /// edit / delete gate compares, and what the timeline persists.
+    ///
+    /// It is deliberately NOT the leaf. A leaf index is a position in the
+    /// ratchet tree, not a person: OpenMLS hands a vacated leaf to the next
+    /// member added, so a leaf recorded now can name somebody else after the
+    /// next commit. Resolving at receipt — the one moment the roster is
+    /// authoritative for the epoch the frame was sealed at — is what makes the
+    /// value mean anything later. See ``AuthorIdentity``.
+    ///
+    /// `nil` for a frame whose sender the client could not resolve (a control
+    /// message, an external sender, a torn roster read) — such a message can
+    /// never be a valid edit / delete target.
     case application(
         messageId: Int64,
         text: String,
         attachments: [AttachmentRef],
-        senderLeaf: UInt32?,
+        senderKey: MemberIdentity?,
         createdAt: String
     )
     /// ADR-0023 — an edit / delete / reaction op carried in the
@@ -692,11 +767,16 @@ public enum IncomingChatEvent: Equatable {
         target: Int64,
         text: String,
         emoji: String?,
-        /// The op sender's MLS leaf index. The author-only gate
-        /// (edit / delete) checks it against the target's
-        /// stored author leaf; reactions attribute the toggle
-        /// to it. `nil` ⇒ the op is dropped (fail-closed).
-        senderLeaf: UInt32?,
+        /// The op sender's IDENTITY: their signature public key,
+        /// base64, resolved from the MLS sender leaf against the
+        /// roster of the epoch this op decrypted at. The
+        /// author-only gate (edit / delete) checks it against the
+        /// target's stored author identity, reactions attribute
+        /// the toggle to it, and typing / read receipts are keyed
+        /// on it — none of which may key on a leaf, which the next
+        /// member added inherits. `nil` ⇒ the op is dropped
+        /// (fail-closed).
+        senderKey: MemberIdentity?,
         createdAt: String
     )
     /// Commit / proposal / external-join-proposal frame. MLS
@@ -784,16 +864,22 @@ public enum IncomingChatEvent: Equatable {
 /// the poll fold. Typing + read-receipt ops render no bubble and never
 /// touch the message timeline; they surface through the repository's
 /// `chatStatusSink` so the view model can fold them into ephemeral
-/// per-leaf typing state + a monotone per-leaf read watermark.
+/// per-member typing state + a monotone per-member read watermark.
+///
+/// `sender` is a signature key on both cases, never a leaf: the watermark is
+/// monotone and is never reset on a membership change, so a leaf key handed a
+/// departed member's whole read history to whoever was added into their slot.
+/// Typing is the same shape with a ~6 s lifetime and is keyed the same way so
+/// there is one rule rather than two. See ``AuthorIdentity``.
 public enum ChatStatusEvent: Equatable {
-    /// The member at `senderLeaf` is (or stopped) typing. `createdAt`
-    /// is the DS row's ISO-8601 timestamp — the view model drops a
-    /// signal older than the expiry window (re-sync replay guard).
-    case typing(senderLeaf: UInt32, isTyping: Bool, createdAt: String)
-    /// The member at `senderLeaf` has read up to `upTo` (inclusive).
-    /// The view model advances a monotone watermark (a lower value
-    /// never overwrites a higher one — re-sync replay is idempotent).
-    case readReceipt(senderLeaf: UInt32, upTo: Int64)
+    /// `sender` is (or stopped) typing. `createdAt` is the DS row's ISO-8601
+    /// timestamp — the view model drops a signal older than the expiry window
+    /// (re-sync replay guard).
+    case typing(sender: MemberIdentity, isTyping: Bool, createdAt: String)
+    /// `sender` has read up to `upTo` (inclusive). The view model advances a
+    /// monotone watermark (a lower value never overwrites a higher one —
+    /// re-sync replay is idempotent).
+    case readReceipt(sender: MemberIdentity, upTo: Int64)
 }
 
 /// ADR-0023 / ADR-0024 — which mutation or status signal an
@@ -829,11 +915,29 @@ public struct PollMessagesResult: Equatable {
     /// id; caller should poll again immediately with the new
     /// cursor.
     public let hasMore: Bool
+    /// `true` when at least one row in this batch was HANDED to the MLS core.
+    ///
+    /// Deliberately NOT "at least one row applied successfully". A throw is no
+    /// proof that nothing durable changed: `process_incoming_verifying_roles`
+    /// runs `process_message` — which decrypts and ratchets — BEFORE the
+    /// ADR-0022 role gate can refuse a commit or the ADR-0045 receipt gate can
+    /// drop a proposal. Rows the echo filter dropped never reach the core, so
+    /// they do not set it.
+    ///
+    /// The caller must not advance the journal cursor past such a batch until
+    /// the provider snapshot has durably landed — see `Chat/DurableCursor.swift`.
+    public let touchedMlsState: Bool
 
-    public init(events: [IncomingChatEvent], cursor: Int64, hasMore: Bool) {
+    public init(
+        events: [IncomingChatEvent],
+        cursor: Int64,
+        hasMore: Bool,
+        touchedMlsState: Bool = false
+    ) {
         self.events = events
         self.cursor = cursor
         self.hasMore = hasMore
+        self.touchedMlsState = touchedMlsState
     }
 }
 

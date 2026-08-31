@@ -344,6 +344,7 @@ public class ChatClient(
     ): PollMessagesResult {
         val events = mutableListOf<IncomingChatEvent>()
         var cursor = after
+        var touchedMlsState = false
         for (message in raw.messages) {
             cursor = message.id
 
@@ -354,6 +355,9 @@ public class ChatClient(
                 continue
             }
 
+            // Marked BEFORE the call, not after — see
+            // [PollMessagesResult.touchedMlsState].
+            touchedMlsState = true
             val processed = try {
                 // ADR-0022 — the CHAT receive loop enforces the group-admin
                 // role policy: an add / remove / role-change commit whose
@@ -376,12 +380,36 @@ public class ChatClient(
                 // NOT commit the batch cursor) and re-fetch the orphan row forever.
                 // Mirrors the blanket iOS / web per-message drop posture. (Only the
                 // per-message drop is widened — the outer poll-loop catch is unchanged.)
+                //
+                // The cursor still advances past it, deliberately: a row that can
+                // never apply must not be able to wedge the poll, and only a
+                // PERSIST failure holds the cursor (see [DurableCursorGate]). The
+                // two are distinguishable because they are different operations at
+                // different points in the batch.
                 continue
             }
-            events.add(toEvent(message.id, message.createdAt, processed))
+            // The roster is read HERE, one line after the apply, because that
+            // is the epoch this row decrypted at — a leaf resolved any later
+            // can name whoever was added into a vacated slot since. Read PER
+            // ROW and never hoisted out of the loop: a Commit row in the middle
+            // of this same batch renumbers leaves, and the rows after it must
+            // resolve against the roster that commit produced.
+            events.add(
+                toEvent(
+                    messageId = message.id,
+                    createdAt = message.createdAt,
+                    processed = processed,
+                    resolveSender = { leaf -> resolveMemberIdentity(rosterOf(group), leaf) },
+                ),
+            )
         }
 
-        return PollMessagesResult(events = events, cursor = cursor, hasMore = raw.hasMore)
+        return PollMessagesResult(
+            events = events,
+            cursor = cursor,
+            hasMore = raw.hasMore,
+            touchedMlsState = touchedMlsState,
+        )
     }
 }
 
@@ -494,6 +522,18 @@ private fun committerBeaconArm(bytes: ByteArray): Boolean =
  * background `me.lakko.app.push.isServiceEnvelope`, which takes its codecs the
  * same way for the same reason.
  *
+ * @param resolveSender maps an MLS leaf index to the member's signature key,
+ *   against the group's roster AS IT STANDS NOW. DELIBERATELY has no default:
+ *   a `{ null }` default would let a new call site compile and then silently
+ *   fail every attribution closed — edit, delete, reactions, typing and read
+ *   ticks all dead, and looking like nothing was wired wrong. Both real callers
+ *   invoke this function immediately after `processIncomingVerifyingRoles`
+ *   returned, which is the one moment "now" is the epoch the message was sealed
+ *   at (an Application frame only decrypts at the current epoch, and a Commit
+ *   that renumbers leaves is a separate journal row applied before or after,
+ *   never during). Resolving later, from a stored leaf, is what lets a member
+ *   added into a departed member's vacated leaf inherit that member's
+ *   authorship. See `AuthorIdentity.kt`.
  * @param isCommitterBeacon the ADR-0045 beacon arm (cheap peek + authoritative
  *   decode). Defaults to the real FFI-backed [committerBeaconArm].
  * @param parseBody the ADR-0023 structured body parser. Defaults to the real
@@ -507,6 +547,7 @@ internal fun toEvent(
     messageId: Long,
     createdAt: String,
     processed: ProcessedMessage,
+    resolveSender: (UInt) -> MemberIdentity?,
     isCommitterBeacon: (ByteArray) -> Boolean = ::committerBeaconArm,
     parseBody: (ByteArray) -> ParsedBody = ::parseBodyEnvelope,
 ): IncomingChatEvent =
@@ -618,6 +659,10 @@ internal fun toEvent(
                 // edit/delete gate + reaction attribution.
                 val body = parseBody(processed.data)
                 val senderLeaf = processed.senderLeaf
+                // ...and the IDENTITY that leaf names, resolved HERE because
+                // here is where the roster is the one the message was sealed
+                // under. Every downstream attribution reads this, not the leaf.
+                val senderKey = senderLeaf?.let(resolveSender)
                 when (body.kind) {
                     MessageBodyKind.CHAT -> IncomingChatEvent.Application(
                         messageId = messageId,
@@ -625,6 +670,7 @@ internal fun toEvent(
                         attachments = body.attachments,
                         plaintext = body.text,
                         senderLeaf = senderLeaf,
+                        senderKey = senderKey,
                         createdAt = createdAt,
                     )
                     MessageBodyKind.EDIT -> IncomingChatEvent.Op(
@@ -634,6 +680,7 @@ internal fun toEvent(
                         text = body.text,
                         emoji = null,
                         senderLeaf = senderLeaf,
+                        senderKey = senderKey,
                         createdAt = createdAt,
                     )
                     MessageBodyKind.DELETE -> IncomingChatEvent.Op(
@@ -643,6 +690,7 @@ internal fun toEvent(
                         text = "",
                         emoji = null,
                         senderLeaf = senderLeaf,
+                        senderKey = senderKey,
                         createdAt = createdAt,
                     )
                     MessageBodyKind.REACTION -> IncomingChatEvent.Op(
@@ -652,6 +700,7 @@ internal fun toEvent(
                         text = "",
                         emoji = body.emoji,
                         senderLeaf = senderLeaf,
+                        senderKey = senderKey,
                         createdAt = createdAt,
                     )
                     // ADR-0024 — an ephemeral typing signal. Never a
@@ -663,6 +712,7 @@ internal fun toEvent(
                         messageId = messageId,
                         isTyping = body.isTyping ?: false,
                         senderLeaf = senderLeaf,
+                        senderKey = senderKey,
                         createdAt = createdAt,
                     )
                     // ADR-0024 — a read receipt: the sender has read up
@@ -673,6 +723,7 @@ internal fun toEvent(
                         messageId = messageId,
                         upTo = body.target ?: 0L,
                         senderLeaf = senderLeaf,
+                        senderKey = senderKey,
                         createdAt = createdAt,
                     )
                 }
@@ -749,12 +800,26 @@ public sealed interface IncomingChatEvent {
          *  still read `plaintext`. New code should read
          *  [text]. */
         val plaintext: String,
-        /** ADR-0023 — the original author's MLS leaf index. The
-         *  timeline records it so a later edit/delete op can be
-         *  gated against it (author-only). `null` for an
-         *  external sender — such a message can never be a valid
-         *  edit/delete target. */
+        /** ADR-0023 — the original author's MLS leaf index. Kept for
+         *  diagnostics and for the roster lookups that legitimately want a
+         *  POSITION; it is NOT what authorship is compared on (see
+         *  [senderKey]). */
         val senderLeaf: UInt?,
+        /** ADR-0023 — the original author's IDENTITY: their signature public
+         *  key, base64, resolved from [senderLeaf] against the roster of the
+         *  epoch this message decrypted at. This is what the author-only
+         *  edit/delete gate compares, and what the timeline persists.
+         *
+         *  A leaf index is a position in the ratchet tree, not a person:
+         *  OpenMLS hands a vacated leaf to the next member added, so a leaf
+         *  recorded now can name somebody else after the next commit.
+         *  Resolving in [toEvent] — at receipt, in the epoch the roster is
+         *  authoritative for — is the only moment the mapping is valid.
+         *
+         *  `null` for a frame whose sender the client could not resolve (a
+         *  control message, an external sender, a torn roster read) — such a
+         *  message can never be a valid edit/delete target. */
+        val senderKey: MemberIdentity?,
         val createdAt: String,
     ) : IncomingChatEvent
 
@@ -776,11 +841,17 @@ public sealed interface IncomingChatEvent {
         val text: String,
         /** Reaction emoji (`null` outside [MessageOp.Reaction]). */
         val emoji: String?,
-        /** The op sender's MLS leaf index. The author-only gate
-         *  (edit / delete) checks it against the target's stored
-         *  author leaf; a reaction attributes its toggle to it.
-         *  `null` ⇒ the op is dropped (fail-closed). */
+        /** The op sender's MLS leaf index. Diagnostic only — every
+         *  attribution decision reads [senderKey]. */
         val senderLeaf: UInt?,
+        /** The op sender's IDENTITY: their signature public key, base64,
+         *  resolved from [senderLeaf] against the roster of the epoch this op
+         *  decrypted at. The author-only gate (edit / delete) checks it
+         *  against the target's stored author identity, and a reaction
+         *  attributes its toggle to it — neither of which may key on a leaf,
+         *  which the next member added inherits.
+         *  `null` ⇒ the op is dropped (fail-closed). */
+        val senderKey: MemberIdentity?,
         val createdAt: String,
     ) : IncomingChatEvent
 
@@ -796,9 +867,14 @@ public sealed interface IncomingChatEvent {
         /** `true` ⇒ the sender is typing now; `false` ⇒ an explicit
          *  stop (blur / on-send). */
         val isTyping: Boolean,
-        /** The signal sender's MLS leaf index. `null` ⇒ dropped
-         *  (no attribution possible). */
+        /** The signal sender's MLS leaf index. Diagnostic only — the fold
+         *  keys on [senderKey]. */
         val senderLeaf: UInt?,
+        /** The signal sender's IDENTITY, resolved at receipt. The typing
+         *  registry is keyed on it: a leaf key lets a newcomer at a departed
+         *  member's vacated leaf inherit — and clear — their typing state.
+         *  `null` ⇒ dropped (no attribution possible). */
+        val senderKey: MemberIdentity?,
         /** DS row timestamp — the receiver ignores any typing
          *  signal older than the expiry window (re-sync replay
          *  guard). */
@@ -816,8 +892,14 @@ public sealed interface IncomingChatEvent {
         val messageId: Long,
         /** The read-up-to messageId watermark the sender asserts. */
         val upTo: Long,
-        /** The receipt sender's MLS leaf index. `null` ⇒ dropped. */
+        /** The receipt sender's MLS leaf index. Diagnostic only — the
+         *  watermark keys on [senderKey]. */
         val senderLeaf: UInt?,
+        /** The receipt sender's IDENTITY, resolved at receipt. The watermark
+         *  is monotone and is never reset on a membership change, so a leaf
+         *  key handed a departed member's whole read history to whoever was
+         *  added into their slot. `null` ⇒ dropped. */
+        val senderKey: MemberIdentity?,
         val createdAt: String,
     ) : IncomingChatEvent
 
@@ -988,6 +1070,20 @@ public data class PollMessagesResult(
      *  returned id; caller should poll again immediately with
      *  the new cursor. */
     val hasMore: Boolean,
+    /**
+     * `true` when at least one row in this batch was HANDED to the MLS core.
+     *
+     * Deliberately NOT "at least one row applied successfully". A throw is no
+     * proof that nothing durable changed: `process_incoming_verifying_roles`
+     * runs `process_message` — which decrypts and ratchets — BEFORE the ADR-0022
+     * role gate can refuse a commit or the ADR-0045 receipt gate can drop a
+     * proposal. Rows the echo filter dropped never reach the core, so they do
+     * not set it.
+     *
+     * The caller must not advance the journal cursor past such a batch until the
+     * provider snapshot has durably landed — see [DurableCursorGate].
+     */
+    val touchedMlsState: Boolean = false,
 )
 
 // =============================================================================

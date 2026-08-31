@@ -354,7 +354,7 @@ public struct ChatScreen: View {
                         ForEach(viewModel.messages) { message in
                             MessageRow(
                                 message: message,
-                                ownLeaf: viewModel.ownLeaf,
+                                ownIdentity: viewModel.ownIdentity,
                                 // ADR-0024 — "Sent" / "Read" check on
                                 // our own messages, derived from the
                                 // other members' read watermarks.
@@ -837,9 +837,10 @@ private struct AttachmentPayload {
 
 private struct MessageRow: View {
     let message: ChatMessage
-    /// ADR-0023 — the local member's MLS leaf, used to highlight
-    /// reaction chips this user contributed.
-    let ownLeaf: UInt32?
+    /// ADR-0023 — the local member's IDENTITY (their signature key),
+    /// used to highlight the reaction chips this user contributed. Never
+    /// their MLS leaf: a leaf is reassigned to the next member added.
+    let ownIdentity: MemberIdentity?
     /// ADR-0024 — read state for our OWN outgoing messages
     /// ("Sent" / "Read"). `nil` for incoming / system rows and
     /// pre-ack outgoing rows (no check rendered).
@@ -1000,7 +1001,7 @@ private struct MessageRow: View {
     @ViewBuilder
     private var reactionChips: some View {
         HStack(spacing: 4) {
-            ForEach(message.reactionSummary(ownLeaf: ownLeaf)) { tally in
+            ForEach(message.reactionSummary(own: ownIdentity)) { tally in
                 Button {
                     onReact(tally.emoji)
                 } label: {

@@ -59,11 +59,19 @@
  *
  * ## Persistence (1.16e6c2)
  *
- * After every successful state-mutating call we fire the
- * optional `onPersist` callback so the on-disk MLS snapshot
- * stays in sync with the canonical Identity's provider. Failures
- * log-and-continue — the in-memory state is still good and the
- * next mutation will retry the persist naturally.
+ * After every state-mutating call we fire the optional `onPersist` callback so
+ * the on-disk MLS snapshot stays in sync with the canonical Identity's
+ * provider.
+ *
+ * That write is **fail-closed on both paths**, for two different reasons:
+ *
+ *   - on SEND, a failed persist ABORTS the publish, so a gen-N ciphertext never
+ *     reaches the DS without its N+1 ratchet state on disk (AEAD nonce reuse);
+ *   - on RECEIVE, a failed persist HOLDS the journal cursor, so the cursor can
+ *     never end up ahead of the durable MLS state. It used to be best-effort
+ *     here, and since ADR-0045 that was enough to brick a device permanently —
+ *     see `chat/durable-cursor.ts` for the mechanism and why holding (rather
+ *     than aborting) is the right shape on the receive side.
  */
 import { DsClient } from "../ds/client";
 import type { FetchResult } from "../ds/client";
@@ -81,6 +89,12 @@ import {
   type AttachmentRefBytes,
 } from "./attachments";
 import { tryDecodeSecretEnvelope } from "../push/group-routing";
+import { DurableCursorGate } from "./durable-cursor";
+import {
+  resolveMemberIdentity,
+  type MemberIdentity,
+  type RosterMember,
+} from "./author-identity";
 
 /** Result of `sendMessage`. */
 export interface SendMessageResult {
@@ -117,13 +131,29 @@ export type IncomingChatEvent =
       /** Alias of `text` — kept for the few call sites that
        *  still read `plaintext`. New code should read `text`. */
       plaintext: string;
-      /** ADR-0023 — the original author's MLS leaf index, used
-       *  by the UI to remember authorship for the author-only
-       *  edit/delete gate + reaction attribution. `undefined`
-       *  for a frame whose sender leaf the FFI couldn't surface
-       *  (a control message, an external sender) — such a
-       *  message can never be a valid edit/delete target. */
+      /** ADR-0023 — the original author's MLS leaf index. Kept for
+       *  diagnostics and for the roster lookups that legitimately
+       *  want a position; it is NOT what authorship is compared on
+       *  (see `senderKey`). */
       senderLeaf: number | undefined;
+      /** ADR-0023 — the original author's IDENTITY: their signature
+       *  public key, base64, resolved from `senderLeaf` against the
+       *  roster of the epoch this message decrypted at. This is what
+       *  the author-only edit/delete gate compares, and what the
+       *  timeline persists.
+       *
+       *  A leaf index is a position in the ratchet tree, not a
+       *  person: OpenMLS hands a vacated leaf to the next member
+       *  added, so a leaf recorded now can name somebody else after
+       *  the next commit. Resolving here — at receipt, in the epoch
+       *  the roster is authoritative for — is the only moment the
+       *  mapping is valid.
+       *
+       *  `undefined` for a frame whose sender the client could not
+       *  resolve (a control message, an external sender, a torn
+       *  roster read) — such a message can never be a valid
+       *  edit/delete target. */
+      senderKey: MemberIdentity | undefined;
       createdAt: string;
     }
   | {
@@ -155,12 +185,18 @@ export type IncomingChatEvent =
        *  `true` = started typing, `false` = stopped. `undefined`
        *  for every other op. */
       isTyping: boolean | undefined;
-      /** The op sender's MLS leaf index — the author-only gate
-       *  (edit/delete) checks it against the target's stored
-       *  author leaf, reactions attribute the toggle to it, and
-       *  typing / read receipts are keyed on it.
-       *  `undefined` ⇒ the op is dropped (fail-closed). */
+      /** The op sender's MLS leaf index. Diagnostic only — every
+       *  attribution decision reads `senderKey`. */
       senderLeaf: number | undefined;
+      /** The op sender's IDENTITY: their signature public key,
+       *  base64, resolved from `senderLeaf` against the roster of
+       *  the epoch this op decrypted at. The author-only gate
+       *  (edit/delete) checks it against the target's stored author
+       *  identity, reactions attribute the toggle to it, and typing
+       *  / read receipts are keyed on it — none of which may key on
+       *  a leaf, which the next member added inherits.
+       *  `undefined` ⇒ the op is dropped (fail-closed). */
+      senderKey: MemberIdentity | undefined;
       createdAt: string;
     }
   | {
@@ -326,7 +362,13 @@ export type PollOutcome =
    *  stale. Dropped WITHOUT applying and WITHOUT touching the cursor; the next
    *  poll re-fetches from the current position. Only ever returned when a
    *  `PollCursorRef` was supplied. */
-  | "cursor-moved";
+  | "cursor-moved"
+  /** The batch WAS applied in memory, but the MLS snapshot did not reach disk,
+   *  so the cursor was HELD at its old value and these rows will be re-fetched.
+   *  The events are still returned — they are real, already decrypted, and the
+   *  UI should render them. See `chat/durable-cursor.ts` for why holding is the
+   *  only safe direction. */
+  | "persist-held";
 
 /** Result of `pollMessages`. */
 export interface PollMessagesResult {
@@ -381,6 +423,10 @@ export class ChatClient {
    *  the echo surfaces as a `processIncoming` failure that
    *  we log-and-skip. */
   private readonly ownPublishedIds = new Set<number>();
+  /** The receive path's cursor-may-lag-never-lead gate. One per client, which
+   *  is the right granularity because `snapshotStorage()` serialises the whole
+   *  provider — see `chat/durable-cursor.ts`. */
+  private readonly cursorGate = new DurableCursorGate();
   private readonly identityProvider: (() => WasmIdentity | null) | undefined;
   private readonly onPersist: (() => Promise<void>) | undefined;
   private readonly pushGidResolver:
@@ -433,29 +479,21 @@ export class ChatClient {
     return wasm.Identity.fromSeed(secrets.accountIdentitySeed);
   }
 
-  /** Run the persist hook, swallow + log failures. The
-   *  in-memory MLS state is still good even if the snapshot
-   *  write missed; the next mutation will retry.
-   *
-   *  Only safe on the RECEIVE / non-critical paths (`pollMessages`,
-   *  contact ops). It MUST NOT be used on the send path — see
-   *  `persistDurableOrThrow`. */
-  private async persistBestEffort(): Promise<void> {
-    if (this.onPersist === undefined) return;
-    try {
-      await this.onPersist();
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.warn("ChatClient: MLS snapshot persist failed", err);
-    }
-  }
-
   /** Persist the canonical Identity's provider snapshot durably,
-   *  AWAIT the IDB write, and RE-THROW on failure — the
-   *  fail-closed counterpart of `persistBestEffort`.
+   *  AWAIT the IDB write, and RE-THROW on failure.
    *
-   *  This is the security-critical variant used by `sendMessage`
-   *  BEFORE it publishes. A swallowed persist failure here would
+   *  Used by BOTH paths that write MLS state, for two different reasons that
+   *  happen to want the same discipline:
+   *
+   *   - `sendMessage` / `broadcastControl` call it BEFORE publishing, so the
+   *     gen-N ciphertext never reaches the DS without its N+1 ratchet state on
+   *     disk (the AEAD nonce-reuse-on-crash window, below);
+   *   - `applyPolledBatch` calls it BEFORE advancing the journal cursor, so the
+   *     cursor can never lead the durable state (see `chat/durable-cursor.ts`).
+   *     The receive path used to swallow this failure, which since ADR-0045
+   *     made a lost proposal a permanent epoch strand.
+   *
+   *  A swallowed persist failure on the send path would
    *  re-open the AEAD nonce-reuse-on-crash window: if the
    *  post-`createApplicationMessage` (generation N+1) ratchet
    *  state is not durably on disk, the gen-N ciphertext must not
@@ -841,16 +879,25 @@ export class ChatClient {
 
     const events: IncomingChatEvent[] = [];
     let cursor = after;
-    let mutated = false;
+    // Echo ids matched in this batch, CONSUMED only once the cursor actually
+    // advances past them. Deleting on match would be wrong on the held path:
+    // the batch gets re-fetched, our own row would then be handed to OpenMLS,
+    // and every subsequent poll would log a `CannotDecryptOwnMessage` for it.
+    const matchedEchoes: number[] = [];
     for (const message of raw.messages) {
       cursor = message.id;
       // Drop our own echoes — the DS doesn't dedupe and
       // OpenMLS can't decrypt them on the sender side at the
       // same epoch.
       if (this.ownPublishedIds.has(message.id)) {
-        this.ownPublishedIds.delete(message.id);
+        matchedEchoes.push(message.id);
         continue;
       }
+      // Marked BEFORE the call, not after. A throw is not proof that nothing
+      // durable changed — `process_message` decrypts and ratchets before the
+      // ADR-0022 role gate can refuse a commit or the ADR-0045 receipt gate can
+      // drop a proposal. See `chat/durable-cursor.ts`.
+      this.cursorGate.markTouched();
       let processed;
       try {
         // ADR-0022 — the CHAT receive loop enforces the group-admin role
@@ -863,30 +910,63 @@ export class ChatClient {
         processed = group.processIncomingVerifyingRoles(myIdentity, message.payload);
       } catch (err) {
         // Bad frame, wrong epoch, malformed wire, OR a role-unauthorized
-        // commit refused by the gate — log and skip. Cursor still advances.
+        // commit refused by the gate — log and skip. The cursor still advances
+        // past it, deliberately: a row that can never apply must not be able to
+        // wedge the poll, and only a PERSIST failure holds the cursor. The two
+        // are distinguishable because they are different operations at
+        // different points in the batch.
         // eslint-disable-next-line no-console
         console.warn("processIncomingVerifyingRoles failed", message.id, err);
         continue;
       }
-      // processIncoming touched provider storage even when the
-      // result is a no-op for the UI (e.g. an external commit
-      // that we rejected). Track the mutation so the persist
-      // hook still fires.
-      mutated = true;
       // 1.19c2: application messages run through the wasm
       // envelope parser (which is async because it has to
       // resolve the cached wasm module promise on first call,
       // then synchronous thereafter). System rows skip it.
-      events.push(await toEvent(message.id, message.createdAt, processed));
+      events.push(
+        await toEvent(message.id, message.createdAt, processed, (leaf) =>
+          resolveMemberIdentity(rosterOf(group), leaf),
+        ),
+      );
     }
 
-    if (mutated) {
-      await this.persistBestEffort();
+    // Still inside the lock: the ratchet and the journal position move
+    // together, and in THIS order. The persist is fail-closed (it re-throws
+    // inside the gate, which reports `held`) rather than the best-effort write
+    // it used to be — a swallowed failure here left the durable MLS state
+    // behind a cursor that had already moved on, which since ADR-0045 strands
+    // the device permanently. See `chat/durable-cursor.ts`.
+    const verdict = await this.cursorGate.commit(
+      () => this.persistDurableOrThrow(),
+      () => {
+        cursorRef?.advance(cursor);
+        // Consume the echo registry entries only now: on the held path they
+        // stay armed so the re-fetched batch still suppresses our own rows.
+        for (const id of matchedEchoes) this.ownPublishedIds.delete(id);
+      },
+    );
+    if (verdict === "held") {
+      // Report `after`, never the un-committed `cursor`: a caller that ignores
+      // `outcome` and writes `result.cursor` back must still not lead.
+      return { events, cursor: after, hasMore: false, outcome: "persist-held" };
     }
-
-    // Still inside the lock: the ratchet and the journal position move together.
-    cursorRef?.advance(cursor);
     return { events, cursor, hasMore: raw.hasMore, outcome: "applied" };
+  }
+}
+
+/**
+ * The group's roster as the identity resolver reads it.
+ *
+ * A torn / unreadable roster yields `[]`, which resolves every leaf to
+ * `undefined` — the fail-closed direction: an unattributable message can never
+ * be edited or deleted by anyone, which is strictly what an unknown author
+ * already meant.
+ */
+export function rosterOf(group: WasmGroup): RosterMember[] {
+  try {
+    return group.members() as unknown as RosterMember[];
+  } catch {
+    return [];
   }
 }
 
@@ -907,11 +987,21 @@ export class ChatClient {
  *
  * Not part of the public `ChatClient` surface — nothing outside those two
  * receive paths should be constructing timeline events.
+ *
+ * `resolveSender` maps an MLS leaf index to the member's signature key against
+ * the group's roster AS IT STANDS NOW. Both callers invoke this function
+ * immediately after `processIncomingVerifyingRoles` returned, which is the one
+ * moment "now" is the epoch the message was sealed at — an Application frame
+ * only decrypts at the current epoch, and a Commit that renumbers leaves is a
+ * separate journal row applied before or after, never during. Resolving later,
+ * from a stored leaf, is what lets a member added into a departed member's
+ * vacated leaf inherit that member's authorship. See `author-identity.ts`.
  */
 export async function toEvent(
   messageId: number,
   createdAt: string,
   processed: ReturnType<WasmGroup["processIncoming"]>,
+  resolveSender: (leafIndex: number) => MemberIdentity | undefined,
 ): Promise<IncomingChatEvent> {
   // The WASM `ProcessedMessage.kind` is a PascalCase string
   // discriminator: "Application" | "Commit" | "Proposal" |
@@ -923,6 +1013,11 @@ export async function toEvent(
     // external sender (which can never be a valid edit/delete
     // target nor a reaction attribution).
     const senderLeaf = processed.senderLeaf;
+    // ...and the identity that leaf names, resolved HERE because
+    // here is where the roster is the one the message was sealed
+    // under. Every downstream attribution reads this, not the leaf.
+    const senderKey =
+      senderLeaf === undefined ? undefined : resolveSender(senderLeaf);
     // Phase 3a8 — sniff for call-signaling bytes before
     // running the chat-envelope parser. Call signaling is a
     // prost-encoded `CallSignalingPayload` proto; chat
@@ -992,6 +1087,7 @@ export async function toEvent(
         // identical to `text`.
         plaintext: body.text,
         senderLeaf,
+        senderKey,
         createdAt,
       };
     }
@@ -1006,6 +1102,7 @@ export async function toEvent(
       emoji: body.kind === "reaction" ? body.emoji : undefined,
       isTyping: body.kind === "typing" ? body.isTyping : undefined,
       senderLeaf,
+      senderKey,
       createdAt,
     };
   }

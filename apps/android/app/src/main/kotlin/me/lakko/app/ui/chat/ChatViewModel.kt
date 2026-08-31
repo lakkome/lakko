@@ -1557,10 +1557,10 @@ public class ChatViewModel(
     }
 
     /**
-     * ADR-0024 — render the typing indicator line from the set of
-     * leaves currently typing, or `null` when nobody is.
+     * ADR-0024 — render the typing indicator line from the set of members
+     * currently typing, or `null` when nobody is.
      *
-     *   * Our own leaf is never shown ("you typing" is noise).
+     *   * We are never shown ("you typing" is noise).
      *   * 1×1 (a single other typist) → a bare "typing…" (the
      *     name is redundant in a two-person chat).
      *   * Exactly one named other in a group → "<name> is typing…"
@@ -1569,28 +1569,37 @@ public class ChatViewModel(
      *     suffix it never carries for a non-self leaf).
      *   * More than one → "Several people are typing…".
      */
-    private fun typingIndicatorText(typingLeaves: Set<UInt>): String? {
-        if (typingLeaves.isEmpty()) return null
-        val own = ownLeafIndex()
-        val others = typingLeaves.filter { it != own }
+    private fun typingIndicatorText(
+        typingMembers: Set<me.lakko.app.chat.MemberIdentity>,
+    ): String? {
+        if (typingMembers.isEmpty()) return null
+        // The LIVE roster read, not the last-refreshed members snapshot: this
+        // runs on every state emission, including before the members sheet has
+        // ever been opened.
+        val own = repo.ownMemberIdentity(groupIdHex)
+        val others = typingMembers.filter { it != own }
         if (others.isEmpty()) return null
         // 1×1: the chat has exactly two members, so a single other
         // typist needs no name.
         val isOneToOne = (repo.memberCount(groupIdHex) ?: 0) <= 2
         if (others.size == 1) {
             if (isOneToOne) return "typing…"
-            val name = labelForLeaf(others.first())
+            val name = labelForIdentity(others.first())
             return if (name != null) "$name is typing…" else "typing…"
         }
         return "Several people are typing…"
     }
 
-    /** ADR-0024 — resolve a single MLS leaf to its member label
-     *  (contact name or fingerprint), or `null` when the leaf is
-     *  not in the live roster. Reuses [memberLabel]. */
-    private fun labelForLeaf(leaf: UInt): String? {
-        val member = repo.members(groupIdHex)?.firstOrNull { it.leafIndex == leaf }
-            ?: return null
+    /** ADR-0024 — resolve a single member IDENTITY to its label (contact name
+     *  or fingerprint), or `null` when that member is not in the live roster.
+     *  Reuses [memberLabel].
+     *
+     *  Keyed on the signature key rather than the leaf so a member who left
+     *  cannot be relabelled with the name of whoever took their slot. */
+    private fun labelForIdentity(identity: me.lakko.app.chat.MemberIdentity): String? {
+        val member = repo.members(groupIdHex)?.firstOrNull {
+            me.lakko.app.chat.outboxB64(it.signaturePublicKey) == identity
+        } ?: return null
         return memberLabel(member)
     }
 
@@ -1611,8 +1620,8 @@ public class ChatViewModel(
             uploading = composer.uploading,
             uploadStage = composer.uploadStage,
             // ADR-0024 — typing indicator + read-state surface.
-            typingText = typingIndicatorText(thread?.typingLeaves ?: emptySet()),
-            readUpToByLeaf = thread?.readUpToByLeaf ?: emptyMap(),
+            typingText = typingIndicatorText(thread?.typingMembers ?: emptySet()),
+            readUpToByMember = thread?.readUpToByMember ?: emptyMap(),
             // We always render the screen as "exists" — if the
             // repo doesn't carry this thread (no Group handle
             // built yet, post-restart pre-bootstrap), the
@@ -1784,19 +1793,24 @@ public class ChatViewModel(
         }
     }
 
-    /** ADR-0023 — our own leaf in this chat group, used by the UI
-     *  to render which reaction chips we contributed (and can
-     *  toggle off). `null` when there is no live handle. */
-    public fun ownChatLeafIndex(): UInt? = repo.ownLeafIndex(groupIdHex)
+    /** ADR-0023 — our own IDENTITY in this chat group, used by the UI to
+     *  render which reaction chips we contributed (and can toggle off). `null`
+     *  when there is no live handle.
+     *
+     *  Not our leaf: a leaf compared against a stored reactor would start
+     *  matching a stranger the moment somebody is added into a slot we once
+     *  held. */
+    public fun ownChatIdentity(): me.lakko.app.chat.MemberIdentity? =
+        repo.ownMemberIdentity(groupIdHex)
 
-    /** ADR-0024 — the live roster's leaves MINUS our own. The
-     *  Bubble's read-state ("Read" only when EVERY other member
-     *  has read it) is gated on every leaf in this set. Empty when
-     *  there is no live handle / no other member. */
-    public fun otherChatLeaves(): Set<UInt> {
-        val own = repo.ownLeafIndex(groupIdHex)
+    /** ADR-0024 — the live roster's member IDENTITIES minus our own. The
+     *  Bubble's read-state ("Read" only when EVERY other member has read it) is
+     *  gated on every member in this set. Empty when there is no live handle /
+     *  no other member. */
+    public fun otherChatIdentities(): Set<me.lakko.app.chat.MemberIdentity> {
+        val own = repo.ownMemberIdentity(groupIdHex)
         return repo.members(groupIdHex)
-            ?.map { it.leafIndex }
+            ?.map { me.lakko.app.chat.outboxB64(it.signaturePublicKey) }
             ?.filter { it != own }
             ?.toSet()
             ?: emptySet()
@@ -2004,10 +2018,10 @@ public data class ChatScreenUiState(
      *  "typing…" / "Several people are typing…"), or `null` when
      *  nobody is typing. Rendered just above the input bar. */
     val typingText: String? = null,
-    /** ADR-0024 — the monotone per-leaf read watermark. The Bubble
-     *  renders "Read" on an OWN message once EVERY other member's
-     *  watermark `>=` that message's id (else "Sent"). */
-    val readUpToByLeaf: Map<UInt, Long> = emptyMap(),
+    /** ADR-0024 — the monotone per-MEMBER read watermark, keyed on the
+     *  member's signature key. The Bubble renders "Read" on an OWN message once
+     *  EVERY other member's watermark `>=` that message's id (else "Sent"). */
+    val readUpToByMember: Map<me.lakko.app.chat.MemberIdentity, Long> = emptyMap(),
 )
 
 /** ADR-0024 — read state of an OWN outgoing message, derived from
@@ -2024,20 +2038,27 @@ public enum class OwnReadState { None, Sent, Read }
  *     `>=` this message's id (the whole group has read it).
  *   * [OwnReadState.Sent] otherwise.
  *
- * [ownLeaf] (excluded from the all-others check) + [otherLeaves]
- * (the live roster minus self) are supplied by the screen so the
- * helper is pure + unit-test-friendly.
+ * [own] (excluded from the all-others check) + [others] (the live roster minus
+ * self) are supplied by the screen so the helper is pure + unit-test-friendly.
+ *
+ * Every one of the three is a [me.lakko.app.chat.MemberIdentity] — a signature
+ * key — and not an MLS leaf. The watermark map is monotone and never reset on a
+ * membership change, so under leaf keys a member added into a departed
+ * member's vacated slot inherited that member's watermark outright, and this
+ * function then answered [OwnReadState.Read] for a message the newcomer had
+ * never seen.
  */
 public fun ownReadStateFor(
     messageId: Long,
-    ownLeaf: UInt?,
-    otherLeaves: Set<UInt>,
-    readUpToByLeaf: Map<UInt, Long>,
+    own: me.lakko.app.chat.MemberIdentity?,
+    others: Set<me.lakko.app.chat.MemberIdentity>,
+    readUpToByMember: Map<me.lakko.app.chat.MemberIdentity, Long>,
 ): OwnReadState {
     if (messageId == 0L) return OwnReadState.None
-    if (otherLeaves.isEmpty()) return OwnReadState.Sent
-    val allRead = otherLeaves.all { leaf ->
-        (readUpToByLeaf[leaf] ?: -1L) >= messageId
+    val peers = others.filter { it != own }
+    if (peers.isEmpty()) return OwnReadState.Sent
+    val allRead = peers.all { who ->
+        (readUpToByMember[who] ?: -1L) >= messageId
     }
     return if (allRead) OwnReadState.Read else OwnReadState.Sent
 }

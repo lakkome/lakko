@@ -30,7 +30,12 @@
  *         }
  * ```
  *
- * Plaintext is the JSON-encoded [`MessageLogPayload`].
+ * Plaintext is the JSON-encoded [`MessageLogPayload`]. Payload
+ * `version` 2 adds `PersistedMessage.authorKeyB64`; a v1 row is
+ * still read (there is no migration and none is needed — the absent
+ * field fails the author gate closed exactly as a reloaded row
+ * always did), so the transcript survives rather than being wiped
+ * for a field whose absence is already safe.
  * Wrapped under the device root key (the non-extractable
  * AES-256-GCM `CryptoKey` from 1.16c3c2) — same posture as
  * the MLS snapshot blob.
@@ -44,6 +49,18 @@ const STORE = "logs";
 const IV_LEN = 12;
 
 // ----- JSON payload (mirror of iOS / Android shapes) -------------
+
+/**
+ * Payload schema version this client WRITES.
+ *
+ * v2 adds [`PersistedMessage.authorKeyB64`]. A v1 payload is still
+ * read: its rows simply carry no author identity, which fails the
+ * ADR-0023 edit/delete gate closed — the same thing every reloaded
+ * row did before the field existed. There is no migration and none
+ * is owed; discarding the transcript would cost history to fix
+ * nothing.
+ */
+export const MESSAGE_LOG_VERSION = 2;
 
 export interface PersistedAttachment {
   /** Base64-encoded 32-byte SHA-256 blob id. */
@@ -68,6 +85,23 @@ export interface PersistedMessage {
   readonly text: string;
   readonly attachments: readonly PersistedAttachment[];
   readonly createdAt: string;
+  /**
+   * ADR-0023 — the author's IDENTITY: their Ed25519 signature public
+   * key, base64, resolved from the MLS sender leaf at receipt (see
+   * `author-identity.ts`). `null` when the client could not resolve
+   * it, and **absent entirely on a v1 row written before this field
+   * existed** — both read back as "unknown author", which fails the
+   * edit/delete gate closed. That is the same posture every reloaded
+   * message had before this field existed; it never misattributes.
+   *
+   * Persisting it is what makes edit / delete survive a reload at
+   * all: the leaf could not be persisted, because a leaf stored now
+   * names a different member after the next commit. A signature key
+   * does not move, so there is nothing left to defer. No secret is
+   * added to the blob — the key is public, and already sits in the
+   * MLS snapshot store beside it.
+   */
+  readonly authorKeyB64?: string | null;
 }
 
 export interface PersistedGroup {

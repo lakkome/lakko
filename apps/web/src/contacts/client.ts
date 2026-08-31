@@ -79,13 +79,19 @@ import {
   parseEnvelope,
   wrapEnvelope,
 } from "./envelope";
-import { deleteEntry, loadUnacked, markAcked } from "../chat/commit-outbox";
+import {
+  deleteEntry,
+  loadUnacked,
+  markAcked,
+  markWelcomesOwed,
+} from "../chat/commit-outbox";
 import type {
   NewCommitEntry,
   PendingCommitEntry,
 } from "../chat/commit-outbox";
 import {
   resolveOwedVerdict,
+  resolveOwedWelcomes,
   runCommitterSweep,
   type SweepCursorRef,
   type SweepDurableEntry,
@@ -98,7 +104,8 @@ import type { ActingCommitter } from "../chat/committer-beacon";
 // timeline event. The sweep's verdict apply consumes journal rows the poll will
 // never fetch again, so it has to build events for them, and it has to build
 // them the same way the poll does.
-import { toEvent } from "../chat/client";
+import { rosterOf, toEvent } from "../chat/client";
+import { resolveMemberIdentity } from "../chat/author-identity";
 import type { IncomingChatEvent } from "../chat/client";
 // ADR-0045 UX §6 — the seventh refusal string, defined ONCE beside the rest of
 // the §6.1 copy. Both C-65 directions reuse it verbatim (a pending role change
@@ -516,6 +523,7 @@ function sweepPortsFor(
   ds: DsClient,
   onPersistWithCommit: ((entry: NewCommitEntry) => Promise<void>) | undefined,
   persist: () => Promise<void>,
+  persistApplied: () => Promise<void>,
   actingCommitter: (ownRank: number) => Promise<ActingCommitter>,
   onSweptEvent: (event: IncomingChatEvent) => void,
 ): SweepPorts {
@@ -568,7 +576,14 @@ function sweepPortsFor(
         // row exactly as the poll loop does.
         const processed = group.processIncomingVerifyingRoles(identity, row.payload);
         try {
-          onSweptEvent(await toEvent(row.id, row.createdAt, processed));
+          // The roster is read HERE, one line after the apply, because that
+          // is the epoch this row decrypted at — a leaf resolved any later
+          // can name whoever was added into a vacated slot since.
+          onSweptEvent(
+            await toEvent(row.id, row.createdAt, processed, (leaf) =>
+              resolveMemberIdentity(rosterOf(group), leaf),
+            ),
+          );
         } catch (err) {
           // The ratchet has already moved and the row is consumed, so an event
           // that could not be built costs one timeline row — never the verdict,
@@ -615,8 +630,24 @@ function sweepPortsFor(
         await onPersistWithCommit(next);
       },
       findOwed: async () => {
+        // A welcomes-owed entry has already reached a verdict, so it is not
+        // this finder's business — re-adjudicating it would re-publish a commit
+        // whose order was already read.
         const owed = (await loadUnacked(groupIdB64)).find(
-          (e) => e.sweepVerdictPending === true,
+          (e) => e.sweepVerdictPending === true && e.sweepWelcomesOwed !== true,
+        );
+        if (owed === undefined) return null;
+        return toSweepEntry(owed);
+      },
+      markWelcomesOwed: async (id, commitMessageId) => {
+        // Deliberately NOT routed through `onPersistWithCommit`: that co-writes
+        // the MLS snapshot, which `persist()` has already done one line earlier
+        // in the sweep. This is outbox bookkeeping only.
+        await markWelcomesOwed(id, commitMessageId);
+      },
+      findOwedWelcomes: async () => {
+        const owed = (await loadUnacked(groupIdB64)).find(
+          (e) => e.sweepWelcomesOwed === true,
         );
         if (owed === undefined) return null;
         return toSweepEntry(owed);
@@ -649,6 +680,7 @@ function sweepPortsFor(
     wrapWelcome: (welcome) => wrapEnvelope(KIND_WELCOME, welcome),
     markOwnPublished,
     persist,
+    persistApplied,
     encodeB64: base64Encode,
     decodeB64: base64Decode,
   };
@@ -674,12 +706,17 @@ function hasPendingRoleChange(group: WasmGroup): boolean {
 
 /** Project a stored outbox row onto the sweep's own entry shape. */
 function toSweepEntry(row: PendingCommitEntry): SweepDurableEntry {
-  return {
+  const entry: SweepDurableEntry = {
     id: row.id,
     commitB64: row.commitB64,
     welcomeEnvelopeB64: row.secondArtifactB64,
     welcomeMailboxesB64: row.welcomeMailboxesB64 ?? [],
   };
+  // Built without assigning `undefined` (exactOptionalPropertyTypes).
+  if (row.commitMessageId !== undefined) {
+    return { ...entry, commitMessageId: row.commitMessageId };
+  }
+  return entry;
 }
 
 export class ContactsClient {
@@ -745,6 +782,22 @@ export class ContactsClient {
       // eslint-disable-next-line no-console
       console.warn("ContactsClient: MLS snapshot persist failed", err);
     }
+  }
+
+  /**
+   * Fire the persist hook and RE-THROW on failure — the fail-closed variant the
+   * ADR-0045 sweep's verdict apply needs.
+   *
+   * That path applies journal rows and advances the SAME cursor the poll drives
+   * over them, so a swallowed failure there would leave the cursor ahead of the
+   * durable MLS state, which since ADR-0045 strands the device permanently. See
+   * `chat/durable-cursor.ts`. A no-op resolve when `onPersist` is unset, for
+   * the same reason `persistDurableOrThrow` is: such callers persist nothing
+   * and reload nothing.
+   */
+  private async persistDurableOrThrow(): Promise<void> {
+    if (this.onPersist === undefined) return;
+    await this.onPersist();
   }
 
   /**
@@ -903,6 +956,7 @@ export class ContactsClient {
           this.ds,
           this.onPersistWithCommit,
           () => this.persistBestEffort(),
+          () => this.persistDurableOrThrow(),
           actingCommitter,
           onSweptEvent,
         ),
@@ -935,30 +989,31 @@ export class ContactsClient {
     // — worse — re-publish its Welcome, which ADR-0045 forbids before the
     // verdict.
     if (cursor !== undefined) {
+      const owedPorts = async (): Promise<SweepPorts> =>
+        sweepPortsFor(
+          await loadWasm(),
+          await this.resolveIdentity(identity ?? null),
+          group,
+          cursor,
+          markOwnPublished,
+          this.ds,
+          this.onPersistWithCommit,
+          () => this.persistBestEffort(),
+          () => this.persistDurableOrThrow(),
+          // ADR-0045 S4b — never consulted on either owed path: an OWED
+          // verdict is finished by whoever staged it, not by whoever is
+          // currently acting, and `resolveOwedVerdict` therefore never asks. A
+          // `defer` is the fail-closed value should that ever change: it would
+          // stop a sweep from STARTING, which is recoverable, rather than let
+          // one start on no evidence, which is the hazard.
+          () => Promise.resolve({ kind: "defer", toRank: undefined }),
+          onSweptEvent ?? (() => {}),
+        );
+
       try {
-        const wasm = await loadWasm();
-        const myIdentity = await this.resolveIdentity(identity ?? null);
+        const ports = await owedPorts();
         await withGroupMlsLock(base64Encode(group.groupId), async () =>
-          resolveOwedVerdict(
-            sweepPortsFor(
-              wasm,
-              myIdentity,
-              group,
-              cursor,
-              markOwnPublished,
-              this.ds,
-              this.onPersistWithCommit,
-              () => this.persistBestEffort(),
-              // ADR-0045 S4b — never consulted on this path: an OWED verdict
-              // is finished by whoever staged it, not by whoever is currently
-              // acting, and `resolveOwedVerdict` therefore never asks. A
-              // `defer` is the fail-closed value should that ever change: it
-              // would stop a sweep from STARTING, which is recoverable, rather
-              // than let one start on no evidence, which is the hazard.
-              () => Promise.resolve({ kind: "defer", toRank: undefined }),
-              onSweptEvent ?? (() => {}),
-            ),
-          ),
+          resolveOwedVerdict(ports),
         );
       } catch (err) {
         // The journal was unreadable, so the verdict stays owed and the sweep
@@ -968,6 +1023,29 @@ export class ContactsClient {
         // abandoning on a verdict nobody read.
         // eslint-disable-next-line no-console
         console.warn("ContactsClient: owed sweep verdict unresolved", err);
+      }
+
+      // A sweep whose verdict SETTLED but whose Welcome never reached the wire
+      // owes only the fan-out. It is invisible to every other recovery path —
+      // the merge cleared `hasStagedSweep()` and emptied the pending set, and
+      // the legacy loop below skips sweep entries — so without this the added
+      // member stays in every peer's roster, addressed by every later message,
+      // permanently unable to construct group state.
+      //
+      // It runs AFTER the owed verdict on purpose: a still-staged sweep owes a
+      // VERDICT, and only once that has merged is a Welcome allowed on the wire
+      // at all (ADR-0045 obligation 2). `resolveOwedWelcomes` refuses while
+      // anything is staged, so the order here is belt to that braces.
+      try {
+        const ports = await owedPorts();
+        await withGroupMlsLock(base64Encode(group.groupId), async () =>
+          resolveOwedWelcomes(ports),
+        );
+      } catch (err) {
+        // The DS is still unreachable. The durable marker survives, so the next
+        // sweep — group open or poll tail — retries the fan-out.
+        // eslint-disable-next-line no-console
+        console.warn("ContactsClient: owed sweep Welcome unresolved", err);
       }
     }
 

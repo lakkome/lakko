@@ -139,10 +139,16 @@ public final class ChatRepository: ObservableObject {
 
     /// ADR-0040 (G-35) — per-group chain tail: the **serializing** lock the
     /// four group-membership create-commit paths run inside, joined by the
-    /// poll's apply half in G-38. Swift counterpart of the Android
-    /// `ChatRepository` per-group mutex — the same lock its `runSplitPoll`
-    /// takes — keyed per group so two different conversations never block each
-    /// other.
+    /// poll's apply half in G-38 and then by EVERY application send —
+    /// ``sendMessage(groupIdHex:plaintext:attachments:)``,
+    /// ``publishApplicationMessage(groupIdHex:plaintextBytes:)``,
+    /// ``broadcastPushRoutingControl(groupIdHex:bytes:)`` and the three
+    /// ADR-0023 message ops via ``publishMessageOpLocked(groupIdHex:envelopeBytes:applyLocally:)``
+    /// — because a send straddling an epoch change is lost permanently, not
+    /// merely reordered (see ``sealAndPublishLocked``). Swift counterpart of
+    /// the Android `ChatRepository` per-group mutex — the same lock its
+    /// `runSplitPoll` takes — keyed per group so two different conversations
+    /// never block each other.
     ///
     /// The value is the tail `Task` the next caller chains behind, type-erased
     /// to `Void` so one queue can hold sections returning different things.
@@ -825,6 +831,20 @@ public final class ChatRepository: ObservableObject {
     public func ownLeafIndex(groupIdHex: String) -> UInt32? {
         guard let record = groups[groupIdHex] else { return nil }
         return try? record.group.ownLeafIndex()
+    }
+
+    /// ADR-0023 — this device's own IDENTITY in `groupIdHex`: its Ed25519
+    /// signature key, base64, resolved THROUGH the roster rather than stored,
+    /// so a leaf renumber cannot make it name someone else.
+    ///
+    /// This is what every authorship decision on our own side reads — the
+    /// own-reaction highlight and the "read by every other member" exclusion.
+    /// ``ownLeafIndex(groupIdHex:)`` above stays for what a leaf is genuinely
+    /// for: a POSITION the MLS / SFU surfaces take and the roster marks "(you)"
+    /// with. Nothing that attributes authorship may compare it.
+    public func ownSignatureKeyB64(groupIdHex: String) -> MemberIdentity? {
+        guard let record = groups[groupIdHex] else { return nil }
+        return AuthorIdentity.own(group: record.group)
     }
 
     /// Our own ADR-0022 role in `groupIdHex` (`.owner` / `.admin` / `.member`),
@@ -1759,16 +1779,21 @@ public final class ChatRepository: ObservableObject {
         let result = try await withCommitLock(groupIdHex: groupIdHex) { [self] in
             try await sealAndPublishLocked(groupIdHex: groupIdHex, plaintextBytes: envelopeBytes)
         }
-        // ADR-0023 — stamp our own leaf as the author so a
-        // later edit / delete of this message passes the
-        // author-only gate on every peer (and locally).
-        let ownLeaf = try? record.group.ownLeafIndex()
+        // ADR-0023 — stamp our own IDENTITY as the author so a later edit /
+        // delete of this message passes the author-only gate locally (and, on
+        // every peer, against the identity they resolved for us at receipt).
+        //
+        // Stamped at SEND time, from the roster we are a member of right now —
+        // the same "resolve once, carry the key" shape the receive path uses
+        // for everyone else. Reading a leaf here and comparing it at gate time
+        // is what let any leaf, ours included, be reassigned to a member added
+        // later.
         record.appendOutgoing(
             text: plaintext,
             attachments: attachments,
             messageId: result.messageId,
             createdAt: result.createdAt,
-            authorLeaf: ownLeaf
+            authorKeyB64: AuthorIdentity.own(group: record.group)
         )
         // The MLS ratchet snapshot was already durably persisted
         // (fail-closed) inside `chatClient.sendMessage` BEFORE the publish,
@@ -1803,12 +1828,6 @@ public final class ChatRepository: ObservableObject {
         target: Int64,
         newText: String
     ) async throws {
-        guard let identity = canonicalIdentity else {
-            throw ChatError.argument("ChatRepository not bootstrapped")
-        }
-        guard let record = groups[groupIdHex] else {
-            throw ChatError.argument("no live Group handle for \(groupIdHex)")
-        }
         let envelopeBytes: Data
         do {
             envelopeBytes = try AttachmentBridge.composeEditBytes(
@@ -1818,14 +1837,12 @@ public final class ChatRepository: ObservableObject {
         } catch {
             throw ChatError.wrapped("edit envelope compose failed", underlying: error)
         }
-        _ = try await chatClient.sendMessage(
-            identity: identity,
-            group: record.group,
-            plaintext: envelopeBytes
-        )
-        record.applyLocalEdit(target: target, newText: newText)
-        persistSnapshotBestEffort()
-        state = state.with(threads: buildThreadList())
+        try await publishMessageOpLocked(
+            groupIdHex: groupIdHex,
+            envelopeBytes: envelopeBytes
+        ) { record in
+            record.applyLocalEdit(target: target, newText: newText)
+        }
     }
 
     /// ADR-0023 — delete (tombstone) our own message `target`.
@@ -1835,26 +1852,18 @@ public final class ChatRepository: ObservableObject {
         groupIdHex: String,
         target: Int64
     ) async throws {
-        guard let identity = canonicalIdentity else {
-            throw ChatError.argument("ChatRepository not bootstrapped")
-        }
-        guard let record = groups[groupIdHex] else {
-            throw ChatError.argument("no live Group handle for \(groupIdHex)")
-        }
         let envelopeBytes: Data
         do {
             envelopeBytes = try AttachmentBridge.composeDeleteBytes(target: target)
         } catch {
             throw ChatError.wrapped("delete envelope compose failed", underlying: error)
         }
-        _ = try await chatClient.sendMessage(
-            identity: identity,
-            group: record.group,
-            plaintext: envelopeBytes
-        )
-        record.applyLocalDelete(target: target)
-        persistSnapshotBestEffort()
-        state = state.with(threads: buildThreadList())
+        try await publishMessageOpLocked(
+            groupIdHex: groupIdHex,
+            envelopeBytes: envelopeBytes
+        ) { record in
+            record.applyLocalDelete(target: target)
+        }
     }
 
     /// ADR-0023 — react to message `target` with `emoji`.
@@ -1867,12 +1876,6 @@ public final class ChatRepository: ObservableObject {
         target: Int64,
         emoji: String
     ) async throws {
-        guard let identity = canonicalIdentity else {
-            throw ChatError.argument("ChatRepository not bootstrapped")
-        }
-        guard let record = groups[groupIdHex] else {
-            throw ChatError.argument("no live Group handle for \(groupIdHex)")
-        }
         let envelopeBytes: Data
         do {
             envelopeBytes = try AttachmentBridge.composeReactionBytes(
@@ -1882,13 +1885,67 @@ public final class ChatRepository: ObservableObject {
         } catch {
             throw ChatError.wrapped("reaction envelope compose failed", underlying: error)
         }
-        _ = try await chatClient.sendMessage(
-            identity: identity,
-            group: record.group,
-            plaintext: envelopeBytes
-        )
-        if let ownLeaf = try? record.group.ownLeafIndex() {
-            record.applyLocalReaction(target: target, emoji: emoji, ownLeaf: ownLeaf)
+        try await publishMessageOpLocked(
+            groupIdHex: groupIdHex,
+            envelopeBytes: envelopeBytes
+        ) { record in
+            // Read off the RE-READ record, for the same reason the record is
+            // re-read at all — a predecessor's persist-abort replaces it.
+            //
+            // Our own identity, not our own leaf: the chip's "mine" test and
+            // the peers' fold have to agree on one value that survives a
+            // renumber. A torn roster read falls back to the sentinel, which
+            // still toggles and still counts locally and — being outside the
+            // base64 alphabet — can never collide with a real member.
+            record.applyLocalReaction(
+                target: target,
+                emoji: emoji,
+                reactor: AuthorIdentity.own(group: record.group)
+                    ?? AuthorIdentity.ownReactionSentinel)
+        }
+    }
+
+    /// The serialized body the three ADR-0023 message ops share: seal + persist
+    /// + publish through ``sealAndPublishLocked``, then fold the op into OUR OWN
+    /// timeline (the sender never receives its own application message back).
+    ///
+    /// ## Why an op takes the commit lock
+    ///
+    /// An edit / delete / reaction is an ordinary MLS application message, so it
+    /// carries the ``sealAndPublishLocked`` hazard verbatim — that doc comment
+    /// is the reasoning; this one records only what is specific to an op. These
+    /// three called `ChatClient.sendMessage` bare, outside the chain, while the
+    /// chat send and the control broadcast beside them were serialized.
+    ///
+    /// ## The local apply's ordering is deliberate, both ways
+    ///
+    /// **After the publish.** A delete that applied first would show the user
+    /// "message deleted" for a message that never reached the wire and that
+    /// every peer still renders — a user told their message is gone when it is
+    /// not. A throw from ``sealAndPublishLocked`` therefore skips the apply
+    /// entirely, which is what these paths already did and what routing them
+    /// through the lock must not quietly change.
+    ///
+    /// **Inside the region.** ``withCommitLock(groupIdHex:_:)``'s contract is
+    /// that a `GroupRecord` read BEFORE the wait can be stale: a predecessor
+    /// that aborted its persist calls ``resetGroupToDurableSnapshot(groupIdHex:)``,
+    /// which REPLACES the record with a fresh one seeded from a *copy* of the
+    /// timeline. An apply against the orphan would mutate nothing the UI reads
+    /// and the edit would silently vanish. So the record is re-read here, the
+    /// way every other `…Locked` body re-reads it — and the caller no longer
+    /// looks one up at all.
+    private func publishMessageOpLocked(
+        groupIdHex: String,
+        envelopeBytes: Data,
+        applyLocally: @escaping @MainActor (GroupRecord) -> Void
+    ) async throws {
+        try await withCommitLock(groupIdHex: groupIdHex) { [self] in
+            _ = try await sealAndPublishLocked(
+                groupIdHex: groupIdHex,
+                plaintextBytes: envelopeBytes
+            )
+            guard let record = groups[groupIdHex] else { return }
+            applyLocally(record)
         }
         persistSnapshotBestEffort()
         state = state.with(threads: buildThreadList())
@@ -2534,8 +2591,8 @@ public final class ChatRepository: ObservableObject {
             raw: raw,
             after: after
         )
-        record.applyPollResult(
-            result,
+        record.consumeEvents(
+            result.events,
             callSignalingSink: { [weak self] payload in
                 self?.callSignalingSink?(groupIdHex, payload)
             },
@@ -2566,9 +2623,31 @@ public final class ChatRepository: ObservableObject {
                     groupIdHex: groupIdHex, record: record, createdAt: createdAt)
             }
         )
-        if !result.events.isEmpty {
-            persistSnapshotBestEffort()
-        }
+        // THE ORDERING RULE — persist first, advance the cursor second, and hold
+        // the cursor when the write does not land. See `Chat/DurableCursor.swift`
+        // for why the cursor may lag the durable MLS state but must never lead
+        // it: since ADR-0045 a proposal applied here but not persisted, with the
+        // cursor already past it, makes the commit that carries it by reference
+        // permanently unappliable and strands this device at epoch N forever.
+        //
+        // The persist is the FAIL-CLOSED `persistSnapshotDurableOrThrow`, not
+        // the swallowing `persistSnapshotBestEffort` this used to call.
+        applyDurableCursorBatch(
+            gate: cursorGate,
+            touchedMlsState: result.touchedMlsState,
+            // Strong `self`: `commit`'s closures are non-escaping, so this is no
+            // cycle — and `[weak self]` plus optional chaining would silently
+            // resolve to "the write succeeded" when it never ran at all, which
+            // is the one direction this gate must never fail in.
+            persist: { try self.persistSnapshotDurableOrThrow() },
+            advance: { record.advanceCursor(to: result.cursor) }
+        )
+        // The plaintext timeline is written either way — held or advanced — and
+        // deliberately AFTER the gate so it records whatever cursor the gate
+        // left. It is not MLS state: a stale timeline costs a re-render, never a
+        // strand. Skipped for a batch that produced nothing, as before, so an
+        // idle long poll still writes no file.
+        if !result.events.isEmpty { persistMessageLogBestEffort() }
         state = state.with(threads: buildThreadList())
         // ADR-0043 — did someone else's Remove commit just land? Then the
         // evicted member still holds this group's push_routing_secret and
@@ -2962,7 +3041,18 @@ public final class ChatRepository: ObservableObject {
                             ChatClient.toEvent(
                                 messageId: row.id,
                                 createdAt: row.createdAt,
-                                processed: processed
+                                processed: processed,
+                                // ADR-0023 — the SECOND receive path, and it
+                                // must resolve identically to the poll: the
+                                // roster is read here, one line after the
+                                // apply, in the epoch this row decrypted at.
+                                // These rows are gone from the poll's future
+                                // forever, so an author resolved wrongly here
+                                // is resolved wrongly for good. It passes the
+                                // GROUP, not a resolver of its own — the two
+                                // paths are then left nothing to disagree
+                                // about.
+                                group: record.group
                             )
                         ],
                         callSignalingSink: { [weak self] payload in
@@ -3057,14 +3147,47 @@ public final class ChatRepository: ObservableObject {
                 },
                 findOwed: { [weak self] in
                     guard let self, let accountIdB64 = self.currentAccountIdB64 else { return nil }
+                    // A welcomes-owed entry has already reached a verdict, so it
+                    // is not this finder's business — re-adjudicating it would
+                    // re-publish a commit whose order was already read.
                     guard let row = self.commitOutbox.loadUnacked(
                         accountIdB64: accountIdB64, groupIdB64: groupIdB64
-                    ).first(where: { $0.sweepVerdictPending == true }) else { return nil }
+                    ).first(where: {
+                        $0.sweepVerdictPending == true && $0.sweepWelcomesOwed != true
+                    }) else { return nil }
                     return SweepDurableEntry(
                         id: row.id,
                         commitB64: row.commitB64,
                         welcomeEnvelopeB64: row.secondArtifactB64,
-                        welcomeMailboxesB64: row.welcomeMailboxesB64 ?? []
+                        welcomeMailboxesB64: row.welcomeMailboxesB64 ?? [],
+                        commitMessageId: row.commitMessageId
+                    )
+                },
+                markWelcomesOwed: { [weak self] id, commitMessageId in
+                    guard let self, let accountIdB64 = self.currentAccountIdB64 else {
+                        throw ChatError.argument("no account — cannot record the owed Welcome")
+                    }
+                    // Outbox bookkeeping only: the MLS snapshot was persisted one
+                    // line earlier by the sweep's own `persist`, so this
+                    // deliberately does NOT go through
+                    // `persistCommitEntryThenSnapshotOrThrow`.
+                    try self.commitOutbox.markWelcomesOwed(
+                        accountIdB64: accountIdB64,
+                        id: id,
+                        commitMessageId: commitMessageId
+                    )
+                },
+                findOwedWelcomes: { [weak self] in
+                    guard let self, let accountIdB64 = self.currentAccountIdB64 else { return nil }
+                    guard let row = self.commitOutbox.loadUnacked(
+                        accountIdB64: accountIdB64, groupIdB64: groupIdB64
+                    ).first(where: { $0.sweepWelcomesOwed == true }) else { return nil }
+                    return SweepDurableEntry(
+                        id: row.id,
+                        commitB64: row.commitB64,
+                        welcomeEnvelopeB64: row.secondArtifactB64,
+                        welcomeMailboxesB64: row.welcomeMailboxesB64 ?? [],
+                        commitMessageId: row.commitMessageId
                     )
                 },
                 ack: { [weak self] id, commitMessageId, welcomeMessageId in
@@ -3090,7 +3213,21 @@ public final class ChatRepository: ObservableObject {
             markOwnPublished: { [weak self] id in
                 self?.chatClient.markOwnPublishedCommit(messageId: id)
             },
-            persist: { [weak self] in self?.persistSnapshotBestEffort() }
+            persist: { [weak self] in self?.persistSnapshotBestEffort() },
+            // The verdict apply advances the SAME cursor the poll drives, so it
+            // takes the FAIL-CLOSED persist — see `Chat/DurableCursor.swift`.
+            // This one IS escaping (it is stored on the ports struct), so `self`
+            // is captured weakly — but a released repository THROWS rather than
+            // resolving to "the write succeeded". Optional-chaining it away would
+            // let the sweep advance the shared cursor over rows nothing wrote.
+            persistApplied: { [weak self] in
+                guard let self else {
+                    throw ChatError.argument(
+                        "ADR-0045 verdict apply: repository released before the snapshot write"
+                    )
+                }
+                try self.persistSnapshotDurableOrThrow()
+            }
         )
     }
 
@@ -3638,6 +3775,26 @@ public final class ChatRepository: ObservableObject {
             // merging or abandoning on a verdict nobody read.
             NSLog("ADR-0045 owed sweep verdict unresolved: \(error)")
         }
+        // A sweep whose verdict SETTLED but whose Welcome never reached the wire
+        // owes only the fan-out. It is invisible to every other recovery path —
+        // the merge cleared `hasStagedSweep()` and emptied the pending set, and
+        // the legacy loop below skips sweep entries — so without this the added
+        // member stays in every peer's roster, addressed by every later message,
+        // permanently unable to construct group state.
+        //
+        // It runs AFTER the owed verdict on purpose: a still-staged sweep owes a
+        // VERDICT, and only once that has merged is a Welcome allowed on the wire
+        // at all (ADR-0045 obligation 2). `resolveOwedWelcomes` refuses while
+        // anything is staged, so the order here is belt to that braces.
+        do {
+            _ = try await withCommitLock(groupIdHex: groupIdHex) { [self] in
+                try await resolveOwedWelcomes(sweepPorts(record: record, groupIdHex: groupIdHex))
+            }
+        } catch {
+            // The DS is still unreachable. The durable marker survives, so the
+            // next sweep — group open or poll tail — retries the fan-out.
+            NSLog("ADR-0045 owed sweep Welcome unresolved: \(error)")
+        }
         let groupIdB64 = base64Encode(record.groupId)
         let entries = commitOutbox.loadUnacked(
             accountIdB64: accountIdB64,
@@ -3752,6 +3909,14 @@ public final class ChatRepository: ObservableObject {
             NSLog("commit-outbox re-publish failed, will retry: \(entry.id) \(error)")
         }
     }
+
+    /// The receive path's cursor-may-lag-never-lead gate.
+    ///
+    /// ONE per repository, which is the accurate granularity: `snapshotStorage()`
+    /// serialises the WHOLE provider, so a failed persist leaves every group
+    /// behind and any successful one flushes them all. See
+    /// `Chat/DurableCursor.swift`.
+    private let cursorGate = DurableCursorGate()
 
     private func persistSnapshotBestEffort() {
         guard let identity = canonicalIdentity,
@@ -3901,13 +4066,20 @@ public struct ChatMessage: Equatable, Identifiable {
     public internal(set) var text: String
     public let attachments: [AttachmentRef]
     public let createdAt: String
-    /// ADR-0023 — the original author's MLS leaf index. Set on
-    /// arrival from the Application frame's sender leaf; for our
-    /// own outgoing messages it is `ownLeafIndex()`. `nil` for a
-    /// frame whose sender leaf was unavailable (a system row, an
-    /// external sender) — such a message can never be a valid
-    /// edit / delete target (the author-only gate fails closed).
-    public let authorLeaf: UInt32?
+    /// ADR-0023 — the original author's IDENTITY: their Ed25519 signature
+    /// public key, base64. Set on arrival from the identity the receive loop
+    /// resolved out of the Application frame's sender leaf, in the epoch that
+    /// named it; for our own outgoing messages it is this device's own key,
+    /// stamped at send. `nil` when the author could not be resolved (a system
+    /// row, an external sender, a row stored before this field existed) — such
+    /// a message can never be a valid edit / delete target (the author-only
+    /// gate fails closed).
+    ///
+    /// It is not a leaf, and there is nowhere left that keeps one: OpenMLS
+    /// hands a vacated leaf to the next member added, so a leaf stored here
+    /// would start naming a stranger after the next commit — permanently,
+    /// because this field is persisted. See ``AuthorIdentity``.
+    public let authorKeyB64: MemberIdentity?
     /// ADR-0023 — `true` after an author-gated edit op folded its
     /// new text into this message. The UI renders a subtle
     /// "(edited)" marker.
@@ -3917,7 +4089,7 @@ public struct ChatMessage: Equatable, Identifiable {
     /// deleted" placeholder in place of the body.
     public internal(set) var deleted: Bool
     /// ADR-0023 — reactions folded onto this message, one entry
-    /// per `(reactorLeaf, emoji)`. Re-receiving the same pair
+    /// per `(reactor, emoji)`. Re-receiving the same pair
     /// toggles the entry off. The UI aggregates by emoji into
     /// chips with counts.
     public internal(set) var reactions: [Reaction]
@@ -3928,7 +4100,7 @@ public struct ChatMessage: Equatable, Identifiable {
         text: String,
         attachments: [AttachmentRef] = [],
         createdAt: String,
-        authorLeaf: UInt32? = nil,
+        authorKeyB64: MemberIdentity? = nil,
         edited: Bool = false,
         deleted: Bool = false,
         reactions: [Reaction] = []
@@ -3938,7 +4110,7 @@ public struct ChatMessage: Equatable, Identifiable {
         self.text = text
         self.attachments = attachments
         self.createdAt = createdAt
-        self.authorLeaf = authorLeaf
+        self.authorKeyB64 = authorKeyB64
         self.edited = edited
         self.deleted = deleted
         self.reactions = reactions
@@ -3950,17 +4122,23 @@ public struct ChatMessage: Equatable, Identifiable {
     public var id: Int64 { messageId }
 
     /// ADR-0023 — aggregate the reaction list into `(emoji,
-    /// count, reactedByOwnLeaf)` rows for the chip UI. A nil
-    /// `ownLeaf` (no handle) renders the chips without the
-    /// "reacted by you" highlight.
-    public func reactionSummary(ownLeaf: UInt32?) -> [ReactionTally] {
+    /// count, reactedByMe)` rows for the chip UI.
+    ///
+    /// `own` is this device's signature key, NOT its leaf: a leaf compared
+    /// against a stored reactor would start matching a stranger after a
+    /// renumber, lighting the "you reacted" highlight on somebody else's
+    /// reaction. A nil `own` (no handle) falls back to the sentinel our own
+    /// unresolved reactions were filed under, so the highlight still matches
+    /// what this device actually contributed.
+    public func reactionSummary(own: MemberIdentity?) -> [ReactionTally] {
+        let mineKey = own ?? AuthorIdentity.ownReactionSentinel
         var order: [String] = []
         var counts: [String: Int] = [:]
         var mine: Set<String> = []
         for r in reactions {
             if counts[r.emoji] == nil { order.append(r.emoji) }
             counts[r.emoji, default: 0] += 1
-            if let own = ownLeaf, r.reactorLeaf == own { mine.insert(r.emoji) }
+            if r.reactor == mineKey { mine.insert(r.emoji) }
         }
         return order.map {
             ReactionTally(
@@ -3972,15 +4150,20 @@ public struct ChatMessage: Equatable, Identifiable {
     }
 }
 
-/// ADR-0023 — a single reaction: who (MLS leaf) reacted with
-/// which emoji. Attribution is per-epoch + ephemeral (the
-/// open-question on leaf renumbering is accepted for v1).
+/// ADR-0023 — a single reaction: who reacted with which emoji.
+///
+/// `reactor` is the member's signature key, never their MLS leaf. The
+/// leaf-renumbering "open question" this type used to carry was not an open
+/// question but a live defect: a member added into a departed member's vacated
+/// leaf toggled the departed member's reaction OFF, and because removing the
+/// last reactor prunes the emoji from the set entirely, the chip disappeared
+/// rather than merely miscounting. See ``AuthorIdentity``.
 public struct Reaction: Equatable {
-    public let reactorLeaf: UInt32
+    public let reactor: MemberIdentity
     public let emoji: String
 
-    public init(reactorLeaf: UInt32, emoji: String) {
-        self.reactorLeaf = reactorLeaf
+    public init(reactor: MemberIdentity, emoji: String) {
+        self.reactor = reactor
         self.emoji = emoji
     }
 }
@@ -4053,7 +4236,7 @@ private final class GroupRecord {
         attachments: [AttachmentRef] = [],
         messageId: Int64,
         createdAt: String,
-        authorLeaf: UInt32?
+        authorKeyB64: MemberIdentity?
     ) {
         messages.append(
             ChatMessage(
@@ -4062,7 +4245,7 @@ private final class GroupRecord {
                 text: text,
                 attachments: attachments,
                 createdAt: createdAt,
-                authorLeaf: authorLeaf
+                authorKeyB64: authorKeyB64
             )
         )
     }
@@ -4085,34 +4268,15 @@ private final class GroupRecord {
     }
 
     /// ADR-0023 — toggle our own reaction locally on `target`.
-    func applyLocalReaction(target: Int64, emoji: String, ownLeaf: UInt32) {
-        toggleReaction(target: target, reactorLeaf: ownLeaf, emoji: emoji)
-    }
-
-    func applyPollResult(
-        _ result: PollMessagesResult,
-        callSignalingSink: ((Data) -> Void)? = nil,
-        chatStatusSink: ((ChatStatusEvent) -> Void)? = nil,
-        pushRoutingSecretSink: ((Data, UInt64, UInt32?) -> Void)? = nil,
-        committerBeaconSink: ((UInt32?, String) -> Void)? = nil,
-        membershipProposalSink: ((ProposalRecord, String) -> Void)? = nil
-    ) {
-        consumeEvents(
-            result.events,
-            callSignalingSink: callSignalingSink,
-            chatStatusSink: chatStatusSink,
-            pushRoutingSecretSink: pushRoutingSecretSink,
-            committerBeaconSink: committerBeaconSink,
-            membershipProposalSink: membershipProposalSink
-        )
-        cursor = result.cursor
+    func applyLocalReaction(target: Int64, emoji: String, reactor: MemberIdentity) {
+        toggleReaction(target: target, reactor: reactor, emoji: emoji)
     }
 
     /// Consume a batch of receive-path events — the ONE place a decoded event
     /// becomes record state.
     ///
-    /// Two callers, and that is the point. The poll is the obvious one, via
-    /// ``applyPollResult(_:callSignalingSink:chatStatusSink:pushRoutingSecretSink:committerBeaconSink:membershipProposalSink:)``.
+    /// Two callers, and that is the point. The poll is the obvious one
+    /// (``ChatRepository`` calls this directly from its locked apply region).
     /// The other is the ADR-0045 committer sweep: its verdict applies every
     /// journal row the DS ordered below its own commit and then advances the SAME
     /// cursor over them, so those rows are gone from the poll's future forever. A
@@ -4122,10 +4286,14 @@ private final class GroupRecord {
     /// function is what keeps the two from drifting — every envelope kind is
     /// folded here once.
     ///
-    /// Deliberately does NOT touch ``cursor``: the poll advances it from the batch
-    /// it fetched, the sweep advances it itself to the last row its verdict
-    /// consumed, and a second writer here would let one path wind the other's
-    /// cursor.
+    /// Deliberately does NOT touch ``cursor``, and neither does any other
+    /// event-folding entry point: since the receive-durability fix, the ONLY way
+    /// this record's cursor moves on either path is
+    /// ``applyDurableCursorBatch(gate:touchedMlsState:persist:advance:)``, which
+    /// refuses to advance it past a batch whose snapshot did not reach disk. A
+    /// second writer here would not merely let one path wind the other's cursor
+    /// — it would route around that gate, which is the defect it exists to
+    /// prevent. See `Chat/DurableCursor.swift`.
     ///
     /// Events must arrive in journal order; the op fold assumes it.
     func consumeEvents(
@@ -4138,7 +4306,7 @@ private final class GroupRecord {
     ) {
         for event in events {
             switch event {
-            case .application(let messageId, let text, let attachments, let senderLeaf, let createdAt):
+            case .application(let messageId, let text, let attachments, let senderKey, let createdAt):
                 messages.append(
                     ChatMessage(
                         messageId: messageId,
@@ -4146,10 +4314,10 @@ private final class GroupRecord {
                         text: text,
                         attachments: attachments,
                         createdAt: createdAt,
-                        authorLeaf: senderLeaf
+                        authorKeyB64: senderKey
                     )
                 )
-            case .op(_, let op, let target, let text, let emoji, let senderLeaf, let createdAt):
+            case .op(_, let op, let target, let text, let emoji, let senderKey, let createdAt):
                 // ADR-0024 — typing / read-receipt ops render NO bubble
                 // and never touch the timeline. They surface to the view
                 // model via `chatStatusSink` (ephemeral typing state +
@@ -4157,10 +4325,10 @@ private final class GroupRecord {
                 // (edit / delete / reaction) still fold into the target.
                 switch op {
                 case .typing(let isTyping):
-                    if let senderLeaf = senderLeaf {
+                    if let senderKey = senderKey {
                         chatStatusSink?(
                             .typing(
-                                senderLeaf: senderLeaf,
+                                sender: senderKey,
                                 isTyping: isTyping,
                                 createdAt: createdAt
                             )
@@ -4168,9 +4336,9 @@ private final class GroupRecord {
                     }
                     continue
                 case .readReceipt:
-                    if let senderLeaf = senderLeaf {
+                    if let senderKey = senderKey {
                         chatStatusSink?(
-                            .readReceipt(senderLeaf: senderLeaf, upTo: target)
+                            .readReceipt(sender: senderKey, upTo: target)
                         )
                     }
                     continue
@@ -4180,7 +4348,7 @@ private final class GroupRecord {
                         target: target,
                         text: text,
                         emoji: emoji,
-                        senderLeaf: senderLeaf
+                        senderKey: senderKey
                     )
                 }
             case .system(let messageId, let systemKind, let createdAt):
@@ -4241,55 +4409,68 @@ private final class GroupRecord {
     /// op is applied exactly once.
     ///
     /// **Author-only gate** (the security core): an edit or
-    /// delete is applied ONLY when the op's sender leaf equals
-    /// the target message's stored author leaf; otherwise it is
+    /// delete is applied ONLY when the op's sender IDENTITY equals
+    /// the target message's stored author identity; otherwise it is
     /// dropped (fail-closed — invariant #4). An unknown target or
-    /// an op with no sender leaf is likewise dropped. A reaction
+    /// an op with no resolvable sender is likewise dropped. A reaction
     /// is accepted from any member (reacting to others' messages
-    /// is the point) but attributed to its sender leaf for dedup
+    /// is the point) but attributed to its sender identity for dedup
     /// + per-user toggle.
+    ///
+    /// Both comparisons are on the **signature key**, resolved back in the
+    /// receive loop from the MLS sender leaf in the epoch that named it.
+    /// Comparing the raw leaves here is what let a member added into a
+    /// departed member's vacated leaf rewrite and erase that member's history
+    /// — and, because the author leaf was persisted, keep doing so across
+    /// every restart. See ``AuthorIdentity``.
     private func applyIncomingOp(
         op: OpKind,
         target: Int64,
         text: String,
         emoji: String?,
-        senderLeaf: UInt32?
+        senderKey: MemberIdentity?
     ) {
-        guard let senderLeaf = senderLeaf else { return }
+        guard let senderKey = senderKey else { return }
         guard let idx = messages.firstIndex(where: { $0.messageId == target }) else { return }
         switch op {
         case .edit:
-            guard messages[idx].authorLeaf == senderLeaf else { return }
+            guard AuthorIdentity.editDeleteAuthorized(
+                author: messages[idx].authorKeyB64, opSender: senderKey) else { return }
             guard !messages[idx].deleted else { return }
             messages[idx].text = text
             messages[idx].edited = true
         case .delete:
-            guard messages[idx].authorLeaf == senderLeaf else { return }
+            guard AuthorIdentity.editDeleteAuthorized(
+                author: messages[idx].authorKeyB64, opSender: senderKey) else { return }
             messages[idx].deleted = true
         case .reaction:
             guard let emoji = emoji, !emoji.isEmpty else { return }
-            toggleReaction(target: target, reactorLeaf: senderLeaf, emoji: emoji)
+            toggleReaction(target: target, reactor: senderKey, emoji: emoji)
         case .typing, .readReceipt:
             // ADR-0024 — typing / read-receipt ops are routed out of
-            // the timeline fold in `applyPollResult` (they render no
+            // the timeline fold in `consumeEvents` (they render no
             // bubble), so they never reach this path. Handled here only
             // to keep the switch exhaustive.
             return
         }
     }
 
-    /// Toggle a `(reactorLeaf, emoji)` pair on `target`: present
+    /// Toggle a `(reactor, emoji)` pair on `target`: present
     /// → remove, else add. Shared by the incoming-op fold + the
     /// local own-reaction path.
-    private func toggleReaction(target: Int64, reactorLeaf: UInt32, emoji: String) {
+    ///
+    /// `reactor` is a signature key: keyed on the leaf, a newcomer at a
+    /// vacated leaf matched the departed member's entry and REMOVED it, so
+    /// their reaction did not add — it destroyed one.
+    private func toggleReaction(target: Int64, reactor: MemberIdentity, emoji: String) {
         guard let idx = messages.firstIndex(where: { $0.messageId == target }) else { return }
         if let existing = messages[idx].reactions.firstIndex(
-            where: { $0.reactorLeaf == reactorLeaf && $0.emoji == emoji }
+            where: { $0.reactor == reactor && $0.emoji == emoji }
         ) {
             messages[idx].reactions.remove(at: existing)
         } else {
             messages[idx].reactions.append(
-                Reaction(reactorLeaf: reactorLeaf, emoji: emoji)
+                Reaction(reactor: reactor, emoji: emoji)
             )
         }
     }

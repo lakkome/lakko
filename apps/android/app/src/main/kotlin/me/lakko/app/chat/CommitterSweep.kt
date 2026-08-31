@@ -272,6 +272,13 @@ internal data class SweepDurableEntry(
     val commitB64: String,
     val welcomeEnvelopeB64: String?,
     val welcomeMailboxesB64: List<String>,
+    /**
+     * The DS id of the published commit, recorded alongside the welcomes-owed
+     * marker. Diagnostics only — it is carried so the eventual ack can name the
+     * commit it belongs to rather than inventing one. `null` until the verdict
+     * settled.
+     */
+    val commitMessageId: Long? = null,
 )
 
 /** The ADR-0040 outbox operations the sweep drives. */
@@ -285,11 +292,45 @@ internal interface SweepOutboxPort {
      */
     suspend fun record(entry: SweepDurableEntry)
 
-    /** The un-acked verdict-owed entry for this group, or `null`. */
+    /**
+     * The un-acked entry whose **verdict** is still owed, or `null`.
+     *
+     * A welcomes-owed entry is deliberately NOT returned here: its verdict is
+     * settled and its commit is merged, so re-adjudicating it would re-publish a
+     * commit whose order was already read.
+     */
     suspend fun findOwed(): SweepDurableEntry?
 
+    /**
+     * Flip the entry from *verdict owed* to *Welcome fan-out owed*, and record
+     * the DS id its commit published under, in ONE durable write.
+     *
+     * ## What a restart must, and must not, do with this
+     *
+     * MUST: re-publish the entry's Welcome to every mailbox in
+     * [SweepDurableEntry.welcomeMailboxesB64], then ack. MUST NOT: re-publish
+     * the commit, re-adjudicate, or apply another journal row — the verdict is
+     * already known and the commit is already merged.
+     *
+     * The marker is written strictly AFTER [SweepGroupPort.mergeStagedSweep] and
+     * its persist, and that ordering is what keeps obligation 2 intact: the
+     * marker IS the durable statement "the verdict said WON", so recording it any
+     * earlier would let a pre-verdict restart publish a Welcome for a commit that
+     * then lost — the three-party fork. A restart that finds a staged sweep
+     * instead finds no marker, and [resolveOwedWelcomes] refuses outright while
+     * one is staged, so the two states cannot be confused even if a write were
+     * ever to land out of order.
+     *
+     * A throw is NOT fatal — see the call site.
+     */
+    suspend fun markWelcomesOwed(id: String, commitMessageId: Long)
+
+    /** The un-acked entry whose verdict settled but whose Welcome fan-out is
+     *  still owed, or `null`. */
+    suspend fun findOwedWelcomes(): SweepDurableEntry?
+
     /** Mark the entry acked once every artifact is on the wire. */
-    suspend fun ack(id: String, commitMessageId: Long, welcomeMessageId: Long?)
+    suspend fun ack(id: String, commitMessageId: Long?, welcomeMessageId: Long?)
 
     /** Delete the entry. Used on a LOSS: a commit that lost the order must never
      *  be re-published by the restart sweep. */
@@ -336,6 +377,24 @@ internal class SweepPorts(
     val markOwnPublished: (Long) -> Unit,
     /** Best-effort MLS snapshot persist after a merge / abandon. */
     val persist: suspend () -> Unit,
+    /**
+     * FAIL-CLOSED MLS snapshot persist — THROWS on a failed write, and is called
+     * from INSIDE an [SweepGroupPort.exclusiveProvider] region (so, unlike
+     * [persist], it must NOT take the provider lock itself — `Mutex` is not
+     * reentrant).
+     *
+     * Used by `adjudicate` only, and it has to be a separate port from [persist]
+     * because the two want opposite things from a failure. The verdict apply
+     * consumes journal rows the poll will never fetch again, so it advances the
+     * shared cursor over them — which makes it subject to exactly the ordering
+     * rule the poll obeys: the cursor may lag the durable MLS state, never lead
+     * it. See [DurableCursorGate].
+     *
+     * NON-suspending on purpose: that is what makes "does not take the provider
+     * lock" a compile-time property rather than a comment. [persist] is
+     * `suspend` precisely because it DOES take it.
+     */
+    val persistApplied: () -> Unit,
     val encodeB64: (ByteArray) -> String,
     val decodeB64: (String) -> ByteArray,
 )
@@ -371,6 +430,17 @@ public sealed class SweepOutcome {
     /** Lost the journal order: abandoned, no Welcome published, the proposals
      *  survive for the winner's next sweep. */
     data class Lost(val commitMessageId: Long) : SweepOutcome()
+
+    /** A previous run merged a winning sweep but could not get its Welcome onto
+     *  the wire. The fan-out has now been retried and acked. */
+    data class WelcomesRepublished(
+        val welcomeMessageIds: List<Long>,
+        val addedCount: Int,
+    ) : SweepOutcome()
+
+    /** No settled-verdict entry was waiting on its Welcome fan-out. The common
+     *  case, and what a staged sweep also reports — that one owes a VERDICT. */
+    object NoWelcomesOwed : SweepOutcome()
 
     /** A staged sweep was found with no durable record of its commit, so the
      *  commit provably never reached the wire (ADR-0040 records before it
@@ -465,6 +535,27 @@ internal suspend fun runCommitterSweep(ports: SweepPorts): SweepOutcome {
             }
         }
     }
+    if (prelude == SweepPrelude.OwedVerdict) return resolveOwedVerdict(ports)
+
+    // The same obligation, one step further along: a sweep whose verdict settled
+    // but whose Welcome never reached the wire owes that fan-out, and nothing
+    // else will ever notice — the merge cleared `hasStagedSweep()` and emptied
+    // the pending set, so both prelude answers below would report an idle group
+    // over a member who can never join.
+    //
+    // Placed BEFORE the rank branch for the same reason the owed verdict is: a
+    // device demoted since the merge still owes the Welcome for a member it
+    // successfully added, and nobody else holds those bytes. Run OUTSIDE the
+    // prelude's provider region — it takes its own, and `Mutex` is not
+    // reentrant.
+    //
+    // The cost is one small store read per attempt where there was none. That is
+    // deliberate: the outbox holds at most one entry per in-flight commit, and
+    // the alternative is a repair that only runs when the user happens to reopen
+    // the chat.
+    val owedWelcomes = resolveOwedWelcomes(ports)
+    if (owedWelcomes !is SweepOutcome.NoWelcomesOwed) return owedWelcomes
+
     val rank = when (prelude) {
         SweepPrelude.OwedVerdict -> return resolveOwedVerdict(ports)
         SweepPrelude.NotCommitter -> return SweepOutcome.NotCommitter(null)
@@ -568,6 +659,61 @@ internal suspend fun resolveOwedVerdict(ports: SweepPorts): SweepOutcome {
 }
 
 /**
+ * Finish a Welcome fan-out a previous run merged but could not publish.
+ *
+ * ## The failure this repairs
+ *
+ * `publishAndAdjudicate` merges, persists, and only then publishes the Welcome.
+ * A transient DS failure in that last step used to be unrecoverable: the merge
+ * had already cleared `hasStagedSweep()` AND emptied the pending-proposal set,
+ * which are exactly the two signals [runCommitterSweep] and [resolveOwedVerdict]
+ * branch on, so both reported "nothing to do" while the added member sat in
+ * every peer's roster unable to ever join. The durable welcomes-owed marker is
+ * what gives that state a name, and this is what reads it.
+ *
+ * ## What it must NOT do
+ *
+ * Not re-adjudicate, and not re-publish the commit. The verdict is settled and
+ * the commit merged; re-reading the journal order would apply rows against a
+ * question that is no longer open, and a second commit publish is noise every
+ * peer drops as wrong-epoch.
+ *
+ * ## Ordering — why a staged sweep is refused before the store is even read
+ *
+ * A staged sweep owes a VERDICT. ADR-0045 obligation 2 forbids its Welcome
+ * reaching the wire until that verdict says the commit won, so this refuses
+ * outright rather than trusting that the marker cannot be present.
+ *
+ * ## Idempotency
+ *
+ * The retry re-publishes the SAME recorded envelope bytes, so a first publish
+ * that actually landed leaves the joiner with two identical mailbox rows. That
+ * is inert: `StagedWelcome::into_group` deletes the joiner's KeyPackage bundle
+ * (openmls-0.8.1 `group/mls_group/creation.rs`), so the second copy cannot be
+ * staged and every client's mailbox handler catches the failure and skips the
+ * row. Nothing forks, and no ratchet moves twice.
+ *
+ * A publish failure THROWS and leaves the marker in place for the next attempt.
+ *
+ * Callers MUST hold the per-group MLS lock and MUST NOT hold the provider lock.
+ */
+internal suspend fun resolveOwedWelcomes(ports: SweepPorts): SweepOutcome {
+    if (ports.group.exclusiveProvider { ports.group.hasStagedSweep() }) {
+        return SweepOutcome.NoWelcomesOwed
+    }
+
+    val owed = ports.outbox.findOwedWelcomes() ?: return SweepOutcome.NoWelcomesOwed
+
+    val welcomeMessageIds = publishWelcomes(ports, owed)
+    ports.outbox.ack(owed.id, owed.commitMessageId, welcomeMessageIds.firstOrNull())
+
+    return SweepOutcome.WelcomesRepublished(
+        welcomeMessageIds = welcomeMessageIds,
+        addedCount = owed.welcomeMailboxesB64.size,
+    )
+}
+
+/**
  * The shared tail of both entry points: durably record (first time only),
  * publish the commit, read the verdict, then merge or abandon.
  *
@@ -629,6 +775,33 @@ private suspend fun publishAndAdjudicate(
     group.exclusiveProvider { group.mergeStagedSweep() }
     ports.persist()
 
+    // The verdict is settled and the merge is durable, so from here on the ONLY
+    // thing this entry still owes is the mailbox fan-out. Say so durably before
+    // attempting it, or a transient DS failure below leaves a GHOST MEMBER:
+    // added to every peer's roster, addressed by every later message, and unable
+    // to construct group state — with nothing left that would retry, because the
+    // merge cleared both signals the two recovery paths look for
+    // (`hasStagedSweep()` and the pending-proposal count).
+    //
+    // A failure to write the marker is NOT fatal and deliberately does not abort
+    // the fan-out. The marker only buys a RETRY; the verdict is already in, so
+    // publishing now is correct with or without it, and refusing to publish
+    // because a bookkeeping write failed would manufacture the very ghost member
+    // this records against.
+    //
+    // Swallowed WITHOUT logging here on purpose: this module is host-testable on
+    // the plain JVM (no `Context`, no `.so`), and `android.util.Log` is not
+    // mocked there — a call would turn every unit test that reaches this line
+    // into a `RuntimeException`. The adapter that owns the store logs it before
+    // re-throwing, which is where the diagnostic belongs anyway.
+    if (entry.welcomeEnvelopeB64 != null) {
+        try {
+            ports.outbox.markWelcomesOwed(entry.id, commitMessageId)
+        } catch (_: Throwable) {
+            // Non-fatal by design — see above.
+        }
+    }
+
     // Obligation 2 — the Welcome is published HERE and nowhere earlier.
     // Publishing it before the verdict would let a joiner open into a state no
     // other member holds if the commit then lost: a three-party fork, strictly
@@ -654,6 +827,27 @@ private suspend fun publishAndAdjudicate(
  * The cursor advances only to the last row actually applied — never past our own
  * commit, which the poll re-fetches and drops through the echo filter, and never
  * past a row this run did not consume.
+ *
+ * ## ...and never past a row whose durable write did not land
+ *
+ * This path advances the SAME cursor the poll drives, over rows the poll will
+ * never fetch again, so it carries the same hazard and obeys the same rule:
+ * persist first, advance second, hold the cursor when the persist does not land.
+ * Since ADR-0045 a proposal applied here but not persisted, with the cursor
+ * already past it, makes the commit that references it permanently unappliable —
+ * the device sits at epoch N forever. See [DurableCursorGate] for why lagging is
+ * the only safe direction.
+ *
+ * The write is [SweepPorts.persistApplied], which runs INSIDE this
+ * `exclusiveProvider` region deliberately: releasing the lock to persist would
+ * let a sibling group's `restoreStorage` roll these rows back between the apply
+ * and the write, and the cursor would then advance over rows the snapshot does
+ * not contain — the very state this is closing.
+ *
+ * A held cursor does NOT fail the verdict: the epoch reads either side of the
+ * loop are in-memory and still correct, so the sweep learns whether it won. The
+ * only thing withheld is the journal position, and the rows are re-fetched by the
+ * next poll.
  */
 private suspend fun adjudicate(
     ports: SweepPorts,
@@ -668,11 +862,17 @@ private suspend fun adjudicate(
 
     return ports.group.exclusiveProvider {
         val epochBefore = ports.group.epoch()
+        val gate = DurableCursorGate()
         var lastApplied = cursorBefore
         for (row in rows) {
             // Our own commit, and everything the DS ordered after it, is not
             // part of the question. Rows above it are left for the poll.
             if (row.id >= ownCommitMessageId) break
+            // Marked BEFORE the apply, not after: a throw is not proof that
+            // nothing durable changed (`process_message` decrypts and ratchets
+            // before either ADR-0022's role gate or ADR-0045's receipt gate can
+            // refuse).
+            gate.markTouched()
             try {
                 // The port applies AND surfaces — see [SweepGroupPort.applyIncoming].
                 // These rows are the only ones the poll will never see again,
@@ -689,7 +889,15 @@ private suspend fun adjudicate(
             }
             lastApplied = row.id
         }
-        if (lastApplied != cursorBefore) ports.cursor.advance(lastApplied)
+        if (lastApplied != cursorBefore) {
+            // No logging here — this file touches no Android API on purpose, so
+            // a failed write surfaces through the repository's `persistApplied`
+            // adapter instead.
+            gate.commit(
+                persist = ports.persistApplied,
+                advance = { ports.cursor.advance(lastApplied) },
+            )
+        }
         sweepVerdict(epochBefore, ports.group.epoch())
     }
 }

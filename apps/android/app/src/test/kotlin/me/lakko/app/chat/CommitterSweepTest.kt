@@ -101,6 +101,12 @@ class CommitterSweepTest {
          */
         val applicableRows = mutableSetOf<Int>()
 
+        /**
+         * Set to make the verdict apply's FAIL-CLOSED snapshot write throw — the
+         * swallowed-filesystem-error shape that used to strand the device.
+         */
+        var persistAppliedThrows: Throwable? = null
+
         override suspend fun <T> exclusiveProvider(block: suspend () -> T): T {
             providerTrace.add("enter")
             try {
@@ -182,6 +188,10 @@ class CommitterSweepTest {
         var nextId: Long = 1
         var fetches = 0
 
+        /** Set to make the mailbox fan-out fail (a transient DS blip); clear it
+         *  again to model the retry after a restart. */
+        var welcomePublishThrows: Throwable? = null
+
         override suspend fun fetch(after: Long): List<SweepJournalRow> {
             fetches++
             return if (scripted.isNotEmpty()) scripted.removeAt(0) else rows
@@ -193,6 +203,7 @@ class CommitterSweepTest {
         }
 
         override suspend fun publishMailbox(pseudonym: ByteArray, bytes: ByteArray): Long {
+            welcomePublishThrows?.let { throw it }
             published.add("mailbox@${bytes[0].toInt()}")
             return nextId++
         }
@@ -204,21 +215,51 @@ class CommitterSweepTest {
         val discarded = mutableListOf<String>()
         var recordThrows: Throwable? = null
 
+        /** The durable welcomes-owed marker: an entry whose VERDICT settled and
+         *  whose mailbox fan-out is all that remains. */
+        var owedWelcomes: SweepDurableEntry? = null
+        var markWelcomesOwedThrows: Throwable? = null
+        val trace = mutableListOf<String>()
+
         override fun newEntryId(): String = "entry-1"
 
         override suspend fun record(entry: SweepDurableEntry) {
             recordThrows?.let { throw it }
+            trace.add("record")
             recorded.add(entry)
+            owed = entry
         }
 
-        override suspend fun findOwed(): SweepDurableEntry? = owed
+        // The real store's condition, verbatim: a SWEEP entry whose welcomes are
+        // NOT yet owed. Once the verdict settles the entry stops being the
+        // verdict finder's business.
+        override suspend fun findOwed(): SweepDurableEntry? =
+            if (owedWelcomes == null) owed else null
 
-        override suspend fun ack(id: String, commitMessageId: Long, welcomeMessageId: Long?) {
+        override suspend fun markWelcomesOwed(id: String, commitMessageId: Long) {
+            trace.add("welcomes-owed")
+            markWelcomesOwedThrows?.let { throw it }
+            val entry = owed ?: return
+            if (entry.id != id) return
+            val next = entry.copy(commitMessageId = commitMessageId)
+            owed = next
+            owedWelcomes = next
+        }
+
+        override suspend fun findOwedWelcomes(): SweepDurableEntry? = owedWelcomes
+
+        override suspend fun ack(id: String, commitMessageId: Long?, welcomeMessageId: Long?) {
+            trace.add("ack")
             acked.add(id)
+            owed = null
+            owedWelcomes = null
         }
 
         override suspend fun discard(id: String) {
+            trace.add("discard")
             discarded.add(id)
+            owed = null
+            owedWelcomes = null
         }
     }
 
@@ -258,6 +299,12 @@ class CommitterSweepTest {
         wrapWelcome = { welcome -> welcome },
         markOwnPublished = {},
         persist = { persisted.add(Unit) },
+        // The FAIL-CLOSED persist the verdict apply runs before it advances the
+        // shared cursor. Distinct from `persist` above because it must THROW.
+        persistApplied = {
+            group.persistAppliedThrows?.let { throw it }
+            group.providerTrace.add("persist-applied")
+        },
         encodeB64 = { bytes -> bytes.joinToString(",") { it.toString() } },
         decodeB64 = { s ->
             if (s.isEmpty()) ByteArray(0) else s.split(",").map { it.toByte() }.toByteArray()
@@ -313,6 +360,7 @@ class CommitterSweepTest {
                 wrapWelcome = { it },
                 markOwnPublished = {},
                 persist = {},
+                persistApplied = {},
                 encodeB64 = { b -> b.joinToString(",") { it.toString() } },
                 decodeB64 = { s -> s.split(",").map { it.toByte() }.toByteArray() },
             ),
@@ -513,6 +561,7 @@ class CommitterSweepTest {
                 wrapWelcome = { it },
                 markOwnPublished = {},
                 persist = {},
+                persistApplied = {},
                 encodeB64 = { b -> b.joinToString(",") { it.toString() } },
                 decodeB64 = { s -> s.split(",").map { it.toByte() }.toByteArray() },
             ),
@@ -554,6 +603,7 @@ class CommitterSweepTest {
                     wrapWelcome = { it },
                     markOwnPublished = {},
                     persist = {},
+                persistApplied = {},
                     encodeB64 = { b -> b.joinToString(",") { it.toString() } },
                         decodeB64 = { s -> s.split(",").map { it.toByte() }.toByteArray() },
                     ),
@@ -605,15 +655,109 @@ class CommitterSweepTest {
             listOf(
                 // prelude: hasStagedSweep + rank + pending count
                 "enter", "exit",
+                // the owed-Welcome check's own `hasStagedSweep` read. Its own
+                // region rather than folded into the prelude's, because
+                // `resolveOwedWelcomes` is also a restart entry point and `Mutex`
+                // is not reentrant — a shared region would self-deadlock there.
+                "enter", "exit",
                 // stage
                 "enter", "exit",
-                // adjudicate: epochBefore, all three applies, cursor, epochAfter
-                "enter", "apply", "apply", "apply", "exit",
+                // adjudicate: epochBefore, all three applies, the FAIL-CLOSED
+                // durable write, the cursor advance, epochAfter. The write is
+                // INSIDE the region deliberately: releasing the lock to persist
+                // would let a sibling `restoreStorage` roll these rows back
+                // between the apply and the write, and the cursor would then
+                // advance over rows the snapshot does not contain.
+                "enter", "apply", "apply", "apply", "persist-applied", "exit",
                 // abandon (a foreign commit was ordered ahead of ours)
                 "enter", "exit",
             ),
             group.providerTrace.toList(),
         )
+    }
+
+    /**
+     * The verdict apply advances the SAME cursor the poll drives, over rows the
+     * poll will never fetch again — so it is subject to the same ordering rule,
+     * and for the same ADR-0045 reason: a PROPOSAL applied here but never written
+     * to disk, with the cursor already past it, makes the commit that carries it
+     * by reference permanently unappliable. The device sits at epoch N while the
+     * group moves on, silently.
+     *
+     * MEASURED — with the `gate.commit(...)` wrapper in `adjudicate` reverted to
+     * the bare `ports.cursor.advance(lastApplied)` it replaced:
+     *
+     *     CommitterSweepTest > the verdict holds the cursor when its snapshot
+     *     write fails FAILED
+     *         java.lang.AssertionError: the cursor must not pass rows whose
+     *         snapshot write did not land expected:<0> but was:<3>
+     *     CommitterSweepTest > the verdict advances the cursor only after the
+     *     snapshot write lands FAILED
+     *         java.lang.AssertionError: the durable write must precede the cursor
+     *         advance: [enter, exit, enter, exit, enter, exit, enter, apply,
+     *         exit, enter, exit]
+     */
+    @Test
+    fun `the verdict holds the cursor when its snapshot write fails`() = runTest {
+        val group = FakeGroup(rank = 0u, pending = 1)
+        group.applicableRows.add(7)
+        group.applicableRows.add(8)
+        group.persistAppliedThrows = java.io.IOException("no space left on device")
+        val journal = FakeJournal(
+            rows = listOf(row(id = 2, tag = 7), row(id = 3, tag = 8)),
+            scripted = mutableListOf(emptyList()),
+        )
+        journal.nextId = 9
+        val cursor = FakeCursor()
+
+        val outcome = runCommitterSweep(ports(group, journal, cursor = cursor))
+
+        // The verdict is still read — the epoch comparison is in memory and
+        // unaffected — so a storage failure never turns a won sweep into a lost
+        // one.
+        assertTrue("a storage failure must not change the verdict", outcome is SweepOutcome.Committed)
+        // The rows still reach the timeline: they were decrypted, they are real.
+        assertEquals(listOf("row#2@t-2", "row#3@t-3"), group.surfaced.toList())
+        assertEquals(
+            "the cursor must not pass rows whose snapshot write did not land",
+            0L,
+            cursor.value,
+        )
+    }
+
+    /** ...and the write comes FIRST on the happy path. Order, not merely
+     *  presence. */
+    @Test
+    fun `the verdict advances the cursor only after the snapshot write lands`() = runTest {
+        val group = FakeGroup(rank = 0u, pending = 1)
+        group.applicableRows.add(7)
+        val journal = FakeJournal(
+            rows = listOf(row(id = 2, tag = 7)),
+            scripted = mutableListOf(emptyList()),
+        )
+        journal.nextId = 9
+        val cursor = FakeCursor()
+
+        runCommitterSweep(ports(group, journal, cursor = cursor))
+
+        assertEquals(2L, cursor.value)
+        val applied = group.providerTrace.indexOf("apply")
+        val persisted = group.providerTrace.indexOf("persist-applied")
+        assertTrue("the apply must have happened: ${group.providerTrace}", applied >= 0)
+        assertTrue(
+            "the durable write must precede the cursor advance: ${group.providerTrace}",
+            persisted > applied,
+        )
+    }
+
+    /** A verdict that applied NOTHING neither persists nor touches the cursor. */
+    @Test
+    fun `a verdict that applied nothing persists nothing`() = runTest {
+        val group = FakeGroup(rank = 0u, pending = 1)
+        val cursor = FakeCursor()
+        runCommitterSweep(ports(group, FakeJournal(), cursor = cursor))
+        assertFalse(group.providerTrace.contains("persist-applied"))
+        assertEquals(0L, cursor.value)
     }
 
     /** The cursor never advances past our own commit — the poll re-fetches it and
@@ -813,5 +957,228 @@ class CommitterSweepTest {
 
         assertTrue("outcome was $outcome", outcome is SweepOutcome.Committed)
         assertEquals(listOf("row#50@t-50"), group.surfaced)
+    }
+
+    // ------------------------------------ a Welcome owed after a settled verdict
+
+    /**
+     * Drive the harness into the exact shape the finding describes: the commit
+     * won, the merge and the persist both landed, and only the mailbox fan-out
+     * failed.
+     */
+    private suspend fun ghostMemberState(
+        group: FakeGroup,
+        journal: FakeJournal,
+        outbox: FakeOutbox,
+    ) {
+        journal.welcomePublishThrows = IllegalStateException("DS unreachable")
+        val failure = runCatching { runCommitterSweep(ports(group, journal, outbox)) }
+        assertTrue(
+            "the Welcome fan-out was supposed to fail, got ${failure.getOrNull()}",
+            failure.isFailure,
+        )
+        journal.welcomePublishThrows = null
+    }
+
+    /**
+     * THE headline. Before the fix nothing retried: the merge had already
+     * cleared `hasStagedSweep()` AND emptied the pending set, which are the two
+     * signals [runCommitterSweep] and [resolveOwedVerdict] branch on, so both
+     * reported an idle group while the added member sat in every peer's roster,
+     * addressed by every later message, unable to ever join.
+     */
+    @Test
+    fun `a Welcome that failed after the merge is republished`() = runTest {
+        val group = FakeGroup(rank = 0u, pending = 1)
+        val journal = FakeJournal()
+        val outbox = FakeOutbox()
+        ghostMemberState(group, journal, outbox)
+
+        assertEquals("the commit won and merged — that must stand", 1, group.merged)
+        assertEquals(listOf("commit@1"), journal.published)
+
+        val outcome = runCommitterSweep(ports(group, journal, outbox))
+
+        assertTrue("outcome was $outcome", outcome is SweepOutcome.WelcomesRepublished)
+        assertEquals(1, (outcome as SweepOutcome.WelcomesRepublished).addedCount)
+        assertEquals(listOf("commit@1", "mailbox@2"), journal.published)
+        assertEquals("acked, so nothing is owed any more", listOf("entry-1"), outbox.acked)
+    }
+
+    @Test
+    fun `the restart seam finishes an owed Welcome without re-adjudicating`() = runTest {
+        val group = FakeGroup(rank = 0u, pending = 1)
+        val journal = FakeJournal()
+        val outbox = FakeOutbox()
+        ghostMemberState(group, journal, outbox)
+        val fetchesBefore = journal.fetches
+
+        val outcome = resolveOwedWelcomes(ports(group, journal, outbox))
+
+        assertTrue("outcome was $outcome", outcome is SweepOutcome.WelcomesRepublished)
+        // The verdict is already known — the retry must not stage, re-publish the
+        // commit, or read the journal order again.
+        assertEquals(listOf("commit@1", "mailbox@2"), journal.published)
+        assertEquals("no journal read: the order was already decided", fetchesBefore, journal.fetches)
+        assertEquals(0, group.abandoned)
+    }
+
+    /** The commit won the order and peers are at N+1. Undoing the merge here
+     *  would strand this device below the group. */
+    @Test
+    fun `a failed Welcome does not roll the merged commit back`() = runTest {
+        val group = FakeGroup(rank = 0u, pending = 1)
+        val journal = FakeJournal()
+        val outbox = FakeOutbox()
+        ghostMemberState(group, journal, outbox)
+
+        assertEquals(1, group.merged)
+        assertEquals(0, group.abandoned)
+        assertFalse(group.hasStagedSweep())
+        assertEquals("the merged epoch stands — 7 was the pre-merge default", 8uL, group.epoch())
+        assertTrue("the marker is what makes the retry possible", outbox.owedWelcomes != null)
+        assertTrue("an un-published Welcome must never ack", outbox.acked.isEmpty())
+    }
+
+    /**
+     * The ordering that keeps obligation 2 intact: the marker IS the durable
+     * statement "the verdict said WON", so recording it any earlier would let a
+     * pre-verdict restart publish a Welcome for a commit that then lost — the
+     * three-party fork.
+     */
+    @Test
+    fun `the owed-Welcome marker is written after the merge and before the fan-out`() = runTest {
+        val group = FakeGroup(rank = 0u, pending = 1)
+        val journal = FakeJournal()
+        val outbox = FakeOutbox()
+        val order = mutableListOf<String>()
+        val recordingJournal = object : SweepJournalPort by journal {
+            override suspend fun publishMailbox(pseudonym: ByteArray, bytes: ByteArray): Long {
+                order.add("publish-welcome")
+                return journal.publishMailbox(pseudonym, bytes)
+            }
+        }
+        val recordingOutbox = object : SweepOutboxPort by outbox {
+            override suspend fun markWelcomesOwed(id: String, commitMessageId: Long) {
+                order.add("welcomes-owed")
+                outbox.markWelcomesOwed(id, commitMessageId)
+            }
+        }
+        val recordingGroup = object : SweepGroupPort by group {
+            override fun mergeStagedSweep() {
+                order.add("merge")
+                group.mergeStagedSweep()
+            }
+        }
+        runCommitterSweep(
+            SweepPorts(
+                group = recordingGroup,
+                journal = recordingJournal,
+                outbox = recordingOutbox,
+                cursor = FakeCursor(),
+                actingCommitter = { ActingCommitter.Act },
+                welcomeMailbox = { it },
+                wrapWelcome = { it },
+                markOwnPublished = {},
+                persist = {},
+                persistApplied = {},
+                encodeB64 = { b -> b.joinToString(",") { it.toString() } },
+                decodeB64 = { s -> s.split(",").map { it.toByte() }.toByteArray() },
+            ),
+        )
+
+        assertEquals(listOf("merge", "welcomes-owed", "publish-welcome"), order)
+    }
+
+    /**
+     * A staged sweep owes a VERDICT, not a Welcome. [resolveOwedWelcomes] must
+     * refuse it outright rather than read the entry's mailboxes, or the
+     * obligation-2 ordering collapses on the restart path.
+     */
+    @Test
+    fun `a pre-verdict restart never publishes the Welcome`() = runTest {
+        val group = FakeGroup(rank = 0u, pending = 1)
+        group.hasStaged = true
+        val owed = SweepDurableEntry(
+            id = "entry-owed",
+            commitB64 = "1",
+            welcomeEnvelopeB64 = "2",
+            welcomeMailboxesB64 = listOf("3"),
+        )
+        val outbox = FakeOutbox(owed = owed)
+        // Belt to that braces: even with the marker wrongly present, a staged
+        // sweep wins and the Welcome waits.
+        outbox.owedWelcomes = owed
+        val journal = FakeJournal()
+
+        val outcome = resolveOwedWelcomes(ports(group, journal, outbox))
+
+        assertTrue("outcome was $outcome", outcome is SweepOutcome.NoWelcomesOwed)
+        assertTrue(journal.published.isEmpty())
+        assertTrue(group.hasStagedSweep())
+    }
+
+    /**
+     * The first fan-out may actually have landed and only the ack failed, so a
+     * retry can put a second identical Welcome in the joiner's mailbox. That is
+     * inert: `StagedWelcome::into_group` deletes the joiner's KeyPackage bundle
+     * (openmls-0.8.1 `group/mls_group/creation.rs`), so the second copy cannot
+     * be staged and every client's mailbox handler catches and skips it. On THIS
+     * side the ack clears the marker, so nothing re-publishes a third time.
+     */
+    @Test
+    fun `a duplicate Welcome republish is a no-op`() = runTest {
+        val group = FakeGroup(rank = 0u, pending = 1)
+        val journal = FakeJournal()
+        val outbox = FakeOutbox()
+        ghostMemberState(group, journal, outbox)
+
+        resolveOwedWelcomes(ports(group, journal, outbox))
+        val again = resolveOwedWelcomes(ports(group, journal, outbox))
+
+        assertTrue("outcome was $again", again is SweepOutcome.NoWelcomesOwed)
+        assertEquals(1, journal.published.count { it.startsWith("mailbox@") })
+    }
+
+    /** A remove / role sweep has no Welcome, so it must not pay for a marker
+     *  write and must leave nothing behind for a restart to chase. */
+    @Test
+    fun `a sweep with no add owes no Welcome`() = runTest {
+        val group = FakeGroup(
+            rank = 0u,
+            pending = 1,
+            staged = StagedSweepArtifacts(
+                commit = byteArrayOf(1),
+                welcome = null,
+                addedSignatureKeys = emptyList(),
+            ),
+        )
+        val journal = FakeJournal()
+        val outbox = FakeOutbox()
+
+        runCommitterSweep(ports(group, journal, outbox))
+
+        assertFalse(outbox.trace.contains("welcomes-owed"))
+        assertTrue(outbox.owedWelcomes == null)
+        val outcome = resolveOwedWelcomes(ports(group, journal, outbox))
+        assertTrue("outcome was $outcome", outcome is SweepOutcome.NoWelcomesOwed)
+    }
+
+    /**
+     * The marker only buys a RETRY. The verdict is already in, so refusing to
+     * publish because the bookkeeping write failed would MANUFACTURE the ghost
+     * member this whole branch exists to prevent.
+     */
+    @Test
+    fun `a failed marker write still publishes the Welcome now`() = runTest {
+        val group = FakeGroup(rank = 0u, pending = 1)
+        val journal = FakeJournal()
+        val outbox = FakeOutbox()
+        outbox.markWelcomesOwedThrows = IllegalStateException("disk full")
+
+        val outcome = runCommitterSweep(ports(group, journal, outbox))
+
+        assertTrue("outcome was $outcome", outcome is SweepOutcome.Committed)
+        assertEquals(listOf("commit@1", "mailbox@2"), journal.published)
     }
 }

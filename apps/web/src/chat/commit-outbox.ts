@@ -106,6 +106,25 @@ export interface PendingCommitEntry {
    */
   sweepVerdictPending?: boolean;
   /**
+   * ADR-0045 — this sweep's verdict is SETTLED (its commit won and merged) and
+   * the only thing it still owes is the Welcome fan-out.
+   *
+   * Set in one durable write at the moment of the merge, which is what keeps
+   * obligation 2 intact: the flag IS the durable statement "the verdict said
+   * WON", so an entry that has not reached a verdict never carries it and a
+   * pre-verdict restart therefore cannot be talked into publishing a Welcome.
+   *
+   * `sweepVerdictPending` stays set alongside it, deliberately — that flag is
+   * what marks the entry as a SWEEP entry, and the ADR-0040 legacy re-publish
+   * loop skips on it. Clearing it would hand a welcome-owed entry to a loop
+   * that re-publishes the commit, finds no singular
+   * `secondArtifactMailboxB64`, publishes no Welcome at all, and then ACKS —
+   * destroying the record. The two flags are read together:
+   * `sweepVerdictPending && !sweepWelcomesOwed` is verdict-owed,
+   * `sweepWelcomesOwed` is fan-out-owed.
+   */
+  sweepWelcomesOwed?: boolean;
+  /**
    * ADR-0045 — the sweep's Welcome fan-out targets: base64 mailbox pseudonyms,
    * one per member the sweep adds.
    *
@@ -210,6 +229,42 @@ export async function markAcked(
           updated.secondMessageId = secondMessageId;
         }
         store.put(updated);
+      };
+    });
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * ADR-0045 — flip a sweep entry from *verdict owed* to *Welcome fan-out owed*,
+ * recording the DS id its commit published under, in ONE read-modify-write
+ * transaction so it is never half-applied.
+ *
+ * THROWS on failure. The caller treats that as non-fatal: the marker only buys
+ * a retry, and the Welcome it guards is correct to publish either way.
+ *
+ * A no-op when the entry is already gone (a concurrent ack / discard raced us).
+ */
+export async function markWelcomesOwed(
+  id: string,
+  commitMessageId: number,
+): Promise<void> {
+  const db = await openMlsDb();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(OUTBOX_STORE, "readwrite");
+      tx.oncomplete = (): void => resolve();
+      tx.onabort = (): void =>
+        reject(tx.error ?? new Error("commit-outbox markWelcomesOwed aborted"));
+      tx.onerror = (): void =>
+        reject(tx.error ?? new Error("commit-outbox markWelcomesOwed errored"));
+      const store = tx.objectStore(OUTBOX_STORE);
+      const getReq = store.get(id);
+      getReq.onsuccess = (): void => {
+        const row = getReq.result as PendingCommitEntry | undefined;
+        if (row === undefined) return; // already gone — tx completes as a no-op
+        store.put({ ...row, sweepWelcomesOwed: true, commitMessageId });
       };
     });
   } finally {

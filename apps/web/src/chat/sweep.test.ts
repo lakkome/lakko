@@ -130,6 +130,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   resolveOwedVerdict,
+  resolveOwedWelcomes,
   runCommitterSweep,
   shouldStandDown,
   sweepVerdict,
@@ -190,11 +191,22 @@ interface Model {
   pending: () => number;
   staged: () => boolean;
   entries: () => Map<string, SweepDurableEntry>;
+  /** Entry ids whose VERDICT is settled and whose Welcome fan-out is still
+   *  owed — the durable marker the ghost-member fix turns on. */
+  welcomesOwed: () => Set<string>;
   cursorValue: () => number;
   /** Rows the DS will return, in id order. */
   journal: SweepJournalRow[];
   /** Rows to splice in the instant the commit publishes — the real race. */
   raceRows: SweepJournalRow[];
+  /** Flip to make the mailbox fan-out fail (a transient DS blip), and back
+   *  again to model the retry after a restart. */
+  failWelcomePublish: (fail: boolean) => void;
+  /** Flip to make the durable welcomes-owed marker write fail. */
+  failMarkWelcomesOwed: (fail: boolean) => void;
+  /** Flip to make the verdict apply's FAIL-CLOSED snapshot write fail — the
+   *  swallowed-IndexedDB-error shape that used to strand the device. */
+  failPersistApplied: (fail: boolean) => void;
 }
 
 function model(opts: {
@@ -226,6 +238,11 @@ function model(opts: {
   const journal: SweepJournalRow[] = [];
   const raceRows: SweepJournalRow[] = [];
   let entrySeq = 0;
+  /** The durable welcomes-owed marker, as a set of entry ids. */
+  const welcomesOwed = new Set<string>();
+  let welcomePublishFails = false;
+  let markWelcomesOwedFails = false;
+  let persistAppliedFails = false;
 
   const ports: SweepPorts = {
     actingCommitter: async (ownRank) => {
@@ -306,6 +323,7 @@ function model(opts: {
         return id;
       },
       publishMailbox: async () => {
+        if (welcomePublishFails) throw new Error("DS unreachable");
         published.push("mailbox:welcome");
         order.push("publish-welcome");
         return (nextId += 1);
@@ -318,14 +336,31 @@ function model(opts: {
         order.push("record");
         entries.set(entry.id, entry);
       },
-      findOwed: async () => entries.values().next().value ?? null,
+      // The real store's condition, verbatim: an un-acked SWEEP entry whose
+      // welcomes are NOT yet owed. A welcome-owed entry has already reached a
+      // verdict, so it is no longer the verdict finder's business.
+      findOwed: async () =>
+        [...entries.values()].find((e) => !welcomesOwed.has(e.id)) ?? null,
+      markWelcomesOwed: async (id, commitMessageId) => {
+        if (markWelcomesOwedFails) throw new Error("IndexedDB quota");
+        order.push("welcomes-owed");
+        const existing = entries.get(id);
+        if (existing !== undefined) {
+          entries.set(id, { ...existing, commitMessageId });
+        }
+        welcomesOwed.add(id);
+      },
+      findOwedWelcomes: async () =>
+        [...entries.values()].find((e) => welcomesOwed.has(e.id)) ?? null,
       ack: async (id) => {
         order.push("ack");
         entries.delete(id);
+        welcomesOwed.delete(id);
       },
       discard: async (id) => {
         order.push("discard");
         entries.delete(id);
+        welcomesOwed.delete(id);
       },
     },
     cursor: {
@@ -340,6 +375,12 @@ function model(opts: {
     persist: async () => {
       order.push("persist");
     },
+    // The FAIL-CLOSED persist the verdict apply runs before it advances the
+    // shared cursor. Distinct from `persist` above because it must REJECT.
+    persistApplied: async () => {
+      if (persistAppliedFails) throw new Error("IndexedDB quota");
+      order.push("persist-applied");
+    },
     encodeB64: (b) => Buffer.from(b).toString("base64"),
     decodeB64: (s) => new Uint8Array(Buffer.from(s, "base64")),
   };
@@ -353,9 +394,19 @@ function model(opts: {
     pending: () => pending,
     staged: () => staged,
     entries: () => entries,
+    welcomesOwed: () => welcomesOwed,
     cursorValue: () => cursorValue,
     journal,
     raceRows,
+    failWelcomePublish: (fail) => {
+      welcomePublishFails = fail;
+    },
+    failMarkWelcomesOwed: (fail) => {
+      markWelcomesOwedFails = fail;
+    },
+    failPersistApplied: (fail) => {
+      persistAppliedFails = fail;
+    },
   };
 }
 
@@ -683,6 +734,174 @@ describe("ADR-0045 — obligation 1: a restart finishes an owed verdict", () => 
   });
 });
 
+describe("ADR-0045 — a Welcome that failed AFTER the merge is still owed", () => {
+  const ADDED = new Uint8Array([0xa1]);
+
+  /** The exact shape the finding describes: the commit won, the merge and the
+   *  persist both landed, and only the mailbox fan-out failed. */
+  async function ghostMemberState(): Promise<Model> {
+    const m = model({ rank: 0, pending: 1, epoch: 6, adds: [ADDED] });
+    m.failWelcomePublish(true);
+    await expect(runCommitterSweep(m.ports)).rejects.toThrow(/DS unreachable/);
+    return m;
+  }
+
+  it("re-publishes the Welcome after a restart — the ghost member is repaired", async () => {
+    // THE headline. Before the fix nothing retried: the next tail sweep found
+    // `hasStagedSweep()` false (it merged) and `pendingProposalCount()` 0 (the
+    // merge consumed them) and reported `nothing-pending`, while the restart
+    // path's `resolveOwedVerdict` reported `no-verdict-owed` for the same
+    // reason and the legacy loop skipped the entry outright. The added member
+    // was in every other member's roster, every later message was encrypted to
+    // their leaf, and they could never construct group state.
+    const m = await ghostMemberState();
+    expect(m.epoch()).toBe(7n);
+    expect(m.published).toEqual(["group:commit"]);
+
+    // The DS comes back; the next sweep runs.
+    m.failWelcomePublish(false);
+    const out = await runCommitterSweep(m.ports);
+
+    expect(out.kind).toBe("welcomes-republished");
+    expect(m.published).toEqual(["group:commit", "mailbox:welcome"]);
+    // Acked, so nothing is owed any more.
+    expect(m.entries().size).toBe(0);
+    expect(m.welcomesOwed().size).toBe(0);
+  });
+
+  it("the restart seam finishes it too, without re-adjudicating", async () => {
+    const m = await ghostMemberState();
+    m.failWelcomePublish(false);
+    // `order` accumulates across both runs, so the retry's own steps are the
+    // tail — the first run legitimately staged and published.
+    const before = m.order.length;
+
+    const out = await resolveOwedWelcomes(m.ports);
+
+    expect(out.kind).toBe("welcomes-republished");
+    expect(m.published).toEqual(["group:commit", "mailbox:welcome"]);
+    // The verdict is already known — the retry must not stage, publish a
+    // second commit, or apply another row to re-read the journal order.
+    expect(m.order.slice(before)).toEqual(["publish-welcome", "ack"]);
+    expect(m.published.filter((p) => p === "group:commit")).toHaveLength(1);
+  });
+
+  it("a Welcome-publish failure does NOT roll the merged commit back", async () => {
+    // The commit won the order and peers are at N+1. Abandoning or otherwise
+    // undoing the merge here would strand this device below the group.
+    const m = await ghostMemberState();
+
+    expect(m.epoch()).toBe(7n);
+    expect(m.staged()).toBe(false);
+    expect(m.order).toContain("merge");
+    expect(m.order).not.toContain("abandon");
+    // Persisted BEFORE the fan-out was attempted, so a crash here keeps N+1.
+    expect(m.order.indexOf("persist")).toBeLessThan(
+      m.order.indexOf("welcomes-owed"),
+    );
+    // The entry survives un-acked, carrying the marker that says what is left.
+    expect(m.entries().size).toBe(1);
+    expect(m.welcomesOwed().size).toBe(1);
+  });
+
+  it("the marker is written BEFORE the fan-out, and only after the merge", async () => {
+    // The ordering that keeps ADR-0045 obligation 2 intact: the marker is what
+    // a restart reads as "the verdict said WON", so recording it any earlier
+    // would let a pre-verdict restart publish a Welcome for a commit that then
+    // lost — the three-party fork.
+    const m = model({ rank: 0, pending: 1, epoch: 6, adds: [ADDED] });
+    await runCommitterSweep(m.ports);
+
+    const merge = m.order.indexOf("merge");
+    const marker = m.order.indexOf("welcomes-owed");
+    const fanout = m.order.indexOf("publish-welcome");
+    expect(merge).toBeGreaterThanOrEqual(0);
+    expect(marker).toBeGreaterThan(merge);
+    expect(fanout).toBeGreaterThan(marker);
+  });
+
+  it("a pre-verdict restart never publishes the Welcome", async () => {
+    // A staged sweep owes a VERDICT, not a Welcome. `resolveOwedWelcomes` must
+    // refuse it outright rather than reading the entry's mailboxes, or the
+    // whole obligation-2 ordering collapses on the restart path.
+    const m = model({
+      rank: 0,
+      pending: 1,
+      epoch: 6,
+      owed: {
+        entry: {
+          id: "entry-owed",
+          commitB64: Buffer.from(frame(COMMIT, 6, 0x5e)).toString("base64"),
+          welcomeEnvelopeB64: Buffer.from([0xee, 0x01]).toString("base64"),
+          welcomeMailboxesB64: [Buffer.from([0xbb, 0xa1]).toString("base64")],
+        },
+      },
+    });
+
+    const out = await resolveOwedWelcomes(m.ports);
+
+    expect(out).toEqual({ kind: "no-welcomes-owed" });
+    expect(m.published).toEqual([]);
+    expect(m.staged()).toBe(true);
+  });
+
+  it("a duplicate re-publish is harmless — the second attempt is a no-op", async () => {
+    // The first fan-out may actually have landed and only the ack failed, so a
+    // retry can put a second identical Welcome in the joiner's mailbox. That is
+    // inert: `StagedWelcome::into_group` deletes the joiner's KeyPackage bundle
+    // (openmls-0.8.1 `group/mls_group/creation.rs`), so the second copy fails to
+    // stage and every client's mailbox handler catches and skips it. On THIS
+    // side the ack clears the marker, so nothing re-publishes a third time.
+    const m = await ghostMemberState();
+    m.failWelcomePublish(false);
+
+    await resolveOwedWelcomes(m.ports);
+    const again = await resolveOwedWelcomes(m.ports);
+
+    expect(again).toEqual({ kind: "no-welcomes-owed" });
+    expect(m.published.filter((p) => p === "mailbox:welcome")).toHaveLength(1);
+  });
+
+  it("nothing is owed when the sweep carried no add", async () => {
+    // A remove / role sweep has no Welcome, so it must not pay for a marker
+    // write and must leave nothing behind for a restart to chase.
+    const m = model({ rank: 0, pending: 1, epoch: 6 });
+    const out = await runCommitterSweep(m.ports);
+
+    expect(out.kind).toBe("committed");
+    expect(m.order).not.toContain("welcomes-owed");
+    expect(m.welcomesOwed().size).toBe(0);
+    await expect(resolveOwedWelcomes(m.ports)).resolves.toEqual({
+      kind: "no-welcomes-owed",
+    });
+  });
+
+  it("the ack path is unchanged when everything succeeds", async () => {
+    const m = model({ rank: 0, pending: 1, epoch: 6, adds: [ADDED] });
+    const out = await runCommitterSweep(m.ports);
+
+    expect(out.kind).toBe("committed");
+    expect(m.published).toEqual(["group:commit", "mailbox:welcome"]);
+    expect(m.order).toContain("ack");
+    // Acked in the same run, so the marker never survives a healthy sweep.
+    expect(m.entries().size).toBe(0);
+    expect(m.welcomesOwed().size).toBe(0);
+  });
+
+  it("a marker write that FAILS still publishes the Welcome now", async () => {
+    // The marker only buys a retry. The verdict is already in, so refusing to
+    // publish because the bookkeeping write failed would MANUFACTURE the ghost
+    // member this whole branch exists to prevent.
+    const m = model({ rank: 0, pending: 1, epoch: 6, adds: [ADDED] });
+    m.failMarkWelcomesOwed(true);
+
+    const out = await runCommitterSweep(m.ports);
+
+    expect(out.kind).toBe("committed");
+    expect(m.published).toEqual(["group:commit", "mailbox:welcome"]);
+  });
+});
+
 describe("ADR-0045 — the verdict reads only the rows BELOW our own commit", () => {
   it("a foreign commit ABOVE our id does not make us lose", async () => {
     const m = model({ rank: 0, pending: 1, epoch: 6 });
@@ -784,6 +1003,63 @@ describe("ADR-0045 — the verdict apply must not swallow the rows it consumes",
     // cursor is untouched — the poll re-fetches it and drops it through the
     // echo filter.
     expect(m.surfaced).toEqual([]);
+    expect(m.cursorValue()).toBe(0);
+  });
+
+  /**
+   * The verdict apply advances the SAME cursor `ChatClient.pollMessages` drives,
+   * over rows the poll will never fetch again — so it is subject to the same
+   * ordering rule, and for the same ADR-0045 reason: a PROPOSAL applied here but
+   * never written to disk, with the cursor already past it, makes the commit
+   * that carries it by reference permanently unappliable. The device sits at
+   * epoch N while the group moves on, silently.
+   *
+   * MEASURED — with the `gate.commit(...)` wrapper in `adjudicate` reverted to
+   * the bare `ports.cursor.advance(lastApplied)` it replaced:
+   *
+   *     FAIL  src/chat/sweep.test.ts > … > the verdict HOLDS the cursor when its
+   *     snapshot write fails
+   *     AssertionError: expected 42 to be +0 // Object.is equality
+   */
+  it("the verdict HOLDS the cursor when its snapshot write fails", async () => {
+    const m = model({ rank: 0, pending: 1, epoch: 6 });
+    m.raceRows.push(row(41, APPLICATION, 6));
+    m.raceRows.push(row(42, PROPOSAL, 6));
+    m.failPersistApplied(true);
+
+    const out = await runCommitterSweep(m.ports);
+
+    // The verdict is still read — the epoch comparison is in memory and
+    // unaffected — so a storage failure never turns a won sweep into a lost one.
+    expect(out.kind).toBe("committed");
+    // The rows still reach the timeline: they were decrypted, they are real.
+    expect(m.surfaced).toEqual(["chat#41@t-41", "proposal#42@t-42"]);
+    // But the cursor does NOT move past them. The next poll re-fetches, and the
+    // proposal is re-delivered ahead of any commit that references it.
+    expect(m.cursorValue()).toBe(0);
+  });
+
+  it("the verdict advances the cursor only AFTER the snapshot write lands", async () => {
+    const m = model({ rank: 0, pending: 1, epoch: 6 });
+    m.raceRows.push(row(42, PROPOSAL, 6));
+
+    await runCommitterSweep(m.ports);
+
+    expect(m.cursorValue()).toBe(42);
+    // Order, not merely presence: the write precedes the advance, which is the
+    // whole rule. `persist-applied` is recorded by the fail-closed port and
+    // sits between the last apply and the merge.
+    const applied = m.order.indexOf(`apply:${PROPOSAL}@6`);
+    const persisted = m.order.indexOf("persist-applied");
+    expect(applied).toBeGreaterThanOrEqual(0);
+    expect(persisted).toBeGreaterThan(applied);
+  });
+
+  it("a verdict that applied NOTHING neither persists nor touches the cursor", async () => {
+    const m = model({ rank: 0, pending: 1, epoch: 6 });
+    const out = await runCommitterSweep(m.ports);
+    expect(out.kind).toBe("committed");
+    expect(m.order).not.toContain("persist-applied");
     expect(m.cursorValue()).toBe(0);
   });
 

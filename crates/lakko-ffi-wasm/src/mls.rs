@@ -462,9 +462,15 @@ impl ProposalRecord {
     /// Discriminator: `"add" | "remove" | "leave" | "update" | "role-change" |
     /// "unsupported"`. Useful for `switch` / `case` in TypeScript.
     ///
-    /// `"unsupported"` is a proposal type Lakko never emits; the core's
-    /// authorisation rule always refuses it (fail-closed, invariant #4), so it
-    /// always arrives with `stored === false`.
+    /// Two kinds always arrive with `stored === false`, because the core's
+    /// authorisation rule refuses them for every member (fail-closed, invariant
+    /// #4). `"unsupported"` is a proposal type Lakko never emits. `"update"` is
+    /// an RFC 9420 leaf rotation, which openmls 0.8.1 does not bind to the
+    /// sender's existing signature key — so it can rotate the very key the
+    /// ADR-0022 role table is keyed on, and it is the one kind whose proposal
+    /// reference is fresh on every emission, which made it floodable past the
+    /// pending-set cap. A Lakko member rotates its leaf with `selfUpdate`, which
+    /// composes no proposal at all.
     #[wasm_bindgen(getter)]
     pub fn kind(&self) -> String {
         self.kind.to_string()

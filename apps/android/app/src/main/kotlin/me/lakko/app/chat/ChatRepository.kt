@@ -668,6 +668,21 @@ public class ChatRepository(
     }
 
     /**
+     * ADR-0023 — our own IDENTITY in [groupIdHex]: this device's signature key,
+     * base64, resolved LIVE through the roster. `null` when there is no handle
+     * or the roster could not be read.
+     *
+     * The UI's own-side authorship decisions read this rather than
+     * [ownLeafIndex]: a leaf is a position, and a position we once held can be
+     * handed to a member added later, at which point a leaf comparison starts
+     * calling a stranger "us". Resolved rather than stored for the same reason.
+     */
+    public fun ownMemberIdentity(groupIdHex: String): MemberIdentity? {
+        val record = groups[groupIdHex] ?: return null
+        return ownIdentity(record.group)
+    }
+
+    /**
      * Our own ADR-0022 role in [groupIdHex] (OWNER / ADMIN / MEMBER), or `null`
      * for an open / legacy group with no role table (or no handle). The members
      * UI gates the add / remove affordances on this.
@@ -1906,25 +1921,22 @@ public class ChatRepository(
             // the security-critical ratchet snapshot already
             // landed durably above.
             //
-            // G-37 — `ownLeafIndex` is read in the SAME provider critical
-            // section as the ratchet advance, so the author stamp cannot be
-            // taken across another group's commit.
-            val (prepared, ownLeaf) = providerLock.withLock {
+            // G-37 — our own identity is resolved in the SAME provider
+            // critical section as the ratchet advance, so the author stamp
+            // cannot be taken across another group's commit.
+            val (prepared, ownKey) = providerLock.withLock {
                 val prepared = chatClient.prepareSend(
                     identity = identity,
                     group = record.group,
                     plaintext = envelopeBytes,
                     persistRatchet = { persistSnapshotDurableOrThrow() },
                 )
-                // ADR-0023 — stamp our own leaf as the author so a
-                // later edit/delete op of this row (ours or a peer's
-                // attempt) is gated against the real author.
-                val ownLeaf = try {
-                    record.group.ownLeafIndex()
-                } catch (_: Throwable) {
-                    null
-                }
-                prepared to ownLeaf
+                // ADR-0023 — stamp our own signature key as the author so a
+                // later edit/delete op of this row (ours or a peer's attempt)
+                // is gated against the real author. NOT our leaf: any leaf,
+                // ours included, can be reassigned to a member added later.
+                val ownKey = ownIdentity(record.group)
+                prepared to ownKey
             }
             val result = chatClient.publishPreparedSend(prepared)
             record.appendOutgoing(
@@ -1932,7 +1944,7 @@ public class ChatRepository(
                 attachments = attachments,
                 messageId = result.messageId,
                 createdAt = result.createdAt,
-                authorLeaf = ownLeaf,
+                authorKey = ownKey,
             )
             persistMessageLogBestEffort()
             publishThreadList()
@@ -1984,19 +1996,18 @@ public class ChatRepository(
             // SECURITY (nonce-reuse-on-crash) — persist the (N+1)
             // ratchet durably, fail-closed, BEFORE publish.
             // G-37 — provider work under the provider lock, publish outside it.
-            val (prepared, ownLeaf) = providerLock.withLock {
+            val (prepared, ownKey) = providerLock.withLock {
                 val prepared = chatClient.prepareSend(
                     identity = identity,
                     group = record.group,
                     plaintext = envelopeBytes,
                     persistRatchet = { persistSnapshotDurableOrThrow() },
                 )
-                val ownLeaf = try {
-                    record.group.ownLeafIndex()
-                } catch (_: Throwable) {
-                    null
-                }
-                prepared to ownLeaf
+                // ADR-0023 — our own IDENTITY, resolved through the roster in
+                // the same critical section as the ratchet advance. Never our
+                // leaf: a leaf names a position, and the position moves.
+                val ownKey = ownIdentity(record.group)
+                prepared to ownKey
             }
             chatClient.publishPreparedSend(prepared)
             record.applyOwnOp(
@@ -2004,7 +2015,7 @@ public class ChatRepository(
                 target = targetMessageId,
                 text = newText,
                 emoji = null,
-                ownLeaf = ownLeaf,
+                ownKey = ownKey,
             )
             persistMessageLogBestEffort()
             publishThreadList()
@@ -2035,19 +2046,18 @@ public class ChatRepository(
             // SECURITY (nonce-reuse-on-crash) — persist the (N+1)
             // ratchet durably, fail-closed, BEFORE publish.
             // G-37 — provider work under the provider lock, publish outside it.
-            val (prepared, ownLeaf) = providerLock.withLock {
+            val (prepared, ownKey) = providerLock.withLock {
                 val prepared = chatClient.prepareSend(
                     identity = identity,
                     group = record.group,
                     plaintext = envelopeBytes,
                     persistRatchet = { persistSnapshotDurableOrThrow() },
                 )
-                val ownLeaf = try {
-                    record.group.ownLeafIndex()
-                } catch (_: Throwable) {
-                    null
-                }
-                prepared to ownLeaf
+                // ADR-0023 — our own IDENTITY, resolved through the roster in
+                // the same critical section as the ratchet advance. Never our
+                // leaf: a leaf names a position, and the position moves.
+                val ownKey = ownIdentity(record.group)
+                prepared to ownKey
             }
             chatClient.publishPreparedSend(prepared)
             record.applyOwnOp(
@@ -2055,7 +2065,7 @@ public class ChatRepository(
                 target = targetMessageId,
                 text = "",
                 emoji = null,
-                ownLeaf = ownLeaf,
+                ownKey = ownKey,
             )
             persistMessageLogBestEffort()
             publishThreadList()
@@ -2091,19 +2101,18 @@ public class ChatRepository(
             // SECURITY (nonce-reuse-on-crash) — persist the (N+1)
             // ratchet durably, fail-closed, BEFORE publish.
             // G-37 — provider work under the provider lock, publish outside it.
-            val (prepared, ownLeaf) = providerLock.withLock {
+            val (prepared, ownKey) = providerLock.withLock {
                 val prepared = chatClient.prepareSend(
                     identity = identity,
                     group = record.group,
                     plaintext = envelopeBytes,
                     persistRatchet = { persistSnapshotDurableOrThrow() },
                 )
-                val ownLeaf = try {
-                    record.group.ownLeafIndex()
-                } catch (_: Throwable) {
-                    null
-                }
-                prepared to ownLeaf
+                // ADR-0023 — our own IDENTITY, resolved through the roster in
+                // the same critical section as the ratchet advance. Never our
+                // leaf: a leaf names a position, and the position moves.
+                val ownKey = ownIdentity(record.group)
+                prepared to ownKey
             }
             chatClient.publishPreparedSend(prepared)
             record.applyOwnOp(
@@ -2111,7 +2120,7 @@ public class ChatRepository(
                 target = targetMessageId,
                 text = "",
                 emoji = emoji,
-                ownLeaf = ownLeaf,
+                ownKey = ownKey,
             )
             persistMessageLogBestEffort()
             publishThreadList()
@@ -2488,7 +2497,7 @@ public class ChatRepository(
      * post-add-member `redistribute` idempotent for existing members.
      *
      * The two `Group` reads happen SYNCHRONOUSLY here — this runs inside the
-     * poll loop's [providerLock] critical section (via `applyPollResult`), the
+     * poll loop's [providerLock] critical section (via `consumeEvents`), the
      * same discipline as the `group.groupId()` read below and as
      * [ensurePushRoutingBestEffort]'s `ownRole` read. Only the store read and
      * the network subscribe are deferred to [pushScope].
@@ -2827,8 +2836,8 @@ public class ChatRepository(
                 raw = raw,
                 after = after,
             )
-            record.applyPollResult(
-                result,
+            record.consumeEvents(
+                events = result.events,
                 callSignalingSink = { payload ->
                     callSignalingSink?.invoke(groupIdHex, payload)
                 },
@@ -2862,9 +2871,37 @@ public class ChatRepository(
                     )
                 },
             )
-            if (result.events.isNotEmpty()) {
-                persistSnapshotBestEffort()
-            }
+            // THE ORDERING RULE — persist first, advance the cursor second, and
+            // hold the cursor when the write does not land. See [DurableCursorGate]
+            // for why the cursor may lag the durable MLS state but must never lead
+            // it: since ADR-0045 a proposal applied here but not persisted, with
+            // the cursor already past it, makes the commit that carries it by
+            // reference permanently unappliable and strands this device at epoch N
+            // forever.
+            //
+            // The persist is the FAIL-CLOSED [persistSnapshotDurableOrThrow], not
+            // the swallowing [persistSnapshotBestEffort] this used to call. Both
+            // run inside the provider lock this block already holds.
+            applyDurableCursorBatch(
+                gate = cursorGate,
+                touchedMlsState = result.touchedMlsState,
+                persist = { persistSnapshotDurableOrThrow() },
+                advance = { record.advanceCursor(result.cursor) },
+                onHeld = { cause ->
+                    android.util.Log.w(
+                        "ChatRepository",
+                        "MLS snapshot persist failed — holding the journal cursor at " +
+                            "${record.cursor} so this batch is re-fetched rather than lost",
+                        cause,
+                    )
+                },
+            )
+            // The plaintext timeline is written either way — held or advanced —
+            // and deliberately AFTER the gate so it records whatever cursor the
+            // gate left. It is not MLS state: a stale timeline costs a re-render,
+            // never a strand. Skipped for a batch that produced nothing, as
+            // before, so an idle long poll still writes no file.
+            if (result.events.isNotEmpty()) persistMessageLogBestEffort()
             // ADR-0043 — did someone else's Remove commit just land? Then the
             // evicted member still holds this group's push_routing_secret and
             // push-gw is still waking it. Re-key so nobody ever notifies the
@@ -3119,6 +3156,18 @@ public class ChatRepository(
      *  [persistSnapshotDurableOrThrow]: publishing a gen-N
      *  ciphertext without its N+1 ratchet state durably on disk
      *  re-opens the AEAD nonce-reuse-on-crash window. */
+    /**
+     * The receive path's cursor-may-lag-never-lead gate.
+     *
+     * ONE per repository, which is the accurate granularity: `snapshotStorage()`
+     * serialises the WHOLE provider, so a failed persist leaves every group
+     * behind and any successful one flushes them all. See [DurableCursorGate].
+     *
+     * Every read/write of it happens inside [providerLock], the same region the
+     * MLS mutations and the snapshot write run in, so it needs no lock of its own.
+     */
+    private val cursorGate = DurableCursorGate()
+
     private fun persistSnapshotBestEffort() {
         val identity = canonicalIdentity.get() ?: return
         val accountIdB64 = currentAccountIdB64.get() ?: return
@@ -3212,7 +3261,7 @@ public class ChatRepository(
      *  Best-effort: a failure here just leaves the entry un-acked, so the next
      *  restart sweep re-publishes it idempotently (peers drop the wrong-epoch
      *  duplicate; the committer's echo filter is re-armed). */
-    private fun ackCommitBestEffort(id: String, commitMessageId: Long, secondMessageId: Long?) {
+    private fun ackCommitBestEffort(id: String, commitMessageId: Long?, secondMessageId: Long?) {
         try {
             CommitOutboxStore.markAcked(
                 applicationContext,
@@ -4005,7 +4054,23 @@ public class ChatRepository(
                         record.group.processIncomingVerifyingRoles(identity, row.payload)
                     try {
                         record.consumeEvents(
-                            events = listOf(toEvent(row.id, row.createdAt, processed)),
+                            events = listOf(
+                                toEvent(
+                                    messageId = row.id,
+                                    createdAt = row.createdAt,
+                                    processed = processed,
+                                    // The SECOND receive path, and it must
+                                    // resolve identically to the poll: the
+                                    // roster is read HERE, one line after the
+                                    // apply, because that is the epoch this row
+                                    // decrypted at. This path consumes rows the
+                                    // poll will never fetch again, so a leaf
+                                    // resolved later here is unrecoverable.
+                                    resolveSender = { leaf ->
+                                        resolveMemberIdentity(rosterOf(record.group), leaf)
+                                    },
+                                ),
+                            ),
                             callSignalingSink = { payload ->
                                 callSignalingSink?.invoke(groupIdHex, payload)
                             },
@@ -4106,17 +4171,56 @@ public class ChatRepository(
                     )
                 }
 
+                // A welcomes-owed entry has already reached a verdict, so it is
+                // not this finder's business — re-adjudicating it would
+                // re-publish a commit whose order was already read.
                 override suspend fun findOwed(): SweepDurableEntry? =
+                    findSweepEntry { it.isSweep && !it.acked && !it.sweepWelcomesOwed }
+
+                override suspend fun markWelcomesOwed(id: String, commitMessageId: Long) {
+                    // Outbox bookkeeping only: the MLS snapshot was persisted one
+                    // line earlier by the sweep's own `persist`, so this
+                    // deliberately does NOT go through `prepareCrashSafeCommit`.
+                    //
+                    // The diagnostic lives HERE rather than in the sweep's catch,
+                    // because `CommitterSweep.kt` is host-testable on the plain
+                    // JVM where `android.util.Log` is not mocked. It re-throws so
+                    // the sweep still sees the failure and takes its non-fatal
+                    // branch.
+                    try {
+                        CommitOutboxStore.markWelcomesOwed(
+                            applicationContext,
+                            id,
+                            commitMessageId,
+                        )
+                    } catch (cause: Throwable) {
+                        android.util.Log.w(
+                            "ChatRepository",
+                            "ADR-0045: could not record the owed Welcome fan-out for $id" +
+                                " — a publish failure below is not retryable",
+                            cause,
+                        )
+                        throw cause
+                    }
+                }
+
+                override suspend fun findOwedWelcomes(): SweepDurableEntry? =
+                    findSweepEntry { it.isSweep && !it.acked && it.sweepWelcomesOwed }
+
+                private fun findSweepEntry(
+                    match: (PendingCommitEntry) -> Boolean,
+                ): SweepDurableEntry? =
                     try {
                         CommitOutboxStore
                             .loadForGroup(applicationContext, accountIdB64, groupIdB64)
-                            .firstOrNull { it.isSweep && !it.acked }
+                            .firstOrNull(match)
                             ?.let {
                                 SweepDurableEntry(
                                     id = it.id,
                                     commitB64 = it.commitB64,
                                     welcomeEnvelopeB64 = it.secondArtifactB64,
                                     welcomeMailboxesB64 = it.sweepWelcomeMailboxesB64,
+                                    commitMessageId = it.commitMessageId,
                                 )
                             }
                     } catch (_: Throwable) {
@@ -4125,7 +4229,7 @@ public class ChatRepository(
 
                 override suspend fun ack(
                     id: String,
-                    commitMessageId: Long,
+                    commitMessageId: Long?,
                     welcomeMessageId: Long?,
                 ) {
                     ackCommitBestEffort(id, commitMessageId, welcomeMessageId)
@@ -4165,6 +4269,24 @@ public class ChatRepository(
             // It is never reached from inside `exclusiveProvider`, which would
             // self-deadlock a non-reentrant `Mutex`.
             persist = { providerLock.withLock { persistSnapshotBestEffort() } },
+            // The verdict apply advances the SAME cursor the poll drives, so it
+            // takes the FAIL-CLOSED persist — see [DurableCursorGate]. Called
+            // from INSIDE an `exclusiveProvider` region, so it must NOT take
+            // `providerLock` (a non-reentrant `Mutex` would self-deadlock); its
+            // non-suspending type is what keeps that from being a comment.
+            persistApplied = {
+                try {
+                    persistSnapshotDurableOrThrow()
+                } catch (t: Throwable) {
+                    android.util.Log.w(
+                        "ChatRepository",
+                        "ADR-0045 verdict apply: MLS snapshot persist failed — holding " +
+                            "the journal cursor so the rows are re-fetched rather than lost",
+                        t,
+                    )
+                    throw t
+                }
+            },
             encodeB64 = ::outboxB64,
             decodeB64 = ::outboxUnb64,
         )
@@ -4196,6 +4318,28 @@ public class ChatRepository(
                 // An unreadable verdict leaves the sweep staged for the next
                 // attempt; the poll tail retries continuously.
                 android.util.Log.w("ChatRepository", "ADR-0045 owed verdict unresolved", cause)
+            }
+            // A sweep whose verdict SETTLED but whose Welcome never reached the
+            // wire owes only the fan-out. It is invisible to every other recovery
+            // path — the merge cleared `hasStagedSweep()` and emptied the pending
+            // set, and the legacy loop below filters sweep entries out — so
+            // without this the added member stays in every peer's roster,
+            // addressed by every later message, permanently unable to construct
+            // group state.
+            //
+            // It runs AFTER the owed verdict on purpose: a still-staged sweep
+            // owes a VERDICT, and only once that has merged is a Welcome allowed
+            // on the wire at all (ADR-0045 obligation 2). `resolveOwedWelcomes`
+            // refuses while anything is staged, so the order here is belt to that
+            // braces.
+            try {
+                groupLock(groupIdHex).withLock {
+                    resolveOwedWelcomes(sweepPortsFor(record, identity, groupIdHex))
+                }
+            } catch (cause: Throwable) {
+                // The DS is still unreachable. The durable marker survives, so
+                // the next sweep — group open or poll tail — retries the fan-out.
+                android.util.Log.w("ChatRepository", "ADR-0045 owed Welcome unresolved", cause)
             }
         }
         val entries = try {
@@ -4309,15 +4453,25 @@ public data class ChatThread(
     val messages: List<ChatMessage>,
     /** Cursor for the next [ChatClient.pollMessages] call. */
     val cursor: Long,
-    /** ADR-0024 — the MLS leaf indices currently shown as "is
-     *  typing", already filtered against the expiry window. The
-     *  UI resolves each leaf to a member label (1×1 → bare
-     *  "typing…"). Empty when nobody is typing. */
-    val typingLeaves: Set<UInt> = emptySet(),
-    /** ADR-0024 — the monotone per-leaf read watermark. The author
-     *  renders "Read" on its OWN message once every OTHER member's
-     *  watermark `>=` that message's id. */
-    val readUpToByLeaf: Map<UInt, Long> = emptyMap(),
+    /** ADR-0024 — the members currently shown as "is typing", by
+     *  [MemberIdentity], already filtered against the expiry window. The UI
+     *  resolves each identity to a member label (1×1 → bare "typing…"). Empty
+     *  when nobody is typing.
+     *
+     *  Keyed on the signature key, never the MLS leaf: OpenMLS hands a vacated
+     *  leaf to the next member added, so a leaf key lets a newcomer inherit —
+     *  and clear — a departed member's typing state. */
+    val typingMembers: Set<MemberIdentity> = emptySet(),
+    /** ADR-0024 — the monotone per-member read watermark. The author renders
+     *  "Read" on its OWN message once every OTHER member's watermark `>=` that
+     *  message's id.
+     *
+     *  Keyed on the signature key for the sharper version of the same reason:
+     *  the watermark is monotone and is never reset on a membership change, so
+     *  a leaf key handed a departed member's entire read history to whoever was
+     *  added into their slot, and the "Read" tick then reported messages as
+     *  read by somebody who never saw them. */
+    val readUpToByMember: Map<MemberIdentity, Long> = emptyMap(),
     /**
      * ADR-0045 UX §6.2 — `true` once this device's own membership has ENDED
      * (`Group.isActive()` is false). Terminal and survives a restart.
@@ -4358,13 +4512,18 @@ public data class ChatMessage(
     val attachments: List<uniffi.lakko_ffi_uniffi.AttachmentRef> = emptyList(),
     /** ISO-8601 timestamp from the DS. */
     val createdAt: String,
-    /** ADR-0023 — the original author's MLS leaf index. Set for
-     *  every chat message (our own outgoing rows carry our own
-     *  leaf). The author-only edit/delete gate compares an op's
-     *  sender leaf against this. `null` ⇒ unknown author (a
-     *  rehydrated pre-ADR-0023 row, or a system row) — no op can
-     *  pass the gate against it. */
-    val authorLeaf: UInt? = null,
+    /** ADR-0023 — the original author's IDENTITY: their Ed25519 signature
+     *  public key, base64, resolved from the MLS sender leaf AT RECEIPT (see
+     *  `AuthorIdentity.kt`). Set for every chat message; our own outgoing rows
+     *  carry our own key, stamped at send. The author-only edit/delete gate
+     *  compares an op's sender identity against this. `null` ⇒ unknown author
+     *  (a row stored before this field existed, an unresolvable sender, or a
+     *  system row) — no op can pass the gate against it.
+     *
+     *  This replaced the author LEAF, which is what let a member added into a
+     *  departed member's vacated leaf edit and delete that member's history —
+     *  and on Android survived restarts, because the leaf was persisted. */
+    val authorKey: MemberIdentity? = null,
     /** ADR-0023 — `true` once a peer-accepted EDIT op replaced
      *  [text]; the UI appends a subtle "(edited)" marker. */
     val edited: Boolean = false,
@@ -4372,16 +4531,21 @@ public data class ChatMessage(
      *  tombstoned the message; the UI renders a muted "message
      *  deleted" placeholder and drops the text + attachments. */
     val deleted: Boolean = false,
-    /** ADR-0023 — accumulated reactions, attributed per sender
-     *  leaf. Rendered as emoji chips with counts; re-sending the
-     *  same `(leaf, emoji)` toggles it off. */
+    /** ADR-0023 — accumulated reactions, attributed per reactor identity.
+     *  Rendered as emoji chips with counts; re-sending the same
+     *  `(reactor, emoji)` toggles it off. */
     val reactions: List<Reaction> = emptyList(),
 )
 
-/** ADR-0023 — one reaction on a [ChatMessage], attributed to its
- *  sender's MLS leaf for dedup + per-user toggle. */
+/** ADR-0023 — one reaction on a [ChatMessage], attributed to its sender's
+ *  signature key for dedup + per-user toggle.
+ *
+ *  Keyed on the identity, never the MLS leaf: a leaf-keyed pair let a newcomer
+ *  at a departed member's vacated leaf toggle that member's reaction OFF, and
+ *  because removing the last reactor of an emoji drops the pair entirely, the
+ *  chip did not merely decrement — it DISAPPEARED. */
 public data class Reaction(
-    val reactorLeaf: UInt,
+    val reactor: MemberIdentity,
     val emoji: String,
 )
 
@@ -4424,22 +4588,31 @@ private class GroupRecord(
     private val messages: MutableList<ChatMessage> =
         Collections.synchronizedList(mutableListOf())
 
-    /** ADR-0024 — ephemeral per-leaf typing state: the local
-     *  monotonic-clock time (`SystemClock.elapsedRealtime` millis)
-     *  at which we last observed a FRESH `typing:true` from that
-     *  leaf. A leaf auto-expires [TYPING_EXPIRY_MS] after this
-     *  stamp; an explicit `typing:false` removes the entry
-     *  immediately. NEVER persisted (rebuilt purely from live
-     *  signals). */
-    private val typingByLeaf: MutableMap<UInt, Long> =
-        Collections.synchronizedMap(mutableMapOf())
+    /** Guards the two presence registries below. They are immutable maps
+     *  swapped under this monitor rather than `Collections.synchronizedMap`s
+     *  mutated in place, because the folds that decide them are pure
+     *  replace-the-map functions in `AuthorIdentity.kt` — which is what makes
+     *  them reachable from a test at all. */
+    private val presenceLock = Any()
 
-    /** ADR-0024 — monotone per-leaf read watermark: the highest
-     *  read-up-to messageId each member has asserted. A lower
-     *  value never overwrites a higher one (re-sync replay is
-     *  idempotent). Session state — not persisted. */
-    private val readUpToByLeaf: MutableMap<UInt, Long> =
-        Collections.synchronizedMap(mutableMapOf())
+    /** ADR-0024 — ephemeral per-MEMBER typing state: the local monotonic-clock
+     *  time (`SystemClock.elapsedRealtime` millis) at which we last observed a
+     *  FRESH `typing:true` from that member. An entry auto-expires
+     *  [TYPING_EXPIRY_MS] after its stamp; an explicit `typing:false` removes
+     *  it immediately. NEVER persisted (rebuilt purely from live signals).
+     *
+     *  Keyed on the sender's signature key, never the MLS leaf — see
+     *  [foldTyping]. */
+    private var typingByMember: Map<MemberIdentity, Long> = emptyMap()
+
+    /** ADR-0024 — monotone per-MEMBER read watermark: the highest read-up-to
+     *  messageId each member has asserted. A lower value never overwrites a
+     *  higher one (re-sync replay is idempotent). Session state — not
+     *  persisted.
+     *
+     *  Keyed on the sender's signature key, never the MLS leaf — see
+     *  [foldReadWatermark]. */
+    private var readUpToByMember: Map<MemberIdentity, Long> = emptyMap()
 
     @Volatile
     var cursor: Long = 0
@@ -4477,10 +4650,12 @@ private class GroupRecord(
         attachments: List<uniffi.lakko_ffi_uniffi.AttachmentRef> = emptyList(),
         messageId: Long,
         createdAt: String,
-        /** ADR-0023 — our own leaf at send time, so a peer's
-         *  later edit/delete op of this row passes the gate only
-         *  if it really comes from us. */
-        authorLeaf: UInt?,
+        /** ADR-0023 — our own IDENTITY at send time, so a peer's later
+         *  edit/delete op of this row passes the gate only if it really comes
+         *  from us. Stamped at send from the roster we are a member of right
+         *  now, rather than read back from a leaf later: any leaf, ours
+         *  included, can be reassigned to a member added afterwards. */
+        authorKey: MemberIdentity?,
     ) {
         messages.add(
             ChatMessage(
@@ -4489,7 +4664,7 @@ private class GroupRecord(
                 text = text,
                 attachments = attachments,
                 createdAt = createdAt,
-                authorLeaf = authorLeaf,
+                authorKey = authorKey,
             ),
         )
     }
@@ -4497,48 +4672,40 @@ private class GroupRecord(
     /**
      * ADR-0023 — locally apply an op WE just sent (the DS never
      * echoes our own application messages back). The
-     * author-only gate is trivially satisfied for our own edit /
-     * delete (we authored the target); a reaction toggles our
-     * own `(ownLeaf, emoji)`. Mirrors [applyOp] but skips the
-     * cross-author gate the receive path enforces.
+     * author-only gate is satisfied for our own edit / delete because we
+     * authored the target and [ownKey] is the identity that row was stamped
+     * with; a reaction toggles our own `(ownKey, emoji)`.
+     *
+     * An unresolvable [ownKey] falls back to [OWN_REACTION_SENTINEL] for the
+     * REACTION path only: the envelope has already been published, so dropping
+     * the local apply would leave every peer showing a reaction this device can
+     * neither see nor undo. Edit / delete deliberately get no sentinel — it
+     * would never equal the target's stored author key, so they fail closed
+     * exactly as an unresolvable sender always did.
      */
     fun applyOwnOp(
         op: MessageOp,
         target: Long,
         text: String,
         emoji: String?,
-        ownLeaf: UInt?,
+        ownKey: MemberIdentity?,
     ) {
         applyOpInternal(
             op = op,
             target = target,
             text = text,
             emoji = emoji,
-            senderLeaf = ownLeaf,
+            sender = if (op == MessageOp.Reaction) ownKey ?: OWN_REACTION_SENTINEL else ownKey,
         )
-    }
-
-    fun applyPollResult(
-        result: PollMessagesResult,
-        callSignalingSink: ((ByteArray) -> Unit)? = null,
-        pushRoutingSecretSink: ((ByteArray, ULong, UInt?) -> Unit)? = null,
-        committerBeaconSink: ((UInt?, String) -> Unit)? = null,
-    ) {
-        consumeEvents(
-            events = result.events,
-            callSignalingSink = callSignalingSink,
-            pushRoutingSecretSink = pushRoutingSecretSink,
-            committerBeaconSink = committerBeaconSink,
-        )
-        cursor = result.cursor
     }
 
     /**
      * Consume a batch of receive-path events — the ONE place a decoded event
      * becomes record state.
      *
-     * Two callers, and that is the point. The poll is the obvious one, via
-     * [applyPollResult]. The other is the ADR-0045 committer sweep: its verdict
+     * Two callers, and that is the point. The poll is the obvious one
+     * ([pollGroup] calls this directly from its locked apply region). The other
+     * is the ADR-0045 committer sweep: its verdict
      * applies every journal row the DS ordered below its own commit and then
      * advances the SAME cursor over them, so those rows are gone from the poll's
      * future forever. A chat message another member sent in the window between the
@@ -4547,9 +4714,13 @@ private class GroupRecord(
      * through this function is what keeps the two from drifting — every envelope
      * kind is folded here once.
      *
-     * Deliberately does NOT touch [cursor]: the poll advances it from the batch it
-     * fetched, the sweep advances it itself to the last row its verdict consumed,
-     * and a second writer here would let one path wind the other's cursor.
+     * Deliberately does NOT touch [cursor], and neither does any other
+     * event-folding entry point: since the receive-durability fix, the ONLY way
+     * this record's cursor moves on either path is [applyDurableCursorBatch],
+     * which refuses to advance it past a batch whose snapshot did not reach disk.
+     * A second writer here would not merely let one path wind the other's cursor
+     * — it would route around that gate, which is the defect it exists to
+     * prevent. See [DurableCursorGate].
      *
      * Events must arrive in journal order; the op fold assumes it.
      */
@@ -4568,7 +4739,12 @@ private class GroupRecord(
                         text = event.text,
                         attachments = event.attachments,
                         createdAt = event.createdAt,
-                        authorLeaf = event.senderLeaf,
+                        // The author IDENTITY the classifier resolved at
+                        // receipt, in the epoch that named the leaf. The leaf
+                        // itself is deliberately not recorded: by the time this
+                        // row is read back it may belong to whoever was added
+                        // next.
+                        authorKey = event.senderKey,
                     ),
                 )
                 is IncomingChatEvent.Op -> applyOpInternal(
@@ -4576,15 +4752,15 @@ private class GroupRecord(
                     target = event.target,
                     text = event.text,
                     emoji = event.emoji,
-                    senderLeaf = event.senderLeaf,
+                    sender = event.senderKey,
                 )
                 is IncomingChatEvent.Typing -> applyTyping(
-                    senderLeaf = event.senderLeaf,
+                    sender = event.senderKey,
                     isTyping = event.isTyping,
                     createdAt = event.createdAt,
                 )
                 is IncomingChatEvent.ReadReceipt -> applyReadReceipt(
-                    senderLeaf = event.senderLeaf,
+                    sender = event.senderKey,
                     upTo = event.upTo,
                 )
                 is IncomingChatEvent.System -> messages.add(
@@ -4641,14 +4817,20 @@ private class GroupRecord(
      * ADR-0023 — fold an edit / delete / reaction op into the
      * target message identified by its DS [target] id.
      *
-     *   * edit / delete — **author-only gate**: applied only if
-     *     [senderLeaf] equals the target's stored [ChatMessage.authorLeaf]
-     *     (both non-null). Otherwise DROPPED (fail-closed,
-     *     invariant #4). An unknown target is also dropped.
-     *   * reaction — accepted from any member, attributed to
-     *     [senderLeaf]; TOGGLE: an existing `(leaf, emoji)` pair
-     *     is removed, else added. A `null` sender leaf is
-     *     dropped (no attribution possible).
+     *   * edit / delete — **author-only gate** ([editDeleteAuthorized]):
+     *     applied only if [sender] equals the target's stored
+     *     [ChatMessage.authorKey] (both non-null). Otherwise DROPPED
+     *     (fail-closed, invariant #4). An unknown target is also dropped.
+     *   * reaction — accepted from any member, attributed to [sender];
+     *     TOGGLE via [toggleReaction]: an existing `(reactor, emoji)` pair is
+     *     removed, else added. A `null` sender is dropped (no attribution
+     *     possible).
+     *
+     * [sender] is an IDENTITY — a signature key resolved at receipt — and never
+     * an MLS leaf index. Comparing leaves here is what let a member added into
+     * a departed member's vacated leaf edit and delete that member's history
+     * and destroy their reactions; see `AuthorIdentity.kt`. The two rules
+     * themselves live there, not here, so a test can reach them.
      *
      * LWW on the single journal: ops arrive in DS order and the
      * last edit/delete wins by construction (later op overwrites
@@ -4659,7 +4841,7 @@ private class GroupRecord(
         target: Long,
         text: String,
         emoji: String?,
-        senderLeaf: UInt?,
+        sender: MemberIdentity?,
     ) {
         synchronized(messages) {
             val idx = messages.indexOfFirst { it.messageId == target }
@@ -4667,22 +4849,12 @@ private class GroupRecord(
             val current = messages[idx]
             when (op) {
                 MessageOp.Edit -> {
-                    // Author-only gate — both leaves must be known
-                    // and equal, else drop.
-                    if (senderLeaf == null || current.authorLeaf == null ||
-                        senderLeaf != current.authorLeaf
-                    ) {
-                        return
-                    }
+                    if (!editDeleteAuthorized(current.authorKey, sender)) return
                     if (current.deleted) return // a deleted message stays deleted
                     messages[idx] = current.copy(text = text, edited = true)
                 }
                 MessageOp.Delete -> {
-                    if (senderLeaf == null || current.authorLeaf == null ||
-                        senderLeaf != current.authorLeaf
-                    ) {
-                        return
-                    }
+                    if (!editDeleteAuthorized(current.authorKey, sender)) return
                     messages[idx] = current.copy(
                         text = "",
                         attachments = emptyList(),
@@ -4691,92 +4863,74 @@ private class GroupRecord(
                 }
                 MessageOp.Reaction -> {
                     val e = emoji ?: return
-                    if (senderLeaf == null) return
-                    val existing = current.reactions.indexOfFirst {
-                        it.reactorLeaf == senderLeaf && it.emoji == e
-                    }
-                    val next = current.reactions.toMutableList()
-                    if (existing >= 0) {
-                        next.removeAt(existing) // toggle off
-                    } else {
-                        next.add(Reaction(reactorLeaf = senderLeaf, emoji = e))
-                    }
-                    messages[idx] = current.copy(reactions = next.toList())
+                    if (sender == null) return
+                    messages[idx] = current.copy(
+                        reactions = toggleReaction(current.reactions, sender, e),
+                    )
                 }
             }
         }
     }
 
     /**
-     * ADR-0024 — fold an incoming TYPING signal into the
-     * ephemeral per-leaf state.
+     * ADR-0024 — fold an incoming TYPING signal into the ephemeral per-MEMBER
+     * state. The rule is [foldTyping]; this supplies the two host values it
+     * deliberately does not read for itself — the DS row's age and the local
+     * monotonic clock.
      *
-     *   * `senderLeaf == null` ⇒ dropped (no attribution).
-     *   * STALE-IGNORE: a `true` whose DS [createdAt] is older
-     *     than [TYPING_EXPIRY_MS] is dropped — on a full journal
-     *     re-download a client would otherwise replay old
-     *     `typing:true` rows and resurrect a stale indicator.
-     *   * `true` (fresh) ⇒ stamp the leaf with the current
-     *     monotonic time so it auto-expires [TYPING_EXPIRY_MS]
-     *     later.
-     *   * `false` ⇒ clear the leaf immediately (explicit stop).
-     *
-     * The UI reads [activeTypingLeaves] which re-filters against
-     * the expiry window on every read, so an entry that is never
-     * refreshed simply ages out without a timer here.
+     * A `null` [sender] is dropped here rather than inside the fold: an
+     * unattributable signal has nothing to key on.
      */
-    fun applyTyping(senderLeaf: UInt?, isTyping: Boolean, createdAt: String) {
-        val leaf = senderLeaf ?: return
-        if (!isTyping) {
-            typingByLeaf.remove(leaf)
-            return
+    fun applyTyping(sender: MemberIdentity?, isTyping: Boolean, createdAt: String) {
+        val who = sender ?: return
+        synchronized(presenceLock) {
+            typingByMember = foldTyping(
+                prev = typingByMember,
+                sender = who,
+                isTyping = isTyping,
+                ageMs = typingSignalAgeMs(createdAt),
+                nowMs = android.os.SystemClock.elapsedRealtime(),
+            )
         }
-        // Stale-`createdAt` re-sync guard: ignore a typing:true
-        // whose DS row is already older than the expiry window.
-        val ageMs = typingSignalAgeMs(createdAt)
-        if (ageMs != null && ageMs > TYPING_EXPIRY_MS) return
-        typingByLeaf[leaf] = android.os.SystemClock.elapsedRealtime()
     }
 
     /**
-     * ADR-0024 — fold an incoming READ-RECEIPT into the monotone
-     * per-leaf watermark. A `null` leaf is dropped (no
-     * attribution); a value `<=` the current watermark is ignored
-     * (monotone — re-sync replay is idempotent).
+     * ADR-0024 — fold an incoming READ-RECEIPT into the monotone per-MEMBER
+     * watermark ([foldReadWatermark]). A `null` sender is dropped (no
+     * attribution).
      */
-    fun applyReadReceipt(senderLeaf: UInt?, upTo: Long) {
-        val leaf = senderLeaf ?: return
-        val current = readUpToByLeaf[leaf] ?: -1L
-        if (upTo > current) readUpToByLeaf[leaf] = upTo
+    fun applyReadReceipt(sender: MemberIdentity?, upTo: Long) {
+        val who = sender ?: return
+        synchronized(presenceLock) {
+            readUpToByMember = foldReadWatermark(readUpToByMember, who, upTo)
+        }
     }
 
     /**
-     * ADR-0024 — the set of leaves currently shown as "typing",
-     * re-filtered against the expiry window at read time. A leaf
-     * whose last fresh `typing:true` is older than
-     * [TYPING_EXPIRY_MS] is auto-expired (and pruned from the
-     * backing map as a side effect).
+     * ADR-0024 — the members currently shown as "typing", re-filtered against
+     * the expiry window at read time ([pruneTyping]). An entry whose last fresh
+     * `typing:true` is older than [TYPING_EXPIRY_MS] is auto-expired (and
+     * pruned from the backing map as a side effect).
      */
-    fun activeTypingLeaves(): Set<UInt> {
+    fun activeTypingMembers(): Set<MemberIdentity> {
         val now = android.os.SystemClock.elapsedRealtime()
-        synchronized(typingByLeaf) {
-            val expired = typingByLeaf.filterValues { now - it > TYPING_EXPIRY_MS }.keys
-            for (leaf in expired) typingByLeaf.remove(leaf)
-            return typingByLeaf.keys.toSet()
+        synchronized(presenceLock) {
+            typingByMember = pruneTyping(typingByMember, now)
+            return typingByMember.keys.toSet()
         }
     }
 
-    /** ADR-0024 — read-only snapshot of the monotone per-leaf read
+    /** ADR-0024 — read-only snapshot of the monotone per-member read
      *  watermark for the author-side read-state render. */
-    fun readUpToSnapshot(): Map<UInt, Long> =
-        synchronized(readUpToByLeaf) { readUpToByLeaf.toMap() }
+    fun readUpToSnapshot(): Map<MemberIdentity, Long> =
+        synchronized(presenceLock) { readUpToByMember }
 
     fun toThread(): ChatThread = ChatThread(
         groupIdHex = DsClient.pseudonymHex(groupId),
         messages = messages.toList(),
         cursor = cursor,
-        typingLeaves = activeTypingLeaves(),
-        readUpToByLeaf = readUpToSnapshot(),
+        typingMembers = activeTypingMembers(),
+        readUpToByMember = readUpToSnapshot(),
         // ADR-0045 UX §6.2 — safe to read here, unlike `members()`: OpenMLS
         // `is_active()` is a field read on the in-memory group state and
         // touches no provider storage, and the FFI `Group` guards it with its
@@ -4807,12 +4961,9 @@ private class GroupRecord(
     }
 
     companion object {
-        /** ADR-0024 — a typing indicator auto-expires this long
-         *  after the last fresh `typing:true`; the same window is
-         *  the stale-`createdAt` re-sync replay guard. ~6 s per
-         *  the ADR (the sender re-emits every ~4 s while typing,
-         *  so a live typist always refreshes inside this). */
-        const val TYPING_EXPIRY_MS: Long = 6_000L
+        // TYPING_EXPIRY_MS moved to `AuthorIdentity.kt`, beside the folds it
+        // bounds: this class is private, so a fold that read it from here
+        // could not be reached from a test.
 
         /**
          * ADR-0024 — age (in millis) of a typing signal whose DS

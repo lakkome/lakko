@@ -157,6 +157,24 @@ public data class PendingCommitEntry(
      */
     val isSweep: Boolean = false,
     /**
+     * ADR-0045 — this sweep's verdict is SETTLED (its commit won and merged) and
+     * the only thing it still owes is the Welcome fan-out.
+     *
+     * Set in one durable write at the moment of the merge, which is what keeps
+     * obligation 2 intact: the flag IS the durable statement "the verdict said
+     * WON", so an entry that has not reached a verdict never carries it and a
+     * pre-verdict restart therefore cannot be talked into publishing a Welcome.
+     *
+     * [isSweep] stays `true` alongside it, deliberately — that flag is what marks
+     * the entry as a SWEEP entry, and [ChatRepository.sweepPendingCommits]'s
+     * legacy loop filters on it. Clearing it would hand a welcome-owed entry to
+     * a loop that re-publishes the commit, finds no singular
+     * [secondArtifactMailboxB64], publishes no Welcome at all, and then ACKS —
+     * destroying the record. The two are read together: `isSweep &&
+     * !sweepWelcomesOwed` is verdict-owed, `sweepWelcomesOwed` is fan-out-owed.
+     */
+    val sweepWelcomesOwed: Boolean = false,
+    /**
      * ADR-0045 — base64 mailbox pseudonyms for a sweep's Welcome fan-out.
      *
      * A sweep commit can carry SEVERAL adds under ONE Welcome, where every
@@ -474,6 +492,21 @@ public object CommitOutboxStore {
         markAckedIn(dir(context), id, commitMessageId, secondMessageId)
     }
 
+    /**
+     * ADR-0045 — flip a sweep entry from *verdict owed* to *Welcome fan-out
+     * owed*, recording the DS id its commit published under, in ONE atomic write
+     * so it is never half-applied.
+     *
+     * THROWS on failure. The caller treats that as non-fatal: the marker only
+     * buys a retry, and the Welcome it guards is correct to publish either way.
+     *
+     * A no-op when the entry is already gone (a concurrent ack / discard raced
+     * us).
+     */
+    public fun markWelcomesOwed(context: Context, id: String, commitMessageId: Long) {
+        markWelcomesOwedIn(dir(context), id, commitMessageId)
+    }
+
     /** Delete one entry by id. No-op when absent. */
     public fun deleteEntry(context: Context, id: String) {
         deleteEntryIn(dir(context), id)
@@ -552,6 +585,22 @@ public object CommitOutboxStore {
                 commitMessageId = commitMessageId ?: existing.commitMessageId,
                 secondMessageId = secondMessageId ?: existing.secondMessageId,
             ),
+        )
+    }
+
+    /** Read-modify-write an entry to welcomes-owed. No-op when absent /
+     *  unreadable; THROWS when the write itself fails. */
+    internal fun markWelcomesOwedIn(dir: File, id: String, commitMessageId: Long) {
+        val file = File(dir, id + JSON_SUFFIX)
+        if (!file.isFile) return
+        val existing = try {
+            json.decodeFromString(PendingCommitEntry.serializer(), file.readText())
+        } catch (_: Throwable) {
+            return
+        }
+        putEntryIn(
+            dir,
+            existing.copy(sweepWelcomesOwed = true, commitMessageId = commitMessageId),
         )
     }
 

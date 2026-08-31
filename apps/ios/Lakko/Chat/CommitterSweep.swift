@@ -144,17 +144,24 @@ public struct SweepDurableEntry: Equatable {
     public var commitB64: String
     public var welcomeEnvelopeB64: String?
     public var welcomeMailboxesB64: [String]
+    /// The DS id of the published commit, recorded alongside the welcomes-owed
+    /// marker. Diagnostics only — it is carried so the eventual ack can name the
+    /// commit it belongs to rather than inventing one. `nil` until the verdict
+    /// settled.
+    public var commitMessageId: Int64?
 
     public init(
         id: String,
         commitB64: String,
         welcomeEnvelopeB64: String? = nil,
-        welcomeMailboxesB64: [String] = []
+        welcomeMailboxesB64: [String] = [],
+        commitMessageId: Int64? = nil
     ) {
         self.id = id
         self.commitB64 = commitB64
         self.welcomeEnvelopeB64 = welcomeEnvelopeB64
         self.welcomeMailboxesB64 = welcomeMailboxesB64
+        self.commitMessageId = commitMessageId
     }
 }
 
@@ -274,10 +281,38 @@ public struct SweepOutboxPort {
     /// Durably record the entry AND the current MLS snapshot, BEFORE any
     /// publish. A throw ABORTS the sweep fail-closed.
     public var record: (SweepDurableEntry) throws -> Void
-    /// The un-acked verdict-owed entry for this group, or `nil`.
+    /// The un-acked entry whose **verdict** is still owed, or `nil`.
+    ///
+    /// A welcomes-owed entry is deliberately NOT returned here: its verdict is
+    /// settled and its commit is merged, so re-adjudicating it would re-publish
+    /// a commit whose order was already read.
     public var findOwed: () -> SweepDurableEntry?
+    /// Flip the entry from *verdict owed* to *Welcome fan-out owed*, and record
+    /// the DS id its commit published under, in ONE durable write.
+    ///
+    /// ## What a restart must, and must not, do with this
+    ///
+    /// MUST: re-publish the entry's Welcome to every mailbox in
+    /// ``SweepDurableEntry/welcomeMailboxesB64``, then ack. MUST NOT: re-publish
+    /// the commit, re-adjudicate, or apply another journal row — the verdict is
+    /// already known and the commit is already merged.
+    ///
+    /// The marker is written strictly AFTER ``SweepGroupPort/mergeStagedSweep``
+    /// and its persist, and that ordering is what keeps obligation 2 intact: the
+    /// marker IS the durable statement "the verdict said WON", so recording it
+    /// any earlier would let a pre-verdict restart publish a Welcome for a
+    /// commit that then lost — the three-party fork. A restart that finds a
+    /// staged sweep instead finds no marker, and ``resolveOwedWelcomes(_:)``
+    /// refuses outright while one is staged, so the two states cannot be
+    /// confused even if a write were ever to land out of order.
+    ///
+    /// A throw is NOT fatal — see the call site.
+    public var markWelcomesOwed: (String, Int64) throws -> Void
+    /// The un-acked entry whose verdict settled but whose Welcome fan-out is
+    /// still owed, or `nil`.
+    public var findOwedWelcomes: () -> SweepDurableEntry?
     /// Mark the entry acked once every artifact is on the wire.
-    public var ack: (String, Int64, Int64?) -> Void
+    public var ack: (String, Int64?, Int64?) -> Void
     /// Delete the entry. Used on a LOSS: a commit that lost the order must never
     /// be re-published by the restart sweep.
     public var discard: (String) -> Void
@@ -286,12 +321,16 @@ public struct SweepOutboxPort {
         newEntryId: @escaping () -> String,
         record: @escaping (SweepDurableEntry) throws -> Void,
         findOwed: @escaping () -> SweepDurableEntry?,
-        ack: @escaping (String, Int64, Int64?) -> Void,
+        markWelcomesOwed: @escaping (String, Int64) throws -> Void,
+        findOwedWelcomes: @escaping () -> SweepDurableEntry?,
+        ack: @escaping (String, Int64?, Int64?) -> Void,
         discard: @escaping (String) -> Void
     ) {
         self.newEntryId = newEntryId
         self.record = record
         self.findOwed = findOwed
+        self.markWelcomesOwed = markWelcomesOwed
+        self.findOwedWelcomes = findOwedWelcomes
         self.ack = ack
         self.discard = discard
     }
@@ -337,6 +376,16 @@ public struct SweepPorts {
     public var markOwnPublished: (Int64) -> Void
     /// Best-effort MLS snapshot persist after a merge / abandon.
     public var persist: () -> Void
+    /// FAIL-CLOSED MLS snapshot persist — THROWS on a failed write.
+    ///
+    /// Used by ``adjudicate(ports:cursorBefore:ownCommitMessageId:)`` only, and
+    /// it has to be a separate port from ``persist`` because the two want
+    /// opposite things from a failure. The verdict apply consumes journal rows
+    /// the poll will never fetch again, so it advances the shared cursor over
+    /// them — which makes it subject to exactly the ordering rule the poll
+    /// obeys: the cursor may lag the durable MLS state, never lead it. See
+    /// `Chat/DurableCursor.swift`.
+    public var persistApplied: () throws -> Void
 
     public init(
         group: SweepGroupPort,
@@ -347,7 +396,8 @@ public struct SweepPorts {
         welcomeMailbox: @escaping (Data) throws -> Data,
         wrapWelcome: @escaping (Data) -> Data,
         markOwnPublished: @escaping (Int64) -> Void,
-        persist: @escaping () -> Void
+        persist: @escaping () -> Void,
+        persistApplied: @escaping () throws -> Void
     ) {
         self.group = group
         self.actingCommitter = actingCommitter
@@ -358,6 +408,7 @@ public struct SweepPorts {
         self.wrapWelcome = wrapWelcome
         self.markOwnPublished = markOwnPublished
         self.persist = persist
+        self.persistApplied = persistApplied
     }
 }
 
@@ -383,6 +434,12 @@ public enum SweepOutcome: Equatable {
     /// Lost the journal order: abandoned, no Welcome published, the proposals
     /// survive for the winner's next sweep.
     case lost(commitMessageId: Int64)
+    /// A previous run merged a winning sweep but could not get its Welcome onto
+    /// the wire. The fan-out has now been retried and acked.
+    case welcomesRepublished(welcomeMessageIds: [Int64], addedCount: Int)
+    /// No settled-verdict entry was waiting on its Welcome fan-out. The common
+    /// case, and what a staged sweep also reports — that one owes a VERDICT.
+    case noWelcomesOwed
     /// A staged sweep was found with no durable record of its commit, so the
     /// commit provably never reached the wire (ADR-0040 records before it
     /// publishes). Abandoned, which also unwedges the frozen membership ops.
@@ -490,6 +547,23 @@ public func runCommitterSweep(_ ports: SweepPorts) async throws -> SweepOutcome 
         return try await resolveOwedVerdict(ports)
     }
 
+    // The same obligation, one step further along: a sweep whose verdict settled
+    // but whose Welcome never reached the wire owes that fan-out, and nothing
+    // else will ever notice — the merge cleared `hasStagedSweep()` and emptied
+    // the pending set, so both of the checks below would report an idle group
+    // over a member who can never join.
+    //
+    // Placed BEFORE the rank check for the same reason the owed verdict is: a
+    // device demoted since the merge still owes the Welcome for a member it
+    // successfully added, and nobody else holds those bytes.
+    //
+    // The cost is one small store read per attempt where there was none. That is
+    // deliberate: the outbox holds at most one entry per in-flight commit, and
+    // the alternative is a repair that only runs when the user happens to reopen
+    // the chat.
+    let owedWelcomes = try await resolveOwedWelcomes(ports)
+    if owedWelcomes != .noWelcomesOwed { return owedWelcomes }
+
     // `nil` is "not in the committer set at all" — a plain member or a group
     // with no role table. `0` is the OWNER.
     guard let rank = group.ownCommitterRank() else {
@@ -595,6 +669,59 @@ public func resolveOwedVerdict(_ ports: SweepPorts) async throws -> SweepOutcome
     )
 }
 
+/// Finish a Welcome fan-out a previous run merged but could not publish.
+///
+/// ## The failure this repairs
+///
+/// `publishAndAdjudicate` merges, persists, and only then publishes the Welcome.
+/// A transient DS failure in that last step used to be unrecoverable: the merge
+/// had already cleared `hasStagedSweep()` AND emptied the pending-proposal set,
+/// which are exactly the two signals ``runCommitterSweep(_:)`` and
+/// ``resolveOwedVerdict(_:)`` branch on, so both reported "nothing to do" while
+/// the added member sat in every peer's roster unable to ever join. The durable
+/// welcomes-owed marker is what gives that state a name, and this is what reads
+/// it.
+///
+/// ## What it must NOT do
+///
+/// Not re-adjudicate, and not re-publish the commit. The verdict is settled and
+/// the commit merged; re-reading the journal order would apply rows against a
+/// question that is no longer open, and a second commit publish is noise every
+/// peer drops as wrong-epoch.
+///
+/// ## Ordering — why a staged sweep is refused before the store is even read
+///
+/// A staged sweep owes a VERDICT. ADR-0045 obligation 2 forbids its Welcome
+/// reaching the wire until that verdict says the commit won, so this refuses
+/// outright rather than trusting that the marker cannot be present.
+///
+/// ## Idempotency
+///
+/// The retry re-publishes the SAME recorded envelope bytes, so a first publish
+/// that actually landed leaves the joiner with two identical mailbox rows. That
+/// is inert: `StagedWelcome::into_group` deletes the joiner's KeyPackage bundle
+/// (openmls-0.8.1 `group/mls_group/creation.rs`), so the second copy cannot be
+/// staged and every client's mailbox handler catches the failure and skips the
+/// row. Nothing forks, and no ratchet moves twice.
+///
+/// A publish failure THROWS and leaves the marker in place for the next attempt.
+///
+/// Callers MUST hold the per-group commit lock.
+@MainActor
+public func resolveOwedWelcomes(_ ports: SweepPorts) async throws -> SweepOutcome {
+    if ports.group.hasStagedSweep() { return .noWelcomesOwed }
+
+    guard let owed = ports.outbox.findOwedWelcomes() else { return .noWelcomesOwed }
+
+    let welcomeMessageIds = try await publishWelcomes(ports: ports, entry: owed)
+    ports.outbox.ack(owed.id, owed.commitMessageId, welcomeMessageIds.first)
+
+    return .welcomesRepublished(
+        welcomeMessageIds: welcomeMessageIds,
+        addedCount: owed.welcomeMailboxesB64.count
+    )
+}
+
 /// The shared tail of both entry points: durably record (first time only),
 /// publish the commit, read the verdict, then merge or abandon.
 ///
@@ -674,6 +801,32 @@ private func publishAndAdjudicate(
     try group.mergeStagedSweep()
     ports.persist()
 
+    // The verdict is settled and the merge is durable, so from here on the ONLY
+    // thing this entry still owes is the mailbox fan-out. Say so durably before
+    // attempting it, or a transient DS failure below leaves a GHOST MEMBER:
+    // added to every peer's roster, addressed by every later message, and unable
+    // to construct group state — with nothing left that would retry, because the
+    // merge cleared both signals the two recovery paths look for
+    // (`hasStagedSweep()` and the pending-proposal count).
+    //
+    // A failure to write the marker is NOT fatal and deliberately does not abort
+    // the fan-out. The marker only buys a RETRY; the verdict is already in, so
+    // publishing now is correct with or without it, and refusing to publish
+    // because a bookkeeping write failed would manufacture the very ghost member
+    // this records against.
+    if entry.welcomeEnvelopeB64 != nil {
+        do {
+            try ports.outbox.markWelcomesOwed(entry.id, commitMessageId)
+        } catch {
+            NSLog(
+                "ADR-0045: could not record the owed Welcome fan-out for %@ "
+                + "— a failure below is not retryable: %@",
+                entry.id,
+                String(describing: error)
+            )
+        }
+    }
+
     // Obligation 2 — the Welcome is published HERE and nowhere earlier.
     // Publishing it before the verdict would let a joiner open into a state no
     // other member holds if the commit then lost: a three-party fork, strictly
@@ -693,6 +846,21 @@ private func publishAndAdjudicate(
 /// The cursor advances only to the last row actually applied — never past our
 /// own commit, which the poll re-fetches and drops through the echo filter, and
 /// never past a row this run did not consume.
+///
+/// ## ...and never past a row whose durable write did not land
+///
+/// This path advances the SAME cursor the poll drives, over rows the poll will
+/// never fetch again, so it carries the same hazard and obeys the same rule:
+/// persist first, advance second, hold the cursor when the persist does not
+/// land. Since ADR-0045 a proposal applied here but not persisted, with the
+/// cursor already past it, makes the commit that references it permanently
+/// unappliable — the device sits at epoch N forever. See
+/// `Chat/DurableCursor.swift` for why lagging is the only safe direction.
+///
+/// A held cursor does NOT fail the verdict: the epoch reads either side of the
+/// loop are in-memory and still correct, so the sweep learns whether it won. The
+/// only thing withheld is the journal position, and the rows are re-fetched by
+/// the next poll.
 @MainActor
 private func adjudicate(
     ports: SweepPorts,
@@ -714,11 +882,16 @@ private func adjudicate(
         throw SweepVerdictUnavailable(error)
     }
 
+    let gate = DurableCursorGate()
     var lastApplied = cursorBefore
     for row in rows {
         // Our own commit, and everything the DS ordered after it, is not part of
         // the question. Rows above it are left for the poll.
         if row.id >= ownCommitMessageId { break }
+        // Marked BEFORE the apply, not after: a throw is not proof that nothing
+        // durable changed (`process_message` decrypts and ratchets before either
+        // ADR-0022's role gate or ADR-0045's receipt gate can refuse).
+        gate.markTouched()
         // Bad frame, wrong epoch, a non-MLS Lakko envelope (rendezvous /
         // attribution), a role-refused commit, or one of our own rows. Skipped,
         // exactly as the poll loop skips it — and none of those advance the
@@ -734,7 +907,12 @@ private func adjudicate(
         try? group.applyIncoming(row)
         lastApplied = row.id
     }
-    if lastApplied != cursorBefore { ports.cursor.advance(lastApplied) }
+    if lastApplied != cursorBefore {
+        gate.commit(
+            persist: ports.persistApplied,
+            advance: { ports.cursor.advance(lastApplied) }
+        )
+    }
 
     let epochAfter: UInt64
     do {

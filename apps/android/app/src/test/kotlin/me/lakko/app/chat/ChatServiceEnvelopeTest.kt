@@ -170,6 +170,12 @@ class ChatServiceEnvelopeTest {
             messageId = messageId,
             createdAt = "2026-08-24T00:00:00Z",
             processed = ProcessedMessage.Application(payload, senderLeaf),
+            // This suite is about ENVELOPE CLASSIFICATION, not attribution: a
+            // resolver that names nobody keeps every event here unattributed,
+            // which is what a control frame looks like and changes no verdict
+            // below. The attribution rule has its own suite
+            // (`AuthorIdentityTest`).
+            resolveSender = { null },
             isCommitterBeacon = ::fakeBeaconArm,
             parseBody = ::lossyParseBody,
         )

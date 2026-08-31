@@ -30,6 +30,8 @@
 //! leave while owner, so without transfer a person was bound to every group they
 //! created.
 
+use openmls::ciphersuite::hash_ref::ProposalRef;
+use openmls::credentials::CredentialType;
 use openmls::extensions::{
     Extension, ExtensionType, Extensions, RequiredCapabilitiesExtension, UnknownExtension,
 };
@@ -38,17 +40,21 @@ use openmls::group::{
     GroupContext, MlsGroup, MlsGroupCreateConfig, MlsGroupJoinConfig, QueuedProposal, StagedCommit,
     StagedWelcome,
 };
-use openmls::messages::proposals::Proposal;
-use openmls::prelude::{KeyPackage, LeafNodeIndex, ProcessedMessageContent, ProtocolVersion};
+use openmls::messages::proposals::{Proposal, ProposalType};
+use openmls::prelude::{
+    Ciphersuite, KeyPackage, LeafNodeIndex, ProcessedMessageContent, ProtocolVersion,
+};
+use openmls::treesync::EncryptionKey;
 use openmls_rust_crypto::MemoryStorage;
+use openmls_traits::types::VerifiableCiphersuite;
 use openmls_traits::OpenMlsProvider as _;
 use tls_codec::{Deserialize as _, Serialize as _};
 use zeroize::Zeroizing;
 
 use crate::error::{Error, Result};
 use crate::group_proposals::{
-    authorise, classify, commit_effects, owner_survives, pubkey_at_leaf, ProposalKind,
-    ProposalRecord, Proposer,
+    authorise, classify, commit_effects, is_owner_response, owner_survives, pubkey_at_leaf,
+    ProposalKind, ProposalRecord, Proposer,
 };
 use crate::group_roles::{OutgoingOwner, Role, RoleTable, ROLE_EXTENSION_TYPE};
 use crate::identity::Identity;
@@ -83,6 +89,23 @@ use crate::identity::Identity;
 /// [`Group::create`] does not use it.
 pub const GROUP_ID_LEN: usize = 32;
 
+/// The MLS protocol version every Lakko group runs at.
+///
+/// Restated as a constant because OpenMLS publishes **no** accessor for a live
+/// group's version — `MlsGroup::export_group_context` is `#[cfg(test-utils)]`
+/// and `PublicGroup::version` is `pub(crate)` — while
+/// [`added_leaf_can_join`] needs it to re-validate a KeyPackage the way
+/// `validate_add_proposals` would.
+///
+/// It is not a guess. [`Group::create`] builds every group through
+/// `MlsGroupCreateConfig`, whose protocol version is
+/// `ProtocolVersion::default()` — the value below, and the only version
+/// openmls 0.8.1 implements. The same constant is already pinned at the two
+/// places a wire KeyPackage is admitted ([`Group::add_member_from_wire`] and
+/// [`Group::propose_add_member_from_wire`]), so a version this crate does not
+/// name would fail there long before it reached a sweep.
+const GROUP_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::Mls10;
+
 /// Max external-join proposals retained per group awaiting an owner/admin
 /// decision (ADR-0027). A proposal arriving past this cap is surfaced but not
 /// retained — anti-spam, since a non-member can post these.
@@ -107,6 +130,32 @@ const MAX_PENDING_EXTERNAL_JOINS: usize = 64;
 /// [`Group::gate_incoming_proposal`] de-duplicates, and this cap is what bounds
 /// the residue of N genuinely distinct requests.
 ///
+/// **That reasoning had a hole, and it is worth keeping the shape of it.** It
+/// enumerated what a plain member may *ask for* and concluded the flood was
+/// de-duplicable, but de-duplication is a property of the **wire bytes**, not of
+/// the ask. `Proposal::Update` was open to every member and carries a freshly
+/// generated leaf node, so N of them are N distinct `ProposalRef`s that nothing
+/// collapses — a plain member could fill this cap on every peer with stock
+/// proposals, freezing the group's membership until a sweep and re-flooding
+/// immediately after. `authorise` now refuses `Update` outright (see its
+/// documentation for the second, sharper reason), so the cap is once again
+/// reachable only from an ask that is either de-duplicable or owner/admin-only.
+///
+/// **And that patch left a second hole, of the same shape.** The residual —
+/// `Add`, which mints a fresh `ProposalRef` every time — was dismissed as
+/// "owner-or-admin only, a role that can already remove every member, so filling
+/// this set is strictly weaker than what it already holds". It is not: the two
+/// capabilities **compose**. Mass removal is loud, attributable and repairable;
+/// filling this set removes the owner's *response*, because at the cap
+/// [`Group::authorise_own_proposal`] refuses the owner's own removal and role
+/// change too, [`Group::refuse_if_proposals_pending`] refuses every direct
+/// commit, and nothing discards a pending proposal without committing it. The
+/// only exit was to sweep, which enacts the flood and leaves the flooder free to
+/// re-flood at once. `Remove` reaches the same place by a second route that the
+/// de-duplication argument above does not cover: a repeat naming *one* target
+/// collapses, but one member may name every *other* member, and those do not.
+/// The fix is [`MAX_RESERVED_OWNER_RESPONSES`], not a smaller number here.
+///
 /// **At the cap the late proposer pays, never the group.** A proposal arriving
 /// into a full set is refused (`stored == false`) rather than evicting one
 /// already held — evicting would be strictly worse than the flood, because a
@@ -114,7 +163,49 @@ const MAX_PENDING_EXTERNAL_JOINS: usize = 64;
 /// refused with `InvalidCommit(MissingProposal)` on the evicting member alone.
 /// Refusing the newcomer costs it a re-proposal after the next sweep; evicting
 /// an incumbent would cost the whole group its next commit.
-const MAX_PENDING_PROPOSALS: usize = 64;
+pub(crate) const MAX_PENDING_PROPOSALS: usize = 64;
+
+/// Slots reserved, **past** [`MAX_PENDING_PROPOSALS`], for the group owner's
+/// `Remove` and `RoleChange` proposals.
+///
+/// The owner must never lose the ability to remove a member or change roles, and
+/// a shared cap enforced without regard to who is asking hands exactly that away
+/// to anyone who can fill it. The reserve is the answer: a proposal that
+/// [`crate::group_proposals::is_owner_response`] recognises is admitted while
+/// the set is below `MAX_PENDING_PROPOSALS + MAX_RESERVED_OWNER_RESPONSES`,
+/// everything else while it is below `MAX_PENDING_PROPOSALS`. See that function
+/// for the escalation in full and for why the reserve grants no new authority.
+///
+/// **The real bound on the pending set becomes the sum, 68.** The set is cloned
+/// and re-stored once per outgoing chat message and is persisted, so what
+/// matters is that it stays finite and small; four slots on top of sixty-four is
+/// a 6% ceiling increase for an unconditional guarantee.
+///
+/// **Why four.** One would do for the mechanism: a role table is rewritten
+/// wholesale, so a single `RoleChange` demotes every malicious admin at once,
+/// and [`Group::refuse_if_role_change_pending`] caps role changes at one pending
+/// anyway. Four lets the owner also file a few removals in the same round
+/// without waiting for a sweep, while keeping the owner's own share bounded —
+/// the reserve must not become an unbounded channel merely because the principal
+/// spending it is trusted. Each sweep empties the whole set, so this is a
+/// per-round budget, not a lifetime one.
+pub(crate) const MAX_RESERVED_OWNER_RESPONSES: usize = 4;
+
+/// How full the pending set may be before this proposal is refused.
+///
+/// The single place the two-tier cap is expressed, consumed by both
+/// [`Group::authorise_own_proposal`] and [`Group::gate_incoming_proposal`]. They
+/// must agree exactly: an owner whose response its peers refuse to retain would
+/// sweep a commit those peers cannot resolve
+/// (`InvalidCommit(MissingProposal)`), which is a worse outcome than the refusal
+/// it was working around.
+const fn pending_capacity(is_owner_response: bool) -> usize {
+    if is_owner_response {
+        MAX_PENDING_PROPOSALS + MAX_RESERVED_OWNER_RESPONSES
+    } else {
+        MAX_PENDING_PROPOSALS
+    }
+}
 
 /// A non-member's external-join request retained for an owner/admin decision
 /// (ADR-0027, G-3). `joiner_signature_key` is the canonical identity handle the
@@ -904,24 +995,32 @@ impl Group {
     /// user an immediate error; the enforcing copies are the peers' receipt gate
     /// and commit gate, which do not trust us.
     ///
-    /// It also applies the [`MAX_PENDING_PROPOSALS`] cap. That one is not a
-    /// courtesy: an honest device must not hand its peers a proposal their
-    /// receipt gates would refuse for being over the cap, because it would then
-    /// hold a proposal nobody else does and sweep a commit they cannot resolve.
-    /// The cap is the same number on both sides for exactly that reason.
+    /// It also applies the pending-set cap. That one is not a courtesy: an
+    /// honest device must not hand its peers a proposal their receipt gates
+    /// would refuse for being over the cap, because it would then hold a
+    /// proposal nobody else does and sweep a commit they cannot resolve. The cap
+    /// is computed by the same [`pending_capacity`] on both sides for exactly
+    /// that reason — including the owner reserve, which is what keeps a full set
+    /// from taking the owner's removal and role change away
+    /// ([`MAX_RESERVED_OWNER_RESPONSES`]).
+    ///
+    /// The cap is still checked **before** [`authorise`], so which error a
+    /// caller sees is unchanged; the reserve only widens the capacity for a
+    /// proposal `authorise` was going to accept anyway.
     fn authorise_own_proposal(&self, identity: &Identity, kind: &ProposalKind) -> Result<()> {
         let table = self.role_table_or_refuse("proposal")?;
-        if self.inner.pending_proposals().count() >= MAX_PENDING_PROPOSALS {
-            return Err(Error::Group(format!(
-                "proposal refused: this group already holds {MAX_PENDING_PROPOSALS} pending \
-                 proposals — a committer must sweep them first"
-            )));
-        }
         let members = self.members();
         let proposer = Proposer {
             leaf: self.own_leaf_index().u32(),
             pubkey: identity.signature_public_key(),
         };
+        let capacity = pending_capacity(is_owner_response(&table, Some(proposer), kind));
+        if self.inner.pending_proposals().count() >= capacity {
+            return Err(Error::Group(format!(
+                "proposal refused: this group already holds {capacity} pending proposals — a \
+                 committer must sweep them first"
+            )));
+        }
         authorise(&table, &members, Some(proposer), kind)
     }
 
@@ -1264,6 +1363,50 @@ impl Group {
         Ok(staged)
     }
 
+    /// Snapshot everything [`added_leaf_can_join`] needs to decide whether a
+    /// prospective leaf may live in **this** group at **this** epoch.
+    ///
+    /// Read into owned values before the commit builder borrows the group, so
+    /// [`SweepContext`] can stay free of any reference into `self` — the same
+    /// discipline the roster and role table already follow.
+    ///
+    /// `removed_leaves` is the set the sweep will remove, so the member-derived
+    /// fields describe the roster the commit **produces**, matching how OpenMLS
+    /// seeds its own key-uniqueness sets.
+    fn admission_requirements(&self, removed_leaves: &[u32]) -> GroupAdmission {
+        let extensions = self.inner.extensions();
+        let required = extensions.required_capabilities();
+        let staying = self
+            .inner
+            .members()
+            .filter(|m| !removed_leaves.contains(&m.index.u32()));
+        let mut staying_credential_types = Vec::new();
+        let mut staying_encryption_keys = Vec::new();
+        for m in staying {
+            let credential_type = m.credential.credential_type();
+            if !staying_credential_types.contains(&credential_type) {
+                staying_credential_types.push(credential_type);
+            }
+            staying_encryption_keys.push(EncryptionKey::from(m.encryption_key));
+        }
+        GroupAdmission {
+            ciphersuite: self.inner.ciphersuite(),
+            protocol_version: GROUP_PROTOCOL_VERSION,
+            group_extension_types: extensions.iter().map(Extension::extension_type).collect(),
+            required_extension_types: required
+                .map(|r| r.extension_types().to_vec())
+                .unwrap_or_default(),
+            required_proposal_types: required
+                .map(|r| r.proposal_types().to_vec())
+                .unwrap_or_default(),
+            required_credential_types: required
+                .map(|r| r.credential_types().to_vec())
+                .unwrap_or_default(),
+            staying_credential_types,
+            staying_encryption_keys,
+        }
+    }
+
     /// Sweep the authorised pending proposals into one Commit and **stop before
     /// merging it** — the ADR-0045 rollback point (G-38 residual 1).
     ///
@@ -1357,66 +1500,192 @@ impl Group {
         //
         // Excluding a role change changes nobody's membership, so it cannot
         // change the answer: one pass suffices, with no fixpoint to iterate.
-        let role_change_survives = owner_survives(
-            &commit_effects(
-                self.inner
-                    .pending_proposals()
-                    .filter(|qp| proposal_is_authorised(&table, &members, qp)),
-            ),
-            &members,
-        )
-        .is_ok();
+        // Neither can excluding a duplicate `Add` — see `sweep_keeps` clause 3.
+        let effects = commit_effects(
+            self.inner
+                .pending_proposals()
+                .filter(|qp| proposal_is_authorised(&table, &members, qp)),
+        );
+        let role_change_survives = owner_survives(&effects, &members).is_ok();
+        // Removes and leaves are never excluded by the filter, so the authorised
+        // set's removals are exactly the emitted commit's removals — which is
+        // what makes this the right roster for the key-collision clause.
+        let removed_leaves = effects.removed_leaves().to_vec();
+        // Read the group's own admission requirements out BEFORE the commit
+        // builder borrows the group: everything `sweep_keeps` consults must be
+        // owned by this frame, which is why `SweepContext` holds no reference
+        // into `self`.
+        let admission = self.admission_requirements(&removed_leaves);
+        let ctx = SweepContext {
+            table: &table,
+            members: &members,
+            role_change_survives,
+            removed_leaves: &removed_leaves,
+            admission: &admission,
+            identity,
+        };
 
-        // Nothing to sweep => emit no commit at all. This is a prediction of what
-        // the filter below will keep, and it is used ONLY to decide emptiness;
-        // `swept` is read back off the staged commit afterwards so the caller is
-        // told what the commit really carried rather than what we expected it to.
-        let mut predicted_role_change = false;
-        let nothing_to_sweep = !self.inner.pending_proposals().any(|qp| {
-            sweep_keeps(
-                &table,
-                &members,
-                role_change_survives,
-                &mut predicted_role_change,
-                qp,
-            )
-        });
-        if nothing_to_sweep {
+        // The enumeration's verdict, taken ONCE and recorded as the set of
+        // proposal references it keeps. Everything downstream selects by
+        // membership in that set rather than by re-running the filter, which is
+        // what lets `Group::stage_selection` vary the selection when the
+        // builder refuses it — and, as a free side effect, closes the expiry
+        // straddle the old prediction-then-filter pair had (see
+        // `added_leaf_can_join`), because the clock is now consulted once.
+        let mut kept = SweepState::default();
+        let candidates: Vec<ProposalRef> = self
+            .inner
+            .pending_proposals()
+            .filter(|qp| sweep_keeps(&ctx, &mut kept, qp))
+            .map(|qp| qp.proposal_reference_ref().clone())
+            .collect();
+        self.stage_selection(identity, candidates)
+    }
+
+    /// Turn a chosen set of pending proposals into one staged Commit, narrowing
+    /// the set by exclusion if the builder refuses it.
+    ///
+    /// The two layers, in the order they run, because a later reader must not
+    /// mistake either for a replacement of the other:
+    ///
+    /// 1. [`sweep_keeps`] — the **enumeration**, which has already produced
+    ///    `candidates`. It is fast, it costs no build, and every exclusion it
+    ///    makes has a name (a duplicate key, a leaf this group will not accept,
+    ///    a second role change). It handles every cause anybody has identified,
+    ///    and it stays.
+    /// 2. This — the **last resort**, reached only when the builder refuses the
+    ///    enumeration's verdict anyway. It has no name for what it excludes and
+    ///    cannot acquire one, because `CreateCommitError` carries no
+    ///    `ProposalRef`, no leaf index and no signature key on any variant.
+    ///
+    /// **Why 1 cannot be sufficient on its own.** The enumeration restates a
+    /// rule set this crate does not own — openmls's `validate_*` family, itself
+    /// tracking RFC 9420 — so it is a mirror, and a mirror can go out of date
+    /// without anybody noticing. That is not a hypothetical worry: one of the
+    /// conditions it already restates is a KeyPackage's **lifetime**, and
+    /// ADR-0045 gives a pending request no deadline, so a proposal can sit until
+    /// the KeyPackage it names expires and every sweep from then on fails. No
+    /// adversary, no bug, no unusual usage — just time. A failure class that
+    /// arrives on its own is a failure class that will arrive again in a shape
+    /// the list does not have.
+    ///
+    /// **And an unbuildable sweep is not a lost round.** The proposal store
+    /// empties only when a commit is *merged*, every direct commit is refused
+    /// while proposals are pending ([`Group::refuse_if_proposals_pending`]), and
+    /// nothing discards a proposal — so a sweep that cannot be built means no
+    /// commit can be produced, which means the store can never be emptied, which
+    /// means no commit can ever be produced. The group's membership is bricked
+    /// permanently, and invisibly, because chat keeps working over the top of it
+    /// ([`Group::create_application_message`] parks the pending set).
+    ///
+    /// # The search
+    ///
+    /// Additive: start from nothing, offer each candidate in store order, and
+    /// keep it only if the selection still builds. Chosen over leave-one-out
+    /// deliberately — leave-one-out is cheaper when there is exactly one
+    /// offender, but needs a fresh round per offender and degrades to `O(n^2)`
+    /// when there are several, which is precisely the case that cannot be ruled
+    /// out when the cause is unknown. The additive shape costs one probe per
+    /// candidate whether there is one offender or all of them, and it is two
+    /// flat loops with no fixpoint, so termination is structural rather than
+    /// argued.
+    ///
+    /// A second pass then re-offers each rejected candidate against the final
+    /// selection, which is what makes the search insensitive to store order for
+    /// the proposals that are only committable **together** — a `Remove` and the
+    /// re-`Add` of the same signature key, or an ownership transfer and the
+    /// `Add` that puts its named owner in the group.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Group`] when the narrowed selection fails to build after all
+    /// (the clock can move under a KeyPackage lifetime between a probe and the
+    /// real build; the next sweep re-runs the enumeration, which will exclude it
+    /// by name), or on any OpenMLS-side staging failure.
+    fn stage_selection(
+        &mut self,
+        identity: &Identity,
+        candidates: Vec<ProposalRef>,
+    ) -> Result<Option<ProposalCommit>> {
+        // Nothing to sweep => emit no commit at all, rather than an empty one
+        // that would advance the epoch (and race other committers) for no
+        // effect.
+        if candidates.is_empty() {
             return Ok(None);
         }
+        match self.stage_sweep_of(identity, &candidates) {
+            Ok(commit) => Ok(Some(commit)),
+            // Anything that is not the builder refusing this selection is not
+            // something a different selection can fix.
+            Err(SweepAttemptError::Fatal(e)) => Err(e),
+            Err(SweepAttemptError::Refused(refusal)) => {
+                let members = self.members();
+                let queued: Vec<QueuedProposal> = self.inner.pending_proposals().cloned().collect();
+                let narrowed =
+                    self.narrow_sweep_by_exclusion(identity, &queued, &members, &candidates);
+                if narrowed.is_empty() {
+                    // Every candidate is uncommittable. The honest outcome is
+                    // the same one the enumeration produces when its filter
+                    // keeps nothing: no commit at all.
+                    return Ok(None);
+                }
+                if narrowed.len() == candidates.len() {
+                    // The search accepts a candidate only when the selection
+                    // including it built, so accepting every one of them means
+                    // the whole set built — contradicting the refusal that sent
+                    // us here, unless the clock moved under a KeyPackage
+                    // lifetime in between. Surface the original refusal rather
+                    // than re-attempt a set that has already been refused once:
+                    // there is no narrowing left to try, and the next sweep
+                    // re-runs the enumeration, which will exclude the expired
+                    // proposal by name.
+                    return Err(refusal);
+                }
+                self.stage_sweep_of(identity, &narrowed)
+                    .map(Some)
+                    .map_err(SweepAttemptError::into_error)
+            },
+        }
+    }
 
-        let filter_members = members;
-        let filter_table = table;
-        // A FRESH flag: the prediction above consumed its own, and sharing one
-        // would leave the real filter with the role-change slot already spent.
-        let mut filter_role_change = false;
-        let bundle = self
+    /// Build and stage one Commit carrying exactly the proposals in
+    /// `selection`.
+    ///
+    /// Selection is by [`ProposalRef`] membership rather than by re-running
+    /// [`sweep_keeps`], so the same call serves the enumeration's verdict and
+    /// any narrowing of it, and so the filter is a pure function of `selection`
+    /// — two builds over one selection can never disagree.
+    fn stage_sweep_of(
+        &mut self,
+        identity: &Identity,
+        selection: &[ProposalRef],
+    ) -> std::result::Result<ProposalCommit, SweepAttemptError> {
+        count_sweep_build();
+        let complete = self
             .inner
             .commit_builder()
             .consume_proposal_store(true)
             .load_psks(identity.provider.storage())
-            .map_err(|e| Error::Group(format!("sweep load_psks: {e:?}")))?
+            .map_err(|e| SweepAttemptError::Fatal(Error::Group(format!("sweep load_psks: {e:?}"))))?
             .build(
                 identity.provider.rand(),
                 identity.provider.crypto(),
                 &identity.signature_keys,
-                |qp| {
-                    sweep_keeps(
-                        &filter_table,
-                        &filter_members,
-                        role_change_survives,
-                        &mut filter_role_change,
-                        qp,
-                    )
-                },
+                |qp| selection.contains(qp.proposal_reference_ref()),
             )
-            .map_err(|e| Error::Group(format!("sweep build: {e:?}")))?
-            .stage_commit(&identity.provider)
-            .map_err(|e| Error::Group(format!("sweep stage_commit: {e:?}")))?;
+            .map_err(|e| SweepAttemptError::Refused(Error::Group(format!("sweep build: {e:?}"))))?;
+        let bundle = complete.stage_commit(&identity.provider).map_err(|e| {
+            SweepAttemptError::Fatal(Error::Group(format!("sweep stage_commit: {e:?}")))
+        })?;
 
         // Read what the commit ACTUALLY carried off the staged commit, before
         // merging clears it. Deriving this rather than predicting it means the
-        // report and the commit cannot disagree.
+        // report and the commit cannot disagree — and it is the ONLY thing a
+        // caller learns about an exclusion, deliberately: a proposal dropped by
+        // the search is simply absent from `swept`, exactly as one dropped by
+        // the enumeration is. The two are not distinguished because there is
+        // nothing to distinguish them WITH — `CreateCommitError` names no
+        // proposal — and inventing a reason would be worse than reporting none.
         let swept: Vec<ProposalRecord> = self
             .inner
             .pending_commit()
@@ -1436,11 +1705,108 @@ impl Group {
             .unwrap_or_default();
 
         let (commit, welcome, _group_info) = bundle.into_messages();
-        Ok(Some(ProposalCommit {
+        Ok(ProposalCommit {
             commit,
             welcome,
             swept,
-        }))
+        })
+    }
+
+    /// `true` when a Commit carrying exactly `selection` can be built.
+    ///
+    /// A probe, and it is free of consequences: `CommitBuilder::build` runs
+    /// every `validate_*` before it takes `public_group.empty_diff()`, holds the
+    /// group by shared reference throughout, and writes nothing — `stage_commit`
+    /// is the writing half, and this never reaches it. So a failed probe leaves
+    /// the group, its epoch and its proposal store exactly as they were, and a
+    /// successful one throws away a commit nobody will ever see.
+    fn sweep_selection_builds(&mut self, identity: &Identity, selection: &[ProposalRef]) -> bool {
+        count_sweep_build();
+        let Ok(loaded) = self
+            .inner
+            .commit_builder()
+            .consume_proposal_store(true)
+            .load_psks(identity.provider.storage())
+        else {
+            return false;
+        };
+        loaded
+            .build(
+                identity.provider.rand(),
+                identity.provider.crypto(),
+                &identity.signature_keys,
+                |qp| selection.contains(qp.proposal_reference_ref()),
+            )
+            .is_ok()
+    }
+
+    /// Find, by blind exclusion, a subset of `candidates` this device can
+    /// actually commit.
+    ///
+    /// See [`Group::stage_selection`] for why the search exists and why it is
+    /// additive rather than leave-one-out. Two flat passes, so it terminates on
+    /// any input and costs at most `2 * candidates.len()` builds — bounded in
+    /// turn by the pending-set cap
+    /// ([`MAX_PENDING_PROPOSALS`] + [`MAX_RESERVED_OWNER_RESPONSES`]), which
+    /// both writers into the store enforce.
+    ///
+    /// A candidate must clear two gates, not one. Building is the obvious gate.
+    /// The other is [`crate::group_proposals::owner_survives`], re-asked over
+    /// each trial selection, because it is a property of the commit as a WHOLE:
+    /// the enumeration blessed a role change against the full candidate set, and
+    /// dropping an `Add` from that set can invalidate it. Without this the
+    /// search could assemble a perfectly buildable commit naming an owner no
+    /// leaf holds — which every peer refuses ([`authorise_role_commit`]),
+    /// trading a local wedge for a fork.
+    fn narrow_sweep_by_exclusion(
+        &mut self,
+        identity: &Identity,
+        queued: &[QueuedProposal],
+        members: &[MemberRecord],
+        candidates: &[ProposalRef],
+    ) -> Vec<ProposalRef> {
+        let mut accepted: Vec<ProposalRef> = Vec::new();
+        let mut rejected: Vec<ProposalRef> = Vec::new();
+        for candidate in candidates {
+            if self.selection_admits(identity, queued, members, &accepted, candidate) {
+                accepted.push(candidate.clone());
+            } else {
+                rejected.push(candidate.clone());
+            }
+        }
+        // Second pass. A candidate refused above may have been refused only
+        // because what it depends on had not been offered yet — a re-`Add`
+        // ahead of the `Remove` that frees its signature key, an ownership
+        // transfer ahead of the `Add` that puts its owner in the group. One
+        // re-offer against the finished selection recovers those; it can never
+        // lose anything, since each acceptance is verified in full.
+        for candidate in rejected {
+            if self.selection_admits(identity, queued, members, &accepted, &candidate) {
+                accepted.push(candidate);
+            }
+        }
+        accepted
+    }
+
+    /// `true` when `accepted` plus `candidate` is a selection this device may
+    /// commit — it keeps the group owned, and it builds.
+    ///
+    /// The cheap gate runs first: `owner_survives` reads proposals already in
+    /// hand, while a build derives a whole epoch's key schedule.
+    fn selection_admits(
+        &mut self,
+        identity: &Identity,
+        queued: &[QueuedProposal],
+        members: &[MemberRecord],
+        accepted: &[ProposalRef],
+        candidate: &ProposalRef,
+    ) -> bool {
+        let mut trial = accepted.to_vec();
+        trial.push(candidate.clone());
+        if !selection_keeps_an_owner(queued, &trial, members) {
+            return false;
+        }
+        self.sweep_selection_builds(identity, &trial)
     }
 
     /// `true` when a sweep built by [`Group::stage_pending_proposals`] is
@@ -1675,7 +2041,15 @@ impl Group {
 
         // Full. Refuse the newcomer rather than evict an incumbent — see
         // [`MAX_PENDING_PROPOSALS`] for why that direction is the only safe one.
-        if self.inner.pending_proposals().count() >= MAX_PENDING_PROPOSALS {
+        //
+        // The capacity is the owner-reserve-aware one, and it MUST be: this is
+        // the gate the owner's own peers run, so refusing the owner's response
+        // here would leave the owner holding a proposal nobody else does and
+        // sweeping a commit nobody can resolve. Authorship is the
+        // MLS-authenticated sender leaf resolved against the pre-merge roster
+        // just above, so the reserve is not claimable by anyone else.
+        let capacity = pending_capacity(is_owner_response(&table, proposer, &kind));
+        if self.inner.pending_proposals().count() >= capacity {
             return refused(kind);
         }
 
@@ -2195,54 +2569,539 @@ fn proposal_is_authorised(
     authorise(table, members, proposer, &classify(qp.proposal())).is_ok()
 }
 
-/// `true` when the ADR-0045 sweep should carry `qp`: authorised for its author,
-/// and — for a role change — not one that would leave the group with an owner
-/// outside it (`role_change_survives`, computed once over the whole authorised
-/// set by [`Group::commit_pending_proposals`]).
+/// Why one attempt to stage a sweep did not produce a commit.
 ///
-/// The second clause is an **exclusion, not a refusal**: a role change dropped
-/// here is simply not committed, its author re-proposes, and the rest of the
-/// sweep still lands. Refusing the whole sweep instead would let one bad role
-/// change block every unrelated membership change in the group.
+/// The distinction is the whole reason the exclusion search is safe to run:
+/// [`SweepAttemptError::Refused`] means `CommitBuilder::build` rejected THIS
+/// selection and wrote nothing, so a different selection may be tried on a
+/// group that is byte-for-byte where it was. Anything else is a failure a
+/// different selection cannot fix, and is surfaced immediately.
+enum SweepAttemptError {
+    /// `CommitBuilder::build` refused the selection. Nothing was written.
+    Refused(Error),
+    /// A failure outside the build — loading PSKs, or staging the commit.
+    /// Do not retry.
+    Fatal(Error),
+}
+
+impl SweepAttemptError {
+    /// Discard the distinction and surface the underlying error.
+    fn into_error(self) -> Error {
+        match self {
+            Self::Refused(e) | Self::Fatal(e) => e,
+        }
+    }
+}
+
+/// `true` when committing exactly `selection` leaves the group with an owner
+/// who is in it ([`crate::group_proposals::owner_survives`]).
 ///
-/// The third clause is the same shape for the same reason, and is the sweep-side
-/// half of [`Group::refuse_if_role_change_pending`]: **at most one role change
-/// per sweep**. RFC 9420 admits one `GroupContextExtensions` proposal per
-/// commit, and OpenMLS enforces it as a hard build failure
-/// (`TooManyGCEProposals`), so a set holding two cannot be swept at all — and
-/// because the proposal store only empties when a commit is *merged* and every
-/// direct-commit path is closed while proposals are pending, that is a
-/// **permanent membership wedge** for every committer that holds both, not a
-/// lost toggle. `propose_group_roles` keeps a well-behaved device from ever
-/// building that set; this keeps a set that reached it anyway — a peer whose
-/// proposal was published before the crash that lost its record of it, say —
-/// from wedging the whole group. Which of the two is kept is the store's own
-/// order and is arbitrary; the one dropped is dropped from every member's store
-/// when the commit merges, so its author must re-propose. The caller learns
-/// which survived from [`ProposalCommit::swept`].
-///
-/// `role_change_taken` carries that "one already" across calls, so the predicate
-/// is stateful and each pass over the pending set needs its own flag: the
-/// emptiness prediction and the real filter must not share one, or the
-/// prediction would spend the budget the filter needs.
-fn sweep_keeps(
-    table: &RoleTable,
+/// The [`sweep_keeps`] clause-2 predicate asks the same question once, over the
+/// whole authorised set, because that is the set it expects to commit. The
+/// exclusion search cannot reuse that answer: it varies the set, and dropping
+/// an `Add` can strand a role change the earlier answer had blessed.
+fn selection_keeps_an_owner(
+    queued: &[QueuedProposal],
+    selection: &[ProposalRef],
     members: &[MemberRecord],
-    role_change_survives: bool,
-    role_change_taken: &mut bool,
-    qp: &QueuedProposal,
 ) -> bool {
-    if !proposal_is_authorised(table, members, qp) {
+    let effects = commit_effects(
+        queued
+            .iter()
+            .filter(|qp| selection.contains(qp.proposal_reference_ref())),
+    );
+    owner_survives(&effects, members).is_ok()
+}
+
+// Counts every `CommitBuilder::build` the sweep path performs, in test builds
+// only. The cost of the exclusion search is a claim this crate makes in prose,
+// and a claim about a count is worth exactly as much as the counter that checks
+// it.
+#[cfg(test)]
+thread_local! {
+    static SWEEP_BUILD_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Record one `CommitBuilder::build` performed by the sweep path.
+///
+/// Compiles to nothing outside tests.
+#[inline]
+fn count_sweep_build() {
+    #[cfg(test)]
+    SWEEP_BUILD_COUNT.with(|count| count.set(count.get() + 1));
+}
+
+/// Zero the sweep build counter.
+#[cfg(test)]
+fn reset_sweep_builds() {
+    SWEEP_BUILD_COUNT.with(|count| count.set(0));
+}
+
+/// Builds performed by the sweep path since [`reset_sweep_builds`].
+#[cfg(test)]
+fn sweep_builds() -> usize {
+    SWEEP_BUILD_COUNT.with(std::cell::Cell::get)
+}
+
+/// Everything [`sweep_keeps`] needs that is the same for every proposal in one
+/// sweep. Held apart from [`SweepState`] so the "shared context, fresh state"
+/// discipline is visible at the call sites: the emptiness prediction and the
+/// real filter share this and must not share that.
+struct SweepContext<'a> {
+    /// The pre-merge role table every proposal is judged against.
+    table: &'a RoleTable,
+    /// The pre-merge roster.
+    members: &'a [MemberRecord],
+    /// Whether the authorised set's role change would leave the group with an
+    /// owner inside it (`owner_survives`, computed once over the whole set).
+    role_change_survives: bool,
+    /// Leaves the authorised set removes. Removes and leaves are never excluded
+    /// by this filter, so this is exactly the set the emitted commit removes.
+    removed_leaves: &'a [u32],
+    /// What this group demands of a leaf before it may join
+    /// (`Group::admission_requirements`), read before the commit builder
+    /// borrowed the group.
+    admission: &'a GroupAdmission,
+    /// The sweeping device, for the crypto provider
+    /// [`added_leaf_can_join`] re-validates a KeyPackage with. Nothing about
+    /// this device enters the decision — a filter whose answer depended on
+    /// *who* swept would make the sweep's contents unpredictable to every peer.
+    identity: &'a Identity,
+}
+
+/// What a group demands of a prospective leaf, snapshotted at one epoch.
+///
+/// Every field is a group property, never a proposal property: two committers
+/// at the same epoch necessarily build the identical value, so
+/// [`added_leaf_can_join`] is a function of the group and the KeyPackage alone
+/// and every honest committer reaches the same verdict on the same proposal.
+struct GroupAdmission {
+    /// The group's ciphersuite.
+    ciphersuite: Ciphersuite,
+    /// The group's MLS protocol version.
+    protocol_version: ProtocolVersion,
+    /// Every extension type present in the authenticated `GroupContext`.
+    group_extension_types: Vec<ExtensionType>,
+    /// Extension types the group's `required_capabilities` demands.
+    required_extension_types: Vec<ExtensionType>,
+    /// Proposal types the group's `required_capabilities` demands.
+    required_proposal_types: Vec<ProposalType>,
+    /// Credential types the group's `required_capabilities` demands.
+    required_credential_types: Vec<CredentialType>,
+    /// Credential types in use by members the commit is **not** removing,
+    /// de-duplicated. A joining leaf must advertise support for all of them.
+    staying_credential_types: Vec<CredentialType>,
+    /// HPKE encryption keys of members the commit is **not** removing. RFC 9420
+    /// §12.2 requires these to stay unique across the group.
+    staying_encryption_keys: Vec<EncryptionKey>,
+}
+
+/// What one pass of [`sweep_keeps`] has committed to so far.
+///
+/// Each pass over the pending set needs its **own** value: the emptiness
+/// prediction and the real filter must not share one, or the prediction would
+/// spend the budget the filter needs.
+#[derive(Default)]
+struct SweepState {
+    /// A role change has already been taken by this pass (at most one is
+    /// admissible per commit).
+    role_change_taken: bool,
+    /// Signature keys of the `Add` proposals this pass has taken (each key is
+    /// admissible at most once per commit).
+    kept_added_keys: Vec<Vec<u8>>,
+    /// HPKE **encryption** keys of the `Add` proposals this pass has taken.
+    kept_encryption_keys: Vec<EncryptionKey>,
+    /// HPKE **init** keys of the `Add` proposals this pass has taken, held as
+    /// [`EncryptionKey`] so the two sets are directly comparable.
+    kept_init_keys: Vec<EncryptionKey>,
+}
+
+/// `true` when the ADR-0045 sweep should carry `qp`.
+///
+/// Every clause below is an **exclusion, not a refusal**: a proposal dropped
+/// here is simply not committed, its author re-proposes, and the rest of the
+/// sweep still lands. Refusing the whole sweep instead would let one bad
+/// proposal block every unrelated membership change in the group — and, because
+/// the proposal store only empties when a commit is *merged* and every
+/// direct-commit path is closed while proposals are pending
+/// ([`Group::refuse_if_proposals_pending`]), a sweep that cannot be built is not
+/// a lost round but a **permanent membership wedge**: no commit can be produced,
+/// so the store can never be emptied, so no commit can ever be produced.
+///
+/// 1. **Authorised for its author**, judged against the table as it stands
+///    (`proposal_is_authorised`).
+/// 2. **At most one role change**, and only one that survives
+///    [`owner_survives`]. RFC 9420 admits one `GroupContextExtensions` proposal
+///    per commit and OpenMLS enforces it as a hard build failure
+///    (`TooManyGCEProposals`), so a set holding two cannot be swept at all.
+///    [`Group::propose_group_roles`] keeps a well-behaved device from building
+///    that set; this keeps a set that reached it anyway — a peer whose proposal
+///    was published before the crash that lost its record of it, say — from
+///    wedging the whole group.
+/// 3. **At most one `Add` per signature key, and none that collides with a
+///    member the commit is not removing.** RFC 9420 §12.2 requires the group's
+///    signature keys to be unique, and OpenMLS enforces it in exactly the same
+///    hard-build-failure shape as the role-change rule
+///    (`validate_key_uniqueness` → `ProposalValidationError::DuplicateSignatureKey`,
+///    reached from `CommitBuilder::build`). Without this clause the wedge is
+///    reachable from **one ordinary proposal**: an admin proposing to add
+///    somebody who is already a member — a stale roster, a double tap — or two
+///    admins independently proposing the same person, which is precisely the
+///    concurrent composition ADR-0045 exists to make safe. It is also the
+///    cheapest form of the flood the owner reserve answers, since an attacker
+///    can mint unlimited distinct KeyPackages for one signature key.
+///
+///    The collision is judged against the roster the commit **produces**, so a
+///    key belonging to a member this same commit removes does not collide —
+///    matching `validate_key_uniqueness`, which seeds its sets from
+///    `full_leaf_members()` filtered by the commit's remove proposals, and so
+///    keeping a legitimate remove-and-re-add working.
+///
+///    Excluding a duplicate cannot change [`owner_survives`]' answer, which is
+///    computed before this runs: a key dropped as a duplicate is still added by
+///    the copy that was kept, and a key dropped for colliding with a member is
+///    by construction a member the commit keeps.
+/// 4. **The added leaf must be able to live in THIS group**
+///    ([`added_leaf_can_join`]). Clause 3 covers the one thing the added leaf
+///    shares with the group — its signature key — and leaves everything the
+///    group *demands* of a leaf uncovered: `validate_add_proposals` also refuses
+///    a build outright when the added leaf does not advertise every extension
+///    type the GroupContext carries, does not satisfy `required_capabilities`,
+///    does not list the group's own ciphersuite or version, is not internally
+///    self-consistent, or carries an expired lifetime.
+///
+///    An incoming `Add` clears only `AddProposalIn::validate` on the way in
+///    (KeyPackage signature, protocol version, ciphersuite), which asks nothing
+///    about the group, so a KeyPackage that is perfectly well-formed and simply
+///    unsuited to this group is authorised, retained, and then wedges every
+///    sweep. Two of those conditions need no adversary whatsoever: a peer whose
+///    KeyPackage was minted with a different capability set is a conformant
+///    RFC 9420 client, and a **lifetime expires by the passage of time alone**
+///    — ADR-0045 gives a request no deadline, so a proposal may outlive the
+///    KeyPackage it names.
+/// 5. **Encryption and init keys unique across the roster the commit
+///    produces**, the remaining arms of `validate_key_uniqueness` that clause 3
+///    does not reach (`DuplicateEncryptionKey`, `DuplicateInitKey`,
+///    `InitEncryptionKeyCollision`). Same hard-build-failure shape, same
+///    permanent wedge; unlike clause 3 these are unreachable from a KeyPackage
+///    this crate mints, because every one carries freshly generated keys.
+///    `Update` proposals contribute encryption keys to the same sets upstream,
+///    and contribute none here for the reason clause 1 gives: every `Update` is
+///    refused by [`crate::group_proposals::authorise`], so none ever reaches a
+///    sweep.
+///
+/// **What a kept-but-uncommittable proposal costs**, which is why clauses 2–5
+/// exist at all: the failure is not the proposal's, it is the **group's**. One
+/// unbuildable proposal means no commit can be produced; no commit means the
+/// proposal store is never emptied; a non-empty store means every direct commit
+/// is refused too — so every add, removal, role change and external-join
+/// approval in that group stops, for everyone, permanently, with no path back
+/// short of another admin's device that somehow lacks the offending entry. And
+/// it is **invisible**: chat keeps working throughout
+/// ([`Group::create_application_message`] parks the pending set around the
+/// encrypt), so the group looks healthy while its membership is bricked.
+///
+/// Which of a colliding pair is kept is the store's own order and is arbitrary;
+/// the one dropped is dropped from every member's store when the commit merges,
+/// so its author must re-propose. The caller learns what survived from
+/// [`ProposalCommit::swept`], which is read back off the staged commit.
+fn sweep_keeps(ctx: &SweepContext<'_>, state: &mut SweepState, qp: &QueuedProposal) -> bool {
+    if !proposal_is_authorised(ctx.table, ctx.members, qp) {
         return false;
     }
-    if !matches!(classify(qp.proposal()), ProposalKind::RoleChange) {
-        return true;
+    match classify(qp.proposal()) {
+        ProposalKind::Add { signature_key } => {
+            if state.kept_added_keys.contains(&signature_key) {
+                return false;
+            }
+            let collides_with_a_staying_member = ctx.members.iter().any(|m| {
+                m.signature_public_key == signature_key
+                    && !ctx.removed_leaves.contains(&m.leaf_index)
+            });
+            if collides_with_a_staying_member {
+                return false;
+            }
+            // `classify` reported an `Add`, so the proposal is one; a variant
+            // mismatch here would be a `classify` bug, and dropping is the safe
+            // reading of "we cannot tell what this is".
+            let Proposal::Add(add) = qp.proposal() else {
+                return false;
+            };
+            let key_package = add.key_package();
+            if !added_leaf_can_join(ctx, key_package) {
+                return false;
+            }
+            // Both keys are normalised to `EncryptionKey` so the "no key may
+            // serve as both an init key and an encryption key" arm compares
+            // like with like; the type carries no byte accessor, but it is
+            // `Clone + Eq` and converts from raw bytes, which is all this needs.
+            let encryption_key = key_package.leaf_node().encryption_key().clone();
+            let init_key = EncryptionKey::from(key_package.hpke_init_key().as_slice().to_vec());
+            // Clause 5. The three sets OpenMLS keeps: encryption keys unique
+            // across the produced roster and the kept adds; init keys unique
+            // across the kept adds; and no key serving as both. Checked in both
+            // directions because the pass is incremental — a later add's
+            // encryption key must not equal an earlier add's init key either.
+            let encryption_key_is_taken = ctx
+                .admission
+                .staying_encryption_keys
+                .contains(&encryption_key)
+                || state.kept_encryption_keys.contains(&encryption_key)
+                || state.kept_init_keys.contains(&encryption_key);
+            let init_key_is_taken = ctx.admission.staying_encryption_keys.contains(&init_key)
+                || state.kept_encryption_keys.contains(&init_key)
+                || state.kept_init_keys.contains(&init_key)
+                || init_key == encryption_key;
+            if encryption_key_is_taken || init_key_is_taken {
+                return false;
+            }
+            state.kept_added_keys.push(signature_key);
+            state.kept_encryption_keys.push(encryption_key);
+            state.kept_init_keys.push(init_key);
+            true
+        },
+        ProposalKind::RoleChange => {
+            if !ctx.role_change_survives || state.role_change_taken {
+                return false;
+            }
+            state.role_change_taken = true;
+            true
+        },
+        _ => true,
     }
-    if !role_change_survives || *role_change_taken {
+}
+
+/// `true` when `key_package`'s leaf can be committed into this group — the
+/// [`sweep_keeps`] clause-4 predicate.
+///
+/// **This is not a permission check.** [`crate::group_proposals::authorise`] has
+/// already run and decides *who may ask*; this decides only *what is
+/// committable*, which is a property of the KeyPackage and the group and of
+/// nothing else. It can therefore never widen or narrow who may propose an add.
+///
+/// It mirrors, at sweep time, what `CommitBuilder::build` would refuse
+/// outright for an `Add` (openmls-0.8.1 `public_group/validation.rs`):
+///
+/// * `validate_add_proposals` / ValSem105 — the KeyPackage's ciphersuite and
+///   protocol version must match the group's;
+/// * valn0502 — the added leaf must advertise every extension type present in
+///   the `GroupContext`;
+/// * `validate_leaf_node` → `validate_leaf_node_capabilities`:
+///   valn1601 / valn0113 (`LeafNode::validate_locally`: every extension the
+///   leaf carries must be legal in a leaf node and covered by its own
+///   capabilities, which must also cover its own credential type), valn0107
+///   (the leaf must list the group's ciphersuite and version), valn0103 (the
+///   group's `required_capabilities`), valn0104 (credential types must be
+///   mutually supported);
+/// * valn0106 — the KeyPackage's **lifetime** must still be current.
+///
+/// # Two halves, and why they are checked differently
+///
+/// The **KeyPackage-intrinsic** half is delegated straight back to OpenMLS:
+/// re-serialising and re-running `KeyPackageIn::validate` at the group's
+/// protocol version is the library's own rule, so it cannot drift from it, and
+/// it is the only way to reach the lifetime at all (`LeafNode::life_time` is
+/// `pub(crate)`). It re-verifies two signatures that were already verified on
+/// the way in; at [`MAX_PENDING_PROPOSALS`] that is a bounded cost paid only
+/// when a membership change is actually being committed, and it buys the one
+/// condition that changes **while the proposal sits in the store**.
+///
+/// The **group-relative** half cannot be delegated — the private
+/// `PublicGroup::validate_*` methods are the only implementation and they need
+/// a group OpenMLS will not lend us — so it is restated here against
+/// [`GroupAdmission`]. Each restatement falls to *reject* on anything it does
+/// not recognise (see [`extension_type_is_default`] and its siblings), because
+/// wrongly keeping a proposal wedges the group permanently while wrongly
+/// dropping one costs its author a re-proposal.
+///
+/// # What this deliberately does not check
+///
+/// * **Every existing member's capabilities must contain the added leaf's
+///   credential type** (the other half of valn0104). OpenMLS exposes a member's
+///   credential but not its capabilities, so this is not decidable from public
+///   API. It is also not a property of the added leaf: it fails only when the
+///   group already contains a member that cannot accept the joiner's credential
+///   type, which no Lakko client can produce — every identity mints a `Basic`
+///   credential and advertises the default credential set.
+/// * **A commit path's own encryption keys** (ValSem206/207). They are freshly
+///   generated by the committer inside `build` and are not visible to a
+///   proposal filter; a collision would be a random-number-generator event.
+///
+/// # The one input that is not group state
+///
+/// The lifetime makes this predicate a function of the clock, with two
+/// consequences worth naming rather than discovering:
+///
+/// * [`Group::stage_pending_proposals`] consults it **once**, recording the
+///   verdict as a set of [`ProposalRef`]s that every later build selects by
+///   membership, so two evaluations of this predicate can no longer disagree
+///   within one sweep. What remains is a microseconds-wide window between the
+///   last exclusion probe and the build that is finally staged: a KeyPackage
+///   expiring in it makes that build fail, which surfaces as an error and is
+///   repaired by the next sweep — where this predicate, re-run, excludes it by
+///   name.
+/// * A peer processing a commit re-runs the same lifetime check
+///   (`staged_commit.rs` calls `validate_add_proposals` too), so an `Add`
+///   committed moments before expiry can still be refused by a peer that
+///   processes it moments after. That is RFC 9420's own behaviour for a
+///   near-expiry KeyPackage and predates this filter; excluding an
+///   already-expired one strictly narrows the window rather than opening it.
+fn added_leaf_can_join(ctx: &SweepContext<'_>, key_package: &KeyPackage) -> bool {
+    let admission = ctx.admission;
+    // ValSem105, first half. The second half (protocol version) is not readable
+    // from a `KeyPackage` — `KeyPackage::protocol_version` is `pub(crate)` — and
+    // is covered by the re-validation below, which takes the version as its
+    // argument.
+    if key_package.ciphersuite() != admission.ciphersuite {
         return false;
     }
-    *role_change_taken = true;
-    true
+
+    // The KeyPackage-intrinsic half, handed back to OpenMLS verbatim: leaf and
+    // KeyPackage signatures, the protocol version, init key != encryption key,
+    // the KeyPackage's own extensions against the leaf's capabilities, and
+    // valn0106 — the lifetime, evaluated NOW rather than when the proposal
+    // arrived. Any failure is a drop.
+    let revalidated = crate::key_package::serialize(key_package)
+        .and_then(|bytes| crate::key_package::deserialize(&bytes))
+        .ok()
+        .and_then(|kp_in| {
+            kp_in
+                .validate(ctx.identity.provider.crypto(), admission.protocol_version)
+                .ok()
+        });
+    if revalidated.is_none() {
+        return false;
+    }
+
+    let leaf = key_package.leaf_node();
+    let capabilities = leaf.capabilities();
+
+    // valn1601 — an extension the leaf carries must be legal in a leaf node.
+    if !leaf
+        .extensions()
+        .iter()
+        .all(|e| extension_type_is_valid_in_leaf_node(e.extension_type()))
+    {
+        return false;
+    }
+    // valn0113, first half — and everything the leaf carries must be covered by
+    // its own capabilities.
+    if !leaf
+        .extensions()
+        .iter()
+        .all(|e| capabilities_contain_extension(capabilities, e.extension_type()))
+    {
+        return false;
+    }
+    // valn0113, second half — including its own credential type.
+    if !capabilities
+        .credentials()
+        .contains(&leaf.credential().credential_type())
+    {
+        return false;
+    }
+    // valn0107 — the leaf must be able to speak this group's ciphersuite and
+    // version.
+    if !capabilities
+        .ciphersuites()
+        .contains(&VerifiableCiphersuite::from(admission.ciphersuite))
+        || !capabilities
+            .versions()
+            .contains(&admission.protocol_version)
+    {
+        return false;
+    }
+    // valn0502 — and to carry every extension the GroupContext holds.
+    if !admission
+        .group_extension_types
+        .iter()
+        .all(|t| capabilities_contain_extension(capabilities, *t))
+    {
+        return false;
+    }
+    // valn0103 — the group's `required_capabilities`, in all three dimensions.
+    if !admission
+        .required_extension_types
+        .iter()
+        .all(|t| capabilities_contain_extension(capabilities, *t))
+    {
+        return false;
+    }
+    if !admission
+        .required_proposal_types
+        .iter()
+        .all(|t| proposal_type_is_default(*t) || capabilities.proposals().contains(t))
+    {
+        return false;
+    }
+    if !admission
+        .required_credential_types
+        .iter()
+        .all(|t| capabilities.credentials().contains(t))
+    {
+        return false;
+    }
+    // valn0104, the half that is decidable — the joiner must accept every
+    // credential type already in use by a member the commit keeps.
+    admission
+        .staying_credential_types
+        .iter()
+        .all(|t| capabilities.credentials().contains(t))
+}
+
+/// `capabilities` cover `extension_type`, matching OpenMLS's private
+/// `Capabilities::contains_extension`: a default extension type needs no
+/// advertisement, anything else must be listed.
+fn capabilities_contain_extension(
+    capabilities: &openmls::prelude::Capabilities,
+    extension_type: ExtensionType,
+) -> bool {
+    extension_type_is_default(extension_type) || capabilities.extensions().contains(&extension_type)
+}
+
+/// Restatement of OpenMLS's private `ExtensionType::is_default`.
+///
+/// Written as a positive `matches!` rather than an exhaustive `match` so that an
+/// extension type this build does not know about answers **`false`** — "not a
+/// default, so the leaf must advertise it explicitly", which drops an `Add` we
+/// cannot judge instead of keeping one that would wedge the sweep.
+fn extension_type_is_default(extension_type: ExtensionType) -> bool {
+    matches!(
+        extension_type,
+        ExtensionType::ApplicationId
+            | ExtensionType::RatchetTree
+            | ExtensionType::RequiredCapabilities
+            | ExtensionType::ExternalPub
+            | ExtensionType::ExternalSenders
+    )
+}
+
+/// Restatement of OpenMLS's private `ExtensionType::is_valid_in_leaf_node`.
+///
+/// Same fail-toward-dropping shape as [`extension_type_is_default`]: an
+/// unrecognised extension type reads as **not** legal in a leaf node.
+fn extension_type_is_valid_in_leaf_node(extension_type: ExtensionType) -> bool {
+    matches!(
+        extension_type,
+        ExtensionType::Unknown(_) | ExtensionType::ApplicationId
+    )
+}
+
+/// Restatement of OpenMLS's private `ProposalType::is_default`.
+///
+/// Same fail-toward-dropping shape: an unrecognised proposal type reads as
+/// non-default, so a leaf must advertise it to satisfy a group that requires it.
+fn proposal_type_is_default(proposal_type: ProposalType) -> bool {
+    matches!(
+        proposal_type,
+        ProposalType::Add
+            | ProposalType::Update
+            | ProposalType::Remove
+            | ProposalType::PreSharedKey
+            | ProposalType::Reinit
+            | ProposalType::ExternalInit
+            | ProposalType::GroupContextExtensions
+    )
 }
 
 /// Enforce the ADR-0022 role policy on a staged commit BEFORE it is merged,
@@ -2374,12 +3233,94 @@ pub fn epoch_of_message(bytes: &[u8]) -> Option<u64> {
 
 #[cfg(test)]
 impl Group {
+    /// **A filter that cannot see.** Sweep with the enumeration reduced to its
+    /// FIRST clause — authorisation, and nothing else — which is byte-for-byte
+    /// what `sweep_keeps` was before clauses 2-5 were written.
+    ///
+    /// It exists so a wedge the enumeration does not catch can be reproduced
+    /// without inventing a hypothetical cause: any condition clauses 2-5
+    /// currently name becomes, through this entry point, a condition the filter
+    /// is blind to, and therefore a stand-in for the ones nobody has named. It
+    /// skips no authorisation and grants no authority — `proposal_is_authorised`
+    /// is the same call [`sweep_keeps`] makes first — so it can only ever
+    /// produce a commit the real sweep could also have produced.
+    ///
+    /// Everything downstream is the shipped path: the same
+    /// [`Group::stage_selection`], the same exclusion search, the same staging.
+    fn sweep_with_authorisation_only_filter(
+        &mut self,
+        identity: &Identity,
+    ) -> Result<Option<ProposalCommit>> {
+        let table = self.role_table_or_refuse("sweep")?;
+        let members = self.members();
+        let candidates: Vec<ProposalRef> = self
+            .inner
+            .pending_proposals()
+            .filter(|qp| proposal_is_authorised(&table, &members, qp))
+            .map(|qp| qp.proposal_reference_ref().clone())
+            .collect();
+        let staged = self.stage_selection(identity, candidates)?;
+        if staged.is_some() {
+            self.merge_staged_sweep(identity)?;
+        }
+        Ok(staged)
+    }
+
     /// **Adversary.** Propose an Add with no local authorisation check.
     fn ungated_propose_add(&mut self, identity: &Identity, kp: KeyPackage) -> Result<Vec<u8>> {
         let (proposal, _r) = self
             .inner
             .propose_add_member(&identity.provider, &identity.signature_keys, &kp)
             .map_err(|e| Error::Group(format!("ungated_propose_add: {e:?}")))?;
+        encode_message(&proposal)
+    }
+
+    /// **Barely an adversary at all.** Emit a stock RFC 9420 `Update` proposal.
+    ///
+    /// Unlike its siblings here, this helper skips no Lakko check, because there
+    /// is none to skip: `MlsGroup::propose_self_update` is ordinary OpenMLS,
+    /// reachable by any conformant MLS client, and `lakko-mls` simply publishes
+    /// no entry point onto it. That is precisely what makes the flood it enables
+    /// reachable **without** a modified client — the reason the refusal has to
+    /// live in [`crate::group_proposals::authorise`] rather than in the absence
+    /// of a `propose_update` method.
+    fn ungated_propose_self_update(&mut self, identity: &Identity) -> Result<Vec<u8>> {
+        use openmls::prelude::LeafNodeParameters;
+        let (proposal, _r) = self
+            .inner
+            .propose_self_update(
+                &identity.provider,
+                &identity.signature_keys,
+                LeafNodeParameters::default(),
+            )
+            .map_err(|e| Error::Group(format!("ungated_propose_self_update: {e:?}")))?;
+        encode_message(&proposal)
+    }
+
+    /// **Adversary.** Propose a role-table rewrite with no local check that the
+    /// table it installs names an owner the group actually holds.
+    ///
+    /// [`Group::propose_group_roles`] refuses that before touching MLS
+    /// (`refuse_unenforceable_role_table`), so an honest client cannot emit one.
+    /// A modified one can, and [`crate::group_proposals::authorise`] — the rule
+    /// every PEER applies on receipt — asks only *who* proposed a role change,
+    /// never *whom it names*. Which is exactly why
+    /// [`crate::group_proposals::owner_survives`] is a commit-level rule, and
+    /// why the exclusion search has to re-ask it of every selection it tries.
+    fn ungated_propose_group_roles(
+        &mut self,
+        identity: &Identity,
+        roles: &RoleTable,
+    ) -> Result<Vec<u8>> {
+        let exts = Extensions::from_vec(vec![
+            role_required_capabilities(),
+            Extension::Unknown(ROLE_EXTENSION_TYPE, UnknownExtension(roles.encode())),
+        ])
+        .map_err(|e| Error::Group(format!("build role extensions: {e:?}")))?;
+        let (proposal, _proposal_ref) = self
+            .inner
+            .propose_group_context_extensions(&identity.provider, exts, &identity.signature_keys)
+            .map_err(|e| Error::Group(format!("ungated_propose_group_roles: {e:?}")))?;
         encode_message(&proposal)
     }
 
@@ -2858,6 +3799,1790 @@ mod proposal_gate_tests {
             1,
             "the park must put the pending set back exactly as it was",
         );
+    }
+
+    // ========================================================================
+    // `Update` is refused (ADR-0045 review findings F2 + F3)
+    // ========================================================================
+
+    /// How many stock `Update` proposals the flood emits. One above
+    /// [`MAX_PENDING_PROPOSALS`] would do; exactly the cap is what the F3
+    /// report measured, and the control below shows it is already enough.
+    const FLOOD: usize = MAX_PENDING_PROPOSALS;
+
+    /// **F3, the fix.** A plain member's `Update` proposals must never reach the
+    /// pending set, however many it sends, and the owner's membership
+    /// operations must be untouched afterwards.
+    ///
+    /// Each `Update` carries a freshly generated leaf node, so every one of them
+    /// hashes to a **distinct** `ProposalRef` — which is exactly what the
+    /// de-duplication in [`Group::gate_incoming_proposal`] cannot collapse, and
+    /// why `Update` was the one kind able to walk a plain member's flood all the
+    /// way to [`MAX_PENDING_PROPOSALS`]. The first assertion pins that the
+    /// flood really is distinct, so a future change that made the wire
+    /// repeat itself could not make this test pass vacuously.
+    #[test]
+    fn a_flood_of_stock_updates_never_reaches_the_pending_set() {
+        let mut s = scene(0x30);
+        let dave = Identity::from_seed(&[0x90u8; 64]).expect("dave");
+
+        let mut refs = std::collections::BTreeSet::new();
+        for i in 0..FLOOD {
+            let update = s
+                .charlie_g
+                .ungated_propose_self_update(&s.charlie)
+                .expect("charlie emits a stock Update proposal");
+            refs.insert(update.clone());
+
+            let incoming = s
+                .alice_g
+                .process_incoming_verifying_roles(&s.alice, &update)
+                .expect("alice processes the Update");
+            let Incoming::Proposal(record) = incoming else {
+                panic!("expected a proposal, got {incoming:?}");
+            };
+            assert!(!record.stored, "Update #{i} must be refused, not retained");
+            assert_eq!(
+                record.kind,
+                ProposalKind::Update,
+                "the refusal must still name what was refused",
+            );
+        }
+        assert_eq!(
+            refs.len(),
+            FLOOD,
+            "the flood must be distinct on the wire, or de-duplication would \
+             already stop it and this test would prove nothing",
+        );
+        assert!(
+            s.alice_g.pending_proposals().is_empty(),
+            "no Update may occupy a pending slot",
+        );
+
+        // ...and every membership operation the flood used to freeze still
+        // works, on the very next call.
+        s.bob_g
+            .propose_add_member_from_wire(&s.bob, &kp_wire(&dave))
+            .expect("an admin may still propose an add");
+        s.alice_g
+            .add_member_from_wire(&s.alice, &kp_wire(&dave))
+            .expect("the owner may still commit an add directly");
+    }
+
+    /// **F3, the harm.** The control for the test above: had those proposals
+    /// been retained, the owner's membership operations would be refused
+    /// outright.
+    ///
+    /// The proposals are planted with [`Group::ungated_store`] — the receipt
+    /// gate bypassed — so this measures the *consequence* of a full pending set
+    /// rather than re-testing the gate, and it keeps measuring it whatever
+    /// `authorise` later decides about `Update`. Without it, the test above
+    /// would assert that a flood is refused without ever establishing that a
+    /// flood matters.
+    #[test]
+    fn control_a_full_pending_set_freezes_the_owners_membership_operations() {
+        let mut s = scene(0x31);
+        let dave = Identity::from_seed(&[0x91u8; 64]).expect("dave");
+
+        for _ in 0..FLOOD {
+            let update = s
+                .charlie_g
+                .ungated_propose_self_update(&s.charlie)
+                .expect("charlie emits a stock Update proposal");
+            s.alice_g
+                .ungated_store(&s.alice, &update)
+                .expect("planted past the receipt gate");
+        }
+        assert_eq!(
+            s.alice_g.pending_proposals().len(),
+            FLOOD,
+            "the flood is distinct, so nothing collapses it",
+        );
+
+        assert!(
+            s.alice_g
+                .propose_add_member_from_wire(&s.alice, &kp_wire(&dave))
+                .is_err(),
+            "at the cap the owner cannot even propose",
+        );
+        let Err(err) = s.alice_g.add_member_from_wire(&s.alice, &kp_wire(&dave)) else {
+            panic!("a direct add must be refused too");
+        };
+        assert!(
+            format!("{err:?}").contains("membership proposal(s) are pending"),
+            "expected the pending-proposal guard, got {err:?}",
+        );
+        assert!(s
+            .alice_g
+            .remove_member(&s.alice, s.charlie_g.own_leaf_index())
+            .is_err());
+        assert!(s
+            .alice_g
+            .set_group_roles(&s.alice, &RoleTable::new(pk32(&s.alice), vec![]))
+            .is_err());
+    }
+
+    /// **F2.** An `Update` must never ride a sweep, so
+    /// [`crate::group_proposals::owner_survives`]' blindness to one is
+    /// unreachable.
+    ///
+    /// `commit_effects` summarises a commit's membership and role effects for
+    /// `owner_survives`, and it discards `Update` — it has no field for "this
+    /// leaf's signature key changed". That blindness matters because OpenMLS
+    /// 0.8.1 does not bind an `Update`'s leaf node to the sender's *existing*
+    /// signature key (`UpdateProposalIn::validate` verifies the leaf against the
+    /// key inside it; `validate_key_uniqueness` collects signature keys from
+    /// `Add` proposals only), so an `Update` can rotate its own leaf's Ed25519
+    /// key out from under the role table.
+    ///
+    /// The fix is not to teach `commit_effects` about `Update` — it is to keep
+    /// one out of every commit in the first place. This pins the two layers that
+    /// do so, with the receipt gate deliberately bypassed so each is measured on
+    /// its own: the sweep filter excludes it, and a peer refuses a commit that
+    /// carries one anyway.
+    #[test]
+    fn an_update_is_excluded_from_a_sweep_and_refused_inside_a_commit() {
+        let mut s = scene(0x32);
+
+        let update = s
+            .charlie_g
+            .ungated_propose_self_update(&s.charlie)
+            .expect("charlie emits a stock Update proposal");
+
+        // Layer 2 — the sweep filter, over a store primed past the gate.
+        s.alice_g
+            .ungated_store(&s.alice, &update)
+            .expect("alice stores it ungated");
+        assert_eq!(s.alice_g.pending_proposals().len(), 1);
+        assert!(
+            s.alice_g
+                .commit_pending_proposals(&s.alice)
+                .expect("sweep")
+                .is_none(),
+            "the sweep filter must exclude an Update, so nothing is committed",
+        );
+
+        // Layer 3 — a malicious committer sweeps it unfiltered anyway.
+        s.bob_g
+            .ungated_store(&s.bob, &update)
+            .expect("bob stores it ungated");
+        let commit = s
+            .bob_g
+            .ungated_sweep(&s.bob)
+            .expect("bob sweeps unfiltered");
+        let epoch_before = s.alice_g.epoch();
+        assert!(
+            s.alice_g
+                .process_incoming_verifying_roles(&s.alice, &wire(commit))
+                .is_err(),
+            "the commit gate must refuse a commit carrying an Update",
+        );
+        assert_eq!(
+            s.alice_g.epoch(),
+            epoch_before,
+            "a refused commit must NOT advance the epoch",
+        );
+    }
+
+    /// The refusal must be attributable. `Update` is *supported and
+    /// deliberately refused*, which is a different fact from "Lakko does not
+    /// know this proposal type", so folding it into
+    /// [`ProposalKind::Unsupported`] would leave a developer reading
+    /// "unsupported proposal type" about a proposal OpenMLS emits by default.
+    #[test]
+    fn the_update_refusal_names_itself() {
+        let mut s = scene(0x33);
+        let update = s
+            .charlie_g
+            .ungated_propose_self_update(&s.charlie)
+            .expect("charlie emits a stock Update proposal");
+        s.bob_g
+            .ungated_store(&s.bob, &update)
+            .expect("bob stores it ungated");
+        let commit = s
+            .bob_g
+            .ungated_sweep(&s.bob)
+            .expect("bob sweeps unfiltered");
+        s.alice_g
+            .ungated_store(&s.alice, &update)
+            .expect("alice stores it so the by-reference lookup resolves");
+
+        let err = s
+            .alice_g
+            .process_incoming_verifying_roles(&s.alice, &wire(commit))
+            .expect_err("the commit must be refused");
+        let text = format!("{err}");
+        assert!(
+            text.contains("leaf-update"),
+            "the refusal must name the leaf update, got {text:?}",
+        );
+        assert!(
+            !text.contains("unsupported"),
+            "an Update is refused on purpose, not for being unrecognised: {text:?}",
+        );
+    }
+
+    // ========================================================================
+    // The owner's response survives a flood of admin `Add`s
+    // ========================================================================
+
+    /// Mint a fresh joiner identity, distinct for every `i`.
+    fn joiner(i: usize) -> Identity {
+        let mut seed = [0x90u8; 64];
+        seed[0] = u8::try_from(i % 251).expect("< 256");
+        seed[1] = u8::try_from(i / 251).expect("< 256");
+        Identity::from_seed(&seed).expect("joiner identity")
+    }
+
+    /// Add one more plain member to a freshly built [`Scene`] through the owner's
+    /// direct path (legal while nothing is pending), keeping every existing peer
+    /// in sync, and return the new member's leaf.
+    fn add_extra_member(s: &mut Scene, tag: u8) -> LeafNodeIndex {
+        let newcomer = Identity::from_seed(&[tag; 64]).expect("newcomer identity");
+        let added = s
+            .alice_g
+            .add_member_from_wire(&s.alice, &kp_wire(&newcomer))
+            .expect("the owner adds a member");
+        let commit = wire(added.commit);
+        s.bob_g
+            .process_incoming_verifying_roles(&s.bob, &commit)
+            .expect("bob applies the add");
+        s.charlie_g
+            .process_incoming_verifying_roles(&s.charlie, &commit)
+            .expect("charlie applies the add");
+        let key = newcomer.signature_public_key().to_vec();
+        let leaf = s
+            .alice_g
+            .members()
+            .iter()
+            .find(|m| m.signature_public_key == key)
+            .map(|m| m.leaf_index)
+            .expect("the newcomer is in the roster");
+        LeafNodeIndex::new(leaf)
+    }
+
+    /// Fill `n` slots of every peer's pending set with `Add` proposals authored
+    /// by the admin `bob`, and return nothing — the point is the residue.
+    ///
+    /// Every call here is an **ordinary, authorised** API call. No adversary
+    /// seam is used and no modified client is needed: `Add` requires owner or
+    /// admin, bob is an admin, and each proposal carries a distinct KeyPackage
+    /// so nothing in the receipt gate's de-duplication collapses them.
+    fn flood_with_admin_adds(s: &mut Scene, n: usize) {
+        for i in 0..n {
+            let proposal = s
+                .bob_g
+                .propose_add_member(&s.bob, kp(&joiner(i)))
+                .unwrap_or_else(|e| panic!("an admin may propose add #{i}: {e:?}"));
+            for (g, id) in [(&mut s.alice_g, &s.alice), (&mut s.charlie_g, &s.charlie)] {
+                let incoming = g
+                    .process_incoming_verifying_roles(id, &proposal)
+                    .unwrap_or_else(|e| panic!("peer processes add #{i}: {e:?}"));
+                let Incoming::Proposal(record) = incoming else {
+                    panic!("expected a proposal, got {incoming:?}");
+                };
+                assert!(
+                    record.stored,
+                    "add #{i} is authorised for an admin, so it must be retained",
+                );
+            }
+        }
+    }
+
+    /// **The escalation.** A malicious admin fills every peer's pending set with
+    /// `Add` proposals; the owner must still be able to remove them and to
+    /// demote them, and the sweep that enacts either must land on an honest
+    /// peer whose set is equally full.
+    #[test]
+    fn a_flood_of_admin_adds_never_takes_away_the_owners_response() {
+        let mut s = scene(0x34);
+        let bob_leaf = s.bob_g.own_leaf_index();
+        flood_with_admin_adds(&mut s, FLOOD);
+
+        assert_eq!(
+            s.alice_g.pending_proposals().len(),
+            FLOOD,
+            "the owner's pending set is full",
+        );
+        assert_eq!(
+            s.charlie_g.pending_proposals().len(),
+            FLOOD,
+            "and so is an honest peer's",
+        );
+
+        // The property. Neither of these may be refused, however full the set.
+        let demote = s
+            .alice_g
+            .propose_group_roles(&s.alice, &RoleTable::new(pk32(&s.alice), vec![]))
+            .expect("the owner must still be able to demote a flooding admin");
+        let remove = s
+            .alice_g
+            .propose_remove_member(&s.alice, bob_leaf)
+            .expect("the owner must still be able to propose the flooding admin's removal");
+
+        // An honest peer must retain both, or the sweep carrying them by
+        // reference is unresolvable there (`InvalidCommit(MissingProposal)`).
+        for (label, bytes) in [("demote", &demote), ("remove", &remove)] {
+            let incoming = s
+                .charlie_g
+                .process_incoming_verifying_roles(&s.charlie, bytes)
+                .unwrap_or_else(|e| panic!("charlie processes the {label}: {e:?}"));
+            let Incoming::Proposal(record) = incoming else {
+                panic!("expected a proposal, got {incoming:?}");
+            };
+            assert!(
+                record.stored,
+                "an honest peer must retain the owner's {label} past the cap",
+            );
+        }
+
+        // And the response actually lands, on the owner and on that peer.
+        let swept = s
+            .alice_g
+            .commit_pending_proposals(&s.alice)
+            .expect("the owner sweeps")
+            .expect("there is something to sweep");
+        s.charlie_g
+            .process_incoming_verifying_roles(&s.charlie, &wire(swept.commit))
+            .expect("an honest peer applies the sweep");
+        for (label, g) in [("owner", &s.alice_g), ("peer", &s.charlie_g)] {
+            let table = g.group_roles().expect("role table");
+            assert!(
+                table.admins().is_empty(),
+                "the flooding admin must be demoted on the {label}",
+            );
+            assert!(
+                !g.members()
+                    .iter()
+                    .any(|m| m.signature_public_key == s.bob.signature_public_key()),
+                "the flooding admin must be removed on the {label}",
+            );
+        }
+    }
+
+    /// The reserve restores an authority; it must not hand out a new one, and it
+    /// must not become a general owner bypass of the cap.
+    ///
+    /// Three things are asserted against a full set: an **admin's** removal and
+    /// role change get no reserve (the admin is the attacker in the escalation
+    /// above, so a reserve it could spend would be no reserve at all); a **plain
+    /// member's** departure gets none either; and the **owner's own `Add`** gets
+    /// none, so the owner cannot inflate the group's bound through the one kind
+    /// that is not a response.
+    #[test]
+    fn the_reserve_is_the_owners_alone_and_only_for_a_response() {
+        let mut s = scene(0x3b);
+        let charlie_leaf = s.charlie_g.own_leaf_index();
+        let bob_leaf = s.bob_g.own_leaf_index();
+        flood_with_admin_adds(&mut s, FLOOD);
+
+        // An admin at the cap: refused, for a removal and for a role change
+        // alike. (The role change is owner-only anyway, so the removal is the
+        // load-bearing half of this pair.)
+        assert!(
+            s.bob_g.propose_remove_member(&s.bob, charlie_leaf).is_err(),
+            "an admin gets no reserve for a removal",
+        );
+        assert!(
+            s.bob_g
+                .propose_group_roles(&s.bob, &RoleTable::new(pk32(&s.bob), vec![]))
+                .is_err(),
+            "an admin gets no reserve for a role change",
+        );
+        // A plain member leaving: refused too.
+        assert!(
+            s.charlie_g
+                .propose_remove_member(&s.charlie, charlie_leaf)
+                .is_err(),
+            "a plain member gets no reserve for its own departure",
+        );
+        // The owner's own Add: refused. The reserve is for the response only.
+        let outsider = Identity::from_seed(&[0x5cu8; 64]).expect("outsider");
+        assert!(
+            s.alice_g
+                .propose_add_member(&s.alice, kp(&outsider))
+                .is_err(),
+            "the owner gets no reserve for an Add",
+        );
+
+        // And the peers' receipt gate agrees. A second scene where only the
+        // owner's set was filled gives a non-owner that genuinely CAN emit a
+        // proposal into a peer's full set — and that peer must drop it.
+        let mut peer = scene(0x3c);
+        for i in 0..FLOOD {
+            let proposal = peer
+                .bob_g
+                .propose_add_member(&peer.bob, kp(&joiner(i)))
+                .unwrap_or_else(|e| panic!("admin proposes #{i}: {e:?}"));
+            peer.alice_g
+                .process_incoming_verifying_roles(&peer.alice, &proposal)
+                .unwrap_or_else(|e| panic!("alice processes #{i}: {e:?}"));
+        }
+        let departure = peer
+            .charlie_g
+            .propose_remove_member(&peer.charlie, peer.charlie_g.own_leaf_index())
+            .expect("charlie's own set is empty, so it may ask to leave");
+        let Incoming::Proposal(record) = peer
+            .alice_g
+            .process_incoming_verifying_roles(&peer.alice, &departure)
+            .expect("alice processes it")
+        else {
+            panic!("expected a proposal");
+        };
+        assert!(
+            !record.stored,
+            "a plain member's proposal arriving into a full set must still be dropped",
+        );
+
+        // The owner, meanwhile, still has its response.
+        s.alice_g
+            .propose_remove_member(&s.alice, bob_leaf)
+            .expect("the owner keeps its response");
+    }
+
+    /// Whatever the reserve admits, the set stays finite and small.
+    ///
+    /// The ordinary cap still refuses at [`MAX_PENDING_PROPOSALS`] and the
+    /// reserve is exhaustible, so the hard ceiling is the sum and nothing can
+    /// push the set past it. This is the memory bound the whole cap exists for
+    /// (the set is persisted and re-parked once per outgoing chat message).
+    #[test]
+    fn the_pending_set_is_still_bounded_by_the_sum_of_the_two_caps() {
+        assert_eq!(pending_capacity(false), MAX_PENDING_PROPOSALS);
+        assert_eq!(
+            pending_capacity(true),
+            MAX_PENDING_PROPOSALS + MAX_RESERVED_OWNER_RESPONSES,
+        );
+
+        let mut s = scene(0x3d);
+        // Enough removable leaves to spend the whole reserve on removals.
+        let mut targets = vec![s.bob_g.own_leaf_index(), s.charlie_g.own_leaf_index()];
+        for i in 0..MAX_RESERVED_OWNER_RESPONSES {
+            targets.push(add_extra_member(
+                &mut s,
+                0xC0 + u8::try_from(i).expect("< 256"),
+            ));
+        }
+        flood_with_admin_adds(&mut s, FLOOD);
+        assert_eq!(s.alice_g.pending_proposals().len(), MAX_PENDING_PROPOSALS);
+
+        for (i, leaf) in targets
+            .iter()
+            .take(MAX_RESERVED_OWNER_RESPONSES)
+            .enumerate()
+        {
+            s.alice_g
+                .propose_remove_member(&s.alice, *leaf)
+                .unwrap_or_else(|e| {
+                    panic!("the owner's response #{i} must fit the reserve: {e:?}")
+                });
+        }
+        assert_eq!(
+            s.alice_g.pending_proposals().len(),
+            MAX_PENDING_PROPOSALS + MAX_RESERVED_OWNER_RESPONSES,
+            "the reserve is spent",
+        );
+
+        let err = s
+            .alice_g
+            .propose_remove_member(&s.alice, targets[MAX_RESERVED_OWNER_RESPONSES])
+            .expect_err("the reserve is finite");
+        assert!(
+            format!("{err}").contains(&format!(
+                "{} pending proposals",
+                MAX_PENDING_PROPOSALS + MAX_RESERVED_OWNER_RESPONSES
+            )),
+            "the refusal must name the ceiling it enforced, got {err}",
+        );
+        assert!(
+            s.alice_g.pending_proposals().len()
+                <= MAX_PENDING_PROPOSALS + MAX_RESERVED_OWNER_RESPONSES,
+            "the set must never exceed the sum of the two caps",
+        );
+    }
+
+    // ========================================================================
+    // A sweep must always be buildable
+    // ========================================================================
+
+    /// **One proposal used to wedge a group forever.** An `Add` naming somebody
+    /// who is already a member — a stale roster, a double tap — is authorised,
+    /// is retained by every peer's receipt gate, and then makes
+    /// `CommitBuilder::build` fail with
+    /// `ProposalValidationError::DuplicateSignatureKey` on **every** committer.
+    ///
+    /// The store only empties when a commit is *merged* and every direct commit
+    /// is refused while proposals are pending, so an unbuildable sweep is not a
+    /// lost round: it is a permanent membership wedge, and it takes the owner's
+    /// removal and role change with it just as the flood does.
+    #[test]
+    fn a_single_add_of_an_existing_member_cannot_wedge_the_sweep() {
+        let mut s = scene(0x3e);
+        let readd = s
+            .bob_g
+            .propose_add_member(&s.bob, kp(&s.charlie))
+            .expect("an admin may ask to add somebody");
+        let Incoming::Proposal(record) = s
+            .alice_g
+            .process_incoming_verifying_roles(&s.alice, &readd)
+            .expect("alice processes it")
+        else {
+            panic!("expected a proposal");
+        };
+        assert!(record.stored, "it is authorised, so it is retained");
+
+        // The sweep must still build, and must simply carry nothing.
+        assert!(
+            s.alice_g
+                .commit_pending_proposals(&s.alice)
+                .expect("the sweep must be buildable")
+                .is_none(),
+            "the redundant add is the only thing pending, so nothing is committed",
+        );
+        // ...and the group is not wedged: membership still works afterwards.
+        let dave = Identity::from_seed(&[0x5du8; 64]).expect("dave");
+        s.alice_g
+            .propose_add_member(&s.alice, kp(&dave))
+            .expect("membership still works");
+        assert!(s
+            .alice_g
+            .commit_pending_proposals(&s.alice)
+            .expect("sweep")
+            .is_some());
+    }
+
+    /// Two admins independently asking for the same person is the exact
+    /// concurrent composition ADR-0045 exists to make safe, and it used to wedge
+    /// the group: the two proposals carry different KeyPackages, so nothing
+    /// de-duplicates them, and one commit may not add one signature key twice.
+    #[test]
+    fn two_admins_asking_for_one_person_compose_into_a_single_add() {
+        let mut s = scene(0x3f);
+        let dave = Identity::from_seed(&[0x5eu8; 64]).expect("dave");
+        let from_bob = s
+            .bob_g
+            .propose_add_member(&s.bob, kp(&dave))
+            .expect("bob asks for dave");
+        s.alice_g
+            .process_incoming_verifying_roles(&s.alice, &from_bob)
+            .expect("alice takes bob's request");
+        s.alice_g
+            .propose_add_member(&s.alice, kp(&dave))
+            .expect("alice asks for dave too");
+        assert_eq!(
+            s.alice_g.pending_proposals().len(),
+            2,
+            "distinct KeyPackages, so the receipt gate cannot collapse them",
+        );
+
+        let swept = s
+            .alice_g
+            .commit_pending_proposals(&s.alice)
+            .expect("the sweep must be buildable")
+            .expect("something is swept");
+        assert_eq!(swept.swept.len(), 1, "exactly one of the pair is carried");
+        assert!(
+            s.alice_g
+                .members()
+                .iter()
+                .any(|m| m.signature_public_key == dave.signature_public_key()),
+            "and dave is in the group once",
+        );
+        assert_eq!(s.alice_g.members().len(), 4, "alice, bob, charlie, dave");
+    }
+
+    /// The key-collision clause is judged against the roster the commit
+    /// **produces**, not the one it inherits — so removing a member and re-adding
+    /// the same signature key in one sweep still composes, exactly as OpenMLS's
+    /// own `validate_key_uniqueness` allows.
+    ///
+    /// This does not discriminate the fix (it passed before it); it is the guard
+    /// that keeps the fix from being written too broadly, and it fails against
+    /// the obvious wrong version of clause 3 — the one that drops an `Add`
+    /// colliding with *any* current member.
+    #[test]
+    fn a_removal_and_a_re_add_of_one_key_still_compose() {
+        let mut s = scene(0x40);
+        let charlie_leaf = s.charlie_g.own_leaf_index();
+        s.alice_g
+            .propose_remove_member(&s.alice, charlie_leaf)
+            .expect("alice removes charlie");
+        let readd = s
+            .bob_g
+            .propose_add_member(&s.bob, kp(&s.charlie))
+            .expect("bob re-adds charlie");
+        s.alice_g
+            .process_incoming_verifying_roles(&s.alice, &readd)
+            .expect("alice takes the re-add");
+
+        let swept = s
+            .alice_g
+            .commit_pending_proposals(&s.alice)
+            .expect("sweep")
+            .expect("something is swept");
+        assert_eq!(
+            swept.swept.len(),
+            2,
+            "the removal and the re-add must BOTH be carried",
+        );
+        assert!(
+            s.alice_g
+                .members()
+                .iter()
+                .any(|m| m.signature_public_key == s.charlie.signature_public_key()),
+            "charlie is back in the group under a fresh leaf",
+        );
+    }
+
+    /// Excluding a duplicate `Add` must not change what
+    /// [`crate::group_proposals::owner_survives`] concluded, which is computed
+    /// over the authorised set **before** the filter runs.
+    ///
+    /// The case that would break it: an ownership transfer whose named owner is
+    /// only reachable through an `Add` the filter then drops. It cannot happen —
+    /// a key dropped as a duplicate is still added by the copy that was kept, and
+    /// a key dropped for colliding with a member is a member the commit keeps —
+    /// and this pins the second half, which is the one an over-eager clause 3
+    /// would break.
+    #[test]
+    fn an_excluded_duplicate_add_does_not_change_the_owner_survives_answer() {
+        let mut s = scene(0x41);
+        // A redundant Add of charlie, who is already a member and is about to be
+        // named owner.
+        let readd = s
+            .bob_g
+            .propose_add_member(&s.bob, kp(&s.charlie))
+            .expect("bob re-adds charlie");
+        s.alice_g
+            .process_incoming_verifying_roles(&s.alice, &readd)
+            .expect("alice takes it");
+        s.alice_g
+            .propose_ownership_transfer(
+                &s.alice,
+                s.charlie.signature_public_key(),
+                OutgoingOwner::Admin,
+            )
+            .expect("alice hands the group to charlie");
+
+        let swept = s
+            .alice_g
+            .commit_pending_proposals(&s.alice)
+            .expect("the sweep must be buildable")
+            .expect("something is swept");
+        assert_eq!(
+            swept.swept.len(),
+            1,
+            "only the transfer is carried; the redundant add is dropped",
+        );
+        let table = s.alice_g.group_roles().expect("role table");
+        assert_eq!(
+            table.owner().as_slice(),
+            s.charlie.signature_public_key(),
+            "the transfer landed, so owner_survives said yes and meant it",
+        );
+    }
+
+    /// The cheapest form of the flood: every `Add` names ONE person, so nothing
+    /// de-duplicates the proposals and the old sweep could not be built at all.
+    /// The owner's response must survive it, and the sweep must land.
+    #[test]
+    fn a_same_key_flood_neither_wedges_the_sweep_nor_silences_the_owner() {
+        let mut s = scene(0x42);
+        let bob_leaf = s.bob_g.own_leaf_index();
+        let dave = Identity::from_seed(&[0x5fu8; 64]).expect("dave");
+        for i in 0..FLOOD {
+            let proposal = s
+                .bob_g
+                .propose_add_member(&s.bob, kp(&dave))
+                .unwrap_or_else(|e| panic!("admin proposes #{i}: {e:?}"));
+            s.alice_g
+                .process_incoming_verifying_roles(&s.alice, &proposal)
+                .unwrap_or_else(|e| panic!("alice processes #{i}: {e:?}"));
+        }
+        assert_eq!(s.alice_g.pending_proposals().len(), FLOOD);
+
+        s.alice_g
+            .propose_remove_member(&s.alice, bob_leaf)
+            .expect("the owner must still be able to respond");
+        let swept = s
+            .alice_g
+            .commit_pending_proposals(&s.alice)
+            .expect("the sweep must be buildable")
+            .expect("something is swept");
+        assert_eq!(
+            swept.swept.len(),
+            2,
+            "one add out of the whole flood, plus the owner's removal",
+        );
+        assert!(
+            !s.alice_g
+                .members()
+                .iter()
+                .any(|m| m.signature_public_key == s.bob.signature_public_key()),
+            "the flooding admin is gone",
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // ...and the second route to the same wedge: a leaf that cannot live
+    // in THIS group (`sweep_keeps` clauses 4 and 5).
+    //
+    // Every KeyPackage below is well-formed — each is built by OpenMLS's own
+    // `KeyPackage::builder()` and passes `KeyPackageIn::validate` — and each
+    // makes `CommitBuilder::build` refuse outright, because "may this leaf join
+    // THAT group" is a question only the group can ask and nothing on the way
+    // in asks it.
+    // ------------------------------------------------------------------
+
+    /// Build a [`SweepContext`] over a real group, so the clause-4 predicate can
+    /// be exercised directly for the conditions the wire cannot reach.
+    ///
+    /// Everything it holds is read from the group exactly as
+    /// [`Group::stage_pending_proposals`] reads it; only the entry point differs.
+    fn admission_ctx<'a>(
+        identity: &'a Identity,
+        table: &'a RoleTable,
+        members: &'a [MemberRecord],
+        admission: &'a GroupAdmission,
+    ) -> SweepContext<'a> {
+        SweepContext {
+            table,
+            members,
+            role_change_survives: true,
+            removed_leaves: &[],
+            admission,
+            identity,
+        }
+    }
+
+    /// **The headline, and it needs no adversary.** An `Add` whose leaf does not
+    /// advertise the group's own ciphersuite is authorised by
+    /// [`crate::group_proposals::authorise`], is accepted by OpenMLS's own
+    /// proposer-side check, is retained by every peer's receipt gate — and then
+    /// makes `CommitBuilder::build` fail with
+    /// `LeafNodeValidationError::CiphersuiteNotInCapabilities` on **every**
+    /// committer.
+    ///
+    /// The store only empties when a commit is *merged* and every direct commit
+    /// is refused while proposals are pending, so an unbuildable sweep is not a
+    /// lost round: it is a permanent membership wedge, invisible because chat
+    /// keeps working over it.
+    #[test]
+    fn a_capability_deficient_add_cannot_wedge_the_sweep() {
+        let mut s = scene(0x44);
+        let dave = Identity::from_seed(&[0x60u8; 64]).expect("dave");
+        let deficient = dave
+            .key_package_without_ciphersuite_capability()
+            .expect("a conformant client may mint this");
+
+        let proposal = s
+            .bob_g
+            .propose_add_member(&s.bob, deficient)
+            .expect("an admin may ask to add somebody");
+        let Incoming::Proposal(record) = s
+            .alice_g
+            .process_incoming_verifying_roles(&s.alice, &proposal)
+            .expect("alice processes it")
+        else {
+            panic!("expected a proposal");
+        };
+        assert!(
+            record.stored,
+            "it is authorised, so it is retained — the exclusion is not a refusal",
+        );
+
+        assert!(
+            s.alice_g
+                .commit_pending_proposals(&s.alice)
+                .expect("the sweep must be buildable")
+                .is_none(),
+            "the uncommittable add is the only thing pending, so nothing is committed",
+        );
+        assert!(
+            !s.alice_g
+                .members()
+                .iter()
+                .any(|m| m.signature_public_key == dave.signature_public_key()),
+            "and dave did not join",
+        );
+
+        // ...and the group is not wedged: membership still works afterwards.
+        let erin = Identity::from_seed(&[0x61u8; 64]).expect("erin");
+        s.alice_g
+            .propose_add_member(&s.alice, kp(&erin))
+            .expect("membership still works");
+        assert!(s
+            .alice_g
+            .commit_pending_proposals(&s.alice)
+            .expect("sweep")
+            .is_some());
+    }
+
+    /// The same wedge through the credential dimension: a leaf advertising no
+    /// credential type satisfies neither its own credential (`validate_locally`)
+    /// nor the members' (valn0104), and `build` refuses with
+    /// `LeafNodeValidationError::UnsupportedCredentials`.
+    #[test]
+    fn an_add_whose_leaf_supports_no_credential_type_cannot_wedge_the_sweep() {
+        let mut s = scene(0x46);
+        let dave = Identity::from_seed(&[0x64u8; 64]).expect("dave");
+        let proposal = s
+            .bob_g
+            .propose_add_member(
+                &s.bob,
+                dave.key_package_without_credential_capability()
+                    .expect("deficient kp"),
+            )
+            .expect("an admin may ask to add somebody");
+        s.alice_g
+            .process_incoming_verifying_roles(&s.alice, &proposal)
+            .expect("alice takes it");
+
+        assert!(
+            s.alice_g
+                .commit_pending_proposals(&s.alice)
+                .expect("the sweep must be buildable")
+                .is_none(),
+            "nothing committable is pending",
+        );
+    }
+
+    /// **Time alone reaches this one.** A KeyPackage's lifetime is checked at
+    /// `CommitBuilder::build`, and ADR-0045 gives a request no deadline — so a
+    /// proposal can outlive the KeyPackage it names and wedge every sweep from
+    /// then on, with nobody having done anything wrong.
+    ///
+    /// It is also the one clause-4 condition that cannot be decided once and
+    /// cached: the answer changes while the proposal sits in the store, which is
+    /// why the check belongs in the filter and not in the receipt gate.
+    #[test]
+    fn an_add_whose_key_package_has_expired_cannot_wedge_the_sweep() {
+        let mut s = scene(0x47);
+        let dave = Identity::from_seed(&[0x65u8; 64]).expect("dave");
+        s.alice_g
+            .propose_add_member(&s.alice, dave.expired_key_package().expect("expired kp"))
+            .expect("the owner may ask to add somebody");
+        assert_eq!(
+            s.alice_g.pending_proposals().len(),
+            1,
+            "the expired add is retained, as any authorised proposal is",
+        );
+
+        assert!(
+            s.alice_g
+                .commit_pending_proposals(&s.alice)
+                .expect("the sweep must be buildable")
+                .is_none(),
+            "nothing committable is pending",
+        );
+        assert!(
+            !s.alice_g
+                .members()
+                .iter()
+                .any(|m| m.signature_public_key == dave.signature_public_key()),
+            "and dave did not join on an expired key package",
+        );
+    }
+
+    /// An uncommittable `Add` must not take the rest of the sweep with it: the
+    /// good add and the owner's removal in the same pending set both land.
+    #[test]
+    fn a_capability_deficient_add_does_not_take_the_sweep_with_it() {
+        let mut s = scene(0x45);
+        let dave = Identity::from_seed(&[0x62u8; 64]).expect("dave");
+        let erin = Identity::from_seed(&[0x63u8; 64]).expect("erin");
+        let charlie_leaf = s.charlie_g.own_leaf_index();
+
+        let bad = s
+            .bob_g
+            .propose_add_member(
+                &s.bob,
+                dave.key_package_without_ciphersuite_capability()
+                    .expect("deficient kp"),
+            )
+            .expect("bob asks for dave");
+        s.alice_g
+            .process_incoming_verifying_roles(&s.alice, &bad)
+            .expect("alice takes it");
+        s.alice_g
+            .propose_add_member(&s.alice, kp(&erin))
+            .expect("alice asks for erin");
+        s.alice_g
+            .propose_remove_member(&s.alice, charlie_leaf)
+            .expect("alice removes charlie");
+
+        let swept = s
+            .alice_g
+            .commit_pending_proposals(&s.alice)
+            .expect("the sweep must be buildable")
+            .expect("something is swept");
+        assert_eq!(
+            swept.swept.len(),
+            2,
+            "erin's add and charlie's removal, but not dave's",
+        );
+        assert!(
+            s.alice_g
+                .members()
+                .iter()
+                .any(|m| m.signature_public_key == erin.signature_public_key()),
+            "erin joined",
+        );
+        assert!(
+            !s.alice_g
+                .members()
+                .iter()
+                .any(|m| m.signature_public_key == s.charlie.signature_public_key()),
+            "charlie is gone",
+        );
+    }
+
+    /// **The condition ADR-0045's recon named, pinned one level down.** A leaf
+    /// that does not advertise the `0xFF02` role-table extension the GroupContext
+    /// carries makes `validate_add_proposals` fail with
+    /// `InsufficientCapabilities`.
+    ///
+    /// It is exercised through [`added_leaf_can_join`] and [`sweep_keeps`]
+    /// rather than through a live proposal, and the reason is worth recording
+    /// rather than working around: OpenMLS's own `create_add_proposal` refuses
+    /// to **emit** this proposal, because a Lakko group lists `0xFF02` in
+    /// `required_capabilities` and the proposer checks that one thing. So the
+    /// only way it reaches a store is a peer whose MLS stack does not run that
+    /// check — and a proposal is signed over the group context, so no
+    /// in-process test can forge one from outside. **What is untested is the
+    /// journey, not the verdict**, and the verdict is asserted at the same
+    /// function the sweep calls.
+    ///
+    /// The clause is not thereby redundant with the `required_capabilities`
+    /// clause it coincides with today: they coincide only because every
+    /// GroupContext extension [`Group::create`] installs is also declared
+    /// required. A future extension installed without that declaration would
+    /// separate them, silently, in the wedging direction.
+    #[test]
+    fn a_leaf_that_cannot_carry_the_group_context_extensions_is_not_committable() {
+        let s = scene(0x48);
+        let dave = Identity::from_seed(&[0x66u8; 64]).expect("dave");
+        let table = s.alice_g.group_roles().expect("role table");
+        let members = s.alice_g.members();
+        let admission = s.alice_g.admission_requirements(&[]);
+        let ctx = admission_ctx(&s.alice, &table, &members, &admission);
+
+        assert!(
+            !added_leaf_can_join(
+                &ctx,
+                &dave
+                    .key_package_without_extension_capabilities()
+                    .expect("deficient kp"),
+            ),
+            "a leaf that cannot carry 0xFF02 must never be committed into a role-enabled group",
+        );
+        assert!(
+            added_leaf_can_join(&ctx, &kp(&dave)),
+            "...and an ordinary Lakko KeyPackage must be",
+        );
+
+        // And the same verdict through the filter itself, on a genuine
+        // `QueuedProposal`. The proposal is minted in a table-less group
+        // (`create_with_id` declares no `required_capabilities`, so OpenMLS's
+        // proposer-side check has nothing to refuse it with) and then judged
+        // against the role-enabled group's context — which is exactly the
+        // asymmetry a peer running a different MLS stack would create.
+        let mut open_group = Group::create_with_id(&s.alice, &[0x48u8; GROUP_ID_LEN])
+            .expect("a group with no role table and no required capabilities");
+        open_group
+            .ungated_propose_add(
+                &s.alice,
+                dave.key_package_without_extension_capabilities()
+                    .expect("deficient kp"),
+            )
+            .expect("nothing in that group refuses it");
+        let queued: Vec<_> = open_group.inner.pending_proposals().cloned().collect();
+        let qp = queued.first().expect("the deficient add is pending");
+        let mut state = SweepState::default();
+        assert!(
+            !sweep_keeps(&ctx, &mut state, qp),
+            "the sweep filter must exclude it, not merely the predicate",
+        );
+    }
+
+    /// The good path, asserted rather than assumed: an ordinary `Add` of a
+    /// properly-minted member is untouched by clauses 4 and 5.
+    #[test]
+    fn an_ordinary_add_of_a_properly_minted_member_still_commits() {
+        let mut s = scene(0x49);
+        let dave = Identity::from_seed(&[0x67u8; 64]).expect("dave");
+        let proposal = s
+            .bob_g
+            .propose_add_member(&s.bob, kp(&dave))
+            .expect("bob asks for dave");
+        s.alice_g
+            .process_incoming_verifying_roles(&s.alice, &proposal)
+            .expect("alice takes it");
+
+        let swept = s
+            .alice_g
+            .commit_pending_proposals(&s.alice)
+            .expect("sweep")
+            .expect("something is swept");
+        assert_eq!(swept.swept.len(), 1);
+        assert!(
+            s.alice_g
+                .members()
+                .iter()
+                .any(|m| m.signature_public_key == dave.signature_public_key()),
+            "dave joined",
+        );
+        assert_eq!(s.alice_g.members().len(), 4);
+    }
+
+    /// **Clause 4 decides what is committable; it must not touch who may ask.**
+    ///
+    /// The same deficient KeyPackage is proposed by an admin and by a plain
+    /// member: the admin's is *stored* and then excluded at sweep time, the
+    /// plain member's is *refused at the receipt gate*. Both end with nothing
+    /// committed, and the two must stay distinguishable — a filter that started
+    /// answering the authorisation question would collapse them.
+    #[test]
+    fn excluding_an_uncommittable_add_did_not_widen_or_narrow_authorisation() {
+        let mut s = scene(0x4a);
+        let dave = Identity::from_seed(&[0x68u8; 64]).expect("dave");
+
+        // The admin's ask: authorised, therefore stored.
+        let from_admin = s
+            .bob_g
+            .propose_add_member(
+                &s.bob,
+                dave.key_package_without_ciphersuite_capability()
+                    .expect("deficient kp"),
+            )
+            .expect("an admin may ask");
+        let Incoming::Proposal(admin_record) = s
+            .alice_g
+            .process_incoming_verifying_roles(&s.alice, &from_admin)
+            .expect("alice processes it")
+        else {
+            panic!("expected a proposal");
+        };
+        assert!(
+            admin_record.stored,
+            "clause 4 excludes at sweep time; it must not turn an authorised ask into a refusal",
+        );
+
+        // The plain member's identical ask: still refused, unstored.
+        let hostile = s
+            .charlie_g
+            .ungated_propose_add(
+                &s.charlie,
+                dave.key_package_without_ciphersuite_capability()
+                    .expect("deficient kp"),
+            )
+            .expect("charlie proposes without its local check");
+        let Incoming::Proposal(member_record) = s
+            .alice_g
+            .process_incoming_verifying_roles(&s.alice, &hostile)
+            .expect("alice processes it")
+        else {
+            panic!("expected a proposal");
+        };
+        assert!(
+            !member_record.stored,
+            "a plain member's Add is still refused on authority, exactly as before",
+        );
+        assert_eq!(
+            s.alice_g.pending_proposals().len(),
+            1,
+            "only the admin's ask is held",
+        );
+    }
+
+    /// Clause 5, isolated. Two `Add`s carrying the same HPKE encryption key
+    /// under **different** signature keys slip past clause 3 and make
+    /// `validate_key_uniqueness` refuse the build with `DuplicateEncryptionKey`
+    /// — the same wedge through a different key.
+    ///
+    /// No KeyPackage minted through `KeyPackage::builder()` can collide this
+    /// way, because the builder generates both keys itself; the collision is
+    /// reachable only from an MLS stack that is not OpenMLS. So the clause is
+    /// pinned where it decides: a pass that has already taken one leaf's
+    /// encryption key must refuse the next proposal presenting it, in either
+    /// direction, and whether the key was taken by a kept add or by a sitting
+    /// member.
+    #[test]
+    fn a_key_already_serving_the_group_makes_an_add_uncommittable() {
+        let mut s = scene(0x4b);
+        let dave = Identity::from_seed(&[0x69u8; 64]).expect("dave");
+        s.alice_g
+            .propose_add_member(&s.alice, kp(&dave))
+            .expect("the owner may ask for dave");
+        let table = s.alice_g.group_roles().expect("role table");
+        let members = s.alice_g.members();
+        let admission = s.alice_g.admission_requirements(&[]);
+        let queued: Vec<_> = s.alice_g.inner.pending_proposals().cloned().collect();
+        let qp = queued.first().expect("dave's add is pending");
+        let encryption_key = match qp.proposal() {
+            Proposal::Add(add) => add.key_package().leaf_node().encryption_key().clone(),
+            other => panic!("expected an Add, got {other:?}"),
+        };
+        let init_key = match qp.proposal() {
+            Proposal::Add(add) => {
+                EncryptionKey::from(add.key_package().hpke_init_key().as_slice().to_vec())
+            },
+            other => panic!("expected an Add, got {other:?}"),
+        };
+
+        // Baseline: on a fresh pass it is kept, and the pass records both keys.
+        let ctx = admission_ctx(&s.alice, &table, &members, &admission);
+        let mut fresh = SweepState::default();
+        assert!(sweep_keeps(&ctx, &mut fresh, qp), "the good add is kept");
+        assert!(fresh.kept_encryption_keys.contains(&encryption_key));
+        assert!(fresh.kept_init_keys.contains(&init_key));
+
+        // A pass that already took this encryption key must refuse it, even
+        // though clause 3 has nothing to say (the signature key is untaken).
+        let mut enc_taken = SweepState {
+            kept_encryption_keys: vec![encryption_key.clone()],
+            ..SweepState::default()
+        };
+        assert!(!sweep_keeps(&ctx, &mut enc_taken, qp));
+
+        // The cross direction: an earlier add's INIT key is this add's
+        // encryption key.
+        let mut init_taken = SweepState {
+            kept_init_keys: vec![encryption_key.clone()],
+            ..SweepState::default()
+        };
+        assert!(!sweep_keeps(&ctx, &mut init_taken, qp));
+
+        // And a key already held by a member the commit keeps.
+        let seeded = GroupAdmission {
+            staying_encryption_keys: vec![encryption_key],
+            ..admission
+        };
+        let member_ctx = admission_ctx(&s.alice, &table, &members, &seeded);
+        let mut pass = SweepState::default();
+        assert!(!sweep_keeps(&member_ctx, &mut pass, qp));
+    }
+
+    /// A `Leave` cannot fill the set: `SelfRemove` names no target, so one member
+    /// has exactly one of them to give and the receipt gate's de-duplication
+    /// collapses every repeat.
+    #[test]
+    fn a_member_cannot_fill_the_set_by_leaving_repeatedly() {
+        let mut s = scene(0x43);
+        for _ in 0..FLOOD {
+            let leave = s
+                .charlie_g
+                .propose_remove_member(&s.charlie, s.charlie_g.own_leaf_index())
+                .expect("a member may always ask to leave");
+            let Incoming::Proposal(record) = s
+                .alice_g
+                .process_incoming_verifying_roles(&s.alice, &leave)
+                .expect("alice processes it")
+            else {
+                panic!("expected a proposal");
+            };
+            assert!(
+                record.stored,
+                "the request is held (it is the same request)"
+            );
+        }
+        assert_eq!(
+            s.alice_g.pending_proposals().len(),
+            1,
+            "a repeated departure occupies exactly one slot",
+        );
+    }
+
+    // ========================================================================
+    // The last-resort exclusion fallback
+    //
+    // `sweep_keeps` enumerates the causes of an unbuildable sweep that somebody
+    // has thought of. The tests below are about the ones nobody has: a build
+    // that fails AFTER the enumeration has had its say. The enumeration is
+    // written against a rule set this crate does not own, and one of the rules
+    // it restates — a KeyPackage's lifetime — fires with no adversary at all,
+    // so "we have listed them" can never be the whole answer.
+    // ========================================================================
+
+    /// **The headline, and it needs neither an adversary nor a seam.**
+    ///
+    /// An admin asking to leave is ordinary ADR-0045 traffic — the ADR made
+    /// leaving reachable precisely as "the member proposes it and an admin
+    /// commits". But OpenMLS refuses to let a committer remove its own leaf
+    /// (`CreateCommitError::CannotRemoveSelf`, raised inside
+    /// `CommitBuilder::build` after the proposals have been applied to the
+    /// diff), so the departing admin's OWN sweep fails — and `sweep_keeps` does
+    /// not enumerate that, because the proposal is not defective at all: it is
+    /// perfectly committable by anybody else.
+    ///
+    /// Before the fallback this returned `Err("sweep build: CannotRemoveSelf")`,
+    /// and since a pending proposal also closes every direct-commit path
+    /// ([`Group::refuse_if_proposals_pending`]), that device's membership
+    /// operations were frozen for as long as it was the acting committer — with
+    /// chat still working over the top of it.
+    #[test]
+    fn a_departing_admins_own_sweep_still_commits_the_rest() {
+        let mut s = scene(0x50);
+        let dave = Identity::from_seed(&[0x6au8; 64]).expect("dave");
+        let bob_leaf = s.bob_g.own_leaf_index();
+
+        s.bob_g
+            .propose_remove_member(&s.bob, bob_leaf)
+            .expect("an admin may always ask to leave");
+        s.bob_g
+            .propose_add_member(&s.bob, kp(&dave))
+            .expect("an admin may ask to add somebody");
+        assert_eq!(s.bob_g.pending_proposals().len(), 2);
+
+        let swept = s
+            .bob_g
+            .commit_pending_proposals(&s.bob)
+            .expect("the departing admin's own sweep must still be buildable")
+            .expect("something is swept");
+        assert_eq!(
+            swept.swept.len(),
+            1,
+            "dave's add lands; bob's own departure is not committable BY BOB",
+        );
+        assert!(
+            s.bob_g
+                .members()
+                .iter()
+                .any(|m| m.signature_public_key == dave.signature_public_key()),
+            "dave joined",
+        );
+        assert!(
+            s.bob_g
+                .members()
+                .iter()
+                .any(|m| m.signature_public_key == s.bob.signature_public_key()),
+            "and bob is still a member — the exclusion did not enact its departure",
+        );
+        assert!(s.bob_g.is_active(), "bob's own group is untouched and live");
+    }
+
+    /// The good path must be exactly as cheap as it was: one `CommitBuilder`
+    /// build, no probes. The fallback is reached only through a failure, so an
+    /// ordinary sweep must never pay for it.
+    #[test]
+    fn an_ordinary_sweep_costs_exactly_one_build() {
+        let mut s = scene(0x51);
+        let dave = Identity::from_seed(&[0x6bu8; 64]).expect("dave");
+        s.alice_g
+            .propose_add_member(&s.alice, kp(&dave))
+            .expect("the owner may ask to add somebody");
+
+        reset_sweep_builds();
+        let swept = s
+            .alice_g
+            .commit_pending_proposals(&s.alice)
+            .expect("sweep")
+            .expect("something is swept");
+        assert_eq!(swept.swept.len(), 1);
+        assert_eq!(
+            sweep_builds(),
+            1,
+            "an ordinary sweep must build once and probe not at all",
+        );
+    }
+
+    /// **The seam.** [`Group::sweep_with_authorisation_only_filter`] is the
+    /// enumeration reduced to its first clause — authorisation, and nothing
+    /// else — which is exactly what `sweep_keeps` was before clauses 2-5 were
+    /// written. It stands in for a cause nobody has enumerated: the proposal
+    /// below IS caught by clause 3 today, and blinding the filter to it is how
+    /// a condition the filter cannot see is reproduced without inventing a
+    /// hypothetical one.
+    ///
+    /// What this proves: given a selection the enumeration passed and the
+    /// builder refuses, the fallback finds the offender by exclusion and lands
+    /// the rest. What it does not prove: that any *particular* unenumerated
+    /// cause exists — [`a_departing_admins_own_sweep_still_commits_the_rest`] is
+    /// the live one.
+    #[test]
+    fn the_fallback_rescues_a_wedge_the_enumeration_cannot_see() {
+        let mut s = scene(0x52);
+        let dave = Identity::from_seed(&[0x6cu8; 64]).expect("dave");
+        let readd = s
+            .bob_g
+            .propose_add_member(&s.bob, kp(&s.charlie))
+            .expect("bob re-adds charlie, who is already a member");
+        s.alice_g
+            .process_incoming_verifying_roles(&s.alice, &readd)
+            .expect("alice takes it");
+        s.alice_g
+            .propose_add_member(&s.alice, kp(&dave))
+            .expect("alice asks for dave");
+
+        let swept = s
+            .alice_g
+            .sweep_with_authorisation_only_filter(&s.alice)
+            .expect("the blind sweep must still be buildable")
+            .expect("something is swept");
+        assert_eq!(
+            swept.swept.len(),
+            1,
+            "dave's add lands; the duplicate is found by exclusion",
+        );
+        assert!(
+            s.alice_g
+                .members()
+                .iter()
+                .any(|m| m.signature_public_key == dave.signature_public_key()),
+            "dave joined",
+        );
+        assert_eq!(s.alice_g.members().len(), 4, "and charlie is in it once");
+    }
+
+    /// Several independent offenders in one pending set: each is excluded, and
+    /// the one good proposal still lands. Leave-one-out would need a second
+    /// round per offender; the additive search pays one probe per candidate
+    /// whether there is one offender or all of them.
+    #[test]
+    fn several_offenders_are_all_excluded_and_the_rest_commits() {
+        let mut s = scene(0x53);
+        let dave = Identity::from_seed(&[0x6du8; 64]).expect("dave");
+        for _ in 0..3 {
+            let readd = s
+                .bob_g
+                .propose_add_member(&s.bob, kp(&s.charlie))
+                .expect("bob re-adds charlie again");
+            s.alice_g
+                .process_incoming_verifying_roles(&s.alice, &readd)
+                .expect("alice takes it");
+        }
+        s.alice_g
+            .propose_add_member(&s.alice, kp(&dave))
+            .expect("alice asks for dave");
+        assert_eq!(
+            s.alice_g.pending_proposals().len(),
+            4,
+            "three distinct KeyPackages plus the good add",
+        );
+
+        let swept = s
+            .alice_g
+            .sweep_with_authorisation_only_filter(&s.alice)
+            .expect("the blind sweep must still be buildable")
+            .expect("something is swept");
+        assert_eq!(swept.swept.len(), 1, "only dave's add survives");
+        assert_eq!(s.alice_g.members().len(), 4);
+    }
+
+    /// Every proposal uncommittable. The honest outcome is **no commit at all**
+    /// — never an epoch-advancing empty one — which is byte-for-byte what the
+    /// enumeration already does when its filter keeps nothing.
+    ///
+    /// The pending set therefore survives, exactly as it does today when clause
+    /// 3 drops everything: the store empties only on a merged commit. That is
+    /// not a wedge, and the second half proves it — one committable proposal
+    /// later, a commit lands and takes the whole set with it.
+    #[test]
+    fn a_wholly_uncommittable_set_yields_no_commit_and_no_wedge() {
+        let mut s = scene(0x54);
+        for _ in 0..2 {
+            let readd = s
+                .bob_g
+                .propose_add_member(&s.bob, kp(&s.charlie))
+                .expect("bob re-adds charlie");
+            s.alice_g
+                .process_incoming_verifying_roles(&s.alice, &readd)
+                .expect("alice takes it");
+        }
+        let epoch_before = s.alice_g.epoch();
+
+        assert!(
+            s.alice_g
+                .sweep_with_authorisation_only_filter(&s.alice)
+                .expect("the blind sweep must still be buildable")
+                .is_none(),
+            "nothing is committable, so nothing is committed",
+        );
+        assert_eq!(s.alice_g.epoch(), epoch_before, "and no epoch was burned");
+        assert!(!s.alice_g.has_staged_sweep());
+        assert_eq!(
+            s.alice_g.pending_proposals().len(),
+            2,
+            "the store empties only on a merged commit",
+        );
+
+        // ...and the group is not wedged: one committable proposal later, a
+        // commit lands and clears the whole set.
+        let erin = Identity::from_seed(&[0x6eu8; 64]).expect("erin");
+        s.alice_g
+            .propose_add_member(&s.alice, kp(&erin))
+            .expect("alice asks for erin");
+        let swept = s
+            .alice_g
+            .sweep_with_authorisation_only_filter(&s.alice)
+            .expect("sweep")
+            .expect("something is swept");
+        assert_eq!(swept.swept.len(), 1, "erin's add, and only it");
+        assert!(s.alice_g.pending_proposals().is_empty());
+    }
+
+    /// **The property the whole design rests on**: `CommitBuilder::build`
+    /// validates before it takes `public_group.empty_diff()`, holds the group by
+    /// shared reference throughout, and writes nothing — `stage_commit` is the
+    /// writing half. So a probe is free of consequences whichever way it
+    /// answers, which is what makes an exclusion search legitimate at all.
+    ///
+    /// Both answers are asserted, because only the *successful* one could
+    /// plausibly leave something behind.
+    #[test]
+    fn a_probe_leaves_the_group_and_the_store_untouched_either_way() {
+        let mut s = scene(0x55);
+        let dave = Identity::from_seed(&[0x71u8; 64]).expect("dave");
+        let bob_leaf = s.bob_g.own_leaf_index();
+        s.bob_g
+            .propose_remove_member(&s.bob, bob_leaf)
+            .expect("an admin may ask to leave");
+        s.bob_g
+            .propose_add_member(&s.bob, kp(&dave))
+            .expect("an admin may ask to add somebody");
+
+        let all: Vec<_> = s
+            .bob_g
+            .inner
+            .pending_proposals()
+            .map(|qp| qp.proposal_reference_ref().clone())
+            .collect();
+        assert_eq!(all.len(), 2);
+        let epoch_before = s.bob_g.epoch();
+        let members_before = s.bob_g.members().len();
+
+        // The refusing probe: a committer cannot remove its own leaf.
+        assert!(
+            !s.bob_g.sweep_selection_builds(&s.bob, &all),
+            "the whole set does not build",
+        );
+        // ...and the succeeding one: dave's add alone is perfectly buildable.
+        assert!(
+            s.bob_g.sweep_selection_builds(&s.bob, &all[1..]),
+            "dave's add alone does build",
+        );
+
+        assert_eq!(s.bob_g.epoch(), epoch_before, "the epoch did not move");
+        assert_eq!(
+            s.bob_g.members().len(),
+            members_before,
+            "the roster did not move",
+        );
+        assert_eq!(
+            s.bob_g.pending_proposals().len(),
+            2,
+            "the proposal store did not move",
+        );
+        assert!(
+            !s.bob_g.has_staged_sweep(),
+            "and nothing was staged behind our back",
+        );
+        assert!(
+            !s.bob_g
+                .members()
+                .iter()
+                .any(|m| m.signature_public_key == dave.signature_public_key()),
+            "least of all did the successful probe let dave in",
+        );
+    }
+
+    /// The exclusion search must never assemble a selection that leaves the
+    /// group with an owner who is not in it. `owner_survives` is a property of
+    /// the commit as a WHOLE, so dropping an `Add` can strand a role change the
+    /// enumeration had already blessed — and OpenMLS, which knows nothing about
+    /// role tables, will happily build the stranded commit.
+    ///
+    /// The setup needs the ungated proposer because an honest client refuses to
+    /// emit a table naming a non-member (`refuse_unenforceable_role_table`); a
+    /// modified one can, and the receipt gate does not ask. A search that
+    /// judged nothing but "does it build" would keep the transfer, publish it,
+    /// and have every peer refuse the commit ([`authorise_role_commit`]) —
+    /// trading a local wedge for a fork.
+    #[test]
+    fn the_exclusion_search_never_leaves_the_group_without_an_owner() {
+        let mut s = scene(0x56);
+        let dave = Identity::from_seed(&[0x6fu8; 64]).expect("dave");
+        s.alice_g
+            .ungated_propose_group_roles(&s.alice, &RoleTable::new(pk32(&dave), vec![]))
+            .expect("a modified owner names dave, who is not in the group yet");
+        s.alice_g
+            .propose_add_member(
+                &s.alice,
+                dave.key_package_without_ciphersuite_capability()
+                    .expect("a conformant client may mint this"),
+            )
+            .expect("...and asks for dave in the same round");
+
+        let outcome = s
+            .alice_g
+            .sweep_with_authorisation_only_filter(&s.alice)
+            .expect("the blind sweep must still be buildable");
+        assert!(
+            outcome.is_none(),
+            "dave's add is uncommittable, so the role change naming dave cannot ride alone",
+        );
+        let table = s.alice_g.group_roles().expect("role table");
+        assert_eq!(
+            table.owner(),
+            s.alice.signature_public_key(),
+            "alice is still the owner",
+        );
+        assert!(
+            s.alice_g.group_roles().is_some(),
+            "and the group still has a role table at all",
+        );
+    }
+
+    /// **The second pass earns its keep.** Two proposals that are committable
+    /// only *together* — a `Remove` and the re-`Add` of the same signature key
+    /// — must both survive the search even when the store offers the `Add`
+    /// first, at which point it collides with a member the selection does not
+    /// yet remove.
+    ///
+    /// One additive pass alone would drop the re-add and quietly evict charlie
+    /// from the group; re-offering every rejected candidate against the
+    /// finished selection recovers it. This is the same shape as an ownership
+    /// transfer arriving ahead of the `Add` that puts its owner in the group.
+    #[test]
+    fn a_pair_that_is_only_committable_together_survives_the_wrong_store_order() {
+        let mut s = scene(0x58);
+        let dave = Identity::from_seed(&[0x70u8; 64]).expect("dave");
+        let charlie_leaf = s.charlie_g.own_leaf_index();
+
+        // Deliberately the awkward order: the re-add lands in the store BEFORE
+        // the removal that makes it committable.
+        s.alice_g
+            .propose_add_member(&s.alice, kp(&s.charlie))
+            .expect("alice re-adds charlie");
+        s.alice_g
+            .propose_remove_member(&s.alice, charlie_leaf)
+            .expect("alice removes charlie");
+        // ...and one proposal the builder will refuse, so the fallback runs at
+        // all.
+        s.alice_g
+            .propose_add_member(
+                &s.alice,
+                dave.key_package_without_ciphersuite_capability()
+                    .expect("a conformant client may mint this"),
+            )
+            .expect("alice asks for dave");
+
+        let swept = s
+            .alice_g
+            .sweep_with_authorisation_only_filter(&s.alice)
+            .expect("the blind sweep must still be buildable")
+            .expect("something is swept");
+        assert_eq!(
+            swept.swept.len(),
+            2,
+            "the removal AND the re-add; only dave's add is excluded",
+        );
+        assert!(
+            s.alice_g
+                .members()
+                .iter()
+                .any(|m| m.signature_public_key == s.charlie.signature_public_key()),
+            "charlie is back under a fresh leaf, not evicted by the search",
+        );
+        assert!(
+            !s.alice_g
+                .members()
+                .iter()
+                .any(|m| m.signature_public_key == dave.signature_public_key()),
+            "and dave did not join on an unusable KeyPackage",
+        );
+    }
+
+    /// The search is **deterministic** on one device: same store, same order,
+    /// same answer, however many times it is asked. Nothing about the number of
+    /// attempts, and nothing random, enters the choice.
+    ///
+    /// It is deliberately NOT asserted to be device-INDEPENDENT, because it is
+    /// not: [`a_departing_admins_own_sweep_still_commits_the_rest`] is a case
+    /// where the answer legitimately differs between committers, since "can I
+    /// commit this" is a question about the committer. Two committers can
+    /// therefore stage different subsets of one pending set — which ADR-0045
+    /// already arbitrates: the DS journal orders the two commits, the loser
+    /// abandons its staged sweep, and whichever landed is what every member
+    /// applies. Unpredictable, never divergent.
+    #[test]
+    fn the_exclusion_search_is_deterministic_for_one_committer() {
+        let mut s = scene(0x5a);
+        let dave = Identity::from_seed(&[0x72u8; 64]).expect("dave");
+        let erin = Identity::from_seed(&[0x73u8; 64]).expect("erin");
+        for _ in 0..2 {
+            s.alice_g
+                .propose_add_member(&s.alice, kp(&s.charlie))
+                .expect("alice re-adds charlie");
+        }
+        s.alice_g
+            .propose_add_member(&s.alice, kp(&dave))
+            .expect("alice asks for dave");
+        s.alice_g
+            .propose_add_member(&s.alice, kp(&erin))
+            .expect("alice asks for erin");
+
+        let table = s.alice_g.group_roles().expect("role table");
+        let members = s.alice_g.members();
+        let queued: Vec<QueuedProposal> = s.alice_g.inner.pending_proposals().cloned().collect();
+        let candidates: Vec<ProposalRef> = queued
+            .iter()
+            .filter(|qp| proposal_is_authorised(&table, &members, qp))
+            .map(|qp| qp.proposal_reference_ref().clone())
+            .collect();
+        assert_eq!(candidates.len(), 4);
+
+        let first = s
+            .alice_g
+            .narrow_sweep_by_exclusion(&s.alice, &queued, &members, &candidates);
+        let second = s
+            .alice_g
+            .narrow_sweep_by_exclusion(&s.alice, &queued, &members, &candidates);
+        assert_eq!(first.len(), 2, "dave and erin; neither re-add of charlie");
+        assert_eq!(first, second, "the search is a pure function of its inputs");
+    }
+
+    /// **One bad apple must not cost the barrel.** A pending set at the cap in
+    /// which every proposal but one is committable: the search must land all
+    /// sixty-three and exclude only the one the builder refuses.
+    ///
+    /// This is also where the search is at its most **expensive**, and the cost
+    /// is not the candidate count alone: every probe carries the selection
+    /// accepted so far, so a build here computes a path and encrypts a Welcome
+    /// for up to sixty-three joiners. Measured on this test at the time of
+    /// writing: **67 builds, ~2.2 s in a debug build and ~215 ms in release**,
+    /// against ~8 ms for the 129-build all-uncommittable case below, where
+    /// nothing is ever accepted and every probe therefore carries one proposal.
+    /// Paid once, on a sweep that would otherwise have bricked the group's
+    /// membership permanently.
+    #[test]
+    fn one_uncommittable_proposal_in_a_full_set_costs_only_itself() {
+        let mut s = scene(0x59);
+        let dave = Identity::from_seed(&[0x7fu8; 64]).expect("dave");
+        for i in 0..(MAX_PENDING_PROPOSALS - 1) {
+            s.bob_g
+                .propose_add_member(&s.bob, kp(&joiner(i)))
+                .unwrap_or_else(|e| panic!("an admin may propose add #{i}: {e:?}"));
+        }
+        s.bob_g
+            .propose_add_member(
+                &s.bob,
+                dave.key_package_without_ciphersuite_capability()
+                    .expect("a conformant client may mint this"),
+            )
+            .expect("...and one the builder will refuse");
+        assert_eq!(s.bob_g.pending_proposals().len(), MAX_PENDING_PROPOSALS);
+
+        reset_sweep_builds();
+        let swept = s
+            .bob_g
+            .sweep_with_authorisation_only_filter(&s.bob)
+            .expect("the blind sweep must still be buildable")
+            .expect("something is swept");
+        assert_eq!(
+            swept.swept.len(),
+            MAX_PENDING_PROPOSALS - 1,
+            "every good add lands; only dave's is excluded",
+        );
+        assert_eq!(
+            sweep_builds(),
+            // the refused attempt, one probe per candidate, one retry for the
+            // single rejected candidate, and the build that is finally staged.
+            1 + MAX_PENDING_PROPOSALS + 1 + 1,
+            "the search pays one probe per candidate, not one per pair",
+        );
+        assert!(
+            !s.bob_g
+                .members()
+                .iter()
+                .any(|m| m.signature_public_key == dave.signature_public_key()),
+            "and dave did not join on an unusable KeyPackage",
+        );
+    }
+
+    /// The other end of the worst case: a pending set at the cap in which
+    /// **nothing** is committable. The additive search pays one probe per
+    /// candidate, then one retry probe per rejected candidate, so the bound is
+    /// `2 * candidates` plus the failed attempt that sent us here — and nothing
+    /// is ever staged, because nothing is accepted.
+    ///
+    /// Measured at the time of writing: **129 builds in ~8 ms** (debug; ~4 ms
+    /// in release). Far cheaper per build than
+    /// [`one_uncommittable_proposal_in_a_full_set_costs_only_itself`] despite
+    /// twice the builds, because a probe here never carries more than the one
+    /// candidate being offered.
+    #[test]
+    fn the_worst_case_build_count_is_two_probes_per_candidate() {
+        let mut s = scene(0x57);
+        for _ in 0..MAX_PENDING_PROPOSALS {
+            s.bob_g
+                .propose_add_member(&s.bob, kp(&s.charlie))
+                .expect("bob re-adds charlie");
+        }
+        assert_eq!(s.bob_g.pending_proposals().len(), MAX_PENDING_PROPOSALS);
+
+        reset_sweep_builds();
+        assert!(
+            s.bob_g
+                .sweep_with_authorisation_only_filter(&s.bob)
+                .expect("the blind sweep must still be buildable")
+                .is_none(),
+            "nothing in the set is committable",
+        );
+        assert_eq!(
+            sweep_builds(),
+            1 + 2 * MAX_PENDING_PROPOSALS,
+            "one failed attempt, then one probe per candidate and one retry each",
+        );
+    }
+
+    /// The direct-commit paths are **not** widened by any of this: they stay
+    /// refused while anything is pending, including for the owner. The response
+    /// the owner regains is the proposal one, which is the path a role-table
+    /// group actually uses.
+    #[test]
+    fn the_direct_commit_paths_stay_refused_while_proposals_are_pending() {
+        let mut s = scene(0x44);
+        let bob_leaf = s.bob_g.own_leaf_index();
+        flood_with_admin_adds(&mut s, 1);
+
+        let dave = Identity::from_seed(&[0x60u8; 64]).expect("dave");
+        for (op, err) in [
+            (
+                "add_member",
+                s.alice_g
+                    .add_member_from_wire(&s.alice, &kp_wire(&dave))
+                    .err()
+                    .map(|e| format!("{e}")),
+            ),
+            (
+                "remove_member",
+                s.alice_g
+                    .remove_member(&s.alice, bob_leaf)
+                    .err()
+                    .map(|e| format!("{e}")),
+            ),
+            (
+                "set_group_roles",
+                s.alice_g
+                    .set_group_roles(&s.alice, &RoleTable::new(pk32(&s.alice), vec![]))
+                    .err()
+                    .map(|e| format!("{e}")),
+            ),
+            (
+                "self_update",
+                s.alice_g
+                    .self_update(&s.alice)
+                    .err()
+                    .map(|e| format!("{e}")),
+            ),
+        ] {
+            let text = err.unwrap_or_else(|| panic!("{op} must still be refused"));
+            assert!(
+                text.contains("membership proposal(s) are pending"),
+                "{op} must be refused by the pending-proposal guard, got {text:?}",
+            );
+        }
     }
 }
 

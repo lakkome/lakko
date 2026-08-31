@@ -11,6 +11,13 @@ import {
 
 const EMPTY = (): Map<number, MessageOpState> => new Map();
 
+// Stand-in signature keys. Real ones are base64 32-byte Ed25519 keys;
+// what matters to these rules is only that distinct members carry
+// distinct strings, and that no member's string is a leaf index.
+const ALICE = "alice-key";
+const BOB = "bob-key";
+const CAROL = "carol-key";
+
 describe("applyOp — edit", () => {
   it("sets editedText on the target", () => {
     const next = applyOp(EMPTY(), { op: "edit", target: 7, text: "new" });
@@ -43,7 +50,7 @@ describe("applyOp — delete", () => {
       op: "reaction",
       target: 3,
       emoji: "👍",
-      reactorLeaf: 2,
+      reactor: BOB,
     });
     m = applyOp(m, { op: "delete", target: 3 });
     expect(m.get(3)?.deleted).toBe(true);
@@ -53,55 +60,55 @@ describe("applyOp — delete", () => {
 });
 
 describe("applyOp — reaction toggle", () => {
-  it("adds a reaction from a leaf", () => {
+  it("adds a reaction from a member", () => {
     const m = applyOp(EMPTY(), {
       op: "reaction",
       target: 5,
       emoji: "❤️",
-      reactorLeaf: 1,
+      reactor: ALICE,
     });
-    expect(m.get(5)?.reactions.get("❤️")).toEqual(new Set([1]));
+    expect(m.get(5)?.reactions.get("❤️")).toEqual(new Set([ALICE]));
   });
 
-  it("toggles the same (leaf, emoji) off, pruning the empty set", () => {
+  it("toggles the same (member, emoji) off, pruning the empty set", () => {
     const a = applyOp(EMPTY(), {
       op: "reaction",
       target: 5,
       emoji: "❤️",
-      reactorLeaf: 1,
+      reactor: ALICE,
     });
     const b = applyOp(a, {
       op: "reaction",
       target: 5,
       emoji: "❤️",
-      reactorLeaf: 1,
+      reactor: ALICE,
     });
     // The emoji entry is gone once its last reactor toggles off.
     expect(b.get(5)?.reactions.has("❤️")).toBe(false);
   });
 
-  it("aggregates distinct leaves on one emoji (count)", () => {
+  it("aggregates distinct members on one emoji (count)", () => {
     let m = applyOp(EMPTY(), {
       op: "reaction",
       target: 9,
       emoji: "😂",
-      reactorLeaf: 1,
+      reactor: ALICE,
     });
-    m = applyOp(m, { op: "reaction", target: 9, emoji: "😂", reactorLeaf: 2 });
-    m = applyOp(m, { op: "reaction", target: 9, emoji: "😂", reactorLeaf: 3 });
+    m = applyOp(m, { op: "reaction", target: 9, emoji: "😂", reactor: BOB });
+    m = applyOp(m, { op: "reaction", target: 9, emoji: "😂", reactor: CAROL });
     expect(m.get(9)?.reactions.get("😂")?.size).toBe(3);
   });
 
-  it("one leaf toggling off leaves the others intact", () => {
+  it("one member toggling off leaves the others intact", () => {
     let m = applyOp(EMPTY(), {
       op: "reaction",
       target: 9,
       emoji: "😂",
-      reactorLeaf: 1,
+      reactor: ALICE,
     });
-    m = applyOp(m, { op: "reaction", target: 9, emoji: "😂", reactorLeaf: 2 });
-    m = applyOp(m, { op: "reaction", target: 9, emoji: "😂", reactorLeaf: 1 });
-    expect(m.get(9)?.reactions.get("😂")).toEqual(new Set([2]));
+    m = applyOp(m, { op: "reaction", target: 9, emoji: "😂", reactor: BOB });
+    m = applyOp(m, { op: "reaction", target: 9, emoji: "😂", reactor: ALICE });
+    expect(m.get(9)?.reactions.get("😂")).toEqual(new Set([BOB]));
   });
 
   it("keeps distinct emojis separate on the same message", () => {
@@ -109,19 +116,19 @@ describe("applyOp — reaction toggle", () => {
       op: "reaction",
       target: 4,
       emoji: "👍",
-      reactorLeaf: 1,
+      reactor: ALICE,
     });
-    m = applyOp(m, { op: "reaction", target: 4, emoji: "🙏", reactorLeaf: 1 });
+    m = applyOp(m, { op: "reaction", target: 4, emoji: "🙏", reactor: ALICE });
     expect(m.get(4)?.reactions.get("👍")?.size).toBe(1);
     expect(m.get(4)?.reactions.get("🙏")?.size).toBe(1);
   });
 
-  it("supports the own-reaction sentinel leaf", () => {
+  it("supports the own-reaction sentinel identity", () => {
     const m = applyOp(EMPTY(), {
       op: "reaction",
       target: 4,
       emoji: "😮",
-      reactorLeaf: OWN_REACTION_SENTINEL,
+      reactor: OWN_REACTION_SENTINEL,
     });
     expect(m.get(4)?.reactions.get("😮")?.has(OWN_REACTION_SENTINEL)).toBe(true);
   });
@@ -131,39 +138,42 @@ describe("applyOp — reaction toggle", () => {
       op: "reaction",
       target: 5,
       emoji: "❤️",
-      reactorLeaf: 1,
+      reactor: ALICE,
     });
     const before = a.get(5)?.reactions.get("❤️")?.size;
-    applyOp(a, { op: "reaction", target: 5, emoji: "❤️", reactorLeaf: 2 });
+    applyOp(a, { op: "reaction", target: 5, emoji: "❤️", reactor: BOB });
     // `a` is unchanged — the second apply cloned the nested set.
     expect(a.get(5)?.reactions.get("❤️")?.size).toBe(before);
-    expect(a.get(5)?.reactions.get("❤️")?.has(2)).toBe(false);
+    expect(a.get(5)?.reactions.get("❤️")?.has(BOB)).toBe(false);
   });
 });
 
 describe("editDeleteAuthorized — author-only gate (invariant #4)", () => {
   it("accepts when the op sender is the message author", () => {
-    expect(editDeleteAuthorized(2, 2)).toBe(true);
+    expect(editDeleteAuthorized(BOB, BOB)).toBe(true);
   });
 
   it("REFUSES a non-author editing/deleting another's message", () => {
-    expect(editDeleteAuthorized(2, 3)).toBe(false);
+    expect(editDeleteAuthorized(BOB, CAROL)).toBe(false);
   });
 
-  it("fails closed when the author leaf is unknown (reloaded msg)", () => {
-    expect(editDeleteAuthorized(undefined, 2)).toBe(false);
+  it("fails closed when the author is unknown (pre-v2 stored row)", () => {
+    expect(editDeleteAuthorized(undefined, BOB)).toBe(false);
   });
 
-  it("fails closed when the op sender leaf is unknown (control frame)", () => {
-    expect(editDeleteAuthorized(2, undefined)).toBe(false);
+  it("fails closed when the op sender is unknown (control frame)", () => {
+    expect(editDeleteAuthorized(BOB, undefined)).toBe(false);
   });
 
-  it("fails closed when both leaves are unknown", () => {
+  it("fails closed when both are unknown", () => {
     expect(editDeleteAuthorized(undefined, undefined)).toBe(false);
   });
 
-  it("treats leaf 0 as a real leaf (not falsy-coerced)", () => {
-    expect(editDeleteAuthorized(0, 0)).toBe(true);
-    expect(editDeleteAuthorized(0, 1)).toBe(false);
+  it("does not falsy-coerce an empty identity into a match", () => {
+    // Not reachable from a real roster (a key is 44 base64 chars),
+    // but the old numeric gate had a leaf-0 hazard and the
+    // replacement must not have its string analogue.
+    expect(editDeleteAuthorized("", undefined)).toBe(false);
+    expect(editDeleteAuthorized(undefined, "")).toBe(false);
   });
 });

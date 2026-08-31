@@ -39,11 +39,16 @@ extension PersistedMessage {
         self.text = msg.text
         self.attachments = msg.attachments.map(PersistedAttachment.init(from:))
         self.createdAt = msg.createdAt
-        self.authorLeaf = msg.authorLeaf
+        // ADR-0023 — the author's signature key, written verbatim for BOTH
+        // directions: the key we stamped at send, and the key the receive loop
+        // resolved at the epoch that named the sender. The store is the record
+        // of who wrote this, not a place to re-derive it from whoever is
+        // holding the device now.
+        self.authorKeyB64 = AuthorIdentity.toPersisted(msg.authorKeyB64)
         self.edited = msg.edited
         self.deleted = msg.deleted
         self.reactions = msg.reactions.map {
-            PersistedReaction(reactorLeaf: $0.reactorLeaf, emoji: $0.emoji)
+            PersistedReaction(reactorKeyB64: $0.reactor, emoji: $0.emoji)
         }
     }
 
@@ -65,11 +70,15 @@ extension PersistedMessage {
             text: text,
             attachments: attachments.compactMap { $0.toAttachmentRef() },
             createdAt: createdAt,
-            authorLeaf: authorLeaf,
+            // Absent on a row written before this field existed, and `nil` when
+            // it could not be resolved — both restore as `nil`, which fails the
+            // edit / delete gate closed rather than falling back to our CURRENT
+            // key, which would invent an author the store never recorded.
+            authorKeyB64: AuthorIdentity.persisted(authorKeyB64),
             edited: edited,
             deleted: deleted,
             reactions: reactions.map {
-                Reaction(reactorLeaf: $0.reactorLeaf, emoji: $0.emoji)
+                Reaction(reactor: $0.reactorKeyB64, emoji: $0.emoji)
             }
         )
     }

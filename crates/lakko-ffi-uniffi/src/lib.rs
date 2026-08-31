@@ -309,8 +309,13 @@ pub enum ProposalKind {
     /// The sender leaves the group (RFC 9420 `SelfRemove`) — structurally
     /// targets the sender's own leaf and can name no other.
     Leave,
-    /// The sender rotates its own leaf node. Confers no authority over anyone
-    /// else.
+    /// The sender rotates its own leaf node. **Always refused**, so it only
+    /// ever arrives with `stored == false`: openmls 0.8.1 does not bind an
+    /// `Update`'s leaf node to the sender's existing signature key, so it can
+    /// rotate the very key the ADR-0022 role table is keyed on, and it is the
+    /// one kind whose proposal reference is fresh on every emission, which made
+    /// it floodable past the pending-set cap. A Lakko member rotates its leaf
+    /// with `selfUpdate`, which composes no proposal at all.
     Update,
     /// Rewrite the GroupContext extensions — in Lakko, the ADR-0022 role table.
     RoleChange,

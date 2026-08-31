@@ -72,10 +72,27 @@ public object MessageLogStore {
      *  per-account message-log envelopes live. */
     private const val ENVELOPE_DIR = "lakko-message-logs"
 
-    /** Strict JSON: refuse to lose data on a schema mismatch,
-     *  emit predictable output for golden tests. */
+    /**
+     * `ignoreUnknownKeys = true`, and the reason is a RETIRED field rather
+     * than a future one.
+     *
+     * ADR-0023 persisted the author's MLS LEAF (`authorLeaf`) and each
+     * reaction's reactor leaf (`reactorLeaf`). Both are gone — a leaf is a
+     * position, so a stored one names a different member after the next commit
+     * — but they are still written into every envelope on disk today. Under
+     * the previous `ignoreUnknownKeys = false` those retired keys would throw,
+     * [getLog] would return `null`, and the whole account's transcript would
+     * be silently discarded. Skipping them instead is what makes "do not
+     * migrate, do not wipe" true: a pre-existing row decodes with the new
+     * [PersistedMessage.authorKeyB64] absent, which reads as an unknown author
+     * and fails the edit/delete gate closed — exactly the posture every
+     * reloaded row had before authorship was persisted at all.
+     *
+     * Output stays predictable for golden tests (`prettyPrint = false`,
+     * `explicitNulls = true`).
+     */
     private val json: Json = Json {
-        ignoreUnknownKeys = false
+        ignoreUnknownKeys = true
         prettyPrint = false
         explicitNulls = true
     }
@@ -154,15 +171,25 @@ public object MessageLogStore {
         } catch (_: Throwable) {
             return null
         }
-        return try {
-            json.decodeFromString(
-                MessageLogPayload.serializer(),
-                String(plaintext, Charsets.UTF_8),
-            )
+        return decodeLogPayload(String(plaintext, Charsets.UTF_8))
+    }
+
+    /**
+     * The pure JSON half of [getLog]: `null` on anything that will not decode.
+     *
+     * Split out of [getLog] for the same reason [withoutGroup] is split out of
+     * [deleteGroupFromLog] — the host suite has no Keystore and no `Context`,
+     * and this is where the rule that could actually be wrong lives. What it
+     * pins is the retired-key behaviour above: an envelope written by the
+     * pre-fix build carries `authorLeaf` / `reactorLeaf`, and this must still
+     * hand back the transcript rather than `null`.
+     */
+    internal fun decodeLogPayload(plaintext: String): MessageLogPayload? =
+        try {
+            json.decodeFromString(MessageLogPayload.serializer(), plaintext)
         } catch (_: Throwable) {
             null
         }
-    }
 
     /**
      * Erase the log for [accountIdB64]. No-op when absent.
@@ -278,11 +305,26 @@ public data class PersistedMessage(
     val text: String,
     val attachments: List<PersistedAttachment>,
     val createdAt: String,
-    /** ADR-0023 — the original author's MLS leaf, or `null`.
-     *  Defaulted so a pre-ADR-0023 envelope (no key) decodes
-     *  cleanly; an unknown author then fails every author-only
-     *  op gate, which is the safe outcome. */
-    val authorLeaf: UInt? = null,
+    /**
+     * ADR-0023 — the author's IDENTITY: their Ed25519 signature public key,
+     * base64, resolved from the MLS sender leaf at receipt (see
+     * `AuthorIdentity.kt`). `null` when the client could not resolve it, and
+     * **absent entirely on a row written before this field existed** — both
+     * read back as "unknown author", which fails the edit/delete gate closed.
+     * That is the same posture every reloaded message had before authorship
+     * was persisted; it never misattributes.
+     *
+     * This REPLACES the author leaf, which is not merely unhelpful here but
+     * actively dangerous: persisting a leaf is what made the leaf-reuse
+     * impersonation survive a restart on Android, for the whole retained
+     * transcript. The retired key is skipped on decode, never round-tripped —
+     * a stored leaf that still decoded cleanly is exactly what a later reader
+     * would reach for.
+     *
+     * No secret is added to the envelope: the key is public, and already sits
+     * in the MLS snapshot store beside it.
+     */
+    val authorKeyB64: String? = null,
     /** ADR-0023 — `true` once an edit op replaced the text. */
     val edited: Boolean = false,
     /** ADR-0023 — `true` once a delete op tombstoned the row. */
@@ -297,7 +339,14 @@ public data class PersistedMessage(
 
 @Serializable
 public data class PersistedReaction(
-    val reactorLeaf: UInt,
+    /**
+     * ADR-0023 — the reactor's signature key, base64. Nullable WITH A DEFAULT
+     * so a row written before this field existed still decodes (its retired
+     * `reactorLeaf` is skipped); such a reaction is DROPPED on restore rather
+     * than restored under a guessed reactor, because an unattributed reaction
+     * cannot be toggled off by anybody and would merge with the next one.
+     */
+    val reactorKeyB64: String? = null,
     val emoji: String,
 )
 
@@ -329,11 +378,14 @@ public fun PersistedMessage.Companion.from(msg: ChatMessage): PersistedMessage =
         text = msg.text,
         attachments = msg.attachments.map(PersistedAttachment.Companion::from),
         createdAt = msg.createdAt,
-        authorLeaf = msg.authorLeaf,
+        // ADR-0023 — the identity we resolved at receipt (or stamped at send),
+        // written back verbatim: the store is the record of who wrote this, not
+        // a place to re-derive it from whoever is holding the device now.
+        authorKeyB64 = msg.authorKey,
         edited = msg.edited,
         deleted = msg.deleted,
         reactions = msg.reactions.map {
-            PersistedReaction(reactorLeaf = it.reactorLeaf, emoji = it.emoji)
+            PersistedReaction(reactorKeyB64 = it.reactor, emoji = it.emoji)
         },
     )
 
@@ -353,11 +405,16 @@ public fun PersistedMessage.toChatMessage(): ChatMessage? {
         text = text,
         attachments = attachments.mapNotNull { it.toAttachmentRef() },
         createdAt = createdAt,
-        authorLeaf = authorLeaf,
+        // Absent on a row written before this field existed, and `null` when it
+        // could not be resolved — both restore as `null`, which fails the
+        // edit/delete gate closed rather than falling back to whoever is
+        // holding the device now. That fallback would invent an author the
+        // store never recorded.
+        authorKey = authorKeyB64,
         edited = edited,
         deleted = deleted,
-        reactions = reactions.map {
-            Reaction(reactorLeaf = it.reactorLeaf, emoji = it.emoji)
+        reactions = reactions.mapNotNull { r ->
+            r.reactorKeyB64?.let { Reaction(reactor = it, emoji = r.emoji) }
         },
     )
 }

@@ -64,11 +64,11 @@ import { createSfuCallUi, type SfuCallUiHandle } from "../calls/sfu-call-ui";
 import { sfuBaseUrl } from "../calls/sfu-config";
 import { CallJwtClient } from "../calls/call-jwt-client";
 import Call from "./Call";
-import { DsClient } from "../ds/client";
 import { loadWasm as loadWasmForCalls } from "../wasm";
 import {
   deleteGroupFromMessageLog,
   loadMessageLog,
+  MESSAGE_LOG_VERSION,
   saveMessageLog,
   type MessageLogPayload,
   type PersistedAttachment,
@@ -78,6 +78,7 @@ import {
 import { getDeviceKey } from "../auth/key-store";
 import { base64Decode, base64Encode, base64UrlDecodeNoPad } from "../auth/account-id";
 import { ChatClient } from "../chat/client";
+import { makeCallSignalingPublisher } from "../chat/call-signaling-publish";
 import { ContactsClient } from "../contacts/client";
 import {
   loadAccepted,
@@ -199,6 +200,11 @@ import {
   type MessageOpState,
 } from "../chat/message-ops";
 import {
+  authorIdentityToPersisted,
+  persistedAuthorIdentity,
+  type MemberIdentity,
+} from "../chat/author-identity";
+import {
   foldTyping,
   activeTypers,
   pruneTyping,
@@ -232,19 +238,31 @@ type TimelineRow =
       /** Filled when ack flips to "sent". */
       messageId?: number;
       createdAt?: string;
+      /** ADR-0023 — the identity that authored this row: this
+       *  device's own signature key at send time, or the key the
+       *  message log persisted for a row restored on reload.
+       *
+       *  Stamped at send rather than read from `ownLeaf()` at gate
+       *  time because a leaf is a position, not a person: any leaf,
+       *  ours included, can be reassigned to a member added later.
+       *  `undefined` (unresolvable) fails the gate closed. */
+      authorKey?: MemberIdentity | undefined;
     };
 
-/** Read the author leaf a displayed row should be gated on:
- *  incoming application messages carry the original author's
- *  `senderLeaf`; outgoing rows are authored by us. `undefined`
- *  ⇒ no author leaf is known for this row (a reloaded message,
- *  a control frame) — its edit/delete gate fails closed. */
-function rowAuthorLeaf(
-  row: TimelineRow,
-  ownLeaf: number | undefined,
-): number | undefined {
-  if (row.kind === "outgoing") return ownLeaf;
-  if (row.event.kind === "application") return row.event.senderLeaf;
+/** Read the author IDENTITY a displayed row should be gated on:
+ *  incoming application messages carry the author's signature key,
+ *  resolved from the MLS sender leaf at receipt; outgoing rows carry
+ *  the key stamped when we sent (or restored from the log).
+ *  `undefined` ⇒ no author is known for this row (a control frame, a
+ *  row stored before the identity was persisted) — its edit/delete
+ *  gate fails closed.
+ *
+ *  Never a leaf index: OpenMLS hands a vacated leaf to the next
+ *  member added, so a leaf read at gate time can name somebody who
+ *  was not there when the message was written. */
+function rowAuthorIdentity(row: TimelineRow): MemberIdentity | undefined {
+  if (row.kind === "outgoing") return row.authorKey;
+  if (row.event.kind === "application") return row.event.senderKey;
   return undefined;
 }
 
@@ -477,11 +495,15 @@ function ChatView(props: {
   // signals in; an interval prunes expired entries; the indicator
   // above the composer reads `activeTypers`.
   const [typingMap, setTypingMap] = createSignal<TypingMap>(new Map());
-  // ADR-0024 — monotone per-leaf read watermark: senderLeaf → the
-  // highest messageId that leaf has read. Session state (multi-
-  // device convergence is Phase-2 future work). The own-message
-  // bubble reads it to flip "Sent" → "Read"; a lower value never
-  // lowers a higher one (re-sync idempotent).
+  // ADR-0024 — monotone per-member read watermark: the sender's
+  // signature key → the highest messageId that member has read.
+  // Keyed on the identity, not the leaf: the watermark is monotone
+  // and never reset on a membership change, so a leaf key handed a
+  // departed member's whole read history to whoever was added into
+  // their slot. Session state (multi-device convergence is Phase-2
+  // future work). The own-message bubble reads it to flip "Sent" →
+  // "Read"; a lower value never lowers a higher one (re-sync
+  // idempotent).
   const [readWatermarks, setReadWatermarks] = createSignal<ReadWatermarkMap>(
     new Map(),
   );
@@ -837,30 +859,21 @@ function ChatView(props: {
     callActions.setParticipantCamera("peer", remoteHasVideo());
   });
 
-  /** Build outbound-signaling callback that PUTs raw
-   *  bytes onto the chat group's DS journal as an MLS
-   *  application message. */
+  /** Build the outbound-signaling callback that puts raw bytes onto the chat
+   *  group's DS journal as an MLS application message.
+   *
+   *  This used to seal + publish here, and it was the only
+   *  `createApplicationMessage` call site outside `chat/client.ts` — no MLS
+   *  lock, no durable persist. It now routes through `broadcastControl`, the
+   *  same locked, fail-closed-persisting seam every other application message
+   *  takes; see `chat/call-signaling-publish.ts` for the two hazards that
+   *  bypass reopened, and the natives' matching route. */
   function publishSignalingFor(group: ActiveGroup): (bytes: Uint8Array) => void {
-    return (bytes: Uint8Array): void => {
-      void (async (): Promise<void> => {
-        try {
-          const id = chats.identity();
-          if (id === null) {
-            // eslint-disable-next-line no-console
-            console.warn(
-              "call signaling publish skipped: no canonical Identity in session",
-            );
-            return;
-          }
-          const out = group.group.createApplicationMessage(id, bytes);
-          const ds = new DsClient();
-          await ds.publishGroup(group.group.groupId, out);
-        } catch (err) {
-          // eslint-disable-next-line no-console
-          console.warn("call signaling publish failed", err);
-        }
-      })();
-    };
+    return makeCallSignalingPublisher({
+      chat,
+      identity: () => props.requireIdentity(),
+      group: () => group.group,
+    });
   }
 
   function buildCallSession(callId: Uint8Array): CallSession {
@@ -1565,6 +1578,9 @@ function ChatView(props: {
 
   /**
    * ADR-0045 S4b — resolve a beacon's MLS sender leaf to its signature key.
+ *
+ * Same rule as `author-identity.ts`'s `resolveMemberIdentity`, in bytes
+ * rather than base64 because the beacon store encodes it itself.
    *
    * The leaf is resolved HERE, at receipt, because that is the only moment the
    * roster is authenticated in the epoch the beacon was sealed at. The KEY is
@@ -2073,10 +2089,13 @@ function ChatView(props: {
 
   let nextTempId = 1;
 
-  // ADR-0023 — our own MLS leaf in this group. Used to author-
-  // stamp outgoing messages (for the edit/delete gate against an
-  // incoming op) and to attribute our own reactions. Re-read on
-  // every membersVersion bump (a Remove/Add can renumber leaves).
+  // Our own MLS leaf in this group. A POSITION, not an identity:
+  // it is the input `ownSignatureKeyB64` resolves through, and the
+  // handle the MLS/SFU surfaces take. Nothing that attributes
+  // authorship may compare it (ADR-0023 did, and that is what let a
+  // member added into a vacated leaf inherit its predecessor's
+  // history). Re-read on every membersVersion bump (a Remove/Add
+  // can renumber leaves — which is the whole point).
   const ownLeaf = createMemo<number | undefined>(() => {
     membersVersion();
     try {
@@ -2092,18 +2111,18 @@ function ChatView(props: {
   // poll). Driven by the same interval that prunes the map.
   const [currentTime, setCurrentTime] = createSignal(Date.now());
 
-  /** ADR-0024 — resolve a member's display label from its MLS leaf,
-   *  reusing the roster's pubkey → accepted-contact-displayName
-   *  resolution. Falls back to `Member #<leaf>` when the leaf isn't
-   *  a known accepted contact (matching the roster's fingerprint
-   *  posture). */
-  const labelForLeaf = (leaf: number): string => {
-    const m = members().find((mm) => mm.leafIndex === leaf);
-    if (m !== undefined) {
-      const name = acceptedByPubkey().get(base64Encode(m.sigPubkey));
-      if (name !== undefined && name.length > 0) return name;
-    }
-    return `Member #${leaf}`;
+  /** ADR-0024 — resolve a member's display label from its signature
+   *  key, reusing the roster's pubkey → accepted-contact-displayName
+   *  resolution. Falls back to a short fingerprint when the member
+   *  isn't a known accepted contact (matching the roster's posture).
+   *
+   *  Keyed on the identity rather than the leaf so a member who left
+   *  cannot be relabelled with the name of whoever took their slot. */
+  const labelForIdentity = (identity: MemberIdentity): string => {
+    const name = acceptedByPubkey().get(identity);
+    if (name !== undefined && name.length > 0) return name;
+    const m = members().find((mm) => base64Encode(mm.sigPubkey) === identity);
+    return m === undefined ? "A member" : shortFingerprint(m.sigPubkey);
   };
 
   // -------------------------------------------------------------------------
@@ -2162,7 +2181,11 @@ function ChatView(props: {
   });
 
   /** This device's own signature key, base64 — resolved through the roster
-   *  rather than stored, so a leaf renumber cannot make it name someone else. */
+   *  rather than stored, so a leaf renumber cannot make it name someone else.
+   *
+   *  This is the value every authorship decision on our side uses: the
+   *  outgoing row's author stamp, our own reaction attribution, and the
+   *  "read by everyone else" exclusion. */
   const ownSignatureKeyB64 = createMemo<string | undefined>(() => {
     const leaf = ownLeaf();
     if (leaf === undefined) return undefined;
@@ -2375,37 +2398,35 @@ function ChatView(props: {
    *  single typer, else "Several people are typing…". */
   const typingIndicator = createMemo<string | null>(() => {
     const now = currentTime();
-    const own = ownLeaf();
-    const leaves = activeTypers(typingMap(), now).filter((l) => l !== own);
-    if (leaves.length === 0) return null;
+    const own = ownSignatureKeyB64();
+    const typers = activeTypers(typingMap(), now).filter((m) => m !== own);
+    if (typers.length === 0) return null;
     // A 1×1 chat has exactly one peer — skip the name (the chat
     // header already shows who it is).
     const oneOnOne = memberCount() <= 2;
-    if (leaves.length === 1) {
-      const leaf = leaves[0] as number;
-      return oneOnOne ? "typing…" : `${labelForLeaf(leaf)} is typing…`;
+    if (typers.length === 1) {
+      const who = typers[0] as MemberIdentity;
+      return oneOnOne ? "typing…" : `${labelForIdentity(who)} is typing…`;
     }
     return "Several people are typing…";
   });
 
-  /** Look up the author leaf of the displayed message with this
-   *  DS `messageId` — incoming app messages carry the original
-   *  `senderLeaf`, outgoing rows are authored by us. `undefined`
-   *  ⇒ the target is unknown or has no known author (a reloaded
-   *  message), so the edit/delete gate fails closed. `extra`
+  /** Look up the author IDENTITY of the displayed message with this
+   *  DS `messageId`. `undefined` ⇒ the target is unknown or has no
+   *  known author, so the edit/delete gate fails closed. `extra`
    *  lets the receive loop also scan rows arriving in the same
    *  batch (which aren't in `rows()` yet). */
-  function authorLeafForMessageId(
+  function authorIdentityForMessageId(
     messageId: number,
     extra: readonly TimelineRow[] = [],
-  ): number | undefined {
+  ): MemberIdentity | undefined {
     for (const row of rows()) {
       if (rowMessageId(row) !== messageId) continue;
-      return rowAuthorLeaf(row, ownLeaf());
+      return rowAuthorIdentity(row);
     }
     for (const row of extra) {
       if (rowMessageId(row) !== messageId) continue;
-      return rowAuthorLeaf(row, ownLeaf());
+      return rowAuthorIdentity(row);
     }
     return undefined;
   }
@@ -2430,28 +2451,34 @@ function ChatView(props: {
    *  dropped, so the caller can skip a needless signal write.
    *
    *  Gate (fail-closed, invariant #4):
-   *   - target unknown                  → DROP
-   *   - op.senderLeaf undefined          → DROP (control frame)
-   *   - edit/delete + senderLeaf ≠ author → DROP
-   *   - reaction                          → accept from any member */
+   *   - target unknown                 → DROP
+   *   - op.senderKey undefined          → DROP (unattributable)
+   *   - edit/delete + senderKey ≠ author → DROP
+   *   - reaction                         → accept from any member
+   *
+   *  Everything here keys on the sender's signature KEY, resolved
+   *  from its MLS leaf back in the receive loop. Keying on the leaf
+   *  is what let a member added into a departed member's vacated
+   *  leaf edit and delete that member's history and toggle off their
+   *  reactions. */
   function applyIncomingOp(
     e: Extract<IncomingChatEvent, { kind: "op" }>,
     extra: readonly TimelineRow[],
     prev: Map<number, MessageOpState>,
   ): Map<number, MessageOpState> {
     if (!targetKnown(e.target, extra)) return prev;
-    if (e.senderLeaf === undefined) return prev;
+    if (e.senderKey === undefined) return prev;
     if (e.op === "reaction") {
       return applyOp(prev, {
         op: "reaction",
         target: e.target,
         emoji: e.emoji ?? "",
-        reactorLeaf: e.senderLeaf,
+        reactor: e.senderKey,
       });
     }
     // edit / delete — author-only (fail-closed, invariant #4).
-    const author = authorLeafForMessageId(e.target, extra);
-    if (!editDeleteAuthorized(author, e.senderLeaf)) return prev;
+    const author = authorIdentityForMessageId(e.target, extra);
+    if (!editDeleteAuthorized(author, e.senderKey)) return prev;
     if (e.op === "edit") {
       return applyOp(prev, { op: "edit", target: e.target, text: e.text });
     }
@@ -2509,7 +2536,7 @@ function ChatView(props: {
         // ADR-0024 — typing / read-receipt are ephemeral status,
         // not message overlays: fold them into their own state.
         if (e.op === "typing") {
-          if (e.senderLeaf !== undefined) {
+          if (e.senderKey !== undefined) {
             const createdAtMs = Date.parse(e.createdAt);
             // A malformed timestamp parses to NaN — treat it as
             // stale (drop the `true`) rather than resurrecting it.
@@ -2518,7 +2545,7 @@ function ChatView(props: {
               : createdAtMs;
             const next = foldTyping(
               typing,
-              e.senderLeaf,
+              e.senderKey,
               e.isTyping ?? false,
               stamp,
               nowMs,
@@ -2531,8 +2558,8 @@ function ChatView(props: {
           continue;
         }
         if (e.op === "read-receipt") {
-          if (e.senderLeaf !== undefined) {
-            const next = foldReadWatermark(watermarks, e.senderLeaf, e.target);
+          if (e.senderKey !== undefined) {
+            const next = foldReadWatermark(watermarks, e.senderKey, e.target);
             if (next !== watermarks) {
               watermarks = next;
               watermarksChanged = true;
@@ -2713,7 +2740,12 @@ function ChatView(props: {
       if (result.outcome === "cursor-moved") return;
       // ADR-0045 — the shared consumer; see `consumeEvents`.
       consumeEvents(result.events);
-      // NB: no `setCursor` here — `pollMessages` advanced it under the lock.
+      // NB: no `setCursor` here — `pollMessages` advanced it under the lock, or
+      // deliberately HELD it (`outcome: "persist-held"`) because the MLS
+      // snapshot did not reach disk. The events are still consumed either way:
+      // they were decrypted and the in-memory state moved. A held batch is
+      // re-fetched on the next poll, which is the benign direction — see
+      // `chat/durable-cursor.ts`.
       // 1.18g — mirror the post-poll member count so the
       // header re-renders after an incoming commit advances
       // the local group state (someone else added / removed a
@@ -2820,6 +2852,10 @@ function ChatView(props: {
         plaintext: text,
         attachments: attached,
         ack: "pending",
+        // Stamped at SEND time, from the roster we are a member of
+        // right now — the same "resolve once, carry the key" shape
+        // the receive path uses for everyone else.
+        authorKey: ownSignatureKeyB64(),
       },
     ]);
     setInput("");
@@ -2929,13 +2965,16 @@ function ChatView(props: {
         props.entry.group,
         envelopeBytes,
       );
-      const reactorLeaf = ownLeaf() ?? OWN_REACTION_SENTINEL;
+      // Our own identity, not our own leaf: the chip's "mine" test
+      // and the peers' fold must agree on one value that survives a
+      // renumber.
+      const reactor = ownSignatureKeyB64() ?? OWN_REACTION_SENTINEL;
       setMsgOps(
         applyOp(msgOps(), {
           op: "reaction",
           target: messageId,
           emoji,
-          reactorLeaf,
+          reactor,
         }),
       );
     } catch (err) {
@@ -3978,9 +4017,10 @@ function ChatView(props: {
       // enough to ignore for MVP.
       const existing =
         (await loadMessageLog(accountIdB64, deviceKey)) ??
-        ({ version: 1, groups: {} } as MessageLogPayload);
+        ({ version: MESSAGE_LOG_VERSION, groups: {} } as MessageLogPayload);
       const next: MessageLogPayload = {
-        version: existing.version,
+        // Bumped on write: this device now writes `authorKeyB64`.
+        version: MESSAGE_LOG_VERSION,
         groups: {
           ...existing.groups,
           [groupIdHexForLog()]: {
@@ -5468,10 +5508,10 @@ function ChatView(props: {
                 onPreview={onPreviewAttachment}
                 onHidePreview={onHideAttachmentPreview}
                 getCachedUrl={getCachedAttachmentUrl}
-                ownLeaf={ownLeaf()}
+                ownIdentity={ownSignatureKeyB64()}
                 opState={(id) => msgOps().get(id)}
                 readByOthers={(id) =>
-                  isReadByEveryOther(readWatermarks(), id, ownLeaf())
+                  isReadByEveryOther(readWatermarks(), id, ownSignatureKeyB64())
                 }
                 editingId={editingId()}
                 editText={editText()}
@@ -5795,8 +5835,10 @@ function TimelineBubble(props: {
   onPreview: (ref: AttachmentRefBytes) => void | Promise<void>;
   onHidePreview: (ref: AttachmentRefBytes) => void;
   getCachedUrl: (ref: AttachmentRefBytes) => string | null;
-  /** ADR-0023 — our own MLS leaf (for own-reaction highlight). */
-  ownLeaf: number | undefined;
+  /** ADR-0023 — our own signature key (for the own-reaction
+   *  highlight). Not our leaf: a leaf we compare against a stored
+   *  reactor would start matching a stranger after a renumber. */
+  ownIdentity: MemberIdentity | undefined;
   /** Reactive overlay accessor for a given target messageId. */
   opState: (messageId: number) => MessageOpState | undefined;
   /** ADR-0024 — reactive read-state accessor: has this messageId
@@ -5927,7 +5969,7 @@ function ChatBubbleBody(props: {
   onPreview: (ref: AttachmentRefBytes) => void | Promise<void>;
   onHidePreview: (ref: AttachmentRefBytes) => void;
   getCachedUrl: (ref: AttachmentRefBytes) => string | null;
-  ownLeaf: number | undefined;
+  ownIdentity: MemberIdentity | undefined;
   opState: (messageId: number) => MessageOpState | undefined;
   readByOthers: (messageId: number) => boolean;
   editingId: number | null;
@@ -5963,7 +6005,7 @@ function ChatBubbleBody(props: {
   }> => {
     const m = state()?.reactions;
     if (m === undefined) return [];
-    const own = props.ownLeaf ?? OWN_REACTION_SENTINEL;
+    const own = props.ownIdentity ?? OWN_REACTION_SENTINEL;
     return [...m.entries()]
       .map(([emoji, reactors]) => ({
         emoji,
@@ -6583,6 +6625,11 @@ function timelineRowToPersisted(row: TimelineRow): PersistedMessage | null {
       text: row.plaintext,
       attachments: row.attachments.map(persistedFromAttachmentRef),
       createdAt: row.createdAt,
+      // ADR-0023 — persisted so edit / delete keep working after a
+      // reload. The key we stamped at send, read back verbatim: the
+      // store is the record of who wrote this, not a place to
+      // re-derive it from whoever is holding the device now.
+      authorKeyB64: authorIdentityToPersisted(row.authorKey),
     };
   }
   // Incoming: split application vs system.
@@ -6593,6 +6640,11 @@ function timelineRowToPersisted(row: TimelineRow): PersistedMessage | null {
       text: row.event.text,
       attachments: row.event.attachments.map(persistedFromAttachmentRef),
       createdAt: row.event.createdAt,
+      // ADR-0023 — the author's signature key, resolved back at
+      // receipt in the epoch that named it. Storing the leaf here
+      // was never an option: by the time this row is read back the
+      // leaf may belong to whoever was added next.
+      authorKeyB64: authorIdentityToPersisted(row.event.senderKey),
     };
   }
   if (row.event.kind === "callSignaling") {
@@ -6668,6 +6720,12 @@ function persistedToTimelineRow(m: PersistedMessage): TimelineRow {
       ack: "sent",
       messageId: Number(m.messageId),
       createdAt: m.createdAt,
+      // Absent on a row written before this field existed, and
+      // `null` when it could not be resolved — both restore as
+      // `undefined`, which fails the edit/delete gate closed rather
+      // than falling back to our CURRENT key (which a self-update
+      // may since have rotated).
+      authorKey: persistedAuthorIdentity(m.authorKeyB64),
     };
   }
   if (m.direction === "incoming") {
@@ -6679,13 +6737,18 @@ function persistedToTimelineRow(m: PersistedMessage): TimelineRow {
         text: m.text,
         plaintext: m.text,
         attachments,
-        // ADR-0023 — the author leaf is not persisted (the
-        // op overlay is session-scoped, multi-device replay
-        // deferred to Phase 2), so a reloaded message's
-        // edit/delete gate fails closed. Acceptable: a peer
-        // editing across the reload boundary just won't apply
-        // until the next live message re-establishes authorship.
+        // The leaf is NOT restored, and never will be: a leaf index
+        // is a position in the ratchet tree, so a value stored under
+        // one epoch names a different member under the next. Only
+        // the identity round-trips.
         senderLeaf: undefined,
+        // ADR-0023 — the author's signature key, restored so a peer
+        // editing or deleting their own message across a reload now
+        // applies (before this it always failed closed). Absent on a
+        // pre-existing row and `null` when unresolved — both become
+        // `undefined`, which is exactly that old fail-closed
+        // behaviour, never a misattribution.
+        senderKey: persistedAuthorIdentity(m.authorKeyB64),
         createdAt: m.createdAt,
       },
     };

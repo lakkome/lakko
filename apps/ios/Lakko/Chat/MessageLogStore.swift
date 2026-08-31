@@ -325,9 +325,22 @@ public struct PersistedMessage: Codable, Equatable {
     public let text: String
     public let attachments: [PersistedAttachment]
     public let createdAt: String
-    /// ADR-0023 — original author's MLS leaf index. Optional so
-    /// a pre-ADR-0023 envelope (no field) decodes cleanly.
-    public let authorLeaf: UInt32?
+    /// ADR-0023 — the author's IDENTITY: their Ed25519 signature public key,
+    /// base64, resolved from the MLS sender leaf at receipt. `nil` when the
+    /// client could not resolve it, and **absent entirely on a row written
+    /// before this field existed** — both read back as "unknown author", which
+    /// fails the edit / delete gate closed. That is the same posture every
+    /// reloaded message had before the field existed; it never misattributes,
+    /// so there is no migration and none is owed.
+    ///
+    /// Persisting it is what makes edit / delete survive a reload at all. The
+    /// leaf it replaces could not be persisted — a leaf stored now names a
+    /// different member after the next commit, and iOS storing it is what made
+    /// the impersonation permanent rather than transient. The field it replaces
+    /// is GONE rather than kept alongside: a stored leaf that still round-trips
+    /// is what a later reader reaches for. No secret is added to the blob —
+    /// the key is public.
+    public let authorKeyB64: String?
     /// ADR-0023 — edited / deleted markers. Default `false` for
     /// older blobs without the field.
     public let edited: Bool
@@ -341,7 +354,7 @@ public struct PersistedMessage: Codable, Equatable {
         text: String,
         attachments: [PersistedAttachment],
         createdAt: String,
-        authorLeaf: UInt32? = nil,
+        authorKeyB64: String? = nil,
         edited: Bool = false,
         deleted: Bool = false,
         reactions: [PersistedReaction] = []
@@ -351,19 +364,18 @@ public struct PersistedMessage: Codable, Equatable {
         self.text = text
         self.attachments = attachments
         self.createdAt = createdAt
-        self.authorLeaf = authorLeaf
+        self.authorKeyB64 = authorKeyB64
         self.edited = edited
         self.deleted = deleted
         self.reactions = reactions
     }
 
-    // ADR-0023 — custom decoder so a pre-ADR-0023 blob (which has
-    // no authorLeaf / edited / deleted / reactions keys) decodes
-    // without throwing. `decodeIfPresent` + defaults keep older
+    // ADR-0023 — custom decoder so a blob written before any of these fields
+    // existed decodes without throwing. `decodeIfPresent` + defaults keep older
     // envelopes loadable.
     enum CodingKeys: String, CodingKey {
         case messageId, direction, text, attachments, createdAt
-        case authorLeaf, edited, deleted, reactions
+        case authorKeyB64, edited, deleted, reactions
     }
 
     public init(from decoder: Decoder) throws {
@@ -373,23 +385,31 @@ public struct PersistedMessage: Codable, Equatable {
         self.text = try c.decode(String.self, forKey: .text)
         self.attachments = try c.decode([PersistedAttachment].self, forKey: .attachments)
         self.createdAt = try c.decode(String.self, forKey: .createdAt)
-        self.authorLeaf = try c.decodeIfPresent(UInt32.self, forKey: .authorLeaf)
+        self.authorKeyB64 = try c.decodeIfPresent(String.self, forKey: .authorKeyB64)
         self.edited = try c.decodeIfPresent(Bool.self, forKey: .edited) ?? false
         self.deleted = try c.decodeIfPresent(Bool.self, forKey: .deleted) ?? false
-        self.reactions = try c.decodeIfPresent(
-            [PersistedReaction].self,
-            forKey: .reactions
-        ) ?? []
+        // `try?` rather than `decodeIfPresent`: a row written before the
+        // reactor became an identity carries `reactorLeaf` instead, which does
+        // not decode. Those reactions are unattributable to a PERSON — the leaf
+        // they name may since have been handed to someone else — so they are
+        // dropped rather than resurrected under a stranger's name, and dropping
+        // them must not cost the message, the group or the whole transcript.
+        self.reactions = (try? c.decode([PersistedReaction].self, forKey: .reactions)) ?? []
     }
 }
 
 /// ADR-0023 — JSON projection of a folded ``Reaction``.
+///
+/// `reactorKeyB64` is the reactor's signature key, never their MLS leaf: a
+/// stored leaf is what let a member added into a vacated leaf toggle the
+/// departed member's reaction off — and, since the last reactor's removal
+/// prunes the emoji entirely, make the chip disappear.
 public struct PersistedReaction: Codable, Equatable {
-    public let reactorLeaf: UInt32
+    public let reactorKeyB64: String
     public let emoji: String
 
-    public init(reactorLeaf: UInt32, emoji: String) {
-        self.reactorLeaf = reactorLeaf
+    public init(reactorKeyB64: String, emoji: String) {
+        self.reactorKeyB64 = reactorKeyB64
         self.emoji = emoji
     }
 }

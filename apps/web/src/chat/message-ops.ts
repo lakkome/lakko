@@ -13,18 +13,36 @@
  *   1. [`applyOp`] — fold an (already-authorized) op into a
  *      mutation-overlay map, returning a NEW map (replace-to-
  *      rerender for SolidJS). Edit sets the text, delete sets the
- *      tombstone, reaction toggles `(reactorLeaf, emoji)`.
+ *      tombstone, reaction toggles `(reactor, emoji)`.
  *
  *   2. [`editDeleteAuthorized`] — the author-only integrity gate
  *      (ADR-0023, invariant #4): an edit / delete is applied ONLY
- *      if the op's sender leaf equals the target message's
- *      original author leaf. Reactions are accepted from any
- *      member (and are not routed through this gate).
+ *      if the op's sender is the target message's original author.
+ *      Reactions are accepted from any member (and are not routed
+ *      through this gate).
  *
  * Both are total + pure — no throw, no I/O — so a malformed op the
  * receive loop already structurally validated can never wedge the
  * timeline.
+ *
+ * ## Identity is a signature key, never a leaf index
+ *
+ * Both rules compare a [`MemberIdentity`] — the member's Ed25519
+ * signature public key, base64 — resolved from the MLS sender leaf
+ * at receipt, in the epoch the message arrived. They used to
+ * compare the raw leaf, and that was the bug: OpenMLS hands a
+ * vacated leaf to the next member added, so a `remove Bob, add
+ * Dave` commit (ADR-0045 composes both into ONE commit) leaves
+ * Dave holding Bob's index, and a leaf comparison then reads Dave
+ * as Bob — free rein to edit and delete Bob's history and to
+ * toggle off Bob's reactions. See `author-identity.ts` for the
+ * resolution rule and the reason it must happen at receipt.
  */
+
+import {
+  OWN_REACTION_SENTINEL as OWN_SENTINEL,
+  type MemberIdentity,
+} from "./author-identity";
 
 /** The session-scoped mutation overlay for one message, keyed in
  *  the timeline's `msgOps` map on the target's DS `messageId`.
@@ -36,12 +54,16 @@ export interface MessageOpState {
   /** Set once a delete op has been applied — renders the
    *  "message deleted" tombstone. */
   deleted?: boolean;
-  /** emoji → set of reactor leaf indices. A sentinel
-   *  ([`OWN_REACTION_SENTINEL`]) records an own reaction whose
-   *  leaf the FFI couldn't surface; it still toggles + counts.
-   *  Empty sets are pruned so a chip vanishes when its last
-   *  reactor toggles off. */
-  reactions: Map<string, Set<number>>;
+  /** emoji → set of reactor IDENTITIES (base64 signature keys),
+   *  never leaf indices: a departing member's leaf is handed to
+   *  the next member added, so a leaf-keyed set lets a newcomer
+   *  toggle the departed member's reaction off and merge their own
+   *  into the departed member's count. A sentinel
+   *  ([`OWN_REACTION_SENTINEL`]) records an own reaction whose key
+   *  the client couldn't resolve; it still toggles + counts. Empty
+   *  sets are pruned so a chip vanishes when its last reactor
+   *  toggles off. */
+  reactions: Map<string, Set<MemberIdentity>>;
 }
 
 /** A normalized op ready to fold into the overlay. The caller has
@@ -50,12 +72,19 @@ export interface MessageOpState {
 export type OverlayOp =
   | { op: "edit"; target: number; text: string }
   | { op: "delete"; target: number }
-  | { op: "reaction"; target: number; emoji: string; reactorLeaf: number };
+  | {
+      op: "reaction";
+      target: number;
+      emoji: string;
+      /** The reactor's signature key, resolved from its MLS leaf at
+       *  receipt — see the module doc on why not the leaf. */
+      reactor: MemberIdentity;
+    };
 
-/** Sentinel reactor-leaf for an own reaction whose MLS leaf the
- *  FFI couldn't surface (mirrors the `senderLeaf === undefined`
- *  case). Never collides with a real leaf (which is `>= 0`). */
-export const OWN_REACTION_SENTINEL = -1;
+/** Re-exported so the reaction call sites take the sentinel from
+ *  the module that owns the op shape. Defined in
+ *  `author-identity.ts` alongside the identity type it inhabits. */
+export const OWN_REACTION_SENTINEL = OWN_SENTINEL;
 
 /** The fixed reaction palette offered by the picker (kept here so
  *  the UI + any future test share one definition). */
@@ -68,8 +97,8 @@ export const REACTION_EMOJI = ["👍", "❤️", "😂", "😮", "😢", "🙏"]
  *
  *   - `edit`     → set `editedText`.
  *   - `delete`   → set `deleted`.
- *   - `reaction` → toggle `(reactorLeaf, emoji)`; an empty emoji
- *     set is pruned.
+ *   - `reaction` → toggle `(reactor, emoji)`; an empty emoji set
+ *     is pruned.
  */
 export function applyOp(
   prev: Map<number, MessageOpState>,
@@ -92,11 +121,12 @@ export function applyOp(
   } else if (op.op === "delete") {
     state.deleted = true;
   } else {
-    const reactors = state.reactions.get(op.emoji) ?? new Set<number>();
-    if (reactors.has(op.reactorLeaf)) {
-      reactors.delete(op.reactorLeaf);
+    const reactors =
+      state.reactions.get(op.emoji) ?? new Set<MemberIdentity>();
+    if (reactors.has(op.reactor)) {
+      reactors.delete(op.reactor);
     } else {
-      reactors.add(op.reactorLeaf);
+      reactors.add(op.reactor);
     }
     if (reactors.size === 0) {
       state.reactions.delete(op.emoji);
@@ -110,17 +140,22 @@ export function applyOp(
 
 /**
  * The author-only integrity gate for edit / delete (ADR-0023,
- * invariant #4). Returns `true` ONLY when both leaves are known
- * and equal. Fail-closed: an `undefined` author (a reloaded
- * message, a control frame) or an `undefined` op sender leaf is
- * never authorized.
+ * invariant #4). Returns `true` ONLY when both identities are
+ * known and equal. Fail-closed: an `undefined` author (a message
+ * stored before the author identity was persisted, a control
+ * frame) or an `undefined` op sender is never authorized.
+ *
+ * The comparison is on the **signature key**, and the reason is
+ * load-bearing rather than stylistic: comparing MLS leaf indices
+ * here is what let a member added into a departed member's vacated
+ * leaf edit and delete that member's history. See the module doc.
  *
  * Reactions DO NOT go through this gate — any member may react.
  */
 export function editDeleteAuthorized(
-  authorLeaf: number | undefined,
-  opSenderLeaf: number | undefined,
+  author: MemberIdentity | undefined,
+  opSender: MemberIdentity | undefined,
 ): boolean {
-  if (authorLeaf === undefined || opSenderLeaf === undefined) return false;
-  return authorLeaf === opSenderLeaf;
+  if (author === undefined || opSender === undefined) return false;
+  return author === opSender;
 }

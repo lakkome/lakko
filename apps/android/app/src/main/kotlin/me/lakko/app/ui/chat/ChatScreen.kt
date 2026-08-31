@@ -143,16 +143,15 @@ public fun ChatScreen(
     // ADR-0023 — the message being edited (the small pre-filled
     // dialog), or `null` when no edit is in progress.
     var editTarget by remember { mutableStateOf<ChatMessage?>(null) }
-    // ADR-0023 — our own leaf in this chat group, sampled once
-    // per composition; the UI marks which reaction chips we
-    // contributed (and can toggle off).
-    val ownLeaf = remember(state.groupIdHex) { viewModel.ownChatLeafIndex() }
-    // ADR-0024 — the live roster's other leaves, re-sampled when
-    // the membership / read-watermark map shifts. The Bubble's
-    // "Read" tick needs every other member's watermark `>=` the
-    // message's id.
-    val otherLeaves = remember(state.groupIdHex, state.readUpToByLeaf) {
-        viewModel.otherChatLeaves()
+    // ADR-0023 — our own IDENTITY (signature key) in this chat group, sampled
+    // once per composition; the UI marks which reaction chips we contributed
+    // (and can toggle off). Never our leaf — see `AuthorIdentity.kt`.
+    val ownIdentity = remember(state.groupIdHex) { viewModel.ownChatIdentity() }
+    // ADR-0024 — the live roster's other members, re-sampled when the
+    // membership / read-watermark map shifts. The Bubble's "Read" tick needs
+    // every other member's watermark `>=` the message's id.
+    val otherMembers = remember(state.groupIdHex, state.readUpToByMember) {
+        viewModel.otherChatIdentities()
     }
 
     // 1.19c4 — system-picker launchers. `ACTION_OPEN_DOCUMENT`
@@ -438,11 +437,11 @@ public fun ChatScreen(
                     items(items = state.messages, key = { it.messageId }) { msg ->
                         MessageRow(
                             msg = msg,
-                            ownLeaf = ownLeaf,
+                            ownIdentity = ownIdentity,
                             // ADR-0024 — read-state inputs (own
                             // bubbles render "Sent" / "Read").
-                            otherLeaves = otherLeaves,
-                            readUpToByLeaf = state.readUpToByLeaf,
+                            otherMembers = otherMembers,
+                            readUpToByMember = state.readUpToByMember,
                             onPreview = { ref ->
                                 scope.launch {
                                     val bytes = withContext(Dispatchers.IO) {
@@ -708,10 +707,11 @@ private fun CallOverlay(
 @Composable
 private fun MessageRow(
     msg: ChatMessage,
-    ownLeaf: UInt?,
-    /** ADR-0024 — live roster minus self; read-state inputs. */
-    otherLeaves: Set<UInt>,
-    readUpToByLeaf: Map<UInt, Long>,
+    ownIdentity: me.lakko.app.chat.MemberIdentity?,
+    /** ADR-0024 — live roster minus self; read-state inputs. Keyed on the
+     *  member's signature key, never the MLS leaf. */
+    otherMembers: Set<me.lakko.app.chat.MemberIdentity>,
+    readUpToByMember: Map<me.lakko.app.chat.MemberIdentity, Long>,
     onPreview: (AttachmentRef) -> Unit,
     onSave: (AttachmentRef) -> Unit,
     onEdit: () -> Unit,
@@ -725,14 +725,14 @@ private fun MessageRow(
         ) {
             Bubble(
                 msg = msg,
-                ownLeaf = ownLeaf,
+                ownIdentity = ownIdentity,
                 isOwn = true,
                 // ADR-0024 — own bubble: compute the read tick.
                 readState = ownReadStateFor(
                     messageId = msg.messageId,
-                    ownLeaf = ownLeaf,
-                    otherLeaves = otherLeaves,
-                    readUpToByLeaf = readUpToByLeaf,
+                    own = ownIdentity,
+                    others = otherMembers,
+                    readUpToByMember = readUpToByMember,
                 ),
                 background = MaterialTheme.colorScheme.primaryContainer,
                 contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
@@ -750,7 +750,7 @@ private fun MessageRow(
         ) {
             Bubble(
                 msg = msg,
-                ownLeaf = ownLeaf,
+                ownIdentity = ownIdentity,
                 isOwn = false,
                 // Incoming bubbles never show our read state.
                 readState = OwnReadState.None,
@@ -805,7 +805,8 @@ private fun TypingIndicator(text: String?) {
 @Composable
 private fun Bubble(
     msg: ChatMessage,
-    ownLeaf: UInt?,
+    /** ADR-0023 — our own signature key, for the own-reaction highlight. */
+    ownIdentity: me.lakko.app.chat.MemberIdentity?,
     isOwn: Boolean,
     /** ADR-0024 — read state for an OWN bubble ([OwnReadState.None]
      *  for incoming / un-acked rows). Renders a "Sent" / "Read"
@@ -948,7 +949,7 @@ private fun Bubble(
         if (!msg.deleted && msg.reactions.isNotEmpty()) {
             ReactionChips(
                 reactions = msg.reactions,
-                ownLeaf = ownLeaf,
+                ownIdentity = ownIdentity,
                 onToggle = { emoji -> if (hasId) onReact(emoji) },
             )
         }
@@ -983,18 +984,20 @@ private fun Bubble(
 @Composable
 private fun ReactionChips(
     reactions: List<me.lakko.app.chat.Reaction>,
-    ownLeaf: UInt?,
+    ownIdentity: me.lakko.app.chat.MemberIdentity?,
     onToggle: (String) -> Unit,
 ) {
-    // Aggregate by emoji preserving first-seen order; track
-    // whether our own leaf is in each bucket.
+    // Aggregate by emoji preserving first-seen order; track whether WE are in
+    // each bucket — by signature key, so a newcomer taking a slot we once held
+    // never lights the "mine" highlight on their reaction.
+    val mineKey = ownIdentity ?: me.lakko.app.chat.OWN_REACTION_SENTINEL
     val order = ArrayList<String>()
     val counts = LinkedHashMap<String, Int>()
     val mine = HashSet<String>()
     for (r in reactions) {
         if (!counts.containsKey(r.emoji)) order.add(r.emoji)
         counts[r.emoji] = (counts[r.emoji] ?: 0) + 1
-        if (ownLeaf != null && r.reactorLeaf == ownLeaf) mine.add(r.emoji)
+        if (r.reactor == mineKey) mine.add(r.emoji)
     }
     FlowRow(
         horizontalArrangement = Arrangement.spacedBy(4.dp),

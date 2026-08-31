@@ -80,6 +80,7 @@ final class SendEpochStraddleTests: XCTestCase {
         private static var _fetchCount = 0
         private static var _heldFetchCount = 0
         private static var _holdFromFetch = Int.max
+        private static var _failPublishes = false
 
         static func reset() {
             lock.lock(); defer { lock.unlock() }
@@ -88,6 +89,14 @@ final class SendEpochStraddleTests: XCTestCase {
             _fetchCount = 0
             _heldFetchCount = 0
             _holdFromFetch = Int.max
+            _failPublishes = false
+        }
+
+        /// Make every subsequent POST answer 503 and record nothing — a publish
+        /// that never reached the wire. Used by the local-apply ordering case:
+        /// the timeline must not move for a message no peer will ever see.
+        static func failPublishes(_ on: Bool) {
+            lock.lock(); _failPublishes = on; lock.unlock()
         }
 
         static var journal: [(id: Int64, body: Data)] {
@@ -144,10 +153,27 @@ final class SendEpochStraddleTests: XCTestCase {
                 let json: String
                 if isPublish {
                     Self.lock.lock()
-                    Self._nextId += 1
-                    let id = Self._nextId
-                    Self._journal.append((id, body))
+                    let refuse = Self._failPublishes
+                    var id: Int64 = 0
+                    if !refuse {
+                        Self._nextId += 1
+                        id = Self._nextId
+                        Self._journal.append((id, body))
+                    }
                     Self.lock.unlock()
+                    if refuse {
+                        let response = HTTPURLResponse(
+                            url: self.request.url!,
+                            statusCode: 503,
+                            httpVersion: "HTTP/1.1",
+                            headerFields: ["Content-Type": "text/plain"]
+                        )!
+                        self.client?.urlProtocol(
+                            self, didReceive: response, cacheStoragePolicy: .notAllowed)
+                        self.client?.urlProtocol(self, didLoad: Data("down".utf8))
+                        self.client?.urlProtocolDidFinishLoading(self)
+                        return
+                    }
                     json = "{\"id\":\(id),\"created_at\":\"2026-08-25T10:00:00.000Z\"}"
                 } else {
                     Self.lock.lock()
@@ -425,6 +451,121 @@ final class SendEpochStraddleTests: XCTestCase {
         XCTAssertEqual(
             replayAsPeer(fx), [],
             "a real second member replayed the journal and never saw these rows"
+        )
+    }
+
+    // MARK: - ADR-0023 message ops (edit / delete / reaction)
+
+    /// The three ADR-0023 ops are application messages like any other, so they
+    /// carry the straddle hazard verbatim — and they reached the DS through a
+    /// bare `ChatClient.sendMessage`, outside the chain, until this suite grew
+    /// these cases. Nothing above covered them: the two cases before this MARK
+    /// drive `ChatRepository.sendMessage` and `publishApplicationMessage`, which
+    /// were already serialized, so the drift was invisible.
+    func testAnEditDoesNotSealBehindAStagedSweepsPublishedCommit() async throws {
+        let fx = try makeFixture()
+        defer { tearDown(fx) }
+        let hex = fx.groupIdHex
+        let repo = fx.repo
+
+        try await driveIntoStagedSweepWindow(fx) {
+            try? await repo.editMessage(groupIdHex: hex, target: 1, newText: "fixed")
+        }
+
+        XCTAssertEqual(
+            replayAsPeer(fx), [],
+            "a real second member replayed the journal and never saw these rows"
+        )
+    }
+
+    /// Delete is the sharpest of the three: the sender's local tombstone is
+    /// applied on the publish's success path, so a lost op leaves the user
+    /// looking at "message deleted" while every peer still renders the message.
+    func testADeleteDoesNotSealBehindAStagedSweepsPublishedCommit() async throws {
+        let fx = try makeFixture()
+        defer { tearDown(fx) }
+        let hex = fx.groupIdHex
+        let repo = fx.repo
+
+        try await driveIntoStagedSweepWindow(fx) {
+            try? await repo.deleteMessage(groupIdHex: hex, target: 1)
+        }
+
+        XCTAssertEqual(
+            replayAsPeer(fx), [],
+            "a real second member replayed the journal and never saw these rows"
+        )
+    }
+
+    func testAReactionDoesNotSealBehindAStagedSweepsPublishedCommit() async throws {
+        let fx = try makeFixture()
+        defer { tearDown(fx) }
+        let hex = fx.groupIdHex
+        let repo = fx.repo
+
+        try await driveIntoStagedSweepWindow(fx) {
+            try? await repo.reactToMessage(groupIdHex: hex, target: 1, emoji: "👍")
+        }
+
+        XCTAssertEqual(
+            replayAsPeer(fx), [],
+            "a real second member replayed the journal and never saw these rows"
+        )
+    }
+
+    /// The local apply's ORDERING, which serializing the op does not by itself
+    /// establish: it must stay strictly on the publish's success path.
+    ///
+    /// This case does not discriminate the lock — it passed before the ops were
+    /// serialized, and it is here so that moving the apply inside the region
+    /// cannot silently move it ahead of the publish. Measured by running the
+    /// inversion, not predicted: applying the tombstone before
+    /// `sealAndPublishLocked` fails it.
+    ///
+    /// The oracle has to be read AFTER a later successful op, and that is not
+    /// incidental. `ChatRepositoryState.threads` holds VALUE copies rebuilt by
+    /// `buildThreadList()`, and the op's `state` rebuild sits on its success
+    /// path — so straight after the failed delete the published snapshot is
+    /// simply stale and reports `deleted == false` no matter what the record
+    /// says. That is not the property under test: the record's mutation is real
+    /// and permanent, and the UI shows it at the very next rebuild (every poll
+    /// does one). The second send is what forces that rebuild, so the assertion
+    /// reads what the user actually ends up looking at. Reading `state`
+    /// immediately instead makes this case vacuous — measured, not assumed:
+    /// it passed under the inversion until the second send was added.
+    func testADeleteIsNotAppliedLocallyWhenThePublishNeverLanded() async throws {
+        let fx = try makeFixture()
+        defer { tearDown(fx) }
+        let hex = fx.groupIdHex
+        let repo = fx.repo
+
+        try await repo.sendMessage(groupIdHex: hex, plaintext: "keep me")
+        guard let target = repo.state.threads
+            .first(where: { $0.groupIdHex == hex })?.messages.last?.messageId
+        else {
+            return XCTFail("the send must have appended a row for the delete to target")
+        }
+
+        JournalURLProtocol.failPublishes(true)
+        do {
+            try await repo.deleteMessage(groupIdHex: hex, target: target)
+            XCTFail("a delete whose DS publish 503s must throw, not report success")
+        } catch {
+            // expected — the publish failed, so the op is not on the wire
+        }
+        JournalURLProtocol.failPublishes(false)
+
+        // Force the thread-list rebuild the failed op skipped, so the assertion
+        // below reads the record rather than a pre-delete snapshot of it.
+        try await repo.sendMessage(groupIdHex: hex, plaintext: "still here")
+
+        let row = repo.state.threads
+            .first(where: { $0.groupIdHex == hex })?
+            .messages.first(where: { $0.messageId == target })
+        XCTAssertEqual(
+            row?.deleted, false,
+            "the user is shown a tombstone for a message that never reached the wire, "
+            + "and every peer still renders it"
         )
     }
 
