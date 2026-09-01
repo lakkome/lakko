@@ -65,6 +65,11 @@ import { sfuBaseUrl } from "../calls/sfu-config";
 import { CallJwtClient } from "../calls/call-jwt-client";
 import Call from "./Call";
 import { loadWasm as loadWasmForCalls } from "../wasm";
+// ADR-0045 UX §6 — the core's own answer to *will the identical call work
+// later*. Imported as a named export rather than through `loadWasm` because
+// `formatError` is synchronous; `src/wasm.ts` imports the same module, so
+// this is the same instance and not a second one.
+import { membershipRefusalRetryMaySucceed as wasmMembershipRefusalRetryMaySucceed } from "../../wasm/lakko_ffi_wasm";
 import {
   deleteGroupFromMessageLog,
   loadMessageLog,
@@ -139,6 +144,15 @@ import {
   type PendingRequest,
   type ProposalRecordView,
 } from "../chat/pending-requests";
+// ADR-0045 UX §6 / §12 item 6 — the typed membership-refusal table. The
+// reason travels on the thrown error as `refusalReason`; this module turns it
+// into a sentence and asks the CORE whether waiting helps. Nothing here reads
+// a message, which is the whole point of the table existing.
+import {
+  JOIN_REQUEST_NOT_KEPT,
+  externalJoinAffordance,
+  membershipRefusalOf,
+} from "../chat/membership-refusal";
 // ADR-0045 S7 residual 1 — the request that left the pending set without
 // landing. Same split, same reason as above.
 import {
@@ -190,9 +204,11 @@ import {
 // `leaveRequestedAt` record and the one-shot teardown list all live in the
 // plain module where they are executable; this file renders and drives them.
 import {
-  DELETE_CHAT_BODY,
+  // The delete-chat TITLE and BODY are no longer read here: they reach the
+  // confirmation through `chat/delete-chat-confirm.ts`, which is also where
+  // the action label that names the chat is decided. Only the CONTROL label
+  // (the button in the exit block) is rendered by this file.
   DELETE_CHAT_CONTROL,
-  DELETE_CHAT_TITLE,
   FROZEN_ROSTER_HEADER,
   clearLeaveRequested,
   composerState,
@@ -209,6 +225,9 @@ import {
   type MembershipState,
 } from "../chat/membership-ended";
 import { removeMemberConfirmation } from "../chat/remove-member-confirm";
+import { deleteChatConfirmation } from "../chat/delete-chat-confirm";
+import { leaveGroupConfirmation } from "../chat/leave-group-confirm";
+import { namedAction, requestConfirm } from "../ui/confirm-dialog";
 import {
   applyOp,
   editDeleteAuthorized,
@@ -1301,6 +1320,16 @@ function ChatView(props: {
   // tracks signal reads, not WASM-side property accesses.
   const [membersOpen, setMembersOpen] = createSignal(false);
   const [membersVersion, setMembersVersion] = createSignal(0);
+  // ADR-0027 / §7.1 — an external-join request arrived while the quarantine
+  // was full, so the core did not keep it. It is in no list and can be
+  // approved by nobody; the only honest thing left is to say it happened.
+  //
+  // Session-scoped and cleared by the admin acting on the queue (see
+  // `onApproveJoin` / `onRejectJoin`), because acting is precisely what may
+  // have made room. There is no count: `MAX_PENDING_EXTERNAL_JOINS` is
+  // module-private in the core and a client-side literal is the stale-drift
+  // class §7.1 flags.
+  const [unkeptJoinRequest, setUnkeptJoinRequest] = createSignal(false);
   // 1.18i — accepted-contacts directory keyed by
   // base64(signature_pubkey). Lookup at member-render time
   // turns a hex fingerprint into a real displayName when the
@@ -1885,12 +1914,16 @@ function ChatView(props: {
     if (leaf === undefined) return;
     // The confirmation is the last exit — a published request cannot be
     // withdrawn — and the body carries the one fact the user needs.
+    //
+    // ADR-0045 UX §14 — an in-page dialog rather than `window.confirm`: the
+    // body is §6's irreversibility copy and has to read as the app's, not
+    // under a browser-supplied title, and the action names the group. The
+    // copy lives in `leave-group-confirm.ts` so it is testable at all —
+    // `vitest` cannot load this file.
     if (
-      !window.confirm(
-        "Leave this group?\n\n" +
-          "You will keep receiving messages until an owner or an admin applies " +
-          "your request. You will need a new invite to rejoin.",
-      )
+      !(await requestConfirm(
+        leaveGroupConfirmation({ groupLabel: props.entry.label }),
+      ))
     ) {
       return;
     }
@@ -1987,7 +2020,20 @@ function ChatView(props: {
     if (s.kind !== "session") return;
     // The confirmation is the only protection there is, so it states exactly
     // what is destroyed rather than gesturing at it.
-    if (!window.confirm(`${DELETE_CHAT_TITLE}\n\n${DELETE_CHAT_BODY}`)) return;
+    //
+    // ADR-0045 UX §14 — an in-page dialog rather than `window.confirm`. This
+    // is the one control in the design that destroys user data on request,
+    // and §6.2.4's body is the sentence a user reads before losing a
+    // transcript that exists nowhere else; putting it under a chrome-supplied
+    // title, in the browser's voice, was the worst place in the app to do it.
+    // The action names the chat.
+    if (
+      !(await requestConfirm(
+        deleteChatConfirmation({ chatLabel: props.entry.label }),
+      ))
+    ) {
+      return;
+    }
     const accountIdB64 = s.account.accountId;
     const groupIdB64 = base64Encode(props.entry.group.groupId);
     setError(null);
@@ -2674,7 +2720,19 @@ function ChatView(props: {
       // surfaces in the members panel via the `pendingJoins` memo. The
       // membersVersion bump after this loop refreshes that memo, so just
       // skip it here (don't materialise a chat bubble for it).
-      if (e.kind === "externalJoinRequest") continue;
+      //
+      // Except for one thing the memo cannot see. A request the core did NOT
+      // retain is absent from `pendingExternalJoins()`, so it renders as
+      // nothing at all — which is correct about the Approve button and silent
+      // about the joiner, who is now waiting on an admin nobody told. §7.1
+      // recorded that state as unsurfaceable; `retained` is what made it
+      // statable, so it is stated.
+      if (e.kind === "externalJoinRequest") {
+        if (externalJoinAffordance({ retained: e.retained }).kind === "informational") {
+          setUnkeptJoinRequest(true);
+        }
+        continue;
+      }
       // ADR-0042 — a push-routing-secret distribution envelope: persist the
       // secret (idempotent) + subscribe under the derived opaque `push_gid`.
       // Never a timeline bubble. Fire-and-forget (best-effort).
@@ -3599,15 +3657,26 @@ function ChatView(props: {
     // line is not a nicety — it is the one fact a user removing someone for a
     // safety reason must have, and the fact the old immediate-looking UI
     // concealed.
-    const confirm = removeMemberConfirmation({
+    //
+    // ADR-0045 UX §14 — an in-page dialog rather than `window.confirm`. §6's
+    // decision is unchanged and still lives in `remove-member-confirm.ts`;
+    // what the widget adds is §6.1's rule that the action button NAMES the
+    // person, which a browser OK/Cancel pair cannot do. The roster label is
+    // read from `rosterViews()` so the button and the row the user just
+    // pressed cannot name the same member differently — the one thing they
+    // cross-check. An absent label falls back to the bare `Remove`.
+    const decided = removeMemberConfirmation({
       usesProposalPath: usesProposalPath(),
     });
+    const memberLabel = rosterViews().find(
+      (r) => r.leafIndex === leafIndex,
+    )?.label;
     if (
-      !window.confirm(
-        confirm.body === null
-          ? confirm.title
-          : `${confirm.title}\n\n${confirm.body}`,
-      )
+      !(await requestConfirm({
+        ...decided,
+        confirmLabel: namedAction(decided.confirmLabel, memberLabel),
+        tone: "danger",
+      }))
     ) {
       return;
     }
@@ -3819,6 +3888,9 @@ function ChatView(props: {
             (queue === null ? "" : ` ${queue}`),
         );
       }
+      // Same reason as in `onRejectJoin`: the queue moved, so the notice
+      // about a request it turned away is no longer current.
+      setUnkeptJoinRequest(false);
       void refresh();
     } catch (err) {
       setError(formatError(err));
@@ -3837,6 +3909,9 @@ function ChatView(props: {
     try {
       await contacts.rejectExternalJoin(props.entry.group, proposalRef);
       setMembersVersion(membersVersion() + 1);
+      // Acting on the queue is what may have made room for the request the
+      // quarantine turned away, so the notice about it stops being current.
+      setUnkeptJoinRequest(false);
       setNotice("Join request rejected.");
     } catch (err) {
       setError(formatError(err));
@@ -4820,7 +4895,9 @@ function ChatView(props: {
               its own — the core filters it out of `pendingExternalJoins()` on
               every read — so this list retires its own rows with no message
               saying so. Hidden when empty. */}
-          <Show when={canManageMembers() && pendingJoins().length > 0}>
+          <Show
+            when={canManageMembers() && (pendingJoins().length > 0 || unkeptJoinRequest())}
+          >
             <div
               style={{
                 margin: "0 0 0.6rem 0",
@@ -4857,6 +4934,23 @@ function ChatView(props: {
               >
                 {JOIN_REQUESTS_NOT_SAVED}
               </p>
+              {/* ADR-0027 / §7.1 — a request the quarantine turned away. It
+                  is in no list below, because the core never kept it, and it
+                  gets no Approve for the same reason: there is nothing to
+                  approve. Informational only, which is the most
+                  `externalJoinAffordance` allows for an unretained
+                  request. */}
+              <Show when={unkeptJoinRequest()}>
+                <p
+                  style={{
+                    "font-size": "0.7rem",
+                    color: "var(--surface-muted)",
+                    margin: "0 0 0.4rem 0",
+                  }}
+                >
+                  {JOIN_REQUEST_NOT_KEPT}
+                </p>
+              </Show>
               <ul
                 style={{
                   "list-style": "none",
@@ -6835,7 +6929,48 @@ function shortFingerprint(pubkey: Uint8Array): string {
   return hex.slice(0, 12);
 }
 
+/**
+ * ADR-0045 UX §6 — ask the core whether a plain retry may succeed.
+ *
+ * Wrapped rather than passed raw because `formatError` is synchronous and
+ * this is a wasm export: on any path that just caught a refusal the module is
+ * initialised (the refusal came out of it), but a throw here would replace a
+ * refusal message with a crash. Failing closed means no invitation to retry,
+ * never a wrong one.
+ */
+function membershipRetryMaySucceed(reason: string): boolean {
+  try {
+    return wasmMembershipRefusalRetryMaySucceed(reason);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * ADR-0045 UX §6 / §12 item 6 — the single funnel every membership handler
+ * already went through, now refusal-aware.
+ *
+ * Before this it was `err.message`, so a member who tapped `Add` was told
+ * `add proposal refused: proposer is not owner or admin` — the core's
+ * sentence for a developer reading a log. The reason now rides beside that
+ * sentence and selects the copy; the message is never inspected.
+ *
+ * A non-refusal keeps its own message unchanged. Collapsing an upload failure
+ * into "This change could not be requested." would be a worse lie than the
+ * raw text, and §6 row 7 is about not leaking a *refusal's* internal reason,
+ * not about hiding every error in the app.
+ */
 function formatError(err: unknown): string {
+  const refusal = membershipRefusalOf(err, membershipRetryMaySucceed);
+  if (refusal !== null) {
+    if (!refusal.recognised) {
+      // The only case the fail-closed row shows for a refusal nobody decided
+      // about: a core newer than this build. Worth a console line, because it
+      // is a shipping gap rather than a user error.
+      console.warn("membership refusal with no copy in this build", refusal.reason, err);
+    }
+    return refusal.message;
+  }
   if (err instanceof Error) return err.message;
   return String(err);
 }

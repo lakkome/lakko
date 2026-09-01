@@ -27,6 +27,7 @@ pub mod identity;
 pub mod key_package;
 pub mod pairing;
 pub mod publisher_group;
+pub mod refusal;
 pub mod welcome_rendezvous;
 
 pub use device_group::{AccountId, DeviceGroup};
@@ -40,6 +41,7 @@ pub use identity::Identity;
 pub use publisher_group::{
     channel_id_from_group_id, ChannelId, PublisherGroup, CHANNEL_EXPORTER_LABEL, CHANNEL_ID_LEN,
 };
+pub use refusal::{RefusalDisposition, RefusalReason};
 pub use welcome_rendezvous::WelcomeRendezvous;
 
 /// Re-exported MLS leaf-node index. Surfaced so callers do not need to

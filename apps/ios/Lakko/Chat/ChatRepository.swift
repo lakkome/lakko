@@ -1419,6 +1419,21 @@ public final class ChatRepository: ObservableObject {
         return (try? record.group.pendingExternalJoins()) ?? []
     }
 
+    /// ADR-0027 / UX §7.1 — whether a request the quarantine turned away has
+    /// been observed for this group since the last time an admin acted.
+    ///
+    /// Not derivable from ``pendingExternalJoins(groupIdHex:)``: an unkept
+    /// request is precisely the one that never entered that set.
+    public func sawUnkeptExternalJoin(groupIdHex: String) -> Bool {
+        groups[groupIdHex]?.sawUnkeptExternalJoin ?? false
+    }
+
+    /// Forget the unkept-request observation, because acting on the queue is
+    /// what may have made room for the request it turned away.
+    public func clearUnkeptExternalJoin(groupIdHex: String) {
+        groups[groupIdHex]?.sawUnkeptExternalJoin = false
+    }
+
     /// ADR-0028 OQ2 (G-3) — read the join-attribution envelopes from this group's
     /// journal so the admin UI can show which member's `/g/` link each pending
     /// request arrived on. For every valid attribution targeting this group
@@ -4178,6 +4193,15 @@ private final class GroupRecord {
     let groupId: Data
     private(set) var messages: [ChatMessage] = []
     private(set) var cursor: Int64 = 0
+    /// ADR-0027 / UX §7.1 — an external-join request arrived that the core did
+    /// NOT keep (the quarantine was full). It is absent from
+    /// ``Group/pendingExternalJoins()`` and can be approved by nobody, so the
+    /// members sheet cannot learn about it from the retained set — this is the
+    /// only place the fact survives.
+    ///
+    /// Read by the sheet on its next refresh and cleared when an admin acts on
+    /// the queue, which is what may have made room.
+    var sawUnkeptExternalJoin: Bool = false
 
     init(group: Group, groupId: Data) {
         self.group = group
@@ -4338,14 +4362,24 @@ private final class GroupRecord {
                 // state machine. Out-of-band — never
                 // touches the chat timeline.
                 callSignalingSink?(payloadBytes)
-            case .externalJoinRequest:
+            case .externalJoinRequest(_, _, let retained, _):
                 // ADR-0027 (G-3) — a non-member's external Add proposal,
                 // retained pending an owner/admin approval. Not a timeline
                 // row; the members sheet reads the retained set via
                 // `pendingExternalJoins(groupIdHex:)`. The `state` republish
                 // below nudges the view model to re-query when its sheet is
                 // open.
-                break
+                //
+                // Except for the one thing that read cannot see. A request the
+                // core did NOT keep is absent from the retained set, so it
+                // renders as nothing at all — correct about the Approve button
+                // and silent about the joiner, who is now waiting on an admin
+                // nobody told. §7.1 recorded that state as unsurfaceable;
+                // `retained` is what made it statable, so it is recorded here
+                // rather than dropped.
+                if case .informational = externalJoinAffordance(retained: retained) {
+                    sawUnkeptExternalJoin = true
+                }
             case .pushRoutingSecret(_, let secret, let mintEpoch, let senderLeaf, _):
                 // ADR-0042 — a `push_routing_secret` distribution envelope.
                 // Not a timeline row: routed out to the repository, which owns

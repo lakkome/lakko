@@ -83,12 +83,18 @@ public enum LeaveGroupRefusal: Equatable {
     case notRequestable
 
     /// The user-facing copy, from the UX §6 table.
+    ///
+    /// Read from ``MembershipRefusal`` rather than restated, since the core
+    /// can now refuse the same two things by reason (`ownerCannotLeave`, and
+    /// the fail-closed row). §6: "One string table, two entry points, no
+    /// second vocabulary" — a user must not be able to tell whether the local
+    /// pre-check or the core answered.
     public var message: String {
         switch self {
         case .ownerCannotLeave:
-            return "The group owner cannot leave the group."
+            return ownerCannotLeaveMessage
         case .notRequestable:
-            return "This change could not be requested."
+            return membershipRefusalFallbackMessage
         }
     }
 }

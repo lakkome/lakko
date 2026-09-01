@@ -1880,6 +1880,7 @@ private fun MembersSheet(
     val isOwner by viewModel.isOwner.collectAsStateWithLifecycle()
     val roleTable by viewModel.roleTable.collectAsStateWithLifecycle()
     val pendingJoins by viewModel.pendingJoins.collectAsStateWithLifecycle()
+    val unkeptJoinRequest by viewModel.unkeptJoinRequest.collectAsStateWithLifecycle()
     val pendingRequests by viewModel.pendingRequests.collectAsStateWithLifecycle()
     val unappliedAdds by viewModel.unappliedAdds.collectAsStateWithLifecycle()
     val pendingNotice by viewModel.pendingNotice.collectAsStateWithLifecycle()
@@ -2210,7 +2211,7 @@ private fun MembersSheet(
                 // only (same gate as add/remove); hidden when there are none.
                 // Approve drives the role-gated MLS approve + posts the commit &
                 // Welcome rendezvous; Reject drops the retained proposal.
-                if (canManage && pendingJoins.isNotEmpty()) {
+                if (canManage && (pendingJoins.isNotEmpty() || unkeptJoinRequest)) {
                     Text(
                         text = "Join requests (${pendingJoins.size})",
                         style = MaterialTheme.typography.titleSmall,
@@ -2228,6 +2229,18 @@ private fun MembersSheet(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    // ADR-0027 / UX §7.1 — a request the quarantine turned
+                    // away. It is in no row below, because the core never kept
+                    // it, and it gets no Approve for the same reason: there is
+                    // nothing to approve. Informational only, which is the most
+                    // `externalJoinAffordance` allows.
+                    if (unkeptJoinRequest) {
+                        Text(
+                            text = me.lakko.app.chat.JOIN_REQUEST_NOT_KEPT,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                     Spacer(Modifier.height(6.dp))
                     pendingJoins.forEach { ref ->
                         Row(

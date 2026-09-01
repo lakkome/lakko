@@ -829,6 +829,7 @@ mod tests {
         let bob_joiner_key = match incoming {
             Incoming::ExternalJoinProposal {
                 joiner_signature_key,
+                ..
             } => joiner_signature_key,
             other => panic!("expected ExternalJoinProposal, got {other:?}"),
         };

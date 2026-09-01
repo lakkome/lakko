@@ -124,6 +124,11 @@ impl From<lakko_mls::Error> for FfiError {
             lakko_mls::Error::Exporter(m) => Self::Exporter(m),
             lakko_mls::Error::Codec(m) => Self::Codec(m),
             lakko_mls::Error::Unsupported(m) => Self::Unsupported(m.to_string()),
+            // A membership refusal cannot arise in this process — the slim
+            // surface exposes no propose, commit or role path (C-59) — but the
+            // match is exhaustive, so the arm is written rather than
+            // wildcarded, and it keeps the sentence.
+            lakko_mls::Error::MembershipRefused { detail, .. } => Self::Group(detail),
         }
     }
 }
@@ -241,8 +246,12 @@ impl Group {
             // ADR-0045: the record is discarded on purpose — see
             // `ProcessedMessage::Proposal`.
             MlsIncoming::Proposal(_) => ProcessedMessage::Proposal,
+            // `retained` is deliberately dropped: this process cannot approve
+            // anything (C-59 — it holds no write path), so the one thing the
+            // flag decides has no consumer here.
             MlsIncoming::ExternalJoinProposal {
                 joiner_signature_key,
+                ..
             } => ProcessedMessage::ExternalJoinProposal {
                 joiner_signature_key,
             },

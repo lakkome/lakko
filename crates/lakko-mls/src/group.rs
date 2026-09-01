@@ -65,6 +65,7 @@ use crate::group_proposals::{
 };
 use crate::group_roles::{OutgoingOwner, Role, RoleTable, ROLE_EXTENSION_TYPE};
 use crate::identity::Identity;
+use crate::refusal::RefusalReason;
 
 /// Byte length of a Lakko-minted MLS group id.
 ///
@@ -319,15 +320,36 @@ pub enum Incoming {
     /// refusal — see that field's documentation for why a refused proposal is
     /// data rather than an error.
     Proposal(ProposalRecord),
-    /// A non-member's external join proposal was processed and (unless the
-    /// per-group cap is hit) retained for an owner/admin decision (ADR-0027,
-    /// G-3). `joiner_signature_key` is the prospective joiner's leaf signature
-    /// public key — the stable handle the caller passes to
+    /// A non-member's external join proposal was processed, and — if the
+    /// stranger quarantine had room — retained for an owner/admin decision
+    /// (ADR-0027, G-3). `joiner_signature_key` is the prospective joiner's leaf
+    /// signature public key: the stable handle the caller passes to
     /// [`Group::approve_external_join`] / [`Group::reject_external_join`], and
     /// the key the role table / contact graph resolve to a display name.
     ExternalJoinProposal {
         /// The prospective joiner's leaf signature public key.
         joiner_signature_key: Vec<u8>,
+        /// `true` when the request was retained and an approve can act on it.
+        ///
+        /// **`false` is the signal that an approve would fail, and a client
+        /// must not offer one.** The event fires either way — a request that
+        /// arrived while the quarantine was at
+        /// [`MAX_PENDING_EXTERNAL_JOINS`] is surfaced but not kept, because a
+        /// stranger must not be able to make a member's receive loop error and
+        /// there is nowhere to put it. Without this flag the drop was
+        /// completely silent: the admin saw a pending request in its list,
+        /// tapped Approve, and got "no pending external join for that key" for
+        /// an entry that had never existed.
+        ///
+        /// The remedy is the joiner's, not the admin's: ask again once the
+        /// quarantine has drained. So a client renders an unretained request as
+        /// informational at most, and never as actionable.
+        ///
+        /// This is deliberately the same shape as
+        /// [`ProposalRecord::stored`] — a refusal that changes no state is data
+        /// rather than an error, so the caller can render it instead of
+        /// discovering it by failing.
+        retained: bool,
     },
 }
 
@@ -538,11 +560,14 @@ impl Group {
         if pending == 0 {
             return Ok(());
         }
-        Err(Error::Group(format!(
-            "{op} refused: {pending} membership proposal(s) are pending in this group, and a \
-             direct commit would silently absorb them (ADR-0045) — sweep them with \
-             commit_pending_proposals / stage_pending_proposals instead"
-        )))
+        Err(Error::refused(
+            RefusalReason::ProposalsPending,
+            format!(
+                "{op} refused: {pending} membership proposal(s) are pending in this group, and a \
+                 direct commit would silently absorb them (ADR-0045) — sweep them with \
+                 commit_pending_proposals / stage_pending_proposals instead"
+            ),
+        ))
     }
 
     /// Refuse a role-table rewrite while another one is already pending
@@ -591,12 +616,15 @@ impl Group {
         if pending == 0 {
             return Ok(());
         }
-        Err(Error::Group(format!(
-            "{op} refused: {pending} role-table change(s) are already pending in this group, and \
-             RFC 9420 admits at most one GroupContextExtensions proposal per commit, so a second \
-             one could not be swept (ADR-0045) — wait for the pending change to be committed, \
-             then propose again"
-        )))
+        Err(Error::refused(
+            RefusalReason::RoleChangePending,
+            format!(
+                "{op} refused: {pending} role-table change(s) are already pending in this group, \
+                 and RFC 9420 admits at most one GroupContextExtensions proposal per commit, so a \
+                 second one could not be swept (ADR-0045) — wait for the pending change to be \
+                 committed, then propose again"
+            ),
+        ))
     }
 
     /// Add a member by their published [`KeyPackage`].
@@ -819,8 +847,17 @@ impl Group {
                 key_package,
             });
         }
+        // Report whether an approve can act on this, rather than leaving the
+        // caller to find out by failing. `already_pending` counts as retained:
+        // the entry is there, this event is just a duplicate of one already
+        // seen. `already_a_member` and a full quarantine do not.
+        let retained = self
+            .pending_external_joins
+            .iter()
+            .any(|p| p.joiner_signature_key == joiner_signature_key);
         Ok(Incoming::ExternalJoinProposal {
             joiner_signature_key,
+            retained,
         })
     }
 
@@ -896,16 +933,21 @@ impl Group {
     /// request nobody can get back.
     fn pending_external_join_key_package(&self, proposal_ref: &[u8]) -> Result<KeyPackage> {
         if self.joiner_is_already_a_member(proposal_ref) {
-            return Err(Error::Group(
-                "external join approve refused: that joiner is already a member of this group"
-                    .into(),
+            return Err(Error::refused(
+                RefusalReason::JoinerAlreadyAMember,
+                "external join approve refused: that joiner is already a member of this group",
             ));
         }
         self.pending_external_joins
             .iter()
             .find(|p| p.joiner_signature_key == proposal_ref)
             .map(|p| p.key_package.clone())
-            .ok_or_else(|| Error::Group("no pending external join for that key".into()))
+            .ok_or_else(|| {
+                Error::refused(
+                    RefusalReason::NoSuchJoinRequest,
+                    "no pending external join for that key",
+                )
+            })
     }
 
     /// Discard the retained request for `proposal_ref`. Idempotent.
@@ -1036,7 +1078,12 @@ impl Group {
             .pending_external_joins
             .iter()
             .position(|p| p.joiner_signature_key == proposal_ref)
-            .ok_or_else(|| Error::Group("no pending external join for that key".into()))?;
+            .ok_or_else(|| {
+                Error::refused(
+                    RefusalReason::NoSuchJoinRequest,
+                    "no pending external join for that key",
+                )
+            })?;
         self.pending_external_joins.remove(pos);
         Ok(())
     }
@@ -1068,8 +1115,9 @@ impl Group {
     ) -> Result<()> {
         let table = self.role_table_or_refuse("role-table change")?;
         if !table.is_owner(identity.signature_public_key()) {
-            return Err(Error::Group(
-                "role-table change refused: this device is not the group owner".into(),
+            return Err(Error::refused(
+                RefusalReason::NotOwner,
+                "role-table change refused: this device is not the group owner",
             ));
         }
         if !self
@@ -1077,8 +1125,9 @@ impl Group {
             .iter()
             .any(|m| m.signature_public_key.as_slice() == roles.owner().as_slice())
         {
-            return Err(Error::Group(
-                "role-table change refused: the named owner is not a member of this group".into(),
+            return Err(Error::refused(
+                RefusalReason::OwnerNotAMember,
+                "role-table change refused: the named owner is not a member of this group",
             ));
         }
         Ok(())
@@ -1144,9 +1193,10 @@ impl Group {
     /// ever commit it.
     fn role_table_or_refuse(&self, op: &str) -> Result<RoleTable> {
         self.group_roles().ok_or_else(|| {
-            Error::Group(format!(
-                "{op} refused: this group carries no role table, so it has no committer"
-            ))
+            Error::refused(
+                RefusalReason::NoRoleTable,
+                format!("{op} refused: this group carries no role table, so it has no committer"),
+            )
         })
     }
 
@@ -1176,10 +1226,13 @@ impl Group {
         };
         let capacity = pending_capacity(is_owner_response(&table, Some(proposer), kind));
         if self.inner.pending_proposals().count() >= capacity {
-            return Err(Error::Group(format!(
-                "proposal refused: this group already holds {capacity} pending proposals — a \
-                 committer must sweep them first"
-            )));
+            return Err(Error::refused(
+                RefusalReason::PendingSetFull,
+                format!(
+                    "proposal refused: this group already holds {capacity} pending proposals — a \
+                     committer must sweep them first"
+                ),
+            ));
         }
         authorise(&table, &members, Some(proposer), kind)
     }
@@ -1340,8 +1393,9 @@ impl Group {
     ) -> Result<RoleTable> {
         let table = self.role_table_or_refuse("ownership transfer")?;
         if !table.is_owner(identity.signature_public_key()) {
-            return Err(Error::Group(
-                "ownership transfer refused: this device is not the group owner".into(),
+            return Err(Error::refused(
+                RefusalReason::NotOwner,
+                "ownership transfer refused: this device is not the group owner",
             ));
         }
         let new_owner: [u8; 32] = new_owner.try_into().map_err(|_| {
@@ -1362,8 +1416,9 @@ impl Group {
             .iter()
             .any(|m| m.signature_public_key == new_owner)
         {
-            return Err(Error::Group(
-                "ownership transfer refused: the named owner is not a member of this group".into(),
+            return Err(Error::refused(
+                RefusalReason::OwnerNotAMember,
+                "ownership transfer refused: the named owner is not a member of this group",
             ));
         }
         Ok(table.with_owner_transferred(new_owner, outgoing))
@@ -1638,14 +1693,16 @@ impl Group {
         identity: &Identity,
     ) -> Result<Option<ProposalCommit>> {
         if self.has_staged_sweep() {
-            return Err(Error::Group(
-                "sweep refused: a staged sweep is already awaiting a verdict".into(),
+            return Err(Error::refused(
+                RefusalReason::SweepAlreadyStaged,
+                "sweep refused: a staged sweep is already awaiting a verdict",
             ));
         }
         let table = self.role_table_or_refuse("sweep")?;
         if !table.can_administer(identity.signature_public_key()) {
-            return Err(Error::Group(
-                "sweep refused: this device is not owner or admin".into(),
+            return Err(Error::refused(
+                RefusalReason::NotACommitter,
+                "sweep refused: this device is not owner or admin",
             ));
         }
         let members = self.members();
@@ -5825,7 +5882,7 @@ mod external_join_tests {
         let prop = external_join_proposal(&dave, &alice_g.group_id(), alice_g.epoch());
         let incoming = alice_g.process_incoming(&alice, &prop).expect("process");
         assert!(
-            matches!(&incoming, Incoming::ExternalJoinProposal { joiner_signature_key }
+            matches!(&incoming, Incoming::ExternalJoinProposal { joiner_signature_key, .. }
                 if *joiner_signature_key == dave_pk),
             "got {incoming:?}",
         );
@@ -6002,7 +6059,7 @@ mod external_join_tests {
         // Admin side: surface + approve. The approve is a PROPOSAL now.
         let incoming = alice_g.process_incoming(&alice, &prop).expect("process");
         assert!(
-            matches!(&incoming, Incoming::ExternalJoinProposal { joiner_signature_key }
+            matches!(&incoming, Incoming::ExternalJoinProposal { joiner_signature_key, .. }
                 if *joiner_signature_key == dave_pk),
             "got {incoming:?}",
         );

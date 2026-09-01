@@ -96,7 +96,7 @@ internal const val NO_TRANSFER_CANDIDATES: String =
  * the group's state neutrally.
  */
 internal const val ROLE_CHANGE_ALREADY_PENDING: String =
-    "A role change is already waiting to apply. Wait for it to land, then try again."
+    "$ROLE_CHANGE_PENDING $RETRY_WHEN_IT_LANDS"
 
 /** §6.1.5 — the headline of the irreversibility statement. It sits **above**
  *  the role choice: below it, the pre-selected option reads as the safe one and

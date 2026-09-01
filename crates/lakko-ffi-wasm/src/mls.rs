@@ -12,16 +12,141 @@ use lakko_mls::group::MemberAddition;
 use lakko_mls::{
     group, key_package, ChannelId as MlsChannelId, DeviceGroup as MlsDeviceGroup,
     Group as MlsGroup, Identity as MlsIdentity, Incoming as MlsIncoming,
-    PublisherGroup as MlsPublisherGroup, Role as MlsRole, RoleTable as MlsRoleTable,
+    PublisherGroup as MlsPublisherGroup, RefusalReason as MlsRefusalReason, Role as MlsRole,
+    RoleTable as MlsRoleTable,
 };
 use wasm_bindgen::prelude::*;
 
-/// Map a `lakko_mls::Error` to a `JsError` that surfaces in JS as a
-/// thrown `Error` with the message preserved. We deliberately don't
-/// expose a structured JS class for errors — adding one is cheap
-/// when `apps/web` actually needs to discriminate.
-fn mls_err(e: lakko_mls::Error) -> JsError {
-    JsError::new(&format!("{e}"))
+/// A failure on its way out to JS: the sentence, plus the machine-readable
+/// membership-refusal reason when there is one.
+///
+/// **Why this exists rather than a bare `String`.** Everything in this file
+/// used to flatten a `lakko_mls::Error` to its `Display` text, so a web client
+/// wanting one of the fixed refusal strings the UX spec specifies had exactly
+/// one way to tell them apart: substring-match the sentence the core happened
+/// to write. That is a drift class, not a mechanism. The reason now rides
+/// beside the message all the way to the thrown object.
+///
+/// It is a plain Rust value rather than a `JsValue` because `js_sys` cannot run
+/// off `wasm32`, and the host suite is where a mapping mistake would actually
+/// be caught. [`Self::into_js`] is the last hop and the only wasm-only part.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MlsFailure {
+    /// The human-readable sentence — becomes `err.message`.
+    pub(crate) message: String,
+    /// Why a membership operation was refused, or `None` when this failure is
+    /// not a refusal at all (a codec failure, an OpenMLS validation failure, a
+    /// poisoned lock). `None` is meaningful: it tells a client "this is not a
+    /// permission answer", which it renders with its fail-closed fallback.
+    pub(crate) reason: Option<MlsRefusalReason>,
+}
+
+impl From<lakko_mls::Error> for MlsFailure {
+    fn from(e: lakko_mls::Error) -> Self {
+        Self {
+            reason: e.refusal_reason(),
+            message: e.to_string(),
+        }
+    }
+}
+
+impl From<String> for MlsFailure {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            reason: None,
+        }
+    }
+}
+
+impl From<&str> for MlsFailure {
+    fn from(message: &str) -> Self {
+        Self {
+            message: message.to_string(),
+            reason: None,
+        }
+    }
+}
+
+impl MlsFailure {
+    /// Build the JS value that is actually thrown: a real `Error` (so
+    /// `instanceof Error`, `.message` and a stack all work as before) carrying
+    /// two extra own properties when this is a membership refusal —
+    /// `refusalReason` (the stable code) and `refusalDisposition`
+    /// (`"retryLater"` / `"doNotRetry"` / `"notPermitted"`).
+    ///
+    /// Properties rather than a message prefix: a caller reads
+    /// `err.refusalReason`, it parses nothing, and adding the fields breaks no
+    /// existing handler that only looks at `message`.
+    fn into_js(self) -> JsValue {
+        let err = js_sys::Error::new(&self.message);
+        if let Some(reason) = self.reason {
+            let target: &JsValue = err.as_ref();
+            // Best-effort: a failed property write must not replace the error
+            // being reported with a different one. The caller still gets the
+            // sentence, and falls back to its fail-closed copy.
+            let _ = js_sys::Reflect::set(
+                target,
+                &JsValue::from_str("refusalReason"),
+                &JsValue::from_str(reason.code()),
+            );
+            let _ = js_sys::Reflect::set(
+                target,
+                &JsValue::from_str("refusalDisposition"),
+                &JsValue::from_str(reason.disposition().code()),
+            );
+        }
+        err.into()
+    }
+}
+
+/// A plain thrown `Error` with `message`, for failures that are not
+/// `lakko_mls::Error`s.
+fn js_error(message: &str) -> JsValue {
+    js_sys::Error::new(message).into()
+}
+
+/// Map a `lakko_mls::Error` to the value thrown in JS: an `Error` with the
+/// message preserved, plus `refusalReason` / `refusalClass` when it is a
+/// membership refusal (ADR-0045 §9.1 item 1).
+fn mls_err(e: lakko_mls::Error) -> JsValue {
+    MlsFailure::from(e).into_js()
+}
+
+/// What the caller should do about a membership-refusal code —
+/// `"retryLater"`, `"doNotRetry"` or `"notPermitted"`, and `null` for an
+/// unknown code.
+///
+/// **Three-valued, and the middle value is the point.** "Not permitted" and
+/// "retry later" are the obvious two, and they leave out the commonest case: a
+/// request that is allowed but cannot be accepted **as formed**, ever. Retrying
+/// that loops forever. The rule is: retryable exactly when a bounded queue was
+/// full.
+///
+/// The thrown error already carries `refusalDisposition`, so this is for a
+/// caller that kept a code and wants to re-ask later. Ask it rather than
+/// deciding from the code's spelling: the rule lives in the core so it cannot
+/// drift between web, iOS and Android.
+#[wasm_bindgen(js_name = membershipRefusalDisposition)]
+#[must_use]
+pub fn membership_refusal_disposition(reason: &str) -> Option<String> {
+    refusal_reason_from_code(reason).map(|r| r.disposition().code().to_string())
+}
+
+/// `true` when the **identical** call will succeed once a committer has swept,
+/// with the caller doing nothing else — i.e. when the UI may offer a plain
+/// retry. An unknown code is `false`, which is the fail-closed direction: no
+/// retry is offered for a refusal this build does not understand.
+#[wasm_bindgen(js_name = membershipRefusalRetryMaySucceed)]
+#[must_use]
+pub fn membership_refusal_retry_may_succeed(reason: &str) -> bool {
+    refusal_reason_from_code(reason).is_some_and(MlsRefusalReason::retry_may_succeed)
+}
+
+/// Look a reason up by its stable code. Not a parser of prose — the code is
+/// the value the thrown error handed the caller.
+fn refusal_reason_from_code(code: &str) -> Option<MlsRefusalReason> {
+    MlsRefusalReason::ALL.into_iter().find(|r| r.code() == code)
 }
 
 /// Build an [`MlsRoleTable`] from the flat key material the wasm surface
@@ -69,7 +194,7 @@ pub struct Identity {
 impl Identity {
     /// Generate a fresh identity with the given user-display label.
     #[wasm_bindgen(constructor)]
-    pub fn new(name: &str) -> Result<Identity, JsError> {
+    pub fn new(name: &str) -> Result<Identity, JsValue> {
         let inner = MlsIdentity::generate(name).map_err(mls_err)?;
         Ok(Self { inner })
     }
@@ -83,7 +208,7 @@ impl Identity {
     /// long-lived public keys without persisting Identity bytes
     /// anywhere.
     #[wasm_bindgen(js_name = fromSeed)]
-    pub fn from_seed(seed: &[u8]) -> Result<Identity, JsError> {
+    pub fn from_seed(seed: &[u8]) -> Result<Identity, JsValue> {
         let inner = MlsIdentity::from_seed(seed).map_err(mls_err)?;
         Ok(Self { inner })
     }
@@ -140,7 +265,7 @@ impl Identity {
     /// IndexedDB so the on-disk bytes can't be lifted by
     /// page-level JavaScript.
     #[wasm_bindgen(js_name = snapshotStorage)]
-    pub fn snapshot_storage(&self) -> Result<Vec<u8>, JsError> {
+    pub fn snapshot_storage(&self) -> Result<Vec<u8>, JsValue> {
         self.inner.snapshot_storage().map_err(mls_err)
     }
 
@@ -150,13 +275,13 @@ impl Identity {
     /// see the Rust-side docstring for the seed-pairing
     /// requirement.
     #[wasm_bindgen(js_name = restoreStorage)]
-    pub fn restore_storage(&self, snapshot: &[u8]) -> Result<(), JsError> {
+    pub fn restore_storage(&self, snapshot: &[u8]) -> Result<(), JsValue> {
         self.inner.restore_storage(snapshot).map_err(mls_err)
     }
 
     /// Create a fresh KeyPackage in TLS wire form.
     #[wasm_bindgen(js_name = createKeyPackage)]
-    pub fn create_key_package(&self) -> Result<Vec<u8>, JsError> {
+    pub fn create_key_package(&self) -> Result<Vec<u8>, JsValue> {
         let kp = self.inner.create_key_package().map_err(mls_err)?;
         key_package::serialize(&kp).map_err(mls_err)
     }
@@ -176,7 +301,7 @@ impl Identity {
         &self,
         group_id: &[u8],
         epoch: u64,
-    ) -> Result<Vec<u8>, JsError> {
+    ) -> Result<Vec<u8>, JsValue> {
         self.inner
             .create_external_join_proposal(group_id, epoch)
             .map_err(mls_err)
@@ -193,7 +318,7 @@ impl Identity {
 ///
 /// `JsError` on a KeyPackage parse failure.
 #[wasm_bindgen(js_name = keyPackageSignatureKey)]
-pub fn key_package_signature_key(key_package: &[u8]) -> Result<Vec<u8>, JsError> {
+pub fn key_package_signature_key(key_package: &[u8]) -> Result<Vec<u8>, JsValue> {
     key_package::signature_key(key_package).map_err(mls_err)
 }
 
@@ -296,6 +421,7 @@ pub struct ProcessedMessage {
     application_data: Option<Vec<u8>>,
     sender_leaf: Option<u32>,
     external_join_signature_key: Option<Vec<u8>>,
+    external_join_retained: bool,
     proposal: Option<ProposalRecord>,
 }
 
@@ -308,6 +434,7 @@ impl ProcessedMessage {
             application_data: Some(data),
             sender_leaf,
             external_join_signature_key: None,
+            external_join_retained: false,
             proposal: None,
         }
     }
@@ -320,6 +447,7 @@ impl ProcessedMessage {
             application_data: None,
             sender_leaf: None,
             external_join_signature_key: None,
+            external_join_retained: false,
             proposal: None,
         }
     }
@@ -332,18 +460,21 @@ impl ProcessedMessage {
             application_data: None,
             sender_leaf: record.sender_leaf,
             external_join_signature_key: None,
+            external_join_retained: false,
             proposal: Some(record.into()),
         }
     }
 
     /// Construct an external-join-proposal result carrying the joiner's
-    /// signature key (ADR-0027, G-3).
-    fn external_join(joiner_signature_key: Vec<u8>) -> Self {
+    /// signature key and whether the stranger quarantine kept it (ADR-0027,
+    /// G-3).
+    fn external_join(joiner_signature_key: Vec<u8>, retained: bool) -> Self {
         Self {
             kind: ProcessedMessageKind::ExternalJoinProposal,
             application_data: None,
             sender_leaf: None,
             external_join_signature_key: Some(joiner_signature_key),
+            external_join_retained: retained,
             proposal: None,
         }
     }
@@ -385,6 +516,22 @@ impl ProcessedMessage {
     #[wasm_bindgen(getter, js_name = externalJoinSignatureKey)]
     pub fn external_join_signature_key(&self) -> Option<Vec<u8>> {
         self.external_join_signature_key.clone()
+    }
+
+    /// Whether an external-join request was **retained**, so an approve can act
+    /// on it. Meaningful only when `kind === "ExternalJoinProposal"`; `false`
+    /// for every other kind.
+    ///
+    /// **`false` means an approve would fail, so do not offer one.** The event
+    /// fires either way — a request arriving while the stranger quarantine is
+    /// full is surfaced but not kept, because a stranger must not be able to
+    /// make a member's receive loop error. Rendering an unretained request as
+    /// actionable is exactly the shape that offers a user an action that cannot
+    /// work. The remedy belongs to the joiner (ask again later), not the admin.
+    #[wasm_bindgen(getter, js_name = externalJoinRetained)]
+    #[must_use]
+    pub fn external_join_retained(&self) -> bool {
+        self.external_join_retained
     }
 
     /// The ADR-0045 proposal record, present **iff** `kind === "Proposal"` and
@@ -703,12 +850,17 @@ impl From<OutgoingOwner> for lakko_mls::OutgoingOwner {
 /// refusal, following the crate's coded-`JsError` convention (`stale:` /
 /// `invalid:` in `backup.rs`, `release:` in `release.rs`).
 ///
-/// The web client branches on `err.message.startsWith("sweep-already-staged:")`
-/// rather than matching prose, so the message text can change without breaking
-/// the caller. It is the one refusal on the staged path a caller is expected to
-/// **handle** rather than log: it means this device already published a sweep
-/// and has not yet told the core whether it won or lost, and the correct
-/// response is to reach that verdict, never to retry the stage.
+/// **Superseded, and retained only because it costs nothing.** Every membership
+/// refusal now arrives with `err.refusalReason` — for this one,
+/// `"sweepAlreadyStaged"` — which is a property read rather than a prefix
+/// match, so new callers should branch on that. The prefix is kept on the
+/// message because it is documented behaviour and removing it would be a
+/// silent behaviour change for anything that already reads it.
+///
+/// It is the one refusal on the staged path a caller is expected to **handle**
+/// rather than log: it means this device already published a sweep and has not
+/// yet told the core whether it won or lost, and the correct response is to
+/// reach that verdict, never to retry the stage.
 pub const SWEEP_ALREADY_STAGED_CODE: &str = "sweep-already-staged:";
 
 /// A member's role in an ADR-0022 role-enabled group. Mirror of UniFFI's
@@ -740,7 +892,7 @@ impl Group {
     /// Create a fresh group with `identity` as the founding member.
     /// Mirror of UniFFI's `Group::create`.
     #[wasm_bindgen(constructor)]
-    pub fn new(identity: &Identity) -> Result<Group, JsError> {
+    pub fn new(identity: &Identity) -> Result<Group, JsValue> {
         let inner = MlsGroup::create(&identity.inner).map_err(mls_err)?;
         Ok(Self {
             inner: Mutex::new(inner),
@@ -749,7 +901,7 @@ impl Group {
 
     /// Join an existing group from a wire-format Welcome message.
     #[wasm_bindgen(js_name = joinFromWelcome)]
-    pub fn join_from_welcome(welcome: &[u8], identity: &Identity) -> Result<Group, JsError> {
+    pub fn join_from_welcome(welcome: &[u8], identity: &Identity) -> Result<Group, JsValue> {
         let inner = MlsGroup::join_from_welcome(welcome, &identity.inner).map_err(mls_err)?;
         Ok(Self {
             inner: Mutex::new(inner),
@@ -768,7 +920,7 @@ impl Group {
     /// distinguish "no group with that id" from "corrupt
     /// storage".
     #[wasm_bindgen(js_name = load)]
-    pub fn load(identity: &Identity, group_id: &[u8]) -> Result<Option<Group>, JsError> {
+    pub fn load(identity: &Identity, group_id: &[u8]) -> Result<Option<Group>, JsValue> {
         match MlsGroup::load(&identity.inner, group_id).map_err(mls_err)? {
             Some(inner) => Ok(Some(Self {
                 inner: Mutex::new(inner),
@@ -783,11 +935,11 @@ impl Group {
         &self,
         identity: &Identity,
         key_package: &[u8],
-    ) -> Result<AddMember, JsError> {
+    ) -> Result<AddMember, JsValue> {
         let mut g = self
             .inner
             .lock()
-            .map_err(|_| JsError::new("internal lock poisoned"))?;
+            .map_err(|_| js_error("internal lock poisoned"))?;
         let MemberAddition { commit, welcome } = g
             .add_member_from_wire(&identity.inner, key_package)
             .map_err(mls_err)?;
@@ -826,11 +978,11 @@ impl Group {
         &self,
         identity: &Identity,
         proposal_ref: &[u8],
-    ) -> Result<Vec<u8>, JsError> {
+    ) -> Result<Vec<u8>, JsValue> {
         let mut g = self
             .inner
             .lock()
-            .map_err(|_| JsError::new("internal lock poisoned"))?;
+            .map_err(|_| js_error("internal lock poisoned"))?;
         g.approve_external_join(&identity.inner, proposal_ref)
             .map_err(mls_err)
     }
@@ -838,11 +990,11 @@ impl Group {
     /// Reject a retained external-join proposal — discards it locally without
     /// adding the joiner or advancing the epoch (ADR-0027).
     #[wasm_bindgen(js_name = rejectExternalJoin)]
-    pub fn reject_external_join(&self, proposal_ref: &[u8]) -> Result<(), JsError> {
+    pub fn reject_external_join(&self, proposal_ref: &[u8]) -> Result<(), JsValue> {
         let mut g = self
             .inner
             .lock()
-            .map_err(|_| JsError::new("internal lock poisoned"))?;
+            .map_err(|_| js_error("internal lock poisoned"))?;
         g.reject_external_join(proposal_ref).map_err(mls_err)?;
         Ok(())
     }
@@ -852,22 +1004,22 @@ impl Group {
     /// the caller slices into 32-byte chunks (the role-table FFI convention).
     /// Each chunk is a handle for `approveExternalJoin` / `rejectExternalJoin`.
     #[wasm_bindgen(js_name = pendingExternalJoins)]
-    pub fn pending_external_joins(&self) -> Result<Vec<u8>, JsError> {
+    pub fn pending_external_joins(&self) -> Result<Vec<u8>, JsValue> {
         let g = self
             .inner
             .lock()
-            .map_err(|_| JsError::new("internal lock poisoned"))?;
+            .map_err(|_| js_error("internal lock poisoned"))?;
         Ok(g.pending_external_joins().concat())
     }
 
     /// Remove a member by their leaf index. Returns the wire-encoded
     /// commit to broadcast.
     #[wasm_bindgen(js_name = removeMember)]
-    pub fn remove_member(&self, identity: &Identity, leaf_index: u32) -> Result<Vec<u8>, JsError> {
+    pub fn remove_member(&self, identity: &Identity, leaf_index: u32) -> Result<Vec<u8>, JsValue> {
         let mut g = self
             .inner
             .lock()
-            .map_err(|_| JsError::new("internal lock poisoned"))?;
+            .map_err(|_| js_error("internal lock poisoned"))?;
         let commit = g
             .remove_member(&identity.inner, lakko_mls::LeafNodeIndex::new(leaf_index))
             .map_err(mls_err)?;
@@ -880,11 +1032,11 @@ impl Group {
         &self,
         identity: &Identity,
         plaintext: &[u8],
-    ) -> Result<Vec<u8>, JsError> {
+    ) -> Result<Vec<u8>, JsValue> {
         let mut g = self
             .inner
             .lock()
-            .map_err(|_| JsError::new("internal lock poisoned"))?;
+            .map_err(|_| js_error("internal lock poisoned"))?;
         let msg = g
             .create_application_message(&identity.inner, plaintext)
             .map_err(mls_err)?;
@@ -897,11 +1049,11 @@ impl Group {
         &self,
         identity: &Identity,
         bytes: &[u8],
-    ) -> Result<ProcessedMessage, JsError> {
+    ) -> Result<ProcessedMessage, JsValue> {
         let mut g = self
             .inner
             .lock()
-            .map_err(|_| JsError::new("internal lock poisoned"))?;
+            .map_err(|_| js_error("internal lock poisoned"))?;
         let result = g
             .process_incoming(&identity.inner, bytes)
             .map_err(mls_err)?;
@@ -913,18 +1065,19 @@ impl Group {
             MlsIncoming::Proposal(record) => ProcessedMessage::from_proposal(record),
             MlsIncoming::ExternalJoinProposal {
                 joiner_signature_key,
-            } => ProcessedMessage::external_join(joiner_signature_key),
+                retained,
+            } => ProcessedMessage::external_join(joiner_signature_key, retained),
         })
     }
 
     /// This member's ADR-0022 role, or `undefined` for an open / legacy group
     /// (no role table). The web gates the add / remove / promote UI on this.
     #[wasm_bindgen(js_name = ownRole)]
-    pub fn own_role(&self, identity: &Identity) -> Result<Option<Role>, JsError> {
+    pub fn own_role(&self, identity: &Identity) -> Result<Option<Role>, JsValue> {
         let g = self
             .inner
             .lock()
-            .map_err(|_| JsError::new("internal lock poisoned"))?;
+            .map_err(|_| js_error("internal lock poisoned"))?;
         Ok(g.own_role(&identity.inner).map(|r| match r {
             MlsRole::Owner => Role::Owner,
             MlsRole::Admin => Role::Admin,
@@ -935,11 +1088,11 @@ impl Group {
     /// The role table's owner signature key (32 bytes), or `undefined` for an
     /// open / legacy group. A non-null return signals the group is role-enabled.
     #[wasm_bindgen(js_name = roleTableOwner)]
-    pub fn role_table_owner(&self) -> Result<Option<Vec<u8>>, JsError> {
+    pub fn role_table_owner(&self) -> Result<Option<Vec<u8>>, JsValue> {
         let g = self
             .inner
             .lock()
-            .map_err(|_| JsError::new("internal lock poisoned"))?;
+            .map_err(|_| js_error("internal lock poisoned"))?;
         Ok(g.group_roles().map(|t| t.owner().to_vec()))
     }
 
@@ -947,11 +1100,11 @@ impl Group {
     /// empty for an open group or one with no admins. The web slices this into
     /// 32-byte chunks.
     #[wasm_bindgen(js_name = roleTableAdmins)]
-    pub fn role_table_admins(&self) -> Result<Vec<u8>, JsError> {
+    pub fn role_table_admins(&self) -> Result<Vec<u8>, JsValue> {
         let g = self
             .inner
             .lock()
-            .map_err(|_| JsError::new("internal lock poisoned"))?;
+            .map_err(|_| js_error("internal lock poisoned"))?;
         Ok(g.group_roles()
             .map_or_else(Vec::new, |t| t.admins().concat()))
     }
@@ -965,13 +1118,9 @@ impl Group {
         identity: &Identity,
         owner: &[u8],
         admins_flat: &[u8],
-    ) -> Result<Vec<u8>, JsError> {
-        let table = role_table_from_flat(owner, admins_flat).map_err(JsError::new)?;
-        let mut g = self
-            .inner
-            .lock()
-            .map_err(|_| JsError::new("internal lock poisoned"))?;
-        g.set_group_roles(&identity.inner, &table).map_err(mls_err)
+    ) -> Result<Vec<u8>, JsValue> {
+        self.set_group_roles_core(identity, owner, admins_flat)
+            .map_err(MlsFailure::into_js)
     }
 
     /// **Propose** adding a member from their published KeyPackage — the
@@ -991,9 +1140,9 @@ impl Group {
         &self,
         identity: &Identity,
         key_package: &[u8],
-    ) -> Result<Vec<u8>, JsError> {
+    ) -> Result<Vec<u8>, JsValue> {
         self.propose_add_member_core(identity, key_package)
-            .map_err(|m| JsError::new(&m))
+            .map_err(MlsFailure::into_js)
     }
 
     /// **Propose** removing the member at `leaf_index` — the ADR-0045
@@ -1008,9 +1157,9 @@ impl Group {
         &self,
         identity: &Identity,
         leaf_index: u32,
-    ) -> Result<Vec<u8>, JsError> {
+    ) -> Result<Vec<u8>, JsValue> {
         self.propose_remove_member_core(identity, leaf_index)
-            .map_err(|m| JsError::new(&m))
+            .map_err(MlsFailure::into_js)
     }
 
     /// **Propose** rewriting the ADR-0022 role table — the ADR-0045
@@ -1033,9 +1182,9 @@ impl Group {
         identity: &Identity,
         owner: &[u8],
         admins_flat: &[u8],
-    ) -> Result<Vec<u8>, JsError> {
+    ) -> Result<Vec<u8>, JsValue> {
         self.propose_group_roles_core(identity, owner, admins_flat)
-            .map_err(|m| JsError::new(&m))
+            .map_err(MlsFailure::into_js)
     }
 
     /// Every ADR-0045 proposal currently in this device's pending set, in the
@@ -1049,10 +1198,10 @@ impl Group {
     /// else, and OpenMLS empties the whole store on every merged commit, so the
     /// set is exactly what a sweep would consider.
     #[wasm_bindgen(js_name = pendingProposals)]
-    pub fn pending_proposals(&self) -> Result<Vec<JsValue>, JsError> {
+    pub fn pending_proposals(&self) -> Result<Vec<JsValue>, JsValue> {
         Ok(self
             .pending_proposals_core()
-            .map_err(|m| JsError::new(&m))?
+            .map_err(MlsFailure::into_js)?
             .into_iter()
             .map(JsValue::from)
             .collect())
@@ -1069,9 +1218,9 @@ impl Group {
     /// **wrong** in both directions — test `rank !== undefined` explicitly, and
     /// never `??`-default the value.
     #[wasm_bindgen(js_name = ownCommitterRank)]
-    pub fn own_committer_rank(&self, identity: &Identity) -> Result<Option<u32>, JsError> {
+    pub fn own_committer_rank(&self, identity: &Identity) -> Result<Option<u32>, JsValue> {
         self.own_committer_rank_core(identity)
-            .map_err(|m| JsError::new(&m))
+            .map_err(MlsFailure::into_js)
     }
 
     /// **Another** member's ADR-0045 committer rank, by its 32-byte Ed25519
@@ -1106,9 +1255,9 @@ impl Group {
     ///
     /// `JsError` if the internal group mutex was poisoned.
     #[wasm_bindgen(js_name = committerRank)]
-    pub fn committer_rank(&self, signature_key: &[u8]) -> Result<Option<u32>, JsError> {
+    pub fn committer_rank(&self, signature_key: &[u8]) -> Result<Option<u32>, JsValue> {
         self.committer_rank_core(signature_key)
-            .map_err(|m| JsError::new(&m))
+            .map_err(MlsFailure::into_js)
     }
 
     /// Sweep the authorised pending proposals into **one** Commit and merge it
@@ -1137,9 +1286,9 @@ impl Group {
     pub fn commit_pending_proposals(
         &self,
         identity: &Identity,
-    ) -> Result<Option<ProposalCommit>, JsError> {
+    ) -> Result<Option<ProposalCommit>, JsValue> {
         self.commit_pending_proposals_core(identity)
-            .map_err(|m| JsError::new(&m))
+            .map_err(MlsFailure::into_js)
     }
 
     /// Sweep the authorised pending proposals into **one** Commit and **stop
@@ -1186,9 +1335,9 @@ impl Group {
     pub fn stage_pending_proposals(
         &self,
         identity: &Identity,
-    ) -> Result<Option<StagedSweep>, JsError> {
+    ) -> Result<Option<StagedSweep>, JsValue> {
         self.stage_pending_proposals_core(identity)
-            .map_err(|m| JsError::new(&m))
+            .map_err(MlsFailure::into_js)
     }
 
     /// `true` when a sweep built by [`Self::stage_pending_proposals`] is staged
@@ -1215,8 +1364,8 @@ impl Group {
     /// [`Self::approve_external_join`] left that list with ADR-0045 S7: it
     /// merges nothing, because it commits nothing.
     #[wasm_bindgen(js_name = hasStagedSweep)]
-    pub fn has_staged_sweep(&self) -> Result<bool, JsError> {
-        self.has_staged_sweep_core().map_err(|m| JsError::new(&m))
+    pub fn has_staged_sweep(&self) -> Result<bool, JsValue> {
+        self.has_staged_sweep_core().map_err(MlsFailure::into_js)
     }
 
     /// **Won.** Merge the sweep staged by [`Self::stage_pending_proposals`],
@@ -1231,9 +1380,9 @@ impl Group {
     /// [`StagedSweepOutcome::NothingStaged`] when there was nothing staged —
     /// not a failure, and what makes a re-run after the merge a no-op.
     #[wasm_bindgen(js_name = mergeStagedSweep)]
-    pub fn merge_staged_sweep(&self, identity: &Identity) -> Result<StagedSweepOutcome, JsError> {
+    pub fn merge_staged_sweep(&self, identity: &Identity) -> Result<StagedSweepOutcome, JsValue> {
         self.merge_staged_sweep_core(identity)
-            .map_err(|m| JsError::new(&m))
+            .map_err(MlsFailure::into_js)
     }
 
     /// **Lost.** Discard the sweep staged by [`Self::stage_pending_proposals`],
@@ -1254,9 +1403,9 @@ impl Group {
     /// state afterwards and refuses to report a rollback it did not actually
     /// perform (fail-closed, invariant #4).
     #[wasm_bindgen(js_name = abandonStagedSweep)]
-    pub fn abandon_staged_sweep(&self, identity: &Identity) -> Result<StagedSweepOutcome, JsError> {
+    pub fn abandon_staged_sweep(&self, identity: &Identity) -> Result<StagedSweepOutcome, JsValue> {
         self.abandon_staged_sweep_core(identity)
-            .map_err(|m| JsError::new(&m))
+            .map_err(MlsFailure::into_js)
     }
 
     /// Hand the group's owner slot to `new_owner`, as a **direct commit**
@@ -1303,9 +1452,9 @@ impl Group {
         identity: &Identity,
         new_owner: &[u8],
         outgoing: OutgoingOwner,
-    ) -> Result<Vec<u8>, JsError> {
+    ) -> Result<Vec<u8>, JsValue> {
         self.transfer_ownership_core(identity, new_owner, outgoing)
-            .map_err(|m| JsError::new(&m))
+            .map_err(MlsFailure::into_js)
     }
 
     /// **Propose** handing the group's owner slot to `new_owner` (ADR-0045) —
@@ -1323,9 +1472,9 @@ impl Group {
         identity: &Identity,
         new_owner: &[u8],
         outgoing: OutgoingOwner,
-    ) -> Result<Vec<u8>, JsError> {
+    ) -> Result<Vec<u8>, JsValue> {
         self.propose_ownership_transfer_core(identity, new_owner, outgoing)
-            .map_err(|m| JsError::new(&m))
+            .map_err(MlsFailure::into_js)
     }
 
     /// Apply an incoming commit ENFORCING the ADR-0022 role policy — a commit
@@ -1338,24 +1487,9 @@ impl Group {
         &self,
         identity: &Identity,
         bytes: &[u8],
-    ) -> Result<ProcessedMessage, JsError> {
-        let mut g = self
-            .inner
-            .lock()
-            .map_err(|_| JsError::new("internal lock poisoned"))?;
-        let result = g
-            .process_incoming_verifying_roles(&identity.inner, bytes)
-            .map_err(mls_err)?;
-        Ok(match result {
-            MlsIncoming::Application { bytes, sender_leaf } => {
-                ProcessedMessage::application(bytes, sender_leaf)
-            },
-            MlsIncoming::Commit => ProcessedMessage::control(ProcessedMessageKind::Commit),
-            MlsIncoming::Proposal(record) => ProcessedMessage::from_proposal(record),
-            MlsIncoming::ExternalJoinProposal {
-                joiner_signature_key,
-            } => ProcessedMessage::external_join(joiner_signature_key),
-        })
+    ) -> Result<ProcessedMessage, JsValue> {
+        self.process_incoming_verifying_roles_core(identity, bytes)
+            .map_err(MlsFailure::into_js)
     }
 
     /// Derive a `length`-byte secret bound to the current epoch.
@@ -1366,11 +1500,11 @@ impl Group {
         label: &str,
         context: &[u8],
         length: u32,
-    ) -> Result<Vec<u8>, JsError> {
+    ) -> Result<Vec<u8>, JsValue> {
         let g = self
             .inner
             .lock()
-            .map_err(|_| JsError::new("internal lock poisoned"))?;
+            .map_err(|_| js_error("internal lock poisoned"))?;
         let secret = g
             .export_secret(&identity.inner, label, context, length as usize)
             .map_err(mls_err)?;
@@ -1402,41 +1536,41 @@ impl Group {
     /// key being the account key, which ADR-0022's per-device-leaf follow-up
     /// would break silently.
     #[wasm_bindgen(getter, js_name = isActive)]
-    pub fn is_active(&self) -> Result<bool, JsError> {
+    pub fn is_active(&self) -> Result<bool, JsValue> {
         let g = self
             .inner
             .lock()
-            .map_err(|_| JsError::new("internal lock poisoned"))?;
+            .map_err(|_| js_error("internal lock poisoned"))?;
         Ok(g.is_active())
     }
 
     /// Local leaf index of the calling identity.
     #[wasm_bindgen(getter, js_name = ownLeafIndex)]
-    pub fn own_leaf_index(&self) -> Result<u32, JsError> {
+    pub fn own_leaf_index(&self) -> Result<u32, JsValue> {
         let g = self
             .inner
             .lock()
-            .map_err(|_| JsError::new("internal lock poisoned"))?;
+            .map_err(|_| js_error("internal lock poisoned"))?;
         Ok(g.own_leaf_index().u32())
     }
 
     /// Current group epoch.
     #[wasm_bindgen(getter)]
-    pub fn epoch(&self) -> Result<u64, JsError> {
+    pub fn epoch(&self) -> Result<u64, JsValue> {
         let g = self
             .inner
             .lock()
-            .map_err(|_| JsError::new("internal lock poisoned"))?;
+            .map_err(|_| js_error("internal lock poisoned"))?;
         Ok(g.epoch())
     }
 
     /// Number of members at the current epoch.
     #[wasm_bindgen(getter, js_name = memberCount)]
-    pub fn member_count(&self) -> Result<u32, JsError> {
+    pub fn member_count(&self) -> Result<u32, JsValue> {
         let g = self
             .inner
             .lock()
-            .map_err(|_| JsError::new("internal lock poisoned"))?;
+            .map_err(|_| js_error("internal lock poisoned"))?;
         Ok(u32::try_from(g.member_count()).unwrap_or(u32::MAX))
     }
 
@@ -1449,11 +1583,11 @@ impl Group {
     /// bytes, so `Group::create` mints the id itself. Identical
     /// for every member of the group at every epoch.
     #[wasm_bindgen(getter, js_name = groupId)]
-    pub fn group_id(&self) -> Result<Vec<u8>, JsError> {
+    pub fn group_id(&self) -> Result<Vec<u8>, JsValue> {
         let g = self
             .inner
             .lock()
-            .map_err(|_| JsError::new("internal lock poisoned"))?;
+            .map_err(|_| js_error("internal lock poisoned"))?;
         Ok(g.group_id())
     }
 
@@ -1469,11 +1603,11 @@ impl Group {
     /// Ordering matches `lakko_mls::Group::members` — left-to-right
     /// over the leaf tree, stable inside a single epoch.
     #[wasm_bindgen]
-    pub fn members(&self) -> Result<Vec<JsValue>, JsError> {
+    pub fn members(&self) -> Result<Vec<JsValue>, JsValue> {
         let g = self
             .inner
             .lock()
-            .map_err(|_| JsError::new("internal lock poisoned"))?;
+            .map_err(|_| js_error("internal lock poisoned"))?;
         Ok(g.members()
             .into_iter()
             .map(|m| {
@@ -1488,17 +1622,58 @@ impl Group {
 
 /// Host-testable cores of the ADR-0045 proposal surface.
 ///
-/// `JsValue` and `JsError` can only be constructed on the `wasm32` target, so
-/// every exported method above is unreachable from `cargo test`. Keeping the
-/// behaviour here — in plain Rust, erroring with a `String` that the wrapper
-/// turns into the identical `JsError` message — is what lets the host suite
-/// cover ADR-0045 end to end instead of only its happy path.
+/// `JsValue` can only be constructed on the `wasm32` target, so every exported
+/// method above is unreachable from `cargo test`. Keeping the behaviour here —
+/// in plain Rust, erroring with an [`MlsFailure`] the wrapper turns into the
+/// thrown `Error` — is what lets the host suite cover ADR-0045 end to end
+/// instead of only its happy path.
+///
+/// [`MlsFailure`] rather than a bare `String` is what keeps a membership
+/// refusal's typed reason alive down here, where the assertions are: flattening
+/// to text at this layer would mean the only thing the host suite could check
+/// about a refusal is its prose.
 impl Group {
     /// Lock the inner group, reporting poisoning as a plain message.
-    fn locked(&self) -> Result<std::sync::MutexGuard<'_, MlsGroup>, String> {
+    fn locked(&self) -> Result<std::sync::MutexGuard<'_, MlsGroup>, MlsFailure> {
         self.inner
             .lock()
-            .map_err(|_| "internal lock poisoned".to_string())
+            .map_err(|_| "internal lock poisoned".into())
+    }
+
+    /// Core of [`Self::set_group_roles`].
+    fn set_group_roles_core(
+        &self,
+        identity: &Identity,
+        owner: &[u8],
+        admins_flat: &[u8],
+    ) -> Result<Vec<u8>, MlsFailure> {
+        let table = role_table_from_flat(owner, admins_flat).map_err(MlsFailure::from)?;
+        self.locked()?
+            .set_group_roles(&identity.inner, &table)
+            .map_err(MlsFailure::from)
+    }
+
+    /// Core of [`Self::process_incoming_verifying_roles`].
+    fn process_incoming_verifying_roles_core(
+        &self,
+        identity: &Identity,
+        bytes: &[u8],
+    ) -> Result<ProcessedMessage, MlsFailure> {
+        let result = self
+            .locked()?
+            .process_incoming_verifying_roles(&identity.inner, bytes)
+            .map_err(MlsFailure::from)?;
+        Ok(match result {
+            MlsIncoming::Application { bytes, sender_leaf } => {
+                ProcessedMessage::application(bytes, sender_leaf)
+            },
+            MlsIncoming::Commit => ProcessedMessage::control(ProcessedMessageKind::Commit),
+            MlsIncoming::Proposal(record) => ProcessedMessage::from_proposal(record),
+            MlsIncoming::ExternalJoinProposal {
+                joiner_signature_key,
+                retained,
+            } => ProcessedMessage::external_join(joiner_signature_key, retained),
+        })
     }
 
     /// Core of [`Self::propose_add_member`].
@@ -1506,10 +1681,10 @@ impl Group {
         &self,
         identity: &Identity,
         key_package: &[u8],
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<Vec<u8>, MlsFailure> {
         self.locked()?
             .propose_add_member_from_wire(&identity.inner, key_package)
-            .map_err(|e| e.to_string())
+            .map_err(MlsFailure::from)
     }
 
     /// Core of [`Self::propose_remove_member`].
@@ -1517,10 +1692,10 @@ impl Group {
         &self,
         identity: &Identity,
         leaf_index: u32,
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<Vec<u8>, MlsFailure> {
         self.locked()?
             .propose_remove_member(&identity.inner, lakko_mls::LeafNodeIndex::new(leaf_index))
-            .map_err(|e| e.to_string())
+            .map_err(MlsFailure::from)
     }
 
     /// Core of [`Self::propose_group_roles`].
@@ -1529,15 +1704,15 @@ impl Group {
         identity: &Identity,
         owner: &[u8],
         admins_flat: &[u8],
-    ) -> Result<Vec<u8>, String> {
-        let table = role_table_from_flat(owner, admins_flat).map_err(ToString::to_string)?;
+    ) -> Result<Vec<u8>, MlsFailure> {
+        let table = role_table_from_flat(owner, admins_flat).map_err(MlsFailure::from)?;
         self.locked()?
             .propose_group_roles(&identity.inner, &table)
-            .map_err(|e| e.to_string())
+            .map_err(MlsFailure::from)
     }
 
     /// Core of [`Self::pending_proposals`].
-    fn pending_proposals_core(&self) -> Result<Vec<ProposalRecord>, String> {
+    fn pending_proposals_core(&self) -> Result<Vec<ProposalRecord>, MlsFailure> {
         Ok(self
             .locked()?
             .pending_proposals()
@@ -1547,12 +1722,12 @@ impl Group {
     }
 
     /// Core of [`Self::own_committer_rank`].
-    fn own_committer_rank_core(&self, identity: &Identity) -> Result<Option<u32>, String> {
+    fn own_committer_rank_core(&self, identity: &Identity) -> Result<Option<u32>, MlsFailure> {
         Ok(self.locked()?.own_committer_rank(&identity.inner))
     }
 
     /// Core of [`Self::committer_rank`].
-    fn committer_rank_core(&self, signature_key: &[u8]) -> Result<Option<u32>, String> {
+    fn committer_rank_core(&self, signature_key: &[u8]) -> Result<Option<u32>, MlsFailure> {
         Ok(self
             .locked()?
             .group_roles()
@@ -1563,15 +1738,15 @@ impl Group {
     fn commit_pending_proposals_core(
         &self,
         identity: &Identity,
-    ) -> Result<Option<ProposalCommit>, String> {
+    ) -> Result<Option<ProposalCommit>, MlsFailure> {
         let Some(swept_commit) = self
             .locked()?
             .commit_pending_proposals(&identity.inner)
-            .map_err(|e| e.to_string())?
+            .map_err(MlsFailure::from)?
         else {
             return Ok(None);
         };
-        let encode = |m: &_| group::encode_message(m).map_err(|e| e.to_string());
+        let encode = |m: &_| group::encode_message(m).map_err(MlsFailure::from);
         let welcome_bytes = match swept_commit.welcome.as_ref() {
             Some(w) => Some(encode(w)?),
             None => None,
@@ -1587,7 +1762,7 @@ impl Group {
     fn stage_pending_proposals_core(
         &self,
         identity: &Identity,
-    ) -> Result<Option<StagedSweep>, String> {
+    ) -> Result<Option<StagedSweep>, MlsFailure> {
         let mut g = self.locked()?;
         // Projected here, under the SAME lock guard the stage runs under, so
         // there is no window between the check and the call. The core carries
@@ -1595,17 +1770,21 @@ impl Group {
         // to give the caller a stable code it can branch on instead of prose it
         // would have to string-match, and never to relax the refusal.
         if g.has_staged_sweep() {
-            return Err(format!(
-                "{SWEEP_ALREADY_STAGED_CODE} a staged sweep is already awaiting its journal verdict"
-            ));
+            return Err(MlsFailure {
+                message: format!(
+                    "{SWEEP_ALREADY_STAGED_CODE} sweep refused: a staged sweep is already \
+                     awaiting a verdict"
+                ),
+                reason: Some(MlsRefusalReason::SweepAlreadyStaged),
+            });
         }
         let Some(staged) = g
             .stage_pending_proposals(&identity.inner)
-            .map_err(|e| e.to_string())?
+            .map_err(MlsFailure::from)?
         else {
             return Ok(None);
         };
-        let encode = |m: &_| group::encode_message(m).map_err(|e| e.to_string());
+        let encode = |m: &_| group::encode_message(m).map_err(MlsFailure::from);
         let welcome_bytes = match staged.welcome.as_ref() {
             Some(w) => Some(encode(w)?),
             None => None,
@@ -1618,16 +1797,19 @@ impl Group {
     }
 
     /// Core of [`Self::has_staged_sweep`].
-    fn has_staged_sweep_core(&self) -> Result<bool, String> {
+    fn has_staged_sweep_core(&self) -> Result<bool, MlsFailure> {
         Ok(self.locked()?.has_staged_sweep())
     }
 
     /// Core of [`Self::merge_staged_sweep`].
-    fn merge_staged_sweep_core(&self, identity: &Identity) -> Result<StagedSweepOutcome, String> {
+    fn merge_staged_sweep_core(
+        &self,
+        identity: &Identity,
+    ) -> Result<StagedSweepOutcome, MlsFailure> {
         let merged = self
             .locked()?
             .merge_staged_sweep(&identity.inner)
-            .map_err(|e| e.to_string())?;
+            .map_err(MlsFailure::from)?;
         Ok(if merged {
             StagedSweepOutcome::Merged
         } else {
@@ -1636,11 +1818,14 @@ impl Group {
     }
 
     /// Core of [`Self::abandon_staged_sweep`].
-    fn abandon_staged_sweep_core(&self, identity: &Identity) -> Result<StagedSweepOutcome, String> {
+    fn abandon_staged_sweep_core(
+        &self,
+        identity: &Identity,
+    ) -> Result<StagedSweepOutcome, MlsFailure> {
         let abandoned = self
             .locked()?
             .abandon_staged_sweep(&identity.inner)
-            .map_err(|e| e.to_string())?;
+            .map_err(MlsFailure::from)?;
         Ok(if abandoned {
             StagedSweepOutcome::Abandoned
         } else {
@@ -1654,13 +1839,13 @@ impl Group {
         identity: &Identity,
         new_owner: &[u8],
         outgoing: OutgoingOwner,
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<Vec<u8>, MlsFailure> {
         if new_owner.len() != 32 {
-            return Err("new owner key must be 32 bytes".to_string());
+            return Err("new owner key must be 32 bytes".into());
         }
         self.locked()?
             .transfer_ownership(&identity.inner, new_owner, outgoing.into())
-            .map_err(|e| e.to_string())
+            .map_err(MlsFailure::from)
     }
 
     /// Core of [`Self::propose_ownership_transfer`].
@@ -1669,13 +1854,13 @@ impl Group {
         identity: &Identity,
         new_owner: &[u8],
         outgoing: OutgoingOwner,
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<Vec<u8>, MlsFailure> {
         if new_owner.len() != 32 {
-            return Err("new owner key must be 32 bytes".to_string());
+            return Err("new owner key must be 32 bytes".into());
         }
         self.locked()?
             .propose_ownership_transfer(&identity.inner, new_owner, outgoing.into())
-            .map_err(|e| e.to_string())
+            .map_err(MlsFailure::from)
     }
 }
 
@@ -1703,7 +1888,7 @@ impl PublisherGroup {
     /// `channel_id` MUST be exactly 16 bytes (
     /// [`lakko_mls::CHANNEL_ID_LEN`]).
     #[wasm_bindgen(constructor)]
-    pub fn new(identity: &Identity, channel_id: &[u8]) -> Result<PublisherGroup, JsError> {
+    pub fn new(identity: &Identity, channel_id: &[u8]) -> Result<PublisherGroup, JsValue> {
         let cid = MlsChannelId::try_from_slice(channel_id).map_err(mls_err)?;
         let inner = MlsPublisherGroup::create(&identity.inner, &cid).map_err(mls_err)?;
         Ok(Self {
@@ -1717,7 +1902,7 @@ impl PublisherGroup {
     /// [`PublisherGroup.openOrCreate`] for the load-or-create
     /// path every composer wants.
     #[wasm_bindgen(js_name = load)]
-    pub fn load(identity: &Identity, channel_id: &[u8]) -> Result<Option<PublisherGroup>, JsError> {
+    pub fn load(identity: &Identity, channel_id: &[u8]) -> Result<Option<PublisherGroup>, JsValue> {
         let cid = MlsChannelId::try_from_slice(channel_id).map_err(mls_err)?;
         match MlsPublisherGroup::load(&identity.inner, &cid).map_err(mls_err)? {
             Some(inner) => Ok(Some(Self {
@@ -1738,7 +1923,7 @@ impl PublisherGroup {
     pub fn open_or_create(
         identity: &Identity,
         channel_id: &[u8],
-    ) -> Result<PublisherGroup, JsError> {
+    ) -> Result<PublisherGroup, JsValue> {
         if let Some(existing) = Self::load(identity, channel_id)? {
             return Ok(existing);
         }
@@ -1751,11 +1936,11 @@ impl PublisherGroup {
     /// hand directly to the channels composer's
     /// `ChannelPublisherKeys.seed` field.
     #[wasm_bindgen(js_name = channelSeed)]
-    pub fn channel_seed(&self, identity: &Identity) -> Result<Vec<u8>, JsError> {
+    pub fn channel_seed(&self, identity: &Identity) -> Result<Vec<u8>, JsValue> {
         let g = self
             .inner
             .lock()
-            .map_err(|_| JsError::new("internal lock poisoned"))?;
+            .map_err(|_| js_error("internal lock poisoned"))?;
         let seed = g.channel_seed(&identity.inner).map_err(mls_err)?;
         Ok(seed.to_vec())
     }
@@ -1764,11 +1949,11 @@ impl PublisherGroup {
     /// bytes (16 elements) so the JS side can compare with
     /// whatever shape the channel-discovery layer hands it.
     #[wasm_bindgen(js_name = channelId)]
-    pub fn channel_id(&self) -> Result<Vec<u8>, JsError> {
+    pub fn channel_id(&self) -> Result<Vec<u8>, JsValue> {
         let g = self
             .inner
             .lock()
-            .map_err(|_| JsError::new("internal lock poisoned"))?;
+            .map_err(|_| js_error("internal lock poisoned"))?;
         Ok(g.channel_id().as_bytes().to_vec())
     }
 
@@ -1785,11 +1970,11 @@ impl PublisherGroup {
     /// services/channels batch fanout to reseal the seed to
     /// every subscriber under the new epoch id.
     #[wasm_bindgen(js_name = rotate)]
-    pub fn rotate(&self, identity: &Identity) -> Result<Vec<u8>, JsError> {
+    pub fn rotate(&self, identity: &Identity) -> Result<Vec<u8>, JsValue> {
         let mut g = self
             .inner
             .lock()
-            .map_err(|_| JsError::new("internal lock poisoned"))?;
+            .map_err(|_| js_error("internal lock poisoned"))?;
         g.rotate(&identity.inner).map_err(mls_err)
     }
 
@@ -1803,11 +1988,11 @@ impl PublisherGroup {
     /// is minted over this; the joiner targets it when crafting its
     /// external-join proposal.
     #[wasm_bindgen(js_name = groupId)]
-    pub fn group_id(&self) -> Result<Vec<u8>, JsError> {
+    pub fn group_id(&self) -> Result<Vec<u8>, JsValue> {
         let g = self
             .inner
             .lock()
-            .map_err(|_| JsError::new("internal lock poisoned"))?;
+            .map_err(|_| js_error("internal lock poisoned"))?;
         Ok(g.group_id())
     }
 
@@ -1820,11 +2005,11 @@ impl PublisherGroup {
         &self,
         identity: &Identity,
         bytes: &[u8],
-    ) -> Result<ProcessedMessage, JsError> {
+    ) -> Result<ProcessedMessage, JsValue> {
         let mut g = self
             .inner
             .lock()
-            .map_err(|_| JsError::new("internal lock poisoned"))?;
+            .map_err(|_| js_error("internal lock poisoned"))?;
         let result = g
             .inner_mut()
             .process_incoming_verifying_roles(&identity.inner, bytes)
@@ -1837,7 +2022,8 @@ impl PublisherGroup {
             MlsIncoming::Proposal(record) => ProcessedMessage::from_proposal(record),
             MlsIncoming::ExternalJoinProposal {
                 joiner_signature_key,
-            } => ProcessedMessage::external_join(joiner_signature_key),
+                retained,
+            } => ProcessedMessage::external_join(joiner_signature_key, retained),
         })
     }
 
@@ -1846,11 +2032,11 @@ impl PublisherGroup {
     /// convention). Each chunk is a handle for `approveExternalJoin` /
     /// `rejectExternalJoin`.
     #[wasm_bindgen(js_name = pendingExternalJoins)]
-    pub fn pending_external_joins(&self) -> Result<Vec<u8>, JsError> {
+    pub fn pending_external_joins(&self) -> Result<Vec<u8>, JsValue> {
         let g = self
             .inner
             .lock()
-            .map_err(|_| JsError::new("internal lock poisoned"))?;
+            .map_err(|_| js_error("internal lock poisoned"))?;
         Ok(g.inner().pending_external_joins().concat())
     }
 
@@ -1869,11 +2055,11 @@ impl PublisherGroup {
         &self,
         identity: &Identity,
         proposal_ref: &[u8],
-    ) -> Result<AddMember, JsError> {
+    ) -> Result<AddMember, JsValue> {
         let mut g = self
             .inner
             .lock()
-            .map_err(|_| JsError::new("internal lock poisoned"))?;
+            .map_err(|_| js_error("internal lock poisoned"))?;
         let MemberAddition { commit, welcome } = g
             .approve_external_join(&identity.inner, proposal_ref)
             .map_err(mls_err)?;
@@ -1886,11 +2072,11 @@ impl PublisherGroup {
     /// ADR-0028 OQ3 — reject a retained co-publisher external-join (local drop;
     /// no epoch advance).
     #[wasm_bindgen(js_name = rejectExternalJoin)]
-    pub fn reject_external_join(&self, proposal_ref: &[u8]) -> Result<(), JsError> {
+    pub fn reject_external_join(&self, proposal_ref: &[u8]) -> Result<(), JsValue> {
         let mut g = self
             .inner
             .lock()
-            .map_err(|_| JsError::new("internal lock poisoned"))?;
+            .map_err(|_| js_error("internal lock poisoned"))?;
         g.inner_mut()
             .reject_external_join(proposal_ref)
             .map_err(mls_err)?;
@@ -1938,9 +2124,9 @@ impl DeviceGroup {
     /// founding leaf. `account_id` MUST be the raw 16-byte
     /// UUIDv7.
     #[wasm_bindgen(js_name = createFounder)]
-    pub fn create_founder(identity: &Identity, account_id: &[u8]) -> Result<DeviceGroup, JsError> {
+    pub fn create_founder(identity: &Identity, account_id: &[u8]) -> Result<DeviceGroup, JsValue> {
         if account_id.len() != 16 {
-            return Err(JsError::new("account_id must be 16 bytes"));
+            return Err(js_error("account_id must be 16 bytes"));
         }
         let mut acct = [0u8; 16];
         acct.copy_from_slice(account_id);
@@ -1960,9 +2146,9 @@ impl DeviceGroup {
         welcome: &[u8],
         identity: &Identity,
         account_id: &[u8],
-    ) -> Result<DeviceGroup, JsError> {
+    ) -> Result<DeviceGroup, JsValue> {
         if account_id.len() != 16 {
-            return Err(JsError::new("account_id must be 16 bytes"));
+            return Err(js_error("account_id must be 16 bytes"));
         }
         let mut acct = [0u8; 16];
         acct.copy_from_slice(account_id);
@@ -1983,11 +2169,11 @@ impl DeviceGroup {
         &self,
         identity: &Identity,
         key_package: &[u8],
-    ) -> Result<AddMember, JsError> {
+    ) -> Result<AddMember, JsValue> {
         let mut g = self
             .inner
             .lock()
-            .map_err(|_| JsError::new("internal lock poisoned"))?;
+            .map_err(|_| js_error("internal lock poisoned"))?;
         let MemberAddition { commit, welcome } = g
             .add_device_from_wire(&identity.inner, key_package)
             .map_err(mls_err)?;
@@ -2000,11 +2186,11 @@ impl DeviceGroup {
     /// The deterministic `group_id` this DeviceGroup is bound
     /// to. Same value `deviceGroupIdFor(account_id)` returns.
     #[wasm_bindgen(js_name = groupId)]
-    pub fn group_id(&self) -> Result<Vec<u8>, JsError> {
+    pub fn group_id(&self) -> Result<Vec<u8>, JsValue> {
         let g = self
             .inner
             .lock()
-            .map_err(|_| JsError::new("internal lock poisoned"))?;
+            .map_err(|_| js_error("internal lock poisoned"))?;
         Ok(g.group_id())
     }
 
@@ -2020,11 +2206,11 @@ impl DeviceGroup {
     /// matches `lakko_mls::DeviceGroup::devices` (left-to-right
     /// over the leaf tree, stable inside a single epoch).
     #[wasm_bindgen]
-    pub fn devices(&self) -> Result<Vec<JsValue>, JsError> {
+    pub fn devices(&self) -> Result<Vec<JsValue>, JsValue> {
         let g = self
             .inner
             .lock()
-            .map_err(|_| JsError::new("internal lock poisoned"))?;
+            .map_err(|_| js_error("internal lock poisoned"))?;
         Ok(g.devices()
             .into_iter()
             .map(|m| {
@@ -2040,11 +2226,11 @@ impl DeviceGroup {
     /// (Phase 2a3c). UI uses this to flag the "(this device)"
     /// row and disable its Remove button.
     #[wasm_bindgen(js_name = ownLeafIndex)]
-    pub fn own_leaf_index(&self) -> Result<u32, JsError> {
+    pub fn own_leaf_index(&self) -> Result<u32, JsValue> {
         let g = self
             .inner
             .lock()
-            .map_err(|_| JsError::new("internal lock poisoned"))?;
+            .map_err(|_| js_error("internal lock poisoned"))?;
         Ok(g.own_leaf_index())
     }
 
@@ -2064,11 +2250,11 @@ impl DeviceGroup {
         &self,
         identity: &Identity,
         leaf_index: u32,
-    ) -> Result<Vec<u8>, JsError> {
+    ) -> Result<Vec<u8>, JsValue> {
         let mut g = self
             .inner
             .lock()
-            .map_err(|_| JsError::new("internal lock poisoned"))?;
+            .map_err(|_| js_error("internal lock poisoned"))?;
         g.remove_device_at(&identity.inner, leaf_index)
             .map_err(mls_err)
     }
@@ -2079,11 +2265,11 @@ impl DeviceGroup {
     /// into [`openHistoryBundle`]. Both devices reach the same
     /// value after they advance to the post-add-device epoch.
     #[wasm_bindgen(js_name = historyBundleSecret)]
-    pub fn history_bundle_secret(&self, identity: &Identity) -> Result<Vec<u8>, JsError> {
+    pub fn history_bundle_secret(&self, identity: &Identity) -> Result<Vec<u8>, JsValue> {
         let g = self
             .inner
             .lock()
-            .map_err(|_| JsError::new("internal lock poisoned"))?;
+            .map_err(|_| js_error("internal lock poisoned"))?;
         let secret =
             lakko_mls::history_bundle::exporter_secret(&g, &identity.inner).map_err(mls_err)?;
         Ok(secret.to_vec())
@@ -2105,11 +2291,11 @@ impl DeviceGroup {
         label: &str,
         context: &[u8],
         length: u32,
-    ) -> Result<Vec<u8>, JsError> {
+    ) -> Result<Vec<u8>, JsValue> {
         let g = self
             .inner
             .lock()
-            .map_err(|_| JsError::new("internal lock poisoned"))?;
+            .map_err(|_| js_error("internal lock poisoned"))?;
         let secret = g
             .export_secret(&identity.inner, label, context, length as usize)
             .map_err(mls_err)?;
@@ -2140,7 +2326,7 @@ impl DeviceGroup {
         up_to_message_id: &[u8],
         read_at_ms: u64,
         hlc: u64,
-    ) -> Result<Vec<u8>, JsError> {
+    ) -> Result<Vec<u8>, JsValue> {
         self.create_devicegroup_body(
             identity,
             lakko_mls::device_group::DeviceGroupBody::ReadCursor {
@@ -2162,7 +2348,7 @@ impl DeviceGroup {
         text: &str,
         reply_to_id: &[u8],
         hlc: u64,
-    ) -> Result<Vec<u8>, JsError> {
+    ) -> Result<Vec<u8>, JsValue> {
         self.create_devicegroup_body(
             identity,
             lakko_mls::device_group::DeviceGroupBody::Draft {
@@ -2188,7 +2374,7 @@ impl DeviceGroup {
         archived: bool,
         unread_override: bool,
         hlc: u64,
-    ) -> Result<Vec<u8>, JsError> {
+    ) -> Result<Vec<u8>, JsValue> {
         self.create_devicegroup_body(
             identity,
             lakko_mls::device_group::DeviceGroupBody::Flags {
@@ -2215,7 +2401,7 @@ impl DeviceGroup {
         identity: &Identity,
         group_ids: Vec<js_sys::Uint8Array>,
         hlc: u64,
-    ) -> Result<Vec<u8>, JsError> {
+    ) -> Result<Vec<u8>, JsValue> {
         let owned: Vec<Vec<u8>> = group_ids.into_iter().map(|a| a.to_vec()).collect();
         self.create_devicegroup_body(
             identity,
@@ -2240,11 +2426,11 @@ impl DeviceGroup {
         &self,
         identity: &Identity,
         message_bytes: &[u8],
-    ) -> Result<ProcessedMessage, JsError> {
+    ) -> Result<ProcessedMessage, JsValue> {
         let mut g = self
             .inner
             .lock()
-            .map_err(|_| JsError::new("internal lock poisoned"))?;
+            .map_err(|_| js_error("internal lock poisoned"))?;
         let incoming = g
             .process_incoming(&identity.inner, message_bytes)
             .map_err(mls_err)?;
@@ -2256,7 +2442,8 @@ impl DeviceGroup {
             lakko_mls::Incoming::Proposal(record) => ProcessedMessage::from_proposal(record),
             lakko_mls::Incoming::ExternalJoinProposal {
                 joiner_signature_key,
-            } => ProcessedMessage::external_join(joiner_signature_key),
+                retained,
+            } => ProcessedMessage::external_join(joiner_signature_key, retained),
         })
     }
 
@@ -2265,11 +2452,11 @@ impl DeviceGroup {
     /// Commit to broadcast over the DS group journal. Call when the account
     /// first enables a passkey (OPAQUE-only accounts never call it).
     #[wasm_bindgen(js_name = setRequireAttestedRemovals)]
-    pub fn set_require_attested_removals(&self, identity: &Identity) -> Result<Vec<u8>, JsError> {
+    pub fn set_require_attested_removals(&self, identity: &Identity) -> Result<Vec<u8>, JsValue> {
         let mut g = self
             .inner
             .lock()
-            .map_err(|_| JsError::new("internal lock poisoned"))?;
+            .map_err(|_| js_error("internal lock poisoned"))?;
         g.set_require_attested_removals(&identity.inner)
             .map_err(mls_err)
     }
@@ -2277,11 +2464,11 @@ impl DeviceGroup {
     /// G-13 (ADR-0015): whether this DeviceGroup currently requires attested
     /// removals (read from authenticated group state).
     #[wasm_bindgen(js_name = requireAttestedRemovals)]
-    pub fn require_attested_removals(&self) -> Result<bool, JsError> {
+    pub fn require_attested_removals(&self) -> Result<bool, JsValue> {
         let g = self
             .inner
             .lock()
-            .map_err(|_| JsError::new("internal lock poisoned"))?;
+            .map_err(|_| js_error("internal lock poisoned"))?;
         Ok(g.require_attested_removals())
     }
 
@@ -2302,9 +2489,9 @@ impl DeviceGroup {
         attestation: &[u8],
         attest_verifying_key: &[u8],
         now_unix_secs: i64,
-    ) -> Result<ProcessedMessage, JsError> {
+    ) -> Result<ProcessedMessage, JsValue> {
         let vk = lakko_crypto::signing::VerifyingKey::from_bytes(attest_verifying_key)
-            .map_err(|_| JsError::new("invalid attestation verifying key"))?;
+            .map_err(|_| js_error("invalid attestation verifying key"))?;
         // The wasm surface carries a single attestation (the web remove-device
         // flow evicts one leaf); empty means none.
         let attestations: Vec<Vec<u8>> = if attestation.is_empty() {
@@ -2315,7 +2502,7 @@ impl DeviceGroup {
         let mut g = self
             .inner
             .lock()
-            .map_err(|_| JsError::new("internal lock poisoned"))?;
+            .map_err(|_| js_error("internal lock poisoned"))?;
         let incoming = g
             .process_incoming_verifying_removals(
                 &identity.inner,
@@ -2333,7 +2520,8 @@ impl DeviceGroup {
             lakko_mls::Incoming::Proposal(record) => ProcessedMessage::from_proposal(record),
             lakko_mls::Incoming::ExternalJoinProposal {
                 joiner_signature_key,
-            } => ProcessedMessage::external_join(joiner_signature_key),
+                retained,
+            } => ProcessedMessage::external_join(joiner_signature_key, retained),
         })
     }
 
@@ -2344,11 +2532,11 @@ impl DeviceGroup {
         identity: &Identity,
         body: lakko_mls::device_group::DeviceGroupBody,
         hlc: u64,
-    ) -> Result<Vec<u8>, JsError> {
+    ) -> Result<Vec<u8>, JsValue> {
         let mut g = self
             .inner
             .lock()
-            .map_err(|_| JsError::new("internal lock poisoned"))?;
+            .map_err(|_| js_error("internal lock poisoned"))?;
         g.create_devicegroup_message(&identity.inner, body, hlc)
             .map_err(mls_err)
     }
@@ -2490,7 +2678,7 @@ impl ParsedDeviceGroupPayload {
 /// `data` field of `ProcessedMessage::Application`) into a
 /// typed [`ParsedDeviceGroupPayload`] (Phase 2a3e2).
 #[wasm_bindgen(js_name = parseDeviceGroupPayload)]
-pub fn parse_devicegroup_payload(plaintext: &[u8]) -> Result<ParsedDeviceGroupPayload, JsError> {
+pub fn parse_devicegroup_payload(plaintext: &[u8]) -> Result<ParsedDeviceGroupPayload, JsValue> {
     use lakko_mls::device_group::DeviceGroupBody as Body;
     let parsed = lakko_mls::DeviceGroup::parse_devicegroup_payload(plaintext).map_err(mls_err)?;
     let mut out = ParsedDeviceGroupPayload {
@@ -2562,16 +2750,16 @@ pub fn parse_devicegroup_payload(plaintext: &[u8]) -> Result<ParsedDeviceGroupPa
 /// Refuses to seal bundles whose total message count exceeds
 /// `lakko_mls::history_bundle::MAX_BUNDLE_MESSAGES` (1000).
 #[wasm_bindgen(js_name = sealHistoryBundle)]
-pub fn seal_history_bundle(secret: &[u8], bundle_bytes: &[u8]) -> Result<Vec<u8>, JsError> {
+pub fn seal_history_bundle(secret: &[u8], bundle_bytes: &[u8]) -> Result<Vec<u8>, JsValue> {
     use prost::Message as _;
     if secret.len() != 32 {
-        return Err(JsError::new("history-bundle secret must be 32 bytes"));
+        return Err(js_error("history-bundle secret must be 32 bytes"));
     }
     let mut key = [0u8; 32];
     key.copy_from_slice(secret);
 
     let bundle = lakko_proto::mls_app::history_bundle::v1::HistoryBundle::decode(bundle_bytes)
-        .map_err(|e| JsError::new(&format!("HistoryBundle decode: {e}")))?;
+        .map_err(|e| js_error(&format!("HistoryBundle decode: {e}")))?;
     lakko_mls::history_bundle::seal_bundle(&key, &bundle).map_err(mls_err)
 }
 
@@ -2579,10 +2767,10 @@ pub fn seal_history_bundle(secret: &[u8], bundle_bytes: &[u8]) -> Result<Vec<u8>
 /// `HistoryBundle` bytes; the caller decodes via its own proto
 /// runtime (`protobuf-ts` on TS).
 #[wasm_bindgen(js_name = openHistoryBundle)]
-pub fn open_history_bundle(secret: &[u8], sealed_bytes: &[u8]) -> Result<Vec<u8>, JsError> {
+pub fn open_history_bundle(secret: &[u8], sealed_bytes: &[u8]) -> Result<Vec<u8>, JsValue> {
     use prost::Message as _;
     if secret.len() != 32 {
-        return Err(JsError::new("history-bundle secret must be 32 bytes"));
+        return Err(js_error("history-bundle secret must be 32 bytes"));
     }
     let mut key = [0u8; 32];
     key.copy_from_slice(secret);
@@ -2591,7 +2779,7 @@ pub fn open_history_bundle(secret: &[u8], sealed_bytes: &[u8]) -> Result<Vec<u8>
     let mut out = Vec::with_capacity(bundle.encoded_len());
     bundle
         .encode(&mut out)
-        .map_err(|e| JsError::new(&format!("HistoryBundle re-encode: {e}")))?;
+        .map_err(|e| js_error(&format!("HistoryBundle re-encode: {e}")))?;
     Ok(out)
 }
 
@@ -2680,9 +2868,9 @@ pub fn seal_history_bundle_structured(
     secret: &[u8],
     groups: Vec<HistoryGroupInput>,
     max_hlc: u64,
-) -> Result<Vec<u8>, JsError> {
+) -> Result<Vec<u8>, JsValue> {
     if secret.len() != 32 {
-        return Err(JsError::new("history-bundle secret must be 32 bytes"));
+        return Err(js_error("history-bundle secret must be 32 bytes"));
     }
     let mut key = [0u8; 32];
     key.copy_from_slice(secret);
@@ -2734,13 +2922,13 @@ fn build_history_bundle_proto(
 // web TS layer already maps these onto its string union).
 // ============================================================================
 
-fn direction_from_u8(tag: u8) -> Result<lakko_mls::history_placeholder::HistoryDirection, JsError> {
+fn direction_from_u8(tag: u8) -> Result<lakko_mls::history_placeholder::HistoryDirection, JsValue> {
     use lakko_mls::history_placeholder::HistoryDirection as D;
     match tag {
         0 => Ok(D::Outgoing),
         1 => Ok(D::Incoming),
         2 => Ok(D::System),
-        other => Err(JsError::new(&format!(
+        other => Err(js_error(&format!(
             "history placeholder: direction must be 0/1/2, got {other}"
         ))),
     }
@@ -2783,9 +2971,9 @@ impl HistoryAttachmentInput {
     }
 }
 
-fn fixed_bytes<const N: usize>(v: &[u8], field: &str) -> Result<[u8; N], JsError> {
+fn fixed_bytes<const N: usize>(v: &[u8], field: &str) -> Result<[u8; N], JsValue> {
     if v.len() != N {
-        return Err(JsError::new(&format!(
+        return Err(js_error(&format!(
             "history placeholder: {field} must be {N} bytes, got {}",
             v.len()
         )));
@@ -2805,7 +2993,7 @@ pub fn encode_history_placeholder(
     created_at: &str,
     text: &str,
     attachments: Vec<HistoryAttachmentInput>,
-) -> Result<Vec<u8>, JsError> {
+) -> Result<Vec<u8>, JsValue> {
     use lakko_mls::history_placeholder::{HistoryAttachmentPlaceholder, HistoryMessagePlaceholder};
     let dir = direction_from_u8(direction)?;
     let mut atts = Vec::with_capacity(attachments.len());
@@ -2922,7 +3110,7 @@ impl OpenedHistoryPlaceholder {
 /// `encodeHistoryPlaceholder` on any platform) into an
 /// [`OpenedHistoryPlaceholder`].
 #[wasm_bindgen(js_name = decodeHistoryPlaceholder)]
-pub fn decode_history_placeholder(bytes: &[u8]) -> Result<OpenedHistoryPlaceholder, JsError> {
+pub fn decode_history_placeholder(bytes: &[u8]) -> Result<OpenedHistoryPlaceholder, JsValue> {
     let msg = lakko_mls::history_placeholder::HistoryMessagePlaceholder::decode(bytes)
         .map_err(mls_err)?;
     Ok(OpenedHistoryPlaceholder {
@@ -3005,7 +3193,7 @@ impl OpenedHistoryGroup {
     /// inner allocations; the caller must not retain references
     /// past the parent `OpenedHistoryGroup`'s lifetime.
     #[wasm_bindgen]
-    pub fn messages(&self) -> Result<Vec<JsValue>, JsError> {
+    pub fn messages(&self) -> Result<Vec<JsValue>, JsValue> {
         Ok(self
             .messages_val
             .iter()
@@ -3043,7 +3231,7 @@ impl OpenedHistoryBundle {
     /// Flat array of [`OpenedHistoryGroup`]. Same JS-iter
     /// pattern as `OpenedHistoryGroup.messages()`.
     #[wasm_bindgen]
-    pub fn groups(&self) -> Result<Vec<JsValue>, JsError> {
+    pub fn groups(&self) -> Result<Vec<JsValue>, JsValue> {
         Ok(self
             .groups_val
             .iter()
@@ -3080,9 +3268,9 @@ impl OpenedHistoryBundle {
 pub fn open_history_bundle_structured(
     secret: &[u8],
     sealed_bytes: &[u8],
-) -> Result<OpenedHistoryBundle, JsError> {
+) -> Result<OpenedHistoryBundle, JsValue> {
     if secret.len() != 32 {
-        return Err(JsError::new("history-bundle secret must be 32 bytes"));
+        return Err(js_error("history-bundle secret must be 32 bytes"));
     }
     let mut key = [0u8; 32];
     key.copy_from_slice(secret);
@@ -3127,9 +3315,9 @@ pub fn remove_device_action_hash(removed_signature_pubkey: &[u8]) -> Vec<u8> {
 /// journal for catch-up Commits before any Welcome has been
 /// processed.
 #[wasm_bindgen(js_name = deviceGroupIdFor)]
-pub fn device_group_id_for(account_id: &[u8]) -> Result<Vec<u8>, JsError> {
+pub fn device_group_id_for(account_id: &[u8]) -> Result<Vec<u8>, JsValue> {
     if account_id.len() != 16 {
-        return Err(JsError::new("account_id must be 16 bytes"));
+        return Err(js_error("account_id must be 16 bytes"));
     }
     let mut acct = [0u8; 16];
     acct.copy_from_slice(account_id);
@@ -3153,9 +3341,9 @@ pub fn device_group_id_for(account_id: &[u8]) -> Result<Vec<u8>, JsError> {
 pub fn load_device_group(
     identity: &Identity,
     account_id: &[u8],
-) -> Result<Option<DeviceGroup>, JsError> {
+) -> Result<Option<DeviceGroup>, JsValue> {
     if account_id.len() != 16 {
-        return Err(JsError::new("account_id must be 16 bytes"));
+        return Err(js_error("account_id must be 16 bytes"));
     }
     let mut acct = [0u8; 16];
     acct.copy_from_slice(account_id);
@@ -3306,7 +3494,7 @@ pub fn compose_call_offer_signaling(
     created_at_ms: u64,
     media_audio: bool,
     media_video: bool,
-) -> Result<Vec<u8>, JsError> {
+) -> Result<Vec<u8>, JsValue> {
     let id = take_call_id(call_id)?;
     let body = lakko_calls::SignalingBody::Offer {
         call_id: id,
@@ -3322,7 +3510,7 @@ pub fn compose_call_offer_signaling(
 
 /// Compose an Answer call-signaling event.
 #[wasm_bindgen(js_name = composeCallAnswerSignaling)]
-pub fn compose_call_answer_signaling(call_id: &[u8], sdp: &str) -> Result<Vec<u8>, JsError> {
+pub fn compose_call_answer_signaling(call_id: &[u8], sdp: &str) -> Result<Vec<u8>, JsValue> {
     let id = take_call_id(call_id)?;
     let body = lakko_calls::SignalingBody::Answer {
         call_id: id,
@@ -3338,7 +3526,7 @@ pub fn compose_call_ice_candidate_signaling(
     candidate: &str,
     sdp_mid: &str,
     sdp_m_line_index: u32,
-) -> Result<Vec<u8>, JsError> {
+) -> Result<Vec<u8>, JsValue> {
     let id = take_call_id(call_id)?;
     let body = lakko_calls::SignalingBody::IceCandidate {
         call_id: id,
@@ -3353,7 +3541,7 @@ pub fn compose_call_ice_candidate_signaling(
 /// `"hungUp"` / `"busy"` / `"declined"` / `"timedOut"` /
 /// `"error"`; unknown values fold to `"hungUp"`.
 #[wasm_bindgen(js_name = composeCallEndSignaling)]
-pub fn compose_call_end_signaling(call_id: &[u8], reason: &str) -> Result<Vec<u8>, JsError> {
+pub fn compose_call_end_signaling(call_id: &[u8], reason: &str) -> Result<Vec<u8>, JsValue> {
     let id = take_call_id(call_id)?;
     let body = lakko_calls::SignalingBody::End {
         call_id: id,
@@ -3372,7 +3560,7 @@ pub fn compose_group_call_start_signaling(
     created_at_ms: u64,
     media_audio: bool,
     media_video: bool,
-) -> Result<Vec<u8>, JsError> {
+) -> Result<Vec<u8>, JsValue> {
     let id = take_call_id(call_id)?;
     let body = lakko_calls::SignalingBody::GroupStart {
         call_id: id,
@@ -3394,7 +3582,7 @@ pub fn compose_group_call_join_signaling(
     call_id: &[u8],
     leaf_index: u32,
     joined_at_ms: u64,
-) -> Result<Vec<u8>, JsError> {
+) -> Result<Vec<u8>, JsValue> {
     let id = take_call_id(call_id)?;
     let body = lakko_calls::SignalingBody::GroupJoin {
         call_id: id,
@@ -3413,7 +3601,7 @@ pub fn compose_group_call_leave_signaling(
     call_id: &[u8],
     leaf_index: u32,
     reason: &str,
-) -> Result<Vec<u8>, JsError> {
+) -> Result<Vec<u8>, JsValue> {
     let id = take_call_id(call_id)?;
     let body = lakko_calls::SignalingBody::GroupLeave {
         call_id: id,
@@ -3427,7 +3615,7 @@ pub fn compose_group_call_leave_signaling(
 /// `processIncoming`) into a typed
 /// [`ParsedCallSignaling`] (Phase 3a3).
 #[wasm_bindgen(js_name = parseCallSignaling)]
-pub fn parse_call_signaling(plaintext: &[u8]) -> Result<ParsedCallSignaling, JsError> {
+pub fn parse_call_signaling(plaintext: &[u8]) -> Result<ParsedCallSignaling, JsValue> {
     let body = lakko_calls::parse_signaling_payload(plaintext).map_err(calls_err)?;
     let mut out = ParsedCallSignaling {
         kind_val: CALL_KIND_OFFER,
@@ -3517,9 +3705,9 @@ pub fn parse_call_signaling(plaintext: &[u8]) -> Result<ParsedCallSignaling, JsE
     Ok(out)
 }
 
-fn take_call_id(bytes: &[u8]) -> Result<lakko_calls::CallId, JsError> {
+fn take_call_id(bytes: &[u8]) -> Result<lakko_calls::CallId, JsValue> {
     if bytes.len() != 16 {
-        return Err(JsError::new(&format!(
+        return Err(js_error(&format!(
             "call_id length: expected 16, got {}",
             bytes.len()
         )));
@@ -3549,8 +3737,8 @@ fn end_reason_str(r: lakko_calls::EndReason) -> &'static str {
     }
 }
 
-fn calls_err(err: lakko_calls::Error) -> JsError {
-    JsError::new(&format!("{err}"))
+fn calls_err(err: lakko_calls::Error) -> JsValue {
+    js_error(&format!("{err}"))
 }
 
 /// Per-participant SFrame key + nonce salt (Phase 3a4).
@@ -3585,11 +3773,11 @@ pub fn sframe_derive_call_key(
     group: &Group,
     identity: &Identity,
     call_id: &[u8],
-) -> Result<Vec<u8>, JsError> {
+) -> Result<Vec<u8>, JsValue> {
     let g = group
         .inner
         .lock()
-        .map_err(|_| JsError::new("internal lock poisoned"))?;
+        .map_err(|_| js_error("internal lock poisoned"))?;
     let key = lakko_calls::CallKey::derive(&g, &identity.inner, call_id).map_err(calls_err)?;
     Ok(key.as_bytes().to_vec())
 }
@@ -3607,9 +3795,9 @@ pub fn sframe_derive_participant_key(
     call_key_seed: &[u8],
     sender_leaf: u32,
     stream_index: u32,
-) -> Result<SframeParticipantKey, JsError> {
+) -> Result<SframeParticipantKey, JsValue> {
     if call_key_seed.len() != 32 {
-        return Err(JsError::new("call_key_seed must be 32 bytes"));
+        return Err(js_error("call_key_seed must be 32 bytes"));
     }
     let mut seed = [0u8; 32];
     seed.copy_from_slice(call_key_seed);
@@ -3643,10 +3831,10 @@ pub fn sframe_open_with_overlap(
     aad: &[u8],
     ciphertext: &[u8],
     frame_counter: u32,
-) -> Result<Vec<u8>, JsError> {
-    let take_seed = |bytes: &[u8]| -> Result<[u8; 32], JsError> {
+) -> Result<Vec<u8>, JsValue> {
+    let take_seed = |bytes: &[u8]| -> Result<[u8; 32], JsValue> {
         if bytes.len() != 32 {
-            return Err(JsError::new(&format!(
+            return Err(js_error(&format!(
                 "call_key_seed must be 32 bytes, got {}",
                 bytes.len()
             )));
@@ -3675,7 +3863,7 @@ pub fn sframe_open_with_overlap(
             .open(aad, ciphertext, frame_counter)
             .map_err(calls_err);
     }
-    Err(JsError::new(
+    Err(js_error(
         "frame failed authentication under current key (no overlap window active)",
     ))
 }
@@ -3725,8 +3913,8 @@ fn claims_to_parsed(claims: lakko_call_jwt::CallJwtClaims, kid: String) -> Parse
     }
 }
 
-fn jwt_err(e: lakko_call_jwt::JwtError) -> JsError {
-    JsError::new(&format!("{e}"))
+fn jwt_err(e: lakko_call_jwt::JwtError) -> JsValue {
+    js_error(&format!("{e}"))
 }
 
 #[wasm_bindgen]
@@ -3777,7 +3965,7 @@ impl ParsedCallJwt {
 /// signature. Useful for inspecting role / expiry / kid
 /// client-side before presenting the JWT to the SFU.
 #[wasm_bindgen(js_name = parseCallJwtUnverified)]
-pub fn parse_call_jwt_unverified(jwt: &str) -> Result<ParsedCallJwt, JsError> {
+pub fn parse_call_jwt_unverified(jwt: &str) -> Result<ParsedCallJwt, JsValue> {
     let (header, claims) = lakko_call_jwt::parse_unverified(jwt).map_err(jwt_err)?;
     Ok(claims_to_parsed(claims, header.kid))
 }
@@ -3793,7 +3981,7 @@ pub fn verify_call_jwt_with_jwks(
     jwks_doc_bytes: &[u8],
     jwt: &str,
     now_unix_secs: u64,
-) -> Result<ParsedCallJwt, JsError> {
+) -> Result<ParsedCallJwt, JsValue> {
     let jwks = lakko_call_jwt::parse_jwks(jwks_doc_bytes).map_err(jwt_err)?;
     let claims = lakko_call_jwt::verify_with_jwks(&jwks, jwt, now_unix_secs).map_err(jwt_err)?;
     let (header, _) = lakko_call_jwt::parse_unverified(jwt).map_err(jwt_err)?;
@@ -4060,9 +4248,9 @@ impl AcceptedCallInvite {
 pub fn accept_call_invite(
     capability: &crate::contacts::CallInviteCapability,
     joiner_identity: &Identity,
-) -> Result<AcceptedCallInvite, JsError> {
+) -> Result<AcceptedCallInvite, JsValue> {
     let accepted = lakko_calls::accept_call_invite(&capability.inner, &joiner_identity.inner)
-        .map_err(|e| JsError::new(&format!("{e}")))?;
+        .map_err(|e| js_error(&format!("{e}")))?;
     let call_key_seed = accepted.session.call_key().as_bytes().to_vec();
     let call_id = accepted.session.call_id.to_vec();
     let own_leaf_index = accepted.session.own_leaf_index;
@@ -4086,10 +4274,10 @@ pub fn accept_call_invite(
 /// rendezvous mailbox; the fresh device derives the same `key` and opens it
 /// via [`open_with_key`]. Mirror of the UniFFI `seal_with_key`.
 #[wasm_bindgen(js_name = sealWithKey)]
-pub fn seal_with_key(key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, JsError> {
+pub fn seal_with_key(key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, JsValue> {
     let key = key_32(key)?;
     lakko_crypto::aead::seal_with_key(&key, plaintext)
-        .map_err(|e| JsError::new(&format!("sealWithKey: {e}")))
+        .map_err(|e| js_error(&format!("sealWithKey: {e}")))
 }
 
 /// Inverse of [`seal_with_key`]: open a `nonce(12) ‖ ciphertext+tag` wire blob
@@ -4097,17 +4285,17 @@ pub fn seal_with_key(key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, JsError> {
 /// when the key is not 32 bytes, the blob is too short, or authentication
 /// fails (wrong key / tampered blob).
 #[wasm_bindgen(js_name = openWithKey)]
-pub fn open_with_key(key: &[u8], wire: &[u8]) -> Result<Vec<u8>, JsError> {
+pub fn open_with_key(key: &[u8], wire: &[u8]) -> Result<Vec<u8>, JsValue> {
     let key = key_32(key)?;
     lakko_crypto::aead::open_with_key(&key, wire)
-        .map_err(|e| JsError::new(&format!("openWithKey: {e}")))
+        .map_err(|e| js_error(&format!("openWithKey: {e}")))
 }
 
 /// Validate + copy a caller-supplied key into the fixed 32-byte array
 /// `lakko_crypto::aead::{seal_with_key, open_with_key}` require.
-fn key_32(key: &[u8]) -> Result<[u8; 32], JsError> {
+fn key_32(key: &[u8]) -> Result<[u8; 32], JsValue> {
     key.try_into()
-        .map_err(|_| JsError::new(&format!("key must be 32 bytes, got {}", key.len())))
+        .map_err(|_| js_error(&format!("key must be 32 bytes, got {}", key.len())))
 }
 
 // Tests run on the host target (`cargo test`) — no `wasm-bindgen-test`
@@ -4662,6 +4850,139 @@ mod tests {
         );
     }
 
+    // ========================================================================
+    // Typed membership refusals (ADR-0045 §9.1 item 1 / §12 item 6)
+    // ========================================================================
+
+    /// Every core [`lakko_mls::RefusalReason`] reaches the JS boundary with its
+    /// reason and its sentence intact.
+    ///
+    /// The final hop — attaching `refusalReason` / `refusalClass` to the thrown
+    /// `Error` — is `js_sys` and cannot run off wasm32, so it is asserted in
+    /// `wasm_tests.rs`. Everything up to it is asserted here, which is where a
+    /// mapping mistake would actually live.
+    #[test]
+    fn every_refusal_reason_survives_the_projection_with_its_sentence() {
+        let mut codes: Vec<&str> = Vec::new();
+        for reason in lakko_mls::RefusalReason::ALL {
+            let f = MlsFailure::from(lakko_mls::Error::refused_for_tests(
+                reason,
+                "the sentence the core wrote",
+            ));
+            assert_eq!(f.reason, Some(reason), "{reason:?} lost its reason");
+            assert_eq!(
+                f.message, "the sentence the core wrote",
+                "{reason:?} lost its sentence",
+            );
+            codes.push(reason.code());
+        }
+        let total = codes.len();
+        codes.sort_unstable();
+        codes.dedup();
+        assert_eq!(codes.len(), total, "refusal codes must be unique");
+    }
+
+    /// A failure that is not a membership refusal carries **no** reason, so the
+    /// web client cannot mistake a codec or OpenMLS failure for a permission
+    /// answer.
+    #[test]
+    fn a_non_refusal_failure_carries_no_reason() {
+        let f = MlsFailure::from("internal lock poisoned");
+        assert_eq!(f.reason, None);
+        let f = MlsFailure::from(lakko_mls::Error::Codec("bad wire".into()));
+        assert_eq!(f.reason, None);
+    }
+
+    /// End to end through the real wasm surface: the reason a client needs to
+    /// pick copy arrives on the failure, not in the sentence.
+    #[test]
+    fn real_refusals_arrive_typed_through_the_wasm_group() {
+        let ((alice, alice_g), (bob, bob_g), (charlie, charlie_g)) = adr0045_trio();
+        let promote = alice_g
+            .set_group_roles_core(
+                &alice,
+                &alice.signature_public_key(),
+                &bob.signature_public_key(),
+            )
+            .unwrap();
+        bob_g
+            .process_incoming_verifying_roles_core(&bob, &promote)
+            .unwrap();
+        charlie_g
+            .process_incoming_verifying_roles_core(&charlie, &promote)
+            .unwrap();
+
+        let dave = Identity::new("dave").unwrap();
+        let err = charlie_g
+            .propose_add_member_core(&charlie, &dave.create_key_package().unwrap())
+            .unwrap_err();
+        assert_eq!(
+            err.reason,
+            Some(lakko_mls::RefusalReason::AddNotOwnerOrAdmin),
+            "a member's add must be typed, got {err:?}",
+        );
+
+        let err = bob_g
+            .set_group_roles_core(&bob, &alice.signature_public_key(), &[])
+            .unwrap_err();
+        assert_eq!(
+            err.reason,
+            Some(lakko_mls::RefusalReason::NotOwner),
+            "an admin's role change must be typed, got {err:?}",
+        );
+
+        // And a wire-format failure is not a refusal at all.
+        let err = alice_g
+            .propose_add_member_core(&alice, b"not a key package")
+            .unwrap_err();
+        assert_eq!(err.reason, None, "got {err:?}");
+    }
+
+    /// The disposition crosses as data — the web client asks the core what to
+    /// do instead of deciding it from a code's spelling — and the retryable set
+    /// is exactly the queue-full one.
+    #[test]
+    fn the_refusal_disposition_is_exported_by_code() {
+        assert_eq!(
+            membership_refusal_disposition("roleChangePending"),
+            Some("retryLater".to_string()),
+        );
+        assert_eq!(
+            membership_refusal_disposition("addNotOwnerOrAdmin"),
+            Some("notPermitted".to_string()),
+        );
+        // The middle value a two-way split would have got wrong: not forbidden,
+        // and still not retryable.
+        assert_eq!(
+            membership_refusal_disposition("sweepAlreadyStaged"),
+            Some("doNotRetry".to_string()),
+        );
+        assert_eq!(membership_refusal_disposition("not-a-code"), None);
+
+        assert!(membership_refusal_retry_may_succeed("pendingSetFull"));
+        assert!(!membership_refusal_retry_may_succeed("ownerUnremovable"));
+        assert!(!membership_refusal_retry_may_succeed("sweepAlreadyStaged"));
+        assert!(!membership_refusal_retry_may_succeed("not-a-code"));
+
+        let retryable: Vec<&str> = lakko_mls::RefusalReason::ALL
+            .into_iter()
+            .filter(|r| membership_refusal_retry_may_succeed(r.code()))
+            .map(lakko_mls::RefusalReason::code)
+            .collect();
+        assert_eq!(
+            retryable,
+            vec!["roleChangePending", "pendingSetFull"],
+            "only a full bounded queue may be offered as a retry",
+        );
+        for reason in lakko_mls::RefusalReason::ALL {
+            assert_eq!(
+                membership_refusal_disposition(reason.code()),
+                Some(reason.disposition().code().to_string()),
+                "{reason:?}",
+            );
+        }
+    }
+
     /// A second stage is refused with the STABLE machine-readable
     /// [`SWEEP_ALREADY_STAGED_CODE`] prefix, so the web client branches on a
     /// code rather than on prose (the crate's `stale:` / `invalid:` /
@@ -4686,7 +5007,7 @@ mod tests {
 
         let err = alice_g.stage_pending_proposals_core(&alice).unwrap_err();
         assert!(
-            err.starts_with(SWEEP_ALREADY_STAGED_CODE),
+            err.message.starts_with(SWEEP_ALREADY_STAGED_CODE),
             "the second stage must carry the stable code, got {err:?}",
         );
 
@@ -5276,7 +5597,7 @@ mod tests {
 pub fn wrap_welcome_rendezvous(
     joiner_signature_key: &[u8],
     welcome: &[u8],
-) -> Result<Vec<u8>, JsError> {
+) -> Result<Vec<u8>, JsValue> {
     lakko_mls::WelcomeRendezvous {
         joiner_signature_key: joiner_signature_key.to_vec(),
         welcome: welcome.to_vec(),

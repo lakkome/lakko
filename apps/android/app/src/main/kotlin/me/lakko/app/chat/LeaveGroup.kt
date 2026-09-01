@@ -74,14 +74,14 @@ internal enum class LeaveGroupRefusal(val message: String) {
      * ([ChatViewModel.onLeaveGroup] re-asks here before publishing). §6 keeps
      * one string per core refusal, and this is the core's.
      */
-    OWNER_CANNOT_LEAVE("The group owner cannot leave the group."),
+    OWNER_CANNOT_LEAVE(me.lakko.app.chat.OWNER_CANNOT_LEAVE),
 
     /**
      * No role table (a legacy / open group), or this device's own leaf could not
      * be resolved. The UX §6 fail-closed fallback: it must exist, must never
      * leak an internal reason, and must never be reached in normal use.
      */
-    NOT_REQUESTABLE("This change could not be requested."),
+    NOT_REQUESTABLE(MEMBERSHIP_REFUSAL_FALLBACK),
 }
 
 /** Whether the `Leave group` control renders, and whether it is live. */

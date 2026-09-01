@@ -1341,6 +1341,24 @@ public class ChatRepository(
         }
     }
 
+    /**
+     * ADR-0027 / UX §7.1 — whether a request the quarantine turned away has
+     * been observed for this group since the last time an admin acted.
+     *
+     * Not derivable from [pendingExternalJoins]: an unkept request is
+     * precisely the one that never entered that set.
+     */
+    public fun sawUnkeptExternalJoin(groupIdHex: String): Boolean =
+        groups[groupIdHex]?.sawUnkeptExternalJoin ?: false
+
+    /**
+     * Forget the unkept-request observation, because acting on the queue is
+     * what may have made room for the request it turned away.
+     */
+    public fun clearUnkeptExternalJoin(groupIdHex: String) {
+        groups[groupIdHex]?.sawUnkeptExternalJoin = false
+    }
+
     /** ADR-0028 OQ2 (G-3) — advisory attribution for a pending request: which
      *  member minted the `/g/` link it arrived on, and whether that issuer is in
      *  the current roster. */
@@ -4636,6 +4654,18 @@ private class GroupRecord(
         private set
 
     /**
+     * ADR-0027 / UX §7.1 — an external-join request arrived that the core did
+     * NOT keep (the quarantine was full). It is absent from
+     * [Group.pendingExternalJoins] and can be approved by nobody, so the
+     * members sheet cannot learn about it from the retained set — this is the
+     * only place the fact survives.
+     *
+     * Read by the sheet on its next refresh and cleared when an admin acts on
+     * the queue, which is what may have made room.
+     */
+    var sawUnkeptExternalJoin: Boolean = false
+
+    /**
      * ADR-0040 F1 (lakko-security) — swap in a freshly-[loadGroup]ed handle after a
      * commit persist-abort reset the in-memory MLS provider to the durable snapshot
      * (N). Preserves this record's timeline / cursor / typing / read-watermark
@@ -4850,8 +4880,20 @@ private class GroupRecord(
                     // ADR-0027 (G-3) — a non-member's external Add proposal,
                     // retained pending an owner/admin approval. Not a timeline
                     // row; the members sheet reads the retained set via
-                    // ChatRepository.pendingExternalJoins(groupIdHex). No fold.
-                    Unit
+                    // ChatRepository.pendingExternalJoins(groupIdHex).
+                    //
+                    // Except for the one thing that read cannot see. A request
+                    // the core did NOT keep is absent from the retained set, so
+                    // it renders as nothing at all — correct about the Approve
+                    // button and silent about the joiner, who is now waiting on
+                    // an admin nobody told. §7.1 recorded that state as
+                    // unsurfaceable; `retained` is what made it statable, so it
+                    // is recorded here rather than dropped.
+                    if (externalJoinAffordance(event.retained) is
+                        ExternalJoinAffordance.Informational
+                    ) {
+                        sawUnkeptExternalJoin = true
+                    }
                 }
                 is IncomingChatEvent.PushRoutingSecret -> {
                     // ADR-0042 — a push-routing-secret distribution envelope.

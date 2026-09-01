@@ -259,6 +259,18 @@ export type IncomingChatEvent =
        *  tag + the `proposal_ref` for `approveExternalJoin` /
        *  `rejectExternalJoin`. */
       joinerSignatureKey: Uint8Array;
+      /** ADR-0027 — whether the core actually KEPT the request.
+       *
+       *  Carried rather than dropped, and the distinction is not
+       *  cosmetic: the core fires this event even when the
+       *  quarantine (`MAX_PENDING_EXTERNAL_JOINS`) was full and the
+       *  request was not retained. Such a request can be approved
+       *  by nobody — `approveExternalJoin` has nothing to look up
+       *  and refuses with `noSuchJoinRequest` — so offering Approve
+       *  for it is an affordance that cannot work. Route it through
+       *  `externalJoinAffordance` rather than reading this
+       *  directly. */
+      retained: boolean;
       createdAt: string;
     }
   | {
@@ -1114,6 +1126,7 @@ export async function toEvent(
       kind: "externalJoinRequest",
       messageId,
       joinerSignatureKey: processed.externalJoinSignatureKey,
+      retained: processed.externalJoinRetained,
       createdAt,
     };
   }

@@ -94,8 +94,11 @@ public let noTransferCandidatesMessage =
 /// its own prose here (`"a role change is already waiting to be applied for this
 /// group"`), which was a second hand-written near-variant of one string — the
 /// exact drift class UX §12.6 exists to prevent.
+/// **Now assembled from ``MembershipRefusal`` rather than written out**, since
+/// the core refuses the same thing by reason (`roleChangePending`) and the two
+/// halves have to stay one sentence. A test asserts the join equals this.
 public let roleChangeAlreadyPendingMessage =
-    "A role change is already waiting to apply. Wait for it to land, then try again."
+    "\(roleChangePendingMessage) \(retryWhenItLandsMessage)"
 
 /// §6.1.5 — the headline of the irreversibility statement. It sits **above** the
 /// role choice: below it, the pre-selected option reads as the safe one and the

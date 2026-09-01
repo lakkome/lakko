@@ -1360,7 +1360,9 @@ private struct MembersSheet: View {
                 // only (same gate as add/remove); hidden when there are none.
                 // Approve drives the role-gated MLS approve + posts the commit
                 // & Welcome rendezvous; Reject drops the retained proposal.
-                if viewModel.canManageMembers, !viewModel.pendingJoins.isEmpty {
+                if viewModel.canManageMembers,
+                    !viewModel.pendingJoins.isEmpty || viewModel.unkeptJoinRequest
+                {
                     Section("Join requests (\(viewModel.pendingJoins.count))") {
                         // ADR-0045 S7 residual 2 — the quarantine's one statable
                         // property. `Group::pending_external_joins` is in-memory:
@@ -1373,6 +1375,16 @@ private struct MembersSheet: View {
                         Text(joinRequestsNotSaved)
                             .font(.caption2)
                             .foregroundStyle(.secondary)
+                        // ADR-0027 / UX §7.1 — a request the quarantine turned
+                        // away. It is in no row below, because the core never
+                        // kept it, and it gets no Approve for the same reason:
+                        // there is nothing to approve. Informational only,
+                        // which is the most `externalJoinAffordance` allows.
+                        if viewModel.unkeptJoinRequest {
+                            Text(joinRequestNotKeptMessage)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
                         ForEach(viewModel.pendingJoins, id: \.self) { ref in
                             HStack {
                                 VStack(alignment: .leading, spacing: 2) {

@@ -94,6 +94,16 @@ public final class ChatViewModel: ObservableObject {
     @Published public private(set) var membershipBusy: Bool = false
     /// Last add/remove error surfaced to the sheet, else `nil`.
     @Published public private(set) var membershipError: String?
+    /// ADR-0027 / UX §7.1 — an external-join request arrived while the
+    /// quarantine was full, so the core did not keep it. It is in no list and
+    /// can be approved by nobody; the only honest thing left is to say it
+    /// happened.
+    ///
+    /// Session-scoped and cleared when the admin acts on the queue (approve or
+    /// reject), because acting is precisely what may have made room. There is
+    /// no count: `MAX_PENDING_EXTERNAL_JOINS` is module-private in the core,
+    /// and a client-side literal is the stale-drift class §7.1 flags.
+    @Published public private(set) var unkeptJoinRequest: Bool = false
     /// ADR-0022 — `true` when the local member may add / remove (owner, admin,
     /// or an open/legacy group with no role table); `false` for a plain member.
     /// The sheet hides the add field + per-member Remove when this is `false`.
@@ -757,6 +767,32 @@ public final class ChatViewModel: ObservableObject {
     }
 
     /// Re-read the live MLS roster + the local member's role from the repository.
+    /// ADR-0045 UX §6 / §12 item 6 — the one funnel every membership handler
+    /// reports a failure through.
+    ///
+    /// Before this, all nine handlers were `membershipError =
+    /// error.localizedDescription`, so a member who tapped `Add` was shown
+    /// `proposeAddMemberFromWire failed: Group(message: "add proposal refused:
+    /// proposer is not owner or admin")` — a `ChatError.wrapped` around the
+    /// core's sentence for a developer reading a log.
+    ///
+    /// The **log keeps that sentence**, because that is who it is for. The
+    /// screen gets the copy the reason selects, and the reason is a typed
+    /// value rather than anything read out of the message.
+    ///
+    /// A non-refusal keeps its own description unchanged: collapsing a dead
+    /// socket into "This change could not be requested." would be a worse lie
+    /// than the raw text, and §6 row 7 is about not leaking a *refusal's*
+    /// internal reason, not about hiding every error.
+    private func reportMembershipFailure(_ error: Error, op: String) {
+        membershipError =
+            membershipRefusalMessage(
+                for: error,
+                retryMaySucceed: { membershipRefusalRetryMaySucceed(reason: $0) })
+            ?? error.localizedDescription
+        NSLog("%@ failed: %@", op, error.localizedDescription)
+    }
+
     func refreshMembers() {
         // ADR-0045 UX §6.2 — FIRST, because every gate below depends on it.
         // A panel open is one of the paths that can be the first thing to
@@ -790,6 +826,10 @@ public final class ChatViewModel: ObservableObject {
         // ADR-0027 (G-3) — refresh the pending external-join list alongside the
         // roster (the retained set is the source of truth).
         pendingJoins = refreshedPendingJoins()
+        // ADR-0027 / §7.1 — the request the quarantine turned away is in no
+        // list, so it can only come from the repository's own observation.
+        unkeptJoinRequest =
+            !membershipHasEnded && repository.sawUnkeptExternalJoin(groupIdHex: groupIdHex)
         refreshPendingRequests()
         refreshJoinAttributions()
         // ADR-0045 UX §6.1.9 — decided AFTER the roster + role table are fresh
@@ -944,8 +984,7 @@ public final class ChatViewModel: ObservableObject {
                 _ = outcome
                 refreshMembers()
             } catch {
-                membershipError = error.localizedDescription
-                NSLog("onAddMember failed: %@", error.localizedDescription)
+                reportMembershipFailure(error, op: "onAddMember")
             }
         }
     }
@@ -973,8 +1012,7 @@ public final class ChatViewModel: ObservableObject {
                 )
                 refreshMembers()
             } catch {
-                membershipError = error.localizedDescription
-                NSLog("onRemoveMember failed: %@", error.localizedDescription)
+                reportMembershipFailure(error, op: "onRemoveMember")
             }
         }
     }
@@ -1066,8 +1104,7 @@ public final class ChatViewModel: ObservableObject {
                     "Leave requested. It applies when an owner or an admin applies the change."
                 refreshMembers()
             } catch {
-                membershipError = error.localizedDescription
-                NSLog("onLeaveGroup failed: %@", error.localizedDescription)
+                reportMembershipFailure(error, op: "onLeaveGroup")
             }
         }
     }
@@ -1234,8 +1271,7 @@ public final class ChatViewModel: ObservableObject {
                     outgoing: outgoing)
                 refreshMembers()
             } catch {
-                membershipError = error.localizedDescription
-                NSLog("onTransferOwnership failed: %@", error.localizedDescription)
+                reportMembershipFailure(error, op: "onTransferOwnership")
             }
         }
     }
@@ -1292,8 +1328,7 @@ public final class ChatViewModel: ObservableObject {
                 )
                 refreshMembers()
             } catch {
-                membershipError = error.localizedDescription
-                NSLog("onToggleAdmin failed: %@", error.localizedDescription)
+                reportMembershipFailure(error, op: "onToggleAdmin")
             }
         }
     }
@@ -1337,10 +1372,13 @@ public final class ChatViewModel: ObservableObject {
                         "Join approved. They join when an owner or an admin applies the change."
                         + (queue.map { " \($0)" } ?? "")
                 }
+                // Acting on the queue is what may have made room for the
+                // request the quarantine turned away, so the notice about it
+                // stops being current.
+                repository.clearUnkeptExternalJoin(groupIdHex: groupIdHex)
                 refreshMembers()
             } catch {
-                membershipError = error.localizedDescription
-                NSLog("onApproveJoin failed: %@", error.localizedDescription)
+                reportMembershipFailure(error, op: "onApproveJoin")
             }
         }
     }
@@ -1358,10 +1396,11 @@ public final class ChatViewModel: ObservableObject {
                 groupIdHex: groupIdHex,
                 proposalRef: proposalRef
             )
+            // Same reason as in `onApproveJoin`: the queue moved.
+            repository.clearUnkeptExternalJoin(groupIdHex: groupIdHex)
             refreshMembers()
         } catch {
-            membershipError = error.localizedDescription
-            NSLog("onRejectJoin failed: %@", error.localizedDescription)
+            reportMembershipFailure(error, op: "onRejectJoin")
         }
     }
 
@@ -1373,8 +1412,7 @@ public final class ChatViewModel: ObservableObject {
             do {
                 inviteLink = try await repository.createGroupInviteLink(groupIdHex: groupIdHex)
             } catch {
-                membershipError = error.localizedDescription
-                NSLog("onCreateInviteLink failed: %@", error.localizedDescription)
+                reportMembershipFailure(error, op: "onCreateInviteLink")
             }
         }
     }
@@ -1390,8 +1428,7 @@ public final class ChatViewModel: ObservableObject {
                 _ = try await repository.revokeGroupInviteLink(link: link)
                 inviteLink = nil
             } catch {
-                membershipError = error.localizedDescription
-                NSLog("onRevokeInviteLink failed: %@", error.localizedDescription)
+                reportMembershipFailure(error, op: "onRevokeInviteLink")
             }
         }
     }
@@ -1556,6 +1593,8 @@ public final class ChatViewModel: ObservableObject {
         // open (cheap in-memory read of the group's retained set).
         if membersPanelOpen {
             pendingJoins = refreshedPendingJoins()
+            unkeptJoinRequest =
+                !membershipHasEnded && repository.sawUnkeptExternalJoin(groupIdHex: groupIdHex)
             refreshJoinAttributions()
         }
     }

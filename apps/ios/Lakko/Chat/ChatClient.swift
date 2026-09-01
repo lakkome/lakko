@@ -639,13 +639,23 @@ public final class ChatClient {
                 record: record,
                 createdAt: createdAt
             )
-        case .externalJoinProposal(let joinerSignatureKey):
+        case .externalJoinProposal(let joinerSignatureKey, let retained):
             // ADR-0027 (G-3) — surface the joiner's signature key the members
             // sheet needs to approve / reject the request, rather than a
             // content-less system row.
+            //
+            // `retained` is carried rather than dropped, and the distinction is
+            // not cosmetic: the core fires this event even when the quarantine
+            // (`MAX_PENDING_EXTERNAL_JOINS`) was full and the request was NOT
+            // kept. A request that was not retained cannot be approved by
+            // anyone — `approveExternalJoin` has nothing to look up and refuses
+            // with `NoSuchJoinRequest` — so offering Approve for it is an
+            // affordance that cannot work. The UI must render such a request as
+            // informational at most.
             return .externalJoinRequest(
                 messageId: messageId,
                 joinerSignatureKey: joinerSignatureKey,
+                retained: retained,
                 createdAt: createdAt
             )
         }
@@ -795,7 +805,7 @@ public enum IncomingChatEvent: Equatable {
     /// pending list rendered in the members sheet (the retained set,
     /// `group.pendingExternalJoins()`, is the source of truth; this event is
     /// the nudge that a new request landed).
-    case externalJoinRequest(messageId: Int64, joinerSignatureKey: Data, createdAt: String)
+    case externalJoinRequest(messageId: Int64, joinerSignatureKey: Data, retained: Bool, createdAt: String)
     /// ADR-0042 — an in-group push-routing-secret distribution envelope
     /// (the group OWNER broadcast the group's `push_routing_secret`). Never
     /// a timeline bubble: the receive loop persists the secret + subscribes

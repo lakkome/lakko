@@ -454,12 +454,36 @@ error. One string per core refusal, reused verbatim wherever it surfaces:
 | remove, not owner/admin | `Only the group owner or an admin can remove members.` |
 | remove targets the owner | `The group owner cannot be removed.` |
 | owner self-remove / leave | `The group owner cannot leave the group.` |
-| role change, not owner | `Only the group owner can change admins.` |
-| role change, one already in flight | `A role change is already waiting to apply. Wait for it to land, then try again.` |
+| role change **or ownership transfer**, not owner | `Only the group owner can change admins or transfer ownership.` |
+| role change, one already in flight | `A role change is already waiting to apply.` + `Wait for it to land, then try again.` |
+| the pending queue is full | `Too many changes are already waiting to apply.` + `Wait for them to land, then try again.` |
+| the chosen owner is not a member | `Ownership can only be held by a current member of this group.` |
+| that join request is no longer waiting | `That join request is no longer waiting.` |
+| that person is already a member | `That person has already joined this group.` |
 | unsupported / unresolvable / no role table | `This change could not be requested.` |
 
 The last row is the fail-closed fallback. It must exist, must never leak an internal
 reason, and must never be reached in normal use.
+
+**Eleven strings over eighteen core reasons — CORRECTED 2026-09-01, and both directions
+of the original count were wrong.** Ten reasons take their own row; eight collapse onto
+the fallback, and each collapse is **recorded in code** rather than defaulted, because
+falling back is also what an *unconsidered* reason does. The rule for the split is that
+**a reason with no user-initiated entry point gets no sentence** — a peer-gate refusal on
+somebody else's commit, or a sweep-side state the committer view is specified to render
+as nothing, has no reader.
+
+**The role-change row widened, and §12 item 6 predicted the opposite.** It said ownership
+transfer adds no row and that the not-the-owner race lands on the fallback. It lands
+here: a transfer **is** a role-table rewrite, so the core raises one reason for both, and
+a sentence naming only admins is wrong for half of what it covers.
+
+**The in-flight row's invitation is appended, not stored.** The constant holds only the
+statement; the second sentence is added when the core's disposition says the call
+resolves on its own. Storing the joined sentence would make the client agree with the
+core **by coincidence** — a client that hard-codes which refusals are retryable passes
+every test written against the real core, which is why each client also drives an
+inverted port that only the wrong implementation satisfies.
 
 **The in-flight row is the odd one out, and its wording carries that.** Every other row
 is an **authorisation** refusal — permanent for this user, in this group, until something
@@ -1592,9 +1616,20 @@ the joiner.
 client-side `64` is the stale-literal drift class this repo has already been bitten by —
 it fails in the dangerous direction, reading as *room left* when there is none. Turning
 the core's cap refusal into fixed copy needs the typed refusal table §12 already lists as
-unbuilt. And one state is unsurfaceable today at any layer: at 64 retained external joins
-`retain_external_join` silently stops retaining, and nothing distinguishes that from a
-request that never arrived.
+unbuilt. **CLOSED 2026-09-01 on both halves.** The cap refusal now has copy, because the
+core carries a typed `PendingSetFull` reason (§12 item 6) — it states no number, per the
+stale-literal warning above. And the state this paragraph called unsurfaceable is
+surfaced: `Incoming::ExternalJoinProposal` gained `retained`, so a request the full
+quarantine dropped is now **distinguishable from one that never arrived**, and all three
+clients say so.
+
+That second half mattered more than it reads. The core fires the event either way, so
+before this an admin saw a pending request in its list that **no approval could ever act
+on** — `approve_external_join` had nothing to look up. Every client was already correct
+by construction (each list is built from the retained set, so no button was offered), but
+each was correct by rendering **nothing at all**, which left the joiner waiting on an
+admin nobody had told. `externalJoinAffordance(retained:)` now makes that explicit, and
+the flag clears on approve or reject — acting on the queue is what may have made room.
 
 ---
 
@@ -2179,7 +2214,68 @@ point in the last three months and did not.
    no client re-requests at all** (§7), so there is no loop to bound; a superseded request
    is dropped and the user asks again. The decision is still owed, but it is owed *before*
    the re-request is built rather than about something that exists.
-6. **Typed refusal reasons on the FFI (§9.1).** Prose-matching `Error::Group` strings across
+6. **~~Typed refusal reasons on the FFI (§9.1).~~ CLOSED 2026-09-01 — both halves, and
+   this item's own arithmetic was wrong in a way worth keeping.**
+
+   The core carries `RefusalReason` (**18** fieldless variants) with a
+   `RefusalDisposition` of `RetryLater` / `DoNotRetry` / `NotPermitted`; both FFI
+   surfaces expose it — UniFFI as one flat `FfiError` variant per reason (a
+   `flat_error` cannot carry associated data), wasm as `refusalReason` /
+   `refusalDisposition` properties on the thrown `Error`. All three clients read it.
+   **No client matches prose anywhere.**
+
+   **The table is eleven strings, not seven.** Ten reasons take their own sentence,
+   eight collapse onto the fail-closed row, and every collapse is **recorded** rather
+   than defaulted — because falling back is also what an *unconsidered* reason does, so
+   a check over the table alone would pass for a reason nobody wrote copy for. The
+   assertion each client carries is `table ∪ collapsed == the core's set`.
+
+   **Row 5 had to widen, and this item predicted the opposite.** It says ownership
+   transfer *"adds none"* and that the not-the-owner race *"lands on the existing
+   fail-closed fallback"*. It lands on `NotOwner` — because a transfer **is** a
+   role-table rewrite, so the core raises one reason for both, and a sentence naming
+   only admins is wrong for half of what it covers. The row now reads *"Only the group
+   owner can change admins or transfer ownership."*
+
+   **Four reasons this item never named needed their own sentence:** `PendingSetFull`
+   (§7.1 already asked for it), `OwnerNotAMember`, `NoSuchJoinRequest` and
+   `JoinerAlreadyAMember` — each reachable by tapping something. The collapse rule is
+   the mirror image: **a reason with no user-initiated entry point gets no sentence**,
+   which is what disposes of the other eight.
+
+   **The retry invitation is appended, never stored.** `RoleChangePending`'s constant
+   holds only the statement; *"Wait for it to land, then try again."* is appended when
+   the core's disposition says so. Joined they are row 6 verbatim, asserted. Storing
+   the joined sentence would make the client agree with the core **by coincidence**, and
+   a probe that hard-codes the retry partition then passes every real-core test — which
+   is exactly why each client also drives an **inverted** port that only the wrong
+   implementation satisfies.
+
+   **The axis is three-valued, and this item's two-valued framing is superseded.** The
+   split it describes — availability versus authorisation — has no room for the middle
+   case: a request refused for **its own state** (a duplicate key, an expired
+   KeyPackage) is neither permitted-later nor forbidden, and under two values
+   `SweepAlreadyStaged` classified as retryable while the core's own documentation says
+   to reach the verdict rather than retry. The cut is mechanical: **`RetryLater` is the
+   disposition that resolves on its own** — the identical call succeeds once any
+   committer sweeps, with the caller doing nothing. Two reasons qualify.
+
+   **An unknown future reason cannot render blank, and the guarantee differs by
+   platform.** iOS and Android get the **compiler** — the copy `switch`/`when` is
+   exhaustive with no wildcard, so a nineteenth reason fails the build. Web has no enum,
+   so its guard is a test that reads `RefusalReason::ALL` out of
+   `crates/lakko-mls/src/refusal.rs` and cross-checks every code against the core's own
+   disposition; a hand-written list would agree with itself forever.
+
+   **Residual:** the native `FfiError` → reason bridge is exhaustive, so a new variant
+   fails the build — but one classified into the non-refusal arm would read as *not a
+   refusal* and show the core's prose. The exhaustive copy switch forces the author to
+   be looking at the bridge when they add the reason, which is the mitigation rather
+   than a fix.
+
+   *Original text follows, kept because its reasoning is why this was built at all.*
+
+   Prose-matching `Error::Group` strings across
    three clients would work and would be wrong. Worth the small core change. **Still open,
    and the clients did the defensible thing rather than the wrong one:** none of them
    built the ~~six~~ **seven**-string refusal table this spec specifies, precisely because

@@ -74,6 +74,11 @@ import {
   requestToCoPublish,
 } from "../channels/copublisher";
 import { LegacyChannelError, channelErrorMessage } from "../channels/legacy-v1";
+// ADR-0045 UX §6 / §12 item 6 — one refusal table, shared with the chat
+// members panel. The co-publisher queue is a different surface but the same
+// core refusals, and a second vocabulary for them is the drift §12.6 flags.
+import { membershipRefusalOf } from "../chat/membership-refusal";
+import { membershipRefusalRetryMaySucceed } from "../../wasm/lakko_ffi_wasm";
 import {
   runRotationOnce,
   startRotationCron,
@@ -1499,9 +1504,24 @@ const CoPublishersPanel: Component<{
       );
       setPending(pendingCoPublishers(props.publisherGroup));
     } catch (err) {
-      setError(`Approve failed: ${String(err)}`);
+      // ADR-0045 UX §6 — the co-publisher approve reaches the SAME core
+      // refusals as the chat one (`noSuchJoinRequest` when another owner got
+      // there first, `joinerAlreadyAMember` when the joiner already landed),
+      // so it reads from the same table rather than dumping the core's prose.
+      setError(coPublisherRefusal(err) ?? `Approve failed: ${String(err)}`);
     } finally {
       setBusy(false);
+    }
+  }
+
+  /** The §6 sentence for a co-publisher approve / reject refusal, or `null`
+   *  when the failure is not a membership refusal (a DS write, a reseal) and
+   *  its own text should stand. */
+  function coPublisherRefusal(err: unknown): string | null {
+    try {
+      return membershipRefusalOf(err, membershipRefusalRetryMaySucceed)?.message ?? null;
+    } catch {
+      return null;
     }
   }
 
@@ -1511,7 +1531,7 @@ const CoPublishersPanel: Component<{
       rejectCoPublisher(props.publisherGroup, ref);
       setPending(pendingCoPublishers(props.publisherGroup));
     } catch (err) {
-      setError(`Reject failed: ${String(err)}`);
+      setError(coPublisherRefusal(err) ?? `Reject failed: ${String(err)}`);
     }
   }
 

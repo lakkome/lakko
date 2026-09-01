@@ -35,6 +35,7 @@ import { DeviceGroupSyncProvider } from "./devices/sync/DeviceGroupSyncContext";
 import { WakeNavigator } from "./push/WakeNavigator";
 import { routes } from "./routes/routes";
 import { SwUpdateBanner } from "./sw/SwUpdateBanner";
+import { ConfirmDialog } from "./ui/ConfirmDialog";
 
 /**
  * Router-level layout (G-36). Renders the active route unchanged and
@@ -80,6 +81,16 @@ const App: Component = () => (
          * dispatched by `sw/register.ts`.
          */}
         <SwUpdateBanner />
+        {/*
+         * ADR-0045 UX §14 — the in-page confirmation that replaced
+         * `window.confirm`. Mounted here, beside the update banner and for
+         * the same reason: it must overlay every route (auth shell + main
+         * app shell + invite landing) and no route knows it exists. Callers
+         * reach it through `requestConfirm`; with no host mounted every
+         * request resolves `false`, so this mount is what makes the
+         * destructive controls live at all.
+         */}
+        <ConfirmDialog />
       </DeviceGroupSyncProvider>
     </AuthProvider>
   </ChatProvider>

@@ -209,3 +209,70 @@ fn group_members_returns_one_entry_for_a_fresh_group() {
         "members.len() must agree with memberCount",
     );
 }
+
+/// A membership refusal reaches JS as a real `Error` carrying the typed reason
+/// as **own properties** — `refusalReason` and `refusalDisposition` — so a web client
+/// picks its copy with a property read and never parses the message.
+///
+/// This is the one hop the host suite cannot reach: `js_sys::Error` and
+/// `Reflect::set` only exist in a JS runtime. Everything before it (the core
+/// reason, the projection onto `MlsFailure`) is asserted host-side in `mls.rs`;
+/// this pins the shape the client actually sees, including that `.message`
+/// still carries the sentence and that `instanceof Error` still holds.
+#[wasm_bindgen_test]
+fn a_membership_refusal_is_thrown_as_an_error_carrying_its_reason() {
+    let alice = Identity::from_seed(&[0xD0u8; 64]).expect("alice");
+    let group = Group::new(&alice).expect("group");
+
+    // A wire-format failure is NOT a refusal: it must carry no reason, so a
+    // client cannot mistake it for a permission answer.
+    let plain = group
+        .propose_add_member(&alice, b"not a key package")
+        .expect_err("garbage is not a KeyPackage");
+    assert!(plain.is_instance_of::<js_sys::Error>());
+    assert!(
+        js_sys::Reflect::get(&plain, &JsValue::from_str("refusalReason"))
+            .expect("get")
+            .is_undefined(),
+        "a codec failure must not look like a refusal",
+    );
+
+    // A staged sweep refuses a second stage — the one refusal reachable from a
+    // single-member group without building a whole role scene.
+    let bob = Identity::from_seed(&[0xD1u8; 64]).expect("bob");
+    group
+        .propose_add_member(&alice, &bob.create_key_package().expect("kp"))
+        .expect("the owner may propose");
+    group
+        .stage_pending_proposals(&alice)
+        .expect("the first stage");
+    let refused = group
+        .stage_pending_proposals(&alice)
+        .expect_err("a second stage must be refused");
+
+    assert!(
+        refused.is_instance_of::<js_sys::Error>(),
+        "a refusal must still be a real Error",
+    );
+    let err: js_sys::Error = refused.clone().unchecked_into();
+    assert!(
+        !String::from(err.message()).is_empty(),
+        "the sentence must survive for logs",
+    );
+    assert_eq!(
+        js_sys::Reflect::get(&refused, &JsValue::from_str("refusalReason"))
+            .expect("get")
+            .as_string()
+            .as_deref(),
+        Some("sweepAlreadyStaged"),
+    );
+    assert_eq!(
+        js_sys::Reflect::get(&refused, &JsValue::from_str("refusalDisposition"))
+            .expect("get")
+            .as_string()
+            .as_deref(),
+        Some("doNotRetry"),
+        "a staged sweep is not forbidden and is still not retryable: the caller \
+         must reach the outstanding verdict, so no plain retry is offered",
+    );
+}

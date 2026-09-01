@@ -42,6 +42,11 @@ import {
   type JSX,
 } from "solid-js";
 import { useAuth } from "./AuthContext";
+import {
+  deleteAccountConfirmation,
+  removePasskeyConfirmation,
+} from "./destructive-confirm";
+import { requestConfirm } from "../ui/confirm-dialog";
 import { getDeviceKey } from "./key-store";
 import { enableAttestedRemovalsIfNeeded } from "../devices/attested-removal-policy";
 import {
@@ -171,11 +176,13 @@ export default function PasskeysSection(): JSX.Element {
       setMessage({ kind: "error", text: "Session not ready." });
       return;
     }
-    if (
-      !confirm(
-        `Remove passkey "${cred.nickname}"? You can't undo this; the device that owns the matching private key will no longer be able to sign in via passkey.`,
-      )
-    ) {
+    // ADR-0045 UX §14 — an in-page dialog rather than the bare global
+    // `confirm`. The nickname moves out of the question and onto the action
+    // button (§6.1: the button's accessible name is its visible label, so
+    // that is what is announced at the point of no return); the old string
+    // had to stuff it into the question because a browser dialog renders one
+    // string and a browser-supplied OK/Cancel pair.
+    if (!(await requestConfirm(removePasskeyConfirmation(cred)))) {
       return;
     }
     setBusy(true);
@@ -212,14 +219,11 @@ export default function PasskeysSection(): JSX.Element {
       setMessage({ kind: "error", text: "Session not ready." });
       return;
     }
-    if (
-      !window.confirm(
-        "Permanently delete your account? This erases your server-side " +
-          "identity (username, keys, recovery factors, backup) and signs you " +
-          "out everywhere. Your local messages are wiped from this device too. " +
-          "This cannot be undone.",
-      )
-    ) {
+    // ADR-0045 UX §14 — an in-page dialog rather than `window.confirm`. This
+    // is the most destructive control in the app and the one whose scope the
+    // user can least check afterwards, so the body enumerates both tiers and
+    // the action names what it deletes.
+    if (!(await requestConfirm(deleteAccountConfirmation()))) {
       return;
     }
     setBusy(true);

@@ -33,7 +33,8 @@ use lakko_mls::group::MemberAddition;
 use lakko_mls::{
     group, key_package, ChannelId as MlsChannelId, DeviceGroup as MlsDeviceGroup,
     Group as MlsGroup, Identity as MlsIdentity, Incoming as MlsIncoming,
-    PublisherGroup as MlsPublisherGroup, Role as MlsRole, RoleTable as MlsRoleTable,
+    PublisherGroup as MlsPublisherGroup, RefusalReason as MlsRefusalReason, Role as MlsRole,
+    RoleTable as MlsRoleTable,
 };
 
 pub mod attachments;
@@ -251,12 +252,114 @@ pub enum FfiError {
     /// because it would silently replace a commit that may already be on the
     /// wire — the loser of that replacement would be a commit peers had
     /// already applied, which is precisely the fork ADR-0045 closes.
-    #[error("a staged sweep is already awaiting its journal verdict")]
-    SweepAlreadyStaged,
+    /// The message is the core's own sentence — this variant carries it rather
+    /// than restating one, so every membership refusal reads identically in a
+    /// log wherever it was raised. (The Swift / Kotlin shape is unchanged: a
+    /// `flat_error` gives **every** variant a `message` regardless of its Rust
+    /// fields.)
+    #[error("{0}")]
+    SweepAlreadyStaged(String),
 
     /// Lock contention / poisoned mutex on the shared Group state.
     #[error("internal lock error")]
     LockPoisoned,
+
+    // ------------------------------------------------------------------
+    // Typed membership refusals (ADR-0045 §9.1 item 1 / §12 item 6).
+    //
+    // One variant per `lakko_mls::RefusalReason`, and the reason is the
+    // variant — because `#[uniffi(flat_error)]` lowers ONLY the variant
+    // discriminant and the `Display` string, dropping associated data. So a
+    // struct field carrying the reason would simply not arrive in Swift or
+    // Kotlin, and the variant is the one zero-parse channel this error type
+    // has. (Removing `flat_error` would carry the field, and would also change
+    // the generated shape and `message` of every existing variant, breaking
+    // callers that have nothing to do with membership.)
+    //
+    // `Display` is the core's sentence verbatim, so logs are unchanged. Select
+    // copy from the VARIANT — never from the message, which is written for a
+    // developer and is reworded freely. `membership_refusal_class` answers
+    // whether waiting helps; do not re-decide that per client.
+    //
+    // The one refusal that already had a variant, `SweepAlreadyStaged`, keeps
+    // it rather than gaining a duplicate under a `Membership` prefix.
+    //
+    // APPENDED here rather than grouped beside `Group`, deliberately: uniffi
+    // lowers a flat error as its variant's ORDINAL, and the generated Swift and
+    // Kotlin decode by that number. Inserting mid-enum renumbers every later
+    // variant, so bindings generated before this change would silently decode
+    // an unrelated error as the wrong variant until `just regen-bindings` runs.
+    // Appending leaves every existing ordinal where it was; stale bindings
+    // simply fail to recognise the new ones. Keep new variants at the end.
+    // ------------------------------------------------------------------
+    /// The proposal's sender is not a resolvable member of the group.
+    #[error("{0}")]
+    MembershipNotAMember(String),
+
+    /// Adding a member needs owner or admin.
+    #[error("{0}")]
+    MembershipAddNotOwnerOrAdmin(String),
+
+    /// Removing somebody else needs owner or admin.
+    #[error("{0}")]
+    MembershipRemoveNotOwnerOrAdmin(String),
+
+    /// The group owner's leaf cannot be removed, by anyone.
+    #[error("{0}")]
+    MembershipOwnerUnremovable(String),
+
+    /// The group owner cannot leave while owner — transfer ownership first.
+    #[error("{0}")]
+    MembershipOwnerCannotLeave(String),
+
+    /// Changing the role table, ownership transfer included, is owner-only.
+    #[error("{0}")]
+    MembershipNotOwner(String),
+
+    /// A leaf `Update` proposal, refused for every role.
+    #[error("{0}")]
+    MembershipLeafUpdateRefused(String),
+
+    /// A proposal type Lakko never emits.
+    #[error("{0}")]
+    MembershipUnsupportedProposal(String),
+
+    /// The group carries no role table, so it has no committer.
+    #[error("{0}")]
+    MembershipNoRoleTable(String),
+
+    /// The role table names an owner who is not a member of the group.
+    #[error("{0}")]
+    MembershipOwnerNotAMember(String),
+
+    /// The commit would delete the group's role table rather than change it.
+    #[error("{0}")]
+    MembershipRoleTableWouldVanish(String),
+
+    /// This device's role does not authorise it to commit.
+    #[error("{0}")]
+    MembershipNotACommitter(String),
+
+    /// Another role-table change is already pending. Availability, not
+    /// authorisation: waiting is the answer.
+    #[error("{0}")]
+    MembershipRoleChangePending(String),
+
+    /// A direct commit was refused because proposals are pending. Availability.
+    #[error("{0}")]
+    MembershipProposalsPending(String),
+
+    /// The pending-proposal set is full. Retryable.
+    #[error("{0}")]
+    MembershipPendingSetFull(String),
+
+    /// No retained external-join request matches that key — a stale view.
+    #[error("{0}")]
+    MembershipNoSuchJoinRequest(String),
+
+    /// The joiner named by an approve is already a member.
+    #[error("{0}")]
+    MembershipJoinerAlreadyAMember(String),
 }
 
 impl From<lakko_mls::Error> for FfiError {
@@ -269,8 +372,250 @@ impl From<lakko_mls::Error> for FfiError {
             lakko_mls::Error::Exporter(m) => Self::Exporter(m),
             lakko_mls::Error::Codec(m) => Self::Codec(m),
             lakko_mls::Error::Unsupported(m) => Self::Unsupported(m.to_string()),
+            lakko_mls::Error::MembershipRefused { reason, detail } => {
+                Self::from_refusal(reason, detail)
+            },
         }
     }
+}
+
+impl FfiError {
+    /// The variant that carries `reason`.
+    ///
+    /// **The single place the reason -> variant mapping is written.** It is an
+    /// exhaustive match with no wildcard, so a new
+    /// [`lakko_mls::RefusalReason`] fails to compile here rather than silently
+    /// collapsing into a generic error a client cannot tell from any other.
+    fn from_refusal(reason: MlsRefusalReason, detail: String) -> Self {
+        match reason {
+            MlsRefusalReason::NotAMember => Self::MembershipNotAMember(detail),
+            MlsRefusalReason::AddNotOwnerOrAdmin => Self::MembershipAddNotOwnerOrAdmin(detail),
+            MlsRefusalReason::RemoveNotOwnerOrAdmin => {
+                Self::MembershipRemoveNotOwnerOrAdmin(detail)
+            },
+            MlsRefusalReason::OwnerUnremovable => Self::MembershipOwnerUnremovable(detail),
+            MlsRefusalReason::OwnerCannotLeave => Self::MembershipOwnerCannotLeave(detail),
+            MlsRefusalReason::NotOwner => Self::MembershipNotOwner(detail),
+            MlsRefusalReason::LeafUpdateRefused => Self::MembershipLeafUpdateRefused(detail),
+            MlsRefusalReason::UnsupportedProposal => Self::MembershipUnsupportedProposal(detail),
+            MlsRefusalReason::NoRoleTable => Self::MembershipNoRoleTable(detail),
+            MlsRefusalReason::OwnerNotAMember => Self::MembershipOwnerNotAMember(detail),
+            MlsRefusalReason::RoleTableWouldVanish => Self::MembershipRoleTableWouldVanish(detail),
+            MlsRefusalReason::NotACommitter => Self::MembershipNotACommitter(detail),
+            MlsRefusalReason::RoleChangePending => Self::MembershipRoleChangePending(detail),
+            MlsRefusalReason::ProposalsPending => Self::MembershipProposalsPending(detail),
+            MlsRefusalReason::PendingSetFull => Self::MembershipPendingSetFull(detail),
+            MlsRefusalReason::NoSuchJoinRequest => Self::MembershipNoSuchJoinRequest(detail),
+            MlsRefusalReason::JoinerAlreadyAMember => Self::MembershipJoinerAlreadyAMember(detail),
+            MlsRefusalReason::SweepAlreadyStaged => Self::SweepAlreadyStaged(detail),
+        }
+    }
+
+    /// The inverse of [`Self::from_refusal`], or `None` when this error is not
+    /// a membership refusal at all.
+    ///
+    /// Rust-side only: a `flat_error` cannot be *lifted* back across the FFI
+    /// (uniffi generates a `try_lift` that refuses), so this can never be an
+    /// exported method taking an error. It exists to pin the mapping's
+    /// injectivity in a test — a collision between two reasons would be
+    /// invisible and unfixable from the client side — and to document the
+    /// correspondence in one readable place. Test-only for that reason.
+    #[cfg(test)]
+    pub(crate) fn refusal_reason(&self) -> Option<FfiRefusalReason> {
+        Some(match self {
+            Self::MembershipNotAMember(_) => FfiRefusalReason::NotAMember,
+            Self::MembershipAddNotOwnerOrAdmin(_) => FfiRefusalReason::AddNotOwnerOrAdmin,
+            Self::MembershipRemoveNotOwnerOrAdmin(_) => FfiRefusalReason::RemoveNotOwnerOrAdmin,
+            Self::MembershipOwnerUnremovable(_) => FfiRefusalReason::OwnerUnremovable,
+            Self::MembershipOwnerCannotLeave(_) => FfiRefusalReason::OwnerCannotLeave,
+            Self::MembershipNotOwner(_) => FfiRefusalReason::NotOwner,
+            Self::MembershipLeafUpdateRefused(_) => FfiRefusalReason::LeafUpdateRefused,
+            Self::MembershipUnsupportedProposal(_) => FfiRefusalReason::UnsupportedProposal,
+            Self::MembershipNoRoleTable(_) => FfiRefusalReason::NoRoleTable,
+            Self::MembershipOwnerNotAMember(_) => FfiRefusalReason::OwnerNotAMember,
+            Self::MembershipRoleTableWouldVanish(_) => FfiRefusalReason::RoleTableWouldVanish,
+            Self::MembershipNotACommitter(_) => FfiRefusalReason::NotACommitter,
+            Self::MembershipRoleChangePending(_) => FfiRefusalReason::RoleChangePending,
+            Self::MembershipProposalsPending(_) => FfiRefusalReason::ProposalsPending,
+            Self::MembershipPendingSetFull(_) => FfiRefusalReason::PendingSetFull,
+            Self::MembershipNoSuchJoinRequest(_) => FfiRefusalReason::NoSuchJoinRequest,
+            Self::MembershipJoinerAlreadyAMember(_) => FfiRefusalReason::JoinerAlreadyAMember,
+            Self::SweepAlreadyStaged(_) => FfiRefusalReason::SweepAlreadyStaged,
+            _ => return None,
+        })
+    }
+}
+
+/// Why a group-membership operation was refused — FFI projection of
+/// [`lakko_mls::RefusalReason`] (ADR-0045 §9.1 item 1).
+///
+/// # Do not select copy by matching the error message
+///
+/// Every refusal below arrives as its own `FfiError` variant carrying the
+/// core's sentence. The **variant** is the contract; the sentence is written
+/// for a developer reading a log and is reworded freely. A client that
+/// substring-matches prose silently falls through to a generic string — or to
+/// the wrong one — the day the core rewords a message, with nothing failing
+/// anywhere. That had already happened three different ways across three
+/// clients before this type existed, which is why it does.
+///
+/// This enum is the same set in value form, so a caller can hold a reason, pass
+/// it to [`membership_refusal_class`], and let the core answer whether waiting
+/// helps rather than re-deciding it per platform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum FfiRefusalReason {
+    /// The proposal's sender is not a resolvable member of the group.
+    NotAMember,
+    /// Adding a member needs owner or admin.
+    AddNotOwnerOrAdmin,
+    /// Removing somebody else needs owner or admin.
+    RemoveNotOwnerOrAdmin,
+    /// The group owner's leaf cannot be removed, by anyone.
+    OwnerUnremovable,
+    /// The group owner cannot leave while owner.
+    OwnerCannotLeave,
+    /// Changing the role table, ownership transfer included, is owner-only.
+    NotOwner,
+    /// A leaf `Update` proposal, refused for every role.
+    LeafUpdateRefused,
+    /// A proposal type Lakko never emits.
+    UnsupportedProposal,
+    /// The group carries no role table, so it has no committer.
+    NoRoleTable,
+    /// The role table names an owner who is not a member of the group.
+    OwnerNotAMember,
+    /// The commit would delete the group's role table rather than change it.
+    RoleTableWouldVanish,
+    /// This device's role does not authorise it to commit.
+    NotACommitter,
+    /// Another role-table change is already pending.
+    RoleChangePending,
+    /// A direct commit was refused because proposals are pending.
+    ProposalsPending,
+    /// The pending-proposal set is full.
+    PendingSetFull,
+    /// No retained external-join request matches that key — a stale view.
+    NoSuchJoinRequest,
+    /// The joiner named by an approve is already a member.
+    JoinerAlreadyAMember,
+    /// A staged sweep is already awaiting its journal verdict.
+    SweepAlreadyStaged,
+}
+
+impl From<MlsRefusalReason> for FfiRefusalReason {
+    fn from(r: MlsRefusalReason) -> Self {
+        match r {
+            MlsRefusalReason::NotAMember => Self::NotAMember,
+            MlsRefusalReason::AddNotOwnerOrAdmin => Self::AddNotOwnerOrAdmin,
+            MlsRefusalReason::RemoveNotOwnerOrAdmin => Self::RemoveNotOwnerOrAdmin,
+            MlsRefusalReason::OwnerUnremovable => Self::OwnerUnremovable,
+            MlsRefusalReason::OwnerCannotLeave => Self::OwnerCannotLeave,
+            MlsRefusalReason::NotOwner => Self::NotOwner,
+            MlsRefusalReason::LeafUpdateRefused => Self::LeafUpdateRefused,
+            MlsRefusalReason::UnsupportedProposal => Self::UnsupportedProposal,
+            MlsRefusalReason::NoRoleTable => Self::NoRoleTable,
+            MlsRefusalReason::OwnerNotAMember => Self::OwnerNotAMember,
+            MlsRefusalReason::RoleTableWouldVanish => Self::RoleTableWouldVanish,
+            MlsRefusalReason::NotACommitter => Self::NotACommitter,
+            MlsRefusalReason::RoleChangePending => Self::RoleChangePending,
+            MlsRefusalReason::ProposalsPending => Self::ProposalsPending,
+            MlsRefusalReason::PendingSetFull => Self::PendingSetFull,
+            MlsRefusalReason::NoSuchJoinRequest => Self::NoSuchJoinRequest,
+            MlsRefusalReason::JoinerAlreadyAMember => Self::JoinerAlreadyAMember,
+            MlsRefusalReason::SweepAlreadyStaged => Self::SweepAlreadyStaged,
+        }
+    }
+}
+
+impl From<FfiRefusalReason> for MlsRefusalReason {
+    fn from(r: FfiRefusalReason) -> Self {
+        match r {
+            FfiRefusalReason::NotAMember => Self::NotAMember,
+            FfiRefusalReason::AddNotOwnerOrAdmin => Self::AddNotOwnerOrAdmin,
+            FfiRefusalReason::RemoveNotOwnerOrAdmin => Self::RemoveNotOwnerOrAdmin,
+            FfiRefusalReason::OwnerUnremovable => Self::OwnerUnremovable,
+            FfiRefusalReason::OwnerCannotLeave => Self::OwnerCannotLeave,
+            FfiRefusalReason::NotOwner => Self::NotOwner,
+            FfiRefusalReason::LeafUpdateRefused => Self::LeafUpdateRefused,
+            FfiRefusalReason::UnsupportedProposal => Self::UnsupportedProposal,
+            FfiRefusalReason::NoRoleTable => Self::NoRoleTable,
+            FfiRefusalReason::OwnerNotAMember => Self::OwnerNotAMember,
+            FfiRefusalReason::RoleTableWouldVanish => Self::RoleTableWouldVanish,
+            FfiRefusalReason::NotACommitter => Self::NotACommitter,
+            FfiRefusalReason::RoleChangePending => Self::RoleChangePending,
+            FfiRefusalReason::ProposalsPending => Self::ProposalsPending,
+            FfiRefusalReason::PendingSetFull => Self::PendingSetFull,
+            FfiRefusalReason::NoSuchJoinRequest => Self::NoSuchJoinRequest,
+            FfiRefusalReason::JoinerAlreadyAMember => Self::JoinerAlreadyAMember,
+            FfiRefusalReason::SweepAlreadyStaged => Self::SweepAlreadyStaged,
+        }
+    }
+}
+
+/// What the caller should do about a refusal — FFI projection of
+/// [`lakko_mls::RefusalDisposition`].
+///
+/// **Three-valued, and the middle value is the point.** The obvious shape is
+/// two — *you may not* against *not yet* — and it is wrong, because "not yet"
+/// silently merges a request the group is too busy to accept right now with one
+/// that cannot be accepted as formed, ever. The first retries successfully; the
+/// second loops forever.
+///
+/// The rule, stated positively: **a refusal is retryable exactly when a bounded
+/// queue was full**, and never when it is about the request's own state.
+///
+/// It is answered by the core so three clients cannot answer it three ways.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum FfiRefusalDisposition {
+    /// *Not yet.* A bounded queue is full. The **identical** call succeeds once
+    /// a committer has swept, with the caller doing nothing else in between.
+    /// Offer a retry; say the group is busy, not that the user may not.
+    RetryLater,
+    /// *Not like this.* The call will never succeed as it stands, but the
+    /// caller is not forbidden — the request's content, an outstanding
+    /// obligation of the caller's, or the thing the request names has to change
+    /// first. Do not offer a plain retry: say what must change, or refresh and
+    /// let the user ask again.
+    DoNotRetry,
+    /// *You may not.* An authority answer. State it as a fact and offer no
+    /// action at all.
+    NotPermitted,
+}
+
+/// What the caller should do about `reason`.
+///
+/// Ask this rather than deciding it from the variant's name — the rule lives in
+/// the core precisely so it cannot drift between platforms.
+#[uniffi::export]
+#[must_use]
+pub fn membership_refusal_disposition(reason: FfiRefusalReason) -> FfiRefusalDisposition {
+    match MlsRefusalReason::from(reason).disposition() {
+        lakko_mls::RefusalDisposition::RetryLater => FfiRefusalDisposition::RetryLater,
+        lakko_mls::RefusalDisposition::DoNotRetry => FfiRefusalDisposition::DoNotRetry,
+        lakko_mls::RefusalDisposition::NotPermitted => FfiRefusalDisposition::NotPermitted,
+    }
+}
+
+/// `true` when the **identical** call will succeed once a committer has swept,
+/// with the caller doing nothing else — i.e. when the UI may offer a plain
+/// retry.
+///
+/// Exactly [`FfiRefusalDisposition::RetryLater`]. Deliberately **not** the
+/// complement of "permitted": a [`FfiRefusalDisposition::DoNotRetry`] refusal is
+/// not a permission problem and is still not retryable.
+#[uniffi::export]
+#[must_use]
+pub fn membership_refusal_retry_may_succeed(reason: FfiRefusalReason) -> bool {
+    MlsRefusalReason::from(reason).retry_may_succeed()
+}
+
+/// The stable machine-readable code for `reason` — the same string the wasm
+/// surface carries on `err.refusalReason`, so a refusal logged from Swift,
+/// Kotlin and the web reads identically.
+#[uniffi::export]
+#[must_use]
+pub fn membership_refusal_code(reason: FfiRefusalReason) -> String {
+    MlsRefusalReason::from(reason).code().to_string()
 }
 
 /// Result of [`Group::add_member_from_wire`].
@@ -591,13 +936,24 @@ pub enum ProcessedMessage {
         /// The proposal as the receive path saw it.
         record: ProposalRecord,
     },
-    /// A non-member's external-join proposal was processed + retained (ADR-0027,
-    /// G-3). `joiner_signature_key` is the handle for
+    /// A non-member's external-join proposal was processed (ADR-0027, G-3).
+    /// `joiner_signature_key` is the handle for
     /// [`Group::approve_external_join`] / [`Group::reject_external_join`], and
     /// the key the contact graph resolves to a display name.
     ExternalJoinProposal {
         /// The prospective joiner's leaf signature public key.
         joiner_signature_key: Vec<u8>,
+        /// `true` when the request was retained and an approve can act on it.
+        ///
+        /// **`false` means an approve would fail, so do not offer one.** The
+        /// event fires either way — a request arriving while the stranger
+        /// quarantine is full is surfaced but not kept, because a stranger must
+        /// not be able to make a member's receive loop error. Rendering an
+        /// unretained request as actionable is exactly the shape that offers a
+        /// user an action that cannot work.
+        ///
+        /// The remedy belongs to the joiner (ask again later), not the admin.
+        retained: bool,
     },
 }
 
@@ -1252,7 +1608,9 @@ impl Group {
         // to give the caller a variant it can branch on instead of a message it
         // would have to string-match, and never to relax the refusal.
         if g.has_staged_sweep() {
-            return Err(FfiError::SweepAlreadyStaged);
+            return Err(FfiError::SweepAlreadyStaged(
+                "sweep refused: a staged sweep is already awaiting a verdict".into(),
+            ));
         }
         let Some(staged) = g.stage_pending_proposals(&identity.inner)? else {
             return Ok(None);
@@ -1464,8 +1822,10 @@ impl Group {
             // new shape and drop the field for now.
             MlsIncoming::ExternalJoinProposal {
                 joiner_signature_key,
+                retained,
             } => ProcessedMessage::ExternalJoinProposal {
                 joiner_signature_key,
+                retained,
             },
         })
     }
@@ -1612,8 +1972,10 @@ impl Group {
             // new shape and drop the field for now.
             MlsIncoming::ExternalJoinProposal {
                 joiner_signature_key,
+                retained,
             } => ProcessedMessage::ExternalJoinProposal {
                 joiner_signature_key,
+                retained,
             },
         })
     }
@@ -1802,8 +2164,10 @@ impl PublisherGroup {
             },
             MlsIncoming::ExternalJoinProposal {
                 joiner_signature_key,
+                retained,
             } => ProcessedMessage::ExternalJoinProposal {
                 joiner_signature_key,
+                retained,
             },
         })
     }
@@ -2241,8 +2605,10 @@ impl DeviceGroup {
             // ADR-0027 Phase 1: drop the new joiner-key field (Phase 2 enriches).
             lakko_mls::Incoming::ExternalJoinProposal {
                 joiner_signature_key,
+                retained,
             } => ProcessedMessage::ExternalJoinProposal {
                 joiner_signature_key,
+                retained,
             },
         })
     }
@@ -2306,8 +2672,10 @@ impl DeviceGroup {
             // ADR-0027 Phase 1: drop the new joiner-key field (Phase 2 enriches).
             lakko_mls::Incoming::ExternalJoinProposal {
                 joiner_signature_key,
+                retained,
             } => ProcessedMessage::ExternalJoinProposal {
                 joiner_signature_key,
+                retained,
             },
         })
     }
@@ -4305,10 +4673,12 @@ mod tests {
             .unwrap();
         let ProcessedMessage::ExternalJoinProposal {
             joiner_signature_key,
+            retained,
         } = seen
         else {
             panic!("expected an ExternalJoinProposal, got {seen:?}");
         };
+        assert!(retained, "the quarantine had room, so an approve can act");
         assert_eq!(
             alice_g.pending_external_joins().unwrap(),
             vec![joiner_signature_key.clone()],
@@ -4372,6 +4742,7 @@ mod tests {
             .unwrap();
         let ProcessedMessage::ExternalJoinProposal {
             joiner_signature_key,
+            ..
         } = seen
         else {
             panic!("expected an ExternalJoinProposal, got {seen:?}");
@@ -4944,6 +5315,153 @@ mod tests {
         );
     }
 
+    // ========================================================================
+    // Typed membership refusals (ADR-0045 §9.1 item 1 / §12 item 6)
+    // ========================================================================
+
+    /// Every core [`RefusalReason`] reaches Swift / Kotlin as its **own**
+    /// `FfiError` variant, and no two share one.
+    ///
+    /// This is the property the whole change exists for. `#[uniffi(flat_error)]`
+    /// lowers only the variant discriminant and the `Display` string, so the
+    /// variant *is* the machine-readable channel — which makes a collision
+    /// between two reasons silently unfixable from the client side, and makes
+    /// this bijection the thing worth pinning.
+    #[test]
+    fn every_refusal_reason_gets_its_own_ffi_variant() {
+        let mut seen: Vec<FfiRefusalReason> = Vec::new();
+        for reason in lakko_mls::RefusalReason::ALL {
+            let err = FfiError::from(lakko_mls::Error::refused_for_tests(
+                reason,
+                "a refusal sentence",
+            ));
+            let recovered = err
+                .refusal_reason()
+                .unwrap_or_else(|| panic!("{reason:?} lost its reason at the FFI: {err:?}"));
+            assert!(
+                !seen.contains(&recovered),
+                "{reason:?} shares an FfiError variant with an earlier reason",
+            );
+            seen.push(recovered);
+            assert_eq!(
+                membership_refusal_code(recovered),
+                reason.code(),
+                "the FFI code must be the core code verbatim",
+            );
+        }
+        assert_eq!(seen.len(), lakko_mls::RefusalReason::ALL.len());
+    }
+
+    /// The prose survives too. A developer reading a Kotlin stack must still get
+    /// the sentence — the typed reason is *additional*, never a replacement.
+    #[test]
+    fn a_typed_refusal_still_carries_its_sentence() {
+        for reason in lakko_mls::RefusalReason::ALL {
+            let err = FfiError::from(lakko_mls::Error::refused_for_tests(
+                reason,
+                "the sentence the core wrote",
+            ));
+            assert_eq!(
+                format!("{err}"),
+                "the sentence the core wrote",
+                "{reason:?} must lower its detail verbatim",
+            );
+        }
+    }
+
+    /// The three-valued disposition crosses the boundary as data, not as
+    /// something a client re-decides from a variant's name — and the
+    /// **retryable** set that crosses is exactly the queue-full one.
+    #[test]
+    fn the_refusal_disposition_crosses_the_boundary() {
+        for reason in lakko_mls::RefusalReason::ALL {
+            let ffi = FfiRefusalReason::from(reason);
+            let expected = match reason.disposition() {
+                lakko_mls::RefusalDisposition::RetryLater => FfiRefusalDisposition::RetryLater,
+                lakko_mls::RefusalDisposition::DoNotRetry => FfiRefusalDisposition::DoNotRetry,
+                lakko_mls::RefusalDisposition::NotPermitted => FfiRefusalDisposition::NotPermitted,
+            };
+            assert_eq!(membership_refusal_disposition(ffi), expected, "{reason:?}");
+            assert_eq!(
+                membership_refusal_retry_may_succeed(ffi),
+                reason.retry_may_succeed(),
+                "{reason:?}",
+            );
+        }
+
+        let retryable: Vec<FfiRefusalReason> = lakko_mls::RefusalReason::ALL
+            .into_iter()
+            .map(FfiRefusalReason::from)
+            .filter(|r| membership_refusal_retry_may_succeed(*r))
+            .collect();
+        assert_eq!(
+            retryable,
+            vec![
+                FfiRefusalReason::RoleChangePending,
+                FfiRefusalReason::PendingSetFull,
+            ],
+            "only a full bounded queue may be offered as a retry",
+        );
+
+        // The middle value a two-way split would have got wrong.
+        assert_eq!(
+            membership_refusal_disposition(FfiRefusalReason::SweepAlreadyStaged),
+            FfiRefusalDisposition::DoNotRetry,
+        );
+        assert_eq!(
+            membership_refusal_disposition(FfiRefusalReason::AddNotOwnerOrAdmin),
+            FfiRefusalDisposition::NotPermitted,
+        );
+    }
+
+    /// End to end through the real object surface: a plain member's add is
+    /// refused with the add-specific variant, and an admin's role change with
+    /// the owner-only one — so a client can tell the two §6 strings apart
+    /// without looking at a message.
+    #[test]
+    fn real_refusals_arrive_typed_through_the_group_object() {
+        let ((alice, alice_g), (bob, bob_g), (charlie, charlie_g)) = adr0045_trio();
+        let promote = alice_g
+            .set_group_roles(
+                &alice,
+                alice.signature_public_key(),
+                vec![bob.signature_public_key()],
+            )
+            .unwrap();
+        bob_g
+            .process_incoming_verifying_roles(&bob, promote.clone())
+            .unwrap();
+        charlie_g
+            .process_incoming_verifying_roles(&charlie, promote)
+            .unwrap();
+
+        let dave = Identity::new("dave".into()).unwrap();
+        let err = charlie_g
+            .propose_add_member_from_wire(&charlie, dave.create_key_package().unwrap())
+            .unwrap_err();
+        assert_eq!(
+            err.refusal_reason(),
+            Some(FfiRefusalReason::AddNotOwnerOrAdmin),
+            "a member's add must be typed, got {err:?}",
+        );
+
+        let err = bob_g
+            .set_group_roles(&bob, alice.signature_public_key(), vec![])
+            .unwrap_err();
+        assert_eq!(
+            err.refusal_reason(),
+            Some(FfiRefusalReason::NotOwner),
+            "an admin's role change must be typed, got {err:?}",
+        );
+
+        // A wire-format failure is NOT a refusal, so a client cannot mistake it
+        // for a permission answer.
+        let err = alice_g
+            .propose_add_member_from_wire(&alice, b"not a key package".to_vec())
+            .unwrap_err();
+        assert_eq!(err.refusal_reason(), None, "got {err:?}");
+    }
+
     /// A second stage is refused with the **typed** [`FfiError::SweepAlreadyStaged`]
     /// variant, not a message a caller would have to string-match.
     ///
@@ -4963,7 +5481,7 @@ mod tests {
 
         let err = alice_g.stage_pending_proposals(&alice).unwrap_err();
         assert!(
-            matches!(err, FfiError::SweepAlreadyStaged),
+            matches!(err, FfiError::SweepAlreadyStaged(_)),
             "the second stage must be the TYPED refusal, got {err:?}",
         );
 

@@ -36,6 +36,7 @@ import uniffi.lakko_ffi_uniffi.FfiCallSignalingBody
 import uniffi.lakko_ffi_uniffi.GroupMember
 import uniffi.lakko_ffi_uniffi.OutgoingOwner
 import uniffi.lakko_ffi_uniffi.Role
+import uniffi.lakko_ffi_uniffi.membershipRefusalRetryMaySucceed
 import uniffi.lakko_ffi_uniffi.RoleTable
 import uniffi.lakko_ffi_uniffi.sfuPeerTag
 
@@ -473,6 +474,19 @@ public class ChatViewModel(
      *  open. */
     public val pendingJoins: StateFlow<List<ByteArray>> = mutablePendingJoins.asStateFlow()
 
+    private val mutableUnkeptJoinRequest: MutableStateFlow<Boolean> = MutableStateFlow(false)
+
+    /** ADR-0027 / UX §7.1 — an external-join request arrived while the
+     *  quarantine was full, so the core did not keep it. It is in
+     *  [pendingJoins] for nobody and can be approved by nobody; the only honest
+     *  thing left is to say it happened.
+     *
+     *  Session-scoped and cleared when the admin acts on the queue (approve or
+     *  reject), because acting is precisely what may have made room. There is
+     *  no count: `MAX_PENDING_EXTERNAL_JOINS` is module-private in the core,
+     *  and a client-side literal is the stale-drift class §7.1 flags. */
+    public val unkeptJoinRequest: StateFlow<Boolean> = mutableUnkeptJoinRequest.asStateFlow()
+
     private val mutablePendingRequests:
         MutableStateFlow<List<me.lakko.app.chat.PendingRequest>> = MutableStateFlow(emptyList())
 
@@ -564,6 +578,34 @@ public class ChatViewModel(
      * failed. A torn read answers "still a member", which is the status quo
      * rather than a false claim the user cannot check.
      */
+    /**
+     * ADR-0045 UX §6 / §12 item 6 — the one funnel every membership handler
+     * reports a failure through.
+     *
+     * Before this, all nine handlers were
+     * `mutableMembershipError.value = e.message ?: e.toString()`, so a member
+     * who tapped `Add` was shown `proposeAddMemberFromWire failed`, or — one
+     * layer in — the core's own `add proposal refused: proposer is not owner
+     * or admin`, a sentence written for a developer reading a log.
+     *
+     * The **log keeps that sentence**, because that is who it is for. The
+     * screen gets the copy the reason selects, and the reason is a typed value
+     * rather than anything read out of the message.
+     *
+     * A non-refusal keeps its own message unchanged: collapsing a dead socket
+     * into "This change could not be requested." would be a worse lie than the
+     * raw text, and §6 row 7 is about not leaking a *refusal's* internal
+     * reason, not about hiding every error.
+     */
+    private fun reportMembershipFailure(e: Throwable, op: String) {
+        mutableMembershipError.value =
+            me.lakko.app.chat.membershipRefusalMessage(
+                e,
+                ::membershipRefusalRetryMaySucceed,
+            ) ?: (e.message ?: e.toString())
+        android.util.Log.w("ChatViewModel", "$op failed", e)
+    }
+
     private fun refreshMembership() {
         mutableMembership.value = me.lakko.app.chat.membershipState(
             isActive = repo.isGroupActive(groupIdHex),
@@ -603,6 +645,9 @@ public class ChatViewModel(
         // section would be a list of buttons that all fail.
         mutablePendingJoins.value =
             if (ended) emptyList() else repo.pendingExternalJoins(groupIdHex)
+        // ADR-0027 / §7.1 — the request the quarantine turned away is in no
+        // list, so it can only come from the repository's own observation.
+        mutableUnkeptJoinRequest.value = !ended && repo.sawUnkeptExternalJoin(groupIdHex)
         // ADR-0045 — and the pending MEMBERSHIP requests, gated by the UX §10
         // visibility rule. Read after the role above, so a just-changed role is
         // reflected in what this member is allowed to see.
@@ -824,8 +869,7 @@ public class ChatViewModel(
                 )
                 refreshMembers()
             } catch (e: Throwable) {
-                mutableMembershipError.value = e.message ?: e.toString()
-                android.util.Log.w("ChatViewModel", "onTransferOwnership failed", e)
+                reportMembershipFailure(e, "onTransferOwnership")
             } finally {
                 mutableMembershipBusy.value = false
             }
@@ -933,8 +977,7 @@ public class ChatViewModel(
                 mutableAddMemberInput.value = ""
                 refreshMembers()
             } catch (e: Throwable) {
-                mutableMembershipError.value = e.message ?: e.toString()
-                android.util.Log.w("ChatViewModel", "onAddMember failed", e)
+                reportMembershipFailure(e, "onAddMember")
             } finally {
                 mutableMembershipBusy.value = false
             }
@@ -958,8 +1001,7 @@ public class ChatViewModel(
                 repo.removeMemberFromGroup(groupIdHex, leafIndex)
                 refreshMembers()
             } catch (e: Throwable) {
-                mutableMembershipError.value = e.message ?: e.toString()
-                android.util.Log.w("ChatViewModel", "onRemoveMember failed", e)
+                reportMembershipFailure(e, "onRemoveMember")
             } finally {
                 mutableMembershipBusy.value = false
             }
@@ -1051,8 +1093,7 @@ public class ChatViewModel(
                     "Leave requested. It applies when an owner or an admin applies the change."
                 refreshMembers()
             } catch (e: Throwable) {
-                mutableMembershipError.value = e.message ?: e.toString()
-                android.util.Log.w("ChatViewModel", "onLeaveGroup failed", e)
+                reportMembershipFailure(e, "onLeaveGroup")
             } finally {
                 mutableMembershipBusy.value = false
             }
@@ -1094,8 +1135,7 @@ public class ChatViewModel(
                 repo.setMemberAdmin(groupIdHex, member.signaturePublicKey, makeAdmin)
                 refreshMembers()
             } catch (e: Throwable) {
-                mutableMembershipError.value = e.message ?: e.toString()
-                android.util.Log.w("ChatViewModel", "onToggleAdmin failed", e)
+                reportMembershipFailure(e, "onToggleAdmin")
             } finally {
                 mutableMembershipBusy.value = false
             }
@@ -1139,10 +1179,13 @@ public class ChatViewModel(
                     "Join approved. They join when an owner or an admin applies the change." +
                         (queue?.let { " $it" } ?: "")
                 }
+                // Acting on the queue is what may have made room for the
+                // request the quarantine turned away, so the notice about it
+                // stops being current.
+                repo.clearUnkeptExternalJoin(groupIdHex)
                 refreshMembers()
             } catch (e: Throwable) {
-                mutableMembershipError.value = e.message ?: e.toString()
-                android.util.Log.w("ChatViewModel", "onApproveJoin failed", e)
+                reportMembershipFailure(e, "onApproveJoin")
             } finally {
                 mutableMembershipBusy.value = false
             }
@@ -1171,10 +1214,11 @@ public class ChatViewModel(
         viewModelScope.launch {
             try {
                 repo.rejectExternalJoin(groupIdHex, proposalRef)
+                // Same reason as in `onApproveJoin`: the queue moved.
+                repo.clearUnkeptExternalJoin(groupIdHex)
                 refreshMembers()
             } catch (e: Throwable) {
-                mutableMembershipError.value = e.message ?: e.toString()
-                android.util.Log.w("ChatViewModel", "onRejectJoin failed", e)
+                reportMembershipFailure(e, "onRejectJoin")
             } finally {
                 mutableMembershipBusy.value = false
             }
@@ -1191,8 +1235,7 @@ public class ChatViewModel(
             try {
                 mutableInviteLink.value = repo.createGroupInviteLink(groupIdHex)
             } catch (e: Throwable) {
-                mutableMembershipError.value = e.message ?: e.toString()
-                android.util.Log.w("ChatViewModel", "onCreateInviteLink failed", e)
+                reportMembershipFailure(e, "onCreateInviteLink")
             }
         }
     }
@@ -1210,8 +1253,7 @@ public class ChatViewModel(
                 repo.revokeGroupInviteLink(link)
                 mutableInviteLink.value = null
             } catch (e: Throwable) {
-                mutableMembershipError.value = e.message ?: e.toString()
-                android.util.Log.w("ChatViewModel", "onRevokeInviteLink failed", e)
+                reportMembershipFailure(e, "onRevokeInviteLink")
             }
         }
     }

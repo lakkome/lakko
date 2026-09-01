@@ -48,6 +48,8 @@ import { loadWasm } from "../wasm";
 import { base64Decode, base64Encode } from "../auth/account-id";
 import { groupIdHex } from "../devices/sync/state";
 import { StorageClient } from "../storage/client";
+import { requestConfirm } from "../ui/confirm-dialog";
+import { staleRestoreConfirmation } from "./stale-restore-confirm";
 import {
   loadAccepted,
   upsertAccepted,
@@ -136,24 +138,32 @@ export interface RestoreGateContext {
   readonly now?: number;
   /** Injectable staleness window in ms (default from the env knob). */
   readonly stalenessMillis?: bigint;
-  /** Blocking confirmation for a stale head — MUST NOT auto-accept. Default is
-   *  `window.confirm`; a headless env with no `window.confirm` returns `false`
-   *  (fail-closed — never a silent downgrade). */
+  /** Confirmation for a stale head — MUST NOT auto-accept. Default is the
+   *  app's in-page dialog; a headless env (or any state with no dialog host
+   *  mounted) resolves `false` (fail-closed — never a silent downgrade). */
   readonly confirmStaleOverride?: (reason: string) => boolean | Promise<boolean>;
 }
 
-/** Default stale-override confirmation — a blocking `window.confirm`, matching
- *  the app's destructive-action pattern (passkey / member removal). Fail-closed
- *  when there is no `window.confirm` to ask. */
-function defaultStaleConfirm(reason: string): boolean {
-  if (typeof window === "undefined" || typeof window.confirm !== "function") {
-    return false;
-  }
-  return window.confirm(
-    `This backup is older than expected (${reason}).\n\n` +
-      "Restoring it will roll your account back to older state — older " +
-      "messages, and devices you removed may reappear.\n\nRestore anyway?",
-  );
+/**
+ * Default stale-override confirmation.
+ *
+ * ADR-0045 UX §14 — the app's in-page dialog, matching every other
+ * destructive-action confirmation (passkey / member removal / leave / delete
+ * chat) rather than a browser one.
+ *
+ * **The ADR-0037 F5a fail-closed posture is preserved, and by the same rule
+ * rather than a special case here:** `requestConfirm` resolves `false`
+ * whenever no dialog host is mounted, which covers the headless case the
+ * previous `typeof window.confirm !== "function"` guard covered and also the
+ * case it did not — a host that failed to mount in a real browser.
+ *
+ * The move matters most at this call site. A suppressed browser dialog
+ * (*"prevent this page from creating additional dialogs"*) returned `false`
+ * without rendering, so a user in that state could not complete a legitimate
+ * restore and was given nothing to explain why.
+ */
+function defaultStaleConfirm(reason: string): Promise<boolean> {
+  return requestConfirm(staleRestoreConfirmation({ reason }));
 }
 
 /**

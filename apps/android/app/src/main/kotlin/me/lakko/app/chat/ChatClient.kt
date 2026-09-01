@@ -748,6 +748,7 @@ internal fun toEvent(
             // sheet needs to approve / reject, not a content-less system row.
             messageId = messageId,
             joinerSignatureKey = processed.joinerSignatureKey,
+            retained = processed.retained,
             createdAt = createdAt,
         )
     }
@@ -957,6 +958,19 @@ public sealed interface IncomingChatEvent {
     public data class ExternalJoinRequest(
         val messageId: Long,
         val joinerSignatureKey: ByteArray,
+        /**
+         * ADR-0027 — whether the core actually KEPT the request.
+         *
+         * Carried rather than dropped, and the distinction is not cosmetic:
+         * the core fires this event even when the quarantine
+         * (`MAX_PENDING_EXTERNAL_JOINS`) was full and the request was not
+         * retained. Such a request can be approved by nobody —
+         * `approveExternalJoin` has nothing to look up and refuses with
+         * `NO_SUCH_JOIN_REQUEST` — so offering Approve for it is an affordance
+         * that cannot work. Route it through `externalJoinAffordance` rather
+         * than reading this directly.
+         */
+        val retained: Boolean,
         val createdAt: String,
     ) : IncomingChatEvent {
         override fun equals(other: Any?): Boolean {
@@ -964,12 +978,14 @@ public sealed interface IncomingChatEvent {
             if (other !is ExternalJoinRequest) return false
             return messageId == other.messageId &&
                 joinerSignatureKey.contentEquals(other.joinerSignatureKey) &&
+                retained == other.retained &&
                 createdAt == other.createdAt
         }
 
         override fun hashCode(): Int {
             var result = messageId.hashCode()
             result = 31 * result + joinerSignatureKey.contentHashCode()
+            result = 31 * result + retained.hashCode()
             result = 31 * result + createdAt.hashCode()
             return result
         }

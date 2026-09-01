@@ -15,6 +15,8 @@ import type { JSX } from "solid-js";
 import { A, useNavigate } from "@solidjs/router";
 import { paths } from "../routes/paths";
 import { useAuth } from "../auth/AuthContext";
+import { forgetDeviceConfirmation } from "../auth/destructive-confirm";
+import { requestConfirm } from "./confirm-dialog";
 import { cycleTheme, useTheme } from "./theme";
 
 /**
@@ -38,14 +40,14 @@ export function AppShell(props: { children?: JSX.Element }): JSX.Element {
   async function onForgetDevice(): Promise<void> {
     // Confirm — this is destructive. After this the account is
     // only reachable via the recovery passphrase (1.16c3c3
-    // /recover flow).
-    if (
-      !window.confirm(
-        "Forget this device? You'll lose the cached account on " +
-          "this browser. The only way back is the 24-word " +
-          "recovery passphrase you wrote down at signup.",
-      )
-    ) {
+    // /recover flow), which is what the body says.
+    //
+    // ADR-0045 UX §14 — an in-page dialog rather than `window.confirm`: the
+    // copy has to read as the app stating a fact about the user's own data,
+    // and the action has to name what it acts on. A cancel (or Escape, or a
+    // host that never mounted) resolves `false` and leaves the wipe
+    // unstarted.
+    if (!(await requestConfirm(forgetDeviceConfirmation()))) {
       return;
     }
     await auth.forgetDevice();

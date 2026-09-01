@@ -112,6 +112,7 @@ use openmls::messages::proposals::Proposal;
 use crate::error::{Error, Result};
 use crate::group::MemberRecord;
 use crate::group_roles::{RoleTable, ROLE_EXTENSION_TYPE};
+use crate::refusal::RefusalReason;
 
 /// What a proposal asks the group to do, in Lakko terms.
 ///
@@ -332,8 +333,9 @@ pub(crate) fn authorise(
     kind: &ProposalKind,
 ) -> Result<()> {
     let Some(proposer) = proposer else {
-        return Err(Error::Group(
-            "proposal refused: sender is not a resolvable group member".into(),
+        return Err(Error::refused(
+            RefusalReason::NotAMember,
+            "proposal refused: sender is not a resolvable group member",
         ));
     };
     let is_owner = table.is_owner(proposer.pubkey);
@@ -342,28 +344,32 @@ pub(crate) fn authorise(
     match kind {
         ProposalKind::Add { .. } => {
             if !can_administer {
-                return Err(Error::Group(
-                    "add proposal refused: proposer is not owner or admin".into(),
+                return Err(Error::refused(
+                    RefusalReason::AddNotOwnerOrAdmin,
+                    "add proposal refused: proposer is not owner or admin",
                 ));
             }
         },
         ProposalKind::Remove { target_leaf } => {
             if leaf_is_owner(table, members, *target_leaf) {
-                return Err(Error::Group(
-                    "removal proposal refused: the group owner cannot be removed".into(),
+                return Err(Error::refused(
+                    RefusalReason::OwnerUnremovable,
+                    "removal proposal refused: the group owner cannot be removed",
                 ));
             }
             // Removing exactly your own leaf is leaving, and needs no role.
             if *target_leaf != proposer.leaf && !can_administer {
-                return Err(Error::Group(
-                    "removal proposal refused: proposer is not owner or admin".into(),
+                return Err(Error::refused(
+                    RefusalReason::RemoveNotOwnerOrAdmin,
+                    "removal proposal refused: proposer is not owner or admin",
                 ));
             }
         },
         ProposalKind::Leave => {
             if is_owner {
-                return Err(Error::Group(
-                    "self-removal proposal refused: the group owner cannot leave".into(),
+                return Err(Error::refused(
+                    RefusalReason::OwnerCannotLeave,
+                    "self-removal proposal refused: the group owner cannot leave",
                 ));
             }
         },
@@ -372,22 +378,24 @@ pub(crate) fn authorise(
         // it is the one kind whose ProposalRef is fresh every time, so it is
         // also the one a plain member can flood the pending set with.
         ProposalKind::Update => {
-            return Err(Error::Group(
+            return Err(Error::refused(
+                RefusalReason::LeafUpdateRefused,
                 "leaf-update proposal refused: an Update can rotate the signature key the role \
-                 table is keyed on, and Lakko rotates a leaf with self_update instead"
-                    .into(),
+                 table is keyed on, and Lakko rotates a leaf with self_update instead",
             ));
         },
         ProposalKind::RoleChange => {
             if !is_owner {
-                return Err(Error::Group(
-                    "role-table change proposal refused: proposer is not the owner".into(),
+                return Err(Error::refused(
+                    RefusalReason::NotOwner,
+                    "role-table change proposal refused: proposer is not the owner",
                 ));
             }
         },
         ProposalKind::Unsupported => {
-            return Err(Error::Group(
-                "proposal refused: unsupported proposal type".into(),
+            return Err(Error::refused(
+                RefusalReason::UnsupportedProposal,
+                "proposal refused: unsupported proposal type",
             ));
         },
     }
@@ -589,8 +597,9 @@ fn role_table_of(proposal: &Proposal) -> Option<RoleTable> {
 /// authorised by this rule.
 pub(crate) fn owner_survives(effects: &CommitEffects, members: &[MemberRecord]) -> Result<()> {
     if effects.role_table_would_vanish {
-        return Err(Error::Group(
-            "commit refused: it would remove this group's role table".into(),
+        return Err(Error::refused(
+            RefusalReason::RoleTableWouldVanish,
+            "commit refused: it would remove this group's role table",
         ));
     }
     if effects.proposed_owners.is_empty() {
@@ -604,9 +613,9 @@ pub(crate) fn owner_survives(effects: &CommitEffects, members: &[MemberRecord]) 
     };
     for owner in &effects.proposed_owners {
         if !survives(owner) {
-            return Err(Error::Group(
-                "role-table change refused: the named owner would not be a member of the group"
-                    .into(),
+            return Err(Error::refused(
+                RefusalReason::OwnerNotAMember,
+                "role-table change refused: the named owner would not be a member of the group",
             ));
         }
     }
@@ -799,6 +808,124 @@ mod tests {
         assert!(
             !is_owner_response(&t, None, &remove),
             "an unresolvable sender claims no reserve",
+        );
+    }
+
+    /// Every arm of the one rule reports its **own** reason.
+    ///
+    /// This is the assertion the six §6 refusal strings rest on, and it is
+    /// written against `authorise` rather than against a `Group` method because
+    /// two of the arms — the owner's `SelfRemove` and an `Update` — are reachable
+    /// only from the receipt and commit gates. No propose API emits either, so
+    /// nothing else in the suite can reach them.
+    #[test]
+    fn every_authorise_arm_reports_its_own_reason() {
+        let (t, m) = fixture();
+        let owner = pk(1);
+        let admin = pk(2);
+        let member = pk(3);
+
+        let cases: Vec<(&str, Option<Proposer<'_>>, ProposalKind, RefusalReason)> = vec![
+            (
+                "unresolvable sender",
+                None,
+                add_kind(),
+                RefusalReason::NotAMember,
+            ),
+            (
+                "a member's add",
+                Some(proposer(2, &member)),
+                add_kind(),
+                RefusalReason::AddNotOwnerOrAdmin,
+            ),
+            (
+                "a member removing another",
+                Some(proposer(2, &member)),
+                ProposalKind::Remove { target_leaf: 1 },
+                RefusalReason::RemoveNotOwnerOrAdmin,
+            ),
+            (
+                "an admin removing the owner",
+                Some(proposer(1, &admin)),
+                ProposalKind::Remove { target_leaf: 0 },
+                RefusalReason::OwnerUnremovable,
+            ),
+            (
+                "the owner leaving",
+                Some(proposer(0, &owner)),
+                ProposalKind::Leave,
+                RefusalReason::OwnerCannotLeave,
+            ),
+            (
+                "an admin's role change",
+                Some(proposer(1, &admin)),
+                ProposalKind::RoleChange,
+                RefusalReason::NotOwner,
+            ),
+            (
+                "an owner's leaf update",
+                Some(proposer(0, &owner)),
+                ProposalKind::Update,
+                RefusalReason::LeafUpdateRefused,
+            ),
+            (
+                "an owner's unsupported proposal",
+                Some(proposer(0, &owner)),
+                ProposalKind::Unsupported,
+                RefusalReason::UnsupportedProposal,
+            ),
+        ];
+
+        for (label, who, kind, expected) in cases {
+            let err = authorise(&t, &m, who, &kind).expect_err(label);
+            assert_eq!(
+                err.refusal_reason(),
+                Some(expected),
+                "{label} reported the wrong reason: {err:?}",
+            );
+        }
+    }
+
+    /// The `owner_survives` commit rule has two refusals, and they must not
+    /// collapse: one says the table would name an owner outside the group, the
+    /// other that the commit would delete the table altogether.
+    #[test]
+    fn owner_survives_reports_its_two_reasons_apart() {
+        let (_t, m) = fixture();
+
+        let vanishing = CommitEffects {
+            role_table_would_vanish: true,
+            ..CommitEffects::default()
+        };
+        assert_eq!(
+            owner_survives(&vanishing, &m)
+                .expect_err("an erased role table must be refused")
+                .refusal_reason(),
+            Some(RefusalReason::RoleTableWouldVanish),
+        );
+
+        let stranger = CommitEffects {
+            proposed_owners: vec![pk(9).to_vec()],
+            ..CommitEffects::default()
+        };
+        assert_eq!(
+            owner_survives(&stranger, &m)
+                .expect_err("an owner outside the group must be refused")
+                .refusal_reason(),
+            Some(RefusalReason::OwnerNotAMember),
+        );
+
+        // And a commit that removes the very leaf it names owner.
+        let self_removing = CommitEffects {
+            proposed_owners: vec![pk(3).to_vec()],
+            removed_leaves: vec![2],
+            ..CommitEffects::default()
+        };
+        assert_eq!(
+            owner_survives(&self_removing, &m)
+                .expect_err("an owner the same commit removes must be refused")
+                .refusal_reason(),
+            Some(RefusalReason::OwnerNotAMember),
         );
     }
 
