@@ -190,6 +190,12 @@ public class ChatViewModel(
                 // content-less `Commit` for a removing commit as for any
                 // other), so this is the only place it can be noticed.
                 refreshMembership()
+                // ADR-0045 UX §7 — a repository emission follows every poll,
+                // and a poll is how this device learns that somebody ELSE's
+                // sweep drained the queue. `refreshMembers` covers the local
+                // half; without this one a request refused here would wait for
+                // the panel to be reopened.
+                evaluateArmedRetries()
             }
         }
         // ADR-0045 UX §6.2.8 — the one-shot half of the teardown. Driven off
@@ -606,6 +612,235 @@ public class ChatViewModel(
         android.util.Log.w("ChatViewModel", "$op failed", e)
     }
 
+    // -----------------------------------------------------------------------
+    // ADR-0045 UX §7 — the automatic re-send of a queue-full refusal
+    //
+    // Every rule lives in `me.lakko.app.chat.MembershipRetry` and is tested
+    // there; what is here is the wiring that feeds it live group state and
+    // re-issues what it decides to fire.
+    // -----------------------------------------------------------------------
+
+    private val retryStore = me.lakko.app.chat.MembershipRetryStore()
+
+    /** The `(account, group)` scope every armed retry is filed under, or
+     *  `null` outside a session, where there is nothing to file. */
+    private fun retryScope(): String? {
+        val account = repo.currentAccountIdB64() ?: return null
+        return me.lakko.app.chat.MembershipRetryStore.scopeKey(account, groupIdHex)
+    }
+
+    /**
+     * The group as the retry verdict reads it, captured in ONE pass — the
+     * roster and the pending set must come from the same moment, because the
+     * merge that empties one is the merge that moves the other.
+     *
+     * A `null` roster is a TORN read, not an empty group, and the verdict
+     * treats it as claiming nothing.
+     */
+    private fun retrySnapshot(): me.lakko.app.chat.RetryGroupSnapshot {
+        val roster = repo.members(groupIdHex)?.map {
+            me.lakko.app.chat.RetryRosterMember(
+                leafIndex = it.leafIndex,
+                signatureKeyB64 = me.lakko.app.chat.outboxB64(it.signaturePublicKey),
+            )
+        }
+        val table = repo.groupRoles(groupIdHex)?.let {
+            me.lakko.app.chat.RetryRoleTable(
+                ownerKeyB64 = me.lakko.app.chat.outboxB64(it.owner),
+                adminKeysB64 = it.admins.map { key -> me.lakko.app.chat.outboxB64(key) },
+            )
+        }
+        return me.lakko.app.chat.RetryGroupSnapshot(
+            roster = roster,
+            pendingKeys = repo.pendingProposalKeys(groupIdHex),
+            pendingCount = repo.pendingProposalCount(groupIdHex),
+            roleTable = table,
+            membershipEnded = membershipEnded.value,
+        )
+    }
+
+    /**
+     * Claim the slot for [request] before a MANUAL attempt starts.
+     *
+     * This is half of the exactly-once property and the half that is easy to
+     * miss: the re-issue goes through the repository's own per-group commit
+     * lock, so the driver cannot hold that across its own last check. A user
+     * tapping again therefore takes the record away rather than racing an
+     * in-flight retry for it.
+     */
+    private fun disarmRetry(request: me.lakko.app.chat.RetryableRequest) {
+        retryScope()?.let { retryStore.claim(it, request.key) }
+    }
+
+    /**
+     * Arm an automatic re-send if — and only if — the CORE says this refusal
+     * resolves on its own.
+     *
+     * Nothing here lists a reason. `armedRetryFor` asks
+     * `membershipRefusalRetryMaySucceed`, so a `DoNotRetry` refusal, a
+     * `NotPermitted` one, an unrecognised reason from a newer core and an
+     * ordinary error all take the same path: no record, nothing retried.
+     */
+    private fun armRetryIfQueueFull(
+        request: me.lakko.app.chat.RetryableRequest,
+        error: Throwable,
+        pendingCountAtRefusal: Int,
+    ) {
+        val scope = retryScope() ?: return
+        val armed = me.lakko.app.chat.armedRetryFor(
+            error = error,
+            request = request,
+            pendingCountAtRefusal = pendingCountAtRefusal,
+            retryMaySucceed = ::membershipRefusalRetryMaySucceed,
+        ) ?: return
+        retryStore.arm(scope, armed)
+    }
+
+    /**
+     * Run one membership request, arming a re-send if a full queue refused it.
+     *
+     * Wrapping rather than editing each handler's body keeps the arm and the
+     * disarm adjacent to each other and to the call, which is what stops a new
+     * handler from arming without disarming.
+     */
+    private suspend fun <T> withMembershipRetry(
+        request: me.lakko.app.chat.RetryableRequest,
+        run: suspend () -> T,
+    ): T {
+        disarmRetry(request)
+        val before = repo.pendingProposalCount(groupIdHex)
+        try {
+            return run()
+        } catch (e: Throwable) {
+            armRetryIfQueueFull(request, e, before)
+            throw e
+        }
+    }
+
+    /**
+     * Re-issue one armed request, reconstructed from its descriptor.
+     *
+     * **Reconstructed, never a stored lambda.** The descriptor is exactly what
+     * the request is; anything a lambda would additionally capture (a roster
+     * snapshot, a leaf index, a KeyPackage) is stale by the time the queue
+     * drains. In particular a removal's LEAF is resolved from the live roster
+     * here, because OpenMLS hands a vacated leaf to the next member added and a
+     * stored one would eventually remove the wrong person.
+     */
+    private suspend fun reissueMembershipRequest(
+        request: me.lakko.app.chat.RetryableRequest,
+    ) {
+        when (request) {
+            is me.lakko.app.chat.RetryableRequest.Add ->
+                repo.addMemberToGroup(
+                    groupIdHex,
+                    me.lakko.app.chat.outboxUnb64(request.subjectAccountIdB64),
+                    me.lakko.app.chat.outboxUnb64(request.subjectKeyB64),
+                )
+            is me.lakko.app.chat.RetryableRequest.Remove,
+            is me.lakko.app.chat.RetryableRequest.Leave,
+            -> {
+                val key = when (request) {
+                    is me.lakko.app.chat.RetryableRequest.Remove -> request.subjectKeyB64
+                    is me.lakko.app.chat.RetryableRequest.Leave -> request.subjectKeyB64
+                    else -> return
+                }
+                // The verdict already dropped a request whose subject has left,
+                // so an unresolvable leaf here is a torn read between the
+                // verdict and now. Refusing to guess is the only safe answer:
+                // any fallback leaf names somebody, and for a removal that
+                // somebody is a real person.
+                val leaf = repo.members(groupIdHex)
+                    ?.firstOrNull { me.lakko.app.chat.outboxB64(it.signaturePublicKey) == key }
+                    ?.leafIndex ?: return
+                repo.removeMemberFromGroup(groupIdHex, leaf)
+            }
+            is me.lakko.app.chat.RetryableRequest.SetAdmin ->
+                repo.setMemberAdmin(
+                    groupIdHex,
+                    me.lakko.app.chat.outboxUnb64(request.subjectKeyB64),
+                    request.makeAdmin,
+                )
+            is me.lakko.app.chat.RetryableRequest.TransferOwnership ->
+                repo.transferGroupOwnership(
+                    groupIdHex,
+                    me.lakko.app.chat.outboxUnb64(request.subjectKeyB64),
+                    request.outgoing,
+                )
+        }
+    }
+
+    /**
+     * The driver: evaluate every armed request against the group as it is now.
+     *
+     * **Driven by observation, never by a timer.** It runs from the repository
+     * emission that follows every poll and from `refreshMembers`, i.e. from
+     * exactly the events that can drain a queue. A quiet group produces no
+     * attempts at all.
+     *
+     * Free when nothing is armed, which is the overwhelmingly common case.
+     */
+    private fun evaluateArmedRetries() {
+        val scope = retryScope() ?: return
+        // Stand down while a MANUAL membership operation is in flight.
+        //
+        // The disarm-on-tap covers every handler that knows its descriptor up
+        // front, but `onAddMember` cannot: the request only becomes nameable
+        // once the typed handle has resolved, so between the tap and the
+        // resolution there is a window in which a retry for the same person
+        // could fire behind the user's own attempt. Standing down costs at
+        // most one poll — the repository emission after the next one
+        // re-evaluates.
+        if (mutableMembershipBusy.value) return
+        val armed = retryStore.armed(scope)
+        if (armed.isEmpty()) return
+        val view = retrySnapshot()
+        for (entry in armed) {
+            val verdict = me.lakko.app.chat.retryVerdict(entry, view)
+            if (verdict is me.lakko.app.chat.RetryVerdict.Wait) continue
+            // Claim first, decide second — the claim is the exactly-once step,
+            // and a `Drop` claims for the same reason a `Fire` does: leaving a
+            // dropped record in the store would re-evaluate it on every future
+            // refresh.
+            val claimed = retryStore.claim(scope, entry.request.key) ?: continue
+            if (verdict is me.lakko.app.chat.RetryVerdict.Drop) continue
+            viewModelScope.launch {
+                try {
+                    reissueMembershipRequest(claimed.request)
+                    repo.sweepIfCommitter(groupIdHex)
+                    refreshMembers()
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    // The screen went away mid-retry. NOT a failure of the
+                    // request and not something to report: swallowing a
+                    // `CancellationException` into an error message is the same
+                    // class of mistake ADR-0044 recorded on the commit path.
+                    // The record is already claimed, so this attempt is simply
+                    // lost — which is exactly the in-memory contract.
+                    throw e
+                } catch (e: Throwable) {
+                    // A second queue-full refusal re-arms against the NEW count
+                    // and waits for the next drain — silently, because nothing
+                    // has changed for the user since the refusal they were
+                    // already shown.
+                    val rearmed = me.lakko.app.chat.armedRetryFor(
+                        error = e,
+                        request = claimed.request,
+                        pendingCountAtRefusal = repo.pendingProposalCount(groupIdHex),
+                        retryMaySucceed = ::membershipRefusalRetryMaySucceed,
+                    )
+                    if (rearmed != null) {
+                        retryStore.arm(scope, rearmed)
+                    } else {
+                        // Anything else is a real failure of a request the user
+                        // made and was not present for, so it replaces the
+                        // stale message rather than being logged away.
+                        reportMembershipFailure(e, "membership retry")
+                    }
+                }
+            }
+        }
+    }
+
     private fun refreshMembership() {
         mutableMembership.value = me.lakko.app.chat.membershipState(
             isActive = repo.isGroupActive(groupIdHex),
@@ -675,6 +910,10 @@ public class ChatViewModel(
         // ADR-0045 UX §6.1.9 — decided from the roster + role table just read,
         // so a torn read says nothing rather than claiming a promotion.
         refreshNewOwnerNotice()
+        // ADR-0045 UX §7 — and the last thing, against the state just read: a
+        // queue that drained since a refusal is exactly what this pass would
+        // have observed.
+        evaluateArmedRetries()
     }
 
     // -----------------------------------------------------------------------
@@ -846,11 +1085,18 @@ public class ChatViewModel(
         mutableMembershipNotice.value = null
         viewModelScope.launch {
             try {
-                val result = repo.transferGroupOwnership(
-                    groupIdHex,
-                    me.lakko.app.chat.outboxUnb64(successor.signatureKeyB64),
-                    outgoing,
-                )
+                val result = withMembershipRetry(
+                    me.lakko.app.chat.RetryableRequest.TransferOwnership(
+                        subjectKeyB64 = successor.signatureKeyB64,
+                        outgoing = outgoing,
+                    ),
+                ) {
+                    repo.transferGroupOwnership(
+                        groupIdHex,
+                        me.lakko.app.chat.outboxUnb64(successor.signatureKeyB64),
+                        outgoing,
+                    )
+                }
                 // Closed only now — the proposal is on the wire, so there is
                 // nothing left to reconsider. A throw above leaves the step open
                 // with the pick and the role choice intact.
@@ -973,7 +1219,17 @@ public class ChatViewModel(
         viewModelScope.launch {
             try {
                 val (accountId, signaturePubkey) = resolveRecipient(username)
-                repo.addMemberToGroup(groupIdHex, accountId, signaturePubkey)
+                // ADR-0045 UX §7 — the descriptor is only knowable once the
+                // typed handle has resolved, which is why it is built here and
+                // not before: re-resolving a username later could name a
+                // different account if the handle has since been
+                // re-registered, and adding the wrong person is not a retry.
+                withMembershipRetry(
+                    me.lakko.app.chat.RetryableRequest.Add(
+                        subjectKeyB64 = me.lakko.app.chat.outboxB64(signaturePubkey),
+                        subjectAccountIdB64 = me.lakko.app.chat.outboxB64(accountId),
+                    ),
+                ) { repo.addMemberToGroup(groupIdHex, accountId, signaturePubkey) }
                 mutableAddMemberInput.value = ""
                 refreshMembers()
             } catch (e: Throwable) {
@@ -998,7 +1254,20 @@ public class ChatViewModel(
         mutableMembershipError.value = null
         viewModelScope.launch {
             try {
-                repo.removeMemberFromGroup(groupIdHex, leafIndex)
+                // ADR-0045 UX §7 — armed against the member's SIGNATURE key,
+                // resolved now and re-resolved to a leaf at fire time. A torn
+                // roster read means no retry for this attempt rather than a
+                // retry against a guess.
+                val targetKeyB64 = repo.members(groupIdHex)
+                    ?.firstOrNull { it.leafIndex == leafIndex }
+                    ?.let { me.lakko.app.chat.outboxB64(it.signaturePublicKey) }
+                if (targetKeyB64 == null) {
+                    repo.removeMemberFromGroup(groupIdHex, leafIndex)
+                } else {
+                    withMembershipRetry(
+                        me.lakko.app.chat.RetryableRequest.Remove(targetKeyB64),
+                    ) { repo.removeMemberFromGroup(groupIdHex, leafIndex) }
+                }
                 refreshMembers()
             } catch (e: Throwable) {
                 reportMembershipFailure(e, "onRemoveMember")
@@ -1072,7 +1341,18 @@ public class ChatViewModel(
                 // The repository records the own-request observation itself, so
                 // unlike the web reference there is nothing to do here afterwards
                 // but re-read the roster — which must still contain us, annotated.
-                repo.removeMemberFromGroup(groupIdHex, leaf)
+                // ADR-0045 UX §7 — keyed on our own SIGNATURE key, never on
+                // the leaf: OpenMLS hands a vacated leaf to the next member
+                // added, so a retry armed against a leaf could come to name
+                // somebody else entirely.
+                val ownKeyB64 = ownSignatureKeyB64()
+                if (ownKeyB64 == null) {
+                    repo.removeMemberFromGroup(groupIdHex, leaf)
+                } else {
+                    withMembershipRetry(
+                        me.lakko.app.chat.RetryableRequest.Leave(ownKeyB64),
+                    ) { repo.removeMemberFromGroup(groupIdHex, leaf) }
+                }
                 // ADR-0045 UX §6.2.3 — the ONE thing that later tells
                 // "You left this group." from "You are no longer a member of
                 // this group.", and it has to be its own durable field rather
@@ -1132,7 +1412,12 @@ public class ChatViewModel(
         mutableMembershipError.value = null
         viewModelScope.launch {
             try {
-                repo.setMemberAdmin(groupIdHex, member.signaturePublicKey, makeAdmin)
+                withMembershipRetry(
+                    me.lakko.app.chat.RetryableRequest.SetAdmin(
+                        subjectKeyB64 = me.lakko.app.chat.outboxB64(member.signaturePublicKey),
+                        makeAdmin = makeAdmin,
+                    ),
+                ) { repo.setMemberAdmin(groupIdHex, member.signaturePublicKey, makeAdmin) }
                 refreshMembers()
             } catch (e: Throwable) {
                 reportMembershipFailure(e, "onToggleAdmin")

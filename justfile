@@ -551,8 +551,13 @@ cross-build-sframe-native-ios:
         -output target/ios-link/iphonesimulator/liblakko_sframe_native.a
     @echo "OK: target/ios-link/{iphoneos,iphonesimulator}/liblakko_sframe_native.a"
 
+# NOTE: depends on `regen-bindings` — it reads
+# `target/bindings/swift/lakko_ffi_uniffiFFI.h`, which only that recipe
+# produces. Without the dependency this fails on a clean `target/` with a
+# bare `cp: No such file or directory`, which names neither the missing
+# step nor the reason.
 [macos]
-build-ios:
+build-ios: regen-bindings
     @command -v xcodebuild >/dev/null 2>&1 || (echo "ERROR: xcodebuild not found — install Xcode Command Line Tools via 'xcode-select --install'" && exit 1)
     # Self-heal the iOS std targets for the pinned toolchain (rust-toolchain.toml
     # pins an exact version, so `rustup target add` here installs them FOR that

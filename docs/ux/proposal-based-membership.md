@@ -1631,6 +1631,74 @@ each was correct by rendering **nothing at all**, which left the joiner waiting 
 admin nobody had told. `externalJoinAffordance(retained:)` now makes that explicit, and
 the flag clears on approve or reject — acting on the queue is what may have made room.
 
+### 7.2 Re-sending a request the queue had no room for
+
+Built 2026-09-01 on all three clients, on the maintainer's rule: **retry when a request
+was refused because a queue was full; never when it was refused because of its own
+state.** The core carries that as `RefusalDisposition`, and this section is the client
+half.
+
+**The trigger is an observation, not a timer, and that is the whole design.** A queue
+drains when a committer sweeps, not when time passes — §8 and ADR-0045 decision 2 give a
+request no deadline — so a schedule would either fire uselessly while nothing had changed
+or spin forever where no committer is running. The clients re-send when the **pending
+proposal set is strictly smaller than it was at the refusal**, which each already
+observes on its poll. If the queue never drains, nothing ever fires; a quiet group costs
+nothing.
+
+**One rule, derived from the core's definition rather than from either reason's name.**
+The set shrinks only when a commit **merges** — OpenMLS empties the whole store on merge,
+and a receipt-gate refusal stores nothing so it moves no count — and `RetryLater` is
+*defined* as the disposition that resolves once a committer has swept. A sweep **is** a
+merged commit. So a nineteenth `RetryLater` reason is handled without anyone editing
+this, and a reason this rule would not handle could not have been classified `RetryLater`
+in the first place. The count compared is the literal quantity
+`authorise_own_proposal` gates on, not a proxy.
+
+**A shrink is necessary, not sufficient**, and the clients say so: the cap itself is
+private to the core (§7.1), so a client cannot know whether the room is enough. That is
+safe, because a re-refusal is simply another retryable refusal re-armed against the new
+count.
+
+**The record is in memory, per `(account, group)`, and durability would be meaningless
+rather than merely unnecessary.** Its whole content is a **comparison baseline**, and a
+count captured in one session says nothing about the set in the next. Secondarily, a
+deferred action the user never saw start is not the action they took. Losing it degrades
+to exactly the behaviour this section replaces — the copy already says *try again* and
+the manual path is untouched.
+
+**Exactly-once, and the manual path claims the same slot.** Firing is a lock-guarded
+take-and-remove, and a user tapping again **disarms** rather than races. That direction
+is the load-bearing one: the re-issue goes through the non-reentrant per-group commit
+lock, so the driver cannot hold it across its own last check. Every subject is keyed on
+the **32-byte signature key**, never a leaf — for a `remove` a stale leaf is not a stale
+label, it is removing the wrong person.
+
+**There is no attempt cap, and a counter would be the wrong shape.** Attempts are not a
+cost the group pays: each is paid for by a sweep that was going to happen anyway, so an
+unbounded number still cannot spin. A cap would give up on a group that is merely
+**busy**, converting a recoverable wait into a permanent failure for no safety gain. §7's
+superseded row already settles the identical question the same way. The stopping
+conditions are **states**: the membership ended; the request is already applied; it is
+already in the live pending set; the group has no role table. A torn roster read claims
+nothing — it waits, and never fires or drops on a guess.
+
+**The copy is unchanged, deliberately.** §7's superseded row already establishes the
+principle — silent and automatic, because the user's intent is unchanged and the system
+is doing what they asked — and a successful retry surfaces through §5.1's existing
+pending set. Promising the retry in the copy was considered and **rejected**: the record
+is session-scoped, so *we will send it again* becomes false the moment the user leaves.
+*Wait for them to land, then try again* stays true; the app may simply beat them to it.
+
+**Two things are deliberately outside this.** A request the **sweep excluded** carries no
+reason — the core reports none by design — so it is neither retryable nor not, and
+defaulting it to retryable is precisely the loop this rule avoids; §7's superseded row
+owns that case and is still unbuilt. And **approving an external join** could not
+participate at all until 2026-09-01, for a reason found while building this: the core
+re-wrapped `propose_add_member`'s error in prose, destroying the reason it had just
+produced, so an approve refused by a full queue arrived with **no reason at all**. Fixed
+in the core; the client arm is not built.
+
 ---
 
 ## 8. The committer's view: automatic, and invisible

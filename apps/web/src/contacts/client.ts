@@ -3101,6 +3101,23 @@ export class ContactsClient {
     identity: IdentitySecrets | null,
     group: WasmGroup,
     username: string,
+    /**
+     * ADR-0045 UX §7 — called once the typed handle has resolved to a concrete
+     * account, immediately before the add is attempted.
+     *
+     * It exists because the caller cannot otherwise learn *who* a failed add
+     * was for: the resolution happens in here and a refusal propagates as a
+     * throw, so by the time the caller catches it the identity of the
+     * prospective member is gone. An automatic re-send has to be keyed on the
+     * resolved `(account_id, signature key)` rather than on the handle —
+     * re-resolving a username later could name a different account if the
+     * handle has since been re-registered, and adding the wrong person is not
+     * a retry.
+     */
+    onResolved?: (recipient: {
+      accountId: Uint8Array;
+      signaturePubkey: Uint8Array;
+    }) => void,
   ): Promise<{
     recipientUsername: string;
     recipientAccountId: Uint8Array;
@@ -3140,6 +3157,10 @@ export class ContactsClient {
     // (`SupersessionRefused`) on a changed key with no valid proof.
     await this.verifyBundleAccountKey(lookup.account, bundle);
     const recipientSignaturePubkey = base64Decode(bundle.signature_pubkey);
+    onResolved?.({
+      accountId: lookup.account,
+      signaturePubkey: recipientSignaturePubkey,
+    });
 
     const outcome = await this.addMemberToGroup(
       identity,

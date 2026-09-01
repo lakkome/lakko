@@ -3353,6 +3353,10 @@ public final class ChatRepository: ObservableObject {
         return (try? record.group.pendingProposals()) ?? []
     }
 
+    /// The signed-in account id, base64 — the first half of a per-`(account,
+    /// group)` scope key (ADR-0045 UX §7). `nil` before bootstrap.
+    public var accountIdB64: String? { currentAccountIdB64 }
+
     /// ADR-0045 S4a — the pending membership requests for `groupIdHex`, joined
     /// from the core's live set and this device's observation store, with the
     /// store pruned against the live set in the same pass.

@@ -1018,9 +1018,24 @@ impl Group {
     ) -> Result<Vec<u8>> {
         self.role_table_or_refuse("external join approve")?;
         let key_package = self.pending_external_join_key_package(proposal_ref)?;
+        // Preserve the typed reason rather than flattening it into prose.
+        //
+        // This used to be an unconditional `Error::Group(format!(…))`, which
+        // destroyed the `RefusalReason` `propose_add_member` had just produced —
+        // so an approve refused by a full pending set reached every client with
+        // no reason at all, and could therefore never participate in the
+        // retry-when-the-queue-drains rule even though it is exactly the case
+        // that rule exists for. The wrap stays for a refusal that carries no
+        // reason, because naming the operation is what makes those readable.
         let proposal = self
             .propose_add_member(identity, key_package)
-            .map_err(|e| Error::Group(format!("external join approve refused: {e}")))?;
+            .map_err(|e| {
+                if e.refusal_reason().is_some() {
+                    e
+                } else {
+                    Error::Group(format!("external join approve refused: {e}"))
+                }
+            })?;
         // Only now. The decision has been made and is on its way to the wire;
         // a refusal above left the request where it was.
         self.drop_pending_external_join(proposal_ref);

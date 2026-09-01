@@ -3410,6 +3410,31 @@ public class ChatRepository(
     }
 
     /**
+     * ADR-0045 UX §7 — the [proposalKey] of every live pending proposal.
+     *
+     * Distinct from [pendingMembershipRequests], which folds the observation
+     * store in and applies the UX §10 visibility gate: this is the raw set, and
+     * the retry verdict needs it raw. A request the visibility gate hides from
+     * this member is still a request that would collide with a re-send.
+     *
+     * Empty on any failure — the direction that suppresses a fire rather than
+     * inventing one.
+     */
+    public fun pendingProposalKeys(groupIdHex: String): List<String> {
+        val record = groups[groupIdHex] ?: return emptyList()
+        return try {
+            record.group.pendingProposals().map(::proposalKey)
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "pendingProposalKeys failed", cause)
+            emptyList()
+        }
+    }
+
+    /** The signed-in account id, base64 — the first half of a per-`(account,
+     *  group)` scope key. `null` before bootstrap. */
+    public fun currentAccountIdB64(): String? = currentAccountIdB64.get()
+
+    /**
      * ADR-0045 S7 residual 1 — the `Not applied` rows the user has not
      * dismissed. Read after [pendingMembershipRequests], which is what detects
      * and records them.

@@ -153,6 +153,23 @@ import {
   externalJoinAffordance,
   membershipRefusalOf,
 } from "../chat/membership-refusal";
+// ADR-0045 UX §7 — the automatic re-send of a request a full queue refused.
+// The decision (whether to arm, when to fire, when to stop) lives in the
+// plain module and is tested there; this file supplies the group state it
+// reads and re-issues what it decides to fire.
+import {
+  armRetry,
+  armedRetries,
+  clearArmedRetries,
+  armedRetryFor,
+  claimArmedRetry,
+  retryKey,
+  retryScopeKey,
+  retryVerdict,
+  type GroupSnapshot,
+  type RetryableRequest,
+  type RosterMemberView,
+} from "../chat/membership-retry";
 // ADR-0045 S7 residual 1 — the request that left the pending set without
 // landing. Same split, same reason as above.
 import {
@@ -1930,12 +1947,28 @@ function ChatView(props: {
     setError(null);
     setNotice(null);
     setBusy(true);
+    // ADR-0045 UX §7 — keyed on our own SIGNATURE key, never on the leaf:
+    // OpenMLS hands a vacated leaf to the next member added, so a retry armed
+    // against a leaf could come to name somebody else entirely. `undefined`
+    // (a torn roster read) simply means no retry is armed for this attempt.
+    const ownKeyB64 = ownSignatureKeyB64();
+    const leaveRequest: RetryableRequest | null =
+      ownKeyB64 === undefined ? null : { kind: "leave", subjectKeyB64: ownKeyB64 };
     try {
-      const out = await contacts.removeMemberFromGroup(
-        props.requireIdentity(),
-        props.entry.group,
-        leaf,
-      );
+      const out =
+        leaveRequest === null
+          ? await contacts.removeMemberFromGroup(
+              props.requireIdentity(),
+              props.entry.group,
+              leaf,
+            )
+          : await withMembershipRetry(leaveRequest, () =>
+              contacts.removeMemberFromGroup(
+                props.requireIdentity(),
+                props.entry.group,
+                leaf,
+              ),
+            );
       chat.markOwnPublishedCommit(
         out.kind === "committed" ? out.commitMessageId : out.proposalMessageId,
       );
@@ -1991,6 +2024,275 @@ function ChatView(props: {
     );
     setPendingVersion(pendingVersion() + 1);
   }
+
+  // -------------------------------------------------------------------------
+  // ADR-0045 UX §7 — the automatic re-send of a queue-full refusal
+  // -------------------------------------------------------------------------
+
+  /** The `(account, group)` scope every armed retry is filed under. `null`
+   *  outside a session, where there is nothing to file. */
+  function retryScope(): string | null {
+    const s = auth.state();
+    if (s.kind !== "session") return null;
+    return retryScopeKey(
+      s.account.accountId,
+      base64Encode(props.entry.group.groupId),
+    );
+  }
+
+  /** `pendingProposals().length` — the exact number the core's cap gates on.
+   *  A torn read answers `0`, which is the fail-safe direction: it can only
+   *  make a later drain test *fail* to fire, never fire spuriously. */
+  function pendingCountNow(): number {
+    try {
+      return (props.entry.group.pendingProposals() as unknown[]).length;
+    } catch {
+      return 0;
+    }
+  }
+
+  /** The group as the retry verdict reads it, captured in ONE pass — the
+   *  roster and the pending set must come from the same moment. */
+  function retrySnapshot(): GroupSnapshot {
+    let roster: RosterMemberView[] | null;
+    try {
+      roster = (
+        props.entry.group.members() as Array<{
+          leafIndex: number;
+          signaturePublicKey: Uint8Array;
+        }>
+      ).map((m) => ({
+        leafIndex: m.leafIndex,
+        signatureKeyB64: base64Encode(m.signaturePublicKey),
+      }));
+    } catch {
+      roster = null;
+    }
+    let pendingKeys: string[] = [];
+    let pendingCount = 0;
+    try {
+      const records = props.entry.group.pendingProposals() as ProposalRecordView[];
+      pendingCount = records.length;
+      pendingKeys = records.filter((r) => r.stored).map(proposalKey);
+    } catch {
+      /* a torn read leaves the set empty, which only ever suppresses a fire */
+    }
+    const owner = ownerKeyB64();
+    return {
+      roster,
+      pendingKeys,
+      pendingCount,
+      roleTable:
+        owner === undefined
+          ? null
+          : { ownerKeyB64: owner, adminKeysB64: [...adminKeysB64()] },
+      membershipEnded: membershipEnded(),
+    };
+  }
+
+  /**
+   * Claim the slot for `request` before a MANUAL attempt starts.
+   *
+   * This is half of the exactly-once property and the half that is easy to
+   * miss: the re-issue goes through `withGroupMlsLock`, which is
+   * non-reentrant, so the driver cannot hold that lock across its own last
+   * check. A user tapping again therefore takes the record away rather than
+   * racing an in-flight retry for it.
+   */
+  function disarmRetry(request: RetryableRequest): void {
+    const scope = retryScope();
+    if (scope !== null) claimArmedRetry(scope, retryKey(request));
+  }
+
+  /**
+   * Arm an automatic re-send if — and only if — the CORE says this refusal
+   * resolves on its own.
+   *
+   * Nothing here lists a reason. `armedRetryFor` asks
+   * `membershipRetryMaySucceed`, which is the wasm export, so a `DoNotRetry`
+   * refusal, a `NotPermitted` one, an unrecognised reason from a newer core
+   * and an ordinary error all take the same path: no record, nothing retried.
+   */
+  function armRetryIfQueueFull(
+    request: RetryableRequest,
+    err: unknown,
+    pendingCountAtRefusal: number,
+  ): void {
+    const scope = retryScope();
+    if (scope === null) return;
+    const armed = armedRetryFor(
+      err,
+      request,
+      pendingCountAtRefusal,
+      membershipRetryMaySucceed,
+    );
+    if (armed !== null) armRetry(scope, armed);
+  }
+
+  /**
+   * Run one membership request, arming a re-send if a full queue refused it.
+   *
+   * Wrapping rather than editing each handler's body keeps the arm and the
+   * disarm adjacent to each other and to the call, which is what stops a new
+   * handler from arming without disarming.
+   */
+  async function withMembershipRetry<T>(
+    request: RetryableRequest,
+    run: () => Promise<T>,
+  ): Promise<T> {
+    disarmRetry(request);
+    const before = pendingCountNow();
+    try {
+      return await run();
+    } catch (err) {
+      armRetryIfQueueFull(request, err, before);
+      throw err;
+    }
+  }
+
+  /**
+   * Re-issue one armed request, reconstructed from its descriptor.
+   *
+   * **Reconstructed, never a stored closure.** The descriptor is exactly what
+   * the request is; anything a closure would additionally capture (a roster
+   * snapshot, a leaf index, a KeyPackage) is stale by the time the queue
+   * drains. In particular a removal's LEAF is resolved from the live roster
+   * here, because OpenMLS hands a vacated leaf to the next member added and a
+   * stored one would eventually remove the wrong person.
+   */
+  async function reissueMembershipRequest(request: RetryableRequest): Promise<void> {
+    const identity = props.requireIdentity();
+    const group = props.entry.group;
+    switch (request.kind) {
+      case "add": {
+        const out = await contacts.addMemberToGroup(
+          identity,
+          group,
+          base64Decode(request.subjectAccountIdB64),
+          base64Decode(request.subjectKeyB64),
+        );
+        chat.markOwnPublishedCommit(
+          out.kind === "committed" ? out.commitMessageId : out.proposalMessageId,
+        );
+        if (out.kind === "proposed") noteOwnRequest(`add:${request.subjectKeyB64}`);
+        return;
+      }
+      case "remove":
+      case "leave": {
+        const leaf = rosterViews().find(
+          (m) => m.signatureKeyB64 === request.subjectKeyB64,
+        )?.leafIndex;
+        // The verdict already dropped a request whose subject has left, so an
+        // unresolvable leaf here is a torn read between the verdict and now.
+        // Refusing to guess is the only safe answer: any fallback leaf names
+        // somebody, and for a removal that somebody is a real person.
+        if (leaf === undefined) return;
+        const out = await contacts.removeMemberFromGroup(identity, group, leaf);
+        chat.markOwnPublishedCommit(
+          out.kind === "committed" ? out.commitMessageId : out.proposalMessageId,
+        );
+        if (out.kind === "proposed") {
+          noteOwnRequest(`${request.kind === "leave" ? "leave" : "remove"}:${leaf}`);
+        }
+        return;
+      }
+      case "set-admin": {
+        const out = await contacts.setMemberAdmin(
+          identity,
+          group,
+          base64Decode(request.subjectKeyB64),
+          request.makeAdmin,
+        );
+        chat.markOwnPublishedCommit(
+          out.kind === "committed" ? out.commitMessageId : out.proposalMessageId,
+        );
+        if (out.kind === "proposed") noteOwnRequest("role-change");
+        return;
+      }
+      default: {
+        const out = await contacts.transferGroupOwnership(
+          identity,
+          group,
+          base64Decode(request.subjectKeyB64),
+          request.outgoing,
+        );
+        chat.markOwnPublishedCommit(
+          out.kind === "committed" ? out.commitMessageId : out.proposalMessageId,
+        );
+        if (out.kind === "proposed") {
+          noteOwnRequest("role-change", request.subjectKeyB64);
+        }
+      }
+    }
+  }
+
+  /**
+   * The driver: evaluate every armed request against the group as it is now.
+   *
+   * **Driven by the fold, never by a timer.** It reads `membersVersion` and
+   * `pendingVersion`, which are bumped by the poll tail and by every sweep —
+   * i.e. by exactly the events that can drain a queue. A quiet group produces
+   * no evaluations that decide anything and no attempts at all.
+   *
+   * Synchronous and free when nothing is armed, which is the overwhelmingly
+   * common case: `armedRetries` returns an empty array and the effect ends.
+   */
+  createEffect(() => {
+    membersVersion();
+    pendingVersion();
+    const scope = retryScope();
+    if (scope === null) return;
+    // Stand down while a MANUAL membership operation is in flight.
+    //
+    // The disarm-on-tap covers every handler that knows its descriptor up
+    // front, but `onAddMember` cannot: the request only becomes nameable once
+    // the typed handle has resolved, so between the tap and the resolution
+    // there is a window in which a retry for the same person could fire behind
+    // the user's own attempt. Both would be published, and the sweep would
+    // exclude one of them as a duplicate signature key — self-correcting, but
+    // a wasted slot in exactly the queue that was full. Standing down costs
+    // one refresh cycle.
+    if (busy()) return;
+    const armed = armedRetries(scope);
+    if (armed.length === 0) return;
+    const view = retrySnapshot();
+    for (const entry of armed) {
+      const verdict = retryVerdict(entry, view);
+      if (verdict.kind === "wait") continue;
+      // Claim first, decide second — the claim is the exactly-once step, and a
+      // `drop` claims for the same reason a `fire` does: leaving a dropped
+      // record in the store would re-evaluate it on every future fold.
+      const claimed = claimArmedRetry(scope, retryKey(entry.request));
+      if (claimed === undefined) continue;
+      if (verdict.kind === "drop") continue;
+      void (async () => {
+        try {
+          await reissueMembershipRequest(claimed.request);
+          setMembersVersion(membersVersion() + 1);
+          await sweepNow();
+          void refresh();
+        } catch (err) {
+          // A second queue-full refusal re-arms against the NEW count and waits
+          // for the next drain — silently, because nothing has changed for the
+          // user since the refusal they were already shown.
+          const rearmed = armedRetryFor(
+            err,
+            claimed.request,
+            pendingCountNow(),
+            membershipRetryMaySucceed,
+          );
+          if (rearmed !== null) {
+            armRetry(scope, rearmed);
+            return;
+          }
+          // Anything else is a real failure of a request the user made and
+          // was not present for, so it replaces the stale message rather than
+          // being logged away.
+          setError(formatError(err));
+        }
+      })();
+    }
+  });
 
   /**
    * ADR-0045 UX §6.2.4 — `Delete this chat`.
@@ -2052,6 +2354,12 @@ function ChatView(props: {
       pruneObservations(accountIdB64, groupIdB64, []);
       clearUnappliedForGroup(accountIdB64, groupIdB64);
       clearLeaveRequested(accountIdB64, groupIdB64);
+      // ADR-0045 UX §7 — an armed re-send names a group that is gone from
+      // here. The verdict would drop it anyway on `membershipEnded`, so this
+      // is tidiness rather than a gate; it is here because leaving a record
+      // behind for a deleted chat is the kind of residue that later reads as
+      // a bug.
+      clearArmedRetries(retryScopeKey(accountIdB64, groupIdB64));
       // Drop the row from the registry LAST, so a failure above leaves the
       // chat reachable rather than orphaning a transcript behind a row the
       // user can no longer open.
@@ -2451,11 +2759,19 @@ function ChatView(props: {
     setNotice(null);
     setBusy(true);
     try {
-      const result = await contacts.transferGroupOwnership(
-        props.requireIdentity(),
-        props.entry.group,
-        base64Decode(successor.signatureKeyB64),
-        outgoing,
+      const result = await withMembershipRetry(
+        {
+          kind: "transfer-ownership",
+          subjectKeyB64: successor.signatureKeyB64,
+          outgoing,
+        },
+        () =>
+          contacts.transferGroupOwnership(
+            props.requireIdentity(),
+            props.entry.group,
+            base64Decode(successor.signatureKeyB64),
+            outgoing,
+          ),
       );
       chat.markOwnPublishedCommit(
         result.kind === "committed"
@@ -3573,11 +3889,31 @@ function ChatView(props: {
     setError(null);
     setNotice(null);
     setBusy(true);
+    // ADR-0045 UX §7 — the add descriptor is only knowable once the typed
+    // handle has resolved, which happens inside the call, so it is captured
+    // through the resolution hook rather than reconstructed from a throw. The
+    // pending count is read at the SAME moment: it is the baseline the drain
+    // is measured against, and reading it before the discovery round-trip
+    // would compare against a set that may since have moved.
+    let addRequest: RetryableRequest | null = null;
+    let addPendingBefore = 0;
     try {
       const result = await contacts.addMemberToGroupByUsername(
         props.requireIdentity(),
         props.entry.group,
         username,
+        (recipient) => {
+          addRequest = {
+            kind: "add",
+            subjectKeyB64: base64Encode(recipient.signaturePubkey),
+            subjectAccountIdB64: base64Encode(recipient.accountId),
+          };
+          // A manual attempt owns the slot: disarm any retry already armed for
+          // this same person before starting, so an in-flight one cannot
+          // publish a second copy behind this.
+          disarmRetry(addRequest);
+          addPendingBefore = pendingCountNow();
+        },
       );
       // Suppress the echo so the sender's next pollMessages
       // doesn't try to processIncoming on its own artifact at
@@ -3637,6 +3973,12 @@ function ChatView(props: {
       // moving past the suppressed commit row).
       void refresh();
     } catch (err) {
+      // ADR-0045 UX §7 — `addRequest` is `null` only when the failure came
+      // BEFORE the handle resolved (an unknown username, a discovery outage),
+      // where there is no request to re-send and nothing to arm.
+      if (addRequest !== null) {
+        armRetryIfQueueFull(addRequest, err, addPendingBefore);
+      }
       setError(formatError(err));
     } finally {
       setBusy(false);
@@ -3727,11 +4069,25 @@ function ChatView(props: {
       // rotates when it shrinks, which keeps the ordering correct by
       // construction rather than by an argument about two adjacent statements.
       if (usesProposalPath()) {
-        const proposed = await contacts.removeMemberFromGroup(
-          props.requireIdentity(),
-          props.entry.group,
-          leafIndex,
-        );
+        // ADR-0045 UX §7 — armed against the member's signature key, resolved
+        // now and re-resolved to a leaf at fire time. A torn roster read means
+        // no retry for this attempt rather than a retry against a guess.
+        const targetKeyB64 = rosterViews().find(
+          (m) => m.leafIndex === leafIndex,
+        )?.signatureKeyB64;
+        const removeRun = () =>
+          contacts.removeMemberFromGroup(
+            props.requireIdentity(),
+            props.entry.group,
+            leafIndex,
+          );
+        const proposed =
+          targetKeyB64 === undefined
+            ? await removeRun()
+            : await withMembershipRetry(
+                { kind: "remove", subjectKeyB64: targetKeyB64 },
+                removeRun,
+              );
         chat.markOwnPublishedCommit(
           proposed.kind === "committed"
             ? proposed.commitMessageId
@@ -3804,11 +4160,19 @@ function ChatView(props: {
     setNotice(null);
     setBusy(true);
     try {
-      const result = await contacts.setMemberAdmin(
-        props.requireIdentity(),
-        props.entry.group,
-        member.sigPubkey,
-        makeAdmin,
+      const result = await withMembershipRetry(
+        {
+          kind: "set-admin",
+          subjectKeyB64: base64Encode(member.sigPubkey),
+          makeAdmin,
+        },
+        () =>
+          contacts.setMemberAdmin(
+            props.requireIdentity(),
+            props.entry.group,
+            member.sigPubkey,
+            makeAdmin,
+          ),
       );
       chat.markOwnPublishedCommit(
         result.kind === "committed"

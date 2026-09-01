@@ -407,6 +407,22 @@ public final class ChatViewModel: ObservableObject {
         // The quiet window matures with the clock, so re-fold on the same tick
         // rather than only when the user does something.
         if membersPanelOpen { refreshPendingRequests() }
+        // ADR-0045 UX §7 — and LOOK at the queue on the same tick, panel open
+        // or not.
+        //
+        // **This is not a retry timer, and the distinction is the whole
+        // design.** The tick decides only *when this device looks*; what
+        // decides whether anything happens is still the queue having shrunk
+        // since the refusal. A tick against an unchanged queue does nothing at
+        // all, so a group where no committer is running produces no attempts
+        // however long it ticks.
+        //
+        // It is here because `refreshMembers` is user-driven on this platform:
+        // without it, a request refused while the panel was open would wait
+        // for the user to touch membership again before anyone noticed the
+        // queue had drained. This tick is already paid for and is already
+        // foreground-gated, which is the same condition a sweep needs.
+        evaluateArmedRetries()
     }
 
     deinit {
@@ -844,6 +860,216 @@ public final class ChatViewModel: ObservableObject {
         maybeRekeyActiveGroupCall()
     }
 
+    // MARK: - ADR-0045 UX §7 — the automatic re-send of a queue-full refusal
+    //
+    // Every rule lives in `MembershipRetry.swift` and is tested there; what is
+    // here is the wiring that feeds it live group state and re-issues what it
+    // decides to fire.
+
+    private let retryStore = MembershipRetryStore()
+
+    /// The `(account, group)` scope every armed retry is filed under, or `nil`
+    /// outside a session, where there is nothing to file.
+    private func retryScope() -> String? {
+        guard let account = repository.accountIdB64 else { return nil }
+        return MembershipRetryStore.scopeKey(accountIdB64: account, groupIdHex: groupIdHex)
+    }
+
+    /// The group as the retry verdict reads it, captured in ONE pass — the
+    /// roster and the pending set must come from the same moment, because the
+    /// merge that empties one is the merge that moves the other.
+    ///
+    /// A `nil` roster is a TORN read, not an empty group, and the verdict
+    /// treats it as claiming nothing.
+    private func retrySnapshot() -> RetryGroupSnapshot {
+        let roster = repository.members(groupIdHex: groupIdHex)?.map {
+            RetryRosterMember(
+                leafIndex: $0.leafIndex,
+                signatureKeyB64: base64Encode($0.signaturePublicKey))
+        }
+        let table = repository.groupRoles(groupIdHex: groupIdHex).map {
+            RetryRoleTable(
+                ownerKeyB64: base64Encode($0.owner),
+                adminKeysB64: $0.admins.map { base64Encode($0) })
+        }
+        let pending = repository.pendingProposals(groupIdHex: groupIdHex)
+        return RetryGroupSnapshot(
+            roster: roster,
+            pendingKeys: pending.map { proposalKey($0) },
+            pendingCount: pending.count,
+            roleTable: table,
+            membershipEnded: membershipHasEnded)
+    }
+
+    /// Claim the slot for `request` before a MANUAL attempt starts.
+    ///
+    /// This is half of the exactly-once property and the half that is easy to
+    /// miss: the re-issue goes through the repository's own per-group commit
+    /// lock, so the driver cannot hold that across its own last check. A user
+    /// tapping again therefore takes the record away rather than racing an
+    /// in-flight retry for it.
+    private func disarmRetry(_ request: RetryableRequest) {
+        guard let scope = retryScope() else { return }
+        _ = retryStore.claim(scope: scope, key: request.key)
+    }
+
+    /// Arm an automatic re-send if — and only if — the CORE says this refusal
+    /// resolves on its own.
+    ///
+    /// Nothing here lists a reason. ``armedRetry(for:request:pendingCountAtRefusal:reason:retryMaySucceed:)``
+    /// asks `membershipRefusalRetryMaySucceed`, so a `DoNotRetry` refusal, a
+    /// `NotPermitted` one, an unrecognised reason from a newer core and an
+    /// ordinary error all take the same path: no record, nothing retried.
+    private func armRetryIfQueueFull(
+        _ request: RetryableRequest,
+        _ error: Error,
+        pendingCountAtRefusal: Int
+    ) {
+        guard let scope = retryScope() else { return }
+        guard
+            let armed = armedRetry(
+                for: error,
+                request: request,
+                pendingCountAtRefusal: pendingCountAtRefusal,
+                retryMaySucceed: { membershipRefusalRetryMaySucceed(reason: $0) })
+        else { return }
+        retryStore.arm(scope: scope, armed)
+    }
+
+    /// Run one membership request, arming a re-send if a full queue refused it.
+    ///
+    /// Wrapping rather than editing each handler's body keeps the arm and the
+    /// disarm adjacent to each other and to the call, which is what stops a new
+    /// handler from arming without disarming.
+    private func withMembershipRetry<T>(
+        _ request: RetryableRequest,
+        _ run: () async throws -> T
+    ) async throws -> T {
+        disarmRetry(request)
+        let before = repository.pendingProposals(groupIdHex: groupIdHex).count
+        do {
+            return try await run()
+        } catch {
+            armRetryIfQueueFull(request, error, pendingCountAtRefusal: before)
+            throw error
+        }
+    }
+
+    /// Re-issue one armed request, reconstructed from its descriptor.
+    ///
+    /// **Reconstructed, never a stored closure.** The descriptor is exactly
+    /// what the request is; anything a closure would additionally capture (a
+    /// roster snapshot, a leaf index, a KeyPackage) is stale by the time the
+    /// queue drains. In particular a removal's LEAF is resolved from the live
+    /// roster here, because OpenMLS hands a vacated leaf to the next member
+    /// added and a stored one would eventually remove the wrong person.
+    private func reissueMembershipRequest(_ request: RetryableRequest) async throws {
+        switch request {
+        case .add(let keyB64, let accountIdB64):
+            guard let key = base64Decode(keyB64), let account = base64Decode(accountIdB64)
+            else { return }
+            _ = try await repository.addMemberToGroup(
+                groupIdHex: groupIdHex,
+                recipientAccountId: account,
+                recipientSignaturePubkey: key)
+        case .remove(let keyB64), .leave(let keyB64):
+            // The verdict already dropped a request whose subject has left, so
+            // an unresolvable leaf here is a torn read between the verdict and
+            // now. Refusing to guess is the only safe answer: any fallback leaf
+            // names somebody, and for a removal that somebody is a real person.
+            guard
+                let leaf = repository.members(groupIdHex: groupIdHex)?
+                    .first(where: { base64Encode($0.signaturePublicKey) == keyB64 })?
+                    .leafIndex
+            else { return }
+            _ = try await repository.removeMemberFromGroup(
+                groupIdHex: groupIdHex, leafIndex: leaf)
+        case .setAdmin(let keyB64, let makeAdmin):
+            guard let key = base64Decode(keyB64) else { return }
+            _ = try await repository.setMemberAdmin(
+                groupIdHex: groupIdHex,
+                memberSignaturePubkey: key,
+                makeAdmin: makeAdmin)
+        case .transferOwnership(let keyB64, let outgoing):
+            guard let key = base64Decode(keyB64) else { return }
+            _ = try await repository.transferGroupOwnership(
+                groupIdHex: groupIdHex,
+                newOwnerSignaturePubkey: key,
+                outgoing: outgoing)
+        }
+    }
+
+    /// The driver: evaluate every armed request against the group as it is now.
+    ///
+    /// **Driven by observation, never by a timer.** It runs from
+    /// ``refreshPendingRequests()``, which is itself driven by every roster
+    /// refresh and by the beacon tick — i.e. by exactly the events that can
+    /// drain a queue, plus a cadence that is already paid for. A quiet group
+    /// produces no attempts at all.
+    ///
+    /// Free when nothing is armed, which is the overwhelmingly common case.
+    private func evaluateArmedRetries() {
+        guard let scope = retryScope() else { return }
+        // Stand down while a MANUAL membership operation is in flight.
+        //
+        // The disarm-on-tap covers every handler that knows its descriptor up
+        // front, but `onAddMember` cannot: the request only becomes nameable
+        // once the typed handle has resolved, so between the tap and the
+        // resolution there is a window in which a retry for the same person
+        // could fire behind the user's own attempt. Standing down costs at
+        // most one refresh — the roster refresh that follows the manual
+        // operation, or the beacon tick, re-evaluates.
+        if membershipBusy { return }
+        let armed = retryStore.armed(scope: scope)
+        if armed.isEmpty { return }
+        let view = retrySnapshot()
+        for entry in armed {
+            let verdict = retryVerdict(entry, view)
+            if verdict == .wait { continue }
+            // Claim first, decide second — the claim is the exactly-once step,
+            // and a `drop` claims for the same reason a `fire` does: leaving a
+            // dropped record in the store would re-evaluate it on every future
+            // refresh.
+            guard let claimed = retryStore.claim(scope: scope, key: entry.request.key)
+            else { continue }
+            if case .drop = verdict { continue }
+            Task { @MainActor in
+                do {
+                    try await reissueMembershipRequest(claimed.request)
+                    _ = await repository.sweepIfCommitter(groupIdHex: groupIdHex)
+                    refreshMembers()
+                } catch is CancellationError {
+                    // The screen went away mid-retry. NOT a failure of the
+                    // request and not something to report: turning a
+                    // cancellation into an error message is the same class of
+                    // mistake ADR-0044 recorded on the commit path. The record
+                    // is already claimed, so this attempt is simply lost —
+                    // which is exactly the in-memory contract.
+                    return
+                } catch {
+                    // A second queue-full refusal re-arms against the NEW count
+                    // and waits for the next drain — silently, because nothing
+                    // has changed for the user since the refusal they were
+                    // already shown.
+                    let count = repository.pendingProposals(groupIdHex: groupIdHex).count
+                    if let rearmed = armedRetry(
+                        for: error,
+                        request: claimed.request,
+                        pendingCountAtRefusal: count,
+                        retryMaySucceed: { membershipRefusalRetryMaySucceed(reason: $0) })
+                    {
+                        retryStore.arm(scope: scope, rearmed)
+                    } else {
+                        // Anything else is a real failure of a request the user
+                        // made and was not present for, so it replaces the
+                        // stale message rather than being logged away.
+                        reportMembershipFailure(error, op: "membership retry")
+                    }
+                }
+            }
+        }
+    }
+
     /// ADR-0045 S4a — re-join the core's retained pending set to this device's
     /// observation store and apply the UX §10 visibility gate.
     ///
@@ -871,6 +1097,10 @@ public final class ChatViewModel: ObservableObject {
         // detects and records them: a row is created at the exact moment its
         // observation is pruned.
         unappliedAddRows = repository.unappliedAdds(groupIdHex: groupIdHex)
+        // ADR-0045 UX §7 — and the last thing, against the state just read: a
+        // queue that drained since a refusal is exactly what this pass would
+        // have observed.
+        evaluateArmedRetries()
     }
 
     /// ADR-0045 S7 residual 1 — dismiss one `Not applied` row. It stays
@@ -971,11 +1201,22 @@ public final class ChatViewModel: ObservableObject {
             defer { membershipBusy = false }
             do {
                 let resolved = try await resolveRecipient(username)
-                let outcome = try await repository.addMemberToGroup(
-                    groupIdHex: groupIdHex,
-                    recipientAccountId: resolved.accountId,
-                    recipientSignaturePubkey: resolved.signaturePubkey
-                )
+                // ADR-0045 UX §7 — the descriptor is only knowable once the
+                // typed handle has resolved, which is why it is built here and
+                // not before: re-resolving a username later could name a
+                // different account if the handle has since been
+                // re-registered, and adding the wrong person is not a retry.
+                let outcome = try await withMembershipRetry(
+                    .add(
+                        subjectKeyB64: base64Encode(resolved.signaturePubkey),
+                        subjectAccountIdB64: base64Encode(resolved.accountId))
+                ) {
+                    try await repository.addMemberToGroup(
+                        groupIdHex: groupIdHex,
+                        recipientAccountId: resolved.accountId,
+                        recipientSignaturePubkey: resolved.signaturePubkey
+                    )
+                }
                 addMemberInput = ""
                 // ADR-0045 — `proposed` is not a quieter `committed`: nobody has
                 // been added yet. `refreshMembers` re-reads the roster (which is
@@ -1006,10 +1247,22 @@ public final class ChatViewModel: ObservableObject {
                 // roster, annotated, until a committer sweeps. Dropping the row
                 // now would assert they are gone while they are still in the
                 // group and still receiving every message.
-                _ = try await repository.removeMemberFromGroup(
-                    groupIdHex: groupIdHex,
-                    leafIndex: leafIndex
-                )
+                // ADR-0045 UX §7 — armed against the member's SIGNATURE key,
+                // resolved now and re-resolved to a leaf at fire time. A torn
+                // roster read means no retry for this attempt rather than a
+                // retry against a guess.
+                let targetKeyB64 = repository.members(groupIdHex: groupIdHex)?
+                    .first(where: { $0.leafIndex == leafIndex })
+                    .map { base64Encode($0.signaturePublicKey) }
+                if let targetKeyB64 {
+                    _ = try await withMembershipRetry(.remove(subjectKeyB64: targetKeyB64)) {
+                        try await repository.removeMemberFromGroup(
+                            groupIdHex: groupIdHex, leafIndex: leafIndex)
+                    }
+                } else {
+                    _ = try await repository.removeMemberFromGroup(
+                        groupIdHex: groupIdHex, leafIndex: leafIndex)
+                }
                 refreshMembers()
             } catch {
                 reportMembershipFailure(error, op: "onRemoveMember")
@@ -1080,10 +1333,19 @@ public final class ChatViewModel: ObservableObject {
                 // suppresses the echo itself, so unlike the web reference there
                 // is nothing to do here afterwards but re-read the roster —
                 // which must still contain us, annotated.
-                _ = try await repository.removeMemberFromGroup(
-                    groupIdHex: groupIdHex,
-                    leafIndex: leaf
-                )
+                // ADR-0045 UX §7 — keyed on our own SIGNATURE key, never on
+                // the leaf: OpenMLS hands a vacated leaf to the next member
+                // added, so a retry armed against a leaf could come to name
+                // somebody else entirely.
+                if let ownKeyB64 = ownSignatureKeyB64 {
+                    _ = try await withMembershipRetry(.leave(subjectKeyB64: ownKeyB64)) {
+                        try await repository.removeMemberFromGroup(
+                            groupIdHex: groupIdHex, leafIndex: leaf)
+                    }
+                } else {
+                    _ = try await repository.removeMemberFromGroup(
+                        groupIdHex: groupIdHex, leafIndex: leaf)
+                }
                 // ADR-0045 UX §6.2.3 — the ONE thing that later tells
                 // `You left this group.` from `You are no longer a member of
                 // this group.`, and it has to be its own durable field rather
@@ -1256,10 +1518,15 @@ public final class ChatViewModel: ObservableObject {
                 return
             }
             do {
-                _ = try await repository.transferGroupOwnership(
-                    groupIdHex: groupIdHex,
-                    newOwnerSignaturePubkey: successorKey,
-                    outgoing: outgoing)
+                _ = try await withMembershipRetry(
+                    .transferOwnership(
+                        subjectKeyB64: successor.signatureKeyB64, outgoing: outgoing)
+                ) {
+                    try await repository.transferGroupOwnership(
+                        groupIdHex: groupIdHex,
+                        newOwnerSignaturePubkey: successorKey,
+                        outgoing: outgoing)
+                }
                 transferStepOpen = false
                 transferPick = nil
                 let swept = await repository.sweepIfCommitter(groupIdHex: groupIdHex)
@@ -1321,11 +1588,17 @@ public final class ChatViewModel: ObservableObject {
         Task { @MainActor in
             defer { membershipBusy = false }
             do {
-                _ = try await repository.setMemberAdmin(
-                    groupIdHex: groupIdHex,
-                    memberSignaturePubkey: member.signaturePublicKey,
-                    makeAdmin: makeAdmin
-                )
+                _ = try await withMembershipRetry(
+                    .setAdmin(
+                        subjectKeyB64: base64Encode(member.signaturePublicKey),
+                        makeAdmin: makeAdmin)
+                ) {
+                    try await repository.setMemberAdmin(
+                        groupIdHex: groupIdHex,
+                        memberSignaturePubkey: member.signaturePublicKey,
+                        makeAdmin: makeAdmin
+                    )
+                }
                 refreshMembers()
             } catch {
                 reportMembershipFailure(error, op: "onToggleAdmin")
