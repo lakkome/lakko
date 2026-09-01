@@ -2593,6 +2593,68 @@ rather than one platform's stronger guarantee.
 
 ---
 
+## Why decision 4's design does not survive
+
+Decision 4 prescribed the shape S7 should take: **store the stranger's external `Add`
+in the openmls proposal store, and give `sweep_keeps` a second arm that admits it once
+an admin has marked it approved**, defaulting to exclude. S7 was built and that design
+was rejected on contact. The reasons are recorded because the design is the obvious one
+and a later hand will re-propose it.
+
+**1. The mark is device-local; the sweeper may be a different admin.** ADR-0045's whole
+point is that the device which *decides* and the device which *commits* are not the same
+device — the committer is whichever candidate is lowest-ranked and running. An approval
+recorded in one admin's memory is invisible to the one that actually sweeps, so either
+the mark has to travel (a new authorisation channel on the wire, which is a bigger change
+than the one being avoided) or the sweeper admits an unmarked stranger, which is the
+auto-admit ADR-0027's gate exists to prevent.
+
+**2. Every peer's commit gate would refuse the result.** A `NewMemberProposal` sender
+resolves to no member leaf, so `authorise` refuses it for **every** kind — that
+unresolvable-sender refusal is what keeps a stranger's own proposal out today. A commit
+carrying it would be refused by each peer on receipt, and the only evidence available to
+relax that refusal is *an admin committed it*, which is precisely the trust in the
+committer that the peer-verified gate is built not to extend.
+
+**3. Merging the stores merges the quotas, and hands a stranger a freeze primitive.**
+`MAX_PENDING_EXTERNAL_JOINS` is a **quarantine for non-members** — its whole reason for
+being separate is that anyone holding a `/g/` link can fill it, and filling it costs the
+group nothing because nothing downstream reads it. Move strangers into the member
+proposal store and that stops being true: the store is what the sweep consumes, what
+`refuse_if_proposals_pending` guards, and what C-66's cap bounds. Any link-holder could
+then fill it and freeze the group's membership — the exact denial this ADR's own C-66
+work spent a sprint closing, handed to people who are not even members.
+
+**What was built instead, and why it is smaller.** The approving admin **authors the
+`Add` itself**. That puts the approval on the wire as an ordinary MLS-authenticated
+artifact judged by the one existing rule: the admin's signature *is* the approval, there
+is no new authorisation channel, no new sweep arm, and no relaxation of the
+unresolvable-sender refusal. On the wire an approved add is **indistinguishable from an
+admin adding a contact**, which is the property that makes it sound rather than a
+limitation to work around — a sweep that could tell the two apart would leak *this member
+arrived via a public link* to every member and to the journal.
+
+Two things fall out that decision 4 did not anticipate. **`pending_external_joins` is not
+retired** — decision 4 wanted it gone, and keeping it is what makes reason 3 not bite.
+And the API **splits**: `PublisherGroup` is built by `Group::create_with_id`, seeds no
+role table, and the proposal path refuses a table-less group by construction, so the
+channel co-publisher approve keeps the direct arm. That is consistent with ADR-0045
+(a table-less group keeps direct commits) but it means S7 could not retire the old entry
+point, only confine it — `Group::approve_external_join_directly` is `pub(crate)`, has one
+caller, and refuses a group that carries a role table, so it cannot become a second
+ungated route into a group that has a committer.
+
+**The cost that is real and is not hidden.** The sweeping device cannot tell which adds
+came from a `/g/` link, so it posts a `WelcomeRendezvous` for **every** added key
+alongside the mailbox fan-out it already does. A rendezvous must be readable by a
+not-yet-member, so it carries the added member's **raw signature key** on the group
+journal where an ordinary add puts only an unkeyed hash of it on a mailbox pseudonym.
+For a peer this is no new capability — both are derivable from a public key by anyone
+holding it — but the **DS** now reads the key directly instead of a hash whose preimage
+it would have to guess. Invariant #5 still holds (the DS learns no account identity), and
+the disclosure is stated here rather than left to be discovered.
+
+
 ## Blast radius, per sprint
 
 | Sprint | Surface | What changes |
@@ -2605,7 +2667,7 @@ rather than one platform's stronger guarantee.
 | **S4b — the beacon, web** — **LANDED `02f0037`** | `apps/web/src` | Ends the admin-only wait: candidates announce themselves and the lowest-ranked active one sweeps. `chat/committer-beacon.ts` — the emitter's foreground+throttle gate, the per-`(group, signature key)` observation store, and `decideActingCommitter` over the core's fold. **`composeCommitterBeacon` gets its first call site anywhere in the tree.** Ranks are re-derived through `Group.committerRank` **at verdict time**, never carried from receipt; age comes from the DS row, never a local clock; an unparseable row timestamp is **dropped rather than stored as fresh**, since storing it fresh would make this device defer forever to something that can never age out. Emission is a **dedicated interval on the chat component**, not the poll, because the web poll is event-driven while a beacon's whole meaning is a cadence. One S4a guarantee moved deliberately: the owed-verdict check now runs **ahead of** the rank check, because S4b made a demoted admin holding a durable staged sweep newly reachable and gating it behind the rank check would freeze that device permanently. |
 | **The send lock, web** — **LANDED `000d9f8`** | `apps/web/src` | Unplanned, and forced by the staged sweep. Both send methods take `withGroupMlsLock` across seal **and** publish. See [§ What the client sprints found](#what-the-client-sprints-found), item 3. |
 | **S5 + S6 — the iOS and Android mirrors** — **LANDED `1f230ab`** | `apps/ios/Lakko`, `apps/android/.../app` | The same shape on both: `CommitterSweep`, `CommitterBeacon`, `PendingRequests` beside the existing `CommitOutbox`, driven from `ChatRepository` / `ChatViewModel` / the members sheet, plus the send lock (Android's `GroupSend.kt` `runGroupSend`). **Both natives run a periodic long poll, so unlike web they satisfy the worst-case-poll constraint the beacon's freshness window is derived against** — the takeover works there as designed. Platform shapes that differ **by necessity, not by taste**: Android brackets the whole adjudication in one provider region, because between two applied rows the group is applied-but-not-persisted and a sibling group's restore must never observe that, and its sweep outbox entries carry a marker, because a sweep entry is written while the group deliberately sits **below** its recorded epoch — which the legacy reconciler reads as a torn write and would discard. iOS moved the lock seam up a layer, since its only lock primitive lives on the repository. Android also took the group lock on `broadcastControlToGroup`, **reversing a documented decision** in the ADR-0042/0043 subsystem that had declined it: that made it the one Android send path that could straddle an epoch, and a straddled routing secret means a member silently never learns the rotation and defers forever. |
-| **S7 — external-join convergence** — **NOT BUILT** | core + FFI + 3 clients | Decision 4: retire `pending_external_joins`, keep the FFI names. `Group::approve_external_join` still calls `add_member` directly and eager-merges, so it is the **one remaining live direct-commit path** in a role-table group and the last hole in G-38 residual 1. It is also now user-visible: `refuse_if_proposals_pending` refuses an approve while any request is pending — see [§ What the client sprints found](#what-the-client-sprints-found), item 6. |
+| **S7 — external-join convergence** — **LANDED `576ea14`** (core + both FFI surfaces + all three clients) | `crates/lakko-mls` (**invariant #3**), both FFI surfaces, `apps/{web,ios,android}` | **An approval is now an `Add` proposal the approving admin authors itself**, carrying the joiner's retained KeyPackage and swept like any other. The last direct-commit path in a role-table group is gone, and G-38 residual 1 closes for the external-join path. Item 6 of [§ What the client sprints found](#what-the-client-sprints-found) is resolved with it — `refuse_if_proposals_pending` no longer reaches the approve, because there is no direct commit left for it to guard. **Decision 4's own prescription was rejected on contact and the reasons are the useful part — see [§ Why decision 4's design does not survive](#why-decision-4s-design-does-not-survive).** Two consequences it did not anticipate: `pending_external_joins` is **NOT** retired (the quarantine is load-bearing), and the API **splits** rather than retiring the direct arm, because `PublisherGroup` carries no role table and the proposal path refuses a table-less group by construction. |
 | **S8 — docs** — **PARTLY DONE (2026-08-20, extended 2026-08-24 and 2026-08-25)** | `docs/` | Flip this ADR's status; reconcile `known-gaps.md` G-38 residual 1 and `invariant-index.md`; CLAUDE.md ADR-table row + `lakko-mls` module-map row. Done 2026-08-20: this ADR reconciled to the built core, ADR-0022's three transfer-as-follow-up references, the UX spec's owner dead-end, the CLAUDE.md ADR row + `lakko-mls` module-map row, and **C-63** minted in `invariant-index.md` + `calls.md`. Done 2026-08-24: the S3b and S3c reconcile — this ADR's three stale claims corrected in place, [§ The beacon, as built](#the-beacon-as-built) + [§ Why not `lakko-presence`](#why-not-lakko-presence) + [§ The filter obligation](#the-filter-obligation-the-beacon-created-and-why-a-beacon-is-an-event-rather-than-a-drop) + the indexed-invariant argument added, and CLAUDE.md's `lakko-contacts` / `lakko-ffi-extension` / `lakko-mls` module-map rows, ADR-0045 table row and fuzz-target list brought up to date. **No new indexed invariant** — argued, not defaulted. Done 2026-08-25: the client reconcile — this ADR's ~ten "inert" / "the clients are not built" passages corrected in place rather than bulk-deleted (several carry reasoning that survives the correction), the S4a/S4b/S5/S6 rows above, [§ What the client sprints found](#what-the-client-sprints-found), the CLAUDE.md ADR-table row + the `lakko-contacts` / `lakko-mls` module-map rows, **C-64** minted in `invariant-index.md` + `calls.md` with C-61 and C-63 amended, `known-gaps.md` G-38 residual 1 re-scoped to the external-join path, and the UX spec reconciled against what was actually built. **Still owed: the status flip**, which is the maintainer's, and which this pass deliberately did not take. |
 
 **Four sprints landed that this table never had a row for. The first two were

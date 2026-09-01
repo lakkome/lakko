@@ -9,6 +9,38 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 - **Date:** 2026-06-24
 - **Context:** Phase 3 (admin-side core) → Phase 4 (channel subscriber join)
 
+> **AMENDED 2026-09-01 by [ADR-0045](0045-remote-commit-epoch-fork.md) S7 (`576ea14`).
+> The approval mechanism described below is intact; what it *produces* changed.**
+>
+> `Group::approve_external_join` no longer commits. It publishes an `Add` **proposal the
+> approving admin authors itself**, carrying the joiner's retained KeyPackage, which one
+> elected committer later sweeps — so approving advances no epoch and returns no Welcome.
+> Three consequences for a reader of this ADR:
+>
+> - **The approve is no longer immediate.** The joiner's wait is two-stage: *asked* →
+>   *approved* (a proposal is on the wire) → *admitted* (a committer swept it and posted
+>   the rendezvous). ADR-0045 decision 2 gives that last step **no deadline**.
+> - **The Welcome moved to the sweep, and this ADR's Phase-3 rendezvous is where it
+>   lands.** The sweeping device is not necessarily the approver and cannot tell which
+>   adds came from a `/g/` link, so it posts a `WelcomeRendezvous` for **every** added
+>   key. Pinned as **C-69**.
+> - **The retention queue survives.** ADR-0045 decision 4 wanted `pending_external_joins`
+>   retired; it is not, and the reason is load-bearing — it is the quarantine that keeps a
+>   non-member out of the member proposal store, whose quota a `/g/` link-holder could
+>   otherwise fill to freeze the group. See
+>   [ADR-0045 § Why decision 4's design does not survive](0045-remote-commit-epoch-fork.md#why-decision-4s-design-does-not-survive).
+>
+> One framing below is now wrong rather than merely incomplete: a retained request is
+> described as **epoch-bound and ephemeral**. The retained *KeyPackage* outlives epoch
+> advances — only the joiner's original external proposal had to arrive at a matching
+> epoch. What still drops it is a restart (the queue is in-memory) and, new under S7, the
+> joiner having landed: `pending_external_joins()` filters members, so an approved request
+> retires itself on every device with no message saying so.
+>
+> The **role gate is unchanged and is still the boundary.** What changed is that the
+> admin's approval is now an MLS-authenticated artifact — its own signature on its own
+> proposal — rather than a local decision expressed as a commit.
+
 ## Context
 
 MLS (RFC 9420 §12.1.8.3) lets a **non-member** ask to join a group by sending

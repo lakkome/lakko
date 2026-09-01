@@ -4405,3 +4405,70 @@ public and already in the MLS snapshot beside the message store; nothing new rea
 server), **#3** (no `lakko-mls` change; the core already surfaced the sender leaf and the
 roster), **#4** (fail-closed at every unknown: a torn roster, an unresolvable sender, an
 authorless stored row), **#5** (unchanged).
+
+### C-69: A discipline attached to a direct-commit call site must be re-attached to the sweep
+
+[ADR-0045](../adr/0045-remote-commit-epoch-fork.md). Stated first as an observation
+during the client sprints, promoted to an invariant when S7 produced the **second**
+instance — and the second one's failure mode is silent, which is what makes the pattern
+worth a number rather than a paragraph.
+
+**Why the pattern exists.** ADR-0022 made a membership change one atomic call: an
+owner or admin created a commit that eager-merged before it returned, so anything that
+had to happen *because* membership changed could be written on the line after. ADR-0045
+splits that into propose / sweep / adjudicate, and the sweep may run on a **different
+device** from the one that asked. Every discipline seamed onto the old call site is
+therefore now attached to the wrong end of the operation — it fires when the request is
+*made*, not when it *lands* — and the compiler cannot see the difference, because the
+call site still exists and still returns.
+
+**The tell is in the discipline's own correctness argument: if it mentions an epoch, or
+mentions "after the commit", it is a candidate.** Both known instances do.
+
+**Instance 1 — the push-routing rotation (C-61).** ADR-0043 requires the rotation to
+follow the `Remove` commit, so the new secret is sealed at an epoch the evicted member
+can no longer open. Seamed onto `removeMemberFromGroup`, that held. Under ADR-0045 a
+removal usually becomes a **proposal**, which advances no epoch — so rotating there
+would seal the new secret at an epoch the target is **still in and can still open**,
+silently revoking C-61's forward-secrecy half without touching a line of rotation code,
+and under ADR-0044 it would additionally stamp the secret at the pre-removal epoch where
+it **ties** with the stale one and can lose the byte tiebreak. Moved to the sweep, via
+the membership-shrink diff the poll already runs.
+
+**Instance 2 — the Welcome rendezvous (S7).** ADR-0027's approve produced a Commit and a
+Welcome together, so the approving admin wrapped a `WelcomeRendezvous` and posted it on
+the spot. Under S7 the approve produces only a **proposal**; the Welcome is produced by
+whichever device sweeps, which is not necessarily the approver and **cannot tell which
+adds came from a `/g/` link** — origin-blindness being the property that makes S7 sound.
+So the sweep posts a rendezvous for **every** added key, alongside the mailbox fan-out.
+Left unmoved, the failure is silent in both directions: the approving admin sees its
+proposal published and swept, every member sees the joiner in the roster, and the joiner
+polls a journal that will never carry its envelope — **approved into a group that already
+holds them as a member, and unable to enter it**.
+
+**The rule, stated so it can be checked rather than admired.** When a membership
+operation moves from a direct commit to a proposal, every side effect attached to the old
+call site must be re-examined against three questions: *does it need the post-commit
+epoch* (then it belongs at the sweep); *does it need to happen exactly once per landed
+change* (then it belongs at the sweep, because a proposal may be excluded and re-proposed);
+and *does it need to know something about the request that the sweep cannot see* (then
+either the sweep must do it origin-blind for everything, as S7 does, or the information
+must be carried — and carrying it is usually a leak, which is why S7 does not).
+
+**What this does NOT do.** It does not enumerate the disciplines — that is the point; a
+list would go stale the next time one is added, and the tell above is what makes a
+reviewer able to find them. It does not apply to a group with **no role table**, which
+keeps direct commits and where every seam is still correct where it sits. And it is not
+enforced by anything: no test can assert that a discipline nobody has written yet is
+attached to the right end. It is a review rule, indexed so that it is read.
+
+**Where the two instances live:** C-61's rotation at each client's sweep
+(`apps/web/src/routes/Chat.tsx`, `apps/ios/.../ChatRepository.swift`,
+`apps/android/.../ChatRepository.kt`), pinned by each platform's C-61 ordering test; the
+rendezvous fan-out in each platform's committer-sweep module, pinned by a
+rendezvous-for-**every**-add test that a flag-threaded implementation could not pass.
+Invariants **#2** (unchanged — no wire format change; the rendezvous is a pre-existing
+envelope kind), **#3** (no `lakko-mls` change; this is client seam placement), **#4**
+(unchanged), **#5** (S7's fan-out puts a raw signature key on the journal where an
+ordinary add puts a hash on a mailbox — recorded in ADR-0045 rather than here, since it
+is a property of the fan-out and not of the rule).

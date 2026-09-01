@@ -3851,8 +3851,25 @@ which write survives, changed. What was lost was liveness on a shared lock, and 
 one path (ADR-0044's routing row, since insulated by `boundedOrNull`) liveness was
 what a confidentiality guarantee rested on.
 
-### G-38: Two membership commits could be in flight to the DS at once → inverted journal order → device-ahead — **serialized on web + iOS + Android and the local poll-vs-commit interleave closed on all three (2026-08); the remote-commit epoch fork is CLOSED for the member membership paths by ADR-0045 and REMAINS OPEN for the external-join path**
+### G-38: Two membership commits could be in flight to the DS at once → inverted journal order → device-ahead — **serialized on web + iOS + Android and the local poll-vs-commit interleave closed on all three (2026-08); the remote-commit epoch fork is CLOSED for the member membership paths by ADR-0045 and, since S7 (`576ea14`), CLOSED for the external-join path too — the last direct-commit route in a role-table group is gone**
 
+> **S7 closed the last route (2026-09-01, `576ea14`).** An approval is now an `Add`
+> proposal the approving admin **authors itself**, carrying the joiner's retained
+> KeyPackage and swept like any other, so two admins approving two joiners against one
+> epoch compose instead of diverging — measured before the fix as three devices all
+> reporting epoch 4 with three different rosters. ADR-0045's own decision 4 prescribed a
+> different design (store the stranger's proposal, mark it approved, admit it with a
+> second sweep arm) and it **did not survive contact**; the three reasons are in
+> [ADR-0045 § Why decision 4's design does not survive](../adr/0045-remote-commit-epoch-fork.md#why-decision-4s-design-does-not-survive),
+> and the sharpest is that merging the stores merges the quotas, which would hand any
+> `/g/` link-holder the membership-freeze primitive C-66 had just closed. Two residuals
+> S7 leaves, both stated rather than buried: a sweep that **excludes** an
+> approval-derived `Add` (an expired KeyPackage being the one cause needing no adversary)
+> gives the joiner **no signal at all**, indistinguishable from being ignored; and
+> nothing bounds how long a request sits in the quarantine when no committer is running —
+> the cap catches it eventually, but as a refusal to the *next* proposer rather than as a
+> signal to anyone.
+>
 > **The closure had seven holes of its own, all now closed, and that is the honest
 > headline of this gap.** The `lakko-security` review ADR-0045 names as a precondition
 > for its own Accepted status finally ran and returned **REQUEST CHANGES**: three HIGH

@@ -271,7 +271,20 @@ shipped** (ADR-0027). This ADR adds: the `GroupInviteCapability` codec + FFI;
    **journal poll loop** (`processIncomingVerifyingRoles` — the first
    DS-journal/membership transport the channel client ever had; channels were
    single-publisher before), and approves / rejects pending requests from a
-   panel. **Reseal-after-add (load-bearing):** `approveExternalJoin` commits the
+   panel. **Unchanged by [ADR-0045](0045-remote-commit-epoch-fork.md) S7 (`576ea14`),
+   and that is a decision rather than an oversight.** S7 turned a chat group's
+   approve into a proposal swept by an elected committer, but a `PublisherGroup`
+   is built by `Group::create_with_id` and seeds **no role table**, so the
+   proposal path refuses it by construction — there is no committer to elect.
+   `PublisherGroup::approve_external_join` therefore keeps the direct arm and is
+   **the only place it survives**: the underlying `Group` method is now
+   `pub(crate)`, has one caller, and refuses a group that carries a role table,
+   so it cannot become a second ungated route into a group that has a committer.
+   The two return types differ — proposal bytes for a chat group, the merged
+   Commit + Welcome here — so confusing them is a compile error. The reseal
+   below therefore still holds **verbatim**, and it holds *because* the approve
+   here still advances the epoch synchronously.
+   **Reseal-after-add (load-bearing):** `approveExternalJoin` commits the
    Add → the MLS epoch advances → the channel content-key seed changes, so the
    approve path RESEALS the new-epoch seed to every subscriber via the audited
    `sealSubscriberSeedEnvelope` + atomic `POST /v1/channels/:id/rotate` fanout
