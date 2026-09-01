@@ -41,6 +41,23 @@ import me.lakko.app.chat.ChatRepository
  * commit — a step ADR-0045 decision 2 gives no deadline. So this poll spans both
  * stages, and promising immediacy here would be the optimistic-update lie the UX
  * spec forbids.
+ *
+ * ## What this side is NOT told (ADR-0045 S7 residual 1)
+ *
+ * A sweep can exclude the approval-derived `Add` — `narrow_sweep_by_exclusion`
+ * drops whatever refuses to build, and the commonest cause needs no adversary at
+ * all (an expired KeyPackage, reachable because a request has no deadline). This
+ * screen is never told when that happens, and the reason is structural rather
+ * than an omission: there is no artifact addressed to a non-member, and the
+ * journal is unauthenticated — the DS pseudonym IS the `group_id` and there is
+ * no auth on it — so any "your request was not carried" envelope would be a
+ * forgeable denial primitive. Inference does not work either: an epoch advancing
+ * with no rendezvous for us is byte-for-byte what *no admin has approved yet*
+ * looks like, which is the ordinary state.
+ *
+ * So the wait copy states the truth about the wait, and the screen offers the
+ * one repair this side has: `Request again`, user-driven, which mints a fresh
+ * KeyPackage. It never claims that is why.
  */
 public class JoinGroupLandingViewModel(
     private val repository: ChatRepository,
@@ -59,11 +76,37 @@ public class JoinGroupLandingViewModel(
     public val state: StateFlow<State> = mutableState.asStateFlow()
     private var started = false
 
+    private val mutableRequesting: MutableStateFlow<Boolean> = MutableStateFlow(false)
+
+    /** In flight, so `Request again` cannot be double-tapped into two journal
+     *  rows. Separate from [state], which STAYS `Waiting` across a re-request:
+     *  going back through `Requesting` would hide the wait copy and read as a
+     *  restart of something that never stopped. */
+    public val requesting: StateFlow<Boolean> = mutableRequesting.asStateFlow()
+
+    private var pollJob: kotlinx.coroutines.Job? = null
+
     /** Drive the request + poll loop exactly once. */
     public fun start() {
         if (started) return
         started = true
-        viewModelScope.launch {
+        request()
+    }
+
+    /**
+     * ADR-0045 S7 residual 1 — send the request. Reached once from [start] and
+     * again from the `Request again` control, which is the joiner's only
+     * repair: a fresh request mints a fresh KeyPackage. Deliberately
+     * user-driven and never automatic — each press is a journal row held to the
+     * DS's 30-day TTL, and a timer would spin against a group that is merely
+     * quiet.
+     */
+    public fun request() {
+        if (mutableRequesting.value) return
+        mutableRequesting.value = true
+        // A re-request replaces the poll rather than adding a second one.
+        pollJob?.cancel()
+        pollJob = viewModelScope.launch {
             val nowMs = System.currentTimeMillis().toULong()
             val groupId: ByteArray
             val joinerKey: ByteArray
@@ -82,9 +125,14 @@ public class JoinGroupLandingViewModel(
                 joinerKey = result.second
             } catch (e: Throwable) {
                 mutableState.value = State.Failed(e.message ?: e.toString())
+                mutableRequesting.value = false
                 return@launch
             }
             mutableState.value = State.Waiting
+            // Cleared as soon as the request itself is on the wire: the poll
+            // below runs for the rest of the wait, and holding the flag across
+            // it would disable `Request again` forever.
+            mutableRequesting.value = false
             while (isActive) {
                 try {
                     val hex = repository.pollForJoinWelcome(groupId, joinerKey)
@@ -109,6 +157,7 @@ public fun JoinGroupLandingScreen(
     onDone: () -> Unit,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val requesting by viewModel.requesting.collectAsStateWithLifecycle()
     LaunchedEffect(Unit) { viewModel.start() }
     Column(
         modifier = Modifier
@@ -128,7 +177,18 @@ public fun JoinGroupLandingScreen(
             is JoinGroupLandingViewModel.State.Waiting -> {
                 CircularProgressIndicator()
                 Spacer(Modifier.height(8.dp))
-                Text("Waiting for an admin to approve, then for the change to be applied…")
+                Text(me.lakko.app.chat.JOIN_WAIT_PRIMARY)
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = me.lakko.app.chat.JOIN_WAIT_SECONDARY,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(12.dp))
+                Button(
+                    onClick = { viewModel.request() },
+                    enabled = !requesting,
+                ) { Text(me.lakko.app.chat.JOIN_REQUEST_AGAIN) }
             }
             is JoinGroupLandingViewModel.State.Joined -> {
                 Text("Joined! You can find the group in your chats.")

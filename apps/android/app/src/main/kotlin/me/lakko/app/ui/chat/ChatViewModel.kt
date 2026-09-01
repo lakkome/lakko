@@ -490,6 +490,17 @@ public class ChatViewModel(
     public val pendingRequests: StateFlow<List<me.lakko.app.chat.PendingRequest>> =
         mutablePendingRequests.asStateFlow()
 
+    private val mutableUnappliedAdds:
+        MutableStateFlow<List<me.lakko.app.chat.UnappliedAdd>> = MutableStateFlow(emptyList())
+
+    /**
+     * ADR-0045 S7 residual 1 — own `add` requests that left the pending set
+     * without reaching the roster, and were therefore never carried. Emptied
+     * with the rest of the pending surface once the membership has ended.
+     */
+    public val unappliedAdds: StateFlow<List<me.lakko.app.chat.UnappliedAdd>> =
+        mutableUnappliedAdds.asStateFlow()
+
     private val mutablePendingNotice:
         MutableStateFlow<me.lakko.app.chat.PendingNotice?> = MutableStateFlow(null)
 
@@ -611,6 +622,10 @@ public class ChatViewModel(
         }
         mutablePendingRequests.value = visible
         mutablePendingNotice.value = me.lakko.app.chat.pendingNotice(visible)
+        // ADR-0045 S7 residual 1 — read AFTER `pendingMembershipRequests` above,
+        // which is what detects and records them: a row is created at the exact
+        // moment its observation is pruned.
+        mutableUnappliedAdds.value = if (ended) emptyList() else repo.unappliedAdds(groupIdHex)
         refreshJoinAttributions()
         // ADR-0045 UX §6.1.9 — decided from the roster + role table just read,
         // so a torn read says nothing rather than claiming a promotion.
@@ -1112,7 +1127,17 @@ public class ChatViewModel(
                 mutableMembershipNotice.value = if (swept is me.lakko.app.chat.SweepOutcome.Committed) {
                     "Join approved. They have been added to the group."
                 } else {
-                    "Join approved. They join when an owner or an admin applies the change."
+                    // ADR-0045 S7 residual 2 — an approve that did not apply has
+                    // grown a queue only a sweep drains, and the core's own
+                    // feedback (its cap refusal) lands on whoever proposes NEXT.
+                    // Naming the depth here puts it in front of the person who
+                    // caused it. Read from the core, not from `pendingRequests`,
+                    // which has not been refreshed yet.
+                    val queue = me.lakko.app.chat.waitingQueueLine(
+                        repo.pendingProposalCount(groupIdHex),
+                    )
+                    "Join approved. They join when an owner or an admin applies the change." +
+                        (queue?.let { " $it" } ?: "")
                 }
                 refreshMembers()
             } catch (e: Throwable) {
@@ -1129,6 +1154,16 @@ public class ChatViewModel(
      * Local-only drop of the retained proposal; no commit / journal post.
      * Fail-closed on error.
      */
+    /**
+     * ADR-0045 S7 residual 1 — dismiss one `Not applied` row. It stays
+     * dismissed: the detection re-runs on every fold, so without the tombstone
+     * the notice could not be dismissed at all.
+     */
+    public fun onDismissUnapplied(addSignatureKeyB64: String) {
+        repo.dismissUnappliedAdd(groupIdHex, addSignatureKeyB64)
+        mutableUnappliedAdds.value = repo.unappliedAdds(groupIdHex)
+    }
+
     public fun onRejectJoin(proposalRef: ByteArray) {
         if (mutableMembershipBusy.value) return
         mutableMembershipBusy.value = true

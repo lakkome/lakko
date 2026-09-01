@@ -632,12 +632,17 @@ final class OwnershipTransferTests: XCTestCase {
         let accountIdB64: String
         let snapshotStore: IdentitySnapshotStore
         let outboxDir: URL
+        /// This fixture's private journal on the scripted DS — see the scoping
+        /// note on `ScriptedDsURLProtocol`. `settledRowCount()` below still
+        /// exists and is still needed: scoping keeps ANOTHER fixture's straggler
+        /// out, but the mint this fixture starts itself is its own.
+        let dsScope: String
     }
 
     /// Owner A + plain member B + plain member C, with A (or B, per `asOwner`)
     /// rehydrated into a real repository over the scripted DS.
     private func makeRepo(asOwner: Bool) async throws -> Fixture {
-        ScriptedDsURLProtocol.reset()
+        let dsScope = ScriptedDsURLProtocol.freshScope()
 
         let ownerSeed = Data(repeating: 0x11, count: 32)
         let aliceSeed = Data(repeating: 0x55, count: 32)
@@ -688,7 +693,8 @@ final class OwnershipTransferTests: XCTestCase {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [ScriptedDsURLProtocol.self]
         let ds = DsClient(
-            baseURL: "http://127.0.0.1:9", session: URLSession(configuration: config))
+            baseURL: ScriptedDsURLProtocol.baseURL(dsScope),
+            session: URLSession(configuration: config))
         let repo = ChatRepository(
             chatClient: ChatClient(ds: ds),
             dsClient: ds,
@@ -728,7 +734,8 @@ final class OwnershipTransferTests: XCTestCase {
             bobKey: try bob.signaturePublicKey(),
             accountIdB64: accountIdB64,
             snapshotStore: snapshotStore,
-            outboxDir: outboxDir)
+            outboxDir: outboxDir,
+            dsScope: dsScope)
     }
 
     private func tearDown(_ fx: Fixture) {
@@ -752,14 +759,14 @@ final class OwnershipTransferTests: XCTestCase {
     ///
     /// `LeaveGroupTests` does not hit it because its device under test is a
     /// plain member, which defers instead of minting.
-    private func settledRowCount() async -> Int {
-        var last = ScriptedDsURLProtocol.rowCount
+    private func settledRowCount(_ fx: Fixture) async -> Int {
+        var last = ScriptedDsURLProtocol.rowCount(scope: fx.dsScope)
         var quiet = 0
         // Bounded: ~1.5 s worst case, and a still-noisy fixture returns the last
         // reading rather than hanging the suite.
         for _ in 0..<30 {
             try? await Task.sleep(nanoseconds: 50_000_000)
-            let now = ScriptedDsURLProtocol.rowCount
+            let now = ScriptedDsURLProtocol.rowCount(scope: fx.dsScope)
             if now == last {
                 quiet += 1
                 if quiet == 2 { return now }
@@ -780,7 +787,7 @@ final class OwnershipTransferTests: XCTestCase {
         defer { tearDown(fx) }
 
         let epochBefore = try XCTUnwrap(fx.repo.epoch(groupIdHex: fx.groupIdHex))
-        let rowsBefore = await settledRowCount()
+        let rowsBefore = await settledRowCount(fx)
 
         let outcome = try await fx.repo.transferGroupOwnership(
             groupIdHex: fx.groupIdHex, newOwnerSignaturePubkey: fx.aliceKey, outgoing: .admin)
@@ -793,7 +800,7 @@ final class OwnershipTransferTests: XCTestCase {
             return
         }
         XCTAssertEqual(
-            ScriptedDsURLProtocol.rowCount, rowsBefore + 1,
+            ScriptedDsURLProtocol.rowCount(scope: fx.dsScope), rowsBefore + 1,
             "the proposal must reach the journal, or no committer can ever sweep it")
         XCTAssertEqual(
             try fx.repo.epoch(groupIdHex: fx.groupIdHex), epochBefore,
@@ -820,7 +827,7 @@ final class OwnershipTransferTests: XCTestCase {
         _ = try await fx.repo.setMemberAdmin(
             groupIdHex: fx.groupIdHex, memberSignaturePubkey: fx.bobKey, makeAdmin: true)
 
-        let rowsBefore = await settledRowCount()
+        let rowsBefore = await settledRowCount(fx)
         do {
             _ = try await fx.repo.transferGroupOwnership(
                 groupIdHex: fx.groupIdHex, newOwnerSignaturePubkey: fx.aliceKey, outgoing: .admin)
@@ -834,7 +841,7 @@ final class OwnershipTransferTests: XCTestCase {
                 "the refusal must be §6's seventh string, not a hand-written near-variant")
         }
         XCTAssertEqual(
-            ScriptedDsURLProtocol.rowCount, rowsBefore,
+            ScriptedDsURLProtocol.rowCount(scope: fx.dsScope), rowsBefore,
             "nothing may reach the wire — a pending set holding two role changes cannot be "
                 + "swept at all, which wedges the whole group's membership")
     }
@@ -870,7 +877,7 @@ final class OwnershipTransferTests: XCTestCase {
         let fx = try await makeRepo(asOwner: false)
         defer { tearDown(fx) }
 
-        let rowsBefore = await settledRowCount()
+        let rowsBefore = await settledRowCount(fx)
         do {
             _ = try await fx.repo.transferGroupOwnership(
                 groupIdHex: fx.groupIdHex, newOwnerSignaturePubkey: fx.bobKey, outgoing: .admin)
@@ -881,9 +888,9 @@ final class OwnershipTransferTests: XCTestCase {
             // UX §12.6 flags, which is why the UI never offers the control.
         }
         XCTAssertEqual(
-            ScriptedDsURLProtocol.rowCount, rowsBefore,
+            ScriptedDsURLProtocol.rowCount(scope: fx.dsScope), rowsBefore,
             "the member's transfer must never reach the DS, but the journal grew from "
-                + "\(rowsBefore) to \(ScriptedDsURLProtocol.rowCount) rows")
+                + "\(rowsBefore) to \(ScriptedDsURLProtocol.rowCount(scope: fx.dsScope)) rows")
     }
 
     /// `ChatError.argument` renders its payload through `localizedDescription`;

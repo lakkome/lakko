@@ -95,6 +95,12 @@ public final class ChatRepository: ObservableObject {
     /// ADR-0045 S4a — when each pending membership request was first observed,
     /// so the UX quiet window can mean the same thing on every device.
     private let pendingRequestStore: PendingRequestStore
+    /// ADR-0045 S7 residual 1 — the `Not applied` rows. Deliberately NOT part of
+    /// ``pendingRequestStore``: that store is pruned against the core's live
+    /// pending set on every fold, and these rows must OUTLIVE the sweep that
+    /// empties it — a row is created at the exact moment its observation is
+    /// pruned.
+    private let unappliedRequestStore: UnappliedRequestStore
 
     /// ADR-0045 UX §6.1.9 — the owner this device last observed, per group, so
     /// an ownership CHANGE can be told apart from a FIRST observation. Nothing
@@ -181,6 +187,7 @@ public final class ChatRepository: ObservableObject {
         pushRouting: PushGroupRouting = PushGroupRouting(),
         beaconStore: BeaconObservationStore = BeaconObservationStore(),
         pendingRequestStore: PendingRequestStore = PendingRequestStore(),
+        unappliedRequestStore: UnappliedRequestStore = UnappliedRequestStore(),
         lastObservedOwnerStore: LastObservedOwnerStore = LastObservedOwnerStore(),
         leaveRequestStore: LeaveRequestStore = LeaveRequestStore()
     ) {
@@ -194,6 +201,7 @@ public final class ChatRepository: ObservableObject {
         self.pushRouting = pushRouting
         self.beaconStore = beaconStore
         self.pendingRequestStore = pendingRequestStore
+        self.unappliedRequestStore = unappliedRequestStore
         self.lastObservedOwnerStore = lastObservedOwnerStore
         self.leaveRequestStore = leaveRequestStore
         // SECURITY (nonce-reuse-on-crash) — wire the fail-closed MLS
@@ -343,6 +351,7 @@ public final class ChatRepository: ObservableObject {
             // timings behind for a later session to fold.
             beaconStore.clearForAccount(accountIdB64: accountIdB64)
             pendingRequestStore.clearForAccount(accountIdB64: accountIdB64)
+            unappliedRequestStore.clearForAccount(accountIdB64: accountIdB64)
             // ADR-0045 UX §6.1.9 — and no memory of who owned which group. It
             // is a public role-table key rather than a secret, but a forgotten
             // device that kept it would greet the next session with a
@@ -791,6 +800,8 @@ public final class ChatRepository: ObservableObject {
         // are best-effort by construction and none can fail the delete.
         pendingRequestStore.prune(
             accountIdB64: accountIdB64, groupIdB64: groupIdB64, liveKeys: [])
+        unappliedRequestStore.clearForGroup(
+            accountIdB64: accountIdB64, groupIdB64: groupIdB64)
         leaveRequestStore.clear(accountIdB64: accountIdB64, groupIdB64: groupIdB64)
         // LAST, and in this order: the registry is what a relaunch rehydrates
         // from, so dropping it after the live handle means a crash between the
@@ -1519,6 +1530,24 @@ public final class ChatRepository: ObservableObject {
             throw ChatError.wrapped("DS publishGroup (approve proposal) failed", underlying: error)
         }
         chatClient.markOwnPublishedCommit(messageId: publish.id)
+        // ADR-0045 S7 residual 1 — record the approval as OUR OWN request, and
+        // flag where it came from. Only this device can know that: on the wire
+        // an approved add is indistinguishable from an admin adding a contact.
+        // If the sweep never carries it, that flag is what makes the notice say
+        // `Ask them to request to join again` rather than offering a retry this
+        // side cannot perform — a successful approve CONSUMED the retained
+        // request, so the admin cannot even re-approve.
+        if let accountIdB64 = currentAccountIdB64,
+           let atMs = Self.parseDsTimestampMs(publish.createdAt) {
+            pendingRequestStore.record(
+                accountIdB64: accountIdB64,
+                groupIdB64: base64Encode(record.groupId),
+                key: "add:\(base64Encode(proposalRef))",
+                atMs: atMs,
+                own: true,
+                joinRequest: true
+            )
+        }
         state = state.with(threads: buildThreadList())
         return publish.id
     }
@@ -3316,15 +3345,55 @@ public final class ChatRepository: ObservableObject {
         guard let accountIdB64 = currentAccountIdB64,
               let record = groups[groupIdHex] else { return [] }
         let groupIdB64 = base64Encode(record.groupId)
+        let observations = pendingRequestStore.load(
+            accountIdB64: accountIdB64, groupIdB64: groupIdB64)
         let (requests, liveKeys) = foldPendingRequests(
             records: (try? record.group.pendingProposals()) ?? [],
-            observations: pendingRequestStore.load(
-                accountIdB64: accountIdB64, groupIdB64: groupIdB64),
+            observations: observations,
             nowMs: Self.nowMs()
         )
+        // ADR-0045 S7 residual 1 — an own `add` that has left the pending set
+        // without reaching the roster was not carried by whatever commit
+        // emptied the set, and nothing will ever carry it. Detected HERE, in
+        // the same pass that prunes, because the observation about to be
+        // dropped is the only record that the request existed at all. The
+        // roster is read in this same pass for the same reason: the merge that
+        // empties the pending set is the merge that moves the roster.
+        var rosterKeysB64: [String]?
+        if let members = try? record.group.members() {
+            rosterKeysB64 = members.map { base64Encode($0.signaturePublicKey) }
+        } else {
+            rosterKeysB64 = nil
+        }
+        unappliedRequestStore.record(
+            accountIdB64: accountIdB64,
+            groupIdB64: groupIdB64,
+            items: unappliedAddRequests(
+                observations: observations, liveKeys: liveKeys,
+                rosterKeysB64: rosterKeysB64))
         pendingRequestStore.prune(
             accountIdB64: accountIdB64, groupIdB64: groupIdB64, liveKeys: liveKeys)
         return requests
+    }
+
+    /// ADR-0045 S7 residual 1 — the `Not applied` rows the user has not
+    /// dismissed. Read after ``pendingRequests(groupIdHex:)``, which is what
+    /// detects and records them.
+    public func unappliedAdds(groupIdHex: String) -> [UnappliedAdd] {
+        guard let accountIdB64 = currentAccountIdB64,
+              let record = groups[groupIdHex] else { return [] }
+        return unappliedRequestStore.load(
+            accountIdB64: accountIdB64, groupIdB64: base64Encode(record.groupId))
+    }
+
+    /// Dismiss one `Not applied` row. It stays dismissed.
+    public func dismissUnapplied(groupIdHex: String, addSignatureKeyB64: String) {
+        guard let accountIdB64 = currentAccountIdB64,
+              let record = groups[groupIdHex] else { return }
+        unappliedRequestStore.dismiss(
+            accountIdB64: accountIdB64,
+            groupIdB64: base64Encode(record.groupId),
+            addSignatureKeyB64: addSignatureKeyB64)
     }
 
     /// ADR-0045 S4a — record that a peer's membership proposal landed, stamped

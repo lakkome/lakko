@@ -202,6 +202,18 @@ export interface RequestObservation {
    * render `Waiting to make {name} the owner.` about somebody nobody proposed.
    */
   readonly transferToB64?: string;
+  /**
+   * ADR-0045 S7 residual 1 — `true` when OUR OWN `add` request was published by
+   * approving an external **join** rather than by adding a contact.
+   *
+   * It lives here for the same reason `transferToB64` does: this store is
+   * pruned against the core's live pending set, so the flag dies with the
+   * request it describes. It is knowable only on the device that made the
+   * request, because on the wire an approved add is indistinguishable from an
+   * admin adding a contact (ADR-0045 S7) — and that device is the one
+   * `chat/unapplied-requests.ts` shows the notice on.
+   */
+  readonly joinRequest?: boolean;
 }
 
 /**
@@ -317,6 +329,53 @@ export function pendingNotice(
 }
 
 /**
+ * ADR-0045 S7 residual 2 — the queue an approve just grew, named to the person
+ * who grew it.
+ *
+ * ## Why this line, and why only this line
+ *
+ * Approving a join no longer admits anyone: it publishes an `Add` proposal into
+ * the member pending set, and that set is drained only by a sweep, which
+ * ADR-0045 decision 2 gives no deadline. So an admin can approve into a queue
+ * indefinitely, and before this the only feedback in the whole system was the
+ * core's cap refusal — which lands on **whoever proposes next**, who is very
+ * often somebody else entirely.
+ *
+ * This does not bound anything and does not pretend to. Bounding needs a number
+ * this layer does not have: `MAX_PENDING_PROPOSALS` is `pub(crate)` in
+ * `lakko-mls` and is on neither FFI surface, and a client-side literal `64`
+ * would be exactly the stale-literal drift class this repo already names as
+ * failing in the dangerous direction. What it does is make the accumulation
+ * *visible at the moment it is caused*, which is the part a client can do
+ * honestly.
+ *
+ * `null` below two, because "1 change is now waiting" after making one change
+ * is noise rather than information.
+ */
+export function waitingQueueLine(pendingCount: number): string | null {
+  if (pendingCount < 2) return null;
+  return `${pendingCount} changes are now waiting to apply.`;
+}
+
+/**
+ * ADR-0045 S7 residual 2 — the one property of the external-join quarantine a
+ * client can state, and it changes what an admin does.
+ *
+ * `Group::pending_external_joins` is **in-memory**: it is not in the provider
+ * snapshot and the poll cursor has already advanced past the proposals that
+ * populated it, so a restart loses the list and no re-fetch brings it back.
+ * ADR-0027 records this as v1 behaviour with persistence as a follow-up.
+ *
+ * Stating it is the honest option. The alternative a client could reach for —
+ * ageing rows out of the panel — would be strictly worse: the request stays
+ * live for the joiner, who goes on polling, so hiding it would make the admin
+ * stop seeing something that is still happening.
+ */
+export const JOIN_REQUESTS_NOT_SAVED =
+  "Join requests are not saved. If this page is reloaded or closed before you decide, " +
+  "they have to be sent again.";
+
+/**
  * The row annotation for a member, or `null` when that member has no pending
  * request against them.
  *
@@ -384,6 +443,10 @@ export function loadObservations(
           ...(typeof v.transferToB64 === "string"
             ? { transferToB64: v.transferToB64 }
             : {}),
+          // Same validation shape, same degrade-rather-than-lose direction: an
+          // absent flag reads as an ordinary add, which is the copy that offers
+          // the weaker action rather than the stronger claim.
+          ...(v.joinRequest === true ? { joinRequest: true } : {}),
         });
       }
     }
@@ -436,14 +499,21 @@ export function recordObservation(
   atMs: number,
   own: boolean,
   transferToB64?: string,
+  joinRequest?: boolean,
 ): void {
   const observations = loadObservations(accountIdB64, groupIdB64);
   const existing = observations.get(key);
   const transferTo = existing?.transferToB64 ?? transferToB64;
+  // Sticky-true, for the same reason `own` is: the receive loop observes our
+  // own approval landing back off the journal and that observation knows
+  // nothing about where the request came from. Losing the flag to arrival order
+  // would silently downgrade the copy to the wrong action.
+  const fromJoin = (existing?.joinRequest ?? false) || joinRequest === true;
   observations.set(key, {
     atMs: existing?.atMs ?? atMs,
     own: (existing?.own ?? false) || own,
     ...(transferTo === undefined ? {} : { transferToB64: transferTo }),
+    ...(fromJoin ? { joinRequest: true } : {}),
   });
   saveObservations(accountIdB64, groupIdB64, observations);
 }

@@ -22,6 +22,23 @@
  * The link conveys only the `group_id` — it authorizes nobody; the admin
  * approval gate is the security boundary. Public route (anonymous visitors land
  * here and are prompted to log in), mirroring the `/i/` contact-invite route.
+ *
+ * ## What this side is NOT told (ADR-0045 S7 residual 1)
+ *
+ * A sweep can exclude the approval-derived `Add` — `narrow_sweep_by_exclusion`
+ * drops whatever refuses to build, and the commonest cause needs no adversary
+ * at all (an expired KeyPackage, reachable because a request has no deadline).
+ * This page is never told when that happens, and the reason is structural
+ * rather than an omission: there is no artifact addressed to a non-member, and
+ * the journal is unauthenticated — the DS pseudonym IS the `group_id` and there
+ * is no auth on it — so any "your request was not carried" envelope would be a
+ * forgeable denial primitive. Inference does not work either: an epoch
+ * advancing with no rendezvous for us is byte-for-byte what *no admin has
+ * approved yet* looks like, which is the ordinary state.
+ *
+ * So the wait copy states the truth about the wait, and the page offers the one
+ * repair this side has: `Request again`, user-driven, which mints a fresh
+ * KeyPackage. It never claims that is why.
  */
 import { Show, createMemo, createResource, createSignal, onCleanup } from "solid-js";
 import { A, useNavigate, useParams } from "@solidjs/router";
@@ -30,6 +47,13 @@ import { useChats } from "../chat/ChatContext";
 import { ContactsClient } from "../contacts/client";
 import { loadWasm } from "../wasm";
 import { base64UrlEncodeNoPad } from "../auth/account-id";
+// ADR-0045 S7 residual 1, the joiner's half. The copy and the one repair live
+// in a plain module because `vitest.config.ts` cannot test a `.tsx` file.
+import {
+  JOIN_REQUEST_AGAIN,
+  JOIN_WAIT_PRIMARY,
+  JOIN_WAIT_SECONDARY,
+} from "../chat/unapplied-requests";
 import { paths } from "./paths";
 
 type JoinPhase = "idle" | "requesting" | "waiting" | "joined" | "error";
@@ -81,14 +105,25 @@ export default function JoinGroup() {
 
   const [phase, setPhase] = createSignal<JoinPhase>("idle");
   const [error, setError] = createSignal<string | null>(null);
+  /** In flight, so `Request again` cannot be double-tapped into two journal
+   *  rows. Separate from `phase`, which stays `waiting` across a re-request —
+   *  going back through `requesting` would hide the wait copy and read as a
+   *  restart of something that never stopped. */
+  const [requesting, setRequesting] = createSignal(false);
   let pollTimer: number | undefined;
   onCleanup(() => {
     if (pollTimer !== undefined) clearInterval(pollTimer);
   });
 
   async function onRequest(ticket: DecodedTicket): Promise<void> {
+    if (requesting()) return;
     setError(null);
-    setPhase("requesting");
+    setRequesting(true);
+    // A re-request keeps the `waiting` copy on screen; only the first one
+    // passes through `requesting`.
+    if (phase() === "idle") setPhase("requesting");
+    // A re-request replaces the poll rather than adding a second one.
+    if (pollTimer !== undefined) clearInterval(pollTimer);
     try {
       const { groupId, joinerSignatureKey } = await client.requestToJoinFromLink(
         auth.identitySecrets(),
@@ -127,6 +162,8 @@ export default function JoinGroup() {
     } catch (err) {
       setError(String(err));
       setPhase("error");
+    } finally {
+      setRequesting(false);
     }
   }
 
@@ -162,10 +199,17 @@ export default function JoinGroup() {
             <p>Sending request…</p>
           </Show>
           <Show when={phase() === "waiting"}>
-            <p>
-              Request sent. Waiting for an admin to approve, then for the
-              change to be applied to the group.
+            <p>{JOIN_WAIT_PRIMARY}</p>
+            <p style={{ color: "var(--surface-muted)", "font-size": "0.85rem" }}>
+              {JOIN_WAIT_SECONDARY}
             </p>
+            <button
+              type="button"
+              disabled={requesting()}
+              onClick={() => void onRequest(decoded()!)}
+            >
+              {JOIN_REQUEST_AGAIN}
+            </button>
           </Show>
           <Show when={phase() === "joined"}>
             <p>Joined! Opening chat…</p>

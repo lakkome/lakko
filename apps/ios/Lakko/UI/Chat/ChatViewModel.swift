@@ -181,6 +181,10 @@ public final class ChatViewModel: ObservableObject {
     /// NOT in ``members`` and gets its own section — neither is an optimistic
     /// update, because neither has taken effect yet.
     @Published public private(set) var pendingRequests: [PendingRequest] = []
+    /// ADR-0045 S7 residual 1 — own `add` requests that left the pending set
+    /// without reaching the roster, and were therefore never carried. Emptied
+    /// with the rest of the pending surface once the membership has ended.
+    @Published public private(set) var unappliedAddRows: [UnappliedAdd] = []
 
     /// ADR-0045 S4a — the §5.1 notice, or `nil` when nothing is past the quiet
     /// window.
@@ -816,12 +820,26 @@ public final class ChatViewModel: ObservableObject {
         // one render site at a time.
         if membershipHasEnded {
             pendingRequests = []
+            unappliedAddRows = []
             return
         }
         pendingRequests = visibleRequests(
             repository.pendingRequests(groupIdHex: groupIdHex),
             canManageMembers: canManageMembers
         )
+        // ADR-0045 S7 residual 1 — read AFTER the fold above, which is what
+        // detects and records them: a row is created at the exact moment its
+        // observation is pruned.
+        unappliedAddRows = repository.unappliedAdds(groupIdHex: groupIdHex)
+    }
+
+    /// ADR-0045 S7 residual 1 — dismiss one `Not applied` row. It stays
+    /// dismissed: the detection re-runs on every fold, so without the tombstone
+    /// the notice could not be dismissed at all.
+    func onDismissUnapplied(addSignatureKeyB64: String) {
+        repository.dismissUnapplied(
+            groupIdHex: groupIdHex, addSignatureKeyB64: addSignatureKeyB64)
+        unappliedAddRows = repository.unappliedAdds(groupIdHex: groupIdHex)
     }
 
     /// ADR-0027 (G-3) — the core's retained external-join set, or empty once
@@ -1307,8 +1325,17 @@ public final class ChatViewModel: ObservableObject {
                 if case .committed = swept {
                     membershipNotice = "Join approved. They have been added to the group."
                 } else {
+                    // ADR-0045 S7 residual 2 — an approve that did not apply has
+                    // grown a queue only a sweep drains, and the core's own
+                    // feedback (its cap refusal) lands on whoever proposes NEXT.
+                    // Naming the depth here puts it in front of the person who
+                    // caused it. Read from the core, not from `pendingRequests`,
+                    // which has not been refreshed yet.
+                    let depth = repository.pendingProposals(groupIdHex: groupIdHex).count
+                    let queue = waitingQueueLine(depth)
                     membershipNotice =
                         "Join approved. They join when an owner or an admin applies the change."
+                        + (queue.map { " \($0)" } ?? "")
                 }
                 refreshMembers()
             } catch {

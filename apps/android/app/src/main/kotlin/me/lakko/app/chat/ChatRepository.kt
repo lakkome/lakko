@@ -1465,6 +1465,19 @@ public class ChatRepository(
                 throw ChatError("DS publishGroup (approve proposal) failed", e)
             }
             chatClient.markOwnPublishedCommit(publish.id)
+            // ADR-0045 S7 residual 1 — record the approval as OUR OWN request,
+            // and flag where it came from. Only this device can know that: on
+            // the wire an approved add is indistinguishable from an admin adding
+            // a contact. If the sweep never carries it, that flag is what makes
+            // the notice say `Ask them to request to join again` rather than
+            // offering a retry this side cannot perform — a successful approve
+            // CONSUMED the retained request, so the admin cannot even
+            // re-approve.
+            noteOwnRequestBestEffort(
+                groupIdHex = groupIdHex,
+                key = "add:" + outboxB64(proposalRef),
+                joinRequest = true,
+            )
             publishThreadList()
             publish.id
         }
@@ -2970,6 +2983,14 @@ public class ChatRepository(
             } catch (_: Throwable) {
                 // best-effort
             }
+            // ADR-0045 S7 residual 1 — the `Not applied` rows follow the same
+            // hygiene: they name a signature key from a session being discarded.
+            try {
+                SharedPrefsUnappliedRequestStore(applicationContext)
+                    .clearForAccount(accountIdB64)
+            } catch (_: Throwable) {
+                // best-effort
+            }
             // ADR-0045 §6.1.10 — and the last-observed-owner memory. A stale
             // entry would make the NEXT account on this device read a role-table
             // reading it never took as a change, and announce a promotion it did
@@ -3345,6 +3366,59 @@ public class ChatRepository(
     }
 
     /**
+     * ADR-0045 S7 residual 1 — the `Not applied` rows. Deliberately NOT part of
+     * [pendingRequestObservations]: that store is pruned against the core's live
+     * pending set on every fold, and these rows must OUTLIVE the sweep that
+     * empties it — a row is created at the exact moment its observation is
+     * pruned.
+     */
+    private val unappliedRequests: UnappliedRequestStore by lazy {
+        SharedPrefsUnappliedRequestStore(applicationContext)
+    }
+
+    /**
+     * ADR-0045 — how many authorised proposals are waiting for a sweep in
+     * [groupIdHex]. `0` on any failure, which is the direction that says
+     * nothing rather than the direction that invents a queue.
+     */
+    public fun pendingProposalCount(groupIdHex: String): Int {
+        val record = groups[groupIdHex] ?: return 0
+        return try {
+            record.group.pendingProposals().size
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "pendingProposalCount failed", cause)
+            0
+        }
+    }
+
+    /**
+     * ADR-0045 S7 residual 1 — the `Not applied` rows the user has not
+     * dismissed. Read after [pendingMembershipRequests], which is what detects
+     * and records them.
+     */
+    public fun unappliedAdds(groupIdHex: String): List<UnappliedAdd> {
+        val accountIdB64 = currentAccountIdB64.get() ?: return emptyList()
+        return try {
+            loadUnapplied(unappliedRequests, accountIdB64, groupIdHex)
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "unappliedAdds failed", cause)
+            emptyList()
+        }
+    }
+
+    /** ADR-0045 S7 residual 1 — dismiss one `Not applied` row. It stays
+     *  dismissed: the detection re-runs on every fold, so without the tombstone
+     *  the notice could not be dismissed at all. */
+    public fun dismissUnappliedAdd(groupIdHex: String, addSignatureKeyB64: String) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        try {
+            dismissUnapplied(unappliedRequests, accountIdB64, groupIdHex, addSignatureKeyB64)
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "dismissUnappliedAdd failed", cause)
+        }
+    }
+
+    /**
      * ADR-0045 — record that a request THIS device just published landed, so the
      * quiet window can be measured from now and so the panel knows it is ours
      * (the UX §10 own-request visibility exception, without which a self-remove
@@ -3368,6 +3442,7 @@ public class ChatRepository(
         groupIdHex: String,
         key: String,
         transferToB64: String? = null,
+        joinRequest: Boolean = false,
     ) {
         val accountIdB64 = currentAccountIdB64.get() ?: return
         try {
@@ -3379,6 +3454,7 @@ public class ChatRepository(
                 atMs = System.currentTimeMillis(),
                 own = true,
                 transferToB64 = transferToB64,
+                joinRequest = joinRequest,
             )
         } catch (cause: Throwable) {
             android.util.Log.w("ChatRepository", "pending request: note own failed", cause)
@@ -3589,6 +3665,11 @@ public class ChatRepository(
             android.util.Log.w("ChatRepository", "ADR-0045 delete chat: observations", cause)
         }
         try {
+            unappliedRequests.clearForGroup(accountIdB64, groupIdHex)
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "ADR-0045 delete chat: unapplied rows", cause)
+        }
+        try {
             leaveRecords.clear(accountIdB64, groupIdHex)
         } catch (cause: Throwable) {
             android.util.Log.w("ChatRepository", "ADR-0045 delete chat: leave record", cause)
@@ -3647,10 +3728,31 @@ public class ChatRepository(
         val record = groups[groupIdHex] ?: return emptyList()
         return try {
             val records = record.group.pendingProposals()
+            val observations = pendingRequestObservations.load(accountIdB64, groupIdHex)
             val folded = foldPendingRequests(
                 records = records,
-                observations = pendingRequestObservations.load(accountIdB64, groupIdHex),
+                observations = observations,
                 nowMs = System.currentTimeMillis(),
+            )
+            // ADR-0045 S7 residual 1 — an own `add` that has left the pending
+            // set without reaching the roster was not carried by whatever commit
+            // emptied the set, and nothing will ever carry it. Detected HERE, in
+            // the same pass that prunes, because the observation about to be
+            // dropped is the only record that the request existed at all. The
+            // roster is read in this same pass for the same reason: the merge
+            // that empties the pending set is the merge that moves the roster.
+            // A torn read is `null` (UNKNOWN), never an empty group.
+            val rosterKeysB64 = try {
+                record.group.members().map { outboxB64(it.signaturePublicKey) }
+            } catch (cause: Throwable) {
+                android.util.Log.w("ChatRepository", "roster read for unapplied failed", cause)
+                null
+            }
+            recordUnapplied(
+                store = unappliedRequests,
+                accountIdB64 = accountIdB64,
+                groupIdHex = groupIdHex,
+                items = unappliedAddRequests(observations, folded.liveKeys, rosterKeysB64),
             )
             prunePendingRequestObservations(
                 store = pendingRequestObservations,

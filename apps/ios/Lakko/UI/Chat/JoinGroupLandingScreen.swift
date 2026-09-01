@@ -18,6 +18,23 @@ import SwiftUI
 /// proposal into a commit — a step ADR-0045 decision 2 gives no deadline. So
 /// this poll spans both stages, and promising immediacy here would be the
 /// optimistic-update lie the UX spec forbids.
+///
+/// ## What this side is NOT told (ADR-0045 S7 residual 1)
+///
+/// A sweep can exclude the approval-derived `Add` — `narrow_sweep_by_exclusion`
+/// drops whatever refuses to build, and the commonest cause needs no adversary
+/// at all (an expired KeyPackage, reachable because a request has no deadline).
+/// This screen is never told when that happens, and the reason is structural
+/// rather than an omission: there is no artifact addressed to a non-member, and
+/// the journal is unauthenticated — the DS pseudonym IS the `group_id` and there
+/// is no auth on it — so any "your request was not carried" envelope would be a
+/// forgeable denial primitive. Inference does not work either: an epoch
+/// advancing with no rendezvous for us is byte-for-byte what *no admin has
+/// approved yet* looks like, which is the ordinary state.
+///
+/// So the wait copy states the truth about the wait, and the screen offers the
+/// one repair this side has: `Request again`, user-driven, which mints a fresh
+/// KeyPackage. It never claims that is why.
 @MainActor
 public final class JoinGroupLandingViewModel: ObservableObject {
     /// Local FSM. `requesting` → `waiting` (poll loop) → `joined` / `failed`.
@@ -35,6 +52,11 @@ public final class JoinGroupLandingViewModel: ObservableObject {
     private let intake: InviteIntake
     private var didRun = false
     private var pollTask: Task<Void, Never>?
+    /// In flight, so `Request again` cannot be double-tapped into two journal
+    /// rows. Separate from `state`, which STAYS `.waiting` across a re-request:
+    /// going back through `.requesting` would hide the wait copy and read as a
+    /// restart of something that never stopped.
+    @Published public private(set) var requesting = false
 
     public init(slug: String, repository: ChatRepository, intake: InviteIntake) {
         self.slug = slug
@@ -47,6 +69,21 @@ public final class JoinGroupLandingViewModel: ObservableObject {
     public func run() async {
         guard !didRun else { return }
         didRun = true
+        await request()
+    }
+
+    /// ADR-0045 S7 residual 1 — send the request. Reached once from ``run()``
+    /// and again from the `Request again` control, which is the joiner's only
+    /// repair: a fresh request mints a fresh KeyPackage. Deliberately
+    /// user-driven and never automatic — each press is a journal row held to
+    /// the DS's 30-day TTL, and a timer would spin against a group that is
+    /// merely quiet.
+    public func request() async {
+        guard !requesting else { return }
+        requesting = true
+        defer { requesting = false }
+        // A re-request replaces the poll rather than adding a second one.
+        pollTask?.cancel()
         let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
         do {
             // Resolve the slug (a pointer fetches the capability from the
@@ -114,8 +151,15 @@ public struct JoinGroupLandingScreen: View {
             case .requesting:
                 ProgressView("Sending request…")
             case .waiting:
-                ProgressView(
-                    "Waiting for an admin to approve, then for the change to be applied…")
+                ProgressView(joinWaitPrimary)
+                Text(joinWaitSecondary)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                Button(joinRequestAgain) {
+                    Task { await viewModel.request() }
+                }
+                .disabled(viewModel.requesting)
             case .joined:
                 Text("Joined! You can find the group in your chats.")
                     .multilineTextAlignment(.center)

@@ -582,11 +582,16 @@ final class MembershipEndedTests: XCTestCase {
         let groupIdHex: String
         let accountIdB64: String
         let outboxDir: URL
+        /// This fixture's private journal on the scripted DS. Every row count in
+        /// this file is read through it, so a straggling publish from ANOTHER
+        /// fixture's fire-and-forget `Task` cannot be counted here — see the
+        /// scoping note on `ScriptedDsURLProtocol`.
+        let dsScope: String
     }
 
     /// Owner A + member B. A removes B; B applies the commit and is out.
     private func makeEvictedRepo() throws -> EvictedFixture {
-        ScriptedDsURLProtocol.reset()
+        let dsScope = ScriptedDsURLProtocol.freshScope()
 
         let ownerSeed = Data(repeating: 0x11, count: 32)
         let memberSeed = Data(repeating: 0x55, count: 32)
@@ -683,7 +688,8 @@ final class MembershipEndedTests: XCTestCase {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [ScriptedDsURLProtocol.self]
         let ds = DsClient(
-            baseURL: "http://127.0.0.1:9", session: URLSession(configuration: config))
+            baseURL: ScriptedDsURLProtocol.baseURL(dsScope),
+            session: URLSession(configuration: config))
         let repo = ChatRepository(
             chatClient: ChatClient(ds: ds),
             dsClient: ds,
@@ -711,7 +717,7 @@ final class MembershipEndedTests: XCTestCase {
 
         return EvictedFixture(
             repo: repo, groupIdHex: groupIdHex, accountIdB64: accountIdB64,
-            outboxDir: outboxDir)
+            outboxDir: outboxDir, dsScope: dsScope)
     }
 
     func testARealEvictionIsSeenByTheRepositoryAndNarrowsWithTheLeaveRecord() throws {
@@ -744,11 +750,13 @@ final class MembershipEndedTests: XCTestCase {
 
         let cursorBefore = f.repo.state.threads
             .first { $0.groupIdHex == f.groupIdHex }?.cursor
-        ScriptedDsURLProtocol.seed(Data([0xDE, 0xAD, 0xBE, 0xEF]))
+        ScriptedDsURLProtocol.seed(Data([0xDE, 0xAD, 0xBE, 0xEF]), scope: f.dsScope)
 
         try await f.repo.pollGroup(groupIdHex: f.groupIdHex)
 
-        XCTAssertEqual(ScriptedDsURLProtocol.rowCount, 1, "the row must still be on the DS")
+        XCTAssertEqual(
+            ScriptedDsURLProtocol.rowCount(scope: f.dsScope), 1,
+            "the row must still be on the DS")
         XCTAssertEqual(
             f.repo.state.threads.first { $0.groupIdHex == f.groupIdHex }?.cursor,
             cursorBefore,
@@ -770,7 +778,7 @@ final class MembershipEndedTests: XCTestCase {
             groupIdHex: f.groupIdHex, foreground: true)
         XCTAssertEqual(verdict, .notACandidate)
         XCTAssertEqual(
-            ScriptedDsURLProtocol.rowCount, 0,
+            ScriptedDsURLProtocol.rowCount(scope: f.dsScope), 0,
             "an emitted beacon would be a POST, and there must not be one")
     }
 
@@ -813,7 +821,7 @@ final class MembershipEndedTests: XCTestCase {
     /// rather than trusting the control it was drawn behind, so a stale gate
     /// can never delete a LIVE conversation.
     func testDeleteChatRefusesWhileTheMembershipHolds() throws {
-        ScriptedDsURLProtocol.reset()
+        let dsScope = ScriptedDsURLProtocol.freshScope()
         let ownerSeed = Data(repeating: 0x33, count: 32)
         let owner = try Identity.fromSeed(seed: ownerSeed)
         let group = try Group.create(identity: owner)
@@ -841,7 +849,8 @@ final class MembershipEndedTests: XCTestCase {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [ScriptedDsURLProtocol.self]
         let ds = DsClient(
-            baseURL: "http://127.0.0.1:9", session: URLSession(configuration: config))
+            baseURL: ScriptedDsURLProtocol.baseURL(dsScope),
+            session: URLSession(configuration: config))
         let repo = ChatRepository(
             chatClient: ChatClient(ds: ds),
             dsClient: ds,

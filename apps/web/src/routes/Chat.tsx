@@ -133,10 +133,25 @@ import {
   recordObservation,
   rowAnnotation,
   visibleRequests,
+  waitingQueueLine,
   waitingToBeAdded,
+  JOIN_REQUESTS_NOT_SAVED,
   type PendingRequest,
   type ProposalRecordView,
 } from "../chat/pending-requests";
+// ADR-0045 S7 residual 1 — the request that left the pending set without
+// landing. Same split, same reason as above.
+import {
+  clearUnappliedForGroup,
+  dismissUnapplied,
+  loadUnapplied,
+  recordUnapplied,
+  unappliedAddRequests,
+  unappliedHeading,
+  unappliedLine,
+  UNAPPLIED_EXPLANATION,
+  type UnappliedAdd,
+} from "../chat/unapplied-requests";
 // ADR-0045 UX §6.1 — ownership transfer, the owner's way out. Same split and
 // the same reason: every rule and every string lives in the plain module, this
 // file only renders what it decides.
@@ -1925,7 +1940,11 @@ function ChatView(props: {
    *  §6.1.10): a role change carries no payload, so the successor's key on our
    *  own record is the only thing that later tells a transfer from a promote,
    *  and it is what names the person in `Waiting to make {name} the owner.` */
-  function noteOwnRequest(key: string, transferToB64?: string): void {
+  function noteOwnRequest(
+    key: string,
+    transferToB64?: string,
+    joinRequest?: boolean,
+  ): void {
     const s = auth.state();
     if (s.kind !== "session") return;
     recordObservation(
@@ -1935,6 +1954,7 @@ function ChatView(props: {
       Date.now(),
       true,
       transferToB64,
+      joinRequest,
     );
     setPendingVersion(pendingVersion() + 1);
   }
@@ -1984,6 +2004,7 @@ function ChatView(props: {
       // Local bookkeeping for a group that no longer exists here. Both are
       // best-effort by construction and neither can fail the delete.
       pruneObservations(accountIdB64, groupIdB64, []);
+      clearUnappliedForGroup(accountIdB64, groupIdB64);
       clearLeaveRequested(accountIdB64, groupIdB64);
       // Drop the row from the registry LAST, so a failure above leaves the
       // chat reachable rather than orphaning a transcript behind a row the
@@ -2038,14 +2059,69 @@ function ChatView(props: {
     } catch {
       return [];
     }
-    const { requests, liveKeys } = foldPendingRequests(
-      records,
-      loadObservations(s.account.accountId, groupIdB64),
-      now,
+    const observations = loadObservations(s.account.accountId, groupIdB64);
+    const { requests, liveKeys } = foldPendingRequests(records, observations, now);
+    // ADR-0045 S7 residual 1 — an own `add` that has left the pending set
+    // without reaching the roster was not carried by whatever commit emptied
+    // the set, and nothing will ever carry it. Detected HERE, in the same pass
+    // that prunes, because the observation about to be dropped is the only
+    // record that the request existed at all. The roster is read in this same
+    // pass for the same reason: the merge that empties the pending set is the
+    // merge that moves the roster.
+    let rosterKeysB64: string[] | null;
+    try {
+      rosterKeysB64 = (
+        props.entry.group.members() as Array<{ signaturePublicKey: Uint8Array }>
+      ).map((m) => base64Encode(m.signaturePublicKey));
+    } catch {
+      rosterKeysB64 = null;
+    }
+    recordUnapplied(
+      s.account.accountId,
+      groupIdB64,
+      unappliedAddRequests(observations, liveKeys, rosterKeysB64),
     );
     pruneObservations(s.account.accountId, groupIdB64, liveKeys);
     return visibleRequests(requests, canManageMembers());
   });
+
+  /** ADR-0045 S7 residual 1 — the rows the user has not dismissed. Read through
+   *  the same `pendingVersion` the detection writes under, so a newly detected
+   *  row appears without a second trigger. */
+  const unappliedAdds = createMemo<UnappliedAdd[]>(() => {
+    // Reading `pendingRequests()` FIRST is the dependency that orders these two
+    // memos: that one is where the detection runs and the row is written, and a
+    // Solid memo has no guaranteed evaluation order relative to a sibling. Read
+    // the other way round, a freshly detected row would not surface until the
+    // next unrelated bump.
+    pendingRequests();
+    membersVersion();
+    pendingVersion();
+    const s = auth.state();
+    if (s.kind !== "session") return [];
+    // A group we are no longer in freezes: the pending surface is emptied at
+    // the source (above) and this goes with it, for the same reason — nothing
+    // here can be acted on any more.
+    if (membershipEnded()) return [];
+    return [
+      ...loadUnapplied(
+        s.account.accountId,
+        base64Encode(props.entry.group.groupId),
+      ).values(),
+    ];
+  });
+
+  /** Dismiss one `Not applied` row. It stays dismissed. */
+  function onDismissUnapplied(addSignatureKeyB64: string): void {
+    const s = auth.state();
+    if (s.kind !== "session") return;
+    dismissUnapplied(
+      s.account.accountId,
+      base64Encode(props.entry.group.groupId),
+      addSignatureKeyB64,
+    );
+    setPendingVersion(pendingVersion() + 1);
+  }
 
   const pendingRequestNotice = createMemo(() => pendingNotice(pendingRequests()));
   const pendingAdds = createMemo(() => waitingToBeAdded(pendingRequests()));
@@ -2055,11 +2131,18 @@ function ChatView(props: {
    *  name when we have one, else the short fingerprint, matching what the
    *  roster and the join-request rows already do. */
   function labelForAddRequest(req: PendingRequest): string {
-    if (req.addSignatureKeyB64 === undefined) return "(unknown)";
-    const name = acceptedByPubkey().get(req.addSignatureKeyB64);
+    return labelForSignatureKey(req.addSignatureKeyB64);
+  }
+
+  /** The same treatment, reachable from a bare signature key — the `Not applied`
+   *  rows have left the pending set, so they no longer have a
+   *  {@link PendingRequest} to carry it. */
+  function labelForSignatureKey(keyB64: string | undefined): string {
+    if (keyB64 === undefined) return "(unknown)";
+    const name = acceptedByPubkey().get(keyB64);
     if (name !== undefined && name.length > 0) return name;
     try {
-      return shortFingerprint(base64Decode(req.addSignatureKeyB64));
+      return shortFingerprint(base64Decode(keyB64));
     } catch {
       return "(unknown)";
     }
@@ -3704,17 +3787,38 @@ function ChatView(props: {
       // ADR-0045 — the same bookkeeping every other membership request gets:
       // the quiet window is measured against the DS row, and this device knows
       // the request is its own.
-      noteOwnRequest(`add:${base64Encode(proposalRef)}`);
+      // The third argument is ADR-0045 S7 residual 1: this add came from a JOIN
+      // request, and only this device can know that (on the wire an approved
+      // add is indistinguishable from an admin adding a contact). If the sweep
+      // never carries it, that flag is what makes the notice say `Ask them to
+      // request to join again` rather than offering a retry this side cannot
+      // perform — a successful approve consumed the retained request.
+      noteOwnRequest(`add:${base64Encode(proposalRef)}`, undefined, true);
       // If this device is the acting committer the sweep runs now, so the
       // common single-admin case still reads as "tap, done".
       const swept = await sweepNow();
       setMemberCount(props.entry.group.memberCount);
       setMembersVersion(membersVersion() + 1);
-      setNotice(
-        swept?.kind === "committed"
-          ? "Join approved. They have been added to the group."
-          : "Join approved. They join when an owner or an admin applies the change.",
-      );
+      if (swept?.kind === "committed") {
+        setNotice("Join approved. They have been added to the group.");
+      } else {
+        // ADR-0045 S7 residual 2 — an approve that did not apply has grown a
+        // queue only a sweep drains, and the core's own feedback (its cap
+        // refusal) lands on whoever proposes NEXT. Naming the depth here is
+        // what puts it in front of the person who caused it. Read from the
+        // core rather than from the memo, which has not re-run yet.
+        let depth: number | null = null;
+        try {
+          depth = (props.entry.group.pendingProposals() as unknown[]).length;
+        } catch {
+          depth = null;
+        }
+        const queue = depth === null ? null : waitingQueueLine(depth);
+        setNotice(
+          "Join approved. They join when an owner or an admin applies the change." +
+            (queue === null ? "" : ` ${queue}`),
+        );
+      }
       void refresh();
     } catch (err) {
       setError(formatError(err));
@@ -4732,11 +4836,27 @@ function ChatView(props: {
                   "text-transform": "uppercase",
                   "letter-spacing": "0.04em",
                   color: "var(--surface-muted)",
-                  margin: "0 0 0.4rem 0",
+                  margin: "0 0 0.2rem 0",
                 }}
               >
                 Join requests ({pendingJoins().length})
               </h3>
+              {/* ADR-0045 S7 residual 2 — the quarantine's one statable
+                  property. `Group::pending_external_joins` is in-memory: it is
+                  not in the provider snapshot, and the poll cursor has already
+                  advanced past the proposals that populated it, so a restart
+                  loses the list and no re-fetch brings it back. Ageing rows out
+                  of the panel instead would be strictly worse — the request
+                  stays live for the joiner, who goes on polling. */}
+              <p
+                style={{
+                  "font-size": "0.7rem",
+                  color: "var(--surface-muted)",
+                  margin: "0 0 0.4rem 0",
+                }}
+              >
+                {JOIN_REQUESTS_NOT_SAVED}
+              </p>
               <ul
                 style={{
                   "list-style": "none",
@@ -4912,6 +5032,102 @@ function ChatView(props: {
                       >
                         Waiting to be added.
                       </span>
+                    </li>
+                  )}
+                </For>
+              </ul>
+            </div>
+          </Show>
+          {/* ADR-0045 S7 residual 1 — `Not applied ({n})`.
+
+              A sweep does not necessarily carry everything it finds, and an
+              excluded request used to vanish without a trace: OpenMLS empties
+              the proposal store on every merged commit whether or not the
+              commit carried the proposal, so the pending set that was the
+              request's only representation is cleared either way. For an
+              approved join it is worse, because a successful approve CONSUMED
+              the retained request — the admin cannot even re-approve.
+
+              This section says the one thing that is knowable, and no more:
+              the request did not apply. The core reports no reason for an
+              exclusion (`CreateCommitError` names no proposal), so neither
+              does the copy. Sits directly under `Waiting to be added` because
+              it is where those rows go when they stop waiting. */}
+          <Show when={unappliedAdds().length > 0}>
+            <div
+              style={{
+                margin: "0 0 0.6rem 0",
+                padding: "0.4rem 0.5rem",
+                border: "1px dashed var(--surface-border)",
+                "border-radius": "var(--radius-sm)",
+                background: "var(--surface-bg)",
+              }}
+            >
+              <h3
+                style={{
+                  "font-size": "0.78rem",
+                  "text-transform": "uppercase",
+                  "letter-spacing": "0.04em",
+                  color: "var(--surface-muted)",
+                  margin: "0 0 0.2rem 0",
+                }}
+              >
+                {unappliedHeading(unappliedAdds().length)}
+              </h3>
+              <p
+                style={{
+                  "font-size": "0.7rem",
+                  color: "var(--surface-muted)",
+                  margin: "0 0 0.4rem 0",
+                }}
+              >
+                {UNAPPLIED_EXPLANATION}
+              </p>
+              <ul
+                style={{
+                  "list-style": "none",
+                  padding: 0,
+                  margin: 0,
+                  display: "flex",
+                  "flex-direction": "column",
+                  gap: "0.3rem",
+                }}
+              >
+                <For each={unappliedAdds()}>
+                  {(item) => (
+                    <li
+                      style={{
+                        display: "flex",
+                        "align-items": "flex-start",
+                        "justify-content": "space-between",
+                        gap: "0.5rem",
+                      }}
+                    >
+                      <span
+                        style={{ display: "flex", "flex-direction": "column", gap: "0.1rem" }}
+                      >
+                        <span
+                          style={{
+                            "font-family": "monospace",
+                            "font-size": "0.78rem",
+                            color: "var(--surface-fg)",
+                          }}
+                        >
+                          {labelForSignatureKey(item.addSignatureKeyB64)}
+                        </span>
+                        <span
+                          style={{ "font-size": "0.7rem", color: "var(--surface-muted)" }}
+                        >
+                          {unappliedLine(item)}
+                        </span>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => onDismissUnapplied(item.addSignatureKeyB64)}
+                        style={{ "font-size": "0.7rem" }}
+                      >
+                        Dismiss
+                      </button>
                     </li>
                   )}
                 </For>

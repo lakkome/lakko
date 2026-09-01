@@ -228,12 +228,17 @@ final class LeaveGroupTests: XCTestCase {
         let accountIdB64: String
         let snapshotStore: IdentitySnapshotStore
         let outboxDir: URL
+        /// This fixture's private journal on the scripted DS — see the scoping
+        /// note on `ScriptedDsURLProtocol`. `asOwner: true` reaches the ADR-0042
+        /// mint on bootstrap, which PUBLISHES from a fire-and-forget `Task`, so
+        /// this fixture is one of the stragglers the scoping contains.
+        let dsScope: String
     }
 
     /// Owner A + plain member B + plain member C, with B (or A, per `asOwner`)
     /// rehydrated into a real repository over the scripted DS.
     private func makeRepo(asOwner: Bool) async throws -> Fixture {
-        ScriptedDsURLProtocol.reset()
+        let dsScope = ScriptedDsURLProtocol.freshScope()
 
         let ownerSeed = Data(repeating: 0x11, count: 32)
         let memberSeed = Data(repeating: 0x55, count: 32)
@@ -297,7 +302,8 @@ final class LeaveGroupTests: XCTestCase {
         // ONE scripted DS behind both seams: the repository publishes through
         // its own `dsClient` but polls through `ChatClient`'s.
         let ds = DsClient(
-            baseURL: "http://127.0.0.1:9", session: URLSession(configuration: config))
+            baseURL: ScriptedDsURLProtocol.baseURL(dsScope),
+            session: URLSession(configuration: config))
         let repo = ChatRepository(
             chatClient: ChatClient(ds: ds),
             dsClient: ds,
@@ -335,7 +341,8 @@ final class LeaveGroupTests: XCTestCase {
             thirdLeaf: thirdLeaf,
             accountIdB64: accountIdB64,
             snapshotStore: snapshotStore,
-            outboxDir: outboxDir)
+            outboxDir: outboxDir,
+            dsScope: dsScope)
     }
 
     /// Ask to leave, reporting any refusal as this test's own failure with the
@@ -373,7 +380,7 @@ final class LeaveGroupTests: XCTestCase {
         defer { tearDown(fx) }
 
         let epochBefore = try XCTUnwrap(fx.repo.epoch(groupIdHex: fx.groupIdHex))
-        let rowsBefore = ScriptedDsURLProtocol.rowCount
+        let rowsBefore = ScriptedDsURLProtocol.rowCount(scope: fx.dsScope)
 
         let outcome = try await leave(fx)
 
@@ -384,7 +391,7 @@ final class LeaveGroupTests: XCTestCase {
             return
         }
         XCTAssertEqual(
-            ScriptedDsURLProtocol.rowCount, rowsBefore + 1,
+            ScriptedDsURLProtocol.rowCount(scope: fx.dsScope), rowsBefore + 1,
             "the proposal must reach the journal, or no committer can ever sweep it")
         XCTAssertEqual(
             try fx.repo.epoch(groupIdHex: fx.groupIdHex), epochBefore,
@@ -399,7 +406,7 @@ final class LeaveGroupTests: XCTestCase {
         let fx = try await makeRepo(asOwner: true)
         defer { tearDown(fx) }
 
-        let rowsBefore = ScriptedDsURLProtocol.rowCount
+        let rowsBefore = ScriptedDsURLProtocol.rowCount(scope: fx.dsScope)
         do {
             _ = try await fx.repo.removeMemberFromGroup(
                 groupIdHex: fx.groupIdHex, leafIndex: fx.ownLeaf)
@@ -412,9 +419,9 @@ final class LeaveGroupTests: XCTestCase {
             // UX §12.6 flags, which is why the UI hides the control instead.
         }
         XCTAssertEqual(
-            ScriptedDsURLProtocol.rowCount, rowsBefore,
+            ScriptedDsURLProtocol.rowCount(scope: fx.dsScope), rowsBefore,
             "the owner's leave must never reach the DS, but the journal grew from "
-                + "\(rowsBefore) to \(ScriptedDsURLProtocol.rowCount) rows")
+                + "\(rowsBefore) to \(ScriptedDsURLProtocol.rowCount(scope: fx.dsScope)) rows")
     }
 
     /// UX §10's non-negotiable exception. A plain member sees no pending request

@@ -7,7 +7,7 @@ import LakkoCore
 
 // MARK: - Scripted DS
 
-/// A `URLProtocol` standing in for the whole Delivery Service: one in-memory
+/// A `URLProtocol` standing in for the whole Delivery Service: an in-memory
 /// group journal that `POST` appends to and `GET` reads from, with the same
 /// `after` cursor semantics the real DS has.
 ///
@@ -16,40 +16,82 @@ import LakkoCore
 /// then reads the journal back to learn whether it won the order. A stub that
 /// answered every fetch with the same rows would either loop or report a verdict
 /// that has nothing to do with what was published.
+///
+/// ## One journal PER SCOPE, and why that is a correctness property
+///
+/// A `URLProtocol` subclass is registered on a `URLSessionConfiguration` and
+/// instantiated per request, so any state it keeps is necessarily `static` — and
+/// therefore process-global, shared by every test in the bundle. That was the
+/// whole design until this scoping landed, and it made a straggling publish from
+/// one fixture visible in another fixture's row count.
+///
+/// The straggler is not hypothetical and it is not a test artefact: it is the
+/// production ADR-0042 path. `ChatRepository.bootstrap` calls
+/// `ensurePushRouting` for every restored group, which is `Task { @MainActor }`
+/// fire-and-forget; on a fixture whose device is the group OWNER that reaches
+/// the mint branch, composes a push-routing-secret envelope and **publishes it
+/// to the group journal** through the very `DsClient` this stub is standing in
+/// for. In a SYNCHRONOUS test the main actor never yields inside the test body,
+/// so that `Task` cannot run until the test returns — i.e. during a later test,
+/// which may be an `async` one asserting an exact `rowCount`. A shared
+/// `reset()` cannot fix that: the reset happens first and the row lands after.
+///
+/// So the journal is keyed on the request's HOST, and each fixture allocates a
+/// unique one via ``freshScope()`` and builds its `DsClient` on
+/// ``baseURL(_:)``. A straggler then writes into the journal of the fixture
+/// that spawned it, where nobody is looking, and cross-test bleed becomes
+/// impossible rather than unlikely.
 final class ScriptedDsURLProtocol: URLProtocol {
 
-    private static let lock = NSLock()
-    private static var rows: [(id: Int64, body: Data)] = []
-    private static var nextId: Int64 = 1
-
-    static func reset() {
-        lock.lock(); defer { lock.unlock() }
-        rows.removeAll()
-        nextId = 1
+    private struct Journal {
+        var rows: [(id: Int64, body: Data)] = []
+        var nextId: Int64 = 1
     }
 
-    /// Append a row as if a peer had published it. Returns the assigned id.
-    @discardableResult
-    static func seed(_ body: Data) -> Int64 {
+    private static let lock = NSLock()
+    private static var journals: [String: Journal] = [:]
+
+    /// A fresh, unique journal scope. Every fixture takes one.
+    static func freshScope() -> String {
+        "s\(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()).test"
+    }
+
+    /// The `DsClient` base URL that routes to `scope`'s journal.
+    static func baseURL(_ scope: String) -> String { "http://\(scope):9" }
+
+    /// Drop every journal. Belt-and-braces hygiene only: scopes are unique, so
+    /// no fixture depends on this to be isolated from another.
+    static func reset() {
         lock.lock(); defer { lock.unlock() }
-        let id = nextId
-        nextId += 1
-        rows.append((id: id, body: body))
+        journals.removeAll()
+    }
+
+    /// Append a row to `scope` as if a peer had published it. Returns the id.
+    @discardableResult
+    static func seed(_ body: Data, scope: String) -> Int64 {
+        lock.lock(); defer { lock.unlock() }
+        var journal = journals[scope] ?? Journal()
+        let id = journal.nextId
+        journal.nextId += 1
+        journal.rows.append((id: id, body: body))
+        journals[scope] = journal
         return id
     }
 
-    static var rowCount: Int {
+    static func rowCount(scope: String) -> Int {
         lock.lock(); defer { lock.unlock() }
-        return rows.count
+        return journals[scope]?.rows.count ?? 0
     }
 
-    private static func append(_ body: Data) -> Int64 {
-        seed(body)
+    private static func scope(of url: URL) -> String {
+        url.host?.lowercased() ?? "?"
     }
 
-    private static func after(_ cursor: Int64) -> [(id: Int64, body: Data)] {
+    private static func after(
+        _ cursor: Int64, scope: String
+    ) -> [(id: Int64, body: Data)] {
         lock.lock(); defer { lock.unlock() }
-        return rows.filter { $0.id > cursor }
+        return (journals[scope]?.rows ?? []).filter { $0.id > cursor }
     }
 
     override class func canInit(with request: URLRequest) -> Bool { true }
@@ -61,16 +103,17 @@ final class ScriptedDsURLProtocol: URLProtocol {
             client?.urlProtocol(self, didFailWithError: URLError(.badURL))
             return
         }
+        let scope = Self.scope(of: url)
         let body: Data
         if request.httpMethod == "POST" {
             // `URLProtocol` strips `httpBody` for a body set on the request when
             // it came through `URLSession`; the stream is the reliable source.
             let payload = Self.bodyData(of: request)
-            let id = Self.append(payload)
+            let id = Self.seed(payload, scope: scope)
             body = Data(#"{"id":\#(id),"created_at":"1970-01-01T00:00:00Z"}"#.utf8)
         } else {
             let cursor = Self.cursor(from: url)
-            let rows = Self.after(cursor).map { row -> String in
+            let rows = Self.after(cursor, scope: scope).map { row -> String in
                 let b64 = row.body.base64EncodedString()
                 return #"{"id":\#(row.id),"payload_b64":"\#(b64)","created_at":"1970-01-01T00:00:00Z"}"#
             }
@@ -160,6 +203,9 @@ final class ExternalJoinApprovalTests: XCTestCase {
         let beaconStore: BeaconObservationStore
         let snapshotStore: IdentitySnapshotStore
         let outboxDir: URL
+        /// This fixture's private journal on the scripted DS — see the scoping
+        /// note on `ScriptedDsURLProtocol`.
+        let dsScope: String
     }
 
     private func nowMs() -> Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
@@ -176,7 +222,7 @@ final class ExternalJoinApprovalTests: XCTestCase {
     }
 
     private func makeRepo(promoteToAdmin: Bool) async throws -> Fixture {
-        ScriptedDsURLProtocol.reset()
+        let dsScope = ScriptedDsURLProtocol.freshScope()
 
         let ownerSeed = Data(repeating: 0x11, count: 32)
         let adminSeed = Data(repeating: 0x55, count: 32)
@@ -223,10 +269,12 @@ final class ExternalJoinApprovalTests: XCTestCase {
             try ownerGroup.members().first { $0.signaturePublicKey == (try third.signaturePublicKey()) }?
                 .leafIndex)
         ScriptedDsURLProtocol.seed(
-            try ownerGroup.proposeRemoveMember(identity: owner, leafIndex: thirdLeaf))
+            try ownerGroup.proposeRemoveMember(identity: owner, leafIndex: thirdLeaf),
+            scope: dsScope)
         // Row 2 — the stranger's external-join request (ADR-0027 / ADR-0028).
         ScriptedDsURLProtocol.seed(
-            try stranger.createExternalJoinProposal(groupId: groupId, epoch: epoch))
+            try stranger.createExternalJoinProposal(groupId: groupId, epoch: epoch),
+            scope: dsScope)
 
         // Rehydrate the admin's provider into a real repository.
         let snapshotBlob = try admin.snapshotStorage()
@@ -251,7 +299,9 @@ final class ExternalJoinApprovalTests: XCTestCase {
         // ONE scripted DS behind both seams. `ChatRepository` publishes through
         // its own `dsClient` but polls through `ChatClient`'s, so a repo whose
         // `ChatClient` kept the default would read a real socket.
-        let ds = DsClient(baseURL: "http://127.0.0.1:9", session: URLSession(configuration: config))
+        let ds = DsClient(
+            baseURL: ScriptedDsURLProtocol.baseURL(dsScope),
+            session: URLSession(configuration: config))
         let repo = ChatRepository(
             chatClient: ChatClient(ds: ds),
             dsClient: ds,
@@ -315,7 +365,8 @@ final class ExternalJoinApprovalTests: XCTestCase {
             ownerKeyB64: base64Encode(ownerKey),
             beaconStore: beaconStore,
             snapshotStore: snapshotStore,
-            outboxDir: outboxDir
+            outboxDir: outboxDir,
+            dsScope: dsScope
         )
     }
 
@@ -341,7 +392,7 @@ final class ExternalJoinApprovalTests: XCTestCase {
         defer { tearDown(fx) }
 
         let epochBefore = try XCTUnwrap(fx.repo.epoch(groupIdHex: fx.groupIdHex))
-        let rowsBefore = ScriptedDsURLProtocol.rowCount
+        let rowsBefore = ScriptedDsURLProtocol.rowCount(scope: fx.dsScope)
 
         let proposalId = try await fx.repo.approveExternalJoin(
             groupIdHex: fx.groupIdHex,
@@ -350,7 +401,7 @@ final class ExternalJoinApprovalTests: XCTestCase {
 
         XCTAssertGreaterThan(proposalId, 0, "the approve must have reached the DS")
         XCTAssertEqual(
-            ScriptedDsURLProtocol.rowCount - rowsBefore, 1,
+            ScriptedDsURLProtocol.rowCount(scope: fx.dsScope) - rowsBefore, 1,
             "S7 publishes ONE artifact: a proposal. The pre-S7 path published a commit AND a "
             + "WelcomeRendezvous; the rendezvous belongs to the sweep now")
         XCTAssertEqual(
@@ -412,7 +463,7 @@ final class ExternalJoinApprovalTests: XCTestCase {
         let fx = try await makeMemberRepo()
         defer { tearDown(fx) }
 
-        let rowsBefore = ScriptedDsURLProtocol.rowCount
+        let rowsBefore = ScriptedDsURLProtocol.rowCount(scope: fx.dsScope)
         let epochBefore = try XCTUnwrap(fx.repo.epoch(groupIdHex: fx.groupIdHex))
 
         do {
@@ -425,7 +476,7 @@ final class ExternalJoinApprovalTests: XCTestCase {
         } catch {}
 
         XCTAssertEqual(
-            ScriptedDsURLProtocol.rowCount, rowsBefore,
+            ScriptedDsURLProtocol.rowCount(scope: fx.dsScope), rowsBefore,
             "a refused approve must publish nothing")
         XCTAssertEqual(fx.repo.epoch(groupIdHex: fx.groupIdHex), epochBefore)
         XCTAssertEqual(

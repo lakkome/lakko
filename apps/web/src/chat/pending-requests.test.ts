@@ -136,6 +136,8 @@ import {
   requestState,
   rowAnnotation,
   visibleRequests,
+  waitingQueueLine,
+  JOIN_REQUESTS_NOT_SAVED,
   waitingToBeAdded,
   type ProposalRecordView,
   type RequestObservation,
@@ -513,5 +515,53 @@ describe("ADR-0045 — a `leave` carries no target on the wire", () => {
     const r = leave(4);
     expect(proposalKey(r)).toBe("leave:4");
     expect(waitingReqs([r])[0]?.targetLeaf).toBe(4);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ADR-0045 S7 residual 2 — the queue an approve grows
+// ---------------------------------------------------------------------------
+
+describe("the queue an approve grows", () => {
+  /**
+   * The whole point of the line: it names the accumulation to the admin causing
+   * it, because the core's own feedback (the cap refusal) lands on whoever
+   * proposes next instead.
+   *
+   * DISCRIMINATION (RUN, then reverted): with the threshold changed from `< 2`
+   * to `< 1` this went red on the one-change case:
+   *
+   *     AssertionError: expected '1 changes are now waiting to apply.' to be null
+   */
+  it("stays silent for one change and counts from two", () => {
+    expect(waitingQueueLine(0)).toBeNull();
+    expect(waitingQueueLine(1)).toBeNull();
+    expect(waitingQueueLine(2)).toBe("2 changes are now waiting to apply.");
+    expect(waitingQueueLine(64)).toBe("64 changes are now waiting to apply.");
+  });
+
+  /**
+   * It states what IS, never a limit — the cap is `pub(crate)` in `lakko-mls`
+   * and on neither FFI surface, so this layer has no number to compare against
+   * and must not imply one.
+   *
+   * DISCRIMINATION (RUN, then reverted): with the line changed to
+   * `${n} of 64 changes are now waiting to apply.`:
+   *
+   *     AssertionError: expected '2 of 64 changes are now waiting to app…' not
+   *     to match /limit|maximum|of \d+|full|cap/
+   */
+  it("never implies a limit it cannot read", () => {
+    for (const n of [2, 10, 64, 100]) {
+      expect(waitingQueueLine(n) ?? "").not.toMatch(/limit|maximum|of \d+|full|cap/);
+    }
+  });
+
+  /** The quarantine's one statable property. Not a deadline — a volatility. */
+  it("says the join-request list is not saved, and offers no expiry", () => {
+    expect(JOIN_REQUESTS_NOT_SAVED).toContain("not saved");
+    expect(JOIN_REQUESTS_NOT_SAVED.toLowerCase()).not.toMatch(
+      /expire|expires|expired|days|hours|deadline/,
+    );
   });
 });

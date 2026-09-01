@@ -1362,6 +1362,17 @@ private struct MembersSheet: View {
                 // & Welcome rendezvous; Reject drops the retained proposal.
                 if viewModel.canManageMembers, !viewModel.pendingJoins.isEmpty {
                     Section("Join requests (\(viewModel.pendingJoins.count))") {
+                        // ADR-0045 S7 residual 2 — the quarantine's one statable
+                        // property. `Group::pending_external_joins` is in-memory:
+                        // it is not in the provider snapshot, and the poll cursor
+                        // has already advanced past the proposals that populated
+                        // it, so a restart loses the list and no re-fetch brings
+                        // it back. Ageing rows out of the panel instead would be
+                        // strictly worse — the request stays live for the joiner,
+                        // who goes on polling.
+                        Text(joinRequestsNotSaved)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
                         ForEach(viewModel.pendingJoins, id: \.self) { ref in
                             HStack {
                                 VStack(alignment: .leading, spacing: 2) {
@@ -1426,6 +1437,44 @@ private struct MembersSheet: View {
                             Text(Self.pendingAddLabel(request))
                                 .font(.system(.footnote, design: .monospaced))
                                 .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                // ADR-0045 S7 residual 1 — `Not applied ({n})`.
+                //
+                // A sweep does not necessarily carry everything it finds, and an
+                // excluded request used to vanish without a trace: OpenMLS
+                // empties the proposal store on every merged commit whether or
+                // not the commit carried the proposal. For an approved join it
+                // is worse, because a successful approve CONSUMED the retained
+                // request — the admin cannot even re-approve.
+                //
+                // This section says the one thing that is knowable, and no more:
+                // the request did not apply. The core reports no reason for an
+                // exclusion (`CreateCommitError` names no proposal), so neither
+                // does the copy. Sits directly under `Waiting to be added`,
+                // because it is where those rows go when they stop waiting.
+                if !viewModel.unappliedAddRows.isEmpty {
+                    Section(unappliedHeading(viewModel.unappliedAddRows.count)) {
+                        Text(unappliedExplanation)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        ForEach(viewModel.unappliedAddRows, id: \.addSignatureKeyB64) { item in
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(Self.unappliedLabel(item))
+                                        .font(.system(.footnote, design: .monospaced))
+                                    Text(unappliedLine(item))
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Button("Dismiss") {
+                                    viewModel.onDismissUnapplied(
+                                        addSignatureKeyB64: item.addSignatureKeyB64)
+                                }
+                                .buttonStyle(.borderless)
+                            }
                         }
                     }
                 }
@@ -1708,6 +1757,14 @@ private struct MembersSheet: View {
     private static func pendingAddLabel(_ request: PendingRequest) -> String {
         guard let b64 = request.addSignatureKeyB64,
               let bytes = base64Decode(b64) else { return "Pending member" }
+        return "Member " + bytes.prefix(4).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// The same identity treatment as ``pendingAddLabel(_:)``, reachable from a
+    /// bare signature key — a `Not applied` row has left the pending set, so it
+    /// no longer has a `PendingRequest` to carry it.
+    private static func unappliedLabel(_ item: UnappliedAdd) -> String {
+        guard let bytes = base64Decode(item.addSignatureKeyB64) else { return "Pending member" }
         return "Member " + bytes.prefix(4).map { String(format: "%02x", $0) }.joined()
     }
 

@@ -1881,6 +1881,7 @@ private fun MembersSheet(
     val roleTable by viewModel.roleTable.collectAsStateWithLifecycle()
     val pendingJoins by viewModel.pendingJoins.collectAsStateWithLifecycle()
     val pendingRequests by viewModel.pendingRequests.collectAsStateWithLifecycle()
+    val unappliedAdds by viewModel.unappliedAdds.collectAsStateWithLifecycle()
     val pendingNotice by viewModel.pendingNotice.collectAsStateWithLifecycle()
     val joinAttributions by viewModel.joinAttributions.collectAsStateWithLifecycle()
     val inviteLink by viewModel.inviteLink.collectAsStateWithLifecycle()
@@ -2150,6 +2151,61 @@ private fun MembersSheet(
                     }
                     Spacer(Modifier.height(12.dp))
                 }
+                // ADR-0045 S7 residual 1 — `Not applied ({n})`.
+                //
+                // A sweep does not necessarily carry everything it finds, and an
+                // excluded request used to vanish without a trace: OpenMLS
+                // empties the proposal store on every merged commit whether or
+                // not the commit carried the proposal. For an approved join it
+                // is worse, because a successful approve CONSUMED the retained
+                // request — the admin cannot even re-approve.
+                //
+                // This section says the one thing that is knowable, and no more:
+                // the request did not apply. The core reports no reason for an
+                // exclusion (`CreateCommitError` names no proposal), so neither
+                // does the copy. A TOP-LEVEL block rather than a child of the
+                // pending notice above, because a `Not applied` row is exactly
+                // the case where nothing is pending any more.
+                if (unappliedAdds.isNotEmpty()) {
+                    Text(
+                        text = me.lakko.app.chat.unappliedHeading(unappliedAdds.size),
+                        style = MaterialTheme.typography.titleSmall,
+                    )
+                    Text(
+                        text = me.lakko.app.chat.UNAPPLIED_EXPLANATION,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    unappliedAdds.forEach { item ->
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 2.dp),
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = viewModel.fingerprintOfKeyB64(
+                                        item.addSignatureKeyB64,
+                                    ),
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                                Text(
+                                    text = me.lakko.app.chat.unappliedLine(item),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            TextButton(
+                                onClick = {
+                                    viewModel.onDismissUnapplied(item.addSignatureKeyB64)
+                                },
+                            ) { Text("Dismiss") }
+                        }
+                    }
+                    Spacer(Modifier.height(12.dp))
+                }
                 // ADR-0027 (G-3) — pending external-join requests. Owner/admin
                 // only (same gate as add/remove); hidden when there are none.
                 // Approve drives the role-gated MLS approve + posts the commit &
@@ -2158,6 +2214,19 @@ private fun MembersSheet(
                     Text(
                         text = "Join requests (${pendingJoins.size})",
                         style = MaterialTheme.typography.titleSmall,
+                    )
+                    // ADR-0045 S7 residual 2 — the quarantine's one statable
+                    // property. `Group::pending_external_joins` is in-memory: it
+                    // is not in the provider snapshot, and the poll cursor has
+                    // already advanced past the proposals that populated it, so
+                    // a restart loses the list and no re-fetch brings it back.
+                    // Ageing rows out of the panel instead would be strictly
+                    // worse — the request stays live for the joiner, who goes on
+                    // polling.
+                    Text(
+                        text = me.lakko.app.chat.JOIN_REQUESTS_NOT_SAVED,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Spacer(Modifier.height(6.dp))
                     pendingJoins.forEach { ref ->

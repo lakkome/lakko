@@ -4086,3 +4086,58 @@ record their own gates** (`1de5fe7` / `02f0037` / `000d9f8` / `1f230ab`): web vi
 706, iOS 432 tests, Android 598 tests, all with zero failures. The residuals above
 are **not** covered by any of those gates — the remaining half of residual 1 in
 particular needs a live multi-device environment.
+
+### G-39: The external cryptographic review of the MLS state machine has not happened — **OPEN, and it is a release gate**
+
+**Owner:** [ADR-0046](../adr/0046-external-crypto-review.md), which moved this obligation
+here from four scattered ADR sentences. It is stated **once**, in this entry, and nowhere
+else.
+
+**What it is.** Security invariant #3's third clause: *"(after Phase 2) an external
+crypto audit"* for changes to `lakko-mls`. The per-change half of that invariant — an ADR
+plus property tests, before the change lands — is unchanged and is still enforced per
+change. This is the other half.
+
+**Why it is a gap rather than a blocker on any one document.** Carried inside each
+MLS-touching ADR, it made every one of them permanently un-Acceptable regardless of how
+finished it was, while specifying nothing an auditor could act on. A blocker that blocks
+unconditionally and forever stops being read. ADR-0046 has the full argument.
+
+**The gate, stated so it cannot be quietly routed around: no build reaches users while
+this is open** — no store submission, no GA tag. That is where "after Phase 2" bites.
+
+**The surface to be reviewed.** Larger than any one ADR, because the interactions are the
+point — a per-change review would see each of these as a slice:
+
+- **ADR-0045's core**, six sprints: the per-proposal authorisation gate (`authorise`, one
+  rule at three layers, by-reference judged against the proposer and by-value against the
+  committer); `owner_survives` (C-63); the staged sweep's stage / merge / abandon
+  lifecycle and its per-group rollback; the `create_application_message` pending-set park;
+  the committer election over the `0xFF02` role table; and S7's approval-as-proposal.
+- **The invariants that arc minted or amended:** C-63 through C-69 — in particular C-66
+  (the reserve past the pending cap, and the sweep's fifteen enumerated build conditions
+  plus the exclusion search that backs them), C-67 (the cursor-may-lag-never-lead ordering
+  rule, and the owed-artifact lifecycle) and C-68 (author identity as a signature key
+  resolved at receipt).
+- **ADR-0022's role table** and its `0xFF02` GroupContext extension, which everything
+  above is layered on.
+- **Three independent client implementations** of the ordering and rollback disciplines
+  the core change depends on — the send lock, the verdict apply, the sweep adjudication,
+  the durable-cursor ordering. These are not incidental: C-69 exists because a discipline
+  can be correct in the core and attached to the wrong end in a client.
+- **The `lakko-security` findings and their fixes** (2026-08-29, seven findings), which
+  are the most recently changed part of the surface and therefore the least settled.
+
+**What an internal review already found, as an argument for the external one rather than
+against it.** The `lakko-security` pass on an already-shipped surface returned three HIGH
+findings plus a confirmed impersonation. **None needed an attacker and four needed nobody
+at all** — a network blip, a stale roster, two admins doing an ordinary thing, or enough
+time passing. An external reviewer does not share the blind spots that let those ship.
+
+**Residual risk while this is open.** Everything above is peer-verified and
+property-tested but unaudited by anyone outside the project. The specific classes an
+external review is best placed to catch, and which the work so far has *not* systematically
+covered: cross-invariant interactions (each was reasoned about locally); the enumeration
+in C-66 being a mirror of openmls rules Lakko does not own; and whether the three-layer
+gate's by-reference/by-value split holds under compositions nobody has thought to write a
+test for.

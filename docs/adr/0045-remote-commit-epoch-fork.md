@@ -17,11 +17,12 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
   place rather than deleted, because the reasoning under them still holds.
   **What is still open** is named honestly in
   [§ Open questions](#open-questions) and summarised here: **S7** — the
-  external-join convergence of decision 4 — is **not built**, so
-  `Group::approve_external_join` remains a live direct-commit path that
-  eager-merges (`crates/lakko-mls/src/group.rs`); the **external crypto review
-  this ADR requires and the `lakko-security` pass have both still not happened**
-  on any sprint, which is the largest open item on the list; and the UX spec's
+  external-join convergence of decision 4 — **landed in `576ea14`**, so no
+  direct-commit path is left in a role-table group; the `lakko-security` pass
+  **ran** (2026-08-29) and its seven findings are closed; the **external crypto
+  review is tracked in [G-39](../security/known-gaps.md) per
+  [ADR-0046](0046-external-crypto-review.md)** rather than as a blocker here, and
+  it is a **release gate** — no build reaches users while it is open; and the UX spec's
   ownership-transfer flow, its typed-refusal table, its committer-side failure surface
   and its automatic re-request on supersession are designed or enumerated but unbuilt
   on every client, while `Leave group` — the member-facing feature this ADR unlocked —
@@ -2872,8 +2873,11 @@ durability shape.
 - **An invariant-#3 change to the audited MLS state machine**, and the largest one
   since ADR-0022 — a new authorisation rule (`authorise`), a new commit-level rule
   (`owner_survives`), a new commit lifecycle (stage / merge / abandon) and a park
-  on the send path. **The external crypto review this ADR calls for has not
-  happened**; `lakko-security` has not run on any of it either.
+  on the send path. `lakko-security` **has** run on all of it (2026-08-29,
+  REQUEST CHANGES, seven findings, all closed — see
+  [§ What the security review found](#what-the-security-review-found)); the
+  **external crypto review is tracked in [G-39](../security/known-gaps.md)**
+  per [ADR-0046](0046-external-crypto-review.md).
 - **A new client obligation that can wedge a group: reach a verdict.** A staged
   sweep freezes that group's own membership operations, and the staged commit is
   **durable**, so a client that stages and never adjudicates leaves membership
@@ -3303,10 +3307,15 @@ crypto review.**
   **stand-down** discriminate instead of standing down conservatively on any
   unapplied row (item 2). An optimisation, decided explicitly rather than by
   omission.
-- **The external crypto review and the `lakko-security` pass on the built core.**
-  This ADR requires both for the invariant-#3 change, and **neither has happened on
-  any sprint** — this is the largest open item on the list, and it grew rather than
-  shrank: what is unreviewed is now six sprints of MLS state-machine change **plus**
+- **The external crypto review.** `lakko-security` has run (2026-08-29) and its
+  seven findings are closed; the external review has not, and it is now tracked
+  **once**, in [G-39](../security/known-gaps.md), per
+  [ADR-0046](0046-external-crypto-review.md) — which also states why it stopped
+  being a per-ADR blocker: carried inside each MLS-touching document it made every
+  one of them permanently un-Acceptable however finished it was, while specifying
+  nothing an auditor could act on. It remains a **release gate**: no build reaches
+  users while it is open. The surface has grown rather than shrunk — six sprints of
+  MLS state-machine change **plus**
   three client implementations of the authorisation, ordering and rollback
   disciplines that change depends on. **The maintainer's call when to run them** —
   the ADR's own earlier framing offered "before S4, or once the clients are wired",

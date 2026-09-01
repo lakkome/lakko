@@ -1528,10 +1528,73 @@ starts meaning "marked for the next sweep", so an approved joiner moves from
 request is superseded, the admin cannot re-request it — only the joiner holds the material —
 so it is terminal on the admin side:
 
-- `This request expired before it could be applied. Ask them to request to join again.`
+- `Not applied. Ask them to request to join again.`
 
-(ADR-0028's joiner already retries on a stale epoch, so in practice a new request usually
-arrives on its own. The string is the fallback, not the expected path.)
+**CORRECTED 2026-09-01, and both halves of the original were wrong.**
+
+The string used to read `This request expired before it could be applied.` — which
+**asserts a reason nobody at this layer can establish**. `CreateCommitError` carries no
+proposal reference on any variant, and `narrow_sweep_by_exclusion` drops what will not
+build without recording why; expiry is one of fifteen enumerated causes and the client
+cannot tell it from the other fourteen. Naming it is the invention this spec forbids
+everywhere else. The implementation pins a regex guard against
+`expired|refused|rejected|invalid|fail…` so the reason cannot drift back in.
+
+The parenthetical was worse, because it made this string look optional: it claimed
+ADR-0028's joiner already retries on a stale epoch. **It does not, on any client** —
+`requestToJoinFromLink` reads the epoch once and posts once, and no poll loop
+re-requests. So this is the **expected path**, not the fallback, and it is why the
+joiner side gets a user-driven `Request again` rather than a promise that something
+retries on its own.
+
+**The joiner is told nothing about the exclusion, and cannot be.** No artifact is
+addressed to a non-member; the group journal is unauthenticated and its DS pseudonym
+*is* the `group_id`, so a "your request was not carried" envelope would be a **forgeable
+denial primitive** any link-holder could post; and an epoch advance without a rendezvous
+is byte-identical to *no admin has approved yet*. What the joiner gets instead is honest
+wait copy plus the repair. Its reach is partial and the code says so:
+`retain_external_join` de-dups by signature key and keeps the **older** KeyPackage, so a
+fresh request refreshes the entry only where the earlier one is gone — which is exactly
+the post-approve case this string covers.
+
+### 7.1 A request that was not carried, and a queue nobody is sweeping
+
+Two surfaces added 2026-09-01, closing the residuals ADR-0045 S7 left. Both exist because
+a sweep can drop an authorised request and say nothing.
+
+**`Not applied (n)`** — a members-panel section listing the requester's **own** requests
+that left the core's pending set without their effect landing, each with `Dismiss`. The
+observation is deliberately not the sweeper-side diff of `pendingProposals()` against
+`swept`: this one is available on **every** device, reaches the person who can act rather
+than whoever happened to sweep, needs no core change, and is exactly as strong as the
+truth — *a request of mine is gone and its effect did not land*, never why.
+
+**Scoped to `add` only, and that is a rule rather than a shortcut.** A `remove` or
+`leave` request keys on a leaf index and OpenMLS reuses a vacated leaf, so a roster test
+on one can be wrong in **both** directions; a `role-change` carries no payload to test
+against; and all three are already visible when they fail, because the member is still
+there or the role is unchanged. An add is the only request whose failure leaves no trace
+and the only one keyed on a signature key.
+
+One false positive is accepted and documented in the code: a member added and removed
+between two folds reads as *not added*. Narrowing it needs the core to say which commit
+emptied the set, which it does not.
+
+**The queue depth, named where it is grown.** When an approve does not land in the same
+breath, the notice names how many changes are now waiting; and the `Join requests` panel
+states the one property of the quarantine that is statable — it is in memory and lost on
+restart. Stating that beats ageing rows out, which would hide something still live for
+the joiner.
+
+**What is deliberately not built, and why it is not a client's to build.** Any actual
+**bound** on the queue: `MAX_PENDING_PROPOSALS` is `pub(crate)` and
+`MAX_PENDING_EXTERNAL_JOINS` is module-private, neither is on either FFI surface, and a
+client-side `64` is the stale-literal drift class this repo has already been bitten by —
+it fails in the dangerous direction, reading as *room left* when there is none. Turning
+the core's cap refusal into fixed copy needs the typed refusal table §12 already lists as
+unbuilt. And one state is unsurfaceable today at any layer: at 64 retained external joins
+`retain_external_join` silently stops retaining, and nothing distinguishes that from a
+request that never arrived.
 
 ---
 

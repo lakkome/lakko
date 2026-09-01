@@ -184,11 +184,24 @@ public struct RequestObservation: Equatable {
     /// would make an unrelated LATER role change render
     /// `Waiting to make {name} the owner.` about somebody nobody proposed.
     public var transferToB64: String?
+    /// ADR-0045 S7 residual 1 — `true` when OUR OWN `add` request was published
+    /// by approving an external **join** rather than by adding a contact.
+    ///
+    /// It lives here for the same reason ``transferToB64`` does: this store is
+    /// pruned against the core's live pending set, so the flag dies with the
+    /// request it describes. It is knowable only on the device that made the
+    /// request, because on the wire an approved add is indistinguishable from an
+    /// admin adding a contact (ADR-0045 S7) — and that device is the one
+    /// `UnappliedRequests.swift` shows the notice on.
+    public var joinRequest: Bool
 
-    public init(atMs: Int64, own: Bool, transferToB64: String? = nil) {
+    public init(
+        atMs: Int64, own: Bool, transferToB64: String? = nil, joinRequest: Bool = false
+    ) {
         self.atMs = atMs
         self.own = own
         self.transferToB64 = transferToB64
+        self.joinRequest = joinRequest
     }
 }
 
@@ -311,6 +324,48 @@ public func rowAnnotation(
 }
 
 /// The `Waiting to be added` rows — pending adds only, past the window.
+/// ADR-0045 S7 residual 2 — the queue an approve just grew, named to the person
+/// who grew it.
+///
+/// ## Why this line, and why only this line
+///
+/// Approving a join no longer admits anyone: it publishes an `Add` proposal into
+/// the member pending set, and that set is drained only by a sweep, which
+/// ADR-0045 decision 2 gives no deadline. So an admin can approve into a queue
+/// indefinitely, and before this the only feedback in the whole system was the
+/// core's cap refusal — which lands on **whoever proposes next**, who is very
+/// often somebody else entirely.
+///
+/// This does not bound anything and does not pretend to. Bounding needs a number
+/// this layer does not have: `MAX_PENDING_PROPOSALS` is `pub(crate)` in
+/// `lakko-mls` and is on neither FFI surface, and a client-side literal `64`
+/// would be exactly the stale-literal drift class this repo already names as
+/// failing in the dangerous direction. What it does is make the accumulation
+/// *visible at the moment it is caused*, which is the part a client can do
+/// honestly.
+///
+/// `nil` below two, because "1 change is now waiting" after making one change is
+/// noise rather than information.
+public func waitingQueueLine(_ pendingCount: Int) -> String? {
+    pendingCount < 2 ? nil : "\(pendingCount) changes are now waiting to apply."
+}
+
+/// ADR-0045 S7 residual 2 — the one property of the external-join quarantine a
+/// client can state, and it changes what an admin does.
+///
+/// `Group::pending_external_joins` is **in-memory**: it is not in the provider
+/// snapshot and the poll cursor has already advanced past the proposals that
+/// populated it, so a restart loses the list and no re-fetch brings it back.
+/// ADR-0027 records this as v1 behaviour with persistence as a follow-up.
+///
+/// Stating it is the honest option. The alternative a client could reach for —
+/// ageing rows out of the panel — would be strictly worse: the request stays
+/// live for the joiner, who goes on polling, so hiding it would make the admin
+/// stop seeing something that is still happening.
+public let joinRequestsNotSaved =
+    "Join requests are not saved. If this app restarts before you decide, "
+    + "they have to be sent again."
+
 public func waitingToBeAdded(_ requests: [PendingRequest]) -> [PendingRequest] {
     requests.filter { $0.kind == .add && $0.state == .waiting }
 }
@@ -360,7 +415,11 @@ public final class PendingRequestStore {
                 // validated the same way as the rest: anything that is not a
                 // string is simply absent, which degrades a pending transfer to
                 // its unnamed variant rather than losing the request.
-                transferToB64: pair["transferTo"] as? String)
+                transferToB64: pair["transferTo"] as? String,
+                // ADR-0045 S7 residual 1. Absent reads as an ordinary add, which
+                // is the copy that offers the weaker action rather than the
+                // stronger claim.
+                joinRequest: (pair["join"] as? NSNumber)?.boolValue ?? false)
         }
         return out
     }
@@ -379,6 +438,7 @@ public final class PendingRequestStore {
             // Written only when present, so an ordinary add / remove / promote
             // observation is the same three-key plist row it always was.
             if let transferTo = value.transferToB64 { entry["transferTo"] = transferTo }
+            if value.joinRequest { entry["join"] = NSNumber(value: true) }
             raw[key] = entry
         }
         defaults.set(raw, forKey: storeKey(accountIdB64: accountIdB64, groupIdB64: groupIdB64))
@@ -406,14 +466,21 @@ public final class PendingRequestStore {
         key: String,
         atMs: Int64,
         own: Bool,
-        transferToB64: String? = nil
+        transferToB64: String? = nil,
+        joinRequest: Bool = false
     ) {
         var observations = load(accountIdB64: accountIdB64, groupIdB64: groupIdB64)
         let existing = observations[key]
         observations[key] = RequestObservation(
             atMs: existing?.atMs ?? atMs,
             own: (existing?.own ?? false) || own,
-            transferToB64: existing?.transferToB64 ?? transferToB64
+            transferToB64: existing?.transferToB64 ?? transferToB64,
+            // Sticky-true, for the same reason `own` is: the receive loop
+            // observes our own approval landing back off the journal and that
+            // observation knows nothing about where the request came from.
+            // Losing the flag to arrival order would silently downgrade the copy
+            // to the wrong action.
+            joinRequest: (existing?.joinRequest ?? false) || joinRequest
         )
         save(accountIdB64: accountIdB64, groupIdB64: groupIdB64, observations)
     }

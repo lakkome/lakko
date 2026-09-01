@@ -197,6 +197,18 @@ internal data class RequestObservation(
      * nobody proposed.
      */
     val transferToB64: String? = null,
+    /**
+     * ADR-0045 S7 residual 1 — `true` when OUR OWN `add` request was published
+     * by approving an external **join** rather than by adding a contact.
+     *
+     * It lives here for the same reason [transferToB64] does: this store is
+     * pruned against the core's live pending set, so the flag dies with the
+     * request it describes. It is knowable only on the device that made the
+     * request, because on the wire an approved add is indistinguishable from an
+     * admin adding a contact (ADR-0045 S7) — and that device is the one
+     * `UnappliedRequests.kt` shows the notice on.
+     */
+    val joinRequest: Boolean = false,
 )
 
 /** What [foldPendingRequests] produced. */
@@ -352,6 +364,51 @@ internal fun rowAnnotation(
     return if (leafIndex == ownLeaf) "Waiting to leave." else "Waiting to be removed."
 }
 
+/**
+ * ADR-0045 S7 residual 2 — the queue an approve just grew, named to the person
+ * who grew it.
+ *
+ * ## Why this line, and why only this line
+ *
+ * Approving a join no longer admits anyone: it publishes an `Add` proposal into
+ * the member pending set, and that set is drained only by a sweep, which
+ * ADR-0045 decision 2 gives no deadline. So an admin can approve into a queue
+ * indefinitely, and before this the only feedback in the whole system was the
+ * core's cap refusal — which lands on **whoever proposes next**, who is very
+ * often somebody else entirely.
+ *
+ * This does not bound anything and does not pretend to. Bounding needs a number
+ * this layer does not have: `MAX_PENDING_PROPOSALS` is `pub(crate)` in
+ * `lakko-mls` and is on neither FFI surface, and a client-side literal `64`
+ * would be exactly the stale-literal drift class this repo already names as
+ * failing in the dangerous direction. What it does is make the accumulation
+ * *visible at the moment it is caused*, which is the part a client can do
+ * honestly.
+ *
+ * `null` below two, because "1 change is now waiting" after making one change is
+ * noise rather than information.
+ */
+internal fun waitingQueueLine(pendingCount: Int): String? =
+    if (pendingCount < 2) null else "$pendingCount changes are now waiting to apply."
+
+/**
+ * ADR-0045 S7 residual 2 — the one property of the external-join quarantine a
+ * client can state, and it changes what an admin does.
+ *
+ * `Group::pending_external_joins` is **in-memory**: it is not in the provider
+ * snapshot and the poll cursor has already advanced past the proposals that
+ * populated it, so a restart loses the list and no re-fetch brings it back.
+ * ADR-0027 records this as v1 behaviour with persistence as a follow-up.
+ *
+ * Stating it is the honest option. The alternative a client could reach for —
+ * ageing rows out of the panel — would be strictly worse: the request stays live
+ * for the joiner, who goes on polling, so hiding it would make the admin stop
+ * seeing something that is still happening.
+ */
+internal const val JOIN_REQUESTS_NOT_SAVED: String =
+    "Join requests are not saved. If this app restarts before you decide, " +
+        "they have to be sent again."
+
 /** The "Waiting to be added" rows — pending adds only, past the window. */
 internal fun waitingToBeAdded(requests: List<PendingRequest>): List<PendingRequest> =
     requests.filter { it.kind == PendingRequestKind.ADD && it.state == RequestState.WAITING }
@@ -407,6 +464,7 @@ internal fun recordPendingRequestObservation(
     atMs: Long,
     own: Boolean,
     transferToB64: String? = null,
+    joinRequest: Boolean = false,
 ) {
     val observations = store.load(accountIdB64, groupIdHex)
     val existing = observations[key]
@@ -418,6 +476,12 @@ internal fun recordPendingRequestObservation(
                 atMs = existing?.atMs ?: atMs,
                 own = (existing?.own ?: false) || own,
                 transferToB64 = existing?.transferToB64 ?: transferToB64,
+                // Sticky-true, for the same reason `own` is: the receive loop
+                // observes our own approval landing back off the journal and
+                // that observation knows nothing about where the request came
+                // from. Losing the flag to arrival order would silently
+                // downgrade the copy to the wrong action.
+                joinRequest = (existing?.joinRequest ?: false) || joinRequest,
             )
             ),
     )
@@ -502,17 +566,18 @@ internal fun prunePendingRequestObservations(
  * written as the Kotlin escape `\u0000`; a RAW NUL in the source would make git
  * classify this file as binary — ADR-0042 MEDIUM-3).
  *
- * Row value: `key|atMs|own|transferToB64` entries joined by newline. A request
+ * Row value: `key|atMs|own|transferToB64|joinRequest` entries joined by newline. A request
  * key is built from base64 / decimal / fixed literals, none of which contain `|`
  * or a newline, and the standard-base64 successor key contains neither either.
  *
  * The fourth field (ADR-0045 §6.1.10) is written as the empty string when
  * absent, which is every request that is not an ownership transfer this device
- * published. A row in the previous three-field shape is simply DROPPED rather
- * than up-converted: there is no deployment to migrate, and the cost of dropping
- * one is bounded to the quiet window and the own-request marker of a request
- * that happened to be in flight across an app upgrade — the request itself lives
- * in the core's pending set and is untouched.
+ * published. The fifth (ADR-0045 S7 residual 1) is `0`/`1`. A row in any earlier
+ * shape is simply DROPPED rather than up-converted: there is no deployment to
+ * migrate, and the cost of dropping one is bounded to the quiet window and the
+ * own-request marker of a request that happened to be in flight across an app
+ * upgrade — the request itself lives in the core's pending set and is
+ * untouched.
  *
  * Never throws: a corrupt or absent row reads as empty, which degrades the quiet
  * window to "render immediately" rather than losing the request. The request
@@ -577,7 +642,8 @@ internal class SharedPrefsPendingRequestStore(context: Context) : PendingRequest
         internal fun encodeRow(observations: Map<String, RequestObservation>): String =
             observations.entries.joinToString("\n") {
                 "${it.key}|${it.value.atMs}|${if (it.value.own) 1 else 0}|" +
-                    (it.value.transferToB64 ?: "")
+                    (it.value.transferToB64 ?: "") +
+                    "|${if (it.value.joinRequest) 1 else 0}"
             }
 
         internal fun decodeRow(raw: String?): Map<String, RequestObservation> {
@@ -585,7 +651,7 @@ internal class SharedPrefsPendingRequestStore(context: Context) : PendingRequest
             val out = mutableMapOf<String, RequestObservation>()
             for (line in raw.split('\n')) {
                 val parts = line.split('|')
-                if (parts.size != 4) continue
+                if (parts.size != 5) continue
                 val at = parts[1].toLongOrNull() ?: continue
                 out[parts[0]] = RequestObservation(
                     atMs = at,
@@ -594,6 +660,10 @@ internal class SharedPrefsPendingRequestStore(context: Context) : PendingRequest
                     // one: a zero-length base64 key names nobody, and letting it
                     // through would make `ownTransfer` true for a promote.
                     transferToB64 = parts[3].takeIf { it.isNotEmpty() },
+                    // ADR-0045 S7 residual 1. Absent reads as an ordinary add,
+                    // which is the copy that offers the weaker action rather
+                    // than the stronger claim.
+                    joinRequest = parts[4] == "1",
                 )
             }
             return out
