@@ -34,15 +34,16 @@
 //!   timestamp check on `decode_request` to block
 //!   wholesale replay of a previously-observed prelude.
 //!
-//! ## What's NOT here yet
+//! ## What's NOT here
 //!
-//! - Full [`Transport`] / [`Connection`] impl over TCP.
-//!   `connect()` still returns `Error::NotImplemented` —
-//!   the wire-format primitives here are the bulk of the
-//!   SS-2022 work; with sprint S-5-shadowsocks-tcp the
-//!   prelude is stitched to a real `TcpStream` + the
-//!   chunked-AEAD body (T-9) and `Transport::connect`
-//!   returns a working `ShadowsocksConnection`.
+//! The [`Transport`] / [`Connection`] impl over TCP **is**
+//! here: `connect()` opens a `TcpStream`, writes the salt +
+//! sealed prelude, reads and verifies the response prelude,
+//! and returns a working [`ShadowsocksConnection`] over the
+//! chunked-AEAD body (T-9). [`ShadowsocksListener`] and
+//! [`accept_inbound`] are the accept half, wired into
+//! `services/obfs-proxy`. What remains absent:
+//!
 //! - Variable header parsing — Lakko uses SS-2022 as a
 //!   raw obfs layer, not as a SOCKS5 proxy, so the
 //!   variable header is opaque bytes that the caller

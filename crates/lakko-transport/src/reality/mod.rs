@@ -21,42 +21,51 @@
 //!   [`RealityConfig`] — strongly-typed config bound to
 //!   the bootstrap-rendezvous wire shape.
 //! - [`authenticator::compute`] /
-//!   [`authenticator::verify`] — the ECDH + HKDF + HMAC
-//!   primitive that produces / accepts the 32-byte
-//!   session_id slot. Reproducible across implementations
-//!   via the pinned label string.
-//! - [`RealityTransport`] still returns
-//!   `Error::NotImplemented` on `connect`, but with a
-//!   pointed message — the TLS-handshake injection layer
-//!   (rustls custom-ClientHello hooks) is the next
-//!   sub-sprint.
+//!   [`authenticator::verify`] — the HKDF + HMAC primitive
+//!   that produces / accepts the session_id slot, keyed by
+//!   the publisher-distributed pre-shared `tag_secret`.
+//!   Reproducible across implementations via the pinned
+//!   [`authenticator::HKDF_LABEL`].
+//! - `RealityTransport::connect` — a real dial: TCP
+//!   connect, a `rustls::ClientConnection` pointed at the
+//!   cover SNI, the authenticator injected into the
+//!   session_id slot, [`driver::drive_handshake`], then a
+//!   [`RealityConnection`] carrying length-prefixed frames
+//!   inside the TLS tunnel.
+//! - **Server side.** [`RealityListener`] +
+//!   [`server_driver`] + [`RealityServerConnection`] — the
+//!   accept half, verifying an inbound ClientHello's
+//!   session_id against a `(short_id, tag_secret)`
+//!   allow-list and answering with a mutual-auth HMAC in
+//!   `ServerHello.Random`. Wired into `services/obfs-proxy`.
 //!
-//! ## What is NOT here yet
+//! ## What is NOT here
 //!
-//! - **rustls ClientHello injection.** rustls 0.23's
-//!   public API does not expose a session_id override
-//!   hook. The wire-up sprint either (a) uses a custom
-//!   TLS client built on `rustls::client::ClientConfig`
-//!   plus the `dangerous_configuration` feature to clone
-//!   and patch the ClientHello payload, or (b) waits on
-//!   the `rustls-hooks` feature flag (tracking upstream).
 //! - **Wire compatibility with upstream xtls/REALITY.**
-//!   The authenticator landed here is REALITY-shaped
-//!   (same primitives, same audit posture) but pins its
-//!   own canonical bytes via the `"lakko/reality/v1"`
-//!   HKDF label. Wire interop with go-xray REALITY
-//!   servers is a separate sprint that aligns the exact
-//!   byte layout to upstream Go source.
-//! - **Server side.** This module only ships the client-
-//!   side primitive. A REALITY server would land in a
-//!   future SFU-frontend sprint.
+//!   The authenticator is REALITY-shaped (same primitives,
+//!   same audit posture) but pins its own canonical bytes
+//!   via [`authenticator::HKDF_LABEL`]. Lakko is a closed
+//!   ecosystem (ADR-0011), so interop with go-xray REALITY
+//!   servers is deliberately not a goal.
+//! - **Forward secrecy of the authenticator itself.** v2
+//!   dropped v1's ECDH because rustls 0.23 exposes no
+//!   TLS 1.3 ephemeral-X25519 hook; the cover TLS session
+//!   keeps its own forward secrecy, and the residual is
+//!   mitigated by rotating `tag_secret` through the
+//!   bootstrap config's TTL.
+//! - **Probe indistinguishability from the cover site.**
+//!   An unauthenticated prober is refused by a connection
+//!   *drop*, which is distinguishable from the cover site
+//!   answering. Closing that needs a live cover-proxy.
 //!
 //! ## Pinned audit invariant
 //!
-//! - **T-13** — REALITY authenticator is ECDH + HKDF +
-//!   HMAC-SHA-256 keyed by the X25519 shared secret;
+//! - **T-13** — the REALITY v2 authenticator is
+//!   HMAC-over-(`short_id` || timestamp) keyed by a
+//!   publisher-distributed pre-shared `tag_secret`;
 //!   timestamp window bounded; tag verified before any
-//!   downstream byte is trusted. See
+//!   downstream byte is trusted; mutual auth via
+//!   `ServerHello.Random`. See
 //!   `docs/security/transport.md`.
 
 pub mod authenticator;

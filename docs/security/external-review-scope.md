@@ -303,20 +303,17 @@ Stated plainly, because each of these would otherwise be a reasonable inference.
   and every witness / release-manifest client pin (empty by default, which disables
   the gate rather than failing it). `LAKKO_TRANSPARENCY_REQUIRE_LEAF_AUTH` does
   default on.
-- **Some code comments are stale and will mislead.** Known cases, all describing a
-  state the code has left:
-  [`crates/lakko-tuf/src/lib.rs:56-65`](../../crates/lakko-tuf/src/lib.rs) (claims
-  delegations are refused; the walk landed at `:1205`),
-  [`crates/lakko-transport/src/reality/mod.rs:29`](../../crates/lakko-transport/src/reality/mod.rs),
-  [`crates/lakko-transport/src/masque/mod.rs:37`](../../crates/lakko-transport/src/masque/mod.rs),
-  [`crates/lakko-transport/src/shadowsocks.rs:40`](../../crates/lakko-transport/src/shadowsocks.rs)
-  (all three claim `connect` returns `NotImplemented`; none does),
-  [`services/sfu/src/media.rs:85-97`](../../services/sfu/src/media.rs) and `:1050-1057`
-  (claim RTP fanout and the media loop have not landed; both have),
-  [`services/obfs-proxy/src/main.rs:12-17`](../../services/obfs-proxy/src/main.rs)
-  (claims MASQUE and WebTransport have no listener; both exist, and the file wires
-  one of them fourteen lines further down).
-  **Trust the code over its comment**, and tell us when you find more.
+- **A module doc may describe a state the code has left.** Six such comments were
+  found while assembling this brief and swept on 2026-09-02 — `lakko-tuf` claimed to
+  refuse delegated targets after the walk had landed; three transport modules claimed
+  `connect` returns `NotImplemented`; `services/sfu` claimed RTP fanout and the media
+  loop had not landed; `services/obfs-proxy` claimed MASQUE and WebTransport have no
+  listener while wiring one of them a few lines further down. **That the sweep
+  happened is not a guarantee that the class is closed** — these were found by
+  chasing one document's claims, not by an exhaustive pass, and the pattern is
+  predictable: a "What is NOT here yet" section written during a scaffold sprint and
+  never revisited when the sprint that filled it landed. **Trust the code over its
+  comment, and tell us when you find one we missed.**
 
 ---
 

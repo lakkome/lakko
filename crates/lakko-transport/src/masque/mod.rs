@@ -33,28 +33,36 @@
 //!   (variable-length Context ID — always 0 for
 //!   CONNECT-UDP — followed by the UDP payload bytes).
 //! - [`MasqueTransport`] — `Transport` impl. `new` validates
-//!   the config eagerly; `connect` still returns
-//!   `NotImplemented` until the h3 + quinn wire-up sub-
-//!   sprint (`S-5-masque-handshake`) lands.
+//!   the config eagerly; `connect` opens a quinn endpoint
+//!   (TLS 1.3, ALPN `h3`), runs the extended-CONNECT-UDP
+//!   request, awaits the `2xx`, and returns a connection
+//!   that sends and receives UDP payloads over QUIC
+//!   datagrams. The h3 `SendRequest` handle is held for the
+//!   tunnel's lifetime — dropping it closes the whole
+//!   HTTP/3 connection, which is a real bug this module
+//!   once had and its loopback e2e caught.
+//! - [`MasqueListener`] — the server half: a quinn server
+//!   accepting extended CONNECT-UDP and answering `200`.
 //!
-//! ## What is NOT here yet
+//! ## What is NOT here, and one thing that will not be
 //!
-//! - **h3 + quinn integration.** Real connect requires
-//!   opening a quinn HTTP/3 connection, building an
-//!   extended-CONNECT request via the `h3` crate, and
-//!   feeding `h3-datagram` frames through the resulting
-//!   stream. The `h3-datagram` crate is at 0.0.2 (very
-//!   early) on crates.io; a follow-up sprint either takes
-//!   that as a dep or implements the QUIC DATAGRAM frame
-//!   handling directly on top of `quinn`'s
-//!   `Connection::send_datagram` API. Tracked as
-//!   `S-5-masque-handshake`.
-//! - **Authentication response handling.** Once the server
-//!   returns its `2xx` response (per RFC 9298 §3), the
-//!   client knows the tunnel is up. The response-handling
-//!   path lands in the same handshake sub-sprint.
-//! - **Re-key + idle / migration semantics.** Out of scope
-//!   for the foundation sprint.
+//! - **Relaying a reliable service over this transport.**
+//!   `MasqueListener` is deliberately **not** wired into
+//!   `services/obfs-proxy`. CONNECT-UDP carries unreliable,
+//!   unordered datagrams: a response datagram is dropped on
+//!   close, never retransmitted and never flushed ahead of
+//!   `CONNECTION_CLOSE`, so relaying a reliable internal
+//!   HTTP service over it does not work. The ignored
+//!   `masque_tunnel_relays_http_request_to_internal_origin`
+//!   in `services/obfs-proxy/tests/loopback_e2e.rs` records
+//!   that conclusion; it is a design finding, not a missing
+//!   dependency. MASQUE is for tunnelling UDP. The three
+//!   reliable-stream transports (REALITY, Shadowsocks-2022,
+//!   WebTransport) cover the proxy's use case.
+//! - **ECH.** No ECH surface on this transport, unlike
+//!   [`crate::http`] and [`crate::webtransport_pt`].
+//! - **Re-key + idle / migration semantics.** Still out of
+//!   scope.
 //!
 //! ## Pinned audit invariant
 //!

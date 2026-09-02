@@ -55,14 +55,21 @@
 //!   ```
 //! - **Delegated targets.** The TUF spec lets the targets
 //!   role delegate sub-paths to other keys (`delegations`
-//!   field). The scaffold does not follow delegations
-//!   yet — and to defend against an attacker who
-//!   compromised the targets signing key, [`verify_chain`]
-//!   actively refuses to install any `Targets` whose
-//!   `delegations` field is present (the field round-trips
-//!   as opaque [`serde_json::Value`] so we can observe
-//!   presence without trusting the contents). Removed
-//!   once the delegation walk lands.
+//!   field), and [`resolve_target`] walks that tree —
+//!   pre-order DFS, each delegated role's metadata verified
+//!   against the keys and threshold its *delegating* role
+//!   published, `paths` globs XOR `path_hash_prefixes`
+//!   matching, `terminating` short-circuiting a branch.
+//!   [`verify_chain`] no longer refuses a `delegations`
+//!   block; it returns the top-level direct target map and
+//!   leaves the walk to `resolve_target`. `delegations` is
+//!   the typed [`Delegations`], not an opaque
+//!   [`serde_json::Value`]. Bounded against a hostile graph
+//!   by [`MAX_DELEGATION_DEPTH`], a visited-role cycle guard
+//!   and [`MAX_DELEGATED_ROLES_VISITED`]; the cycle guard is
+//!   deliberately global rather than per-branch, so a
+//!   spec-legal diamond is refused — it over-refuses and
+//!   never wrongly accepts.
 //! - **Key rotation across root versions.** Closed by
 //!   [`verify_root_chain`] — the caller holds an
 //!   ordered slice of root metadata files (one per

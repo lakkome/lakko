@@ -79,25 +79,28 @@
 //!   surfaces a typed
 //!   [`crate::router::RouterError::MediaNotWired`] (maps
 //!   to `ErrorCode::BadSdp` on the wire). The
-//!   router-to-MediaPeer integration lands in step 3
+//!   router-to-MediaPeer integration is [`spawn_media_task`]
 //!   alongside the UDP socket loop.
 //!
 //! ## What does NOT land yet
 //!
-//! Steps 3-5 of S-3-B-routing-media:
+//! All five steps of S-3-B-routing-media landed. The UDP
+//! socket and its tokio loop are [`spawn_media_task`] /
+//! `run_media_loop`; RTP fanout is `fanout_media_data`,
+//! which walks every non-origin peer and forwards the frame
+//! bytes verbatim; simulcast layer selection is
+//! `drive_layer_selection` over per-`(Mid, Rid)` bitrate
+//! meters; and the in-process synthetic-client tests are
+//! `services/sfu/tests/synthetic_client_e2e.rs`. All of it
+//! keeps the audit-pack invariant ("payload-opaque router",
+//! **C-39**) intact: the SFU never decodes a frame body, and
+//! fanout refuses to cross a `call_id` boundary.
 //!
-//! - Step 3 — open the SFU's UDP socket + spawn the
-//!   tokio task that polls the registry, writes to the
-//!   socket, and dispatches `ClientFrame::SdpOffer` /
-//!   `IceCandidate` into the right `MediaPeer`.
-//! - Step 4 — translate `str0m::Event::MediaData`
-//!   into outgoing writes on every other peer's `Rtc`
-//!   (RTP fanout).
-//! - Step 5 — integration tests with synthetic
-//!   `str0m::Rtc` clients in-process.
-//!
-//! Each step keeps the audit-pack invariant
-//! ("payload-opaque router") intact.
+//! What genuinely remains is a **runtime** gate rather than
+//! code: a real RTP round-trip between two platforms over a
+//! **deployed** SFU has never been run (**G-26**). The
+//! headless half — six SFrame stacks pinning one golden wire
+//! vector — is done.
 
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -1048,10 +1051,9 @@ impl std::fmt::Debug for MediaPeer {
 /// (see [`crate::peer::PeerRegistry`]) decides what
 /// goes into each `MediaRouter`.
 ///
-/// Step 1 ships only the construction surface; the
-/// per-tick fanout logic lands in step 4 once the
-/// signaling-driven SDP exchange (step 2) and the UDP
-/// socket loop (step 3) are in place.
+/// The per-tick fanout logic this type feeds is
+/// `fanout_media_data`, driven from `run_media_loop`
+/// over the UDP socket [`spawn_media_task`] owns.
 #[derive(Debug, Default)]
 pub struct MediaRouter {
     peers: Vec<MediaPeer>,

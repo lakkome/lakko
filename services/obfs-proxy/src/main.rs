@@ -9,11 +9,17 @@
 //! (`/health` `/ready` `/version`) serves ops + load-balancer probes; the obfs
 //! port itself is raw, not HTTP.
 //!
-//! REALITY + Shadowsocks-2022 listeners run side by side; the relay is
-//! transport-agnostic (it only needs a `Box<dyn Connection>`). MASQUE +
-//! WebTransport (the QUIC/UDP transports) have no server-side terminating
-//! listener in `lakko-transport` yet — adding them is a separate transport-side
-//! task, not a proxy wiring one.
+//! REALITY, Shadowsocks-2022 and WebTransport listeners run side by side; the
+//! relay is transport-agnostic (it only needs a `Box<dyn Connection>`).
+//!
+//! MASQUE is the deliberate omission. `lakko_transport::MasqueListener` exists
+//! and its handshake works, but CONNECT-UDP carries unreliable, unordered
+//! datagrams — a response datagram is dropped on close, never retransmitted and
+//! never flushed ahead of `CONNECTION_CLOSE` — so relaying a *reliable* internal
+//! HTTP service over it does not work. The ignored
+//! `masque_tunnel_relays_http_request_to_internal_origin` in
+//! `tests/loopback_e2e.rs` records that finding. MASQUE is for tunnelling UDP;
+//! wiring it here would need a reliability layer this proxy should not add.
 
 use std::sync::Arc;
 
