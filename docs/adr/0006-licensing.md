@@ -5,7 +5,8 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0006: AGPLv3 for the entire monorepo + CLA
 
-- **Status:** Accepted
+- **Status:** Accepted — **the AGPLv3 half is implemented; the CLA half is
+  not built** (see the marked sections below; recorded 2026-09-02).
 - **Date:** 2026-04-28
 - **Context:** Phase 0
 
@@ -25,7 +26,33 @@ The repo is a monorepo (see CLAUDE.md), AI-agent-driven workflow.
 
 **AGPLv3 for all code in the monorepo.** A single `LICENSE` at the root (full text of AGPL-3.0). The SPDX header `AGPL-3.0-or-later` is mandatory in every file.
 
-**A CLA (Contributor License Agreement)** is mandatory for every contributor — Apache ICLA-style. Verified by the `cla-assistant` bot on every PR. PRs without a signed CLA do not merge.
+> **Qualified 2026-09-02 (documentation audit): "every file" now has documented
+> exceptions, and this ADR never mentioned them.** `crates/vendor/` holds two
+> **MPL-2.0** crates — `webauthn-rs-core` (the minimal challenge-injection fork,
+> [ADR-0014](./0014-webauthn-action-binding.md)) and `hpke-rs-libcrux`
+> (known-gap G-23). Both are correctly mechanised: `REUSE.toml` carries
+> `precedence = "override"` blocks for them and `LICENSES/MPL-2.0.txt` is
+> present, so `reuse lint` passes honestly rather than by looking the other way.
+> MPL-2.0 is file-level copyleft and AGPL-compatible, so nothing about the
+> outbound licence changes — but the unqualified sentence above is now false,
+> and a reader adding a third vendored crate needs to know the override
+> mechanism exists. **Every first-party crate and service is AGPL-3.0-or-later**
+> via `license.workspace = true`; that part is exactly true.
+
+~~**A CLA (Contributor License Agreement)** is mandatory for every contributor — Apache ICLA-style. Verified by the `cla-assistant` bot on every PR. PRs without a signed CLA do not merge.~~
+
+> **NOT BUILT (recorded 2026-09-02) — and it is in this ADR's own title.**
+> There is **no CLA document** anywhere in the repository and **no
+> `cla-assistant`** configuration; `.github/` contains only `workflows/`, none
+> of them CLA-related, plus no `CODEOWNERS` and no PR template. The project is
+> single-maintainer with no external contributors so far, so nothing has been
+> merged un-covered — but the gap is not cost-free, because **the re-licensing
+> option described immediately below depends entirely on this**. Without signed
+> contributor grants, splitting `lakko-mls` out under Apache-2.0 or
+> dual-licensing commercially would require tracking down and getting
+> permission from every past contributor. **The cost of the omission grows with
+> every contribution**, which is the argument for putting it in place before
+> the first external PR rather than after.
 
 The CLA gives the project maintainer the right to re-license a contribution under a different licence in the future — a critical option for:
 - Splitting out a separate SDK crate (e.g. `lakko-mls`) under Apache 2.0 in Phase 4-5 if it becomes attractive to the industry
@@ -36,7 +63,12 @@ The CLA gives the project maintainer the right to re-license a contribution unde
 - `REUSE.toml` (FSFE REUSE 3.0) — fallback annotations for files without a header (binary fixtures, generated code)
 - `reuse lint` in CI — blocks PRs without a header or with the wrong licence
 - `cargo deny` — blocks deps with GPL-incompatible licences (e.g. MS-RL, EPL without explicit permission)
-- A pre-commit hook adds the SPDX header into new files (template per language)
+- ~~A pre-commit hook adds the SPDX header into new files (template per language)~~
+  **Not built** (2026-09-02): there is no `.pre-commit-config.yaml` and no
+  installed hook. SPDX enforcement is CI-only (`reuse lint` via
+  `fsfe/reuse-action` in `.github/workflows/ci.yml`) plus the manual
+  `just reuse`. The gate holds — a missing header fails the build — it just
+  fails later than intended, in CI rather than at commit time.
 
 ### Third-party dependencies
 
@@ -45,6 +77,19 @@ The CLA gives the project maintainer the right to re-license a contribution unde
 - AGPL-compatible: AGPL-3.0+, GPL-3.0+, LGPL-3.0+
 
 Not allowed: proprietary, GPL-2.0-only (incompatible with AGPL-3.0), CDDL, OSL-without-explicit-permission.
+
+> **`deny.toml` is the authority and has moved since (2026-09-02).** The list
+> above is the intent; the enforced list lives in
+> [`deny.toml`](../../deny.toml) and now additionally allows
+> `Apache-2.0 WITH LLVM-exception`, `0BSD`, `Unicode-3.0`, `OpenSSL`,
+> `CDLA-Permissive-2.0` and bare `AGPL-3.0` — each with an in-file
+> justification comment naming the crate that needed it. It also does **not**
+> allow `GPL-3.0` in any form, and allows `LGPL-3.0-only` specifically rather
+> than the `LGPL-3.0+` written here. The drift is one-directional: `deny.toml`
+> grew as real dependencies arrived and this ADR did not follow. **Read
+> `deny.toml` for the list; read this ADR for the policy** — the policy
+> (allow-list, not deny-list; nothing AGPL-incompatible) is unchanged and every
+> addition is consistent with it.
 
 ## Alternatives
 

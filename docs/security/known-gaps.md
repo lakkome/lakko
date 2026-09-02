@@ -2758,12 +2758,24 @@ the ex-member could still derive the id.
   shrink the owner **or an admin** (ratified option (b)) re-mints and
   redistributes the secret, sealed at the **post-remove epoch**, so RFC 9420
   forward secrecy denies the evicted leaf the envelope. The ex-member's push-gw
-  row is **never deleted** — nobody else *can* delete it (`group_unsubscribe`
-  removes only the `(device, group)` row named in the request, and a device knows
-  only its own pseudonym) and no client has "you were removed" handling. It goes
+  row is **not deleted by anyone else** — nobody else *can* delete it
+  (`group_unsubscribe` removes only the `(device, group)` row named in the request,
+  and a device knows only its own pseudonym) — so from the group's side it goes
   **INERT**: nothing ever notifies the old gid again. **That inertness is the
   win** — the ex-member stops learning the group is active — and it is
-  deliberately *not* cleanup. The row persists.
+  deliberately *not* cleanup.
+
+  > **AMENDED 2026-08-29 (`8763f3e`): the clause "and no client has 'you were
+  > removed' handling" no longer holds, and with it the row's permanence.** The
+  > ADR-0045 self-eviction work built exactly that handling — `Group::is_active()`
+  > surfaced through both FFI surfaces, and a `retire-push-subscription` teardown
+  > step on all three clients — so **the evicted device deletes its own row**
+  > (`ENDED_TEARDOWN_STEPS` in `apps/web/src/chat/membership-ended.ts` and its two
+  > native twins, reusing the same `retireOldPushGid` the rotation teardown uses).
+  > That closes the half of this residual ADR-0043 recorded as unclosable. **The
+  > bound is real and is stated rather than glossed:** it needs the evicted device
+  > to come online and run it, so it **complements** rotation and replaces nothing —
+  > a device that never returns still leaves its row, inert.
 - **Per-group unsubscribe stops being dead code.** Its **first real caller** on
   every client is the receive-side teardown, in which each remaining member
   retires **its own** old gid (unsubscribe + delete the reverse-index row): web
@@ -3907,9 +3919,12 @@ what a confidentiality guarantee rested on.
 > - **One degraded corner can duplicate a timeline row** (C-67): a persist fails, the
 >   debounced message-log write lands with the old cursor and the new rows, then the
 >   process dies. Cosmetic, and strictly better than the permanent strand it replaces.
-> - **The external crypto review ADR-0045 also requires has still not happened.** The
->   `lakko-security` pass is one of the two preconditions; the other is outstanding, and
->   the surface it would review grew again with these seven fixes.
+> - **The external crypto review ADR-0045 also requires has still not happened**, and
+>   since [ADR-0046](../adr/0046-external-crypto-review.md) it is tracked once, as
+>   **G-39**, rather than as a per-ADR blocker — a **release gate**: no build reaches
+>   users while it is open. The `lakko-security` pass was one of the two preconditions
+>   and is now done; the other is outstanding, and the surface it would review grew
+>   again with these seven fixes.
 
 **Get the mechanism right, because the obvious statement of it is wrong.** The hazard
 is **not** "two commits built on the same epoch". On all three clients the
@@ -3971,12 +3986,13 @@ nothing, since the eager merge is exactly what goes stale.
   prevented it, and the G-37 narrowing preserves the same-group guarantee by design.
 
 **Residuals — read residual 1 first. It was the largest unfixed item here and it is
-now the largest PARTLY fixed one: closed for the member membership paths by
-ADR-0045, still open for external joins.**
+now CLOSED for every membership path: for add / remove / role-change by ADR-0045
+(2026-08-25) and for external joins by its S7 (2026-08-31, `576ea14`). What is left
+under residual 1 is a live multi-device proof, not a mechanism.**
 
-1. **The remote-commit fork. CLOSED for the member membership paths (2026-08-25,
-   [ADR-0045](../adr/0045-remote-commit-epoch-fork.md)); OPEN for the external-join
-   path.** The hazard, unchanged: a poll applying a **remote** commit while a local
+1. **The remote-commit fork. CLOSED for every membership path — the member paths on
+   2026-08-25 ([ADR-0045](../adr/0045-remote-commit-epoch-fork.md)) and the
+   external-join path on 2026-08-31 (S7, `576ea14`).** The hazard, unchanged: a poll applying a **remote** commit while a local
    one is mid-publish is a genuine MLS commit race — the peer built its commit
    against epoch N independently, so whichever commit loses the DS journal ordering
    is rejected by everyone who applied the winner, while its own author has already
@@ -4003,21 +4019,36 @@ ADR-0045, still open for external joins.**
    Pinned as **C-64**; the ownership-transfer safety rule the same arc produced is
    **C-63**.
 
-   **What is NOT closed.** `Group::approve_external_join` still calls `add_member`
-   and **eager-merges**, so it is the one remaining direct-commit path in a
-   role-table group. Two admins approving two different joiners against the same
-   epoch fork each other **exactly as they did before ADR-0045**. That convergence is
-   ADR-0045's S7 and it is unbuilt. It has also become user-visible: the `a90fa90`
-   hardening `refuse_if_proposals_pending` makes the direct and sweep paths mutually
-   exclusive at any instant, so an admin approving a join while any membership
-   request is pending gets a refusal — correct and fail-closed, and a dead end nobody
-   designed. **Two further residuals of the closure itself**, both recorded in the
-   ADR rather than here: a chat message can still straddle an epoch when the commit
+   ~~**What is NOT closed.** `Group::approve_external_join` still calls `add_member`
+   and **eager-merges** … That convergence is ADR-0045's S7 and it is unbuilt.~~
+   **S7 landed on 2026-08-31 (`576ea14`) and this paragraph is superseded.**
+   `approve_external_join` publishes an `Add` **proposal the approving admin authors
+   itself**, carrying the joiner's retained KeyPackage, so two admins approving two
+   different joiners against one epoch now compose into a single sweep instead of
+   forking. The user-visible dead end went with it: `refuse_if_proposals_pending` no
+   longer reaches the approve, because there is no direct commit left for it to
+   guard. The one direct arm that survives is `pub(crate)
+   approve_external_join_directly`, whose single caller is
+   `PublisherGroup::approve_external_join` and which **refuses** a group carrying a
+   role table — so it exists exactly where the proposal path cannot work (a
+   `PublisherGroup` seeds no role table, hence has no committer) and nowhere else.
+
+   **Three residuals of the closure itself**, all recorded in the ADR rather than
+   here — the first two predate S7: a chat message can still straddle an epoch when the commit
    that changes it is a **remote** one (the clients serialized seal-and-publish, which
    closes the local half only; closing the rest needs `max_past_epochs` above zero in
    `lakko-mls`, an invariant-#3 change with its own forward-secrecy cost), and
    `PublisherGroup::rotate` / `self_update` remain a fifth epoch-advancing path
-   ADR-0045 does not scope.
+   ADR-0045 does not scope. S7 adds a third: a sweep can **drop an authorised
+   approval** (fifteen enumerated `CommitBuilder::build` conditions plus the
+   exclusion pass, the commonest needing no adversary being a KeyPackage expiring
+   while a request waits under decision 2's deliberate absence of a deadline), and
+   the **joiner cannot be told** — the group journal is unauthenticated and its DS
+   pseudonym *is* the `group_id`, so a "your request was not carried" envelope would
+   be a forgeable denial primitive any `/g/` link-holder could post, and an epoch
+   advance without a rendezvous is byte-identical to nobody having approved yet. The
+   **approver** does learn, via the `Not applied (n)` surface (`46c7aa4`); the joiner
+   gets honest wait copy and a user-driven repair.
 
    The sub-case that was platform-dependent is **closed on all three**: the poll apply
    takes the same per-group lock as the commits, with the network fetch outside it and
@@ -4070,12 +4101,19 @@ indexed `C-` / `I-` / `T-` invariant.
 **Invariants — of the ADR-0045 closure of residual 1**, which is a different change
 and a much larger one. It **does** touch `crates/lakko-mls` (invariant **#3**): a new
 per-proposal authorisation rule, a commit-level never-orphan-the-owner rule, a new
-stage / merge / abandon commit lifecycle, and a park on the send path. **The external
+stage / merge / abandon commit lifecycle, and a park on the send path. ~~**The external
 crypto review that ADR requires and a `lakko-security` pass have both still not
-happened on any of it** — the largest open item on the arc, and it grew rather than
-shrank once three client implementations of the same disciplines landed on top.
-Two indexed invariants were minted: **C-63** and **C-64**. See the Quick stats table
-in [`invariant-index.md`](./invariant-index.md) for the current counts.
+happened on any of it**~~ — **the `lakko-security` pass RAN on 2026-08-29**, returned
+REQUEST CHANGES on seven findings (three HIGH plus a confirmed impersonation) and all
+seven are closed; the **external crypto review has not run** and is now tracked once,
+as **[G-39](#g-39-the-external-cryptographic-review-of-the-mls-state-machine-has-not-happened--open-and-it-is-a-release-gate)**,
+per [ADR-0046](../adr/0046-external-crypto-review.md). It remains the largest open
+item on the arc, and it grew rather than shrank once three client implementations of
+the same disciplines landed on top. ~~Two indexed invariants were minted: **C-63** and
+**C-64**~~ — **seven**: C-63 and C-64 from the build, C-65 from the concurrent
+role-change wedge, C-66 / C-67 / C-68 from the security review, and C-69 from S7. See
+the Quick stats table in [`invariant-index.md`](./invariant-index.md) for the current
+counts.
 
 **Verified firsthand by the maintainer against the tree at the time of the
 serialization fix:** Android `:app:compileDebugKotlin` BUILD SUCCESSFUL and
@@ -4084,13 +4122,19 @@ and vitest 583; iOS `xcodebuild` BUILD SUCCEEDED with LakkoTests 342/342 excludi
 the two dockerised-SFU cases; `just spec-check` OK. **The ADR-0045 client sprints
 record their own gates** (`1de5fe7` / `02f0037` / `000d9f8` / `1f230ab`): web vitest
 706, iOS 432 tests, Android 598 tests, all with zero failures. The residuals above
-are **not** covered by any of those gates — the remaining half of residual 1 in
-particular needs a live multi-device environment.
+are **not** covered by any of those gates — what remains under residual 1 (a live
+multi-device proof of the whole propose-sweep-adjudicate loop) in particular needs a
+live multi-device environment. This sentence previously read "the remaining half of
+residual 1", meaning the unbuilt external-join convergence; that half is built.
 
 ### G-39: The external cryptographic review of the MLS state machine has not happened — **OPEN, and it is a release gate**
 
 **Owner:** [ADR-0046](../adr/0046-external-crypto-review.md), which moved this obligation
-here from four scattered ADR sentences. It is stated **once**, in this entry, and nowhere
+here from where it had been scattered — two ADRs stating it as a blocker
+([ADR-0040](../adr/0040-durable-pending-commit-outbox.md),
+[ADR-0045](../adr/0045-remote-commit-epoch-fork.md)), four `C-` rows in
+[`invariant-index.md`](./invariant-index.md) repeating it, and four further ADRs
+mentioning it without acting on it. It is stated **once**, in this entry, and nowhere
 else.
 
 **What it is.** Security invariant #3's third clause: *"(after Phase 2) an external

@@ -9,6 +9,32 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 - **Date:** 2026-06-19
 - **Context:** Phase 5 — anti-censorship operational wiring (Phase-3 block B entry)
 
+> **AMENDED 2026-09-02 (documentation audit). This ADR's premise expired the
+> same day it was written, and its status has not moved since.**
+>
+> - **The dialer was built.** `BootstrapDialer` with `from_verified_config` /
+>   `from_signed_config` / `dial` / `candidate_kinds` is in
+>   [`crates/lakko-transport/src/selector.rs`](../../crates/lakko-transport/src/selector.rs),
+>   matching the API sketched below. The `Status: Proposed` line is stale; see
+>   the note at the end of Consequences.
+> - **`lakko-transport` is no longer a dependency of nothing.** The Context
+>   below rests on a grep that is now false — it is a dependency of
+>   [`lakko-ffi-uniffi`](../../crates/lakko-ffi-uniffi/Cargo.toml) (so of iOS
+>   and Android) and of
+>   [`services/obfs-proxy`](../../services/obfs-proxy/Cargo.toml).
+> - **The per-client wiring this ADR defers is largely done on native.**
+>   [ADR-0026](./0026-anti-censorship-wiring.md), written the same day, is the
+>   arc that did it: every native HTTP surface and the SFU WebSocket route
+>   through the obfs tunnel when the user arms anti-censorship. **Web is the
+>   honest exception and always will be** — a browser cannot open raw sockets,
+>   so it stays on direct HTTPS by design, not by backlog.
+>
+> What is unchanged and still worth reading: the fail-closed candidate-build
+> rules, the no-`Direct`-variant argument, and the four rejected alternatives.
+> The sequential-race limitation below is also still true — verified in this
+> audit at `pluggable.rs`, where `race_select` still walks candidates in a
+> `for` loop.
+
 ## Context
 
 `crates/lakko-transport` ships a full set of censorship-resistant transports —
@@ -21,6 +47,10 @@ downgrade), and a signed bootstrap-config layer (`BootstrapConfig` + a 4-stage
 confirms `lakko-transport` is a dependency of no client and no service; the
 clients dial over their platform HTTP stacks (web `fetch`, iOS `URLSession`,
 Android Ktor/OkHttp).
+
+> **True on 2026-06-19, false since.** `lakko-transport` is now depended on by
+> `lakko-ffi-uniffi` and `services/obfs-proxy`; see the amendment at the head.
+> The paragraph is kept because it is the motivation for everything below.
 
 The missing piece is the **runtime dispatcher**: nothing fetches the verified
 config, turns its ordered `TransportSpec` list into selector candidates, and
@@ -101,21 +131,38 @@ censored path).
   entry point driven by the verified config — the prerequisite for any client
   wiring; consolidates five transports + the race + the config gate into one
   audited surface; no new dependency, no wire-format change.
-- **Negative (honest):** it remains Rust-internal — no user-facing
+- **Negative (honest):** ~~it remains Rust-internal — no user-facing
   censorship-resistance ships until the deferred per-client wiring lands. The
-  dialer is "better-composed dead code" until then. The happy-eyeballs race is
-  still sequential (the concurrent `tokio::select!` upgrade is a separate,
-  already-tracked follow-up).
+  dialer is "better-composed dead code" until then.~~ **Superseded by
+  [ADR-0026](./0026-anti-censorship-wiring.md).** The dialer is the engine the
+  FFI `tunneled_http_request` / `open_tunneled_websocket` entry points drive,
+  and iOS + Android route their HTTP and the SFU WebSocket through it when the
+  user arms anti-censorship — so it is neither Rust-internal nor dead. Two
+  honest qualifications replace the old one: **web is permanently excluded**
+  (browser sandbox, no raw sockets), and what has *not* happened is the live
+  censored-network test, which needs a deployed environment. The
+  happy-eyeballs race **is still sequential** (verified 2026-09-02 —
+  `race_select` walks a `for` loop, and its own comment says so); the
+  concurrent `tokio::select!` upgrade remains a real follow-up, blocked on
+  `Transport` not being `Clone`.
 - **Neutral:** the config's transport ORDER is the race order; an operator tunes
   priority by ordering `transports`.
 
 ## Open questions
 
-- **Per-client connection-layer wiring** (web / iOS / Android) — the large
-  Phase-5 arc that actually puts the transport on the wire. Needs a live
-  censored-network (or the `ci/censorship-lab`) test to validate end-to-end.
+- **~~Per-client connection-layer wiring~~ — ANSWERED by
+  [ADR-0026](./0026-anti-censorship-wiring.md).** It is built on **iOS and
+  Android** (every native HTTP surface plus the SFU WebSocket, via a
+  server-side obfs-terminating proxy rather than the per-platform socket
+  surgery guessed at below). **Web is not deferred but excluded** — a browser
+  cannot open raw sockets, so anti-censorship is a native feature by
+  construction. What remains is the **live censored-network test**, which needs
+  a deployed environment; `ci/censorship-lab` covers the observer/detector half
+  headlessly.
 - **Concurrent happy-eyeballs** (sub-RTT first-byte) — upgrade `race_select`
-  from sequential to a true parallel race.
+  from sequential to a true parallel race. **Still open** (verified
+  2026-09-02); blocked on `Transport` not being `Clone`, which the candidate
+  set would need for a concurrent spawn.
 
 ## References
 

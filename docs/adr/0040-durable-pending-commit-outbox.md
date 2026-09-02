@@ -5,21 +5,40 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0040: Durable pending-commit outbox for crash-safe MLS group commits
 
-- **Status:** Accepted — design (S1). The maintainer directed "design the ADR
-  then build" on 2026-07-21; the S2–S5 per-client implementation is **pending**
-  (this ADR + the G-35 known-gaps entry are S1). Option A (a durable
-  pending-commit outbox, **no `lakko-mls` core / FFI change**) is the accepted
-  mechanism; Option B (split create-from-merge in the core) is recorded as a
-  possible future refinement, not chosen for v1. **Update (2026-08): Option B
-  landed narrowly** under [ADR-0045](0045-remote-commit-epoch-fork.md) — for the
-  new proposal-**sweep** path only, not for the four direct-commit paths this ADR
-  covers, and it does **not** retire the outbox. See the Open Questions entry.
+- **Status:** **Accepted — implemented S1–S5 (2026-07), end to end on web + iOS +
+  Android; G-35 CLOSED.** ~~Accepted — design (S1) … the S2–S5 per-client
+  implementation is **pending**~~ — that status line stood after the
+  implementation landed and is corrected here. The maintainer directed "design the
+  ADR then build" on 2026-07-21; S1 is this ADR plus the G-35 known-gaps entry, and
+  the outbox itself is `apps/web/src/chat/commit-outbox.ts`,
+  `apps/ios/Lakko/Chat/CommitOutbox.swift` and
+  `apps/android/.../chat/CommitOutbox.kt`. Option A (a durable pending-commit
+  outbox, **no `lakko-mls` core / FFI change**) is the accepted mechanism; Option B
+  (split create-from-merge in the core) is recorded as a possible future
+  refinement, not chosen for v1. **Update (2026-08): Option B landed narrowly**
+  under [ADR-0045](0045-remote-commit-epoch-fork.md) — for the new
+  proposal-**sweep** path only, not for the direct-commit paths this ADR covers,
+  and it does **not** retire the outbox. See the Open Questions entry. **Further
+  update (2026-08-31): the outbox now also serves the ADR-0045 sweep** — each
+  client's sweep adjudication is wired through the same `sweepPendingCommits` seam
+  and outbox bookkeeping, so this ADR's mechanism carries a path it was not
+  designed for. That is deliberate reuse, not drift: an owed sweep verdict and an
+  un-acked direct commit are the same restart question.
+
 - **Date:** 2026-07-23
 - **Context:** Phase 3 — group-membership commits / MLS ratchet durability.
   Closes the G-34 T2 commit-path residual (the add / remove / role-change /
   external-join-approve paths share the same publish-before-persist ordering the
   chat send path had before G-34 T2, but with a **distinct, worse** failure
   mode — epoch desync, not same-generation nonce reuse).
+
+> **A note on the line numbers in this document.** They are a 2026-07 snapshot and
+> most of them have since shifted — `crates/lakko-mls/src/group.rs` roughly doubled
+> under ADR-0045, and the client files moved with it. Where a citation was actively
+> misleading (a wrong method **name**, a fabricated quotation, a line past a file's
+> end) it is corrected in place below. The rest are left as they are and should be
+> read as symbol pointers, per the anchor convention ADR-0045 adopted for exactly
+> this reason.
 
 ## Context
 
@@ -48,7 +67,31 @@ group-membership **commit** paths.
 
 ### The four commit paths, and the eager merge
 
-Every group membership change on all three clients runs the same shape: the
+> **Amended 2026-08-31 (ADR-0045 S7, `576ea14`): there are now three, and in an
+> ordinary chat group none of them is reached.** Two things moved under this
+> heading and neither invalidates the analysis — the hazard is a property of the
+> create-then-publish-then-persist *shape*, and every path that still has that
+> shape still has the hazard.
+>
+> 1. **external-join approve is no longer one of them.** `approve_external_join`
+>    publishes an `Add` **proposal** and returns proposal bytes
+>    (`crates/lakko-mls/src/group.rs`, `approve_external_join` →
+>    `propose_add_member`); it neither commits nor merges. The direct arm survives
+>    as `pub(crate) approve_external_join_directly`, whose single caller is
+>    `PublisherGroup::approve_external_join` and which refuses a group carrying a
+>    role table.
+> 2. **The remaining three are unreachable from a role-table group.** All three
+>    clients branch on the role table (web's `usesProposalPath` in
+>    `apps/web/src/contacts/client.ts`, and its two native twins) and route to a
+>    proposal when there is one, and `Group::create` has seeded a table since
+>    ADR-0022 — so the direct paths are now reached only by table-less groups
+>    (`DeviceGroup`, `PublisherGroup`, call groups).
+>
+> The outbox is **not** thereby dead: it wraps both shapes. It still guards the
+> direct paths where they are reached, and it is the seam the ADR-0045 sweep uses
+> for its own restart-time verdict.
+
+Every group membership change on all three clients ran the same shape: the
 `lakko-mls` core **create-commit** call **eagerly merges** the epoch N → N+1
 transition into the in-memory provider *inside* the create call, then the client
 publishes the commit (and, for add / approve, a Welcome carried in a
@@ -69,11 +112,14 @@ memory, so there is no "created-but-unmerged" state a caller could hold.
 
 Client call sites (each ends in a best-effort snapshot persist):
 
-- **web** `apps/web/src/contacts/client.ts` — `persistBestEffort` (`:443`) is the
-  final step of `addMember` (`:1586`), `removeMember` (`:1640`), `setMemberAdmin`
-  (`:1691`), `approveExternalJoin` (`:1747`). The persist is best-effort by
-  design — the class doc (`:95`) notes failures are "logged and swallowed; the
-  in-memory state stays good."
+- **web** `apps/web/src/contacts/client.ts` — `persistBestEffort` is the
+  final step of `addMemberToGroup`, `removeMemberFromGroup`, `setMemberAdmin` and
+  `approveExternalJoin`. (The first two were cited here as `addMember` /
+  `removeMember`; those methods do not exist and never did — corrected, since a
+  wrong **name** sends a reader looking for the wrong thing, where a stale line
+  number only sends them a few screens away.) The persist is best-effort by
+  design — the class doc notes failures are "logged and swallowed; the in-memory
+  state stays good."
 - **iOS** `apps/ios/Lakko/Chat/ChatRepository.swift` — `persistSnapshotBestEffort`
   called from the add (`:627`), remove (`:696`), role (`:733`), approve (`:831`)
   paths.
@@ -103,10 +149,17 @@ silently.** The in-memory own-published echo-suppression set is lost on restart:
   `private val ownPublishedIds: MutableSet<Long>`.
 
 The receive loop suppresses a committer's own commit echo via
-`markOwnPublishedCommit` (web `chat/client.ts:467`) — the client doc states plainly
+`markOwnPublishedCommit` (web `chat/client.ts`). ~~The client doc states plainly
 that "Without that suppression `processIncoming` raises 'cannot process own
-commit'" (`chat/client.ts:1511-1512`). That set is **in-memory only**, so after a
-restart it is empty. The poll loop then re-fetches C and feeds it to OpenMLS, which
+commit'" (`chat/client.ts:1511-1512`).~~ **That quotation was fabricated and is
+withdrawn** — the string appears nowhere in the tree, and the cited lines are past
+the end of a 1225-line file. The real supporting comment sits beside the
+echo-matching loop in `apps/web/src/chat/client.ts` and says the same thing about
+the same mechanism: deleting an echo id on match rather than on cursor advance
+would mean "the batch gets re-fetched, our own row would then be handed to OpenMLS,
+and every subsequent poll would log a `CannotDecryptOwnMessage` for it." The
+argument is unchanged; only the citation was wrong. That set is **in-memory only**,
+so after a restart it is empty. The poll loop then re-fetches C and feeds it to OpenMLS, which
 **unconditionally rejects processing one's own commit at its own epoch**: the
 device's `own_leaf_index()` equals the commit's sender leaf →
 `ValidationError::CannotDecryptOwnMessage`
@@ -366,7 +419,9 @@ under-specified point (§ Open questions).
   ADR does not touch the E2EE guarantee; it hardens durability around it.
 - **Invariant-index touchpoints:** this lands as a **free-form G-35 entry** in
   `docs/security/known-gaps.md` — it adds **no** new indexed C / I / T invariant
-  (the audit index stays **8 I + 58 C + 15 T**), mirroring how the G-33 / G-34
+  (the audit index gains nothing from this ADR; it stood at **8 I + 58 C + 15 T**
+  when this was written and is **8 I + 69 C + 15 T** as of 2026-09-02 — the
+  substantive claim, that this ADR takes no indexed number, is unchanged), mirroring how the G-33 / G-34
   AEAD-audit records were kept free-form. The `docs/security/invariant-index.md`
   cheat sheet is unchanged.
 
@@ -396,11 +451,16 @@ closes the orphan-`messageId` edge.
   [ADR-0045](0045-remote-commit-epoch-fork.md) (2026-08).** Defer-merge landed in
   the core, but **narrowly**: only the new proposal-sweep path
   (`Group::stage_pending_proposals` -> `merge_staged_sweep` /
-  `abandon_staged_sweep`) defers. The four direct-commit paths this ADR covers
+  `abandon_staged_sweep`) defers. The direct-commit paths this ADR covers
   still merge eagerly and are byte-for-byte unchanged, so **Option A remains the
-  v1 mechanism for them**. Two corrections to the expectation recorded above:
+  v1 mechanism for them** — though as of ADR-0045 S7 (`576ea14`) there are three
+  rather than four, and none of the three is reachable from a role-table group.
+  Two corrections to the expectation recorded above:
   the invariant-#3 cost was **paid** (under ADR-0045, with property tests; the
-  external crypto review is still owed), and it does **not** remove the
+  external crypto review is tracked once in
+  [G-39](../security/known-gaps.md) per
+  [ADR-0046](0046-external-crypto-review.md), as a release gate rather than a
+  per-ADR blocker), and it does **not** remove the
   re-publish machinery — the outbox answers *did my commit reach the wire* while
   the staged pair answers *did it win the wire order*, and the first must be
   *yes* before the second is meaningful. The two compose; neither subsumes the
@@ -434,7 +494,9 @@ closes the orphan-`messageId` edge.
   CLOSED in `docs/security/known-gaps.md` (with the touchpoints + the residual, if
   any); add the CLAUDE.md ADR-table row + the module-map note (the three chat
   clients gain a pending-commit outbox on the four commit paths). No
-  invariant-index change (free-form G-entry; audit index stays 8 I + 58 C + 15 T).
+  invariant-index change (free-form G-entry; this ADR takes no indexed number —
+  the audit index stood at 8 I + 58 C + 15 T when this was written and is
+  8 I + 69 C + 15 T as of 2026-09-02).
 
 ## References
 

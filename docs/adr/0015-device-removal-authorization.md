@@ -3,10 +3,35 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 SPDX-FileCopyrightText: 2026 Lakko Contributors
 -->
 
-# ADR-0015: Device-removal authorization — threat analysis and (deferred) peer-verified passkey attestation
+# ADR-0015: Device-removal authorization — threat analysis and peer-verified passkey attestation
 
-- **Status:** Accepted — implement the peer-verified attestation design (the maintainer elected to close the on-device-malware residual rather than accept it; 2026-06-05)
+- **Status:** Accepted — implement the peer-verified attestation design (the maintainer elected to close the on-device-malware residual rather than accept it; 2026-06-05). **All five sprints landed; G-13 is CLOSED.**
 - **Date:** 2026-06-05
+
+> **AMENDED 2026-09-02 (documentation audit).** The title said
+> *"(deferred) peer-verified passkey attestation"* and the Consequences said
+> *"Until sprints 3–5 land…"*. **Both were stale — the design in this ADR was
+> built end to end**, and G-13 has been marked CLOSED in
+> [`docs/security/known-gaps.md`](../security/known-gaps.md) since. What
+> shipped, verified against the tree in this audit:
+>
+> - **The primitive** — [`crates/lakko-attest`](../../crates/lakko-attest/src/lib.rs)
+>   `ActionAttestation::sign` / `verify_bound` (121-byte fixed layout).
+> - **The signing key + mint** — `services/auth` (its own Ed25519 attestation
+>   key, migration 0010, published at `/.well-known/device-attest-jwks.json`).
+> - **The policy flag (sprint 4)** — `DeviceGroup::set_require_attested_removals`
+>   / `require_attested_removals`
+>   ([`device_group.rs`](../../crates/lakko-mls/src/device_group.rs)).
+> - **The apply-path gate (sprint 3)** —
+>   `DeviceGroup::process_incoming_verifying_removals`, which refuses to merge
+>   an unattested removal under the policy.
+> - **The FFI + all three clients (sprint 5)**, with the policy
+>   auto-enabled once a passkey is registered, and a build-time key pin per
+>   platform so a compromised serving tier cannot substitute the verifying key.
+>
+> The threat analysis below — *why* the delete-passkey grant mechanism does not
+> transfer to device removal — is unchanged and is still the most useful part
+> of this record.
 - **Context:** G-13 (`docs/security/known-gaps.md`) — the WebAuthn
   action-binding work added a *client-side* passkey gate before removing a
   device from the DeviceGroup. This ADR asks whether that gate can be made
@@ -211,8 +236,13 @@ main remaining risk is retired.
 - **Unconditional peer-enforced attestation (no policy flag).** Rejected:
   breaks device-removal for OPAQUE-only accounts, who have no passkey to
   attest with.
-- **Implement peer-verified attestation now.** Held in reserve (this ADR's
-  design section) rather than rejected; deferred on cost/benefit grounds.
+- **Implement peer-verified attestation now.** ~~Held in reserve (this ADR's
+  design section) rather than rejected; deferred on cost/benefit grounds.~~
+  **This is what was chosen and built.** The line above survives from the draft
+  written before the maintainer decided; the Status line has said "implement"
+  since 2026-06-05 and the five sprints landed. Kept rather than deleted
+  because the cost/benefit reasoning is the argument the decision was taken
+  *against*, and that is worth being able to read.
 
 ## Consequences
 
@@ -230,6 +260,12 @@ main remaining risk is retired.
   to joiners on 0.8.1 (the application-level fallback is unnecessary);
   the only implementation requirement is advertising the extension type in
   every device's leaf capabilities.
-- Until sprints 3–5 land, known-gaps G-13 continues to record the
+- ~~Until sprints 3–5 land, known-gaps G-13 continues to record the
   on-device-malware residual as open (now *in progress* rather than
-  accepted).
+  accepted).~~ **Sprints 3–5 landed; G-13 is CLOSED** (see the amendment note
+  at the head). The one item left open there is optional and is *not* this
+  residual: distributing the pinned attestation verifying key through the
+  signed bootstrap config, which needs Phase-5 client bootstrap consumption.
+  Each client pins the key at build time today, which already defends a
+  compromised serving tier — but not a compromised signing key, and that is
+  the auth service's own trust tier by construction.

@@ -348,9 +348,14 @@ clients"; the `infra/README.md` runbook has the full flow.
 
 ## Freshness model + residual
 
-The staleness window is a **client-side** knob (`LAKKO_RELEASE_STALENESS_MILLIS` or
-the per-platform equivalent), the same shape as `BackupHead`'s. Its integrity value
-here is **modest and should not be oversold**:
+The staleness window was designed as a **client-side** knob, the same shape as
+`BackupHead`'s. ~~(`LAKKO_RELEASE_STALENESS_MILLIS` or the per-platform
+equivalent)~~ — **no such knob exists in the tree, and that follows from the Open
+question this ADR resolved the other way**: freshness is DISABLED in v1, so each
+client passes a hardcoded `i64::MAX` (web's `STALENESS_DISABLED_MILLIS` in
+`apps/web/src/update/release-check.ts`, and its two native twins) rather than
+reading a configurable dial. The reasoning below is why the dial would be worth
+little if it were wired, and is kept for whoever revisits the resolution:
 
 - The signature is what prevents forging a *higher* `latest_release` or `min_supported`
   (a phishing nudge). Freshness only bounds how long a **replayed genuine old**
@@ -472,7 +477,8 @@ posture, accepted.
 - **Invariant-index touchpoints (S6, reconciled 2026-07-21):** this is an
   **availability / anti-phishing** control (a signed public artifact, client-verify,
   fail-toward-silence), **not** an E2EE / MLS / call invariant — so it takes **no new
-  indexed C-number**, and the invariant index stays at 8 I + 58 C + 15 T
+  indexed C-number**, and the invariant index gains nothing from it (it stood at
+  8 I + 58 C + 15 T when this was written; 8 I + 69 C + 15 T as of 2026-09-02)
   (`just audit-index-check` clean). The accepted LOW suppress/replay residual is
   recorded in `docs/security/known-gaps.md` (G-32), which the index tooling does not
   count. The CLAUDE.md ADR-table row + module-map (`lakko-attest` gains
@@ -563,7 +569,12 @@ Each step names the ADR-0037 / ADR-0036 file it mirrors.
   `fetch("/.well-known/lakko-release")` + the shared wasm verify core
   (`apps/web/src/update/release-check.ts`), so the primitive and one codepath exist
   on web; **keep `SwUpdateBanner`** as the web update path and do **not** add a second
-  store-linking banner (web has no store — the module stays DORMANT).
+  store-linking banner (web has no store, so no banner ships). ~~the module stays
+  DORMANT~~ — **the UI is dormant; the module is not.** `apps/web/src/main.tsx`
+  calls `runBootUpdateCheck()` at boot, which fetches, verifies and logs via
+  `console.info`; with no pinned key it returns before fetching, which is the
+  default-empty dormancy, not an unreferenced module. The source calls itself "a
+  dormant future hook" and that is the accurate description.
 - **S6 — docs reconcile.** Flip this ADR's Status to Accepted; add the CLAUDE.md ADR
   table row + module map update (`lakko-attest` gains `ReleaseManifest`; both FFI
   rows gain the release verify surface; `tools/` gains the publisher CLI; the fuzz
@@ -571,7 +582,8 @@ Each step names the ADR-0037 / ADR-0036 file it mirrors.
   residual in `docs/security/known-gaps.md` (G-32); **do not** add a new indexed
   invariant to `docs/security/invariant-index.md` — this is an availability /
   anti-phishing control, not an E2EE / MLS / call invariant, so the index stays at
-  8 I + 58 C + 15 T.
+  unchanged by this ADR (8 I + 58 C + 15 T when written; 8 I + 69 C + 15 T as of
+  2026-09-02).
 
 ## References
 

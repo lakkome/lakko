@@ -5,7 +5,20 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0014: WebAuthn action binding via a minimal webauthn-rs-core challenge-injection fork
 
-- **Status:** Accepted (server-side implemented 2026-06-04; client-side wiring + fork-delta CI guard pending)
+- **Status:** Accepted — implemented end-to-end. Server-side 2026-06-04; the
+  two items this line listed as *pending* both landed and the line was stale
+  until the 2026-09-02 documentation audit corrected it: the **fork-delta CI
+  guard** is [`services/auth/tests/fork_delta_guard.rs`](../../services/auth/tests/fork_delta_guard.rs)
+  (it pins the hash of the vendored `core.rs` so an accidental edit to the
+  upstream-verbatim verification path fails CI), and the **client-side wiring**
+  is live on all three platforms — web
+  ([`webauthn-client.ts`](../../apps/web/src/auth/webauthn-client.ts),
+  `PasskeysSection.tsx`, `Devices.tsx`), iOS
+  ([`WebauthnActionBinding.swift`](../../apps/ios/Lakko/Webauthn/WebauthnActionBinding.swift),
+  `WebauthnClient.swift`, `DevicesScreen.swift`) and Android
+  (`ui/devices/DevicesScreen.kt`). See also
+  [ADR-0015](./0015-device-removal-authorization.md), which took the
+  remove-device half from client-gated to peer-verified.
 - **Date:** 2026-06-04
 - **Context:** G-13 (`docs/security/known-gaps.md`) — bind a passkey assertion to the specific action it authorises, so a verified assertion cannot be replayed against (or reordered onto) a different request inside the same TLS session.
 

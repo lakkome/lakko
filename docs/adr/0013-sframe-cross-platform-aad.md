@@ -55,6 +55,10 @@ The AAD is where the platforms currently diverge:
   **platform-specific** and is **not reconstructible** from the
   `RTCEncodedAudioFrame` / `RTCEncodedVideoFrame` a browser
   `RTCRtpScriptTransform` sees.
+  **(Past tense as of `b92a8a7`, 2026-06-02 — the same day this ADR
+  landed. The shim was reconciled immediately; see the Reconciliation
+  note under Consequences. This paragraph describes the divergence the
+  ADR was written to remove, not a state that still exists.)**
 
 Consequence: a web sender and a native receiver (or vice versa) would
 feed **different AAD** into the same AEAD and every cross-platform
@@ -77,6 +81,21 @@ output of [`SframeHeader::encode`](../../crates/lakko-calls/src/header.rs)
 (the RFC 9605 §4.3 header layout; KID = sender leaf index,
 CTR = per-frame counter) — and nothing else. No host RTP `additional_data`
 is bound.**
+
+> **The KID's meaning changed; this decision did not (2026-07,
+> [ADR-0035](./0035-sframe-per-stream-kid-key.md)).** KID is no longer the bare
+> sender leaf index — it is `(sender_leaf << 8) | stream_index`, so each of a
+> participant's concurrent streams (audio, camera, screen-share) derives a
+> disjoint key and nonce space. Read `KID = sender leaf index` below as
+> `KID = the header's key identifier`, and the roster split as
+> `sender_leaf = KID >> 8` (`SframeHeader::leaf_of` / `stream_of`). **Nothing
+> about the AAD rule moves:** the AAD is still exactly the encoded header, the
+> §4.3 codec is unchanged (a wider KID simply takes the extended form the RFC
+> already defines), and the AAD is still computed from values both endpoints
+> agree on with zero dependence on the host media stack — which is the whole
+> point. One receiver-side detail did improve: because the *full* KID is the
+> key input, the receiver derives the sender's key straight from the header and
+> needs **no** local media/track-kind signal at all.
 
 Concretely, on every platform, for each frame:
 
@@ -124,14 +143,19 @@ computed from `(kid, ctr)` alone — values both sides already agree on
   existing `seal` + `wrap_sframe_frame` without changing the AEAD
   primitive. (Implemented as a follow-up to this ADR, with property
   tests + the audit-pack update the crypto-change rule requires.)
-- **Native reconciliation.** `apps/shared/sframe-bridge/sframe-bridge.cc`
-  stops passing libwebrtc `additional_data` and passes the SFrame
-  header as AAD instead. This **changes the bytes iOS/Android already
-  put on the wire**, so it requires a re-verified host-side test
-  (`test_bridge.cc`) + a device smoke before shipping. Until both
-  native and web are on this contract, cross-platform calls are not
-  interop-safe (and per invariant #4 must refuse rather than fall
-  back to a server-readable path).
+- **Native reconciliation — DONE (`b92a8a7`, 2026-06-02).**
+  `apps/shared/sframe-bridge/sframe-bridge.cc` ~~stops passing~~ **no longer
+  passes** libwebrtc `additional_data` and passes the SFrame header as AAD
+  instead. Both entry points now take the parameter unnamed
+  (`rtc::ArrayView<const uint8_t> /*additional_data*/`, `sframe-bridge.cc:80`
+  and `:212`) with the reason stated in the code at each site — so the omission
+  is deliberate and readable, not an oversight waiting to be "fixed" back.
+  This **changed the bytes iOS/Android put on the wire**, and the host-side
+  test was re-verified with it: `apps/shared/sframe-bridge/test_bridge.cc`
+  seals and opens the canonical cross-stack golden vector **while passing a
+  non-empty host `additional_data`**, which is the assertion that pins the
+  decision — a regression that re-bound the RTP data would fail there rather
+  than in a call. Indexed as **C-53**.
 - **Closes G-26.** With a single platform-independent AAD + the
   already-landed `SframeHeader` wire codec, the RFC 9605 wire-frame
   interop gap is resolved in design; the closeout is the native
@@ -166,6 +190,6 @@ computed from `(kid, ctr)` alone — values both sides already agree on
 - RFC 9605 — Secure Frame (SFrame).
 - [`crates/lakko-calls/src/header.rs`](../../crates/lakko-calls/src/header.rs) — `SframeHeader::encode` / `decode` (the AAD bytes).
 - [`crates/lakko-calls/src/sframe.rs`](../../crates/lakko-calls/src/sframe.rs) — `ParticipantKey::seal` / `open` (AAD-agnostic AEAD).
-- [`apps/shared/sframe-bridge/sframe-bridge.cc`](../../apps/shared/sframe-bridge/sframe-bridge.cc) — native shim (to reconcile).
+- [`apps/shared/sframe-bridge/sframe-bridge.cc`](../../apps/shared/sframe-bridge/sframe-bridge.cc) — native shim (~~to reconcile~~ **reconciled**, `b92a8a7`).
 - [`docs/security/known-gaps.md` G-26](../security/known-gaps.md) — the interop gap this closes.
 - [ADR-0011](./0011-rust-sfu.md) — the Rust SFU this media flows through.

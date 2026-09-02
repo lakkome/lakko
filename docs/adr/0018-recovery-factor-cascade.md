@@ -71,15 +71,19 @@ joins the DeviceGroup but gets **no session token**. This factor adds two halves
 
 ### ACCESS — a single-use device-authorization grant (server)
 
-- `device_grants(account_id BINARY(16), grant_token BINARY(32), expires_at)` —
+- `device_grants(account_id BINARY(16), ~~grant_token~~ **`grant_hash`** BINARY(32), expires_at)` —
   modelled on `webauthn_action_grants` (ADR-0014, migration 0009); next migration
   `0011`. Short TTL; FK-cascade; swept by the existing state pruner.
+  *(The shipped column stores a **SHA-256 of the token**, not the token — the
+  hash-at-rest property this ADR's own Implementation-status section already
+  claims. Marked 2026-09-02 so the design block and the status line agree: a
+  database read alone cannot redeem a grant.)*
 - `POST /device/authorize/start` — **bearer-auth** (the already-authenticated
   existing device) + **PoW**. Mints a random 32-byte `grant_token` bound to the
   session's `account_id`, stores it, returns it to the existing device.
 - `POST /device/authorize/redeem` — **anonymous** (the fresh device has no token
   yet) + **PoW**. Submits the `grant_token`; the server **atomically consumes** it
-  (`DELETE … WHERE account_id=? AND grant_token=? AND expires_at>NOW(3)`,
+  (`DELETE … WHERE account_id=? AND grant_hash=? AND expires_at>NOW(3)`,
   `rows_affected==1`) and issues the session-token triple. Single-use, time-bound,
   account-bound.
 

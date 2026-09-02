@@ -319,8 +319,15 @@ same way against the SFU built on top of either stack.
 
 ## Migration notes
 
-`services/sfu/` currently contains scaffolding for a
-LiveKit fork:
+> **Done (verified 2026-09-02).** `lakko-patches/` and `lakko-additions/` are
+> gone, the three markdown files were rewritten, and `services/sfu/` is now the
+> Rust crate (`Cargo.toml`, `src/`, `tests/`, `fuzz/`, `Dockerfile`, plus
+> `SPIKE.md` recording the `webrtc-rs` vs `str0m` bake-off). The section below
+> is the migration instruction as written, kept as the record of what was to be
+> removed.
+
+`services/sfu/` ~~currently contains~~ **contained, at the time this ADR was
+written,** scaffolding for a LiveKit fork:
 
 ```text
 services/sfu/

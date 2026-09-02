@@ -93,6 +93,22 @@ The `message_body_parse` fuzz target is extended.
 - **Attribution** is the MLS `senderLeaf` (already surfaced by ADR-0023); a
   member can only assert its own read state.
 
+> **CORRECTED (`5b2b654`, 2026-08-31) — the registry key was wrong. C-68.**
+> Both registries — the read watermark **and** the typing state — are keyed on
+> the sender's **Ed25519 signature public key**, never the leaf index. OpenMLS
+> hands a **vacated leaf to the next member added**, and this watermark is
+> **monotone and never reset on a membership change**, so a leaf-keyed map
+> handed the newcomer the departed member's `readUpTo` outright and the UI then
+> reported messages as **read by someone who never saw them**. Typing has the
+> same shape with a ~6 s lifetime; it is keyed the same way so there is one
+> rule rather than two. Read `senderLeaf` throughout this section as
+> *the author identity resolved at receipt* — the same C-68 correction
+> [ADR-0023](./0023-message-edit-delete-reactions.md) took for its author gate,
+> and for the same reason. Everything else here — monotone, idempotent,
+> self-asserted-only — is unchanged and still holds.
+> See [`apps/web/src/chat/presence-ops.ts`](../../apps/web/src/chat/presence-ops.ts)
+> and its two native twins.
+
 ### Privacy + opacity
 
 The server relays opaque encrypted envelopes it cannot parse (invariant #2); a

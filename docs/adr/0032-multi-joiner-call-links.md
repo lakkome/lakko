@@ -189,7 +189,18 @@ The protocol above serves a **live, ad-hoc** call — not a persistent room:
   auto-squatting would block the user's real choice). `signupGuest` adds no new
   crypto; it is a new *entry point* to the existing account-creation path,
   reachable pre-ACCESS from a public link — offered to `lakko-security`.
-- **Account-creation-spam mitigation (deferred backend sprint).** Auto-minting an
+- **Account-creation-spam mitigation ~~(deferred backend sprint)~~ — BUILT as
+  [ADR-0033](0033-call-admission-antispam-throttle.md)** (recorded here
+  2026-09-02; the forward link was missing). The throttle described below is
+  what shipped, at the call-admission JWT mint in `services/auth`
+  ([`throttle.rs`](../../services/auth/src/throttle.rs), with the
+  `call_admission_events` + `throttled_calls` tables), and the
+  owner-auto-suspension is still deliberately **not** built for exactly the
+  weaponisability reason given here. One detail ADR-0033 added that this
+  paragraph did not anticipate: the throttle **fails open** on a store error —
+  a deliberate exception to the fail-closed default, because an anti-abuse
+  counter that fails closed would self-DoS every call. Authorization still runs
+  first and still fails closed. Auto-minting an
   account per anonymous link visit is an account-creation-spam surface. The
   mitigation is an **intelligent throttle at the call-admission / auth layer**
   (which sees `(account_id, call_id)` + account age per JWT mint): a burst of
@@ -209,6 +220,9 @@ The protocol above serves a **live, ad-hoc** call — not a persistent room:
 - [ADR-0027](0027-external-join-approval.md) — the admission-approval pattern the
   join toggle reuses.
 - [ADR-0028](0028-group-join-ticket.md) — the joiner-initiated request shape.
+- [ADR-0033](0033-call-admission-antispam-throttle.md) — the guest-account
+  admission throttle that closes this ADR's named account-creation-spam
+  residual.
 - [ADR-0021](0021-sfu-peer-identity-exposure.md) — the per-call SFU peer tag /
   roster the presence election reads.
 - G-21 / G-22 (`docs/security/known-gaps.md`) — the single-joiner limitation +

@@ -109,18 +109,20 @@ derives it deterministically:
 username_hash = BLAKE3("lakko/transparency/account/v1" ‖ account_id)
 ```
 
-This is the SAME derivation discovery uses on append
-(`services/discovery/src/transparency_log.rs:55-71`, `ACCOUNT_KEY_DOMAIN`) and
-the client uses on verify (`ak` in `apps/web/src/transparency/verify.ts`). The
+This is the SAME derivation discovery uses on append (`ACCOUNT_KEY_DOMAIN`, which
+S2 promoted out of `services/discovery` into
+`crates/lakko-transparency/src/account.rs`) and the client uses on verify (`ak` in `apps/web/src/transparency/verify.ts`). The
 transparency gate then checks `attestation.username_hash == leaf.username_hash`
 and `attestation.pubkey == leaf.identity_pubkey` — it never needs `account_id`.
 The signature over `(account_id ‖ username_hash)` plus BLAKE3 preimage/collision
 resistance is what ties the two together: an attacker cannot find a *different*
 `account_id` whose `username_hash` collides with the victim's.
 
-> **Drift hazard — must be guarded.** The domain constant
-> `"lakko/transparency/account/v1"` currently lives only in
-> `services/discovery/src/transparency_log.rs:55`. If auth computes
+> **Drift hazard — must be guarded. (Guarded: S2 did exactly this — see below.)**
+> When this was written, the domain constant `"lakko/transparency/account/v1"`
+> lived only in `services/discovery/src/transparency_log.rs`; it now lives in
+> `crates/lakko-transparency/src/account.rs` (`ACCOUNT_KEY_DOMAIN`), and discovery
+> imports `account_username_hash` from there. If auth computed
 > `username_hash` with even a one-byte-different domain, every genesis
 > attestation fails silently at the transparency gate
 > (`attestation.username_hash != leaf.username_hash`), and genesis-attest would
@@ -128,7 +130,12 @@ resistance is what ties the two together: an attacker cannot find a *different*
 > and its derivation MUST be promoted to a single shared location (recommended:
 > `lakko-transparency`, which already owns the leaf/genesis primitives and is
 > depended on by both the FFI crates and, newly, auth) and pinned by a drift
-> test that asserts the exact derived bytes for a fixed `account_id`.
+> test that asserts the exact derived bytes for a fixed `account_id`. **Both
+> happened** — the promotion, and `golden_pins_the_account_username_hash` in
+> `crates/lakko-transparency/src/account.rs`, which pins the derived bytes so a
+> domain change fails CI rather than silently fail-closing the gate. The hazard is
+> kept in place rather than deleted, because it is the reason the constant lives
+> where it does.
 
 The maintainer must accept this framing — "attestation of a client-supplied key,
 sufficient because only the account holder can mint it" — before implementation.

@@ -20,6 +20,27 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 > document as the still-binding decision for everything
 > *except* "fork of LiveKit (Go)" which is now "Rust SFU
 > built in-tree".
+>
+> **Update (2026-09-02, documentation audit): "remain in force" is true of the
+> decisions, not of their details** — the SFrame parts have been refined four
+> times since, and none of it was linked from here. Before relying on any SFrame
+> statement below, read:
+>
+> - [ADR-0013](./0013-sframe-cross-platform-aad.md) — the AEAD **AAD** is the
+>   RFC 9605 SFrame header, never the host RTP `additional_data`. This is what
+>   makes web ⇄ native interop possible at all.
+> - [ADR-0029](./0029-mid-call-key-rotation.md) — the "1-second overlap"
+>   mentioned below, as actually built (`lakko_calls::CallKeyRing`). It was
+>   specified here and in ADR-0001 from the start, but nothing drove it on any
+>   client until 2026-07.
+> - [ADR-0034](./0034-sframe-per-media-stream-key.md) →
+>   [ADR-0035](./0035-sframe-per-stream-kid-key.md) — **the sentence below that
+>   says keys are "keyed by leaf index" is no longer true, and it was a
+>   vulnerability.** One leaf's concurrent streams shared a key and nonce salt
+>   while counting independently, which is AEAD nonce reuse in front of the
+>   zero-trust SFU. The key is now derived from the full header **KID** =
+>   `(leaf << 8) | stream_index`, so every stream of every participant has a
+>   disjoint key space.
 
 ## Context
 
@@ -41,7 +62,7 @@ Used as a base; we fork it under AGPLv3 into `services/sfu/`. We modify it to:
 
 Per-frame AES-128-GCM with a counter-derived nonce. Hardware AES acceleration (AES-NI / ARMv8 Crypto Extensions) — overhead < 0.001% CPU at 60fps@1080p.
 
-Keys are derived once at the start of a call via `mls_exporter("lakko/call/v1", call_id, 32)` → HKDF → per-participant SFrame keys keyed by leaf index. Rotation on Add/Remove with a 1-second overlap (the old key remains accepted briefly).
+Keys are derived once at the start of a call via `mls_exporter("lakko/call/v1", call_id, 32)` → HKDF → per-participant SFrame keys ~~keyed by leaf index~~ **keyed by the full SFrame header KID = `(leaf << 8) | stream_index`** ([ADR-0035](./0035-sframe-per-stream-kid-key.md)). Rotation on Add/Remove with a 1-second overlap (the old key remains accepted briefly) — built as `lakko_calls::CallKeyRing` ([ADR-0029](./0029-mid-call-key-rotation.md)).
 
 ### Call topologies
 

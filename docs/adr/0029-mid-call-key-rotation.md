@@ -25,13 +25,29 @@ The overlap logic already existed in the core
 (`lakko_calls::group_call::GroupCallSession`: `refresh_call_key_at`,
 `try_open_with_overlap`, `prune_expired_previous`, `has_live_previous`,
 5 property tests) — but a code reconnaissance for G-18 found it is **entirely
-dormant**: no client instantiates `GroupCallSession`. The three clients seal /
+dormant**: ~~no client instantiates `GroupCallSession`~~ **no client holds a
+`GroupCallSession` handle**. The three clients seal /
 open at a lower level — the main thread derives the 32-byte seed
 (`deriveCallKey`) and hands it to the media layer, which holds one `CallKey` and
 seals / opens per frame off the main thread (the web `RTCRtpScriptTransform`
 worker; the iOS / Android native SFrame shims). No client re-derives the seed
 mid-call, so a group whose epoch advances during a call keeps using the
-start-of-call key. Consequences: a member added mid-call cannot key into the
+start-of-call key.
+
+> **Precision correction, 2026-09-02.** The original wording ("no client
+> instantiates `GroupCallSession`") is over-broad and, read literally, false:
+> `lakko_calls::accept_call_invite` **does** construct one, it is FFI-exposed on
+> both surfaces, and the web acceptor calls it — as do `found_call` and
+> `join_call_from_welcome`. What is true is that **nothing keeps the handle**:
+> each FFI wrapper builds a session, drains `call_key()` / `call_id` /
+> `own_leaf_index` into flat fields, and drops it. The uniffi wrapper says so at
+> the call site — the seed is surfaced flat "without holding a
+> `GroupCallSession` handle". The **conclusion is unaffected**: no live object
+> carried the overlap state across a mid-call epoch change, which is exactly why
+> the overlap logic had to be extracted into the seed-based `CallKeyRing` this
+> ADR builds.
+
+Consequences: a member added mid-call cannot key into the
 call's media, and forward secrecy on a long call is not refreshed. G-18 is
 therefore not "wire an existing call" — it is "build mid-call rekey on the level
 the clients actually run at".

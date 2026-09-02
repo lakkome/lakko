@@ -89,7 +89,9 @@ channel owner/admin.
 Add an **admin-approved external-join** flow: `lakko-mls` surfaces the joiner's
 identity from the external Add proposal and retains it; a **role-gated**
 `approve_external_join` commits the pending proposal (producing the in-group
-Commit + the joiner's Welcome); a `reject_external_join` discards it. The Welcome
+Commit + the joiner's Welcome) — **since S7 it publishes an `Add` proposal
+instead, and a committer's later sweep produces the Commit and the Welcome; see
+the head note**; a `reject_external_join` discards it. The Welcome
 is delivered to the joiner via a **journal rendezvous envelope** keyed on the
 joiner's KeyPackage reference, which the (not-yet-member) joiner polls and opens
 with their KeyPackage init key.
@@ -100,6 +102,25 @@ Phase-4-scale and land behind the channel path.
 
 ### Phase 1 — admin-side core (`lakko-mls`, testable now)
 
+> **The three items below were implemented DIFFERENTLY, from the first commit
+> (`4a9afe1`, 2026-06-24 — the same day as this ADR). The deviation was never
+> recorded here; recorded 2026-09-02.** Each substitution turned out to be
+> load-bearing rather than incidental, so they are marked in place rather than
+> rewritten. What the built code does:
+>
+> | This ADR specified | What was built | Why it matters |
+> |---|---|---|
+> | `{ joiner_signature_key, joiner_credential, proposal_ref }` | `{ joiner_signature_key, retained }` | No credential is carried (Lakko's `BasicCredential` is empty — see [ADR-0001](./0001-mls-only.md) § Identity), and the **signature key is the handle**: `approve` / `reject` take it, and it is what the role table and contact graph resolve. The parameter is still *named* `proposal_ref` in the signature, which is a naming leftover from this ADR, not an openmls `ProposalRef`. `retained` was added later (`8018e8b`) and is the anti-spam counterpart — see below. |
+> | `MlsGroup::store_pending_proposal` (the openmls proposal store) | A Lakko-side in-memory `Vec<PendingExternalJoin>` on the `Group`, `MAX_PENDING_EXTERNAL_JOINS`-bounded, deduped by signature key | **This is the difference that ended up mattering most.** Keeping strangers out of the member proposal store keeps their requests out of the *member* quota — which is exactly why [ADR-0045](./0045-remote-commit-epoch-fork.md) decision 4's plan to retire this queue did not survive: merging them would have handed any `/g/` link-holder the group-membership-freeze primitive **C-66** had just closed. The code comment at the call site says it outright: the quarantine is *"nowhere near `store_pending_proposal`"*. The costs of the substitution are real and are stated in the head note: the queue does not survive a restart. |
+> | `commit_to_pending_proposals` over the single targeted proposal | `add_member` with the retained KeyPackage (2026-06-24) → since S7, `propose_add_member` | `commit_to_pending_proposals` is commit-**all**; it cannot target one joiner, and it would sweep whatever else the store held. Reusing the audited `add_member` path gave single-joiner targeting for free. S7 then replaced the commit entirely — see the head note. |
+>
+> One more consequence of the quarantine being Lakko-side rather than
+> openmls-side, added in `8018e8b`: a request arriving at
+> `MAX_PENDING_EXTERNAL_JOINS` is **surfaced but not kept**, and
+> `Incoming::ExternalJoinProposal.retained` says so. Erroring instead would let
+> a stranger fail a member's receive loop; dropping silently showed the admin a
+> pending request that no approve could ever act on. It is reported as data.
+
 1. **Surface the joiner identity.** Replace the data-less unit variant with
    `Incoming::ExternalJoinProposal { joiner_signature_key: Vec<u8>, joiner_credential: Vec<u8>, proposal_ref: Vec<u8> }`,
    extracted from the `QueuedProposal`'s `Proposal::Add(AddProposal)` →
@@ -107,20 +128,25 @@ Phase-4-scale and land behind the channel path.
    openmls `ProposalRef` so a later approve/reject targets exactly this proposal.
    A `QueuedProposal` whose inner proposal is **not** an `Add` from a
    `NewMemberProposal` sender is refused (fail-closed) — defence in depth against
-   a member smuggling a non-Add through this path.
-2. **Retain the proposal.** Call `MlsGroup::store_pending_proposal` so the
-   proposal survives in the group's proposal store until an admin acts. (Today
-   it is dropped.) Bounded: a `MAX_PENDING_EXTERNAL_JOINS` cap rejects further
-   external proposals once the queue is full (anti-spam).
+   a member smuggling a non-Add through this path. *(The non-Add refusal shipped
+   as written; the variant shape did not — see the table above.)*
+2. **Retain the proposal.** ~~Call `MlsGroup::store_pending_proposal` so the
+   proposal survives in the group's proposal store until an admin acts.~~
+   *(See the table above — a separate Lakko-side quarantine was built instead,
+   deliberately.)* (Today it is dropped.) Bounded: a
+   `MAX_PENDING_EXTERNAL_JOINS` cap rejects further external proposals once the
+   queue is full (anti-spam) — **this part shipped as written.**
 3. **Role-gated approve.** `Group::approve_external_join(identity, proposal_ref) -> MemberAddition`
    — first checks the local `RoleTable` (ADR-0022): the caller's own role must be
    owner or admin, else `Error::Unauthorized` (fail-closed, no commit produced);
-   then `commit_to_pending_proposals` over the single targeted proposal →
-   `(commit, welcome)`. The commit broadcasts to the group on the existing
-   journal path; the welcome is the Phase-3 transport's payload. Because the
-   resulting Add commit is itself role-gated on the receiving side
-   (`process_incoming_verifying_roles`), a forged local approve cannot take
-   effect on peers either — defence in depth.
+   then ~~`commit_to_pending_proposals` over the single targeted proposal →
+   `(commit, welcome)`~~ *(see the table above)*. The commit broadcasts to the
+   group on the existing journal path; the welcome is the Phase-3 transport's
+   payload. Because the resulting Add commit is itself role-gated on the
+   receiving side (`process_incoming_verifying_roles`), a forged local approve
+   cannot take effect on peers either — defence in depth. **The role gate and
+   the peer-side re-verification are unchanged and are still the boundary;**
+   only the artifact the approve produces changed (S7 — head note).
 4. **Reject.** `Group::reject_external_join(proposal_ref)` removes the pending
    proposal from the store without committing (no state advance, no membership
    change).

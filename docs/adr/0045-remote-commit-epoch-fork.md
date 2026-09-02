@@ -22,11 +22,18 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
   **ran** (2026-08-29) and its seven findings are closed; the **external crypto
   review is tracked in [G-39](../security/known-gaps.md) per
   [ADR-0046](0046-external-crypto-review.md)** rather than as a blocker here, and
-  it is a **release gate** — no build reaches users while it is open; and the UX spec's
-  ownership-transfer flow, its typed-refusal table, its committer-side failure surface
-  and its automatic re-request on supersession are designed or enumerated but unbuilt
-  on every client, while `Leave group` — the member-facing feature this ADR unlocked —
-  shipped on **web only**.
+  it is a **release gate** — no build reaches users while it is open. Four of the UX
+  spec's surfaces were listed here as unbuilt and **two of them have since shipped on
+  all three clients**: the ownership-transfer flow (`0274fa7`) and the typed-refusal
+  table (`8018e8b`), and with them `Leave group` — the member-facing feature this ADR
+  unlocked — which reached the two natives in `c50bdd7`. **Two remain open**, and they
+  are not the same kind: the **committer-side failure surface** is unbuilt *and
+  unimplementable as specified* (§8 gates it on an activation delay belonging to the
+  staggered variant the maintainer did not choose), and the **automatic re-request on
+  supersession** is unbuilt *by a later decision* — a request the sweep dropped now
+  reaches its author as the `Not applied (n)` surface (`46c7aa4`) with a user-driven
+  repair, while the **sibling** case, a request refused because the queue was full, does
+  re-send automatically on all three (`21f6c8c`, and `1839da7` for an approve).
   **The maintainer has chosen Option B — proposal-based commits.** This ADR was
   originally written as a recon that recommended Option C (client-side loser
   rollback); that recommendation has been **overturned by the maintainer** and
@@ -1487,10 +1494,18 @@ which is why deleting the retry cap costs nothing:
   happens once at *propose* time regardless.
 - **No approve-path stale-proposal question.** The external-join proposal is not
   held in a Lakko-side in-memory queue under B; it is a stored MLS proposal like any
-  other (decision 4). **That is true of B as designed and not of B as built** —
-  decision 4 is S7 and S7 is unbuilt, so the in-memory `pending_external_joins`
-  `Vec` is still there, still epoch-bound, and still not covered by the staged
-  rollback.
+  other (decision 4). **That is true of B as designed and it is not what S7 built** —
+  S7 (`576ea14`) landed the convergence but **kept** `pending_external_joins`
+  deliberately, because the quarantine is what stops a `/g/` link-holder filling the
+  member proposal store (see
+  [§ Why decision 4's design does not survive](#why-decision-4s-design-does-not-survive)).
+  So the in-memory `Vec` is still there and still outside the staged rollback. Two
+  corrections to how this bullet described it: the retained entry is **not
+  epoch-bound** — the retained `KeyPackage` outlives epoch advances, and only the
+  joiner's *original* external proposal had to arrive at a matching epoch — and it is
+  no longer dropped only by a restart, since `pending_external_joins()` filters
+  members, so an approved joiner retires itself from every admin's list once the sweep
+  lands.
 
 #### Every candidate offline: the request waits
 
@@ -1553,15 +1568,20 @@ an owner who has *already* gone; it only lets one who is still present hand the
 duty on deliberately. Recovering a lost owner is ADR-0022's separate,
 still-open admin-quorum question.
 
-**And it does not resolve it in the product either, because no client offers it.**
-`transferOwnership` / `proposeOwnershipTransfer` / `OutgoingOwner` are on both FFI
-surfaces and have **no production call site on web, iOS or Android** — the client
-sprints built `Leave group` (which the transfer exists to make reachable for an
-owner) and did not build the transfer itself. The UX spec enumerates what the flow
-needs and deliberately does not design it. So the dead-end is closed in the core and
-open to a user, which is a UX gap rather than a protocol one, and is worth stating
-plainly because "ownership transfer is built" is true of the crate and false of the
-app.
+~~**And it does not resolve it in the product either, because no client offers it.**~~
+**It does now — the flow shipped on all three clients in `0274fa7`** (UX spec §6.1),
+so "ownership transfer is built" is finally true of the app as well as the crate and
+the owner dead-end is closed to a user. The design pass **settled** a question rather
+than answering it, and that is the part worth keeping: the **direct arm is
+structurally unreachable**, because `isOwner` and `usesProposalPath` are the same
+read — the role table's presence — so every client drives `proposeOwnershipTransfer`
+and none can reach `transferOwnership`. iOS proved it by execution rather than by
+argument: driving the direct arm advanced the epoch **and stripped the transferor
+locally**, so the next role change was refused as *proposer is not the owner*.
+
+What survives of this paragraph is the part that was never about the affordance:
+transfer needs the owner's **key** to mint, so shipping it does nothing for an owner
+who has already gone. The stall in item 2 stands.
 
 **The security content of that sprint was `owner_survives`, not the transfer
 wrapper — and it closes a hole that predates it.** See
@@ -1840,12 +1860,16 @@ when there is none, and every `propose_*` refuses without one), so `DeviceGroup`
 permanently empty set and the guard is a counted-zero no-op for them. **What it
 meant for the clients** is that in a role-table group the direct paths and the
 sweep path are mutually exclusive at any instant — a client that still calls
-`approve_external_join` or `self_update` while a proposal is pending gets an
-error, not a widened commit. **That is now a live consequence rather than a
-prediction, and it is the sharpest argument for finishing S7:**
-`approve_external_join` is still a direct commit on all three clients, so in a
-role-table group an admin approving a join while any membership request is pending
-gets a refusal — correct, fail-closed, and a user-visible dead end nobody designed.
+`self_update` while a proposal is pending gets an error, not a widened commit.
+~~**That is now a live consequence rather than a prediction, and it is the sharpest
+argument for finishing S7:** `approve_external_join` is still a direct commit on all
+three clients~~ — **and it was exactly that, until S7 (`576ea14`) closed it.** For the
+window between `a90fa90` and S7, an admin approving a join while any membership
+request was pending got a refusal — correct, fail-closed, and a user-visible dead end
+nobody designed, which is why it is kept here: the guard behaved as specified and the
+dead end came from the *other* path not having converged yet. `approve_external_join`
+now publishes a proposal, so `refuse_if_proposals_pending` no longer reaches it at all
+and the guard's remaining callers are the paths that genuinely still commit directly.
 Pinned by
 `a_direct_commit_refuses_to_absorb_a_pending_proposal`,
 `a_direct_add_cannot_smuggle_in_a_second_member`,
@@ -2052,16 +2076,27 @@ separate inside the gate.**
   it, instead of two paths with two retention mechanisms and two authorisation
   stories.
 
-**S7 is not built, and staging it second turned out to cost more than "keep the
-approve buttons out of one sprint".** With the member paths converged and the
-external-join path not, a role-table group now has one live direct-commit path left,
-and `refuse_if_proposals_pending` makes the two **mutually exclusive at any
-instant** — so an admin approving a join while any membership request is pending is
-refused. That is the correct fail-closed answer and it is also a user-visible dead
-end nobody designed. It is worth being precise about what remains open: **G-38
-residual 1 is closed for the member paths and open for this one.** Two admins
-approving two different joiners against the same epoch still fork each other exactly
-as before this ADR, because both are still direct commits.
+**S7 LANDED in `576ea14`, and staging it second turned out to cost more than "keep
+the approve buttons out of one sprint".** For the interval in which the member paths
+were converged and the external-join path was not, a role-table group had one live
+direct-commit path left, and `refuse_if_proposals_pending` made the two **mutually
+exclusive at any instant** — so an admin approving a join while any membership
+request was pending was refused. That was the correct fail-closed answer and it was
+also a user-visible dead end nobody designed. **G-38 residual 1 is now closed for
+this path too**: two admins approving two different joiners against the same epoch
+each author an `Add` **proposal**, which advances no epoch, so the two compose into
+one sweep instead of forking.
+
+**What S7 built is not what this decision prescribed**, and the three reasons the
+prescription does not survive contact are recorded separately, because the design
+below is the obvious one and a later hand will re-propose it — see
+[§ Why decision 4's design does not survive](#why-decision-4s-design-does-not-survive).
+In short: the approval **mark** is device-local while the sweeper may be a different
+admin; every peer's commit gate would refuse a stranger's proposal, since a
+`NewMemberProposal` sender resolves to no member; and merging the two stores merges
+their **quotas**, handing any `/g/` link-holder the membership-freeze primitive C-66
+had just closed. The approving admin therefore **authors the `Add` itself**, and
+`pending_external_joins` is **kept** rather than retired.
 
 ### Decision 5 — what the user sees
 
@@ -2150,7 +2185,10 @@ The recon was honest about Option C's limits; B's deserve the same treatment.
    item survives it.** Transfer removes the *dead-end in the core* — an owner is no
    longer bound permanently to every group they create, and a member may now
    leave — but it does not remove the *stall*, and neither feature has reached
-   every client (transfer has no affordance anywhere; `Leave group` is web-only). Minting a transfer needs the owner's key, so it
+   every client ~~(transfer has no affordance anywhere; `Leave group` is web-only)~~ —
+   **both have since reached all three** (`0274fa7` for the transfer flow, `c50bdd7`
+   for `Leave group` on the natives), which changes nothing about this item.
+   Minting a transfer needs the owner's key, so it
    is something a present owner does deliberately; it does nothing for an owner
    who has already gone, which is precisely the case that stalls. The remedies for
    a stall remain what they were: appoint more admins, or have the owner hand the
@@ -2164,17 +2202,31 @@ The recon was honest about Option C's limits; B's deserve the same treatment.
    committer that sweeps *nothing* loses the duty — but **partial** censorship by an
    otherwise-active committer is not bounded by anything in this design. Named, not
    solved.
-4. **Proposals go stale too, and the automatic re-proposal is not built.**
-   ValSem003 rejects *any* non-Application message at the wrong epoch, not only
-   Commits, so a proposal that misses the sweep must be re-proposed. This is cheap —
-   the whole point — but it is a client state machine, not a no-op, and a stale
-   proposal litters the journal for its 30-day TTL the way the recon says a dead
-   commit does under C. **As built, none of the three clients re-proposes.** The UX
-   spec §7 specifies it as silent and automatic; no client has the code, so a
-   superseded request is dropped and the user must ask again. It is the one designed
-   state in decision 5 with no implementation behind it, and it is a functional gap
-   rather than a safety one: the effect is a request that quietly does not happen,
-   which is the same thing the user sees when nobody sweeps.
+4. **Proposals go stale too, and the automatic re-proposal on *supersession* is
+   still not built — but the silence around it is closed, and the sibling case
+   now retries by itself.** ValSem003 rejects *any* non-Application message at the
+   wrong epoch, not only Commits, so a proposal that misses the sweep must be
+   re-proposed. This is cheap — the whole point — but it is a client state machine,
+   not a no-op, and a stale proposal litters the journal for its 30-day TTL the way
+   the recon says a dead commit does under C. ~~**As built, none of the three clients
+   re-proposes.**~~ **Three things have changed under this item and they pull in
+   different directions, so it is worth separating them:**
+   - **Still unbuilt:** the UX spec §7 *superseded* case — a silent, automatic
+     re-request of a proposal the sweep dropped. No client has it.
+   - **No longer silent (`46c7aa4`):** an author now learns that a request of theirs
+     left the pending set without its effect landing — the `Not applied (n)` surface,
+     with a user-driven repair. It is scoped to **adds**, and that is a rule rather
+     than a shortcut: `remove` and `leave` key on a **leaf index** and OpenMLS reuses
+     a vacated leaf, so a roster test on one is wrong in both directions, and all
+     three are already visible when they fail.
+   - **Built for the sibling case (`21f6c8c`, `1839da7`):** a request refused because
+     the queue was **full** re-sends automatically on all three, triggered by an
+     observed shrink of the pending set rather than by a timer — because a queue
+     drains when a committer sweeps, not when time passes.
+
+   So the residual is narrower than it was and it is still real: a **superseded**
+   request is dropped and the user must ask again, now knowing that they must. It
+   remains a functional gap rather than a safety one.
 5. **`self_update` / `PublisherGroup::rotate` is a fifth epoch-advancing path B
    does not cover.** `rotate` (`crates/lakko-mls/src/publisher_group.rs:455`) is
    FFI-exposed on both surfaces and advances the epoch via `self_update`. Two
@@ -2199,13 +2251,18 @@ The recon was honest about Option C's limits; B's deserve the same treatment.
 8. **It does not make an already-forked device converge.** Nothing in B repairs a
    device that forked before B shipped. With no deployment that is vacuous today,
    and it stops being vacuous the moment there is one.
-9. **The external-join path is still a direct commit, so G-38 residual 1 is closed
-   for the member paths and open for that one.** Decision 4's convergence is **S7
-   and S7 is unbuilt**: `Group::approve_external_join` calls `add_member` and
-   eager-merges, so two admins approving two different joiners against the same
-   epoch fork each other exactly as they did before this ADR. Everything the fix
-   needs already exists; what it needs is deciding what `Approve` means once it
-   stops meaning "added".
+9. ~~**The external-join path is still a direct commit, so G-38 residual 1 is closed
+   for the member paths and open for that one.**~~ **Closed by S7 (`576ea14`).**
+   `Group::approve_external_join` no longer calls `add_member`: it publishes an `Add`
+   **proposal the approving admin authors itself**, carrying the joiner's retained
+   KeyPackage, so two admins approving two different joiners against the same epoch
+   compose into one sweep instead of forking. The question this item said needed
+   deciding — *what `Approve` means once it stops meaning "added"* — was answered by
+   the build: it means *the admin's own MLS-authenticated proposal is on the wire*,
+   which is why S7 needed no new authorisation channel. The one direct external-join
+   arm that survives is `pub(crate) approve_external_join_directly`, reachable only
+   from `PublisherGroup::approve_external_join` and refusing any group that carries a
+   role table.
 10. **A send can still straddle an epoch when the commit is a REMOTE one.** The
     client sprints closed the local half by serializing seal-and-publish under the
     per-group lock, and the bound is written into the code rather than implied: a
@@ -2366,35 +2423,47 @@ argument for putting the rule in the core rather than in three clients.
 ~~Web and iOS **refuse** a second role change while one is pending and say so; **Android
 does not**, so a second concurrent toggle there still loses one silently.~~ **Stale as of
 the core fix.** The refusal now holds for **every** caller on every platform and cannot
-drift between them. What Android still lacks is **readable copy for the refusal**, not the
-refusal itself: it will surface the core's `Error::Group` diagnostic where web and iOS
-surface a sentence. That is the remaining client follow-up
-([§ Open questions](#open-questions)).
+drift between them. ~~What Android still lacks is **readable copy for the refusal**, not
+the refusal itself: it will surface the core's `Error::Group` diagnostic where web and
+iOS surface a sentence.~~ **Closed 2026-09-01 in `8018e8b`, and the fix went further than
+this follow-up asked.** Android gained the same narrow `hasPendingRoleChange` pre-check
+web and iOS already had *and* the sentence — but the drift this bullet describes was
+three-way, not one-way (web surfaced the spec's string, iOS threw its own near-variant
+prose, Android surfaced the core diagnostic raw), so mapping core prose to fixed copy by
+substring would have rebuilt the same drift class. The core now raises
+`Error::MembershipRefused { reason, detail }` (`crates/lakko-mls/src/refusal.rs`), whose
+whole `Display` is `detail` — the same sentence the refusal always carried, so nothing
+about a log line changed — with a typed `RefusalReason` travelling **beside** it as the
+contract. Each client selects its copy from the reason rather than from the text.
 
 The UX spec's "a second, different add composes into the same sweep" is true for adds and
 **false if generalised to role changes**.
 
 **6. The direct-commit refusal reaches the external-join path, and only S7 closes
-it.** `refuse_if_proposals_pending` (the `a90fa90` hardening) makes the direct and
-sweep paths mutually exclusive in a role-table group. `approve_external_join` is
-still a direct commit on every client, so approving a join while any membership
-request is pending now returns an error. Correct and fail-closed, but a user-visible
-dead end nobody designed, and the sharpest practical argument for finishing S7.
+it. — CLOSED by S7 (`576ea14`); kept because it is the item that argued for S7.**
+`refuse_if_proposals_pending` (the `a90fa90` hardening) makes the direct and
+sweep paths mutually exclusive in a role-table group. While `approve_external_join`
+was still a direct commit on every client, approving a join while any membership
+request was pending returned an error. Correct and fail-closed, but a user-visible
+dead end nobody designed, and it was the sharpest practical argument for finishing S7.
 
-*Mitigated on all three clients, not closed.* Approve now drains first — it runs the
-committer sweep, then re-reads the pending count **inside** the lock and, if the set
-survived, refuses in copy a person can act on instead of in a core diagnostic naming
-two Rust entry points. Neither platform's lock is reentrant (iOS's `withCommitLock`
+*The interim mitigation is gone with the cause, and it is recorded because a reader
+of the client history will find its remains.* Before S7, approve **drained first** —
+it ran the committer sweep, then re-read the pending count **inside** the lock and, if
+the set survived, refused in copy a person can act on instead of in a core diagnostic
+naming two Rust entry points. Neither native lock is reentrant (iOS's `withCommitLock`
 is a task chain that would await the tail its own outer section installed; Android's
-is a `kotlinx.coroutines.sync.Mutex`), so the drain runs **outside** the lock on both
-and the in-lock re-read is what closes the window the poll opens between them. Two
-ceilings remain, and both are S7's to lift rather than a client's: the stand-down
+is a `kotlinx.coroutines.sync.Mutex`), so the drain ran **outside** the lock on both
+and the in-lock re-read closed the window the poll opened between them. Two ceilings
+were named as S7's to lift rather than a client's, and S7 lifted both: the stand-down
 stands down on **any** unapplied row including this device's own just-published
-proposal, so an admin who removes someone and immediately approves a join is still
-refused; and an admin correctly **deferring to a live owner** never drains at all, so
-for a non-owner admin the Approve button is effectively unavailable whenever anything
-is pending. The client change converts a crash-shaped error into an honest "not yet",
-which is the most a client can do while approval remains a direct commit.
+proposal, so an admin who removed someone and immediately approved a join was still
+refused; and an admin correctly **deferring to a live owner** never drained at all, so
+for a non-owner admin the Approve button was effectively unavailable whenever anything
+was pending. Both are gone because approving no longer needs an empty queue: it
+publishes a proposal, and the clients follow it with an opportunistic
+`sweepIfCommitter` whose failure is now an honest *they join when an owner or an admin
+applies the change* rather than a refusal.
 
 **7. The verdict apply swallowed the rows it applied.** The sibling of item 1, and
 the sharper half. `adjudicate` applies every row the DS ordered below its own commit
@@ -2744,6 +2813,19 @@ adjudication and its sweep-entry marker, and iOS's lock seam moved up a layer. N
 of the three is a stylistic choice; each falls out of that platform's existing
 durability shape.
 
+**Five more sprints landed after S7 that neither table has a row for, and a reader
+of the tables alone would conclude the arc stopped at S7.** They are listed here as
+a pointer rather than re-argued, because each is written up where it belongs:
+
+| Landed | Surface | What changed |
+|---|---|---|
+| `c50bdd7` · `0274fa7` · `8763f3e` · `5b2b654` | `crates/lakko-mls`, all three clients | The seven `lakko-security` findings — see [§ What the security review found](#what-the-security-review-found). Minted **C-66**, **C-67**, **C-68**. |
+| `0274fa7` | all three clients | **Ownership transfer, end to end** (UX §6.1). The core half landed in `e780952`; this is the affordance, and it closes the owner dead-end in the product as well as in the crate. |
+| `8763f3e` | `crates/lakko-mls` + both FFI surfaces + all three clients | **`Group::is_active()` / `isActive`** and the self-eviction state (UX §6.2) — the case where your own removal lands. Tearing down the device's own push row here closes the half of **G-36 residual 2** ADR-0043 recorded as unclosable. |
+| `8018e8b` | `crates/lakko-mls` (`refusal.rs`) + both FFI surfaces + all three clients | **Typed refusal reasons.** `RefusalReason` (18 variants) + `RefusalDisposition` + `Error::MembershipRefused`, so a client selects copy from a type rather than substring-matching core prose. |
+| `21f6c8c` · `1839da7` | all three clients (+ one core fix) | **Automatic re-send of a request the queue had no room for**, triggered by an observed shrink of the pending set rather than by a timer. The core fix is the one that mattered: `approve_external_join` was re-wrapping its inner error in prose and destroying the `RefusalReason` it had just produced. |
+| `46c7aa4` | all three clients + `docs/` | **S7's two client-visible residuals** — the `Not applied (n)` surface, and the honest wait copy plus user-driven repair on the joiner side — and **[ADR-0046](0046-external-crypto-review.md)**, which moved this ADR's external-review debt to **G-39**. |
+
 ---
 
 ## Alternatives rejected
@@ -2851,13 +2933,15 @@ durability shape.
   group; every peer now refuses that commit, whether or not anyone uses the
   transfer API. Indexed as **C-63**.
 - **Two features fall out that the product did not have:** a member can leave a
-  group, and an owner can hand one on. **Neither has reached every client.**
-  `Leave group` is on the **web** members panel only — hidden for the owner, whose
-  departure the core refuses fail-closed — and iOS and Android built the rest of the
-  membership surface without it. Ownership transfer is on both FFI surfaces with **no
-  affordance anywhere**. So both features exist in `lakko-mls`, one exists on one
-  client, and the owner dead-end the transfer was built to close is still open to
-  every user.
+  group, and an owner can hand one on. ~~**Neither has reached every client.**~~
+  **Both have, and the dead end is closed to a user as well as in the crate.**
+  `Leave group` reached the two natives in `c50bdd7` and the ownership-transfer flow
+  reached all three in `0274fa7`. Two shapes are worth keeping from how they landed:
+  `Leave group` is **disabled rather than hidden** for the owner, carrying the
+  precondition as its reason — hiding it would leave an owner scanning for the exit
+  and finding nothing — and the transfer's **direct arm is structurally unreachable**
+  on every client, because `isOwner` and `usesProposalPath` are the same read, so
+  each drives `proposeOwnershipTransfer` alone.
 - **The election is real, not a design.** All three clients emit a throttled beacon
   from a foregrounded chat screen, store the observations and fold them at sweep
   time, so an admin-only group is served by whichever admin is running the app
@@ -2946,9 +3030,15 @@ durability shape.
   seeded one since ADR-0022, so no freshly created group reaches that path.
 - The four direct-commit paths still exist and still merge eagerly, so every
   caller that has not migrated behaves byte-for-byte as before. ADR-0045 forbids
-  keeping them permanently. **Three of the four have no production caller left in a
-  role-table group** — add, remove and role-change all propose on all three clients
-  — and the fourth, `approve_external_join`, goes with **S7**.
+  keeping them permanently. ~~**Three of the four have no production caller left in a
+  role-table group** … and the fourth, `approve_external_join`, goes with **S7**.~~
+  **All four are now unreachable from a role-table group.** Add, remove and
+  role-change propose on all three clients, and S7 (`576ea14`) made the fourth a
+  proposal too. What survives is `pub(crate) approve_external_join_directly`, whose
+  one caller is `PublisherGroup::approve_external_join` and which **refuses** a group
+  carrying a role table — so the direct arm exists exactly where the proposal path
+  cannot work (a `PublisherGroup` seeds no role table, hence has no committer) and
+  nowhere else.
 - Chat sends are unaffected by a pending proposal, and — for *decryptability* —
   unaffected by a staged sweep. **The second half of that sentence was true of the
   core and false of the clients**, and is what item 3 of
@@ -3019,9 +3109,15 @@ decision 2 rather than here.
   lifecycle**, stage / merge / abandon, which defers the eager merge on the sweep
   path (`fe3de6c`, and the thing ADR-0040 deliberately declined to do); and a park
   of the pending proposal set around the application-message encrypt (`fe3de6c`).
-  Property tests exist for all four (180 across seven binaries). **The external
-  crypto review is still owed, and `lakko-security` has not run on any of it** —
-  the largest single gap in this ADR's status.
+  Property tests exist for all four (180 across seven binaries at the time this was
+  written; 268 `#[test]` functions as of 2026-09-02 — 172 in the lib and 96 across
+  seven integration binaries). ~~**The
+  external crypto review is still owed, and `lakko-security` has not run on any of
+  it**~~ — **`lakko-security` ran on 2026-08-29** (REQUEST CHANGES, seven findings,
+  all closed); the **external crypto review has not**, and is tracked once in
+  [G-39](../security/known-gaps.md) per
+  [ADR-0046](0046-external-crypto-review.md) as a **release gate**. It is still the
+  largest single open item behind this ADR.
 - **#4 (no fallback to non-E2EE / fail-closed).** **Strengthened by Option C**: a
   device never remains silently on an epoch the group did not adopt, and a Welcome
   is never published for a group state that no member holds. There is no
@@ -3066,10 +3162,14 @@ decision 2 rather than here.
   two of its three enforcement layers acquired production callers**: layer (b), the
   sweep-side exclusion, is live on all three clients now that a sweep exists at all,
   and layer (c), the receipt boundary, was already live through
-  `processIncomingVerifyingRoles`. Layer (a), the authoring pre-check, still has
+  `processIncomingVerifyingRoles`. ~~Layer (a), the authoring pre-check, still has
   **no production caller anywhere** — no client builds an ownership-transfer
-  affordance — which is a UX gap and not a weakening, since (c) is the boundary and
-  does not trust (a).
+  affordance~~ — **and since `0274fa7` it has one on every client**, because the
+  transfer flow shipped and each client drives `proposeOwnershipTransfer`, which runs
+  `plan_ownership_transfer` before any OpenMLS call. **All three layers now have
+  production callers.** The reason (a) never being called was *a UX gap and not a
+  weakening* is unchanged and still worth keeping: (c) is the boundary precisely
+  because it does not trust (a).
 
   **C-64**: *the committer election and the staged sweep decide from authenticated
   state, and no epoch advances until the journal has ordered it* (Quick stats
@@ -3094,17 +3194,25 @@ decision 2 rather than here.
   swallowing the row.
 
   Both entries also bear on **G-38 residual 1**, which stays a free-form known-gaps
-  entry, matching how G-35 / G-36 / G-37 were kept. It is now **closed for the chat
-  membership paths and open for the external-join one** — see
-  [§ What Option B does not fix](#what-option-b-does-not-fix) and the S7 row.
+  entry, matching how G-35 / G-36 / G-37 were kept. ~~It is now **closed for the chat
+  membership paths and open for the external-join one**~~ — **it is closed for every
+  membership path** since S7 (`576ea14`) converged the external-join approve onto the
+  same sweep; see the S7 row in
+  [§ Blast radius, per sprint](#blast-radius-per-sprint).
 
 **Flag through `lakko-security` before merging any option.** Option C touches the
 MLS commit publish ordering and the ADR-0040 durability argument. Option A touches
 the zero-trust server's behaviour and adds an availability attack surface. Option B
 touches the audited MLS state machine and relocates ADR-0022's authorisation
-boundary. None of the three is a "no review needed" change. **This is outstanding:
+boundary. None of the three is a "no review needed" change. ~~**This is outstanding:
 Option B's core is built and has had no `lakko-security` pass and no external
-crypto review.**
+crypto review.**~~ **The `lakko-security` pass ran on 2026-08-29** against
+`9a60ab3 → 8763f3e` and returned **REQUEST CHANGES**; its seven findings are closed
+(see [§ What the security review found](#what-the-security-review-found)). The
+**external crypto review has not run** and is tracked once, in
+[G-39](../security/known-gaps.md), per
+[ADR-0046](0046-external-crypto-review.md) — as a **release gate**, not a per-ADR
+blocker.
 
 ---
 
@@ -3125,15 +3233,33 @@ crypto review.**
   its window from what it actually does; neither is designed here, and the honest
   statement in the meantime is that the mechanism **underperforms its own design on
   one of three platforms**.
-- **`approve_external_join` is the last live direct-commit path, and it is now
-  user-visible.** S7 is unbuilt, so a role-table group's admin approving a join
-  while any membership request is pending is **refused** by
-  `refuse_if_proposals_pending` — correct and fail-closed, and a dead end nobody
-  designed. It is also the remaining half of G-38 residual 1: two admins approving
-  two different joiners against the same epoch still fork, exactly as before this
-  ADR. Everything S7 needs exists (the proposal store, the gate's deliberately
-  separate external-join arm, the sweep); what it needs deciding is what `Approve`
-  *means* once it stops meaning "added", which the UX spec §7 already drafts.
+- ~~**`approve_external_join` is the last live direct-commit path, and it is now
+  user-visible.**~~ **ANSWERED — S7 landed (`576ea14`).** The question this bullet
+  said needed deciding — *what `Approve` means once it stops meaning "added"* — was
+  answered by the build, and **not** the way decision 4 prescribed. It means *the
+  approving admin authors the `Add` proposal itself*, so the approval reaches the
+  wire as an ordinary MLS-authenticated artifact judged by the one existing rule. The
+  three reasons decision 4's own design (store the stranger's proposal and mark it
+  approved) does not survive contact are in
+  [§ Why decision 4's design does not survive](#why-decision-4s-design-does-not-survive),
+  and the last of them is why this bullet's *"everything S7 needs exists"* was
+  optimistic: putting a stranger's proposal in the member store merges the **quotas**
+  and hands a `/g/` link-holder the membership-freeze primitive C-66 had just closed.
+  Two consequences, both stated in the S7 row: the `refuse_if_proposals_pending` dead
+  end is gone because there is no direct commit left for it to guard, and G-38
+  residual 1 closes for this path.
+
+  **Two residuals S7 opened, both recorded rather than closed.** A sweep can drop an
+  authorised approval and tell the **joiner** nothing — the group journal is
+  unauthenticated and its DS pseudonym *is* the `group_id`, so a "your request was not
+  carried" envelope would be a forgeable denial primitive any link-holder could post,
+  and an epoch advance without a rendezvous is byte-identical to *nobody has approved
+  yet*. The **approver** does learn (the `Not applied (n)` surface, `46c7aa4`); the
+  joiner gets honest wait copy and a user-driven `Request again`. And nothing bounds
+  how long a request sits in the quarantine when no committer is running — decision 2
+  gives it no deadline by design, and the quarantine's depth is not a bound a client
+  can state, since both caps are private to the core and absent from both FFI
+  surfaces.
 - ~~**Android does not refuse a second concurrent role change; web and iOS do.**~~
   **Closed 2026-08-28 in the core, and the call this bullet floated — "the natural fix
   is arguably the core rather than the third client" — is the one that was taken.**
@@ -3145,29 +3271,41 @@ crypto review.**
   sweep with `TooManyGCEProposals` — see
   [§ What the client sprints found](#what-the-client-sprints-found) item 5. Pinned as
   **C-65**.
-- **All three clients should surface the new core refusal as human copy, not the core
-  diagnostic.** This is what replaces the bullet above. The refusal string is now in the
-  UX spec §6 table; Android has no client-side pre-check at all, so today it would show
-  the raw `Error::Group` text. **Checked while closing the entry, and it is the good
-  news:** web's `hasPendingRoleChange` (`apps/web/src/contacts/client.ts`) and iOS's
-  (`apps/ios/Lakko/Chat/ChatRepository.swift`) are **correctly narrow** — each filters the
-  pending set on the role-change kind specifically, so neither is stricter than the core
-  rule and neither refuses a legitimate toggle merely because an unrelated add or remove
-  is pending. **One residual worth fixing when the copy is done:** both clients' own doc
-  comments still describe the superseded keeps-one-discards-the-other mechanism, so the
-  correction above has to reach three files, not one.
-- **Android surfaces a received proposal as a timeline row, and never stamps an
-  observation for one.** UX §10 treats a membership request as a panel signal, and
-  web and iOS do; Android's `ChatClient` maps `ProcessedMessage.Proposal` to a
-  `System` row in the message list instead. The consequence runs deeper than a stray
-  bubble: `recordPendingRequestObservation`'s only production caller there is the
-  own-request path, so a request that arrives from **someone else** is never given a
-  DS timestamp, and the §4 quiet window — which exists precisely so a request that
-  resolves in milliseconds never flashes an annotation — silently never applies to
-  it. Pre-existing on the poll path; the sweep path was deliberately made to behave
-  identically rather than diverge, so the inconsistency is now uniform on that client
-  instead of uniform across the three. Closing it needs an event variant plus a sink,
-  which is a change of its own.
+- ~~**All three clients should surface the new core refusal as human copy, not the core
+  diagnostic.**~~ **ANSWERED in `8018e8b`, and the answer was larger than the ask.**
+  The bullet framed this as Android catching up: *Android has no client-side pre-check
+  at all, so today it would show the raw `Error::Group` text*. Android now has the
+  same narrow `hasPendingRoleChange` (`apps/android/.../chat/OwnershipTransfer.kt`) —
+  and the drift turned out to be **three-way**, not one-way: web surfaced the spec's
+  string, iOS threw its own near-variant prose, Android surfaced the diagnostic raw.
+  Mapping core prose to fixed copy by substring would have rebuilt exactly that class,
+  so the core gained a typed `RefusalReason` beside the sentence
+  (`crates/lakko-mls/src/refusal.rs`) and each client selects its copy from the type.
+  **What checking this entry found is still true and worth keeping:** web's
+  `hasPendingRoleChange` (`apps/web/src/contacts/client.ts`) and iOS's
+  (`apps/ios/Lakko/Chat/ChatRepository.swift`) are **correctly narrow** — each filters
+  the pending set on the role-change kind specifically, so neither is stricter than
+  the core rule and neither refuses a legitimate toggle merely because an unrelated
+  add or remove is pending. **And one residual genuinely survives the copy landing:**
+  both clients' *other* role-change call sites still carry doc comments describing the
+  superseded keeps-one-discards-the-other mechanism
+  (`apps/web/src/contacts/client.ts` and `apps/ios/Lakko/Chat/ChatRepository.swift`),
+  which OpenMLS refuses outright as `TooManyGCEProposals`.
+- ~~**Android surfaces a received proposal as a timeline row, and never stamps an
+  observation for one.**~~ **CLOSED in `576ea14`, both halves.** UX §10 treats a
+  membership request as a panel signal, and Android's `ChatClient` used to map
+  `ProcessedMessage.Proposal` to a `System` row in the message list instead. It now
+  raises its own `IncomingChatEvent.MembershipProposal`, and `SystemKind` carries no
+  `Proposal` entry at all — deliberately, since `System` is the only variant
+  `consumeEvents` turns into a `ChatMessage`, so an enum that *cannot name* a proposal
+  is the strongest available statement of the rule. The deeper half is closed with it:
+  `recordReceivedProposalObservation` gives a request arriving from **someone else** a
+  DS timestamp, so §4's quiet window — which exists precisely so a request that
+  resolves in milliseconds never flashes an annotation — now applies to every request,
+  not only the reader's own. It refuses rather than guesses in two cases, and both are
+  the point: an unstored proposal (the receipt gate refused it, so no sweep will carry
+  it) and an unparseable DS timestamp, where falling back to the local clock would
+  silently reintroduce the skew the DS timestamp exists to remove.
 - **Android carries two `looksLikeCommitterBeacon` functions**, one in
   `me.lakko.app.chat.ChatClient` (3-arg: bytes, length, decoder lambda) and one in
   `me.lakko.app.push.PushServiceEnvelopeFilter` (2-arg: bytes, length — the peek
@@ -3271,12 +3409,22 @@ crypto review.**
   clients rather than none.
 - **The approve-path retry and the stale proposal ref.** ~~ADR-0027's pending
   external joins are epoch-bound and in-memory. After the replay the retained
-  proposal is stale~~; **decision 4 dissolves the in-memory half** — after S7 an
-  external-join proposal is a stored MLS proposal like any other. Until S7 lands,
-  the two mechanisms coexist and the question stands in its original form: the
-  Lakko-side `pending_external_joins` `Vec` is still there, still epoch-bound and
-  still in memory, and it is **not** covered by the staged rollback. A UX question
-  as much as a mechanism one — route through `ux-ui`.
+  proposal is stale~~; ~~**decision 4 dissolves the in-memory half** — after S7 an
+  external-join proposal is a stored MLS proposal like any other.~~ **S7 landed and
+  dissolved neither half, deliberately.** The Lakko-side `pending_external_joins`
+  `Vec` is **kept** — it is the quarantine that stops a `/g/` link-holder filling the
+  member proposal store — so it is still in memory and still outside the staged
+  rollback. One correction to the framing: it is **not epoch-bound**. The retained
+  `KeyPackage` outlives epoch advances; only the joiner's *original* external proposal
+  had to arrive at a matching epoch. What drops an entry is a restart, or the joiner
+  landing (`pending_external_joins()` filters members). **Two in-memory lifetimes now
+  meet on the client side and the mismatch is handled rather than prevented:** the
+  quarantine lives on the `Group` while the retry record lives beside the chat, and
+  both the ADR-0040 crash-abort reset and the web rehydrate rebuild the `Group`
+  mid-session — so a retry record can outlive its request with no restart, and each
+  client's verdict re-reads the live retained set and **drops** rather than firing an
+  approve the core would refuse. Still a UX question as much as a mechanism one —
+  route through `ux-ui`.
 - **Whether ~~Option C~~ the staged sweep generalises to the DeviceGroup and the
   channel PublisherGroup.** Unchanged and still open, and the answer today is
   **no**: `PublisherGroup::rotate` still calls `self_update` and merges eagerly,
@@ -3325,9 +3473,12 @@ crypto review.**
   ways, and the **C-61 re-seam** onto the sweep, which is a security ordering rule
   that moved call sites (Android's commit message asks for exactly this look). It is
   not a question that closes by itself.
-- **The stale ADR index.** `docs/adr/README.md` carries a duplicated `## Index`
-  section and both copies stop at ADR-0015. Out of scope here; flagged for a
-  separate docs pass.
+- **The stale ADR index.** `docs/adr/README.md`'s `## Index` stops at ADR-0015, so
+  it is missing thirty-one entries. (This bullet also said the `## Index` section was
+  **duplicated**; it is not, and was not when the bullet was written — the file has one
+  `## Index` heading. Corrected rather than deleted, because the miscount is the kind
+  of detail a reader would otherwise chase.) Out of scope here; flagged for a separate
+  docs pass.
 
 ---
 
@@ -3392,6 +3543,15 @@ Symbols rather than line numbers, per the anchor convention at the top.
   **Verified firsthand by the maintainer on this tree:** `cargo test -p lakko-mls`
   180 passed across seven binaries, 0 failed; clippy on `lakko-mls` clean;
   `cargo check --workspace --all-targets` clean.
+
+  > **These counts are a 2026-08-20 snapshot and every later sprint added to them.**
+  > As of 2026-09-02 the integration binaries hold 37 / 12 / 8 `#[test]` functions
+  > respectively — `group_admin_roles.rs` stopped being untouched at `a90fa90`, which
+  > added the eighth — plus two integration binaries that did not exist on the tree
+  > this snapshot names: `group_membership_state.rs` (5, the `is_active` accessor,
+  > `8763f3e`) and `membership_refusal_reason.rs` (21, the typed refusals,
+  > `8018e8b`). The snapshot is left standing rather than rewritten, because it is
+  > what was verified on the tree it names.
 - `openmls-0.8.1/src/group/mls_group/mod.rs` `is_operational` +
   `commit_builder.rs` `stage_commit` — the freeze and the durability of a staged
   commit, both of which are client obligations

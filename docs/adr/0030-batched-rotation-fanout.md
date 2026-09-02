@@ -5,7 +5,18 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0030: Batched channel-rotation fanout — staged prepare + atomic commit
 
-- **Status:** Accepted (maintainer chose Variant 1; implementation in progress)
+- **Status:** Accepted (maintainer chose Variant 1). **Implemented** —
+  ~~implementation in progress~~ was stale until the 2026-09-02 documentation
+  audit. Verified in the tree: `POST /v1/channels/:id/rotate/stage` +
+  `/rotate/commit` with the `MAX_STAGE_CHUNK_ENTRIES` cap
+  ([`services/channels/src/api.rs`](../../services/channels/src/api.rs)), the
+  `channel_staged_envelopes` table (migration `0003_staged_envelopes.sql`),
+  `stage_envelopes` / `commit_rotation` on both `ChannelStore` impls, and the
+  chunk-then-commit fanout on the clients
+  ([`apps/web/src/channels/api.ts`](../../apps/web/src/channels/api.ts)
+  `stageRotation` / `commitRotation`, driven by `rotation-cron.ts`, mirrored on
+  iOS + Android). The staging TTL / GC for an abandoned prepare (OQ2) is still
+  unbuilt.
 - **Date:** 2026-07-04
 - **Context:** Phase 4 (channels, G-1) — scale the rotation fanout to >50k subscribers
 
@@ -103,10 +114,14 @@ re-expressed internally as stage-all-then-commit), so nothing regresses.
   restated; this ADR + the extended tests are offered to `lakko-security` since
   the change touches the atomicity invariant.
 - Deferred: staging TTL / GC for abandoned prepares (a prune sweep, like the
-  post/subscriber retention loops); the partial-coverage policy (a subscriber not
-  in the staged set at commit time — v1 keeps their prior-epoch envelope, and
-  they catch up via the ADR-0010 re-subscribe path, Sprint C); a streaming/push
-  delivery layer.
+  post/subscriber retention loops) — **still open**; the partial-coverage policy
+  (a subscriber not in the staged set at commit time — v1 keeps their
+  prior-epoch envelope, and they catch up via the ADR-0010 re-subscribe path,
+  ~~Sprint C~~) — **that catch-up path was built as
+  [ADR-0031](0031-multi-epoch-envelope-retention.md)**, which retains the most
+  recent N=4 seed envelopes per subscriber and adds `fetch_envelopes` so an
+  offline subscriber recovers every epoch it missed rather than only the
+  current one; a streaming/push delivery layer — **still open**.
 
 ## Open questions
 

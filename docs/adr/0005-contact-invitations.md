@@ -5,9 +5,32 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0005: Capability-based contact invitations + 6 scenarios + pseudonym lifecycle
 
-- **Status:** Accepted
+- **Status:** Accepted — **the model shipped; most of the concrete struct
+  definitions below did not survive implementation** and are marked in place
+  (documentation audit, 2026-09-02).
 - **Date:** 2026-04-28
 - **Context:** Phase 0
+
+> **AMENDED 2026-09-02 (documentation audit).** The decisions here — invites as
+> signed capabilities, pseudonymous routing, HPKE-sealed envelopes, PoW +
+> Privacy Pass gating, no address-book upload, no global presence — are what
+> Lakko built, and the six-scenario framing is still the right map. **The
+> `struct` blocks are not the shipped types.** Each is marked where it appears;
+> the ones worth knowing before you read on:
+>
+> - **`InviteCapability`** carries the owner's **full pubkey**, not a hash, and
+>   has neither a KT proof nor a Bloom counter.
+> - **`QrPayload`** does not exist. Scenario D shipped as *verify*, not *add*.
+> - **`GroupInvite`** became `GroupInviteCapability` with a **joiner-initiated,
+>   admin-approved** accept model — the inversion that makes a leaked link
+>   harmless ([ADR-0028](0028-group-join-ticket.md) /
+>   [ADR-0027](0027-external-join-approval.md)).
+> - The **fourth pseudonym type** and the **`InviteOnly` discoverability
+>   default** were never built; the latter is listed here as a *settled
+>   trade-off*, which makes it the most misleading line in the document.
+>
+> `ContactRequest` / `ContactAck` / the three pseudonym types / safety numbers /
+> `compose` / `decode_and_verify` all exist as named.
 
 ## Context
 
@@ -49,7 +72,32 @@ The server only sees `(pseudonym_A → pseudonym_B, opaque_envelope, PoW_token)`
 
 ### Capability-based invite links (scenarios B/C)
 
-URL: `https://lakko.app/i/<base64url-pointer>` — only a pointer + MAC are in the URL; the **capability itself** is an encrypted blob in SeaweedFS:
+URL: ~~`https://lakko.app/i/<base64url-pointer>`~~ **`https://lakko.me/i/<base64url>`** — ~~only a pointer + MAC are in the URL; the **capability itself** is an encrypted blob in SeaweedFS~~:
+
+> **The struct below is the design sketch, not the shipped type (marked
+> 2026-09-02).** `crates/lakko-contacts/src/invite.rs` documents every
+> divergence honestly in its module header; it is this ADR that was never
+> updated. The differences that change how you should read the design:
+>
+> | Sketched here | Shipped `InviteCapability` |
+> |---|---|
+> | `owner_identity_hash: [u8; 32]` (BLAKE3 of the pubkey) | `owner_signature_pubkey: VerifyingKey` — **the full pubkey**, not a hash, so the link is self-verifying without a lookup |
+> | `owner_transparency_proof: KTLogProof` | **absent** — `KTLogProof` exists nowhere; KT verification happens on the identity bundle, not in the link |
+> | `ephemeral_prekey: HpkePublicKey` | `owner_x25519_pubkey` — **long-term**, not ephemeral |
+> | `blob_id: Sha256` | **not a struct field** — the blob indirection is a server-side transport choice, and the codec emits the full capability |
+> | `consumed_pubkey_log: HmacBloom` | **absent** — `HmacBloom` exists nowhere. Server-blind accounting is `compute_joiner_tag` + an atomic consume, which is **stronger**: `max_uses` is server-enforced with per-joiner dedup rather than a probabilistic counter |
+> | `bootstrap_referral: Option<bool>` | `bootstrap_referral: bool` |
+> | `signature: Ed25519Sig` | not a field — the signature is a trailing element of the wire encoding |
+> | — | `label: String`, added |
+>
+> **Three more corrections in the sentence above.** The host is **`lakko.me`**,
+> not `lakko.app`. **SeaweedFS is not used** — invite blobs live in the
+> discovery service's SQL store (`services/discovery/src/invite.rs`, migration
+> `0004_invites.sql`); the only SeaweedFS mention in the tree is an aspirational
+> future-migration comment in `services/storage`. And the URL carries **the
+> capability bytes, not "a pointer + MAC"** — integrity comes from the trailing
+> Ed25519 signature; the short blob-pointer form is an *optional* transport
+> that ADR-0028 later reused for group invites.
 
 ```rust
 struct InviteCapability {
@@ -86,6 +134,16 @@ struct QrPayload {
 
 Dual purpose: add a new contact OOB-secure + verify an existing contact (Signal-style safety numbers).
 
+> **Half built (marked 2026-09-02). `QrPayload` does not exist** — nor do
+> `identity_fingerprint`, `one_time_prekey` or `transparency_position`, in any
+> form, anywhere in the tree. **The verify half shipped**: safety numbers are
+> `safety_number` / `safety_number_bytes` in
+> [`safety.rs`](../../crates/lakko-contacts/src/safety.rs), and comparing them
+> out of band is the working MITM check. **The add-a-new-contact-by-QR half did
+> not**, and `safety.rs` records why: it is gated on a per-platform
+> camera-permission UX sprint. So scenario D today means "verify a contact you
+> already have", not "add one".
+
 ### Group invite (scenario E)
 
 ```rust
@@ -100,6 +158,26 @@ struct GroupInvite {
 
 On accept: the joiner downloads the Welcome → MLS Add proposal → the joiner becomes a leaf.
 
+> **Built as something meaningfully different — see
+> [ADR-0028](0028-group-join-ticket.md) (marked 2026-09-02).** The shipped type
+> is `GroupInviteCapability`
+> ([`group_invite.rs`](../../crates/lakko-contacts/src/group_invite.rs)) with
+> **three** fields: `group_id` (the opaque MLS `GroupId` itself, **not** a
+> pseudonym), `issuer_signature_pubkey`, `expiry_ms`. No
+> `group_name_ciphertext`, no `welcome_blob_id`, no `max_uses` in the signed
+> capability — the last is a deliberate split, since a `max_uses` inside the
+> signature could not be tightened after minting, so it became a **soft
+> server-side ceiling** instead.
+>
+> **The accept model inverted, and that is the substantive change.** Here the
+> admin pre-places a Welcome the joiner downloads. What shipped is
+> **joiner-initiated**: the joiner reads the group's current epoch from the
+> journal's public framing, crafts an MLS **external-join proposal**, and an
+> admin approves it ([ADR-0027](0027-external-join-approval.md)) — so **a
+> leaked link lets a stranger *ask*, never *in***, and the security boundary is
+> the admin gate rather than the secrecy of the link. That property is why
+> ADR-0028 could make the link short and public.
+
 ### Pseudonym lifecycle
 
 | Type | Lifecycle | Purpose |
@@ -107,14 +185,14 @@ On accept: the joiner downloads the Welcome → MLS Add proposal → the joiner 
 | Identity pubkey | Permanent | Primary key, recorded in KT log; rotation via supersession proof |
 | Per-relationship pseudonym | Lifetime of the contact | Used by the server for routing; rotates on demand |
 | Stranger-inbox pseudonym | Long-lived, optionally rotatable | Receives cold ContactRequests; rotation tears down undelivered invites |
-| Per-invite-link pseudonym | Lifetime of the capability | Tied to blob_id |
+| ~~Per-invite-link pseudonym~~ | ~~Lifetime of the capability~~ | ~~Tied to blob_id~~ — **never built** (2026-09-02). [`pseudonym.rs`](../../crates/lakko-contacts/src/pseudonym.rs) defines exactly the three types above. Server-blind per-joiner accounting on an invite is `compute_joiner_tag`, which is a derived tag rather than a routable pseudonym. |
 
 ### Settled trade-offs
 
 | Question | Decision |
 |---|---|
 | Cancel pending ContactRequest | Allowed before accept (client "delete-for-everyone" on pending) |
-| Default discoverability scope for new users | **InviteOnly** — secure by default |
+| Default discoverability scope for new users | ~~**InviteOnly** — secure by default~~ — **not implemented** (2026-09-02). No discoverability scope enum, column or setting exists in `crates/`, `services/` or any client; `ContactsOfContacts`, referenced later in this ADR, likewise does not exist. Presented here as settled, it is in fact unbuilt — and the practical default today is whatever username lookup permits, which is **not** InviteOnly. |
 | Global "online" / "last seen" | **None.** Presence only inside MLS groups via blinded tokens |
 | Auto-import of the device address book | **Forbidden.** The address book = PII; never uploaded |
 | Contact subgroups ("colleagues", "family") | DeviceGroup-encrypted list (server-blind) |
@@ -180,4 +258,10 @@ Identity = pubkey, no usernames. Pros: zero PII. Cons: discovery UX is terrible 
 - [draft-ietf-keytrans-architecture](https://datatracker.ietf.org/doc/draft-ietf-keytrans-architecture/)
 - [Equix proof-of-work (Tor onion services)](https://gitlab.torproject.org/tpo/core/tor/-/issues/40729)
 - ADR-0001 — MLS / OPRF discovery
-- Full specification — `~/.claude/plans/1-nested-wreath.md` §13
+- [ADR-0009](0009-link-based-call-invitations.md) — the call-invite link, built
+  on this ADR's capability codec (added 2026-09-02)
+- [ADR-0027](0027-external-join-approval.md) +
+  [ADR-0028](0028-group-join-ticket.md) — what scenario E actually became
+  (added 2026-09-02)
+- Full specification — `~/.claude/plans/1-nested-wreath.md` §13 (outside the
+  repository; nothing sourced only from it could be verified in this audit)

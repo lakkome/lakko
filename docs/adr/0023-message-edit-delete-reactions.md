@@ -9,6 +9,27 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 - **Date:** 2026-06-18
 - **Context:** Phase 3 — block B (chat-feature parity)
 
+> **AMENDED 2026-08-31 (`5b2b654`) — the author gate was an impersonation, and
+> it is fixed. Recorded here 2026-09-02.** The decision below is unchanged in
+> shape: an author-only, peer-verified, client-side, fail-closed gate is still
+> exactly right. **What it compares changed.** This ADR specified the gate on
+> the **MLS leaf index**, and OpenMLS hands a **vacated leaf to the next member
+> added** — so remove Bob, add Dave, and Dave inherits Bob's leaf and may
+> rewrite and delete Bob's history. On both natives that was **permanent**,
+> because the leaf was persisted beside the message. The gate now keys on the
+> **Ed25519 signature public key, resolved at receipt, in the epoch the row
+> arrived** — indexed as **C-68**. See the two marked sections below
+> (§ Author-only integrity gate, and the reaction item under Open questions,
+> whose severity call was wrong).
+>
+> Two things worth carrying out of it. First, **[ADR-0045](./0045-remote-commit-epoch-fork.md)
+> made this cheap rather than possible** — it lets a remove and an add compose
+> into one commit — so the hazard predates that ADR and was simply never
+> reachable in one step before. Second, the fix is *not* "compare keys" but
+> "compare keys resolved at receipt": resolving later, against the current
+> roster, reproduces the impersonation under a comparison that looks correct,
+> which is why all three clients pin the timing with a permanent contrast test.
+
 ## Context
 
 Lakko chat carries a user-visible text message plus optional attachment
@@ -115,6 +136,40 @@ messages is the point) but is attributed to its sender leaf for dedup,
 aggregation ("👍 ×3"), and per-user toggle (re-sending the same emoji removes
 it).
 
+> **CORRECTED (`5b2b654`, 2026-08-31) — the identity above is wrong and was
+> exploitable. C-68.** Read every "sender leaf" in this section as **"author
+> signature key"**:
+>
+> - **The comparison.** Not the leaf index — the sender's **32-byte Ed25519
+>   signature public key**. OpenMLS reuses a vacated leaf for the next member
+>   added, so a leaf index identifies a *seat*, not a person; a newcomer
+>   seated at a departed member's leaf passed this gate as that member. It was
+>   permanent on iOS and Android (the leaf was on disk with the message) and
+>   session-scoped on web only because the author was not persisted at all —
+>   a deferral that narrowed the window, not a defence.
+> - **The timing, which is the load-bearing half.** The key is resolved from
+>   the MLS-authenticated sender **at receipt, inside the batch loop, in the
+>   epoch the row arrived** — one line after the receive call returns. Never in
+>   a view model, never hoisted. A batch carrying both the removal and the add
+>   would otherwise resolve an epoch-N message against the N+1 roster, which
+>   **is** the same impersonation wearing a correct-looking comparison. Both
+>   receive paths (the poll and the ADR-0045 sweep's verdict apply) resolve
+>   identically.
+> - **Reactions had the same shape.** Attribution is on the reactor's
+>   signature key, not the leaf — see the corrected Open question below.
+> - **Fail-closed at every unknown.** A torn roster read, an unresolvable
+>   sender, and a message stored under the old shape (no author key) all refuse
+>   — including for the genuine author. Refusing an edit is the safe direction;
+>   there is deliberately no *this row is ours, assume our current key*
+>   fallback.
+>
+> Landed as `authorKey` / `authorKeyB64` plus an `AuthorIdentity` resolver on
+> all three clients ([web](../../apps/web/src/chat/author-identity.ts),
+> [iOS](../../apps/ios/Lakko/Chat/ChatRepository.swift),
+> [Android](../../apps/android/app/src/main/kotlin/me/lakko/app/chat/MessageLogStore.kt)).
+> Web gained something it never had along the way: an author that survives a
+> reload, so edit and delete now work after one.
+
 ### UI (all three clients, consistent affordances)
 
 A per-message action menu (web right-click / long-press; iOS context menu;
@@ -178,12 +233,26 @@ affordance).
   lands, the `edit_of`/`delete_of`/`react_to` ops should feed `lakko-sync`
   `EditChain` so a second device reconstructs the same resolved view; the HLC
   tie-break becomes load-bearing there. Deferred.
-- **Reaction identity across a leaf renumber:** MLS leaf indices can change on
-  Remove/Add (the ADR-0022 reason role tables key on signature pubkey, not
-  leaf). For reactions, attribution is per-call/epoch and ephemeral (a count),
-  so a renumber at worst mis-dedups a live reaction across an epoch boundary —
-  acceptable for v1; if it bites, key reaction attribution on the sender's
-  signature pubkey instead of the leaf.
+- **~~Reaction identity across a leaf renumber~~ — RESOLVED, and the severity
+  call here was wrong (`5b2b654`, 2026-08-31).** The question was right and
+  its own suggested fix was the one adopted: reaction attribution now keys on
+  **the reactor's signature pubkey**, not the leaf. What this text got wrong
+  was the cost of waiting. It reasoned that *"attribution is per-call/epoch and
+  ephemeral (a count), so a renumber at worst mis-dedups a live reaction across
+  an epoch boundary — acceptable for v1."* It is not a count and it is not
+  ephemeral: a reaction is stored per `(reactor, emoji)`, so a newcomer seated
+  at a departed member's leaf **un-reacted on that member's behalf**, and all
+  three clients independently measured that this is worse than a mis-toggle —
+  removing the last reactor **prunes the set, so the chip disappears
+  entirely**. The read-receipt watermark map ([ADR-0024](./0024-typing-read-receipts.md))
+  carried the identical defect: never reset on a membership change, it let a
+  newcomer **inherit** a departed member's watermark, so the UI reported
+  messages as read by someone who never saw them.
+  <br>The general lesson, indexed as **C-68**: every module built after this
+  ADR keys on the signature pubkey and several name leaf reuse in a comment as
+  the reason — C-63's role table, C-64's committer rank and beacon store,
+  C-60/C-62's push-routing gate. **This ADR predates that convention and was
+  never revisited when it formed.**
 - **Typing indicators + read receipts** share this envelope's extension shape
   (the proto reserved them too) but are a separate block-B item; this ADR does
   not build them.

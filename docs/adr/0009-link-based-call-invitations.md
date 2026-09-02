@@ -5,9 +5,45 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0009: Link-based call invitations
 
-- **Status:** Accepted
+- **Status:** Accepted — **the multi-party joining model below was replaced by
+  [ADR-0032](0032-multi-joiner-call-links.md)** (2026-07). The capability codec,
+  the envelope formats, the revocation design and the URL parity are unchanged
+  and still in force.
 - **Date:** 2026-05-21
 - **Context:** Phase 3c3 (link calls — sub-sprint cluster of Phase 3 Calls)
+
+> **AMENDED by [ADR-0032](0032-multi-joiner-call-links.md); recorded here
+> 2026-09-02.** ADR-0032 cites this ADR four times as the thing it fixes. **This
+> ADR cited it nowhere** — no status note, no forward link — so the superseded
+> model below read as current.
+>
+> **What changed, and it is the load-bearing half:** this ADR has the **joiner
+> found the MLS group** (`accept_call_invite` → the joiner is founder, owner
+> added via the embedded KeyPackage), with the **first joiner becoming the
+> committer**. That does not survive a shareable link: two joiners arriving at
+> once each found a group, and the call splits in two — the **G-21 two-groups
+> bug**. It also puts a **one-time KeyPackage in a link meant to be shared**.
+>
+> ADR-0032 inverted it: **the owner is the sole founder** (`found_call`), so
+> there is no founding race by construction, the embedded owner KP goes unused
+> and each joiner supplies its own fresh one; and the committer is chosen by the
+> pure `elect_committer` rather than by arrival order (see the resolved Open
+> question below). The new surface is `found_call` / `request_call_join` /
+> `admit_joiner` / `join_call_from_welcome` / `elect_committer`.
+>
+> **`accept_call_invite` still exists and is still correct** — retained as the
+> **1×1 fast path**, which is the topology this ADR was written for and where a
+> founding race cannot occur. So read the multi-party sections below as the V1
+> design and its post-mortem, not as the shipped one; the two topologies are
+> documented side by side in
+> [`link_invite.rs`](../../crates/lakko-calls/src/link_invite.rs).
+>
+> **A smaller scoping note:** this ADR says it expands ADR-0005 "scenario E",
+> quoting it as *"invite a contact into a group call link"*. ADR-0005's scenario
+> E is **"invite into a group"** — the group-invite case, which
+> [ADR-0028](0028-group-join-ticket.md) actually built. ADR-0005 has no call-link
+> scenario; this one is genuinely new rather than an expansion of an existing
+> row.
 
 ## Context
 
@@ -227,7 +263,7 @@ incoming ContactRequest and discriminates on byte prefix:
 
 ```rust
 pub fn dispatch_incoming_envelope(plaintext: &[u8])
-    -> Result<IncomingEnvelope<'_>, CallWelcomeError>
+    -> Result<IncomingEnvelope<'_>, DispatchError>   // ADR said CallWelcomeError
 ```
 
 Three variants — `CallWelcome(&[u8])`, `CallKeyPackage(&[u8])`,
@@ -401,10 +437,15 @@ KP-forward via envelope keeps the protocol committer-agnostic.
 
 ## Open questions
 
-- **Owner handover protocol** when the current committer leaves
-  the call. Currently the next available member would take over,
-  but no Add proposal mechanism is wired for "committer is gone,
-  pick another." Tracked as a follow-up sprint.
+- **~~Owner handover protocol~~ — ANSWERED by
+  [ADR-0032](0032-multi-joiner-call-links.md)** (recorded 2026-09-02), and it
+  was answered by removing the protocol rather than writing one. There is **no
+  handover message and no election exchange**: `elect_committer`
+  ([`link_invite.rs`](../../crates/lakko-calls/src/link_invite.rs)) is a pure
+  function recomputed by every participant on every roster change — the owner
+  while present, else the lowest-leaf present member — so failover **and**
+  reclaim are automatic and split-brain-free by construction. Shipped on all
+  three clients (`multi-joiner-election.{ts,swift,kt}`); G-21 is closed.
 - **KP-rotation cadence.** The first joiner's KP-forward path is
   symmetric to the original `acceptCallInvite`, but if a 4th
   joiner shows up 30 minutes later and the committer's KP has
@@ -439,4 +480,9 @@ KP-forward via envelope keeps the protocol committer-agnostic.
 - RFC 9180 — HPKE; the ContactRequest envelope's seal/open is
   standard `HPKE-Base-X25519-SHA256-ChaCha20Poly1305`.
 - Signal Foundation, "Safety Numbers": the `ownerFingerprint`
-  follows the same 60-decimal-digit / 5-group-of-6 layout.
+  follows the same 60-decimal-digit / ~~5-group-of-6~~ **12-group-of-5** layout
+  (corrected 2026-09-02 —
+  [`safety.rs`](../../crates/lakko-contacts/src/safety.rs) pins
+  `SAFETY_NUMBER_GROUPS = 12`, `SAFETY_NUMBER_DIGITS_PER_GROUP = 5`; the
+  71-character total quoted earlier in this ADR is right, so only the grouping
+  was misdescribed).

@@ -5,9 +5,43 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0010: Channels — two-tier PublisherGroup + sender-key broadcast
 
-- **Status:** Accepted (design only — implementation lands in Phase 4)
+- **Status:** Accepted ~~(design only — implementation lands in Phase 4)~~ —
+  **built** (Sprints A–D, 2026-07). See the amendment below.
 - **Date:** 2026-05-21
 - **Context:** Phase 4 (channels) — extends ADR-0001 (§ "Channels >50k")
+
+> **AMENDED 2026-09-02 (documentation audit). The architecture below is what
+> shipped. The API surface below is not — almost none of the names in
+> § "Concrete additions" survived implementation, and this was never recorded.**
+>
+> **What holds, verified against the tree:** the two-tier split (subscribers are
+> not MLS members), the `PublisherGroup` with its deterministic `group_id`, the
+> exporter label `"lakko/channel/v1"`, the 32-byte content-key seed, the 16-byte
+> `channel_id`, the monotone `u32` `epoch_id`, the per-message key/nonce salt
+> binding, the AEAD AAD, Ed25519-signed posts, and retention `N = 4`. The
+> forward-secrecy trade-off and the whole Context / Alternatives discussion are
+> unchanged.
+>
+> **What does not hold** — each marked in place below: there is **no `Channel`
+> type** and no `Channel::publish/receive/rotate`; the seed envelope is **not
+> HPKE**; there is **no `channel_subscribe` module in `lakko-contacts`**; there
+> is **no `schemas/channel/v1.proto`**; two of the four named endpoints do not
+> exist and the others are prefixed `/v1`; the rotation post-cap is **1 000, not
+> 100 000**; and two HKDF `info` labels are misquoted.
+>
+> **Extended by four later ADRs this document never links to:**
+> [ADR-0027](0027-external-join-approval.md) (external-join approval),
+> [ADR-0028](0028-group-join-ticket.md) (the join-ticket, whose OQ3 built the
+> co-publisher path this ADR left open),
+> [ADR-0030](0030-batched-rotation-fanout.md) (staged + atomic rotation fanout,
+> which replaced the single-shot rotate for scale), and
+> [ADR-0031](0031-multi-epoch-envelope-retention.md) (multi-epoch retention,
+> which built the `N = 4` catch-up this ADR specified but the first
+> implementation shipped as `N = 1`).
+>
+> **The residual is unchanged and is the real one:** nothing here has been
+> proven at the >50k subscriber scale it was designed for, because that needs a
+> deployed environment (G-1).
 
 ## Context
 
@@ -72,9 +106,12 @@ churn semantics.
   tree size + commit fanout cheap; larger publisher sets are
   vanishingly rare in practice (broadcast channels almost always
   have ≤ 50 active publishers).
-- **Cipher suite**: same as 1×1 / group chats (`MLS_256_DHKEMX25519_
-  CHACHA20POLY1305_SHA256_Ed25519` fast path,
-  `MLS_256_DHKEMP384_AES256GCM_SHA384_P384` FIPS path).
+- **Cipher suite**: same as 1×1 / group chats (~~`MLS_256_DHKEMX25519_
+  CHACHA20POLY1305_SHA256_Ed25519`~~ **`MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519`**
+  fast path, `MLS_256_DHKEMP384_AES256GCM_SHA384_P384` FIPS path).
+  *(Corrected 2026-09-02 — the `MLS_256` X25519 suite is not registered in
+  RFC 9420; this ADR inherited the naming error from
+  [ADR-0001](0001-mls-only.md), where it is explained. Same suite, right name.)*
 - **Forward secrecy**: full MLS — each Add/Remove/Update commit
   produces a new epoch with a fresh root key; a compromised
   publisher device cannot decrypt future content after the next
@@ -90,8 +127,18 @@ a 32-byte **content key seed** via the MLS exporter
 content_key_seed = mls_exporter("lakko/channel/v1", channel_id, 32)
 ```
 
-The seed is delivered to every subscriber via an HPKE-sealed envelope
+The seed is delivered to every subscriber via an ~~HPKE~~-sealed envelope
 to that subscriber's identity X25519 public key:
+
+> **Not HPKE (corrected 2026-09-02).** What shipped is a hand-rolled ECIES —
+> ephemeral X25519 → HKDF-SHA-256 → ChaCha20-Poly1305, wire
+> `eph_pub(32) || ct || tag`, labels
+> `"lakko/channel/v1/seed-envelope/{key,nonce}"`
+> ([`subscribe.rs`](../../crates/lakko-channels/src/subscribe.rs)). Sound and
+> domain-separated, but not RFC 9180 and not interoperable with it. The
+> pseudocode below is therefore illustrative of the *shape*, not of the
+> primitive or the `info` string. ADR-0030 and ADR-0031 inherited the "HPKE"
+> label from here.
 
 ```
 envelope = HPKE_seal(
@@ -107,11 +154,11 @@ encrypted under a **per-message AEAD** keyed off the seed:
 
 ```
 message_key   = HKDF-SHA-256(content_key_seed,
-                             info  = "lakko/channel/v1/msg",
+                             info  = "lakko/channel/v1/msg-key",   # ADR said ".../msg"
                              salt  = channel_id || epoch_id || sender_pubkey,
                              okm_len = 32)
 message_nonce = HKDF-SHA-256(content_key_seed,
-                             info  = "lakko/channel/v1/nonce",
+                             info  = "lakko/channel/v1/msg-nonce", # ADR said ".../nonce"
                              salt  = channel_id || epoch_id || sender_pubkey
                                      || message_counter_be,
                              okm_len = 12)
@@ -136,8 +183,12 @@ A new `epoch_id` (monotone u32 counter) is emitted when:
 - Any PublisherGroup membership change (Add, Remove, Update) merges
   a commit. The new MLS group epoch derives a new `content_key_seed`
   via the exporter.
-- A scheduled rotation fires: every 24h **OR** every 100k posts,
-  whichever first.
+- A scheduled rotation fires: every 24h **OR** every ~~100k~~ **1 000**
+  posts, whichever first. *(Corrected 2026-09-02 — `DEFAULT_MAX_POSTS = 1000`
+  in [`rotation_policy.rs`](../../crates/lakko-channels/src/rotation_policy.rs).
+  The shipped cap is 100x tighter than this ADR specified, i.e. it rotates far
+  MORE often — the safe direction, and the code believes it is following this
+  ADR. The 24 h half matches.)*
 - The owner manually triggers a rotation (UI: "force a rotation").
 
 On a rotation:
@@ -180,7 +231,7 @@ from decrypting messages they already received under epoch N. We
 mitigate by:
 
 - Rotating seeds aggressively (24h cap even on quiet channels;
-  100k posts cap even on busy ones).
+  ~~100k~~ **1 000** posts cap even on busy ones — see the correction above).
 - Documenting this publicly in the privacy policy: "a channel
   subscriber's revocation is enforced going forward only".
 - Offering the publisher an "emergency rotation" UI affordance.
@@ -227,6 +278,31 @@ Mitigations:
 
 Concrete additions Phase 4 lands across the codebase:
 
+> **This whole section is the plan, not the build (marked 2026-09-02).** It
+> shipped with different names and a different decomposition; the table below is
+> the map from what is written here to what exists. The design *above* this
+> section is what to trust; this section is what to translate.
+>
+> | Planned here | What was built |
+> |---|---|
+> | `Channel` handle + `publish` / `receive` / `rotate` | **No `Channel` type at all.** `crates/lakko-channels` is a stateless codec of free functions — `compose_post` / `decode_post` / `verify_and_decrypt` (`post.rs`) plus `RotationPolicy` / `RotationState` / `should_rotate` (`rotation_policy.rs`). The stateful handle is `lakko_mls::PublisherGroup`; the rotation *driver* is a per-client `RotationCron` (web/iOS/Android), deliberately outside the crate so the cadence decision stays one pure shared function. `ChannelPost` is the one planned name that survived. |
+> | `lakko-contacts::channel_subscribe` | `crates/lakko-channels/src/subscribe.rs` — different crate, and `seal_seed` / `open_seed` rather than a `subscribe` request composer. |
+> | `POST /channels/:id/posts`, `GET …/posts` | Exist, prefixed **`/v1`**. |
+> | `POST /channels/:id/subscribe` | Renamed **`POST /v1/channels/{id}/subscribers`**. |
+> | `POST /channels/:id/seeds/distribute` | **Does not exist.** Superseded by the rotation endpoints: `/rotate` and — per [ADR-0030](0030-batched-rotation-fanout.md) — `/rotate/stage` + `/rotate/commit`. |
+> | (unplanned) | `POST /v1/channels` (create), `/epoch`, `/subscribers/{pk}/envelope`, and — per [ADR-0031](0031-multi-epoch-envelope-retention.md) — `/subscribers/{pk}/envelopes`. |
+>
+> **The seed envelope is not HPKE.** This ADR (and, inheriting the phrase,
+> ADR-0030 and ADR-0031) calls it "HPKE-sealed". It is a hand-rolled ECIES:
+> ephemeral X25519 `diffie_hellman` → HKDF-SHA-256 → ChaCha20-Poly1305, on the
+> wire as `eph_pub(32) || ct || tag`
+> ([`subscribe.rs`](../../crates/lakko-channels/src/subscribe.rs)). The
+> construction is sound and domain-separated, but it is **not** RFC 9180 HPKE
+> and does not interoperate with one, so the label should not be read as a
+> statement about the primitive. Its HKDF labels are
+> `"lakko/channel/v1/seed-envelope/{key,nonce}"`, not the
+> `"lakko/channel/v1/key"` quoted earlier in this ADR.
+
 ### `crates/lakko-channels` (new)
 
 - `Channel` — handle wrapping a PublisherGroup + cached current
@@ -259,7 +335,17 @@ Concrete additions Phase 4 lands across the codebase:
   a batch of HPKE-sealed seed envelopes for the fanout layer to
   deliver to subscriber mailboxes.
 
-### `schemas/channel/v1.proto` (new)
+### ~~`schemas/channel/v1.proto` (new)~~ — NOT BUILT
+
+> **Corrected 2026-09-02.** No channel protobuf exists; `schemas/` holds only
+> `media/`, `mls-app/` and `wire/`. `ChannelPost` is a **hand-written
+> big-endian binary codec** (`ChannelPost::to_bytes` / `decode_post` in
+> [`post.rs`](../../crates/lakko-channels/src/post.rs)), and its `post_decode`
+> fuzz target fuzzes that codec, not a prost decoder. The field set below is
+> nonetheless accurate field-for-field — only the encoding differs. One thing
+> the schema below omits that the code does: the post signature covers a
+> domain separator, `"lakko/channel/v1/post" || 0x00 || …`, which is a
+> strengthening this ADR under-specified.
 
 ```protobuf
 message ChannelPost {
@@ -314,8 +400,13 @@ deferred to implementation-time decisions:
 3. **Channel ownership transfer.** ADR-0007 covers individual
    identity rotation; channel ownership is a separate concept
    (the channel's owner can resign and pass the PublisherGroup
-   to a moderator). Sketched out as a future ADR-0011 if the
-   need surfaces in Phase 4 usability testing.
+   to a moderator). ~~Sketched out as a future ADR-0011~~ — **that number was
+   taken by [ADR-0011](0011-rust-sfu.md) (the Rust SFU); channel ownership
+   transfer still has no ADR and is unbuilt** (corrected 2026-09-02). Note
+   *group* ownership transfer was built under
+   [ADR-0045](0045-remote-commit-epoch-fork.md) / ADR-0022, and a
+   `PublisherGroup` is a thin wrapper over a `Group` — so the mechanism now
+   exists even though no channel-level decision or affordance does.
 4. **Replies / threaded comments.** Out of scope for Phase 4.
    Either layered on top (each top-level post spawns a per-post
    sub-channel) or punted to Phase 5.
@@ -332,5 +423,17 @@ deferred to implementation-time decisions:
   `"lakko/channel/v1"`.
 - [`ROADMAP.md`](../ROADMAP.md) Phase 4 — implementation
   decomposition (4a / 4b / 4c sub-sprints).
+- **The four ADRs that extend this one** (added 2026-09-02 — the links were
+  one-directional; all four cite this ADR and none was cited back):
+  [ADR-0027](0027-external-join-approval.md) — external-join approval, the
+  prerequisite for adding a publisher;
+  [ADR-0028](0028-group-join-ticket.md) — the group join-ticket, whose OQ3
+  reuses it verbatim to add a **co-publisher** to a `PublisherGroup`;
+  [ADR-0030](0030-batched-rotation-fanout.md) — staged + atomic rotation
+  fanout, which replaced the single-shot rotate this ADR implies at 50k-1M
+  subscriber scale;
+  [ADR-0031](0031-multi-epoch-envelope-retention.md) — multi-epoch retention,
+  which built the `N = 4` catch-up specified here after the first
+  implementation shipped `N = 1`.
 - [`~/.claude/plans/1-nested-wreath.md`](file:///Users/valentingoncharov/.claude/plans/1-nested-wreath.md)
   §3 "Crypto model" — the strategic plan this ADR derives from.

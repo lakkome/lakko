@@ -3238,9 +3238,14 @@ Six sub-invariants — 1-5 from ADR-0042, 6 added by
    **its own** old gid (unsubscribe + delete the reverse-index row) — required,
    not hygiene: without it each rotation would leave one dead row per member,
    turning a live cluster into a live cluster **plus an archive of every previous
-   one**. The evicted device's own row is **never deleted** (no other party can
-   delete it, and no client has "you were removed" handling); it goes **INERT**,
-   because nothing ever notifies the old gid again. Rotation fires only on a
+   one**. The evicted device's own row is deleted by **no other party** (none can),
+   so from the group's side it goes **INERT**, because nothing ever notifies the
+   old gid again. ~~and no client has "you were removed" handling~~ — **that clause
+   stopped holding on 2026-08-29 (`8763f3e`)**: the ADR-0045 self-eviction work gave
+   every client a `retire-push-subscription` teardown step, so **the evicted device
+   deletes its own row**. It complements rotation and replaces nothing — it needs
+   the evicted device to come online and run it, so a device that never returns
+   still leaves an inert row. Rotation fires only on a
    shrink, never on an add, and **never mints**.
 
 **Residual (G-36).** push-gw and the push providers still observe a
@@ -3710,8 +3715,10 @@ walks the whole intended flow.
 
 Invariants: **#2** (the role table is an opaque `0xFF02` GroupContext body; the DS
 relays the commit as ciphertext and parses nothing — unchanged), **#3** (a
-`crates/lakko-mls` state-machine change under ADR-0045; property-tested, **external
-crypto review and a `lakko-security` pass both still owed**), **#4** (refuse-to-merge,
+`crates/lakko-mls` state-machine change under ADR-0045; property-tested, **the
+`lakko-security` pass ran 2026-08-29 (REQUEST CHANGES, seven findings, all closed);
+the external crypto review is tracked once in [G-39](known-gaps.md) per
+[ADR-0046](../adr/0046-external-crypto-review.md) as a release gate**), **#4** (refuse-to-merge,
 never apply-then-warn), **#5** (roles stay in-group; no server ever learns them).
 
 **Amended 2026-08-25 by the client sprints (`1de5fe7` / `1f230ab`).** Two of the
@@ -3719,13 +3726,23 @@ three enforcement layers acquired production callers. **Layer 2 is live for the
 first time** — there was no sweep on any client until S4a, so the sweep-side
 exclusion had nothing to run in. **Layer 3, the boundary, was already live**
 through each client's `processIncomingVerifyingRoles` receive path and is unchanged.
-**Layer 1 still has no production caller anywhere**: `transferOwnership` /
-`proposeOwnershipTransfer` are on both FFI surfaces and no client offers an
-ownership-transfer affordance, so the authoring pre-check is reachable only from
-tests. That is a **UX gap and not a weakening** — layer 3 is the boundary
-precisely because it does not trust layer 1 — but it does mean the sentence
-"ownership transfer is built" is true of `crates/lakko-mls` and false of the
-product.
+**Layer 1 had no production caller anywhere**: `transferOwnership` /
+`proposeOwnershipTransfer` were on both FFI surfaces and no client offered an
+ownership-transfer affordance, so the authoring pre-check was reachable only from
+tests. That was a **UX gap and not a weakening** — layer 3 is the boundary
+precisely because it does not trust layer 1.
+
+**Amended again 2026-09-02 (`0274fa7`).** The transfer flow shipped on all three
+clients, so **all three layers now have production callers** and the sentence
+"ownership transfer is built" is finally true of the product as well as of
+`crates/lakko-mls`. One property of how it shipped belongs here rather than in the
+UX spec, because it is what keeps layer 1 from being bypassed: the **direct** arm
+(`transfer_ownership`) has no client caller and cannot acquire one by accident,
+since `isOwner` and `usesProposalPath` are the same read — the role table's
+presence — so a client that can transfer is by construction a client on the
+proposal path. iOS established that by execution rather than by argument: driving
+the direct arm advanced the epoch **and** stripped the transferor locally, so the
+next role change was refused as *proposer is not the owner*.
 
 ### C-64: The committer election and the staged sweep decide from authenticated state, and no epoch advances until the journal has ordered it
 
@@ -3864,8 +3881,10 @@ server learns who commits), **#2** (both the beacon and the sweep commit ride th
 as opaque ciphertext; the only server contribution is the row's `created_at`
 timestamp, which is metadata the DS already assigns to every row), **#3** (the staged
 commit lifecycle is a `crates/lakko-mls` state-machine change under ADR-0045;
-property-tested, **external crypto review and a `lakko-security` pass both still
-owed**), **#4** (every new decision point fails closed toward the cheap outcome — an
+property-tested; the **`lakko-security` pass ran 2026-08-29 (REQUEST CHANGES, seven
+findings, all closed) and the external crypto review is tracked once in
+[G-39](known-gaps.md) per [ADR-0046](../adr/0046-external-crypto-review.md) as a
+release gate**), **#4** (every new decision point fails closed toward the cheap outcome — an
 unreadable verdict defers, an unreadable journal leaves the sweep staged, an
 unclassifiable row stands the sweep down, and a device that cannot establish it is a
 candidate does not claim to be one).
@@ -4005,17 +4024,26 @@ reason and not this one. 33 tests in the binary, all green.
 Invariants: **#2** (unchanged — the role table is an opaque `0xFF02` GroupContext body and
 the DS parses nothing; this rule adds no wire format and no server surface), **#3** (a
 `crates/lakko-mls` state-machine change under ADR-0045 — a new refusal on the propose path
-and a stateful predicate on the sweep filter; property-tested, **external crypto review and
-a `lakko-security` pass both still owed**), **#4** (fail-closed: the second propose is
+and a stateful predicate on the sweep filter; property-tested, **the `lakko-security` pass
+ran 2026-08-29 (REQUEST CHANGES, seven findings, all closed); the external crypto review is
+tracked once in [G-39](known-gaps.md) per
+[ADR-0046](../adr/0046-external-crypto-review.md) as a release gate**), **#4** (fail-closed: the second propose is
 refused rather than published, and the sweep excludes rather than building a commit
 OpenMLS would reject), **#5** (unchanged — roles stay in-group).
 
-**Client status (2026-08-28).** Enforcement is complete in the core and holds for every
-caller on every platform. What is outstanding is **copy, not enforcement**: web and iOS
-carry their own narrow client-side pre-checks (`hasPendingRoleChange`, each filtering on
-the role-change kind specifically, so neither is stricter than the core rule) and surface a
-sentence; Android has no pre-check and would surface the core's `Error::Group` diagnostic.
-The refusal string is specified in
+**Client status (2026-08-28, closed 2026-09-01).** Enforcement is complete in the core and
+holds for every caller on every platform. What was outstanding was **copy, not
+enforcement**: web and iOS carried narrow client-side pre-checks (`hasPendingRoleChange`,
+each filtering on the role-change kind specifically, so neither is stricter than the core
+rule) and surfaced a sentence; Android had no pre-check and surfaced the core's
+`Error::Group` diagnostic. **Closed in `8018e8b`,** and the fix was wider than the gap
+described: the drift was three-way rather than one-way — web rendered the spec's string,
+iOS threw its own near-variant prose, Android rendered the diagnostic raw — so mapping
+core prose to fixed copy by substring would have rebuilt the same drift class. The core now
+raises `Error::MembershipRefused { reason, detail }` (`crates/lakko-mls/src/refusal.rs`)
+whose whole `Display` is `detail`, the sentence it always carried, with a typed
+`RefusalReason` travelling beside it as the contract; each client selects copy from the
+type, and Android gained the pre-check as well. The refusal string is specified in
 [`docs/ux/proposal-based-membership.md`](../ux/proposal-based-membership.md) §6.
 
 ## Exporter labels (call-side)
@@ -4229,8 +4257,10 @@ answer, not a proof.
 `a_wholly_uncommittable_set_yields_no_commit_and_no_wedge` for the search;
 `an_ordinary_sweep_costs_exactly_one_build` for the good path. Invariants **#2**
 (unchanged — no wire format, no server surface), **#3** (a `crates/lakko-mls`
-state-machine change under ADR-0045; property-tested, **external crypto review still
-owed**), **#4** (fail-closed in the direction that matters: an undecidable proposal is
+state-machine change under ADR-0045; property-tested, **the external crypto review
+tracked once in [G-39](known-gaps.md) per
+[ADR-0046](../adr/0046-external-crypto-review.md) as a release gate**), **#4**
+(fail-closed in the direction that matters: an undecidable proposal is
 dropped, because wrongly keeping one freezes the group permanently while wrongly
 dropping one costs a re-request), **#5** (unchanged).
 

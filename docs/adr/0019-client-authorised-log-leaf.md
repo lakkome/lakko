@@ -111,17 +111,29 @@ version-1 key) + the existing ADR-0016 fail-closed peer gate. This matches the
 system's TOFU-everywhere posture, couples to nothing, and reuses Ed25519. The
 residual is documented.
 
+> **Still accurate as the default, but no longer the only option (2026-09-02).**
+> [ADR-0036](./0036-auth-attested-genesis.md) built the prevention this
+> paragraph rules out, and it ships **default-OFF**
+> (`LAKKO_TRANSPARENCY_REQUIRE_GENESIS_ATTEST`). So "detected, not prevented" is
+> what a deployment gets today — and stops being true the moment that flag is
+> turned on, which is a deploy decision sequenced after the clients mint.
+
 **Alternative considered — auth-attested genesis:** `services/auth` (the only
 party that authenticated the account at OPAQUE signup) co-signs
 `(account_id -> first pubkey)`; the operator rejects an unattested genesis, so
 squatting is *prevented*. Rejected for now: it couples transparency<->auth and
 adds an attestation key + endpoint (the `lakko-attest` / ADR-0015 shape). It is
 recorded here as the hardening to elect if first-entry squatting becomes a real
-concern. **Elected + designed in ADR-0036** (auth-attested KT-log genesis,
-Proposed) — the `lakko-attest` `GenesisAttestation` primitive + a bearer-authed
-`POST /auth/genesis/attest` mint + an operator-side append gate behind
+concern. **Elected + designed in [ADR-0036](./0036-auth-attested-genesis.md)
+(auth-attested KT-log genesis) — ~~Proposed~~ and since IMPLEMENTED**
+(all 7 sprints landed; corrected 2026-09-02) — the `lakko-attest`
+`GenesisAttestation` primitive + a bearer-authed `POST /auth/genesis/attest`
+mint + an operator-side append gate behind
 `LAKKO_TRANSPARENCY_REQUIRE_GENESIS_ATTEST`, additive to (not replacing) the
-genesis self-signature above. See ADR-0036.
+genesis self-signature above, which stays as belt-and-suspenders for the
+append-secret-not-leaked case. **The flag ships default-OFF**, so the residual
+described above is still what a live deployment carries until it is flipped.
+See ADR-0036.
 
 ## Consequences
 

@@ -11,9 +11,14 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
   ADR-0017 mitigation), 4 (version fail-closed), 5 (self-Remove test) folded
   into the text below. **Sprint 1 (lakko-mls core) landed + passed the
   post-implementation `lakko-security` review (APPROVE WITH NOTES)** — both the
-  design and the landed-code gates are green (invariant #3). Remaining: Sprint 2
-  (FFI) + Sprint 3 (client wiring), with the two post-code notes (SelfRemove,
-  call-path) in Open Questions.
+  design and the landed-code gates are green (invariant #3). ~~Remaining: Sprint 2
+  (FFI) + Sprint 3 (client wiring)~~ — **both landed** (corrected 2026-09-02):
+  `ownRole` / `setGroupRoles` / `processIncomingVerifyingRoles` are on both FFI
+  surfaces ([uniffi](../../crates/lakko-ffi-uniffi/src/lib.rs),
+  [wasm](../../crates/lakko-ffi-wasm/src/mls.rs)) and all three clients apply
+  commits through the role-verifying path and gate the members-panel
+  affordances on `ownRole`. The two post-code notes (SelfRemove, call-path)
+  remain in Open Questions.
 - **Extended by [ADR-0045](0045-remote-commit-epoch-fork.md)** (2026-08;
   supersedes nothing here). ADR-0045 moves the role check from the **committer**
   to each **proposal's own author**, with the by-value arm left byte-for-byte as

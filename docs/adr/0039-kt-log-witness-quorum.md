@@ -275,6 +275,18 @@ behaviour exactly, so an existing (test) pin migrates trivially.
   carry. (This is the deliberate inverse of a mid-deployment migration — the
   greenfield state is what licenses the clean cut.)
 
+  **Kept honest: the clean cut applied to the WIRE only, and the build kept
+  singular fallbacks on both CONFIG surfaces.** `services/transparency/src/handlers.rs`
+  carries `witness_cosigs_b64: Vec<String>` and nothing singular, so the wire claim
+  holds exactly as argued. But `witness_client.rs` falls back to
+  `LAKKO_TRANSPARENCY_WITNESS_URL` / `_COSIGN_SECRET` when the list form is unset,
+  and `apps/web/src/transparency/config.ts` retains `pinnedWitnessKey()` as a
+  backward-compat source for the pre-ADR-0039 `VITE_LAKKO_TRANSPARENCY_WITNESS_KEY`.
+  That is not a contradiction of the reasoning above — a *deployment's env file* is
+  not a *wire client*, and nothing pins a field — but "there is nothing to stay
+  compatible with" is true of the protocol and not of the operator's configuration,
+  and the shipped code chose to be kind to the latter.
+
 - **Server-side threshold enforcement (the server refuses to serve a
   sub-threshold root).** Rejected. The server is zero-trust; a malicious /
   colluding operator could serve a sub-threshold bundle and *claim* it is a

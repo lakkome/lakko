@@ -20,9 +20,15 @@ Security invariant #3 reads, in full:
 > property tests + (after Phase 2) an external crypto audit.
 
 In practice the third clause has been carried **inside each ADR that touches
-`lakko-mls`**, as an open item on that ADR. Four now say some version of *"the external
-crypto review this ADR requires has not happened"*, and each treats it as a reason it
-cannot move to `Accepted`.
+`lakko-mls`**, as an open item on that ADR, and again in the invariant index beside each
+`C-` entry the change minted. Some version of *"the external crypto review this ADR
+requires has not happened"* appears in [ADR-0040](0040-durable-pending-commit-outbox.md)
+and [ADR-0045](0045-remote-commit-epoch-fork.md), and in **four** rows of
+[`invariant-index.md`](../security/invariant-index.md) (C-63 / C-64 / C-65 / C-66) plus
+their mirrors in [`calls.md`](../security/calls.md); the obligation is also referenced,
+without being made a blocker, by [ADR-0012](0012-ech-hpke-adapter.md),
+[ADR-0014](0014-webauthn-action-binding.md), [ADR-0015](0015-device-removal-authorization.md)
+and [ADR-0022](0022-group-admin-roles.md).
 
 That reading has a consequence nobody chose: **no ADR touching the MLS state machine can
 ever be Accepted, no matter how finished it is.** ADR-0045 is built end to end across the
@@ -81,9 +87,17 @@ Concretely:
 
 ## Consequences
 
-- ADR-0015, ADR-0022, ADR-0023 and ADR-0045 lose the sentence that made them
-  permanently `Proposed`; each gains a pointer to G-39. Whether any of them flips to
-  `Accepted` remains the maintainer's call, made on that ADR's own merits.
+- The ADRs and index rows carrying the debt lose it and gain a pointer to G-39 instead.
+  **One correction to how this bullet originally read**, because it overstated the
+  blocker's reach: it named ADR-0015, ADR-0022, ADR-0023 and ADR-0045 as *"permanently
+  `Proposed`"*, and only **ADR-0045** actually was. ADR-0015 and ADR-0022 reached
+  `Accepted` while still carrying a mention of the audit, and ADR-0023 never mentioned it
+  at all — which sharpens rather than weakens the case here: a blocker that three of four
+  documents quietly stepped over was already not functioning as one, and was doing its
+  only real work against the single most finished ADR in the set. Whether ADR-0045 flips
+  to `Accepted` remains the maintainer's call, made on that ADR's own merits. **As of
+  2026-09-02 the pointers have landed in ADR-0040, ADR-0045 and the four invariant-index
+  rows; ADR-0012 / ADR-0014 / ADR-0015 / ADR-0022 still carry their own wording.**
 - The audit acquires, for the first time, a written scope — which is the thing an
   external reviewer actually needs and which four scattered sentences never provided.
 - The release gate becomes explicit and checkable, where before it was implied by a

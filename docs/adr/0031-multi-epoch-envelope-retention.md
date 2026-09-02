@@ -5,7 +5,16 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0031: Multi-epoch channel seed-envelope retention + subscriber catch-up
 
-- **Status:** Accepted (maintainer approved the design; implementation in progress)
+- **Status:** Accepted (maintainer approved the design). **Implemented** —
+  ~~implementation in progress~~ was stale until the 2026-09-02 documentation
+  audit. Verified in the tree: migration `0004_multi_epoch_envelopes.sql`
+  re-keys `channel_envelopes` to `(channel, subscriber, epoch)`,
+  `fetch_envelopes` is on both `ChannelStore` impls and served at
+  `GET /v1/channels/{id}/subscribers/{pk}/envelopes`, and the clients keep a
+  per-channel `epoch → seed` map and decrypt each post by its `epoch_id`
+  ([`apps/web/src/channels/api.ts`](../../apps/web/src/channels/api.ts) and the
+  two native mirrors). The deferred items listed under Consequences are
+  unchanged and still open.
 - **Date:** 2026-07-13
 - **Context:** Phase 4 (channels, G-1) — an offline subscriber cannot read posts
   made under a rotation it missed. The N-retention / re-subscribe follow-up

@@ -17,12 +17,18 @@ out of scope (OpenMLS gets its own external audit upstream).
 | Module | Responsibility |
 |---|---|
 | [`crates/lakko-mls/src/identity.rs`](../../crates/lakko-mls/src/identity.rs) | `Identity` — signing keypair + credential + per-device storage provider. `from_seed` builds a deterministic Identity from a 32-byte seed (HKDF → Ed25519). |
-| [`crates/lakko-mls/src/group.rs`](../../crates/lakko-mls/src/group.rs) | `Group` — single MLS conversation group. `create` / `join_from_welcome` / `add_member` / `remove_member` / `create_application_message` / `process_incoming` / `export_secret`. |
+| [`crates/lakko-mls/src/group.rs`](../../crates/lakko-mls/src/group.rs) | `Group` — single MLS conversation group. `create` / `join_from_welcome` / `add_member` / `remove_member` / `create_application_message` / `process_incoming` / `export_secret`, **plus the ADR-0045 proposal surface** — `propose_add_member` / `propose_remove_member` / `propose_group_roles` / `propose_ownership_transfer`, `pending_proposals`, `own_committer_rank`, the staged sweep (`stage_pending_proposals` / `has_staged_sweep` / `merge_staged_sweep` / `abandon_staged_sweep`), the role-verifying receive path `process_incoming_verifying_roles`, the external-join quarantine (`pending_external_joins` / `approve_external_join` / `reject_external_join`), and `is_active`. |
+| [`crates/lakko-mls/src/group_proposals.rs`](../../crates/lakko-mls/src/group_proposals.rs) | ADR-0045 — the **one** per-proposal authorisation rule (`ProposalKind` / `classify` / `authorise`), the commit-level `owner_survives` (**C-63**), `commit_effects`, and the sweep filter's exclusion pass. |
+| [`crates/lakko-mls/src/group_roles.rs`](../../crates/lakko-mls/src/group_roles.rs) | ADR-0022 — `RoleTable` / `Role` and the `0xFF02` GroupContext codec, plus ADR-0045's `committer_rank`. |
+| [`crates/lakko-mls/src/refusal.rs`](../../crates/lakko-mls/src/refusal.rs) | `RefusalReason` / `RefusalDisposition` — the machine-readable reason a membership operation was refused, so a client selects copy from a type rather than substring-matching core prose. |
+| [`crates/lakko-mls/src/publisher_group.rs`](../../crates/lakko-mls/src/publisher_group.rs) | ADR-0010 — `PublisherGroup`, a `Group` with a deterministic id and the `lakko/channel/v1` exporter. Carries **no** role table, which is why it keeps the direct external-join approve. |
+| [`crates/lakko-mls/src/welcome_rendezvous.rs`](../../crates/lakko-mls/src/welcome_rendezvous.rs) | ADR-0027 — the bounded `WelcomeRendezvous` envelope a not-yet-member matches by its own signature key. |
 | [`crates/lakko-mls/src/device_group.rs`](../../crates/lakko-mls/src/device_group.rs) | `DeviceGroup` — per-user multi-device MLS group (ADR-0007). Same operations as `Group` plus a deterministic `group_id_for(account_id)`. |
-| [`crates/lakko-mls/src/key_package.rs`](../../crates/lakko-mls/src/key_package.rs) | `KeyPackage` creation + wire decoding with validation. |
+| [`crates/lakko-mls/src/key_package.rs`](../../crates/lakko-mls/src/key_package.rs) | `KeyPackage` creation + wire decoding with validation, plus `create_external_join_proposal` (ADR-0027). |
 | [`crates/lakko-mls/src/pairing.rs`](../../crates/lakko-mls/src/pairing.rs) | Pairing-QR codec (ADR-0007 §"Add-device"). |
 | [`crates/lakko-mls/src/history_bundle.rs`](../../crates/lakko-mls/src/history_bundle.rs) | History catch-up bundle exporter + AEAD seal / open (Phase 2a3d8). |
-| [`crates/lakko-mls/fuzz/`](../../crates/lakko-mls/fuzz/) | `cargo fuzz` harnesses — `mls_message` (wire parser), `key_package` (wire parser). |
+| [`crates/lakko-mls/src/history_placeholder.rs`](../../crates/lakko-mls/src/history_placeholder.rs) | Bounded codec for the cross-platform history-bundle payload placeholder (G-6). |
+| [`crates/lakko-mls/fuzz/`](../../crates/lakko-mls/fuzz/) | `cargo fuzz` harnesses — **eight**: `mls_message`, `key_package`, `history_placeholder`, `devicegroup_payload`, `pairing_qr`, `history_bundle_open`, `role_table_decode`, `welcome_rendezvous_decode`. (This row listed two for a long time; every entry point is in `fuzz_api` in [`lib.rs`](../../crates/lakko-mls/src/lib.rs).) |
 
 ## Invariants the wrapper MUST preserve
 
@@ -109,11 +115,17 @@ free of collisions. Current set:
 
 | Label | Length (bytes) | Source | Used for |
 |---|---|---|---|
-| `lakko/history-bundle/v1` | 32 | `lakko_mls::history_bundle::exporter_secret` | Per-pairing AEAD key for the history catch-up bundle (Phase 2a3d8) |
-| `lakko/call/v1` | 32 | `lakko_calls::sframe::CallKey::derive` (Phase 3a4) | Per-call SFrame seed; per-participant keys derived via HKDF over `(seed, sender_leaf_be)` with info `lakko/sframe/v1/key` and nonce salt under `lakko/sframe/v1/nonce`. See [`calls.md`](./calls.md). |
+| `lakko/history-bundle/v1` | 32 | `lakko_mls::history_bundle::exporter_secret` (`HISTORY_EXPORTER_LABEL`) | Per-pairing AEAD key for the history catch-up bundle (Phase 2a3d8) |
+| `lakko/call/v1` | 32 | `lakko_calls::sframe::CallKey::derive` (Phase 3a4) | Per-call SFrame seed; per-participant keys derived via HKDF over `(seed, kid_be)` with info `lakko/sframe/v1/key` and nonce salt under `lakko/sframe/v1/nonce`. **The HKDF input is the full RFC 9605 header KID, not the sender leaf** — [ADR-0035](../adr/0035-sframe-per-stream-kid-key.md) made `KID = (sender_leaf << 8) \| stream_index` so a leaf's concurrent streams derive disjoint key + nonce spaces; this row said `sender_leaf_be`. See [`calls.md`](./calls.md). |
+| `lakko/channel/v1` | 32 | `lakko_mls::publisher_group::CHANNEL_EXPORTER_LABEL`, consumed by `PublisherGroup::channel_seed` | Per-epoch channel content seed ([ADR-0010](../adr/0010-channels-two-tier-broadcast.md)). **Was missing from this table** — it is a production label in the core, not a test constant. |
+| `lakko/device-recovery/v1` | 32 | Client-side constant (`RECOVERY_EXPORTER_LABEL` on web, `recoveryExporterLabel` on iOS, `RECOVERY_EXPORTER_LABEL` on Android), passed to `DeviceGroup.exportSecret` | Per-pairing key sealing the ADR-0018 Path-B recovery payload `(grant ‖ phrase seed)`. **Also missing.** It has no Rust-side production constant — the label is supplied by the caller, and the only in-crate occurrence is a `device_group.rs` test — which is exactly how it escaped this table, and is the case the rule below is weakest against. |
 
 A new label requires an ADR amendment + a test +
-re-running this audit pack.
+re-running this audit pack. **That rule was not followed for the last two rows**,
+and the reason is worth recording rather than just fixing: `export_secret` takes the
+label as a **parameter**, so a new label can be coined entirely outside
+`crates/lakko-mls` — by a client, as `lakko/device-recovery/v1` was — and nothing in
+the crate can notice. There is no gate here, only this list.
 
 ## State-flow diagrams
 
@@ -148,6 +160,44 @@ re-running this audit pack.
    └─ snapshot_storage() / restore_storage(blob)
 ```
 
+**This diagram is the pre-ADR-0045 shape and is kept because it is still exactly
+what a group with NO role table does.** A group that carries one — which is every
+group `Group::create` makes, since ADR-0022 — takes the path below instead, and the
+difference is the whole point of [ADR-0045](../adr/0045-remote-commit-epoch-fork.md):
+a membership change stops being one atomic call.
+
+```text
+   member                          elected committer (committer_rank)
+     │                                        │
+     ├─ propose_add_member / _remove_ /       │
+     │  _group_roles / _ownership_transfer    │
+     │        └─► proposal bytes ─── DS ─────►│
+     │            (advances NO epoch)         │
+     │                                        ├─ stand down if any journal row
+     │                                        │  is unapplied
+     ▼                                        │
+   process_incoming_verifying_roles ──────────┤
+     │   receipt gate: authorise(author)      │
+     │     ├─ stored   ─► pending set         ├─ stage_pending_proposals
+     │     └─ dropped  ─► Incoming::Proposal  │     └─► commit staged, still at N
+     │                    { stored: false }   │          publish ──► DS
+     │                                        │
+     │   commit gate: authorise(EVERY         ├─ read the verdict: apply the rows
+     │   proposal against ITS OWN author)     │  below our own commit, ask whether
+     │     + owner_survives (C-63)            │  our epoch moved
+     │     └─ refuse-to-merge, never          │     ├─ moved   ─► merge_staged_sweep
+     │        apply-then-warn                 │     └─ did not ─► abandon_staged_sweep
+     │                                        │
+     └─ is_active() ─► false once a commit removes our own leaf
+```
+
+Two properties of this shape a reader must not infer wrongly. A staged sweep
+**freezes that group's own membership operations** and is **durable**, so a client
+that stages and never adjudicates wedges membership across restarts — reaching a
+verdict is a client obligation, not an optimisation. And a staged sweep does **not**
+block a chat send (`create_message` gates on `is_active`, not `is_operational`),
+which is why all three clients hold the per-group lock across seal-and-publish.
+
 ### DeviceGroup lifecycle (ADR-0007)
 
 ```text
@@ -178,13 +228,36 @@ re-running this audit pack.
 See [`known-gaps.md`](./known-gaps.md) for the canonical list.
 The MLS-side items currently parked there:
 
-- **Channel two-tier flow** (>50k subscribers) — sender-key
+- **Channel two-tier flow** (>50k subscribers) — ~~sender-key
   bootstrap + content-key rotation. The wire shape lands in
-  Phase 4; not in this audit pass.
+  Phase 4; not in this audit pass.~~ **BUILT** (crypto,
+  service, UI, rotation cron, batched fanout and multi-epoch
+  retention all landed in 2026-07; `PublisherGroup` and
+  `crates/lakko-channels`). What G-1 still tracks is the
+  deploy-gated >50k **scale proof**, not the wire shape.
 - **MLS-2 / quantum hybrid suites** — pinned for later
   upgrade once the IETF lands the hybrid cipher suite
-  identifiers.
-- **External-join proposals** — currently returned as a
+  identifiers. **Still open** (G-2).
+- **External-join proposals** — ~~currently returned as a
   defensive `Incoming::ExternalJoinProposal` variant but
-  no UI surface drives them. Phase 4 channel-subscriber
-  flow lights this up.
+  no UI surface drives them.~~ **Driven end to end on all
+  three clients** (G-3 closed): the variant carries the
+  joiner's signature key and a `retained` flag, a role-gated
+  `approve_external_join` / `reject_external_join` pair acts
+  on it, and since [ADR-0045](../adr/0045-remote-commit-epoch-fork.md)
+  S7 an approval is an `Add` **proposal the approving admin
+  authors itself** rather than a direct commit. The retained
+  set is a **quarantine**, deliberately kept separate from the
+  member proposal store so a `/g/` link-holder cannot fill the
+  store the sweep consumes.
+
+**Three properties in this document have no numbered invariant and arguably want
+one; this is a pointer, not a mint.** The ADR-0045 receipt gate (an unauthorised
+proposal is dropped, and the drop is reported as data), the staged-sweep lifecycle
+(nothing merges until the journal has ordered it), and `is_active` (a group the
+device has been evicted from can never decrypt again, at any epoch) are all
+load-bearing and are currently pinned only as **C-63 / C-64 / C-66 / C-67 / C-68**
+in [`calls.md`](./calls.md) — which is where the ADR-0045 arc put them, because the
+`C-` class had already absorbed ADR-0022's role table. Whether any of them belongs
+in the `I-` class instead is a maintainer call, recorded here so the omission is
+deliberate rather than accidental.

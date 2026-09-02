@@ -57,9 +57,12 @@ relaxes).
 
 ### Components
 
+> **Names + scope corrected 2026-09-02 (documentation audit).** Three items in
+> this list drifted from what shipped; each is marked at its component.
+
 1. **Server: `services/obfs-proxy`** (new `lakko-svc-obfs-proxy`).
    Runs the obfs server listeners (`RealityListener`, `ShadowsocksListener`,
-   MASQUE server, WebTransport server) on dedicated public ports. On each
+   ~~MASQUE server,~~ WebTransport server) on dedicated public ports. On each
    accepted tunnel it obtains a framed `Box<dyn Connection>`, reassembles the
    byte stream, opens a TCP connection to the **internal** Lakko HTTP entry
    (nginx on localhost, or a service port), and relays bytes in both directions
@@ -68,6 +71,20 @@ relaxes).
    account state (invariant #5). One confinement knob: the relay target is a
    fixed configured internal address, so a tunnel cannot be used to reach
    arbitrary hosts (no open relay).
+
+   > **MASQUE is deliberately NOT one of the proxy's listeners** — and this is a
+   > finding, not a backlog item. `services/obfs-proxy`'s config carries exactly
+   > three listeners (`reality`, `shadowsocks`, `webtransport` —
+   > [`config.rs`](../../services/obfs-proxy/src/config.rs)). A
+   > `MasqueListener` **does exist** in `lakko-transport` and its handshake is
+   > verified, but MASQUE `CONNECT-UDP` carries **unreliable, unordered QUIC
+   > datagrams**, so relaying a *reliable* internal HTTP service over it does
+   > not work: the response datagram is dropped on close, because QUIC datagrams
+   > are never retransmitted nor flushed ahead of `CONNECTION_CLOSE`. The
+   > MASQUE loopback e2e is `#[ignore]`d and documents this. MASQUE is the right
+   > tool for tunnelling UDP, not TCP/HTTP; making it work here would mean
+   > adding a reliability layer this proxy should not have. The other three
+   > reliable-stream transports cover the use case.
 
 2. **Bridge: `ByteStreamConnection`** (in `lakko-transport`).
    An adapter that presents the framed `Connection` as an `AsyncRead + AsyncWrite`
@@ -83,11 +100,19 @@ relaxes).
    fails, the request fails — there is no direct-HTTP fallback inside this path
    (the caller decides whether anti-censorship is required; see Consequences).
 
-4. **FFI: `tunneled_request`** (UniFFI, in `lakko-ffi-uniffi`).
-   `tunneled_request(config, method, path, headers, body) -> Response` (and a
-   WS variant later) so Swift/Kotlin route a Lakko API call through the dialer +
-   tunnel without re-implementing any transport logic in the platform language.
-   No wasm surface — browser web is excluded by the sandbox constraint.
+4. **FFI: ~~`tunneled_request`~~ `tunneled_http_request`** (UniFFI, in `lakko-ffi-uniffi`).
+   `tunneled_http_request(config, anchor, now, endpoint, method, path, host, headers, body) -> FfiTunneledResponse`
+   ([`transport.rs`](../../crates/lakko-ffi-uniffi/src/transport.rs)) so
+   Swift/Kotlin route a Lakko API call through the dialer + tunnel without
+   re-implementing any transport logic in the platform language. **The WS
+   variant this called "later" landed too** — `open_tunneled_websocket` →
+   `TunneledWsConnection` (`send_text` / `send_binary` / `recv` / `shutdown`,
+   [`ws.rs`](../../crates/lakko-ffi-uniffi/src/ws.rs)) over
+   `lakko_transport::ws_tunnel::tunneled_websocket`; both native
+   `SfuSignalingClient`s use it. A third entry point the component list did not
+   anticipate is `fetch_bootstrap_config`, which sources the config itself
+   (component 6). No wasm surface — browser web is excluded by the sandbox
+   constraint.
 
 5. **Native client wiring.** When anti-censorship is **armed** (a user setting +
    a fetched, verified bootstrap config), iOS and Android route their Lakko REST
@@ -119,7 +144,8 @@ the byte-relay is agnostic.)
   + `TunneledHttpClient` + a **loopback e2e** (client dials a local obfs listener
   → in-process proxy relay → a local HTTP echo, proving the full path). Fully
   headless-verifiable here.
-- **Phase 3 — FFI** (`lakko-ffi-uniffi`): `tunneled_request` + regen-bindings.
+- **Phase 3 — FFI** (`lakko-ffi-uniffi`): ~~`tunneled_request`~~
+  `tunneled_http_request` + regen-bindings.
 - **Phase 4 — native wiring**: iOS + Android route armed Lakko API calls through
   the FFI; the arming setting + bootstrap-config fetch at boot.
 - **Phase 5 — deploy + live validation** (`infra/` + `ci/censorship-lab`): the
@@ -127,6 +153,27 @@ the byte-relay is agnostic.)
   censored-network test** proving an end-to-end request survives a blocking
   middlebox. **Deferred — needs a deployed environment; cannot be verified in
   this repo.**
+
+> **Phase status, re-verified 2026-09-02.** Phases 1–4 landed, including the
+> WS-over-tunnel work this ADR originally scoped as a follow-up. **Phase 5 is
+> half-open, and the two halves are worth separating** rather than carrying one
+> "deferred":
+>
+> - **`ci/censorship-lab` exists** — the SNI observer, its JA3/JA4 fingerprint
+>   parser, the blocklist detector, the throttle model, `docker-compose.yml`,
+>   and `.github/workflows/censorship-lab.yml` driving the `#[ignore]`-gated
+>   transport e2e tests. Note the workflow's automatic triggers are disabled for
+>   CI-quota reasons, so it is manual-dispatch only.
+> - **The `infra/` half has not landed.** There is **no obfs-proxy systemd
+>   unit** (`infra/systemd/` carries coturn, sfu, and the six services — no
+>   obfs-proxy), no nginx vhost, no `just` target, and no public-port opening.
+>   So the proxy is built and loopback-proven but **has never been deployed**,
+>   which means no user has ever routed traffic through it. Arming
+>   anti-censorship on a device today points at a proxy that is not running.
+>
+> That distinction matters for reading the rest of this ADR: everything from
+> the client side inward is real and tested; the operational half is not
+> started.
 
 Phases 1–3 + the Phase-2 loopback e2e are buildable and verifiable headless now.
 Phase 4 builds + compiles here but cannot be run end-to-end without a deployed

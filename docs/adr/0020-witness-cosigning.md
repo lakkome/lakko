@@ -7,8 +7,17 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 - **Status:** Accepted — Sprints 1-6 landed (Merkle consistency proof + witness
   co-sig format + FFI + `services/witness` + transparency integration + the
-  3-client co-sig gate + the live recovery-e2e). Only the `lakko-security` gate
-  on the audited-core changes remains before merge. 2026-06-13
+  3-client co-sig gate + the live recovery-e2e). ~~Only the `lakko-security`
+  gate on the audited-core changes remains before merge.~~ **The
+  `lakko-security` pass ran** (APPROVE-WITH-NOTES) — corrected 2026-09-02; its
+  finding was applied in `0d00478`, which added `#![forbid(unsafe_code)]` to
+  `services/witness`. 2026-06-13
+- **Extended by [ADR-0039](./0039-kt-log-witness-quorum.md)** (2026-07-21;
+  supersedes nothing here). ADR-0039 realises the "K-of-N a config slot for
+  later" this ADR parked: a client now requires **≥ K valid co-signatures from
+  distinct keys in a pinned witness set of size N**, and `N=1 / K=1` is
+  byte-for-byte this ADR's gate. `services/witness` itself is **unchanged** —
+  N witnesses are N instances of the same binary.
 - **Date:** 2026-06-13
 - **Context:** The KT log (`services/transparency` + `crates/lakko-transparency`
   + the 3-client verify) is operator-signed + append-only, and the G-30 #2 chain
@@ -126,5 +135,7 @@ proof per co-sign — light).
 - The witness is a NEW trust party; its independence is the load-bearing deploy
   property, and operator+witness collusion is the documented residual.
 
-Gate this ADR + the audited-core Sprint 1/2 changes through `lakko-security`
-before merge.
+~~Gate this ADR + the audited-core Sprint 1/2 changes through `lakko-security`
+before merge.~~ **Done** — APPROVE-WITH-NOTES; the finding (a missing
+`#![forbid(unsafe_code)]` on `services/witness`) was fixed in `0d00478`.
+Corrected 2026-09-02.

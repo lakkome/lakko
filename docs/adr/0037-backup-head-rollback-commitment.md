@@ -35,10 +35,16 @@ runs today authenticates "this blob is the current head."
 **CLOSED** by `crates/lakko-backup/src/chain.rs` — a v2 envelope carrying a
 plaintext `(version: u64, prev_hash)` chain header (`ChainHeader`, `verify_chain`,
 `header_of`) bound into the AEAD AAD. That closure is only *crate-level* true. The
-v2 chain is **dormant**: it is not exposed on either FFI surface (the UniFFI +
-wasm backup modules — `crates/lakko-ffi-{uniffi,wasm}/src/backup.rs` — export only
-the v1 `build / seal / open / parse` primitives), no client persists a
-`last_known_version` anchor, and no client calls `verify_chain`. So in practice
+v2 chain is **dormant**: it is not exposed on either FFI surface, no client
+persists a `last_known_version` anchor, and no client calls `verify_chain`. **Still
+true as of 2026-09-02** — `verify_chain` / `ChainHeader` / `header_of` are reachable
+only from `crates/lakko-backup`'s own re-export and its fuzz targets. One
+parenthetical here has gone stale and is corrected rather than deleted: the backup
+FFI modules (`crates/lakko-ffi-{uniffi,wasm}/src/backup.rs`) no longer export "only
+the v1 `build / seal / open / parse` primitives" — this ADR's own S3 and S4 added
+`verify_backup_head`, `verify_backup_head_binding`, `backup_envelope_hash`,
+`frame_backup_blob` and `parse_backup_blob` to both. None of those is the v2 chain,
+so the dormancy claim itself is unaffected. So in practice
 **neither** the client-with-state case **nor** the fresh-install case is closed on
 any deployed path. This ADR closes both, in practice, and the G-11 doc claim must
 be corrected accordingly (Sprint 6).
@@ -375,19 +381,25 @@ Torn states:
 
 ## Freshness model + residual
 
-The staleness window is a **client-side** knob (`LAKKO_BACKUP_HEAD_STALENESS_SECS`
-or the per-platform equivalent), not a server-fixed TTL, because it must track the
-client's own auto-backup cadence.
+The staleness window is a **client-side** knob, not a server-fixed TTL, because it
+must track the client's own auto-backup cadence. **As built it is
+`VITE_LAKKO_BACKUP_HEAD_STALENESS_SECS` on web
+(`apps/web/src/backup/head-gate.ts`) and `BuildConfig.LAKKO_BACKUP_HEAD_STALENESS_SECS`
+on Android (`apps/android/.../backup/HeadGate.kt`)** — this section named a bare
+`LAKKO_BACKUP_HEAD_STALENESS_SECS`, which exists on no platform.
 
 - **Sizing.** The window must comfortably exceed the maximum gap between a
   recently-active user's last upload and their restore, so a legitimately-current
   head is never flagged stale for such a user. It should be set to roughly the
   auto-backup cadence times a small slack factor plus clock-skew allowance. The
-  concrete default is a **rollout decision the maintainer tunes to the observed
-  cadence** (not pinned in the current code); a reasonable *starting* value is on
-  the order of tens of days, which bounds the fresh-install replay residual to at
-  most that much state while rarely tripping the override for an active user. This
-  is an engineering recommendation to tune, not a measured figure. It parallels the
+  concrete default was left as a **rollout decision the maintainer tunes to the
+  observed cadence**; a reasonable *starting* value is on the order of tens of
+  days, which bounds the fresh-install replay residual to at most that much state
+  while rarely tripping the override for an active user. This is an engineering
+  recommendation to tune, not a measured figure. ~~(not pinned in the current
+  code)~~ — **it is pinned now, at 30 days**: `BACKUP_HEAD_STALENESS_SECS_DEFAULT`
+  in `apps/web/src/backup/head-gate.ts` and its Android twin, with a web test
+  asserting the literal `2_592_000` so the value cannot drift silently. It parallels the
   bounded 30-day validity window the supersession proof already uses (ADR-0016
   `MAX_VALIDITY_SECS`).
 - **Trade-off.** Too tight → false "stale" refusals for legitimately-inactive
@@ -498,26 +510,38 @@ client's own auto-backup cadence.
   open + client-with-state (crate-level) closed" to "both cases closed in practice
   (fresh-install bounded by freshness; residual: within-window zero-anchor replay)".
 
-**Flag this ADR + the implementation through `lakko-security` before merge**
+~~**Flag this ADR + the implementation through `lakko-security` before merge**~~
 (maintainer-invoked) — it touches auth (a new stateful endpoint + migration +
 monotonic counter), the storage-blob framing, the client restore gate, the rollback
-threat model, and invariants #1 / #2 / #4.
+threat model, and invariants #1 / #2 / #4. **The pass RAN and returned
+APPROVE-WITH-NOTES** — no CRITICAL/HIGH, no invariant-#4 break on the live path —
+and its findings F1-F5b all landed: F4 (an absent-head floor check, so a returning
+client is hard-protected against head-stripping and the residual narrows to a true
+zero-anchor fresh install), F5a (a corrupt floor degrades to the stale override
+rather than to a pass), F2 (the gate is mandatory), F1 (an unpinned attest key
+warns), F3 (Android catches `Throwable`), and F5b (the mint rate limit in Open
+questions below). Recorded in **C-58**.
 
 ## Open questions
 
-- **Staleness window default + hard-refuse vs. override on stale.** The concrete
-  window default is a rollout tuning decision; and whether a stale head is a
-  pure hard-refuse or a user-acknowledged override is the maintainer's call (this
-  ADR recommends the override to avoid bricking a long-dormant recovery).
+- ~~**Staleness window default**~~ **— ANSWERED: 30 days**, pinned in each client
+  as `BACKUP_HEAD_STALENESS_SECS_DEFAULT` and asserted by a test. **Hard-refuse vs.
+  override on stale** was the maintainer's call and resolved as the override this
+  ADR recommended, to avoid bricking a long-dormant recovery; the three-case policy
+  table in §6 is what shipped.
 - **Auth-served current-version marker (residual tightening).** Whether restore
   should read the trusted current version from auth to close the fresh-install
   within-window residual, at the cost of a second trusted round-trip (Alternatives).
 - **Dedicated backup-head signing key.** Whether to split the signing role from
   device/genesis attestation (§3) for blast-radius isolation. Deferred as a clean
   follow-up.
-- **Rate-limiting / PoW on the mint endpoint.** An authenticated account can call
-  `POST /auth/backup/head` repeatedly (for its own account); harmless to others and
-  bounded, but a limiter is cheap defence-in-depth. Deferred.
+- ~~**Rate-limiting / PoW on the mint endpoint.** … Deferred.~~ **BUILT** — it came
+  back as `lakko-security` finding **F5b**: a default-off, **fail-open**,
+  per-account mint rate limit (`LAKKO_BACKUP_HEAD_MINT_RATE_LIMIT`, default `0` =
+  disabled; table `backup_head_mint_limits`, migration `0016`) in
+  `services/auth/src/backup_head.rs`. Fail-open for the ADR-0033 reason: it is an
+  anti-abuse limiter, not an authorisation gate, so a store failure must not deny
+  every account its head.
 
 ## Sprint decomposition
 

@@ -48,20 +48,28 @@ are process-model facts, all confirmed against the current tree:
 with a hard, tight RAM ceiling (the file's own header notes ~30 MB; the practical
 NSE budget is in the ~24–30 MB range) and ~30 s of wall-clock. iOS invokes it
 before displaying any APNs alert push that carries `aps.mutable-content = 1`.
-**Today it decrypts nothing** — its only mutation is to set `threadIdentifier`
-(and a short `subtitle`) from the wake payload's group-pseudonym `g` field so iOS
-groups notifications per conversation on the lock screen. Its own header comment
-already names the three blockers this ADR resolves (App Group container, a slim
-decrypt-only framework, and MLS-state persistence sharing).
+**As this ADR was written it decrypted nothing** — its only mutation was to set
+`threadIdentifier` (and a short `subtitle`) from the wake payload's
+group-pseudonym `g` field so iOS groups notifications per conversation on the lock
+screen. Its own header comment already named the three blockers this ADR resolves
+(App Group container, a slim decrypt-only framework, and MLS-state persistence
+sharing). **All three are resolved and the NSE decrypts today** — Phase 3 landed
+`NsePushDecrypt.swift` + `NseDecryptDeps.swift` beside it; this Context section is
+kept in the past tense rather than deleted, because the blockers are what make the
+Phase 1-3 design legible.
 
 ### The five decrypt inputs are all app-private today
 
 The App Group entitlement `group.me.lakko.dev.shared` is provisioned on **both**
 the main app (`apps/ios/Lakko/Lakko.entitlements`) and the NSE
 (`apps/ios/LakkoNotificationService/LakkoNotificationService.entitlements`) — but
-it is not yet read, there is **no shared Keychain access group** (a repo-wide grep
-for `kSecAttrAccessGroup` is empty), and every input the decrypt needs lives in
-app-private storage the NSE process cannot reach:
+it was not yet read, there was **no shared Keychain access group** (a repo-wide
+grep for `kSecAttrAccessGroup` was empty), and every input the decrypt needs lived
+in app-private storage the NSE process could not reach. **Phase 1 closed this**:
+`kSecAttrAccessGroup` is now set in `apps/ios/Lakko/Auth/AccountIdentitySeedStore.swift`
+and `apps/ios/Lakko/Shared/SharedStorage.swift`, with the group declared in
+`apps/ios/project.yml`. The table below is the *pre-Phase-1* state, which is what
+the migration was designed against:
 
 | Decrypt input | Store today | Backing | NSE-reachable today |
 |---|---|---|---|
@@ -212,7 +220,19 @@ The decrypt path needs only `lakko-mls` + `lakko-attachments` (+ their transitiv
 `load_group`, `Group.process_incoming_verifying_roles` (with the sender leaf),
 `parse_body_envelope` → `ParsedBody` — matching the `lakko-ffi-uniffi` Swift API
 shape so Phase 3 calls the same names. There is **no** compose / send / call /
-channel / transport surface. `cargo tree` confirms tokio, `lakko-transport`,
+channel / transport surface.
+
+**Amended 2026-09-02: the crate has since taken a third dependency and three more
+exports, and both are classification-only.** `lakko-contacts` was added
+(`crates/lakko-ffi-extension/Cargo.toml`) for the background service-envelope
+filter, bringing `decode_push_routing_secret` (ADR-0042/0044) and, in `94da492`,
+`decode_committer_beacon` + `committer_beacon_envelope_len` (ADR-0045). The
+no-write property is untouched: all three answer *is this a service envelope* so
+the NSE can suppress it instead of rendering it as lossy-UTF-8 garbage, and the
+compose / derive / order halves of both envelope kinds are deliberately **not**
+brought over. The dependency is cheap by measurement rather than by assertion —
+`lakko-contacts` depends only on `thiserror` and `lakko-crypto`, both already
+present. The 193-crate figure below predates it. `cargo tree` confirms tokio, `lakko-transport`,
 `lakko-calls`, `lakko-channels`, `lakko-sfu-proto`, `lakko-call-jwt`, and
 tungstenite are all absent (193 crates vs the full surface's 356). The
 `justfile build-ios-extension` recipe cross-compiles the three iOS targets into a
@@ -426,7 +446,8 @@ Phase-3 findings (armed → generic short-circuit; cursor floor) are resolved
   seed-sharing decision — `lakko-security` gate before this lands.**
 - **Phase 2 — slim decrypt-only framework.** **Done** (`5ea5c1a`). Measurement
   taken (~1.6 MB dead-stripped vs 333 MB full → fits with an order of magnitude of
-  headroom), so `crates/lakko-ffi-extension` ({`lakko-mls`, `lakko-attachments`}) →
+  headroom), so `crates/lakko-ffi-extension` ({`lakko-mls`, `lakko-attachments`}, plus
+  `lakko-contacts` since the service-envelope filters) →
   `LakkoCoreExtension.xcframework` was built, cross-compiled, and linked by the NSE
   instead of `LakkoCore.xcframework`.
 - **Phase 3 — NSE read-only throwaway decrypt handler.** **Done** (`714d019`).

@@ -5,15 +5,53 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0007: Two-tier identity for multi-device
 
-- **Status:** Accepted
+- **Status:** Accepted — **the identity-derivation rule below was amended by
+  [ADR-0017](./0017-phrase-seeded-identity.md)** (2026-06-09). The two-tier
+  structure, the DeviceGroup, and the deterministic `group_id` are unchanged.
 - **Date:** 2026-05-18
 - **Context:** Phase 2a3 — multi-device sync via DeviceGroup substrate
+
+> **AMENDED by [ADR-0017](./0017-phrase-seeded-identity.md); recorded here
+> 2026-09-02.** ADR-0017 says four times that it amends this ADR. **This ADR
+> said so nowhere** — no status note, no forward link — so a reader arriving
+> here got the superseded rule with nothing to warn them. That is the drift this
+> note closes.
+>
+> **Read every `Identity::fromSeed(exportKey)` below as
+> `Identity::fromSeed(accountIdentitySeed)`** — the 64-byte BIP39
+> recovery-phrase seed, not the OPAQUE password export key. `from_seed` itself
+> is unchanged and seed-agnostic (HKDF-SHA-256 under salt `"lakko-identity-v1"`,
+> [`identity.rs`](../../crates/lakko-mls/src/identity.rs)), which is precisely
+> why the change was client-side only and touched no MLS state machine.
+>
+> **The property this ADR leans on survives, but its basis moved.** "Every
+> device that knows the password reconstructs the same keypair" is now "every
+> device that holds the account's phrase seed does". The practical gain is that
+> a routine password change or recovery **no longer rotates the identity at
+> all** — so contacts never re-verify, and the ADR-0016 supersession machinery
+> is dormant. Two consequences for this document:
+>
+> - **The deterministic-from-exportKey framing is gone**, and with it the
+>   implicit "the password is the identity" model. A device now needs the phrase
+>   seed, which is why ADR-0017 added a per-platform seed store and a
+>   fresh-device `provideRecoveryPhrase` path that hard-blocks against the
+>   published bundle.
+> - **The recovery-flow line further down happens to remain correct** ("recover
+>   from phrase → re-derive AccountIdentity") — but by coincidence of wording,
+>   not because the mechanism described around it still applies.
+>
+> **A stale comment in the code says the same wrong thing** and is reported
+> rather than fixed here (this audit's scope was `docs/adr/`):
+> `crates/lakko-mls/src/identity.rs` still documents `from_seed` as being seeded
+> by "the OPAQUE password export key".
+
 
 ## Context
 
 Phase 1 ships with a single deterministic `Identity` per account: every device that runs `Identity::fromSeed(exportKey)` against the OPAQUE-derived export key reproduces **byte-identical** Ed25519 + X25519 keypairs. This was the right choice for single-device flows — recovery works without server-side device state, and the `accountIdB64 → signature_public_key` map on discovery is one-to-one and trivially deterministic.
 
-Phase 2a3 needs multi-device support. The DeviceGroup substrate (ADR-0001, [§3 of the plan](../../README.md)) is an MLS group whose **leaves are the user's own devices**. RFC 9420 §5.3 requires every leaf's `signature_key` to be unique within the group; adding two leaves with the same key fails validation. The deterministic-from-exportKey Identity collides with that requirement: a second device joining via `Identity::fromSeed(same_exportKey)` would produce the same signature key as the first leaf, and MLS rejects the Welcome.
+Phase 2a3 needs multi-device support. The DeviceGroup substrate (ADR-0001, §3 of the strategic plan — *the link here pointed at the repo
+`README.md`, which has no §3; corrected to a plain reference 2026-09-02*) is an MLS group whose **leaves are the user's own devices**. RFC 9420 §5.3 requires every leaf's `signature_key` to be unique within the group; adding two leaves with the same key fails validation. The deterministic-from-exportKey Identity collides with that requirement: a second device joining via `Identity::fromSeed(same_exportKey)` would produce the same signature key as the first leaf, and MLS rejects the Welcome.
 
 The same friction surfaces in conversation groups once they hold multiple leaves per user (a user texting from two devices into the same chat). Each device needs its own leaf so the per-leaf private state — init key, encryption key, leaf decryption history — stays scoped to the device that owns it. Cross-device leakage of the init private bytes via a shared deterministic Identity defeats the point of per-leaf forward secrecy.
 
@@ -134,7 +172,14 @@ Trade-offs:
 
 ## Open questions
 
-- **Per-device-leaf conversation groups (Phase 2b)** — how peers verify a leaf belongs to the sender's DeviceGroup. Sketch: every conversation group's `epoch_authenticator` exporter binds the per-device leaf to the sender's published DeviceGroup epoch; peers cross-check on every Commit. ADR-0008 will pin this once the wire shape lands.
+- **Per-device-leaf conversation groups (Phase 2b)** — how peers verify a leaf belongs to the sender's DeviceGroup. Sketch: every conversation group's `epoch_authenticator` exporter binds the per-device leaf to the sender's published DeviceGroup epoch; peers cross-check on every Commit. ~~ADR-0008 will pin this once the wire shape lands.~~
+  **Still open, and no ADR pins it** (corrected 2026-09-02): ADR-0008 is the
+  LiveKit-fork operational strategy, itself superseded by ADR-0011 — the number
+  was claimed by unrelated work. The same question is carried forward as
+  [ADR-0022](./0022-group-admin-roles.md)'s "Phase 2b per-device leaves"
+  open question, where it matters for a second reason this ADR did not
+  anticipate: the role gate would have to resolve a committer's *device* leaf
+  back to its *account* before the role lookup.
 - **Multi-account on one device** — out of scope here, but the per-platform store layer is keyed by `accountIdB64` so the data model already tolerates it.
 - **PRF-extension WebAuthn** — orthogonal: if landed (2a2c3?) the export key gains a passkey-derived alternative path. Doesn't affect DeviceIdentity.
 
@@ -142,6 +187,9 @@ Trade-offs:
 
 - ADR-0001 — MLS for everything
 - ADR-0002 — Rust core + native UI
+- [ADR-0017](./0017-phrase-seeded-identity.md) — **amends this ADR's
+  identity-derivation rule** (exportKey → phrase seed); added 2026-09-02, the
+  link having been one-directional until then
 - Phase 2a3 sub-sprints in `docs/ROADMAP.md`
 - RFC 9420 §5.3 — leaf node uniqueness
 - Signal Protocol's per-device "device ID" model

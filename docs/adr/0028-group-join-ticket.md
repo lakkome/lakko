@@ -9,13 +9,41 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 - **Date:** 2026-06-25
 - **Context:** Phase 3/4 — the live consumer of ADR-0027 (external-join approval, G-3)
 
+> **AMENDED 2026-09-02 by [ADR-0045](0045-remote-commit-epoch-fork.md) S7
+> (`576ea14`). The ticket is unchanged; the far end of the flow it feeds is
+> not.** In a group that carries a role table — every ordinary chat group —
+> `approve_external_join` no longer commits. The approving admin publishes an
+> `Add` **proposal**, and one elected committer later sweeps it and posts the
+> `WelcomeRendezvous`. Three readings below need adjusting, and all three are
+> in the *description* of ADR-0027's half rather than in this ADR's own
+> decision:
+>
+> - **The Context** says the admin *"approves it (role-gated, reusing the
+>   audited `add_member`), and ferries the Welcome back"*. Approving no longer
+>   calls `add_member` and produces no Welcome.
+> - **The § 4 flow diagram** shows `approve_external_join → commit +
+>   WelcomeRendezvous` as one step. It is now two, by two possibly different
+>   devices, with **no deadline** between them (ADR-0045 decision 2).
+> - **The joiner's wait therefore has three states, not two:** *asked* →
+>   *approved* (a proposal is on the wire) → *admitted* (a committer swept it).
+>
+> **Nothing in this ADR's own decision moves.** The capability codec, the
+> no-epoch-in-the-ticket rule, the read-the-epoch-from-the-journal mechanism,
+> the retry-on-stale loop, and — most importantly — *the security boundary is
+> the admin approval gate, not a ticket secret* all hold exactly as written.
+> **OQ3's co-publisher path is also unaffected and says so already** (see the
+> note there): a `PublisherGroup` seeds no role table, so it keeps the direct
+> commit and its load-bearing reseal-after-add.
+
 ## Context
 
 [ADR-0027](0027-external-join-approval.md) closed G-3 on the **admin** side:
 an owner/admin sees a non-member's MLS external `Add` proposal
 (`Incoming::ExternalJoinProposal`), approves it (role-gated, reusing the
 audited `add_member`), and ferries the Welcome back over a `WelcomeRendezvous`
-journal envelope. The **joiner-side core** also landed:
+journal envelope. *(Both halves of that sentence changed under ADR-0045 S7 —
+see the head note. The `WelcomeRendezvous` envelope itself is unchanged; only
+who posts it, and when, moved.)* The **joiner-side core** also landed:
 `Identity::create_external_join_proposal(group_id, epoch)` lets a non-member
 craft the external `Add` proposal, and a full in-process e2e test proves the
 whole loop (propose → approve → rendezvous → `join_from_welcome` → member).
@@ -135,12 +163,24 @@ Capability                                  read epoch from journal ◄── (h
 process_incoming_  ◄──────────────────────────────────────────────────────────── (poll)
   verifying_roles
   → pending list (ADR-0027 Phase-4 UI)
-approve_external_                                                                 ─► commit
-  join → commit +                                                                 ─► WelcomeRendezvous
-  WelcomeRendezvous
+approve_external_                                                                 ─► Add proposal
+  join                                                                               (authored by the
+                                                                                      approving admin)
+   ⋮  (no deadline — ADR-0045 decision 2)
+elected committer                                                                 ─► commit
+  sweeps                                                                          ─► WelcomeRendezvous
                                             welcomeRendezvousFor(bytes) ◄──────── (poll)
                                             join_from_welcome → member
 ```
+
+> **Updated 2026-09-02 for [ADR-0045](0045-remote-commit-epoch-fork.md) S7.**
+> Before S7 the last admin step was a single `approve_external_join → commit +
+> WelcomeRendezvous`. It is now two steps by two possibly different devices,
+> because two admins approving two joiners against one epoch would otherwise
+> fork the group. The sweeping device cannot tell which adds came from a `/g/`
+> link, so it posts a `WelcomeRendezvous` for **every** added key — pinned as
+> **C-69**. The joiner's poll loop below is unchanged: it still matches the
+> rendezvous by its own signature key and ignores the rest.
 
 Steps the admin side (`process_incoming_verifying_roles` + the Phase-4
 members-panel approve/reject UI) and `WelcomeRendezvous` transport are **already

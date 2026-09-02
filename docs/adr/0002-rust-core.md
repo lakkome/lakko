@@ -28,7 +28,24 @@ All crates in `crates/`:
 - `lakko-ffi-uniffi` — Swift / Kotlin bindings via [UniFFI](https://github.com/mozilla/uniffi-rs)
 - `lakko-ffi-wasm` — Web / Tauri bindings via [wasm-bindgen](https://rustwasm.github.io/wasm-bindgen/)
 
-`#![forbid(unsafe_code)]` on all domain crates; unsafe is allowed only inside `lakko-ffi-*` and must carry an explicit `// SAFETY:` comment.
+`#![forbid(unsafe_code)]` on all domain crates; unsafe is allowed only inside the FFI crates and must carry an explicit `// SAFETY:` comment.
+
+> **The exception moved (recorded 2026-09-02).** This ADR — and the code-style
+> rule in `CLAUDE.md` that restates it — grants the exception to `lakko-ffi-*`
+> by *name*. That is no longer where unsafe lives. As of this audit **all three
+> `lakko-ffi-*` crates carry `#![forbid(unsafe_code)]`** (`lakko-ffi-uniffi`,
+> `lakko-ffi-wasm`, `lakko-ffi-extension`) — UniFFI and wasm-bindgen generate
+> their own glue, so the hand-written surface needs none — and the **only**
+> crate in the workspace with `#![allow(unsafe_code)]` is
+> [`lakko-sframe-native`](../../crates/lakko-sframe-native/src/lib.rs), the flat
+> C ABI the iOS Obj-C++ shim and the Android JNI module link against. That crate
+> is an FFI crate by function and not by prefix, so a name-based rule silently
+> stopped describing the tree.
+>
+> The intent is unchanged and is what should be read here: **unsafe is confined
+> to the FFI boundary, everywhere else forbids it.** Stated as a property rather
+> than a prefix, that is still exactly true — and it is now true of a *smaller*
+> surface than this ADR assumed, which is the direction to want.
 
 ### Per-platform UI
 

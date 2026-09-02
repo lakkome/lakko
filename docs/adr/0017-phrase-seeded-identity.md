@@ -175,9 +175,24 @@ Landed end-to-end on web + iOS + Android, each step build/test-verified:
   one window is at most 2 keys (a flip-flop), never N-key churn.
   `lakko-security`: APPROVE-WITH-NOTES.
 
-**Still deferred:** a KT-log "fresh start" marker (needs the KT-log chain
+~~**Still deferred:** a KT-log "fresh start" marker (needs the KT-log chain
 verifier — a separate work item) to let contacts distinguish an owner reset from
-an active attacker.
+an active attacker.~~
+
+**BUILT (recorded 2026-09-02) — both halves.** The chain verifier it was waiting
+on is `lakko_transparency::verify_supersession_chain`, exposed on both FFI
+surfaces by [ADR-0019](./0019-client-authorised-log-leaf.md) Sprint 1. The
+marker itself is an `is_reset` flag threaded through `services/transparency`
+(`AppendReq.is_reset` → `LatestRes.is_reset`) and read by the clients
+(`apps/web/src/transparency/client.ts`, with tests). So a contact **can** now
+distinguish an owner reset from an active attacker: the log says which it was.
+
+**One thing this does not do, and should not be read as doing:** a reset marker
+is a *label the resetting party asked for*, so it distinguishes the two cases
+only for an observer who already trusts the log's genesis gate. That is exactly
+why [ADR-0036](./0036-auth-attested-genesis.md) exists — it makes the log entry
+itself account-authenticated rather than merely self-consistent. The out-of-band
+safety-number re-verify remains the backstop either way.
 
 ## Relationship to prior ADRs
 

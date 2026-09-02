@@ -26,10 +26,26 @@ contiguous as it accumulates.
 | [`crates/lakko-transport/src/http.rs`](../../crates/lakko-transport/src/http.rs) | shipped | reqwest+rustls REST client with SPKI pinning |
 | [`crates/lakko-transport/src/pluggable.rs`](../../crates/lakko-transport/src/pluggable.rs) | shipped | `PluggableTransport` policy + `HappyEyeballs` selector |
 | [`crates/lakko-transport/src/rendezvous.rs`](../../crates/lakko-transport/src/rendezvous.rs) | shipped | Ed25519-signed bootstrap config + sign / verify |
-| [`crates/lakko-transport/src/reality.rs`](../../crates/lakko-transport/src/reality.rs) | scaffold (G5-1) | REALITY TLS-in-TLS config + stub transport |
-| [`crates/lakko-transport/src/masque.rs`](../../crates/lakko-transport/src/masque.rs) | scaffold (G5-2) | MASQUE / CONNECT-UDP config + stub transport |
-| [`crates/lakko-transport/src/shadowsocks.rs`](../../crates/lakko-transport/src/shadowsocks.rs) | scaffold (G5-3) | Shadowsocks-2022 config + stub transport |
-| [`crates/lakko-transport/src/webtransport_pt.rs`](../../crates/lakko-transport/src/webtransport_pt.rs) | scaffold (G5-4) | WebTransport config + stub transport |
+| [`crates/lakko-transport/src/reality/`](../../crates/lakko-transport/src/reality/) | shipped (G5-1) | REALITY TLS-in-TLS — a **directory**, not `reality.rs`: authenticator / config / handshake wire / client driver / stream / server driver + listener / rng hook / cert verifier |
+| [`crates/lakko-transport/src/masque/`](../../crates/lakko-transport/src/masque/) | shipped (G5-2) | MASQUE / CONNECT-UDP — a **directory**: config / request / datagram codec / transport / listener |
+| [`crates/lakko-transport/src/shadowsocks.rs`](../../crates/lakko-transport/src/shadowsocks.rs) | shipped (G5-3) | Shadowsocks-2022 — outer header, TCP transport **and** `ShadowsocksListener` |
+| [`crates/lakko-transport/src/webtransport_pt.rs`](../../crates/lakko-transport/src/webtransport_pt.rs) | shipped (G5-4) | WebTransport over QUIC — cert-hash pinning + `WebTransportListener` |
+| [`crates/lakko-transport/src/doh_fetch.rs`](../../crates/lakko-transport/src/doh_fetch.rs) | shipped | `DohFetcher` — JSON-DoH resolve + IP-pinned HTTPS GET (T-8) |
+| [`crates/lakko-transport/src/aead_stream.rs`](../../crates/lakko-transport/src/aead_stream.rs) | shipped | Chunked ChaCha20-Poly1305 framing (T-9) |
+| [`crates/lakko-transport/src/ech/`](../../crates/lakko-transport/src/ech/) | shipped | ECH config-list parser + RustCrypto/hpke adapter + rustls wire-up (T-12) |
+| [`crates/lakko-transport/src/selector.rs`](../../crates/lakko-transport/src/selector.rs) | shipped | `BootstrapDialer` — [ADR-0025](../adr/0025-bootstrap-transport-dialer.md)'s verify-then-build-then-race dispatcher |
+| [`crates/lakko-transport/src/byte_stream.rs`](../../crates/lakko-transport/src/byte_stream.rs) | shipped | `ByteStreamConnection` — a framed `Connection` as one `AsyncRead + AsyncWrite` ([ADR-0026](../adr/0026-anti-censorship-wiring.md)) |
+| [`crates/lakko-transport/src/tunnel_http.rs`](../../crates/lakko-transport/src/tunnel_http.rs) | shipped | `TunneledHttpClient` — minimal HTTP/1.1 inside the obfs tunnel (ADR-0026) |
+| [`crates/lakko-transport/src/ws_tunnel.rs`](../../crates/lakko-transport/src/ws_tunnel.rs) | shipped | `tunneled_websocket` — RFC 6455 handshake + frames over the tunnel (ADR-0026) |
+| `endpoint.rs` · `error.rs` · `in_memory.rs` · `pinning.rs` | shipped | Endpoint parsing, the crate error enum, an in-memory loopback transport for tests, SPKI pin helpers |
+
+> **This table was four rows of "scaffold … stub transport" long after all four
+> shipped, and it linked `reality.rs` / `masque.rs`, which are directories — both
+> links 404'd.** It also omitted eleven modules, four of which
+> (`selector` / `byte_stream` / `tunnel_http` / `ws_tunnel`) landed under ADR-0025
+> and ADR-0026 **after** this document's last revision and are not described
+> anywhere in it. Corrected 2026-09-02; the ADR-0025 / ADR-0026 surfaces still have
+> no invariant of their own here, which is noted at the end.
 
 ## Threat-model context
 
@@ -80,29 +96,40 @@ Test: `pluggable_kind_string_table_pinned` in
 `pluggable.rs::tests` — explicit byte-string equality
 for every variant.
 
-### T-2: Scaffold transports surface `NotImplemented` loudly
+### T-2: Scaffold transports surface `NotImplemented` loudly — **SPENT, and its cited test never existed**
 
-The four PT scaffolds (REALITY / MASQUE / Shadowsocks-
-2022 / WebTransport) return
-[`crate::error::Error::NotImplemented { feature, sprint }`](../../crates/lakko-transport/src/error.rs)
-from their `Transport::connect` impl. The error message
-carries the sprint label (`S-5-reality`, `S-5-masque`,
-…) so an operator log line points straight at the open
-ROADMAP item.
+> **This invariant described a state the crate has left, and it is retained rather
+> than deleted because what replaced it is the interesting part.** When it was
+> written, all four PT scaffolds returned
+> [`Error::NotImplemented { feature, sprint }`](../../crates/lakko-transport/src/error.rs)
+> from `Transport::connect`, carrying the sprint label (`S-5-reality`,
+> `S-5-masque`, …) so an operator log line pointed straight at the open ROADMAP
+> item. **No `Transport::connect` impl in the crate returns it any more** — all four
+> are real implementations (T-11 / T-13 / T-14 / T-15 below, each with a loopback
+> e2e), and the only remaining construction site is `RealityTransport::new`, where
+> the variant is kept for a **bad config** so the bootstrap loader's error shape
+> does not change. The three other mentions are stale code comments.
+>
+> **And the citation was fabricated.** `scaffold_transport_surfaces_not_implemented`
+> exists nowhere in the tree — the only match for that name is this document. The
+> tests actually in `pluggable.rs` are `pluggable_kind_string_table_pinned`,
+> `empty_candidates_rejects_at_connect`, `all_candidates_failing_surfaces_all_failed`
+> and `candidate_kinds_in_race_order_preserved`. So this invariant has been
+> uncited for as long as it has been recorded, which is the more useful lesson: a
+> stated invariant with an unverified test reference is not an invariant.
+>
+> **What genuinely still holds** is the fail-closed *property* T-2 was reaching
+> for, and it lives in the selector rather than in the transports: a candidate that
+> cannot be built is **skipped** and zero buildable candidates is a fail-closed
+> `SelectorError::NoCandidates`, while `TransportSpec` has no `Direct` variant at
+> all, so there is no silent plaintext fallback to fall back *to*
+> ([ADR-0025](../adr/0025-bootstrap-transport-dialer.md)). That property has no
+> numbered invariant here.
 
-This is structural: a build that accidentally enables a
-scaffold transport in production fails at the first
-connect attempt with a typed error, never falls back to
-unauthenticated transport, never crashes silently.
-
-The `Pluggable` selector wraps these per-candidate
-errors inside
+The `Pluggable` selector wraps per-candidate errors inside
 [`PluggableError::AllFailed::per_candidate`](../../crates/lakko-transport/src/pluggable.rs)
-so the operator can see "every candidate is still a
-stub" at a glance.
-
-Test: `scaffold_transport_surfaces_not_implemented` in
-`pluggable.rs::tests`.
+so the operator can see why every candidate failed at a glance. That part is
+current — `all_candidates_failing_surfaces_all_failed` covers it.
 
 ### T-3: Selector race preserves submission order
 
@@ -223,9 +250,19 @@ The Ed25519 public key
 checks against is **not** fetched from the network. It
 ships in the client binary (TUF / app bundle). Compromise
 of the signing key requires a new build with a rotated
-trust anchor — the rotation procedure is tracked in
+trust anchor. ~~the rotation procedure is tracked in
 [`known-gaps.md`](./known-gaps.md) until the TUF
-auto-update sprint (GA-5) lands.
+auto-update sprint (GA-5) lands.~~ **Both halves of that
+cross-reference are dangling and are withdrawn:**
+`known-gaps.md` has no entry for bootstrap trust-anchor
+rotation (a search for "TUF" there returns nothing), and
+the label "GA-5" appears in no roadmap — only here. The
+invariant itself is unaffected and still holds
+(`BootstrapConfig::verify` takes the anchor as a
+**parameter** and `rendezvous.rs` performs no network
+fetch); what is missing is the rotation **procedure**,
+which is genuinely unwritten and now unowned by any
+tracked item.
 
 Network-resident attackers can substitute a malicious
 rendezvous response but cannot mint a signature that
@@ -549,9 +586,15 @@ server-side helper `accept_inbound`.
    acceptance call on the same listener; a replayed
    prelude across two separate TCP connections to
    the same server is rejected via the window's
-   FIFO LRU (T-10 #4). The listener-loop is not
+   FIFO LRU (T-10 #4). ~~The listener-loop is not
    shipped in this sprint — the helper alone is the
-   point where the window is consumed.
+   point where the window is consumed.~~ **It shipped:**
+   `ShadowsocksListener` (`bind` / `from_parts` +
+   `impl TransportListener`) threads `&mut self.window`
+   into `accept_inbound`, so the window is consumed on
+   the real accept path and not only by the helper. Its
+   two peers, `MasqueListener` and `WebTransportListener`,
+   also exist and are undocumented here.
 
 6. **PSK decode is eager.** `ShadowsocksTransport::new`
    calls `psk_from_b64` at construct time so a bad
@@ -802,8 +845,10 @@ cover traffic later even if the tag_secret leaks. The
 forward-secrecy loss in v2 is strictly limited to "can
 the leaked tag_secret forge fresh AUTHENTICATORS".
 
-**Tests.** 13 unit tests in
+**Tests.** 14 unit tests in
 [`crates/lakko-transport/src/reality/authenticator.rs`](../../crates/lakko-transport/src/reality/authenticator.rs)
+(this read 13, while the enumeration below already listed
+14 — the numeral disagreed with its own prose)
 covering: compute + verify round-trip; wrong short_id
 in allow-set is `ShortIdNotAllowed`; timestamp outside
 tolerance is `TimestampSkew`; timestamp inside window
@@ -819,7 +864,7 @@ short_id; server-response rejects wrong timestamp;
 server-response refuses a reflected client tag
 (domain separation via `"v2-server-response"` prefix).
 
-Plus 7 unit tests on
+Plus 8 unit tests on
 [`crates/lakko-transport/src/reality/config.rs`](../../crates/lakko-transport/src/reality/config.rs)
 covering happy parse + every rejection path
 (`tag_secret_b64` base64, wrong tag_secret length,
@@ -865,7 +910,11 @@ TLS-bytes interceptor needs:
   auth-response into that field. Same family of refusals
   as the ClientHello patcher.
 
-13 unit tests in `handshake.rs` cover: round-trip patch +
+**`handshake.rs` now holds 25 unit tests; the 13 enumerated
+here are the client-side G5-1-wire subset**, and the
+S-5-reality-server sprint added twelve more
+(`extract_session_id_*`, `patch_random_*`, `server_side_*`).
+Those 13 cover: round-trip patch +
 extract, "preserves everything else" on the ClientHello
 patch (cipher_suites / compression / extensions
 untouched), reject non-handshake content type, reject
@@ -906,16 +955,26 @@ Shipped pieces:
   wired with the any-cert verifier. `drive_handshake`
   is an async function that owns mutable references
   to a tokio socket + `rustls::ClientConnection` and
-  loops `wants_write` / `write_tls` (patching the first
-  outgoing batch's ClientHello.session_id) and
+  loops `wants_write` / `write_tls` and
   `wants_read` / socket.read / extract+verify
   ServerHello.Random / `read_tls` / `process_new_packets`
-  until `is_handshaking` returns false. Typed
-  `RealityDriverError` with 10 variants — each maps to a
+  until `is_handshaking` returns false. **The driver does
+  NOT patch the ClientHello** — this said "(patching the
+  first outgoing batch's ClientHello.session_id)" and the
+  code says the opposite in a comment at that exact point:
+  *"The REALITY authenticator is already in
+  legacy_session_id from build_reality_client_connection;
+  no patching needed here."* The rng hook described further
+  down superseded the patching path;
+  `patch_client_hello_session_id` still exists but is called
+  only from `handshake.rs`'s own tests. Typed
+  `RealityDriverError` with **9** variants — each maps to a
   specific failure surface (ConfigBuild / InvalidSni /
   ClientConnectionInit / SocketIo / PeerClosed / Rustls /
-  PatchClientHello / ExtractServerHello / ServerAuth /
-  HandshakeBufferOverflow). `MAX_HANDSHAKE_BUFFER_BYTES`
+  ExtractServerHello / ServerAuth /
+  HandshakeBufferOverflow). This listed 10, including a
+  `PatchClientHello` variant that does not exist — the same
+  stale reading, from the other end. `MAX_HANDSHAKE_BUFFER_BYTES`
   (64 KiB) caps pre-extraction buffering to defend
   against slow-loris drip-feed peers.
 - [`reality/stream.rs`](../../crates/lakko-transport/src/reality/stream.rs)
@@ -1144,7 +1203,9 @@ attacker-controllable parser between the proxy and the
 client; a panic / overflow here on a malicious datagram
 would crash the client's connect path.
 
-**Tests.** 28 unit tests across the three modules:
+**Tests.** 32 unit tests across **four** modules (this said
+"28 … across the three modules" while enumerating four
+groups):
 
 - 10 config tests: happy parse, allow no bearer, reject
   non-https proxy, reject bad URL, reject missing-port
@@ -1156,13 +1217,16 @@ would crash the client's connect path.
   `:authority`, IPv6 inner target percent-encoded
   in `:path`, DNS host passes through unchanged,
   percent-encoder only escapes RFC-3986-reserved bytes.
-- 7 datagram-codec tests: encode/decode round trip,
+- 8 datagram-codec tests (the list below already had eight
+  items under a "7" label): encode/decode round trip,
   encode rejects oversize, decode rejects empty wire,
   decode rejects truncated varint, decode rejects
   unsupported context id, decode rejects oversize wire,
   varint encoding classes (all four length classes),
   varint round-trip across classes.
-- 5 transport-ctor tests: accept valid config, reject
+- 8 transport-ctor tests — the three `*extra_roots*` ones
+  came with the private-CA hook described below and were
+  never counted: accept valid config, reject
   non-https proxy, reject bad inner target, http::Request
   translation carries pseudo-headers correctly, connect
   to an unreachable proxy surfaces a typed `Error::Io`
@@ -1258,53 +1322,96 @@ the connection) only when the caller drops the connection. No
 plaintext-fallback path is involved — the fix is purely about
 keeping the established encrypted tunnel alive.
 
-## Known soft spots — out of scope for Phase 5 scaffold
+## Known soft spots
 
-### Real `Transport` implementations for REALITY / MASQUE / SS-2022 / WebTransport
+> **Reviewed 2026-09-02 and four of the five had closed.** The heading said "out of
+> scope for Phase 5 **scaffold**" and nothing under it is a scaffold any more. Each
+> item is kept with its original reasoning and its resolution beside it, because two
+> of them record *why* the design is what it is.
+
+### ~~Real `Transport` implementations for REALITY / MASQUE / SS-2022 / WebTransport~~ — **CLOSED**
 
 Tracked as G5-1 / G5-2 / G5-3 / G5-4 in
-[`docs/ROADMAP-PHASE3-CLOSEOUT.md`](../ROADMAP-PHASE3-CLOSEOUT.md).
-Until those land, the only candidate that **actually
-completes a connect** through the pluggable selector
-is the existing QUIC transport. T-2 protects us from
-silently using a half-built scaffold.
+[`docs/ROADMAP-PHASE3-CLOSEOUT.md`](../ROADMAP-PHASE3-CLOSEOUT.md). ~~Until those
+land, the only candidate that **actually completes a connect** through the
+pluggable selector is the existing QUIC transport. T-2 protects us from silently
+using a half-built scaffold.~~ **All four landed**, each with a live loopback e2e
+(`tests/reality_e2e.rs::reality_v2_loopback_roundtrip`,
+`tests/masque_e2e.rs::masque_loopback_roundtrip`,
+`tests/webtransport_e2e.rs::webtransport_loopback_roundtrip`, and
+`shadowsocks.rs::tcp_round_trip_frame_traffic`). And T-2 protects nothing — see the
+T-2 note above; the fail-closed property now lives in `BootstrapDialer`.
 
-### DoH-resolved bootstrap fetch
+**One genuine caveat survives the closure and is not a scaffold issue:** MASQUE's
+listener is built but is deliberately **not wired** into `services/obfs-proxy`,
+because CONNECT-UDP carries unreliable, unordered datagrams and relaying a
+*reliable* internal HTTP service over them does not work. That is recorded in
+[ADR-0026](../adr/0026-anti-censorship-wiring.md) with an `#[ignore]`d e2e
+documenting the failure.
 
-The rendezvous module implements parse + sign + verify.
-The actual fetch path (DoH → innocuous-looking domain →
-HTTP GET → `BootstrapConfig`) is a follow-up sub-sprint
-that reuses [`crate::http::HttpTransport`](../../crates/lakko-transport/src/http.rs)
-with SPKI pinning.
+### ~~DoH-resolved bootstrap fetch~~ — **CLOSED, and this description was wrong about the mechanism**
 
-### Concurrent happy-eyeballs
+The rendezvous module implements parse + sign + verify. ~~The actual fetch path
+(DoH → innocuous-looking domain → HTTP GET → `BootstrapConfig`) is a follow-up
+sub-sprint that reuses [`crate::http::HttpTransport`](../../crates/lakko-transport/src/http.rs)
+with SPKI pinning.~~ **It shipped as `crates/lakko-transport/src/doh_fetch.rs`**
+(`DohFetcher::fetch_bootstrap` / `fetch_pinned_bytes`), and **not** via
+`HttpTransport` or SPKI pinning: T-8 above documents the shipped design and says
+explicitly that it uses `rustls-tls-webpki-roots` and is *intentionally
+independent* of SPKI pinning. So this paragraph contradicted T-8 in the same
+document. The pin it does apply is the **resolved IP**, which is the point.
 
-The scaffold selector is sequential (per-candidate
+### Concurrent happy-eyeballs — **STILL OPEN, unchanged**
+
+The selector is still sequential (per-candidate
 outer-`tokio::time::timeout`). True concurrent race
 (`tokio::select!` over spawned per-candidate tasks)
 needs the `Transport` trait to support cheap cloning
-(`Arc<dyn Transport>` wrapping or a `Clone` bound). The
-first G5-N sprint that wants sub-RTT first-byte does
+(`Arc<dyn Transport>` wrapping or a `Clone` bound), and the code carries the same
+blocker in a comment. The first sprint that wants sub-RTT first-byte does
 the refactor.
 
-### ECH (Encrypted Client Hello)
+### ECH (Encrypted Client Hello) — **CLOSED; the remaining item was already answered elsewhere in this doc**
 
-Parser-side closed by T-12 (see invariants section).
-Remaining work for full ECH coverage: wire the parsed
-[`EchConfigList`](../../crates/lakko-transport/src/ech.rs)
-into `rustls::client::ClientConfig::with_ech_config_list`
-on the HTTPS-based transports (REALITY, WebTransport,
-HttpTransport) once a working ECH-supporting test
-endpoint is stood up. Until then the outer SNI on those
-transports remains observable to the path even though
-the parser is ready.
+Parser-side closed by T-12 (see invariants section). ~~Remaining work for full ECH
+coverage: wire the parsed `EchConfigList` into
+`rustls::client::ClientConfig::with_ech_config_list` on the HTTPS-based transports
+(REALITY, WebTransport, HttpTransport)…~~ **The wire-up landed**
+([`crates/lakko-transport/src/ech/`](../../crates/lakko-transport/src/ech/) —
+`adapter.rs` + `wireup.rs::build_ech_mode_from_bytes`,
+[ADR-0012](../adr/0012-ech-hpke-adapter.md)), and T-12 above already documents it.
+Two corrections beyond the status: the path was written `src/ech.rs`, which is a
+directory (`src/ech/mod.rs`), so the link 404'd; and **REALITY was never a target** —
+T-12 records that REALITY is *intentionally* not wired for ECH, because both
+mechanisms claim the same outer-ClientHello SNI slot and REALITY already provides
+SNI privacy.
 
-### Censorship lab tests
+### ~~Censorship lab tests~~ — **BUILT; gated rather than absent**
 
-Tracked as G5-7. A real CI gate that exercises every
-PT against GFW / TSPU / IR DPI emulators is the audit
-acceptance for Phase 5; today the invariants above are
-unit-level + offline.
+Tracked as G5-7. ~~A real CI gate that exercises every PT against GFW / TSPU / IR
+DPI emulators is the audit acceptance for Phase 5; today the invariants above are
+unit-level + offline.~~ **The lab exists**:
+[`ci/censorship-lab/`](../../ci/censorship-lab/) (an SNI observer with JA3 / JA4
+fingerprinting, a QUIC-Initial decryptor, a string-match blocklist detector and a
+throttle model), the `censorship-lab` workflow, and seven `#[ignore]`-gated live
+tests in
+[`crates/lakko-transport/tests/sni_observer_e2e.rs`](../../crates/lakko-transport/tests/sni_observer_e2e.rs)
+covering all five production transports over both TCP and UDP. The accurate
+statement is that it runs on a **PR label and a nightly cron rather than on every
+PR**, not that the invariants are offline. The one capability residual is that the
+observer is drop-only, so its bandwidth throttle is **modelled** rather than applied
+to a live forwarded flow — that needs a proxy layer.
+
+### The ADR-0025 / ADR-0026 surfaces have no invariant here — **OPEN**
+
+`BootstrapDialer` (the verify-then-build-then-race dispatcher),
+`ByteStreamConnection`, `TunneledHttpClient` and `tunneled_websocket` all landed
+after this document's last revision and are described nowhere in it. Two of their
+properties look invariant-shaped and are currently pinned by nothing in the `T-`
+class: **a spec whose config fails to build is skipped and logged kind-only, never
+with the secret-bearing spec**, and **`TransportSpec` has no `Direct` variant, so
+the candidate set is exactly the operator's obfuscated transports with no silent
+plaintext fallback**. Recorded as an observation for the maintainer, not minted.
 
 ## Cross-links
 

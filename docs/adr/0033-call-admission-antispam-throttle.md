@@ -6,7 +6,16 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 # ADR-0033: Call-admission anti-spam throttle for guest-account link joins
 
 - **Status:** Accepted (Variant A — owner-suspension deferred behind a
-  hard-to-forge signal; end-call + throttle is the automatic response)
+  hard-to-forge signal; end-call + throttle is the automatic response).
+  **Implemented** — this ADR carried no implementation record until the
+  2026-09-02 documentation audit added one: `services/auth/src/throttle.rs`
+  with migration `0014_call_admission_throttle.sql`
+  (`call_admission_events` + `throttled_calls`), gating `POST /call/jwt`. Every
+  knob defaults safe (limit 0 = disabled), and `lakko-security` returned
+  APPROVE-WITH-NOTES with four low/info findings, all ADR-accepted. The
+  **owner auto-suspension remains deliberately unbuilt** for the
+  weaponisability reason below — that is a standing decision, not a backlog
+  item.
 - **Date:** 2026-07-15
 - **Context:** [ADR-0032](0032-multi-joiner-call-links.md) residual — guest accounts
   on public `/c/<slug>` call links open an account-creation-spam surface.

@@ -5,8 +5,36 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0016: Identity-supersession proof transport — the discovery identity bundle (Carrier B)
 
-- **Status:** Accepted — implement Carrier B (discovery identity bundle, pull); 2026-06-08
+- **Status:** Accepted — implement Carrier B (discovery identity bundle, pull);
+  2026-06-08. **Built end to end — and then made DORMANT by
+  [ADR-0017](./0017-phrase-seeded-identity.md)** (see the note below).
 - **Date:** 2026-06-08
+
+> **AMENDED 2026-09-02 (documentation audit). This ADR reads as live design
+> work; the machinery it specifies is built but, in the ordinary case, never
+> runs.**
+>
+> **Why.** [ADR-0017](./0017-phrase-seeded-identity.md) reseeded the
+> `AccountIdentity` from the BIP39 recovery-phrase seed instead of the OPAQUE
+> password export key. A routine recover or password change therefore
+> **reproduces the same account key**, so there is no rotation, so there is no
+> proof to emit — `recover` compares old and new pubkeys and skips the emit when
+> they are equal. ADR-0017 states this in its own text ("**Renders ADR-0016
+> dormant** for the recover path"); this ADR never said so.
+>
+> **Dormant is not deleted, and the distinction matters.** The carrier, the
+> emit, and the fail-closed verify gate are all still built and still run on
+> every `identityFetch`. What changed is the *frequency* of a rotation, not the
+> handling of one — and there is exactly one path that still produces a genuine
+> account-key change: ADR-0017's `mintFreshIdentity`, the lost-everything
+> fallback. That path deliberately publishes **without** a proof (none is
+> mintable once the old seed is gone), so it lands on this ADR's fail-closed
+> branch: peers see a changed pin with no proof and **refuse**, and the contact
+> re-verifies out of band. The verify gate below is therefore doing real work
+> today; it is the *emit* side that is idle.
+>
+> **The "Hidden prerequisites" section below is fully resolved** — see the note
+> there. So is the deferred `verify_supersession_chain` exposure.
 - **Context:** G-4 (`docs/security/known-gaps.md`) and security invariant #6
   ("identity rotation only via a KT-log supersession proof; old keys do not
   come back"). The supersession proof primitive, its strict verifier, the
@@ -110,14 +138,18 @@ lands later with `verify_supersession_chain` + the KT log.
 
 ## Hidden prerequisites (verified in the tree)
 
-- **Mobile UniFFI bindings are stale.** `signSupersessionProof` /
-  `verifySupersession` are absent from the iOS and Android generated bindings →
-  mobile cannot call the FFI until `just regen-bindings` (+ iOS `just build-ios`
-  xcframework rebuild). This is a prerequisite sprint, not a line in emit.
-- **Mobile never re-publishes the bundle on recover.** `uploadIdentityBundle` is
-  defined but has zero production callers on iOS (`DiscoveryClient.swift:352`) and
-  Android (`DiscoveryClient.kt:1032`); only web calls it. The mobile emit sprint
-  must **add** the call, not augment one.
+> **Both resolved (verified 2026-09-02).** This section was a to-do list, and
+> the work was done — the section was simply never struck through.
+
+- ~~**Mobile UniFFI bindings are stale.**~~ **Resolved** —
+  `signSupersessionProof` / `verifySupersession` are in both generated binding
+  sets and are called from production code (`ContactsClient.swift`,
+  `ContactsClient.kt`).
+- ~~**Mobile never re-publishes the bundle on recover.**~~ **Resolved** —
+  `uploadIdentityBundle` now has two production callers on each native platform,
+  both in `AuthRepository`. (The line numbers cited here are also stale by
+  several hundred lines in both files, which is a good reminder not to pin line
+  numbers in an ADR.)
 
 ## Alternatives considered
 
@@ -201,3 +233,10 @@ fail-open in the verify path. Disposition of the findings:
   `verify_supersession_chain` over FFI when the KT service lands (it can reuse the
   same bundle channel, upgraded from "trust the old-key signature" to "trust the
   operator-signed Merkle inclusion").
+  **Done** (2026-09-02): the KT service landed and
+  `verify_supersession_chain` is exposed on **both** FFI surfaces
+  (`crates/lakko-ffi-uniffi`, `crates/lakko-ffi-wasm`), fuzzed
+  (`verify_supersession_chain`), and the clients persist the chain-version floor
+  in the pin store — delivered by
+  [ADR-0019](./0019-client-authorised-log-leaf.md) Sprint 1. The upgrade this
+  bullet anticipated is exactly what happened.
