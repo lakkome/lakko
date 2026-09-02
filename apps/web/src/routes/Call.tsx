@@ -62,6 +62,7 @@ import {
   type QualityTier,
 } from "../state/call-state";
 import { CallSoundController } from "../calls/CallSoundController";
+import { showsSafetyNumber } from "../calls/safety-pill";
 import { paths } from "./paths";
 
 // ============================================================================
@@ -141,7 +142,7 @@ const E2eePill: Component = () => {
   const e = (): ReturnType<typeof callState.e2ee> => callState.e2ee();
   return (
     <Show
-      when={e().active && e().shortFingerprint !== null}
+      when={showsSafetyNumber(e())}
       fallback={
         <div
           role="status"
@@ -2025,13 +2026,12 @@ const Call: Component<{
             "z-index": "5",
           }}
         >
-          {/* G3-3-web-session-bind — the text E2EE pill is hidden in
-              the embedded (live-call) view: the 1×1 web path is P2P
-              DTLS-SRTP, not SFrame, so a "secured" text chip would
-              mislead. It stays on the standalone design route. */}
-          <Show when={props.embedded !== true} fallback={<span />}>
-            <E2eePill />
-          </Show>
+          {/* The pill gates on whether there IS a safety number, not on
+              which surface is asking — see calls/safety-pill.ts. It used to
+              also require `props.embedded !== true`, which hid it on every
+              live call, group calls included, because `Chat.tsx` always
+              mounts this embedded. */}
+          <E2eePill />
           <QualityIndicator />
         </header>
 

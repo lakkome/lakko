@@ -752,8 +752,9 @@ function ChatView(props: {
         callActions.setPhase({ kind: "connecting" });
         callActions.setParticipants([localParticipant()]);
         // 1×1 web media is P2P DTLS-SRTP, not SFrame — keep the
-        // E2EE indicator inactive (and the text pill is hidden in
-        // the embedded view regardless).
+        // E2EE indicator inactive. This is what hides the pill on this
+        // path: it gates on there BEING a safety number, not on which
+        // surface renders it (see calls/safety-pill.ts).
         callActions.setE2ee({ active: false, shortFingerprint: null });
         break;
       case "connected":
