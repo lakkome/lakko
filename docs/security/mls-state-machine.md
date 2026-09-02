@@ -127,6 +127,35 @@ label as a **parameter**, so a new label can be coined entirely outside
 `crates/lakko-mls` — by a client, as `lakko/device-recovery/v1` was — and nothing in
 the crate can notice. There is no gate here, only this list.
 
+## MLS-state-machine rules that live in the `C-` class
+
+Several rules about this state machine are numbered `C-`, not `I-`, because that is
+where the numbering happened to be when they were minted: **C-63** (a commit must never
+leave the group with an owner who is not in it), **C-64** (the committer election and the
+staged-sweep lifecycle), **C-65** (one role-table change in flight), **C-66** (a group
+must never lose the ability to change its own membership), and the receiver half of
+**C-67** (the cursor may lag the durable MLS state, never lead it). All five are
+[ADR-0045](../adr/0045-remote-commit-epoch-fork.md) rules about proposal handling, commit
+composition and the receive path — this document's subject, not the call layer's.
+
+**They are deliberately not renumbered.** Those numbers are already cited in commit
+messages, code comments and each other's cross-references, and git history is immutable —
+a rename would leave dangling references in the log for as long as the repository exists,
+which is a worse defect than a filing error.
+
+**What the misfiling actually cost, and what fixes it.** This section carries an
+obligation the `C-` section does not: a change requires an ADR amendment, a test, and
+**re-running this audit pack**. A rule filed under `C-` silently escapes that — which is
+exactly how the two exporter labels above went missing. So the obligation is extended
+here rather than the rules moved: **the five entries named above are governed by this
+document's re-check rule, wherever they are numbered.** A change to any of them requires
+the same ADR amendment, test and re-read as a change to `I-1`..`I-8`.
+
+The rule of thumb for the next one, since the numbering will drift again: **file by what
+the rule constrains, not by which section was last edited.** If breaking it would produce
+a wrong group state rather than a wrong call, it belongs to this document's obligation
+even if its number says otherwise.
+
 ## State-flow diagrams
 
 ### Conversation group lifecycle

@@ -5,7 +5,7 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0025: Bootstrap transport dialer
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-19
 - **Context:** Phase 5 — anti-censorship operational wiring (Phase-3 block B entry)
 

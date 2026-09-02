@@ -5,7 +5,7 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0045: Closing the remote-commit epoch fork — proposal-based commits with a designated committer (G-38 residual 1)
 
-- **Status:** **Proposed.** **The arc is built end to end** — the core (sprints
+- **Status:** **Accepted.** **The arc is built end to end** — the core (sprints
   S0-S3 plus four unplanned ones), both FFI surfaces, and **all three clients**
   (S4a/S4b web, S5 iOS, S6 Android); see the date line and the
   [blast-radius table](#blast-radius-per-sprint). Decision 2's **candidate

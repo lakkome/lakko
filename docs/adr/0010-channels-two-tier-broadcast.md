@@ -5,7 +5,7 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0010: Channels — two-tier PublisherGroup + sender-key broadcast
 
-- **Status:** Accepted ~~(design only — implementation lands in Phase 4)~~ —
+- **Status:** Accepted —
   **built** (Sprints A–D, 2026-07). See the amendment below.
 - **Date:** 2026-05-21
 - **Context:** Phase 4 (channels) — extends ADR-0001 (§ "Channels >50k")
