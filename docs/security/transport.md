@@ -1322,6 +1322,54 @@ the connection) only when the caller drops the connection. No
 plaintext-fallback path is involved — the fix is purely about
 keeping the established encrypted tunnel alive.
 
+### T-16: There is no unprotected transport to fall back to, and a spec that fails to build is skipped without logging its secrets
+
+The dialer that picks a connection for a censored network carries **two properties that
+behave like guarantees and were, until now, written down nowhere.** T-2 used to be the
+entry reaching for the first of them, and it cited a test that has never existed — so the
+class has in fact been unpinned since the day the scaffold it described was replaced.
+
+**(1) The list of connection types contains no unprotected option.** `TransportSpec`
+enumerates REALITY, Shadowsocks-2022, WebTransport and MASQUE, and **has no `Direct`
+variant**. So a client on a censored network cannot silently degrade to a plain
+connection — not because a check refuses it, but because there is nothing to degrade
+*to*. `BootstrapDialer::build_candidates` maps each spec to its transport, and when the
+set is empty the answer is a fail-closed `SelectorError::NoCandidates` rather than an
+unprotected attempt.
+
+**This is the entire "no silent downgrade" guarantee for the transport layer** (security
+invariant #4 as it applies here), and it currently rests on an **absence**. Nothing
+announces that the absence is load-bearing. Someone adding a `Direct` variant — to make
+local development easier, to support an uncensored deployment, to skip obfuscation on a
+trusted network — would be doing something reasonable-looking that removes the guarantee,
+and no test, type or comment would object. **That is what this entry exists to make
+noticeable.** Adding such a variant is a decision that needs an ADR and a re-reading of
+this rule, not a convenience.
+
+**(2) A spec whose configuration will not parse is skipped, and only its *kind* is
+logged.** A `TransportSpec` carries secrets — REALITY's `tag_secret`, Shadowsocks's PSK,
+MASQUE's bearer token — so a build failure logs the transport kind and nothing else. The
+temptation at that point is exactly wrong: a developer debugging a misconfigured
+deployment wants the spec in the log, and putting it there writes a long-lived secret
+into a log file that outlives the debugging session and is usually less protected than
+the config it came from. Skipping rather than failing the whole dial is deliberate too —
+one bad spec must not remove the transports that would have worked — and it composes with
+(1), because skipping everything still lands on `NoCandidates` rather than on a plaintext
+attempt.
+
+**What this does NOT claim.** It says nothing about whether an obfuscated transport
+actually resists a given censor — that is T-10 through T-15 and the censorship lab. It
+does not make the dial concurrent (the happy-eyeballs race is still sequential, an open
+soft spot below). And it is **not enforced by a test**, because neither property is a
+behaviour a test can easily reach: the first is the absence of an enum variant and the
+second is the absence of a field in a log line. A reviewer noticing a `Direct` variant in
+a diff is the enforcement, which is why the rule is written down rather than asserted.
+
+Invariants **#2** (unchanged — the dialer moves ciphertext either way), **#4** (this *is*
+the transport layer's fail-closed rule: no candidate means no connection, never an
+unprotected one).
+
+
 ## Known soft spots
 
 > **Reviewed 2026-09-02 and four of the five had closed.** The heading said "out of
@@ -1407,11 +1455,13 @@ to a live forwarded flow — that needs a proxy layer.
 `BootstrapDialer` (the verify-then-build-then-race dispatcher),
 `ByteStreamConnection`, `TunneledHttpClient` and `tunneled_websocket` all landed
 after this document's last revision and are described nowhere in it. Two of their
-properties look invariant-shaped and are currently pinned by nothing in the `T-`
-class: **a spec whose config fails to build is skipped and logged kind-only, never
-with the secret-bearing spec**, and **`TransportSpec` has no `Direct` variant, so
-the candidate set is exactly the operator's obfuscated transports with no silent
-plaintext fallback**. Recorded as an observation for the maintainer, not minted.
+properties looked invariant-shaped and were pinned by nothing in the `T-` class: **a
+spec whose config fails to build is skipped and logged kind-only, never with the
+secret-bearing spec**, and **`TransportSpec` has no `Direct` variant, so the
+candidate set is exactly the operator's obfuscated transports with no silent
+plaintext fallback**. Both were minted as **T-16** above; what remains a soft spot is
+that neither is enforced by a test, because each is an *absence* — of an enum variant
+and of a log field.
 
 ## Cross-links
 
@@ -1426,50 +1476,3 @@ plaintext fallback**. Recorded as an observation for the maintainer, not minted.
 - [`threat-model.md`](./threat-model.md) — the censor
   + active-probe + compromised-rendezvous adversary
   models this doc's invariants resist
-
-### T-16: There is no unprotected transport to fall back to, and a spec that fails to build is skipped without logging its secrets
-
-The dialer that picks a connection for a censored network carries **two properties that
-behave like guarantees and were, until now, written down nowhere.** T-2 used to be the
-entry reaching for the first of them, and it cited a test that has never existed — so the
-class has in fact been unpinned since the day the scaffold it described was replaced.
-
-**(1) The list of connection types contains no unprotected option.** `TransportSpec`
-enumerates REALITY, Shadowsocks-2022, WebTransport and MASQUE, and **has no `Direct`
-variant**. So a client on a censored network cannot silently degrade to a plain
-connection — not because a check refuses it, but because there is nothing to degrade
-*to*. `BootstrapDialer::build_candidates` maps each spec to its transport, and when the
-set is empty the answer is a fail-closed `SelectorError::NoCandidates` rather than an
-unprotected attempt.
-
-**This is the entire "no silent downgrade" guarantee for the transport layer** (security
-invariant #4 as it applies here), and it currently rests on an **absence**. Nothing
-announces that the absence is load-bearing. Someone adding a `Direct` variant — to make
-local development easier, to support an uncensored deployment, to skip obfuscation on a
-trusted network — would be doing something reasonable-looking that removes the guarantee,
-and no test, type or comment would object. **That is what this entry exists to make
-noticeable.** Adding such a variant is a decision that needs an ADR and a re-reading of
-this rule, not a convenience.
-
-**(2) A spec whose configuration will not parse is skipped, and only its *kind* is
-logged.** A `TransportSpec` carries secrets — REALITY's `tag_secret`, Shadowsocks's PSK,
-MASQUE's bearer token — so a build failure logs the transport kind and nothing else. The
-temptation at that point is exactly wrong: a developer debugging a misconfigured
-deployment wants the spec in the log, and putting it there writes a long-lived secret
-into a log file that outlives the debugging session and is usually less protected than
-the config it came from. Skipping rather than failing the whole dial is deliberate too —
-one bad spec must not remove the transports that would have worked — and it composes with
-(1), because skipping everything still lands on `NoCandidates` rather than on a plaintext
-attempt.
-
-**What this does NOT claim.** It says nothing about whether an obfuscated transport
-actually resists a given censor — that is T-10 through T-15 and the censorship lab. It
-does not make the dial concurrent (the happy-eyeballs race is still sequential, an open
-soft spot below). And it is **not enforced by a test**, because neither property is a
-behaviour a test can easily reach: the first is the absence of an enum variant and the
-second is the absence of a field in a log line. A reviewer noticing a `Direct` variant in
-a diff is the enforcement, which is why the rule is written down rather than asserted.
-
-Invariants **#2** (unchanged — the dialer moves ciphertext either way), **#4** (this *is*
-the transport layer's fail-closed rule: no candidate means no connection, never an
-unprotected one).

@@ -4150,6 +4150,13 @@ unconditionally and forever stops being read. ADR-0046 has the full argument.
 **The gate, stated so it cannot be quietly routed around: no build reaches users while
 this is open** — no store submission, no GA tag. That is where "after Phase 2" bites.
 
+**Scoped for an engagement in
+[`external-review-scope.md`](./external-review-scope.md)** (added 2026-09-02) — the
+boundaries, the measured sizes, a reading order through ten thousand lines of security
+documentation, what has already been verified and where that verification is thin, the
+six questions ranked by where we think the risk is, and the five things a reviewer must
+not assume. This entry states the obligation; that document states the engagement.
+
 **The surface to be reviewed.** Larger than any one ADR, because the interactions are the
 point — a per-change review would see each of these as a slice:
 

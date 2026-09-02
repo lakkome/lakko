@@ -14,7 +14,7 @@ section that describes it.
 |---|---|---|---|
 | **I-** | 8   | I-1..I-8   | [`mls-state-machine.md`](./mls-state-machine.md) |
 | **C-** | 69  | C-1..C-69  | [`calls.md`](./calls.md) |
-| **T-** | 15  | T-1..T-15  | [`transport.md`](./transport.md) |
+| **T-** | 16  | T-1..T-16  | [`transport.md`](./transport.md) |
 | **G-** | 39  | G-1..G-39 | [`known-gaps.md`](./known-gaps.md) — open / deferred |
 | Total invariants  | 93  | (I + C + T) | live properties |
 | Total open gaps   | 14  | (G)         | tracked + scoped |
@@ -110,7 +110,7 @@ media-key pipeline (C-1..C-14), call-admission JWT
 (C-15..C-23), link-based invite + composer + dispatcher
 (C-24..C-36), SFrame + RFC 9605 + SFU signaling
 (C-37..C-39), channel-broadcast backend opacity
-(C-40..C-44), then per-arc additions C-45..C-65
+(C-40..C-44), then per-arc additions C-45..C-69
 (SFrame native shim, TURN, PublisherGroup persistence,
 host-side bridge validation, rotation policy, the
 SFU multi-party client SFrame coverage, the KT-log
@@ -299,7 +299,7 @@ one-role-change-in-flight rule).
 | C-69 | **A discipline attached to a direct-commit call site must be re-attached to the sweep** ([ADR-0045](../adr/0045-remote-commit-epoch-fork.md)). Stated as an observation during the client sprints, promoted when S7 produced the **second** instance — and the second one fails **silently**, which is what makes it worth a number. **Why the pattern exists:** ADR-0022 made a membership change one atomic call that eager-merged before returning, so anything that had to happen *because* membership changed could be written on the next line. ADR-0045 splits it into propose / sweep / adjudicate and the sweep may run on a **different device**, so every such discipline is now attached to the wrong end — it fires when the request is *made*, not when it *lands* — and no compiler can see it, because the call site still exists and still returns. **The tell: if the discipline's own correctness argument mentions an epoch or says "after the commit", it is a candidate.** Both known instances do. **Instance 1, C-61's push-routing rotation:** ADR-0043 requires it to follow the `Remove` commit so the new secret is sealed at an epoch the evicted member cannot open; under ADR-0045 a removal usually becomes a **proposal**, which advances no epoch, so rotating there would seal it at an epoch the target is **still in**, silently revoking the forward-secrecy half without touching a line of rotation code — and under ADR-0044 it would stamp the secret at the pre-removal epoch, where it **ties** with the stale one and can lose the byte tiebreak. Moved to the sweep via the membership-shrink diff. **Instance 2, S7's Welcome rendezvous:** ADR-0027's approve produced a Commit and a Welcome together, so the approver wrapped a `WelcomeRendezvous` on the spot; under S7 the approve produces only a proposal and the Welcome comes from whichever device sweeps, which is not necessarily the approver and **cannot tell which adds came from a `/g/` link** (origin-blindness being what makes S7 sound), so it posts one for **every** added key alongside the mailbox fan-out. Left unmoved the failure is silent in both directions: the admin sees its proposal swept, every member sees the joiner in the roster, and the joiner polls a journal that will never carry its envelope — **approved into a group that already holds them, and unable to enter it**. **The rule, checkable rather than admirable:** when an operation moves from a direct commit to a proposal, re-examine every side effect against three questions — does it need the post-commit **epoch** (then it belongs at the sweep); does it need to happen **exactly once per landed change** (then it belongs at the sweep, since a proposal may be excluded and re-proposed); and does it need to know something about the request **the sweep cannot see** (then either the sweep does it origin-blind for everything, as S7 does, or the information must be carried — and carrying it is usually a leak, which is why S7 does not). **Does NOT:** enumerate the disciplines (a list goes stale the next time one is added; the tell is what lets a reviewer find them); apply to a group with no role table, which keeps direct commits and where every seam is still correct where it sits; or get enforced by anything — no test can assert that a discipline nobody has written yet sits at the right end. It is a **review** rule, indexed so that it is read. Invariants **#2** / **#3** (no `lakko-mls` change — client seam placement) / **#4** / **#5** (S7's fan-out puts a raw signature key on the journal where an ordinary add puts a hash on a mailbox; recorded in ADR-0045 as a property of the fan-out rather than of this rule). |
 
 
-## Transport-layer invariants (T-1..T-15)
+## Transport-layer invariants (T-1..T-16)
 
 Source: [`transport.md`](./transport.md). Anti-censorship
 + rendezvous + Shadowsocks-2022 surfaces (Phase 5).

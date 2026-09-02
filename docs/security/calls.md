@@ -4107,9 +4107,9 @@ fully in effect.
 | Per-participant nonce salt | ❌ | ✅ | Same derivation chain |
 | SFrame header (sender leaf + counter + timestamp) | ✅ | ✅ | Forwarding metadata only |
 | Encrypted frame body | ✅ (opaque) | ✅ (decoded) | AEAD-sealed |
-| JWT `(account_id, call_id, role, expires_at)` | ✅ (validate via cached JWKS) | ✅ (mint via `POST /call/jwt`) | Per ADR-0008 + C-15..C-23 |
+| JWT `(account_id, call_id, role, expires_at)` | ✅ (validate via cached JWKS) | ✅ (mint via `POST /call/jwt`) | Claims shape per ADR-0008, which ADR-0011 superseded for the SFU choice; the shape itself survives in `crates/lakko-call-jwt`. C-15..C-23 |
 | Ed25519 signing seed for call JWTs | ❌ | ❌ (stays on `services/auth` host) | Persisted in `call_jwt_signing_key.seed`. Public half published at `/.well-known/jwks.json` |
-| Plaintext SDP / ICE | ❌ | ✅ | 1×1 rides MLS; group rides LiveKit-signaling channel which never sees keys |
+| Plaintext SDP / ICE | ❌ | ✅ | 1x1 rides MLS; group rides the Rust SFU's own signaling channel (ADR-0011), which never sees keys |
 
 ## Known soft spots — out of scope, tracked
 
@@ -4118,19 +4118,31 @@ See [`known-gaps.md`](./known-gaps.md) — call-side gaps:
 - **G-17** — frame-counter exhaustion path is documented but
   not exercised by a dedicated test (running 2^32 seal
   operations is infeasible in CI).
-- **G-18** — overlap-window 1-second timer lives in the
-  platform layer (iOS / Android / Web), not in the Rust
-  core. Each platform's timer correctness is reviewed
-  alongside the WebRTC pod integration (3a9 / 3a10
-  followups).
-- **G-19** — the SFU JWT validation surface (3b1c) is not
-  yet implemented; this audit covers the client-side
-  contract only. The server-side validation lands with the
-  LiveKit fork.
+- **G-18** — **CLOSED (2026-07,
+  [ADR-0029](../adr/0029-mid-call-key-rotation.md)).** The overlap keyring moved
+  into the Rust core as `lakko_calls::CallKeyRing` and is driven from all three
+  clients on a mid-call MLS epoch advance. Only the live rekey over a **deployed**
+  SFU is deferred, on the same runtime gate as G-26.
+- **G-19** — **CLOSED.** The LiveKit fork was retired by
+  [ADR-0011](../adr/0011-rust-sfu.md), so there is no Go verifier and never will be;
+  the load-bearing path is the Rust SFU's own admission gate, which verifies the JWT
+  through `lakko_call_jwt::verify_with_jwks` **before** the WebSocket upgrade and
+  takes the peer's `call_id` and `account_id` from the verified claims rather than
+  from the client (`services/sfu/src/signaling.rs`).
 - **G-20** — call-recording is out of scope (deferred per
   ROADMAP 3c8). If it ever lands, the recording client
   joins as a regular participant with its own MLS leaf, so
   no break to C-1..C-10.
+
+## MLS group-membership rules (C-66..C-69)
+
+**These four are in scope, not soft spots.** They sit here because the `C-` class is
+the catch-all, and until 2026-09-02 they were appended directly below the
+"out of scope" heading above with no heading of their own — which read as though the
+core of what [G-39](./known-gaps.md) asks an external reviewer to examine had been
+waived. They are group-membership rules from
+[ADR-0045](../adr/0045-remote-commit-epoch-fork.md), minted by the `lakko-security`
+review of that arc, and they are the primary review surface.
 
 ### C-66: A group must never lose the ability to change its own membership
 
