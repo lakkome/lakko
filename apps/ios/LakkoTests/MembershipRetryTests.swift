@@ -56,8 +56,11 @@ final class MembershipRetryTests: XCTestCase {
     private var transferToBob: RetryableRequest {
         .transferOwnership(subjectKeyB64: bob, outgoing: .admin)
     }
+    /// Carol asked to join via a `/g/` link and an admin's approve was refused.
+    private var approveCarol: RetryableRequest { .approveJoin(subjectKeyB64: carol) }
 
-    /// A group of Alice (owner, leaf 0) and Bob (leaf 1), nothing pending.
+    /// A group of Alice (owner, leaf 0) and Bob (leaf 1), nothing pending, with
+    /// Carol's join request retained in the quarantine.
     private func snapshot(
         roster: [RetryRosterMember]? = [
             RetryRosterMember(leafIndex: 0, signatureKeyB64: "QUxJQ0U="),
@@ -66,14 +69,16 @@ final class MembershipRetryTests: XCTestCase {
         pendingKeys: [String] = [],
         pendingCount: Int = 0,
         roleTable: RetryRoleTable? = RetryRoleTable(ownerKeyB64: "QUxJQ0U=", adminKeysB64: []),
-        membershipEnded: Bool = false
+        membershipEnded: Bool = false,
+        retainedJoinKeys: [String]? = ["Q0FST0w="]
     ) -> RetryGroupSnapshot {
         RetryGroupSnapshot(
             roster: roster,
             pendingKeys: pendingKeys,
             pendingCount: pendingCount,
             roleTable: roleTable,
-            membershipEnded: membershipEnded
+            membershipEnded: membershipEnded,
+            retainedJoinKeys: retainedJoinKeys
         )
     }
 
@@ -311,6 +316,235 @@ final class MembershipRetryTests: XCTestCase {
             retryVerdict(armed(makeBobAdmin), snapshot(pendingCount: 0, roleTable: nil)),
             .drop(.noRoleTable)
         )
+    }
+
+    // MARK: - 3b. Approving an external join — the arm the core made possible
+
+    func testArmsOnAQueueFullApproveRefusal() {
+        let out = armedApproveJoinRetry(
+            for: FfiError.MembershipPendingSetFull(message: "core prose"),
+            subjectKeyB64: carol,
+            pendingCountAtRefusal: 64,
+            retained: true,
+            retryMaySucceed: real
+        )
+        XCTAssertEqual(out?.request, approveCarol)
+        XCTAssertEqual(out?.pendingCountAtRefusal, 64)
+    }
+
+    /// Every reason `approve_external_join` can produce besides the queue-full
+    /// one, asserted against the CORE's own answer rather than a list written
+    /// here — so a core that reclassified one fails this test instead of
+    /// silently changing what the client does.
+    func testNeverArmsOnAnApproveRefusalTheCoreDoesNotCallRetryable() {
+        for reason: FfiRefusalReason in [
+            .noRoleTable, .noSuchJoinRequest, .joinerAlreadyAMember,
+            .addNotOwnerOrAdmin, .notAMember,
+        ] {
+            XCTAssertFalse(real(reason), "\(reason)")
+            XCTAssertNil(
+                armedApproveJoinRetry(
+                    for: FfiError.Group(message: "irrelevant"),
+                    subjectKeyB64: carol,
+                    pendingCountAtRefusal: 64,
+                    retained: true,
+                    reason: reason,
+                    retryMaySucceed: real
+                ),
+                "\(reason) must never arm"
+            )
+        }
+    }
+
+    /// The state before the core fix: `approve_external_join` flattened the
+    /// typed error into prose, so this is what EVERY approve refusal looked
+    /// like. An absent reason arms nothing, then and now.
+    func testNeverArmsOnAnApproveThatFailedWithNoReasonAtAll() {
+        XCTAssertNil(
+            armedApproveJoinRetry(
+                for: FfiError.Group(message: "external join approve refused: proposal refused"),
+                subjectKeyB64: carol,
+                pendingCountAtRefusal: 64,
+                retained: true,
+                retryMaySucceed: real
+            )
+        )
+    }
+
+    func testFindsTheApproveReasonThroughTheWrapperTheRepositoryThrows() {
+        let inner = FfiError.MembershipPendingSetFull(message: "core prose")
+        XCTAssertNotNil(
+            armedApproveJoinRetry(
+                for: ChatError.wrapped("approveExternalJoin failed", underlying: inner),
+                subjectKeyB64: carol,
+                pendingCountAtRefusal: 64,
+                retained: true,
+                retryMaySucceed: real
+            )
+        )
+    }
+
+    func testTheApproveArmFollowsThePortEvenWhenThePortIsWrong() {
+        let invertedTrue: (FfiRefusalReason) -> Bool = { $0 == .noSuchJoinRequest }
+        XCTAssertNotNil(
+            armedApproveJoinRetry(
+                for: FfiError.MembershipNoSuchJoinRequest(message: "x"),
+                subjectKeyB64: carol,
+                pendingCountAtRefusal: 64,
+                retained: true,
+                retryMaySucceed: invertedTrue
+            ),
+            "a port that says a missing-request refusal is retryable must be believed"
+        )
+        let invertedFalse: (FfiRefusalReason) -> Bool = { _ in false }
+        XCTAssertNil(
+            armedApproveJoinRetry(
+                for: FfiError.MembershipPendingSetFull(message: "x"),
+                subjectKeyB64: carol,
+                pendingCountAtRefusal: 64,
+                retained: true,
+                retryMaySucceed: invertedFalse
+            ),
+            "a port that says pendingSetFull is NOT retryable must be believed"
+        )
+    }
+
+    /// The rule this asserts is ``externalJoinAffordance(retained:)``'s, not
+    /// one restated here: an unretained request has nothing for
+    /// `approveExternalJoin` to look up, so a retry for it could only ever be
+    /// refused. Written against the affordance rather than the literal `false`
+    /// so a future change to what "actionable" means carries the retry with it.
+    func testArmsExactlyWhenTheAffordanceSaysTheRequestIsActionable() {
+        for retained in [true, false] {
+            let actionable = externalJoinAffordance(retained: retained) == .actionable
+            let out = armedApproveJoinRetry(
+                for: FfiError.MembershipPendingSetFull(message: "x"),
+                subjectKeyB64: carol,
+                pendingCountAtRefusal: 64,
+                retained: retained,
+                retryMaySucceed: real
+            )
+            XCTAssertEqual(out != nil, actionable, "retained=\(retained)")
+        }
+    }
+
+    func testKeepsTheApproveSlotApartFromAnAddOfTheSamePerson() {
+        XCTAssertNotEqual(approveCarol.key, addCarol.key)
+        XCTAssertTrue(approveCarol.key.contains(carol))
+        store.arm(scope: scope, armed(approveCarol))
+        store.arm(scope: scope, armed(addCarol))
+        XCTAssertEqual(store.armed(scope: scope).count, 2)
+        // A manual approve tap disarms the approve record and leaves the add.
+        XCTAssertNotNil(store.claim(scope: scope, key: approveCarol.key))
+        XCTAssertNil(store.claim(scope: scope, key: approveCarol.key))
+        XCTAssertEqual(store.armed(scope: scope).count, 1)
+    }
+
+    func testTheApproveFiresOnceTheQueueDrainedAndNotBefore() {
+        XCTAssertEqual(retryVerdict(armed(approveCarol), snapshot(pendingCount: 64)), .wait)
+        XCTAssertEqual(retryVerdict(armed(approveCarol), snapshot(pendingCount: 63)), .fire)
+    }
+
+    func testDropsAnApproveOnceTheJoinerIsAMember() {
+        let view = snapshot(
+            roster: [
+                RetryRosterMember(leafIndex: 0, signatureKeyB64: alice),
+                RetryRosterMember(leafIndex: 1, signatureKeyB64: bob),
+                RetryRosterMember(leafIndex: 2, signatureKeyB64: carol),
+            ],
+            pendingCount: 0,
+            // The core reaps a joined request out of the quarantine, so this is
+            // empty in reality; supplied non-empty here so the test can only
+            // pass by reading the ROSTER.
+            retainedJoinKeys: [carol]
+        )
+        XCTAssertEqual(retryVerdict(armed(approveCarol), view), .drop(.alreadyApplied))
+    }
+
+    /// An approved external join IS an ordinary admin-authored `Add` keyed on
+    /// the joiner's signature key, so it lands in the pending set under exactly
+    /// the key an add of the same person would.
+    func testDropsAnApproveOnceAnAddForTheJoinerIsAlreadyWaiting() {
+        XCTAssertEqual(
+            retryVerdict(
+                armed(approveCarol),
+                snapshot(pendingKeys: ["add:\(carol)"], pendingCount: 1)
+            ),
+            .drop(.alreadyWaiting)
+        )
+    }
+
+    /// Nothing else in the group changed: Carol is not a member, no Add is
+    /// pending, the queue drained. The core simply no longer holds the request
+    /// — anything that reloads the group empties the in-memory quarantine while
+    /// this record survives — and re-issuing would be refused
+    /// `noSuchJoinRequest`.
+    func testDropsAnApproveOnceTheRequestHasLeftTheRetainedQuarantine() {
+        XCTAssertEqual(
+            retryVerdict(armed(approveCarol), snapshot(pendingCount: 0, retainedJoinKeys: [])),
+            .drop(.joinRequestGone)
+        )
+        // Somebody ELSE's retained request is not ours.
+        XCTAssertEqual(
+            retryVerdict(armed(approveCarol), snapshot(pendingCount: 0, retainedJoinKeys: [bob])),
+            .drop(.joinRequestGone)
+        )
+    }
+
+    func testClaimsNothingOnATornReadOfTheRetainedSet() {
+        XCTAssertEqual(
+            retryVerdict(armed(approveCarol), snapshot(pendingCount: 0, retainedJoinKeys: nil)),
+            .wait
+        )
+    }
+
+    /// A torn or empty quarantine says nothing about an add, a removal or a
+    /// role change, so it must not stop one.
+    func testDoesNotReadTheRetainedSetForAnyOtherKindOfRequest() {
+        for request in [addCarol, removeBob, makeBobAdmin] {
+            XCTAssertEqual(
+                retryVerdict(armed(request), snapshot(pendingCount: 0, retainedJoinKeys: nil)),
+                .fire,
+                "\(request)"
+            )
+            XCTAssertEqual(
+                retryVerdict(armed(request), snapshot(pendingCount: 0, retainedJoinKeys: [])),
+                .fire,
+                "\(request)"
+            )
+        }
+    }
+
+    func testDropsAnApproveInAGroupThatHasLostItsRoleTable() {
+        XCTAssertEqual(
+            retryVerdict(armed(approveCarol), snapshot(pendingCount: 0, roleTable: nil)),
+            .drop(.noRoleTable)
+        )
+    }
+
+    func testDropsAnApproveOnceOurOwnMembershipHasEnded() {
+        XCTAssertEqual(
+            retryVerdict(armed(approveCarol), snapshot(pendingCount: 0, membershipEnded: true)),
+            .drop(.membershipEnded)
+        )
+    }
+
+    /// REAL threads, like the generic probe: the approve record goes through
+    /// the same lock, and a serial queue would mask a broken one.
+    func testExactlyOneThreadWinsTheApproveRecordAgainstAConcurrentManualTap() {
+        for _ in 0..<200 {
+            store.arm(scope: scope, armed(approveCarol))
+            let winners = NSMutableArray()
+            let barrier = NSLock()
+            DispatchQueue.concurrentPerform(iterations: 8) { _ in
+                if let got = self.store.claim(scope: self.scope, key: self.approveCarol.key) {
+                    barrier.lock()
+                    winners.add(got.request.key)
+                    barrier.unlock()
+                }
+            }
+            XCTAssertEqual(winners.count, 1, "exactly one caller may own the record")
+        }
     }
 
     // MARK: - 4. Exactly-once

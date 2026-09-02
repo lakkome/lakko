@@ -115,16 +115,68 @@ import uniffi.lakko_ffi_uniffi.OutgoingOwner
  * already settles the same question for the superseded case: *"There is no
  * attempt cap."*
  *
- * ## What is deliberately NOT retried, and it is a CORE finding
+ * ## Approving an external join, and why it took a core change to get here
  *
- * An **approved external join** cannot participate, because the core destroys
- * the reason on that path: `Group::approve_external_join` re-wraps its inner
- * failure as `Error::Group(format!("external join approve refused: {e}"))`,
- * and `Error::Group` carries no `RefusalReason`. So an approve refused because
- * the pending set was full arrives with no reason at all. An absent reason
- * never retries, so it does not. Fixing it is a one-line core change
- * (propagate rather than re-wrap); inferring the reason from message text is
- * exactly the drift class `MembershipRefusal.kt` exists to end.
+ * It could not participate at all until `21f6c8c`, and not for a reason any
+ * client could work around: `Group::approve_external_join` re-wrapped its inner
+ * failure as `Error::Group(format!("external join approve refused: {e}"))`, and
+ * `Error::Group` carries no `RefusalReason` — so an approve refused because the
+ * pending set was full arrived with no reason at all, indistinguishable from a
+ * socket failure. An absent reason never retries, so it did not. Inferring the
+ * reason from message text would have been the exact drift class
+ * `MembershipRefusal.kt` exists to end.
+ *
+ * The core now propagates the typed error and wraps only a reasonless one, so
+ * the approve joins the rule on the same terms as every other kind: the port
+ * decides whether it arms, and a drained queue decides when it fires.
+ *
+ * It brings **two** stopping conditions of its own, and the second is the one
+ * that is easy to get wrong:
+ *
+ *   - the joiner is now a member. Someone else's approve was swept, or our own
+ *     was — either way the ask is satisfied, and it reads off the roster like
+ *     every other `ALREADY_APPLIED` test.
+ *   - the request has left the **retained quarantine**
+ *     (`Group.pendingExternalJoins()`). This is [RetryDropReason.JOIN_REQUEST_GONE],
+ *     and it is checked rather than assumed because the quarantine and this
+ *     store are two different in-memory lifetimes: the quarantine lives on the
+ *     live `Group` handle and is emptied by anything that reloads it from a
+ *     snapshot, while this store lives as long as the view model. So the record
+ *     CAN outlive the request that justified it, within one session, with no
+ *     restart. **Handled, not prevented** — the verdict reads the live set and
+ *     drops, rather than firing an approve the core would refuse
+ *     `NO_SUCH_JOIN_REQUEST`.
+ *
+ * And it must never arm for a request the quarantine did not keep in the first
+ * place. That rule already exists as [externalJoinAffordance], so
+ * [armedApproveJoinRetry] **asks** it rather than restating `!retained` — one
+ * definition of "this request is actionable", which the panel and the retry
+ * both read.
+ *
+ * ## Discrimination MEASURED on the approve arm
+ *
+ * Each was introduced as a deliberate regression, the suite was run, the named
+ * test observed to fail, and the probe reverted:
+ *
+ *   1. drop the affordance guard -> `arms exactly when the affordance says the
+ *      request is actionable`
+ *   2. remove the retained-quarantine check -> `drops an approve once the
+ *      request has left the retained quarantine` + `claims nothing on a torn
+ *      read of the retained set`
+ *   3. treat a torn retained read as an empty quarantine -> `claims nothing on
+ *      a torn read of the retained set`
+ *   4. stop sharing the `Add` arm of `alreadyApplied` -> `drops an approve once
+ *      the joiner is a member`
+ *   5. stop sharing the `Add` arm of `alreadyWaiting` -> `drops an approve once
+ *      an Add for the joiner is already waiting`
+ *   6. give the approve the `add:` store slot -> `keeps the approve slot apart
+ *      from an add of the same person`
+ *   7. drop `ApproveJoin` from `needsRoleTable` -> `drops an approve in a group
+ *      that has lost its role table`
+ *   8. hard-code the retryable reason instead of asking the port -> `the
+ *      approve arm follows the port even when the port is wrong`
+ *   9. apply the retained gate to every kind -> `does not read the retained set
+ *      for any other kind of request`
  */
 
 // ---------------------------------------------------------------------------
@@ -178,6 +230,26 @@ internal sealed interface RetryableRequest {
         override val key: String get() = ROLE_CHANGE_KEY
     }
 
+    /**
+     * Approving a retained external-join request (ADR-0027).
+     *
+     * **One field, doing two jobs at once** — a property of the core rather
+     * than a shortcut here: the joiner's signature key IS the `proposal_ref`
+     * handle (`Group.pendingExternalJoins()` returns exactly these keys, and
+     * `approveExternalJoin` looks the request up by matching one). There is no
+     * separate proposal reference to carry, and — unlike [Add] — no account id
+     * either, because the joiner's KeyPackage is already retained in the
+     * quarantine. That is what the quarantine is for.
+     *
+     * The store slot is deliberately NOT the `add:` one, even though an
+     * approve resolves to an `Add` proposal: they are different operations
+     * reached by different affordances, so a manual approve tap must disarm
+     * the approve record and leave an armed add alone, and vice versa.
+     */
+    data class ApproveJoin(val subjectKeyB64: String) : RetryableRequest {
+        override val key: String get() = "approve-join:$subjectKeyB64"
+    }
+
     companion object {
         /**
          * Both role-change shapes share ONE slot, because RFC 9420 admits one
@@ -188,9 +260,19 @@ internal sealed interface RetryableRequest {
     }
 }
 
-/** Both role-change shapes, which share the single RFC 9420 GCE slot. */
-private val RetryableRequest.isRoleChange: Boolean
-    get() = this is RetryableRequest.SetAdmin || this is RetryableRequest.TransferOwnership
+/**
+ * Which requests the core refuses outright in a group with no role table.
+ *
+ * A role change has no committer to sweep it; an approve is refused by
+ * `role_table_or_refuse` before it looks at anything else. Both are
+ * `NO_ROLE_TABLE`, a `DoNotRetry` answer, so waiting for a drain would wait
+ * forever.
+ */
+private val RetryableRequest.needsRoleTable: Boolean
+    get() =
+        this is RetryableRequest.SetAdmin ||
+            this is RetryableRequest.TransferOwnership ||
+            this is RetryableRequest.ApproveJoin
 
 // ---------------------------------------------------------------------------
 // Arming
@@ -232,6 +314,41 @@ internal fun armedRetryFor(
     return ArmedRetry(request, reason, pendingCountAtRefusal)
 }
 
+/**
+ * Arm a retry for a refused **external-join approve**, or `null`.
+ *
+ * Everything [armedRetryFor] decides is decided the same way here; the one
+ * addition is the [retained] gate, and it is delegated to
+ * [externalJoinAffordance] rather than written as `if (!retained)`. That
+ * function already owns the question *may an approve be offered for this
+ * request at all* — the members panel asks it before rendering a button — and
+ * an automatic re-send is the same question asked later. Two copies of it could
+ * disagree; one cannot.
+ *
+ * A request the quarantine never kept has nothing for `approveExternalJoin` to
+ * look up, so a retry for it could only ever be refused `NO_SUCH_JOIN_REQUEST`.
+ * In production the caller reads [retained] LIVE off `pendingExternalJoins()`
+ * at the moment of the refusal, so this is a real read rather than a constant
+ * `true`: a quarantine emptied between the tap and the refusal arms nothing.
+ */
+internal fun armedApproveJoinRetry(
+    error: Throwable,
+    subjectKeyB64: String,
+    pendingCountAtRefusal: Int,
+    retained: Boolean,
+    explicitReason: FfiRefusalReason? = null,
+    retryMaySucceed: (FfiRefusalReason) -> Boolean,
+): ArmedRetry? {
+    if (externalJoinAffordance(retained) !is ExternalJoinAffordance.Actionable) return null
+    return armedRetryFor(
+        error = error,
+        request = RetryableRequest.ApproveJoin(subjectKeyB64),
+        pendingCountAtRefusal = pendingCountAtRefusal,
+        explicitReason = explicitReason,
+        retryMaySucceed = retryMaySucceed,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // The verdict
 // ---------------------------------------------------------------------------
@@ -262,6 +379,19 @@ internal data class RetryGroupSnapshot(
     val roleTable: RetryRoleTable?,
     /** ADR-0045 §6.2 — our own leaf has been removed. */
     val membershipEnded: Boolean,
+    /**
+     * ADR-0027 — the joiner key of every request the core still holds in its
+     * retained external-join quarantine (`pendingExternalJoins()`).
+     *
+     * `null` is a TORN read, not an empty quarantine, and claims nothing — the
+     * same rule [roster] follows, and for the same reason: an empty answer here
+     * would look exactly like "the request is gone" and would drop a live
+     * retry.
+     *
+     * Read ONLY for a [RetryableRequest.ApproveJoin]. A quarantine says nothing
+     * about an add, a removal or a role change, so it must never stop one.
+     */
+    val retainedJoinKeys: List<String>?,
 )
 
 /** Why a retry stopped. Every one is a state; none is a count. */
@@ -276,10 +406,17 @@ internal enum class RetryDropReason {
     ALREADY_WAITING,
 
     /**
-     * The group has no role table, so a role change has no committer and the
+     * The group has no role table, so the operation has no committer and the
      * core would refuse it `NoRoleTable` — a `DoNotRetry` answer.
      */
     NO_ROLE_TABLE,
+
+    /**
+     * ADR-0027 — the core no longer holds this external-join request, so an
+     * approve has nothing to look up and would be refused
+     * `NO_SUCH_JOIN_REQUEST`.
+     */
+    JOIN_REQUEST_GONE,
 }
 
 internal sealed interface RetryVerdict {
@@ -306,7 +443,7 @@ internal fun retryVerdict(armed: ArmedRetry, snapshot: RetryGroupSnapshot): Retr
     val roster = snapshot.roster ?: return RetryVerdict.Wait
 
     val request = armed.request
-    if (request.isRoleChange && snapshot.roleTable == null) {
+    if (request.needsRoleTable && snapshot.roleTable == null) {
         return RetryVerdict.Drop(RetryDropReason.NO_ROLE_TABLE)
     }
     if (alreadyApplied(request, roster, snapshot.roleTable)) {
@@ -314,6 +451,17 @@ internal fun retryVerdict(armed: ArmedRetry, snapshot: RetryGroupSnapshot): Retr
     }
     if (alreadyWaiting(request, roster, snapshot.pendingKeys)) {
         return RetryVerdict.Drop(RetryDropReason.ALREADY_WAITING)
+    }
+    // ADR-0027 — LAST of the stopping conditions, so the two that describe the
+    // world (the joiner landed / somebody's Add is waiting) are reported ahead
+    // of the one that describes only our own core's bookkeeping. Both of those
+    // also empty the quarantine eventually, and "they are already in" is the
+    // more useful thing to have said.
+    if (request is RetryableRequest.ApproveJoin) {
+        val retained = snapshot.retainedJoinKeys ?: return RetryVerdict.Wait
+        if (!retained.contains(request.subjectKeyB64)) {
+            return RetryVerdict.Drop(RetryDropReason.JOIN_REQUEST_GONE)
+        }
     }
     return if (snapshot.pendingCount < armed.pendingCountAtRefusal) {
         RetryVerdict.Fire
@@ -331,6 +479,10 @@ private fun alreadyApplied(
     fun inRoster(keyB64: String) = roster.any { it.signatureKeyB64 == keyB64 }
     return when (request) {
         is RetryableRequest.Add -> inRoster(request.subjectKeyB64)
+        // An approve asks for exactly one thing — that this person be in the
+        // group — so it is satisfied by them being in it, whoever's approve was
+        // swept. Sharing the `Add` answer is the statement, not a saving.
+        is RetryableRequest.ApproveJoin -> inRoster(request.subjectKeyB64)
         is RetryableRequest.Remove -> !inRoster(request.subjectKeyB64)
         is RetryableRequest.Leave -> !inRoster(request.subjectKeyB64)
         is RetryableRequest.SetAdmin -> {
@@ -368,6 +520,12 @@ private fun alreadyWaiting(
     val pending = pendingKeys.toSet()
     return when (request) {
         is RetryableRequest.Add -> pending.contains("add:${request.subjectKeyB64}")
+        // ADR-0045 S7 — an approved external join IS an ordinary admin-authored
+        // `Add` carrying the joiner's retained KeyPackage, so it lands in the
+        // pending set under exactly the key an add of the same person would.
+        // That is the point of S7 (indistinguishable from an ordinary add on
+        // the wire) and it is why the same lookup answers for both.
+        is RetryableRequest.ApproveJoin -> pending.contains("add:${request.subjectKeyB64}")
         is RetryableRequest.Remove -> pendingRemoval(request.subjectKeyB64, roster, pending)
         is RetryableRequest.Leave -> pendingRemoval(request.subjectKeyB64, roster, pending)
         is RetryableRequest.SetAdmin,

@@ -1342,6 +1342,24 @@ public class ChatRepository(
     }
 
     /**
+     * ADR-0045 UX §7 — the same retained set, but with a TORN read reported as
+     * `null` rather than folded into an empty list.
+     *
+     * A panel wants the fold (nothing to render either way). The retry verdict
+     * does not: "no request retained" is a reason to DROP an armed approve, and
+     * a failed read must not be allowed to say that.
+     */
+    public fun retainedExternalJoinKeys(groupIdHex: String): List<ByteArray>? {
+        val record = groups[groupIdHex] ?: return null
+        return try {
+            record.group.pendingExternalJoins()
+        } catch (e: FfiException) {
+            android.util.Log.w("ChatRepository", "retainedExternalJoinKeys failed", e)
+            null
+        }
+    }
+
+    /**
      * ADR-0027 / UX §7.1 — whether a request the quarantine turned away has
      * been observed for this group since the last time an admin acted.
      *

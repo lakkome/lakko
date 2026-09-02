@@ -161,6 +161,7 @@ import {
   armRetry,
   armedRetries,
   clearArmedRetries,
+  armedApproveJoinRetry,
   armedRetryFor,
   claimArmedRetry,
   retryKey,
@@ -2051,6 +2052,29 @@ function ChatView(props: {
     }
   }
 
+  /**
+   * ADR-0027 — the joiner key of every request the core still holds in its
+   * retained external-join quarantine, or `null` on a torn read.
+   *
+   * Deliberately NOT the `pendingJoins` memo: that one folds a failed read
+   * into an empty list (correct for a panel, which then renders nothing) and
+   * gates on `membershipEnded`. Here an empty list and a failed read are
+   * different answers — the first says the request is gone, the second says
+   * nothing — and conflating them would drop a live retry.
+   */
+  function retainedJoinKeysNow(): string[] | null {
+    try {
+      const flat = props.entry.group.pendingExternalJoins();
+      const out: string[] = [];
+      for (let i = 0; i + 32 <= flat.length; i += 32) {
+        out.push(base64Encode(flat.slice(i, i + 32)));
+      }
+      return out;
+    } catch {
+      return null;
+    }
+  }
+
   /** The group as the retry verdict reads it, captured in ONE pass — the
    *  roster and the pending set must come from the same moment. */
   function retrySnapshot(): GroupSnapshot {
@@ -2087,6 +2111,7 @@ function ChatView(props: {
           ? null
           : { ownerKeyB64: owner, adminKeysB64: [...adminKeysB64()] },
       membershipEnded: membershipEnded(),
+      retainedJoinKeys: retainedJoinKeysNow(),
     };
   }
 
@@ -2151,6 +2176,41 @@ function ChatView(props: {
   }
 
   /**
+   * The approve-an-external-join twin of {@link withMembershipRetry}.
+   *
+   * Separate because the arming gate is: `armedApproveJoinRetry` additionally
+   * asks `externalJoinAffordance` whether the request is one an approve could
+   * act on at all, and the `retained` answer is read LIVE off the core's
+   * quarantine rather than assumed. A torn read of that set answers `false`,
+   * which is the fail-safe direction — it can only decline to arm, never arm
+   * a retry the core has nothing to look up.
+   */
+  async function withApproveJoinRetry<T>(
+    proposalRef: Uint8Array,
+    run: () => Promise<T>,
+  ): Promise<T> {
+    const subjectKeyB64 = base64Encode(proposalRef);
+    disarmRetry({ kind: "approve-join", subjectKeyB64 });
+    const before = pendingCountNow();
+    try {
+      return await run();
+    } catch (err) {
+      const scope = retryScope();
+      if (scope !== null) {
+        const armed = armedApproveJoinRetry(
+          err,
+          subjectKeyB64,
+          before,
+          retainedJoinKeysNow()?.includes(subjectKeyB64) ?? false,
+          membershipRetryMaySucceed,
+        );
+        if (armed !== null) armRetry(scope, armed);
+      }
+      throw err;
+    }
+  }
+
+  /**
    * Re-issue one armed request, reconstructed from its descriptor.
    *
    * **Reconstructed, never a stored closure.** The descriptor is exactly what
@@ -2194,6 +2254,30 @@ function ChatView(props: {
         if (out.kind === "proposed") {
           noteOwnRequest(`${request.kind === "leave" ? "leave" : "remove"}:${leaf}`);
         }
+        return;
+      }
+      case "approve-join": {
+        // The joiner's signature key IS the `proposal_ref` handle, so the
+        // descriptor reconstructs the call whole. The KeyPackage it needs is
+        // the one the core retained — which is also why the verdict refuses
+        // to fire once that request has left the quarantine.
+        const out = await contacts.approveExternalJoin(
+          identity,
+          group,
+          base64Decode(request.subjectKeyB64),
+        );
+        chat.markOwnPublishedCommit(out.proposalMessageId);
+        // Identical bookkeeping to the manual `onApproveJoin`, third argument
+        // included: only this device can know the add came from a JOIN
+        // request, and that flag is what later says `Ask them to request to
+        // join again` instead of offering a retry nobody can perform.
+        noteOwnRequest(`add:${request.subjectKeyB64}`, undefined, true);
+        // `unkeptJoinRequest` is deliberately NOT cleared here. The manual
+        // handler clears it as feedback for something the user just did; a
+        // background re-send is not that, and the notice's action item — ask
+        // that person to send their request again — stays true regardless,
+        // because a request the quarantine never kept is not recoverable by
+        // approving a different one.
         return;
       }
       case "set-admin": {
@@ -2275,12 +2359,29 @@ function ChatView(props: {
           // A second queue-full refusal re-arms against the NEW count and waits
           // for the next drain — silently, because nothing has changed for the
           // user since the refusal they were already shown.
-          const rearmed = armedRetryFor(
-            err,
-            claimed.request,
-            pendingCountNow(),
-            membershipRetryMaySucceed,
-          );
+          //
+          // An approve re-arms through its OWN helper, so the affordance gate
+          // runs on this path too. It is defence in depth rather than a hole
+          // being closed — `approve_external_join` looks the request up BEFORE
+          // it proposes, so a queue-full refusal proves the request was still
+          // retained — but the re-arm is part of the retry path, and a second
+          // way to arm one that skipped a gate the first way applies is the
+          // shape that eventually diverges.
+          const rearmed =
+            claimed.request.kind === "approve-join"
+              ? armedApproveJoinRetry(
+                  err,
+                  claimed.request.subjectKeyB64,
+                  pendingCountNow(),
+                  retainedJoinKeysNow()?.includes(claimed.request.subjectKeyB64) ?? false,
+                  membershipRetryMaySucceed,
+                )
+              : armedRetryFor(
+                  err,
+                  claimed.request,
+                  pendingCountNow(),
+                  membershipRetryMaySucceed,
+                );
           if (rearmed !== null) {
             armRetry(scope, rearmed);
             return;
@@ -4211,10 +4312,17 @@ function ChatView(props: {
     setNotice(null);
     setBusy(true);
     try {
-      const result = await contacts.approveExternalJoin(
-        props.requireIdentity(),
-        props.entry.group,
-        proposalRef,
+      // ADR-0045 UX §7 — an approve refused by a full pending set now carries
+      // its reason (the core stopped flattening it into prose in `21f6c8c`),
+      // so it re-sends itself when a committer drains the queue. The wrapper
+      // also disarms first, so tapping Approve again takes the record rather
+      // than racing an in-flight re-send for it.
+      const result = await withApproveJoinRetry(proposalRef, () =>
+        contacts.approveExternalJoin(
+          props.requireIdentity(),
+          props.entry.group,
+          proposalRef,
+        ),
       );
       chat.markOwnPublishedCommit(result.proposalMessageId);
       // ADR-0045 — the same bookkeeping every other membership request gets:
@@ -4271,6 +4379,15 @@ function ChatView(props: {
     setNotice(null);
     setBusy(true);
     try {
+      // ADR-0045 UX §7 — a reject is the user saying no, so any armed re-send
+      // of an approve for the same request goes with it. The verdict would
+      // drop it anyway once it saw the emptied quarantine
+      // (`join-request-gone`), but leaving a record that contradicts a
+      // decision the user just made is not a state to keep for a poll cycle.
+      disarmRetry({
+        kind: "approve-join",
+        subjectKeyB64: base64Encode(proposalRef),
+      });
       await contacts.rejectExternalJoin(props.entry.group, proposalRef);
       setMembersVersion(membersVersion() + 1);
       // Acting on the queue is what may have made room for the request the

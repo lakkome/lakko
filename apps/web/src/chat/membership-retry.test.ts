@@ -28,10 +28,12 @@ import init, {
   membershipRefusalDisposition,
   membershipRefusalRetryMaySucceed,
 } from "../../wasm/lakko_ffi_wasm";
+import { externalJoinAffordance } from "./membership-refusal";
 import {
   type ArmedRetry,
   type GroupSnapshot,
   type RetryableRequest,
+  armedApproveJoinRetry,
   armedRetryFor,
   claimArmedRetry,
   armRetry,
@@ -100,8 +102,11 @@ const TRANSFER_TO_BOB: RetryableRequest = {
   subjectKeyB64: BOB,
   outgoing: "admin",
 };
+/** Carol asked to join via a `/g/` link and an admin's approve was refused. */
+const APPROVE_CAROL: RetryableRequest = { kind: "approve-join", subjectKeyB64: CAROL };
 
-/** A group of Alice (owner, leaf 0) and Bob (leaf 1), nothing pending. */
+/** A group of Alice (owner, leaf 0) and Bob (leaf 1), nothing pending, with
+ *  Carol's join request retained in the quarantine. */
 function snapshot(over: Partial<GroupSnapshot> = {}): GroupSnapshot {
   return {
     roster: [
@@ -112,6 +117,7 @@ function snapshot(over: Partial<GroupSnapshot> = {}): GroupSnapshot {
     pendingCount: 0,
     roleTable: { ownerKeyB64: ALICE, adminKeysB64: [] },
     membershipEnded: false,
+    retainedJoinKeys: [CAROL],
     ...over,
   };
 }
@@ -385,6 +391,229 @@ describe("when the retry stops", () => {
     expect(
       retryVerdict(armed(MAKE_BOB_ADMIN, 64), snapshot({ pendingCount: 0, roleTable: null })),
     ).toEqual({ kind: "drop", why: "no-role-table" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 3b. Approving an external join — the arm the core made possible
+// ---------------------------------------------------------------------------
+
+describe("approving an external join", () => {
+  it("arms on a queue-full approve refusal, which the core now carries a reason for", () => {
+    const out = armedApproveJoinRetry(
+      thrownRefusal("pendingSetFull"),
+      CAROL,
+      64,
+      true,
+      REAL,
+    );
+    expect(out).not.toBeNull();
+    expect(out?.request).toEqual(APPROVE_CAROL);
+    expect(out?.pendingCountAtRefusal).toBe(64);
+  });
+
+  it("never arms on any approve refusal the core does not call retryable", () => {
+    // Every reason `approve_external_join` can produce besides the queue-full
+    // one. Each is asserted against the CORE's own answer rather than a list
+    // written here, so a core that reclassified one would fail this test
+    // rather than silently change what the client does.
+    for (const reason of [
+      "noRoleTable",
+      "noSuchJoinRequest",
+      "joinerAlreadyAMember",
+      "addNotOwnerOrAdmin",
+      "notAMember",
+    ]) {
+      expect(membershipRefusalRetryMaySucceed(reason), reason).toBe(false);
+      expect(
+        armedApproveJoinRetry(thrownRefusal(reason), CAROL, 64, true, REAL),
+        reason,
+      ).toBeNull();
+    }
+  });
+
+  it("never arms on an approve that failed with NO reason at all", () => {
+    // The state before the core fix: `approve_external_join` flattened the
+    // typed error into prose, so this is what every approve refusal looked
+    // like. An absent reason arms nothing, then and now.
+    expect(
+      armedApproveJoinRetry(
+        new Error("external join approve refused: proposal refused"),
+        CAROL,
+        64,
+        true,
+        REAL,
+      ),
+    ).toBeNull();
+  });
+
+  it("finds the reason through the wrapper the contacts client throws", () => {
+    expect(
+      armedApproveJoinRetry(
+        wrapped(thrownRefusal("pendingSetFull")),
+        CAROL,
+        64,
+        true,
+        REAL,
+      ),
+    ).not.toBeNull();
+  });
+
+  it("follows the port even when the port is wrong, in both directions", () => {
+    const invertedTrue: typeof REAL = (r) => r === "noSuchJoinRequest";
+    expect(
+      armedApproveJoinRetry(
+        thrownRefusal("noSuchJoinRequest"),
+        CAROL,
+        64,
+        true,
+        invertedTrue,
+      ),
+      "a port that says a missing-request refusal is retryable must be believed",
+    ).not.toBeNull();
+
+    const invertedFalse: typeof REAL = () => false;
+    expect(
+      armedApproveJoinRetry(
+        thrownRefusal("pendingSetFull"),
+        CAROL,
+        64,
+        true,
+        invertedFalse,
+      ),
+      "a port that says pendingSetFull is NOT retryable must be believed",
+    ).toBeNull();
+  });
+
+  // The rule this asserts is `externalJoinAffordance`'s, not one restated
+  // here: an unretained request has nothing for `approveExternalJoin` to look
+  // up, so a retry for it could only ever be refused. Written against the
+  // affordance rather than against the literal `false` so that a future change
+  // to what "actionable" means carries the retry path with it.
+  it("arms exactly when the affordance says the request is actionable", () => {
+    for (const retained of [true, false]) {
+      const actionable = externalJoinAffordance({ retained }).kind === "actionable";
+      const out = armedApproveJoinRetry(
+        thrownRefusal("pendingSetFull"),
+        CAROL,
+        64,
+        retained,
+        REAL,
+      );
+      expect(out !== null, `retained=${retained}`).toBe(actionable);
+    }
+  });
+
+  it("keeps the approve slot apart from an add of the same person", () => {
+    expect(retryKey(APPROVE_CAROL)).not.toBe(retryKey(ADD_CAROL));
+    expect(retryKey(APPROVE_CAROL)).toContain(CAROL);
+    armRetry(SCOPE, armed(APPROVE_CAROL));
+    armRetry(SCOPE, armed(ADD_CAROL));
+    expect(armedRetries(SCOPE)).toHaveLength(2);
+    // A manual approve tap disarms the approve record and leaves the add one.
+    expect(claimArmedRetry(SCOPE, retryKey(APPROVE_CAROL))).not.toBeUndefined();
+    expect(claimArmedRetry(SCOPE, retryKey(APPROVE_CAROL))).toBeUndefined();
+    expect(armedRetries(SCOPE)).toHaveLength(1);
+    expect(armedRetries(SCOPE)[0]?.request.kind).toBe("add");
+  });
+
+  it("fires once the queue drained, and not before", () => {
+    expect(retryVerdict(armed(APPROVE_CAROL, 64), snapshot({ pendingCount: 64 }))).toEqual({
+      kind: "wait",
+    });
+    expect(retryVerdict(armed(APPROVE_CAROL, 64), snapshot({ pendingCount: 63 }))).toEqual({
+      kind: "fire",
+    });
+  });
+
+  it("drops once the joiner is a member — whoever's approve landed", () => {
+    const view = snapshot({
+      pendingCount: 0,
+      roster: [
+        { leafIndex: 0, signatureKeyB64: ALICE },
+        { leafIndex: 1, signatureKeyB64: BOB },
+        { leafIndex: 2, signatureKeyB64: CAROL },
+      ],
+      // The core reaps a joined request out of the quarantine, so this is
+      // empty in reality; supplied non-empty here so the test can only pass
+      // by reading the ROSTER.
+      retainedJoinKeys: [CAROL],
+    });
+    expect(retryVerdict(armed(APPROVE_CAROL, 64), view)).toEqual({
+      kind: "drop",
+      why: "already-applied",
+    });
+  });
+
+  it("drops once another admin's Add for the joiner is already waiting", () => {
+    // An approved external join IS an ordinary admin-authored `Add` keyed on
+    // the joiner's signature key, so it lands in the pending set under exactly
+    // the key an add of the same person would.
+    expect(
+      retryVerdict(
+        armed(APPROVE_CAROL, 64),
+        snapshot({ pendingCount: 1, pendingKeys: [`add:${CAROL}`] }),
+      ),
+    ).toEqual({ kind: "drop", why: "already-waiting" });
+  });
+
+  it("drops once the request has left the retained quarantine", () => {
+    // Nothing else in the group changed: Carol is not a member, no Add is
+    // pending, the queue drained. The core simply no longer holds the request
+    // — a reload of the group empties the in-memory quarantine while this
+    // record survives — and re-issuing would be refused `noSuchJoinRequest`.
+    expect(
+      retryVerdict(armed(APPROVE_CAROL, 64), snapshot({ pendingCount: 0, retainedJoinKeys: [] })),
+    ).toEqual({ kind: "drop", why: "join-request-gone" });
+    // Somebody ELSE's retained request is not ours.
+    expect(
+      retryVerdict(
+        armed(APPROVE_CAROL, 64),
+        snapshot({ pendingCount: 0, retainedJoinKeys: [BOB] }),
+      ),
+    ).toEqual({ kind: "drop", why: "join-request-gone" });
+  });
+
+  it("claims nothing on a torn read of the retained set", () => {
+    expect(
+      retryVerdict(
+        armed(APPROVE_CAROL, 64),
+        snapshot({ pendingCount: 0, retainedJoinKeys: null }),
+      ),
+    ).toEqual({ kind: "wait" });
+  });
+
+  it("does not read the retained set for any other kind of request", () => {
+    // A torn or empty quarantine says nothing about an add, a removal or a
+    // role change, so it must not stop one.
+    for (const request of [ADD_CAROL, REMOVE_BOB, MAKE_BOB_ADMIN]) {
+      expect(
+        retryVerdict(armed(request, 64), snapshot({ pendingCount: 0, retainedJoinKeys: null })),
+        request.kind,
+      ).toEqual({ kind: "fire" });
+      expect(
+        retryVerdict(armed(request, 64), snapshot({ pendingCount: 0, retainedJoinKeys: [] })),
+        request.kind,
+      ).toEqual({ kind: "fire" });
+    }
+  });
+
+  it("drops an approve in a group that has lost its role table", () => {
+    expect(
+      retryVerdict(armed(APPROVE_CAROL, 64), snapshot({ pendingCount: 0, roleTable: null })),
+    ).toEqual({ kind: "drop", why: "no-role-table" });
+  });
+
+  it("drops an approve once our own membership has ended", () => {
+    expect(
+      retryVerdict(armed(APPROVE_CAROL, 64), snapshot({ pendingCount: 0, membershipEnded: true })),
+    ).toEqual({ kind: "drop", why: "membership-ended" });
+  });
+
+  it("hands the approve record to exactly one of two concurrent claims", () => {
+    armRetry(SCOPE, armed(APPROVE_CAROL));
+    expect(claimArmedRetry(SCOPE, retryKey(APPROVE_CAROL))).not.toBeUndefined();
+    expect(claimArmedRetry(SCOPE, retryKey(APPROVE_CAROL))).toBeUndefined();
   });
 });
 

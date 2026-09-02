@@ -121,23 +121,91 @@
  * it landed, or its effect is already true, or we are no longer in the group.
  * Each is a fact about group state that the fold reads anyway.
  *
- * ## What is deliberately NOT retried, and it is a core finding rather than a
- * scope choice
+ * ## Approving an external join, and why it took a core change to get here
  *
- * An **approved external join** cannot participate, because the core destroys
- * the reason on that path: `Group::approve_external_join` re-wraps its inner
- * failure as `Error::Group(format!("external join approve refused: {e}"))`,
- * and `Error::Group` carries no `RefusalReason`. So an approve refused because
- * the pending set was full arrives at the client as an untyped error with no
- * reason at all — indistinguishable from any other failure. Rule 5 of this
- * module's contract is that an absent reason never retries, so it does not.
- * Fixing it is a one-line core change (propagate rather than re-wrap) and is
- * reported rather than worked around here: inferring the reason from the
- * message text is precisely the drift class `membership-refusal.ts` exists to
- * end.
+ * It could not participate at all until `21f6c8c`, and not for a reason any
+ * client could work around: `Group::approve_external_join` re-wrapped its
+ * inner failure as `Error::Group(format!("external join approve refused:
+ * {e}"))`, and `Error::Group` carries no `RefusalReason` — so an approve
+ * refused because the pending set was full arrived as an untyped error with no
+ * reason at all, indistinguishable from a socket failure. Rule 5 of this
+ * module's contract is that an absent reason never retries, so it did not.
+ * Inferring the reason from the message text would have been the exact drift
+ * class `membership-refusal.ts` exists to end.
+ *
+ * The core now propagates the typed error and wraps only a reasonless one, so
+ * the approve joins the rule on the same terms as every other kind: the port
+ * decides whether it arms, and a drained queue decides when it fires.
+ *
+ * It brings **two** stopping conditions of its own, and the second is the one
+ * that is easy to get wrong:
+ *
+ *   - the joiner is now a member. Someone else's approve was swept, or our own
+ *     was — either way the ask is satisfied, and it reads off the roster like
+ *     every other `already-applied` test.
+ *   - the request has left the **retained quarantine**
+ *     (`Group::pending_external_joins`). This is `join-request-gone`, and it
+ *     is checked rather than assumed because the quarantine and this store are
+ *     two different in-memory lifetimes: the quarantine lives on the live
+ *     `Group` handle and is emptied by anything that reloads it from a
+ *     snapshot, while this store survives until the tab closes. So the record
+ *     CAN outlive the request that justified it, within one session, with no
+ *     restart. **Handled, not prevented** — the verdict reads the live set and
+ *     drops, rather than firing an approve the core would refuse
+ *     `noSuchJoinRequest`.
+ *
+ * And it must never arm for a request the quarantine did not keep in the first
+ * place. That rule already exists as `externalJoinAffordance`, so
+ * {@link armedApproveJoinRetry} **asks** it rather than restating `!retained`
+ * — one definition of "this request is actionable", which the panel and the
+ * retry both read.
+ *
+ * ## Discrimination MEASURED on the approve arm
+ *
+ * Each was introduced as a deliberate regression, `npx vitest run` was run, the
+ * named test observed to fail, and the probe reverted:
+ *
+ * 1. drop the affordance guard → `arms exactly when the affordance says the
+ *    request is actionable`:
+ *
+ *        AssertionError: retained=false: expected true to be false
+ *
+ * 2. remove the retained-quarantine check → two tests, `drops once the request
+ *    has left the retained quarantine` and `claims nothing on a torn read of
+ *    the retained set`, both `expected { kind: 'fire' }`
+ *
+ * 3. treat a torn retained read as an empty quarantine → `claims nothing on a
+ *    torn read of the retained set`:
+ *
+ *        AssertionError: expected { kind: 'drop', …(1) } to deeply equal
+ *        { kind: 'wait' }
+ *
+ * 4. stop sharing the `add` arm of `alreadyApplied` → `drops once the joiner is
+ *    a member — whoever's approve landed`
+ * 5. stop sharing the `add` arm of `alreadyWaiting` → `drops once another
+ *    admin's Add for the joiner is already waiting`
+ * 6. give the approve the `add:` store slot → `keeps the approve slot apart
+ *    from an add of the same person`:
+ *
+ *        AssertionError: expected 'add:Q0FST0w=' not to be 'add:Q0FST0w='
+ *
+ * 7. drop `approve-join` from `needsRoleTable` → `drops an approve in a group
+ *    that has lost its role table`
+ * 8. hard-code the retryable reason instead of asking the port → `follows the
+ *    port even when the port is wrong, in both directions`:
+ *
+ *        AssertionError: a port that says a missing-request refusal is
+ *        retryable must be believed: expected null not to be null
+ *
+ * 9. apply the retained gate to every request kind → five tests, including
+ *    `does not read the retained set for any other kind of request`
  */
 
-import { refusalReasonOf, type RetryPort } from "./membership-refusal";
+import {
+  externalJoinAffordance,
+  refusalReasonOf,
+  type RetryPort,
+} from "./membership-refusal";
 
 // ---------------------------------------------------------------------------
 // What a retryable request is
@@ -153,8 +221,14 @@ import { refusalReasonOf, type RetryPort } from "./membership-refusal";
  * resolved from the LIVE roster at fire time, which is also what makes
  * "already applied" checkable.
  *
- * `approve-join` is absent by a finding rather than an omission — see the
- * module header.
+ * `approve-join` carries **one** field and it is doing two jobs at once, which
+ * is a property of the core rather than a shortcut here: the joiner's
+ * signature key IS the `proposal_ref` handle
+ * (`Group::pending_external_joins` returns exactly these keys, and
+ * `approve_external_join` looks the request up by matching one). There is no
+ * separate proposal reference to carry, and — unlike `add` — no account id
+ * either, because the joiner's KeyPackage is already retained in the
+ * quarantine. That is what the quarantine is for.
  */
 export type RetryableRequest =
   | {
@@ -179,6 +253,12 @@ export type RetryableRequest =
       readonly kind: "transfer-ownership";
       readonly subjectKeyB64: string;
       readonly outgoing: "admin" | "member";
+    }
+  | {
+      readonly kind: "approve-join";
+      /** The joiner's Ed25519 signature key — both the subject's identity and
+       *  the `proposal_ref` handle the approve takes. */
+      readonly subjectKeyB64: string;
     };
 
 /**
@@ -198,6 +278,13 @@ export function retryKey(request: RetryableRequest): string {
       return `remove:${request.subjectKeyB64}`;
     case "leave":
       return `leave:${request.subjectKeyB64}`;
+    case "approve-join":
+      // Deliberately NOT the `add:` slot, even though an approve resolves to
+      // an `Add` proposal. They are different operations reached by different
+      // affordances — one consumes a quarantined request, the other fetches a
+      // KeyPackage from discovery — so a manual approve tap must disarm the
+      // approve record and leave an armed add alone, and vice versa.
+      return `approve-join:${request.subjectKeyB64}`;
     default:
       // Both role-change shapes share ONE slot, because RFC 9420 admits one
       // `GroupContextExtensions` proposal per commit — two of them could never
@@ -248,6 +335,40 @@ export function armedRetryFor(
   return { request, reason, pendingCountAtRefusal };
 }
 
+/**
+ * Arm a retry for a refused **external-join approve**, or `null`.
+ *
+ * Everything {@link armedRetryFor} decides is decided the same way here; the
+ * one addition is the `retained` gate, and it is delegated to
+ * {@link externalJoinAffordance} rather than written as `if (!retained)`. That
+ * function already owns the question *may an approve be offered for this
+ * request at all* — the members panel asks it before rendering a button — and
+ * an automatic re-send is the same question asked later. Two copies of it
+ * could disagree; one cannot.
+ *
+ * A request the quarantine never kept has nothing for `approveExternalJoin` to
+ * look up, so a retry for it could only ever be refused `noSuchJoinRequest`.
+ * In production the caller reads `retained` LIVE off
+ * `pendingExternalJoins()` at the moment of the refusal, so this is a real
+ * read rather than a constant `true`: a quarantine emptied between the tap and
+ * the refusal arms nothing.
+ */
+export function armedApproveJoinRetry(
+  err: unknown,
+  subjectKeyB64: string,
+  pendingCountAtRefusal: number,
+  retained: boolean,
+  retryMaySucceed: RetryPort,
+): ArmedRetry | null {
+  if (externalJoinAffordance({ retained }).kind !== "actionable") return null;
+  return armedRetryFor(
+    err,
+    { kind: "approve-join", subjectKeyB64 },
+    pendingCountAtRefusal,
+    retryMaySucceed,
+  );
+}
+
 // ---------------------------------------------------------------------------
 // The verdict
 // ---------------------------------------------------------------------------
@@ -280,6 +401,18 @@ export interface GroupSnapshot {
   } | null;
   /** ADR-0045 §6.2 — our own leaf has been removed. */
   readonly membershipEnded: boolean;
+  /**
+   * ADR-0027 — the joiner key of every request the core still holds in its
+   * retained external-join quarantine (`pendingExternalJoins()`).
+   *
+   * `null` is a TORN read, not an empty quarantine, and claims nothing — the
+   * same rule `roster` follows, and for the same reason: an empty answer here
+   * would look exactly like "the request is gone" and would drop a live retry.
+   *
+   * Read ONLY for an `approve-join` request. A quarantine says nothing about
+   * an add, a removal or a role change, so it must never stop one.
+   */
+  readonly retainedJoinKeys: readonly string[] | null;
 }
 
 /** Why a retry stopped. Every one is a state; none is a count. */
@@ -290,9 +423,13 @@ export type RetryDropReason =
   | "already-applied"
   /** The request is itself in the live pending set — it landed. */
   | "already-waiting"
-  /** The group has no role table, so a role change has no committer and the
+  /** The group has no role table, so the operation has no committer and the
    *  core would refuse it `NoRoleTable` — a `DoNotRetry` answer. */
-  | "no-role-table";
+  | "no-role-table"
+  /** ADR-0027 — the core no longer holds this external-join request, so an
+   *  approve has nothing to look up and would be refused
+   *  `NoSuchJoinRequest`. */
+  | "join-request-gone";
 
 export type RetryVerdict =
   | { readonly kind: "fire" }
@@ -317,12 +454,24 @@ export function retryVerdict(armed: ArmedRetry, snapshot: GroupSnapshot): RetryV
 
   const request = armed.request;
 
-  if (isRoleChange(request) && snapshot.roleTable === null) {
+  if (needsRoleTable(request) && snapshot.roleTable === null) {
     return { kind: "drop", why: "no-role-table" };
   }
 
   if (alreadyApplied(request, snapshot)) return { kind: "drop", why: "already-applied" };
   if (alreadyWaiting(request, snapshot)) return { kind: "drop", why: "already-waiting" };
+
+  // ADR-0027 — LAST of the stopping conditions, so the two that describe the
+  // world (the joiner landed / somebody's Add is waiting) are reported ahead
+  // of the one that describes only our own core's bookkeeping. Both of those
+  // also empty the quarantine eventually, and "they are already in" is the
+  // more useful thing to have said.
+  if (request.kind === "approve-join") {
+    if (snapshot.retainedJoinKeys === null) return { kind: "wait" };
+    if (!snapshot.retainedJoinKeys.includes(request.subjectKeyB64)) {
+      return { kind: "drop", why: "join-request-gone" };
+    }
+  }
 
   return snapshot.pendingCount < armed.pendingCountAtRefusal
     ? { kind: "fire" }
@@ -337,6 +486,10 @@ function alreadyApplied(request: RetryableRequest, snapshot: GroupSnapshot): boo
 
   switch (request.kind) {
     case "add":
+    // An approve asks for exactly one thing — that this person be in the
+    // group — so it is satisfied by them being in it, whoever's approve was
+    // swept. Sharing the `add` arm is the statement, not a saving.
+    case "approve-join":
       return inRoster(request.subjectKeyB64);
     case "remove":
     case "leave":
@@ -361,9 +514,20 @@ function alreadyApplied(request: RetryableRequest, snapshot: GroupSnapshot): boo
   }
 }
 
-/** Both role-change shapes, which share the single RFC 9420 GCE slot. */
-function isRoleChange(request: RetryableRequest): boolean {
-  return request.kind === "set-admin" || request.kind === "transfer-ownership";
+/**
+ * Which requests the core refuses outright in a group with no role table.
+ *
+ * A role change has no committer to sweep it; an approve is refused by
+ * `role_table_or_refuse` before it looks at anything else. Both are
+ * `NoRoleTable`, a `DoNotRetry` answer, so waiting for a drain would wait
+ * forever.
+ */
+function needsRoleTable(request: RetryableRequest): boolean {
+  return (
+    request.kind === "set-admin" ||
+    request.kind === "transfer-ownership" ||
+    request.kind === "approve-join"
+  );
 }
 
 /**
@@ -379,6 +543,12 @@ function alreadyWaiting(request: RetryableRequest, snapshot: GroupSnapshot): boo
   const pending = new Set(snapshot.pendingKeys);
   switch (request.kind) {
     case "add":
+    // ADR-0045 S7 — an approved external join IS an ordinary admin-authored
+    // `Add` carrying the joiner's retained KeyPackage, so it lands in the
+    // pending set under exactly the key an add of the same person would. That
+    // is the point of S7 (indistinguishable from an ordinary add on the wire)
+    // and it is why the same lookup answers for both.
+    case "approve-join":
       return pending.has(`add:${request.subjectKeyB64}`);
     case "remove":
     case "leave": {

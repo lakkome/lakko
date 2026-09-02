@@ -74,12 +74,18 @@ class MembershipRetryTest {
     private val transferToBob =
         RetryableRequest.TransferOwnership(subjectKeyB64 = bob, outgoing = OutgoingOwner.ADMIN)
 
+    /** Carol asked to join via a `/g/` link and an admin's approve was refused. */
+    private val approveCarol = RetryableRequest.ApproveJoin(subjectKeyB64 = carol)
+
     @Before
     fun reset() {
         store.clear(scope)
     }
 
-    /** A group of Alice (owner, leaf 0) and Bob (leaf 1), nothing pending. */
+    /**
+     * A group of Alice (owner, leaf 0) and Bob (leaf 1), nothing pending, with
+     * Carol's join request retained in the quarantine.
+     */
     private fun snapshot(
         roster: List<RetryRosterMember>? =
             listOf(
@@ -90,7 +96,15 @@ class MembershipRetryTest {
         pendingCount: Int = 0,
         roleTable: RetryRoleTable? = RetryRoleTable("QUxJQ0U=", emptyList()),
         membershipEnded: Boolean = false,
-    ) = RetryGroupSnapshot(roster, pendingKeys, pendingCount, roleTable, membershipEnded)
+        retainedJoinKeys: List<String>? = listOf("Q0FST0w="),
+    ) = RetryGroupSnapshot(
+        roster,
+        pendingKeys,
+        pendingCount,
+        roleTable,
+        membershipEnded,
+        retainedJoinKeys,
+    )
 
     private fun armed(request: RetryableRequest, count: Int = 64) =
         ArmedRetry(request, FfiRefusalReason.PENDING_SET_FULL, count)
@@ -338,6 +352,287 @@ class MembershipRetryTest {
             RetryVerdict.Drop(RetryDropReason.NO_ROLE_TABLE),
             retryVerdict(armed(makeBobAdmin), snapshot(pendingCount = 0, roleTable = null)),
         )
+    }
+
+    // -----------------------------------------------------------------------
+    // 3b. Approving an external join — the arm the core made possible
+    // -----------------------------------------------------------------------
+
+    @Test
+    fun `arms on a queue-full approve refusal`() {
+        val out =
+            armedApproveJoinRetry(
+                error = FfiException.MembershipPendingSetFull("core prose"),
+                subjectKeyB64 = carol,
+                pendingCountAtRefusal = 64,
+                retained = true,
+                retryMaySucceed = real,
+            )
+        assertEquals(approveCarol, out?.request)
+        assertEquals(64, out!!.pendingCountAtRefusal)
+    }
+
+    /**
+     * Every reason `approve_external_join` can produce besides the queue-full
+     * one, asserted against the port's answer rather than a list written here.
+     */
+    @Test
+    fun `never arms on an approve refusal the core does not call retryable`() {
+        val reasons =
+            listOf(
+                FfiRefusalReason.NO_ROLE_TABLE,
+                FfiRefusalReason.NO_SUCH_JOIN_REQUEST,
+                FfiRefusalReason.JOINER_ALREADY_A_MEMBER,
+                FfiRefusalReason.ADD_NOT_OWNER_OR_ADMIN,
+                FfiRefusalReason.NOT_A_MEMBER,
+            )
+        for (reason in reasons) {
+            assertTrue("$reason", !real(reason))
+            assertNull(
+                "$reason must never arm",
+                armedApproveJoinRetry(
+                    error = FfiException.Group("irrelevant"),
+                    subjectKeyB64 = carol,
+                    pendingCountAtRefusal = 64,
+                    retained = true,
+                    explicitReason = reason,
+                    retryMaySucceed = real,
+                ),
+            )
+        }
+    }
+
+    /**
+     * The state before the core fix: `approve_external_join` flattened the
+     * typed error into prose, so this is what EVERY approve refusal looked
+     * like. An absent reason arms nothing, then and now.
+     */
+    @Test
+    fun `never arms on an approve that failed with no reason at all`() {
+        assertNull(
+            armedApproveJoinRetry(
+                error = FfiException.Group("external join approve refused: proposal refused"),
+                subjectKeyB64 = carol,
+                pendingCountAtRefusal = 64,
+                retained = true,
+                retryMaySucceed = real,
+            ),
+        )
+    }
+
+    @Test
+    fun `finds the approve reason through the wrapper the repository throws`() {
+        assertNotNull(
+            armedApproveJoinRetry(
+                error =
+                    ChatError(
+                        "approveExternalJoin failed",
+                        FfiException.MembershipPendingSetFull("prose"),
+                    ),
+                subjectKeyB64 = carol,
+                pendingCountAtRefusal = 64,
+                retained = true,
+                retryMaySucceed = real,
+            ),
+        )
+    }
+
+    @Test
+    fun `the approve arm follows the port even when the port is wrong`() {
+        val invertedTrue: (FfiRefusalReason) -> Boolean = {
+            it == FfiRefusalReason.NO_SUCH_JOIN_REQUEST
+        }
+        assertNotNull(
+            "a port that says a missing-request refusal is retryable must be believed",
+            armedApproveJoinRetry(
+                error = FfiException.MembershipNoSuchJoinRequest("x"),
+                subjectKeyB64 = carol,
+                pendingCountAtRefusal = 64,
+                retained = true,
+                retryMaySucceed = invertedTrue,
+            ),
+        )
+        assertNull(
+            "a port that says pendingSetFull is NOT retryable must be believed",
+            armedApproveJoinRetry(
+                error = FfiException.MembershipPendingSetFull("x"),
+                subjectKeyB64 = carol,
+                pendingCountAtRefusal = 64,
+                retained = true,
+                retryMaySucceed = { false },
+            ),
+        )
+    }
+
+    /**
+     * The rule this asserts is [externalJoinAffordance]'s, not one restated
+     * here: an unretained request has nothing for `approveExternalJoin` to look
+     * up, so a retry for it could only ever be refused. Written against the
+     * affordance rather than the literal `false` so a future change to what
+     * "actionable" means carries the retry path with it.
+     */
+    @Test
+    fun `arms exactly when the affordance says the request is actionable`() {
+        for (retained in listOf(true, false)) {
+            val actionable = externalJoinAffordance(retained) is ExternalJoinAffordance.Actionable
+            val out =
+                armedApproveJoinRetry(
+                    error = FfiException.MembershipPendingSetFull("x"),
+                    subjectKeyB64 = carol,
+                    pendingCountAtRefusal = 64,
+                    retained = retained,
+                    retryMaySucceed = real,
+                )
+            assertEquals("retained=$retained", actionable, out != null)
+        }
+    }
+
+    @Test
+    fun `keeps the approve slot apart from an add of the same person`() {
+        assertTrue(approveCarol.key != addCarol.key)
+        assertTrue(approveCarol.key.contains(carol))
+        store.arm(scope, armed(approveCarol))
+        store.arm(scope, armed(addCarol))
+        assertEquals(2, store.armed(scope).size)
+        // A manual approve tap disarms the approve record and leaves the add.
+        assertNotNull(store.claim(scope, approveCarol.key))
+        assertNull(store.claim(scope, approveCarol.key))
+        assertEquals(1, store.armed(scope).size)
+        assertTrue(store.armed(scope).first().request is RetryableRequest.Add)
+    }
+
+    @Test
+    fun `the approve fires once the queue drained and not before`() {
+        assertEquals(RetryVerdict.Wait, retryVerdict(armed(approveCarol), snapshot(pendingCount = 64)))
+        assertEquals(RetryVerdict.Fire, retryVerdict(armed(approveCarol), snapshot(pendingCount = 63)))
+    }
+
+    @Test
+    fun `drops an approve once the joiner is a member`() {
+        val view =
+            snapshot(
+                roster =
+                    listOf(
+                        RetryRosterMember(0u, alice),
+                        RetryRosterMember(1u, bob),
+                        RetryRosterMember(2u, carol),
+                    ),
+                pendingCount = 0,
+                // The core reaps a joined request out of the quarantine, so this
+                // is empty in reality; supplied non-empty here so the test can
+                // only pass by reading the ROSTER.
+                retainedJoinKeys = listOf(carol),
+            )
+        assertEquals(
+            RetryVerdict.Drop(RetryDropReason.ALREADY_APPLIED),
+            retryVerdict(armed(approveCarol), view),
+        )
+    }
+
+    /**
+     * An approved external join IS an ordinary admin-authored `Add` keyed on
+     * the joiner's signature key, so it lands in the pending set under exactly
+     * the key an add of the same person would.
+     */
+    @Test
+    fun `drops an approve once an Add for the joiner is already waiting`() {
+        assertEquals(
+            RetryVerdict.Drop(RetryDropReason.ALREADY_WAITING),
+            retryVerdict(
+                armed(approveCarol),
+                snapshot(pendingKeys = listOf("add:$carol"), pendingCount = 1),
+            ),
+        )
+    }
+
+    /**
+     * Nothing else in the group changed: Carol is not a member, no Add is
+     * pending, the queue drained. The core simply no longer holds the request —
+     * anything that reloads the group empties the in-memory quarantine while
+     * this record survives — and re-issuing would be refused
+     * `NO_SUCH_JOIN_REQUEST`.
+     */
+    @Test
+    fun `drops an approve once the request has left the retained quarantine`() {
+        assertEquals(
+            RetryVerdict.Drop(RetryDropReason.JOIN_REQUEST_GONE),
+            retryVerdict(armed(approveCarol), snapshot(pendingCount = 0, retainedJoinKeys = emptyList())),
+        )
+        // Somebody ELSE's retained request is not ours.
+        assertEquals(
+            RetryVerdict.Drop(RetryDropReason.JOIN_REQUEST_GONE),
+            retryVerdict(armed(approveCarol), snapshot(pendingCount = 0, retainedJoinKeys = listOf(bob))),
+        )
+    }
+
+    @Test
+    fun `claims nothing on a torn read of the retained set`() {
+        assertEquals(
+            RetryVerdict.Wait,
+            retryVerdict(armed(approveCarol), snapshot(pendingCount = 0, retainedJoinKeys = null)),
+        )
+    }
+
+    /**
+     * A torn or empty quarantine says nothing about an add, a removal or a role
+     * change, so it must not stop one.
+     */
+    @Test
+    fun `does not read the retained set for any other kind of request`() {
+        for (request in listOf(addCarol, removeBob, makeBobAdmin)) {
+            assertEquals(
+                "$request",
+                RetryVerdict.Fire,
+                retryVerdict(armed(request), snapshot(pendingCount = 0, retainedJoinKeys = null)),
+            )
+            assertEquals(
+                "$request",
+                RetryVerdict.Fire,
+                retryVerdict(armed(request), snapshot(pendingCount = 0, retainedJoinKeys = emptyList())),
+            )
+        }
+    }
+
+    @Test
+    fun `drops an approve in a group that has lost its role table`() {
+        assertEquals(
+            RetryVerdict.Drop(RetryDropReason.NO_ROLE_TABLE),
+            retryVerdict(armed(approveCarol), snapshot(pendingCount = 0, roleTable = null)),
+        )
+    }
+
+    @Test
+    fun `drops an approve once our own membership has ended`() {
+        assertEquals(
+            RetryVerdict.Drop(RetryDropReason.MEMBERSHIP_ENDED),
+            retryVerdict(armed(approveCarol), snapshot(pendingCount = 0, membershipEnded = true)),
+        )
+    }
+
+    /**
+     * REAL platform threads, like the generic probe: the approve record goes
+     * through the same lock, and `Dispatchers.IO` would drain the claims
+     * serially and pass a broken one.
+     */
+    @Test
+    fun `exactly one thread wins the approve record against a concurrent manual tap`() {
+        repeat(200) {
+            store.arm(scope, armed(approveCarol))
+            val winners = ConcurrentLinkedQueue<ArmedRetry>()
+            val start = CountDownLatch(1)
+            val done = CountDownLatch(8)
+            repeat(8) {
+                Thread {
+                        start.await()
+                        store.claim(scope, approveCarol.key)?.let(winners::add)
+                        done.countDown()
+                    }
+                    .start()
+            }
+            start.countDown()
+            assertTrue("threads must finish", done.await(10, TimeUnit.SECONDS))
+            assertEquals("exactly one caller may own the record", 1, winners.size)
+        }
     }
 
     // -----------------------------------------------------------------------

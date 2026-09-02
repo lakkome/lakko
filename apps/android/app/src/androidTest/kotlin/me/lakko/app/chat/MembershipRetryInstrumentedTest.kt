@@ -56,6 +56,50 @@ class MembershipRetryInstrumentedTest {
         }
     }
 
+    /**
+     * The approve arm, against the real core. The host suite proves it ASKS;
+     * this proves the answers it gets are the core's own — including that the
+     * queue-full approve refusal the core stopped flattening into prose is one
+     * the core still calls retryable.
+     */
+    @Test
+    fun theApproveArmsExactlyOnTheReasonsTheCoreCallsRetryable() {
+        for (reason in FfiRefusalReason.entries) {
+            val armed =
+                armedApproveJoinRetry(
+                    error = FfiException.Group("prose the client never reads"),
+                    subjectKeyB64 = "Q0FST0w=",
+                    pendingCountAtRefusal = 64,
+                    retained = true,
+                    explicitReason = reason,
+                    retryMaySucceed = real,
+                )
+            if (real(reason)) {
+                assertNotNull("$reason is retryable per the core, so it must arm", armed)
+            } else {
+                assertNull("$reason is not retryable per the core, so it must not arm", armed)
+            }
+        }
+    }
+
+    /** An unretained request never arms, whatever the core says about the reason. */
+    @Test
+    fun theApproveNeverArmsForARequestTheQuarantineDidNotKeep() {
+        for (reason in FfiRefusalReason.entries) {
+            assertNull(
+                "$reason must not arm for an unretained request",
+                armedApproveJoinRetry(
+                    error = FfiException.Group("prose"),
+                    subjectKeyB64 = "Q0FST0w=",
+                    pendingCountAtRefusal = 64,
+                    retained = false,
+                    explicitReason = reason,
+                    retryMaySucceed = real,
+                ),
+            )
+        }
+    }
+
     @Test
     fun readsTheReasonOffARealCoreExceptionAndArmsOnIt() {
         // Not a stated reason: the exception itself carries it, through the

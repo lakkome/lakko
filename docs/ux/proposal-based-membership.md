@@ -1697,7 +1697,31 @@ owns that case and is still unbuilt. And **approving an external join** could no
 participate at all until 2026-09-01, for a reason found while building this: the core
 re-wrapped `propose_add_member`'s error in prose, destroying the reason it had just
 produced, so an approve refused by a full queue arrived with **no reason at all**. Fixed
-in the core; the client arm is not built.
+in the core, and the client arm followed. **Six kinds now, not five.**
+
+Approving needed a **third** stopping condition the other five do not: `approve_external_join`
+opens with `role_table_or_refuse`, so in a group with no role table the answer is
+permanent, and a retry there would wait forever. The predicate that used to ask *is this
+a role change* now asks *does this need a role table*, which is what it was always
+testing.
+
+Its subject is **one field** — the joiner's signature key, which the core makes both the
+identity and the handle, so no separate proposal reference is carried. And it delegates
+the not-retained rule to `externalJoinAffordance` rather than restating it, so a future
+change to what *actionable* means carries the retry with it; a torn read of the retained
+set answers *not actionable* and declines to arm.
+
+**Two in-memory lifetimes meet here, and the mismatch is handled rather than prevented.**
+The quarantine lives on the `Group`; the retry record lives beside the chat. A record can
+outlive its request **without a restart** — the ADR-0040 crash-abort reset and the web
+rehydrate both rebuild the `Group` mid-session while the retry store survives — so the
+verdict reads the live retained set and **drops** rather than firing an approve the core
+would refuse with `NoSuchJoinRequest`.
+
+**One `RetryLater` reason is reachable on this path, and it was enumerated rather than
+assumed:** six typed reasons can come back from an approve, and only the full pending set
+is retryable. The other `RetryLater` reason, a role change already in flight, cannot
+reach it at all — its guard is on the role-change paths, never on adding a member.
 
 ---
 

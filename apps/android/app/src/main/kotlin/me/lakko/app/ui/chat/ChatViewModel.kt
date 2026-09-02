@@ -656,8 +656,22 @@ public class ChatViewModel(
             pendingCount = repo.pendingProposalCount(groupIdHex),
             roleTable = table,
             membershipEnded = membershipEnded.value,
+            retainedJoinKeys = retainedJoinKeysNow(),
         )
     }
+
+    /**
+     * ADR-0027 — the joiner key of every request the core still holds in its
+     * retained external-join quarantine, or `null` on a torn read.
+     *
+     * Deliberately NOT `repo.pendingExternalJoins`: that one folds a failed
+     * read into an empty list (correct for a panel, which then renders nothing)
+     * and its caller gates on `membershipEnded`. Here an empty list and a
+     * failed read are different answers — the first says the request is gone,
+     * the second says nothing — and conflating them would drop a live retry.
+     */
+    private fun retainedJoinKeysNow(): List<String>? =
+        repo.retainedExternalJoinKeys(groupIdHex)?.map { me.lakko.app.chat.outboxB64(it) }
 
     /**
      * Claim the slot for [request] before a MANUAL attempt starts.
@@ -718,6 +732,41 @@ public class ChatViewModel(
     }
 
     /**
+     * The approve-an-external-join twin of [withMembershipRetry].
+     *
+     * Separate because the arming gate is: `armedApproveJoinRetry` also asks
+     * `externalJoinAffordance` whether the request is one an approve could act
+     * on at all, and the `retained` answer is read LIVE off the core's
+     * quarantine rather than assumed. A torn read of that set answers `false`,
+     * which is the fail-safe direction — it can only decline to arm, never arm
+     * a retry the core has nothing to look up.
+     */
+    private suspend fun <T> withApproveJoinRetry(
+        proposalRef: ByteArray,
+        run: suspend () -> T,
+    ): T {
+        val subjectKeyB64 = me.lakko.app.chat.outboxB64(proposalRef)
+        disarmRetry(me.lakko.app.chat.RetryableRequest.ApproveJoin(subjectKeyB64))
+        val before = repo.pendingProposalCount(groupIdHex)
+        try {
+            return run()
+        } catch (e: Throwable) {
+            val scope = retryScope()
+            if (scope != null) {
+                val armed = me.lakko.app.chat.armedApproveJoinRetry(
+                    error = e,
+                    subjectKeyB64 = subjectKeyB64,
+                    pendingCountAtRefusal = before,
+                    retained = retainedJoinKeysNow()?.contains(subjectKeyB64) ?: false,
+                    retryMaySucceed = ::membershipRefusalRetryMaySucceed,
+                )
+                if (armed != null) retryStore.arm(scope, armed)
+            }
+            throw e
+        }
+    }
+
+    /**
      * Re-issue one armed request, reconstructed from its descriptor.
      *
      * **Reconstructed, never a stored lambda.** The descriptor is exactly what
@@ -767,6 +816,24 @@ public class ChatViewModel(
                     me.lakko.app.chat.outboxUnb64(request.subjectKeyB64),
                     request.outgoing,
                 )
+            is me.lakko.app.chat.RetryableRequest.ApproveJoin -> {
+                // The joiner's signature key IS the `proposal_ref` handle, so
+                // the descriptor reconstructs the call whole. The KeyPackage it
+                // needs is the one the core retained — which is also why the
+                // verdict refuses to fire once that request has left the
+                // quarantine.
+                repo.approveExternalJoin(
+                    groupIdHex,
+                    me.lakko.app.chat.outboxUnb64(request.subjectKeyB64),
+                )
+                // `unkeptJoinRequest` is deliberately NOT cleared here. The
+                // manual handler clears it as feedback for something the user
+                // just did; a background re-send is not that, and the notice's
+                // action item — ask that person to send their request again —
+                // stays true regardless, because a request the quarantine never
+                // kept is not recoverable by approving a different one.
+                Unit
+            }
         }
     }
 
@@ -822,12 +889,34 @@ public class ChatViewModel(
                     // and waits for the next drain — silently, because nothing
                     // has changed for the user since the refusal they were
                     // already shown.
-                    val rearmed = me.lakko.app.chat.armedRetryFor(
-                        error = e,
-                        request = claimed.request,
-                        pendingCountAtRefusal = repo.pendingProposalCount(groupIdHex),
-                        retryMaySucceed = ::membershipRefusalRetryMaySucceed,
-                    )
+                    //
+                    // An approve re-arms through its OWN helper, so the
+                    // affordance gate runs on this path too. Defence in depth
+                    // rather than a hole being closed — `approve_external_join`
+                    // looks the request up BEFORE it proposes, so a queue-full
+                    // refusal proves it was still retained — but the re-arm is
+                    // part of the retry path, and a second way to arm one that
+                    // skipped a gate the first way applies is the shape that
+                    // eventually diverges.
+                    val request = claimed.request
+                    val count = repo.pendingProposalCount(groupIdHex)
+                    val rearmed = if (request is me.lakko.app.chat.RetryableRequest.ApproveJoin) {
+                        me.lakko.app.chat.armedApproveJoinRetry(
+                            error = e,
+                            subjectKeyB64 = request.subjectKeyB64,
+                            pendingCountAtRefusal = count,
+                            retained =
+                                retainedJoinKeysNow()?.contains(request.subjectKeyB64) ?: false,
+                            retryMaySucceed = ::membershipRefusalRetryMaySucceed,
+                        )
+                    } else {
+                        me.lakko.app.chat.armedRetryFor(
+                            error = e,
+                            request = request,
+                            pendingCountAtRefusal = count,
+                            retryMaySucceed = ::membershipRefusalRetryMaySucceed,
+                        )
+                    }
                     if (rearmed != null) {
                         retryStore.arm(scope, rearmed)
                     } else {
@@ -1447,7 +1536,15 @@ public class ChatViewModel(
         mutableMembershipNotice.value = null
         viewModelScope.launch {
             try {
-                repo.approveExternalJoin(groupIdHex, proposalRef)
+                // ADR-0045 UX §7 — an approve refused by a full pending set now
+                // carries its reason (the core stopped flattening it into prose
+                // in `21f6c8c`), so it re-sends itself when a committer drains
+                // the queue. The wrapper also disarms first, so tapping Approve
+                // again takes the record rather than racing an in-flight
+                // re-send for it.
+                withApproveJoinRetry(proposalRef) {
+                    repo.approveExternalJoin(groupIdHex, proposalRef)
+                }
                 val swept = repo.sweepIfCommitter(groupIdHex)
                 mutableMembershipNotice.value = if (swept is me.lakko.app.chat.SweepOutcome.Committed) {
                     "Join approved. They have been added to the group."
@@ -1498,6 +1595,17 @@ public class ChatViewModel(
         mutableMembershipError.value = null
         viewModelScope.launch {
             try {
+                // ADR-0045 UX §7 — a reject is the user saying no, so any armed
+                // re-send of an approve for the same request goes with it. The
+                // verdict would drop it anyway once it saw the emptied
+                // quarantine (`JOIN_REQUEST_GONE`), but leaving a record that
+                // contradicts a decision the user just made is not a state to
+                // keep for a poll cycle.
+                disarmRetry(
+                    me.lakko.app.chat.RetryableRequest.ApproveJoin(
+                        me.lakko.app.chat.outboxB64(proposalRef),
+                    ),
+                )
                 repo.rejectExternalJoin(groupIdHex, proposalRef)
                 // Same reason as in `onApproveJoin`: the queue moved.
                 repo.clearUnkeptExternalJoin(groupIdHex)

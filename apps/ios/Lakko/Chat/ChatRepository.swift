@@ -1419,6 +1419,17 @@ public final class ChatRepository: ObservableObject {
         return (try? record.group.pendingExternalJoins()) ?? []
     }
 
+    /// ADR-0045 UX §7 — the same retained set, but with a TORN read reported as
+    /// `nil` rather than folded into an empty list.
+    ///
+    /// A panel wants the fold (nothing to render either way). The retry verdict
+    /// does not: "no request retained" is a reason to DROP an armed approve,
+    /// and a failed read must not be allowed to say that.
+    public func retainedExternalJoinKeys(groupIdHex: String) -> [Data]? {
+        guard let record = groups[groupIdHex] else { return nil }
+        return try? record.group.pendingExternalJoins()
+    }
+
     /// ADR-0027 / UX §7.1 — whether a request the quarantine turned away has
     /// been observed for this group since the last time an admin acted.
     ///
