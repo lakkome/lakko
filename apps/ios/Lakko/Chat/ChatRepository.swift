@@ -211,7 +211,11 @@ public final class ChatRepository: ObservableObject {
     /// here it would be worse than useless — two membership operations answer
     /// two DIFFERENT intents (add Alice, remove Bob), so a fold would silently
     /// drop one.
-    private var commitChain: [String: Task<Void, Never>] = [:]
+    ///
+    /// The chain lives in ``GroupMlsLock`` (same construction, moved so the
+    /// app-level call host can observe its drains — see
+    /// ``observeGroupMlsIdle(_:)``).
+    private let commitLock = GroupMlsLock()
 
     /// ADR-0040 (G-35) — hex group ids already swept this session, so the
     /// pending-commit outbox sweep runs at most once per group per session (on
@@ -465,7 +469,7 @@ public final class ChatRepository: ObservableObject {
         // ADR-0048 — a scheduled growth republish belongs to the session that
         // saw the growth.
         profilePublisher.reset()
-        // `commitChain` is deliberately NOT cleared. Dropping a tail does not
+        // The commit chain (``GroupMlsLock``) is deliberately NOT cleared. Dropping a tail does not
         // stop the section behind it — it only makes the next caller start
         // BESIDE that section, which is the race the chain exists to close.
         // Queued sections re-read `canonicalIdentity` / `groups` (now empty)
@@ -826,6 +830,13 @@ public final class ChatRepository: ObservableObject {
     public func epoch(groupIdHex: String) -> UInt64? {
         guard let record = groups[groupIdHex] else { return nil }
         return try? record.group.epoch()
+    }
+
+    /// `true` while this repository holds a live handle for `groupIdHex` — the
+    /// chat is still in the registry. The group call host ends a call whose
+    /// chat is gone rather than keep media flowing under a key nobody rotates.
+    func hasGroup(groupIdHex: String) -> Bool {
+        groups[groupIdHex] != nil
     }
 
     /// ADR-0045 UX §6.2 — is this device still a member of `groupIdHex`?
@@ -3885,31 +3896,21 @@ public final class ChatRepository: ObservableObject {
         groupIdHex: String,
         _ body: @escaping @MainActor () async throws -> T
     ) async throws -> T {
-        // Read the tail and replace it with NO `await` in between: `@MainActor`
-        // cannot interleave another caller across a straight-line region, so two
-        // callers can never observe the SAME predecessor and run beside each
-        // other.
-        let predecessor = commitChain[groupIdHex]
-        let run = Task { @MainActor () async throws -> T in
-            // Wait for everything already queued for this group. A predecessor
-            // that threw must not block its successor, hence the discarded
-            // result on a `Never`-failing erased tail.
-            _ = await predecessor?.value
-            return try await body()
-        }
-        // The erased tail completes exactly when `run` does, so a successor
-        // chaining on it observes this section's writes.
-        let tail = Task { @MainActor in _ = try? await run.value }
-        commitChain[groupIdHex] = tail
-        // Tail-guarded release — a successor that queued behind this section is
-        // the tail now, and dropping it would let the caller after it start
-        // beside it. Runs on both the success and the throw path.
-        defer {
-            if commitChain[groupIdHex] == tail {
-                commitChain.removeValue(forKey: groupIdHex)
-            }
-        }
-        return try await run.value
+        try await commitLock.run(groupIdHex: groupIdHex, body)
+    }
+
+    /// Observe every moment a group's MLS chain DRAINS: the last queued
+    /// region for that group has settled and nothing is queued behind it. See
+    /// ``GroupMlsLock`` for why only a drain is reported. The app-level group
+    /// call host uses it to rotate a live call's SFrame key after an epoch
+    /// advance applied by ANY receive path (G-18 / ADR-0029).
+    @discardableResult
+    func observeGroupMlsIdle(_ observer: @escaping @MainActor (_ groupIdHex: String) -> Void) -> UUID {
+        commitLock.observeIdle(observer)
+    }
+
+    func removeGroupMlsIdleObserver(_ token: UUID) {
+        commitLock.removeIdleObserver(token)
     }
 
     // MARK: - ADR-0040 (G-35) durable pending-commit outbox

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * `/profile` — the viewer's own profile (ADR-0048, UX spec §4).
+ * Settings > Profile — the viewer's own profile (ADR-0048, UX spec §4).
  *
  * A name field (one line, at most 64 characters, validated by the core as the
  * user types), a live preview of how others see you (`Alice Petrova ·
@@ -72,18 +72,12 @@ export default function Profile(): JSX.Element {
   }
 
   return (
-    <article>
-      <h1>Profile</h1>
-      <section
-        style={{
-          background: "var(--surface-elevated)",
-          border: "1px solid var(--surface-border)",
-          "border-radius": "var(--radius-md)",
-          padding: "1rem",
-          margin: "1rem 0",
-          "max-width": "32rem",
-        }}
-      >
+    <>
+      <div class="lk-page-head">
+        <h1>Profile</h1>
+        <p>How you appear to your contacts.</p>
+      </div>
+      <section class="lk-card">
         <form onSubmit={(e) => void onSave(e)}>
           <label>
             Your name
@@ -150,6 +144,6 @@ export default function Profile(): JSX.Element {
           </button>
         </form>
       </section>
-    </article>
+    </>
   );
 }

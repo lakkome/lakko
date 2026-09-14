@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * `PasskeysSection` — passkey management UI on the Home screen
+ * `PasskeysSection` — passkey management, under Settings > Security
  * (Phase 2a2c1).
  *
  * Renders three things, in this order:
@@ -42,10 +42,7 @@ import {
   type JSX,
 } from "solid-js";
 import { useAuth } from "./AuthContext";
-import {
-  deleteAccountConfirmation,
-  removePasskeyConfirmation,
-} from "./destructive-confirm";
+import { removePasskeyConfirmation } from "./destructive-confirm";
 import { requestConfirm } from "../ui/confirm-dialog";
 import { getDeviceKey } from "./key-store";
 import { enableAttestedRemovalsIfNeeded } from "../devices/attested-removal-policy";
@@ -56,38 +53,17 @@ import {
   WebauthnUnsupportedError,
   WebauthnUserCancelledError,
   actionHashForDeleteCredential,
-  actionHashForDeleteAccount,
   type CredentialSummary,
 } from "./webauthn-client";
-import { DiscoveryClient } from "../discovery/client";
+import { useWebauthnClient } from "./use-webauthn-client";
+import { Icon } from "../ui/icons";
 
 const SUPPORTED = WebauthnClient.isWebauthnAvailable();
 
 export default function PasskeysSection(): JSX.Element {
   const auth = useAuth();
 
-  // Capture the username + sessionToken reactively so the section
-  // can re-bind across logins / token rotations without remounting.
-  const username = (): string | null => {
-    const s = auth.state();
-    return s.kind === "session" ? s.account.username : null;
-  };
-  const sessionToken = (): string | null => {
-    const secrets = auth.identitySecrets();
-    return secrets === null ? null : secrets.sessionToken;
-  };
-
-  // Build a fresh `WebauthnClient` whenever the session token
-  // rotates — same shape as `ContactsClient` in `Contacts.tsx`.
-  // Memo-cheap: the client itself is tiny, the only state is the
-  // bearer token.
-  const client = (): WebauthnClient | null => {
-    const token = sessionToken();
-    if (token === null) return null;
-    const c = new WebauthnClient();
-    c.setSessionToken(token);
-    return c;
-  };
+  const { client, username } = useWebauthnClient();
 
   const [refreshTrigger, setRefreshTrigger] = createSignal(0);
   const [credentials] = createResource(
@@ -130,7 +106,7 @@ export default function PasskeysSection(): JSX.Element {
       return;
     }
     if (label.length === 0) {
-      setMessage({ kind: "error", text: "Give the passkey a nickname." });
+      setMessage({ kind: "error", text: "Give the passkey a name." });
       return;
     }
     setBusy(true);
@@ -208,178 +184,64 @@ export default function PasskeysSection(): JSX.Element {
     }
   }
 
-  // A3 (GDPR right-to-erasure) — delete the whole account across services +
-  // wipe this device. Orchestration: auth `DELETE /account` (with a passkey
-  // action gesture when the account has a passkey) -> best-effort discovery
-  // purge -> local `forgetDevice` wipe + sign-out.
-  async function onDeleteAccount(): Promise<void> {
-    const c = client();
-    const secrets = auth.identitySecrets();
-    if (c === null || secrets === null) {
-      setMessage({ kind: "error", text: "Session not ready." });
-      return;
-    }
-    // ADR-0045 UX §14 — an in-page dialog rather than `window.confirm`. This
-    // is the most destructive control in the app and the one whose scope the
-    // user can least check afterwards, so the body enumerates both tiers and
-    // the action names what it deletes.
-    if (!(await requestConfirm(deleteAccountConfirmation()))) {
-      return;
-    }
-    setBusy(true);
-    setMessage(null);
-    try {
-      // Raw 16-byte account_id for the delete-account action hash.
-      const accountId = secrets.accountId;
-      // Auth tier: try the delete; if the server demands a passkey gesture
-      // (the account has a passkey) it answers 403, so run the action ceremony
-      // bound to this account and retry once. A throw (the user dismisses the
-      // sheet) aborts — fail-closed.
-      try {
-        await c.deleteAccount();
-      } catch (err) {
-        if (err instanceof WebauthnHttpError && err.status === 403) {
-          const actionHashB64 = await actionHashForDeleteAccount(accountId);
-          await c.assertAction(actionHashB64);
-          await c.deleteAccount();
-        } else {
-          throw err;
-        }
-      }
-      // Discovery tier: best-effort (the auth tier is the critical erasure;
-      // the session token is about to be invalidated anyway, and what is left
-      // behind is only opaque public artefacts).
-      try {
-        const d = new DiscoveryClient();
-        d.setSessionToken(secrets.sessionToken);
-        await d.deleteAccount();
-      } catch {
-        /* best-effort */
-      }
-      // Local wipe + full sign-out on this device.
-      await auth.forgetDevice();
-    } catch (err) {
-      setMessage({ kind: "error", text: explainError(err) });
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  // A3 (GDPR data-portability) — download a JSON of what the server holds about
-  // this account + the locally-known username. The actual E2EE content
-  // (messages, contacts, groups) lives only on-device and is exported via the
-  // encrypted Backup, not here.
-  async function onExportData(): Promise<void> {
-    const c = client();
-    if (c === null) {
-      setMessage({ kind: "error", text: "Session not ready." });
-      return;
-    }
-    setBusy(true);
-    setMessage(null);
-    try {
-      const server = await c.exportAccount();
-      const exportDoc = {
-        schema: "lakko/account-export/v1",
-        exported_at: new Date().toISOString(),
-        username: username(),
-        server,
-        note:
-          "Your messages, contacts, and group state are end-to-end encrypted " +
-          "and live only on your devices — export them via the encrypted Backup.",
-      };
-      const blob = new Blob([JSON.stringify(exportDoc, null, 2)], {
-        type: "application/json",
-      });
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = "lakko-account-export.json";
-      anchor.click();
-      URL.revokeObjectURL(url);
-      setMessage({ kind: "ok", text: "Exported your account data." });
-    } catch (err) {
-      setMessage({ kind: "error", text: explainError(err) });
-    } finally {
-      setBusy(false);
-    }
-  }
-
   return (
-    <section class="passkeys-section">
-      <h2 style={{ "margin-bottom": "0.5rem" }}>Passkeys</h2>
-      <p style={{ color: "var(--surface-muted)", "margin-top": 0 }}>
-        Sign in with a hardware key, Face ID, or your password manager.
-        Recovery phrase always works as the last-resort path.
+    <section class="lk-card">
+      <h2>Passkeys</h2>
+      <p class="lk-card-desc">
+        Sign in with Touch ID, Face ID or a security key instead of your password.
+        Your recovery phrase always works too.
       </p>
 
       <Show
         when={SUPPORTED}
         fallback={
           <p class="form-error">
-            Your browser doesn't support WebAuthn. Use a recent version
-            of Safari, Chrome, Firefox, or Edge to manage passkeys.
+            This browser cannot manage passkeys. Use a recent Safari, Chrome,
+            Firefox or Edge.
           </p>
         }
       >
-        <Show
-          when={credentials() !== undefined}
-          fallback={<p>Loading passkeys…</p>}
-        >
+        <Show when={credentials() !== undefined} fallback={<p class="form-info">Loading…</p>}>
           <Show
             when={(credentials() ?? []).length > 0}
-            fallback={
-              <p style={{ color: "var(--surface-muted)" }}>
-                No passkeys yet. Add one below.
-              </p>
-            }
+            fallback={<p class="form-info">No passkeys yet.</p>}
           >
-            <ul class="passkeys-list" style={{ "list-style": "none", padding: 0 }}>
+            <div>
               <For each={credentials() ?? []}>
                 {(cred) => (
-                  <li
-                    style={{
-                      display: "flex",
-                      "align-items": "center",
-                      "justify-content": "space-between",
-                      padding: "0.5rem 0",
-                      "border-bottom": "1px solid var(--surface-border, #eee)",
-                    }}
-                  >
-                    <div>
-                      <strong>{cred.nickname || "(unnamed passkey)"}</strong>
-                      <div
-                        style={{
-                          color: "var(--surface-muted)",
-                          "font-size": "0.85em",
-                        }}
-                      >
+                  <div class="lk-card-row">
+                    <span class="lk-card-row-icon">
+                      <Icon name="key" size={18} />
+                    </span>
+                    <div class="lk-card-row-body">
+                      <span class="lk-card-row-title">{cred.nickname || "Unnamed passkey"}</span>
+                      <span class="lk-card-row-sub">
                         Added {formatTimestamp(cred.created_at_ms)}
                         {cred.last_used_at_ms !== null
                           ? ` · last used ${formatTimestamp(cred.last_used_at_ms)}`
                           : " · never used"}
-                      </div>
+                      </span>
                     </div>
                     <button
                       type="button"
+                      class="ghost small lk-card-row-action"
+                      style={{ color: "var(--danger)" }}
                       disabled={busy()}
                       onClick={() => void onDelete(cred)}
                     >
-                      Delete
+                      Remove
                     </button>
-                  </li>
+                  </div>
                 )}
               </For>
-            </ul>
+            </div>
           </Show>
 
-          <form
-            onSubmit={onAdd}
-            style={{ display: "flex", gap: "0.5rem", "margin-top": "1rem" }}
-          >
+          <form onSubmit={onAdd} class="lk-actions" style={{ "flex-wrap": "nowrap" }}>
             <input
               type="text"
-              placeholder="Nickname (e.g. MacBook Touch ID)"
+              placeholder="Name this passkey (e.g. MacBook Touch ID)"
+              aria-label="Passkey name"
               value={nickname()}
               onInput={(e) => setNickname(e.currentTarget.value)}
               disabled={busy()}
@@ -392,60 +254,10 @@ export default function PasskeysSection(): JSX.Element {
           </form>
         </Show>
 
-        {message() !== null && (
-          <div
-            class={message()?.kind === "ok" ? "form-info" : "form-error"}
-            style={{ "margin-top": "0.75rem" }}
-          >
-            {message()?.text}
-          </div>
-        )}
+        <Show when={message()}>
+          {(m) => <div class={m().kind === "ok" ? "form-info" : "form-error"}>{m().text}</div>}
+        </Show>
       </Show>
-
-      {/* A3 (GDPR) — data portability: download what the server holds. */}
-      <div
-        style={{
-          "margin-top": "2rem",
-          "padding-top": "1rem",
-          "border-top": "1px solid var(--surface-border, #ccc)",
-        }}
-      >
-        <h3 style={{ "margin-bottom": "0.25rem" }}>Your data</h3>
-        <p style={{ color: "var(--surface-muted)", "margin-top": 0 }}>
-          Download a copy of what the server holds about your account. Your
-          messages and contacts are end-to-end encrypted on your devices —
-          export those via the encrypted Backup.
-        </p>
-        <button type="button" disabled={busy()} onClick={() => void onExportData()}>
-          Export my data
-        </button>
-      </div>
-
-      {/* A3 (GDPR) — danger zone: permanent account deletion. */}
-      <div
-        style={{
-          "margin-top": "2rem",
-          "padding-top": "1rem",
-          "border-top": "1px solid var(--surface-border, #ccc)",
-        }}
-      >
-        <h3 style={{ "margin-bottom": "0.25rem", color: "var(--error)" }}>
-          Delete account
-        </h3>
-        <p style={{ color: "var(--surface-muted)", "margin-top": 0 }}>
-          Permanently erase your account from the server (username, keys,
-          recovery factors, backup) and wipe this device. This cannot be undone.
-        </p>
-        <button
-          type="button"
-          class="danger"
-          style={{ color: "var(--error)" }}
-          disabled={busy()}
-          onClick={() => void onDeleteAccount()}
-        >
-          Delete my account
-        </button>
-      </div>
     </section>
   );
 }

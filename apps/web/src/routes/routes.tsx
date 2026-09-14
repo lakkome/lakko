@@ -13,8 +13,8 @@
  *      `<RequireAnonymous>` so a signed-in user gets bounced home
  *      instead of landing on a login form they cannot use.
  *
- *   2. **Protected** (`/`, `/contacts`, `/chat/:id`, `/dev`) —
- *      wrapped in `<RequireSession>` and rendered inside the
+ *   2. **Protected** (`/`, `/chat/:id`, `/contacts`, `/channels`, `/calls`,
+ *      `/settings`, `/devices`, `/dev`) — wrapped in `<RequireSession>` and rendered inside the
  *      `<AppShell>` layout. The wrapper short-circuits to `/login`
  *      when the user is anonymous.
  *
@@ -23,15 +23,17 @@
  * behaves better when the wasm chunk is the only big payload. We
  * revisit lazy loading in 1.16f together with the bundle pass.
  */
-import type { RouteDefinition } from "@solidjs/router";
+import { Navigate, type RouteDefinition } from "@solidjs/router";
 import { AppShell } from "../ui/AppShell";
 import { RequireAnonymous, RequireSession } from "../auth/guards";
 import Login from "./Login";
 import Recover from "./Recover";
 import Signup from "./Signup";
 import Home from "./Home";
+import ChatsLayout from "./ChatsLayout";
 import Contacts from "./Contacts";
-import Profile from "./Profile";
+import Settings from "./Settings";
+import Calls from "./Calls";
 import Call from "./Call";
 import {
   ChannelsList,
@@ -116,10 +118,20 @@ export const routes: RouteDefinition[] = [
       </RequireSession>
     ),
     children: [
-      { path: paths.home, component: Home },
+      // Chats: the list pane stays mounted across `/` and `/chat/:id`.
+      {
+        path: "/",
+        component: ChatsLayout,
+        children: [
+          { path: paths.home, component: Home },
+          { path: chatRoutePattern, component: Chat },
+        ],
+      },
       { path: paths.contacts, component: Contacts },
-      { path: paths.profile, component: Profile },
-      { path: chatRoutePattern, component: Chat },
+      { path: paths.calls, component: Calls },
+      { path: "/settings/:section?", component: Settings },
+      // The old profile URL lands on its Settings section.
+      { path: "/profile", component: () => <Navigate href={paths.settingsSection("profile")} /> },
       // Standalone design route — render Call with no props (its
       // embedded/onExit props are only used when Chat.tsx presents
       // it over a live call). Wrapping decouples Call's prop type

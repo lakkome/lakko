@@ -21,6 +21,8 @@ import { readReturnUrl } from "../auth/return-url";
 import { WebauthnClient } from "../auth/webauthn-client";
 import { UsernameHint } from "../profile/UsernameHint";
 import { requireValidUsername } from "../profile/username-field";
+import { AuthLayout } from "../ui/AuthLayout";
+import { Icon } from "../ui/icons";
 
 export default function Login(): JSX.Element {
   const auth = useAuth();
@@ -99,14 +101,9 @@ export default function Login(): JSX.Element {
   };
 
   return (
-    <div class="auth-shell">
-      <section class="auth-card">
-        <h1>Log in to Lakko</h1>
-        <p style={{ color: "var(--surface-muted)", "margin-top": 0 }}>
-          OPAQUE-PAKE login + OPRF username lookup. Wrong
-          username and wrong password produce the same error —
-          by design.
-        </p>
+    <AuthLayout>
+        <h1>Welcome back</h1>
+        <p class="auth-lede">Log in to continue.</p>
         <form onSubmit={onSubmit}>
           <label>
             Username
@@ -133,34 +130,26 @@ export default function Login(): JSX.Element {
           </label>
           {error() !== null && <div class="form-error">{error()}</div>}
           <button class="primary" type="submit" disabled={busy()}>
-            {busy() ? "Signing in…" : "Log in"}
+            {busy() ? "Logging in…" : "Log in"}
           </button>
         </form>
         <Show when={passkeyAvailable()}>
-          <div style={{ margin: "0.75rem 0", "text-align": "center" }}>
-            <button
-              type="button"
-              disabled={busy()}
-              onClick={() => void onPasskeyLogin()}
-              style={{ "min-width": "60%" }}
-            >
-              Sign in with passkey
-            </button>
-            <p
-              class="form-footer"
-              style={{ "font-size": "0.85em", "margin-top": "0.25rem" }}
-            >
-              Uses the passkey you registered earlier on this device.
-            </p>
-          </div>
+          <button
+            type="button"
+            disabled={busy()}
+            onClick={() => void onPasskeyLogin()}
+            style={{ "margin-top": "-6px" }}
+          >
+            <Icon name="key" size={18} />
+            Log in with a passkey
+          </button>
         </Show>
         <p class="form-footer">
-          New to Lakko? <A href={paths.signup}>Create an account</A>.
+          New to Lakko? <A href={paths.signup}>Create an account</A>
         </p>
         <p class="form-footer">
-          Lost your password? <A href={paths.recover}>Recover with your 24-word phrase</A>.
+          Forgot your password? <A href={paths.recover}>Use your recovery phrase</A>
         </p>
-      </section>
-    </div>
+    </AuthLayout>
   );
 }

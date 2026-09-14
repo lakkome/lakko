@@ -31,18 +31,15 @@ import {
   createSignal,
   For,
   on,
-  onCleanup,
-  onMount,
   Show,
   type JSX,
 } from "solid-js";
-import { A, useNavigate } from "@solidjs/router";
+import { useNavigate } from "@solidjs/router";
 import { useAuth } from "../auth/AuthContext";
 import {
   base64Decode,
   base64Encode,
   base64UrlDecodeNoPad,
-  base64UrlEncodeNoPad,
 } from "../auth/account-id";
 import {
   ContactsClient,
@@ -51,21 +48,8 @@ import {
 } from "../contacts/client";
 import type { IncomingContactRequest, SendResult } from "../contacts/client";
 import { supersessionRefusedMessage } from "../contacts/supersession-message";
-import { useChats, type ActiveGroup } from "../chat/ChatContext";
-// ADR-0045 UX §6.2.4 — the chat-list row's muted line for a group this device
-// is no longer in. The rule and the string both live in the plain module; this
-// file only renders what it decides.
-import {
-  chatListLine,
-  membershipState,
-  readIsActive,
-} from "../chat/membership-ended";
-import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
+import { useChats } from "../chat/ChatContext";
 import { groupIdHex as syncGroupIdHex } from "../devices/sync/state";
-import { loadMessageLog, type PersistedGroup } from "../chat/message-log-store";
-import { summarizeGroupSlot, type ChatListSummary } from "../chat/background-log";
-import { subscribeMessageLogChanged } from "../chat/message-log-events";
-import { getDeviceKey } from "../auth/key-store";
 import { loadWasm } from "../wasm";
 import { paths } from "./paths";
 import {
@@ -80,7 +64,6 @@ import {
 import { DiscoveryClient, type ActiveInvite } from "../discovery/client";
 import {
   loadAccepted,
-  peerContactByMemberPubkeys,
   removeAccepted,
   upsertAccepted,
   type AcceptedContact,
@@ -390,7 +373,6 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
         onDecline={onDecline}
       />
 
-      <ActiveGroupsPanel groups={chats.groups} accepted={accepted} />
 
       <AcceptedPanel
         accepted={accepted}
@@ -478,9 +460,9 @@ function SendPanel(props: SendPanelProps): JSX.Element {
             type="button"
             disabled={props.busy() || !mayLookUp(props.searchCheck())}
             onClick={props.onStartGroup}
-            title="Fetch the recipient's KeyPackage, build a 1×1 MLS group, ship the Welcome over DS."
+            title="Start an encrypted chat with this person."
           >
-            Start MLS group
+            Start chat
           </button>
         </div>
       </form>
@@ -1101,437 +1083,6 @@ function GeneratedUrlPanel(props: {
       </Show>
     </div>
   );
-}
-
-function ActiveGroupsPanel(props: {
-  groups: () => readonly ActiveGroup[];
-  /** Reactive accepted-contacts list (ADR-0021 follow-up). A chat
-   *  linked to a contact (by group id) renders the contact's
-   *  user-chosen displayName instead of the static creation-time
-   *  label, so a rename propagates here too. */
-  accepted: () => AcceptedContact[];
-}): JSX.Element {
-  const chats = useChats();
-  const profiles = useProfiles();
-  /** Best label for a chat row (ADR-0048 §5). A 1x1 chat is the other person,
-   *  through the one resolver (rename, profile name, verified username,
-   *  fingerprint), read live from the MLS roster so it works however the
-   *  chat was created. A group keeps its own label. */
-  const chatLabel = (g: ActiveGroup): string => {
-    props.accepted();
-    const own = chats.identity();
-    const ownB64 = own === null ? null : base64Encode(own.signaturePublicKey);
-    let memberB64s: string[] = [];
-    try {
-      memberB64s = (
-        g.group.members() as Array<{ signaturePublicKey: Uint8Array }>
-      ).map((m) => base64Encode(m.signaturePublicKey));
-    } catch {
-      // members() can throw on a torn group; fall through to the label.
-    }
-    const peers = memberB64s.filter((k) => k !== ownB64);
-    if (memberB64s.length === 2 && peers.length === 1 && peers[0] !== undefined) {
-      return profiles.resolve(peers[0]).listLabel;
-    }
-    // A group: a linked contact (accept-created) still names it when renamed.
-    const byId = props.accepted().find((c) => c.groupIdB64 === g.groupIdB64);
-    if (byId !== undefined && byId.displayName.length > 0) return byId.displayName;
-    const byMember = peerContactByMemberPubkeys(memberB64s, ownB64, props.accepted());
-    if (byMember !== undefined && byMember.displayName.length > 0 && memberB64s.length <= 2) {
-      return byMember.displayName;
-    }
-    return g.label;
-  };
-  // Phase 2a3e2c-web — reactive flags from the cross-device
-  // sync runtime. Reads here drive (a) the pin / mute /
-  // archive indicators next to each row, (b) the sort
-  // ordering (pinned top, archived bottom).
-  const sync = useDeviceGroupSync();
-  const auth = useAuth();
-  // Phase 2a3e2c-followup-web — the chat list's unread badge and last-message
-  // preview, both read from the persisted message log. The log is written by
-  // the open chat view AND by the background receive for every chat that is
-  // not open (`chat/BackgroundReceiveContext.tsx`), and every write publishes
-  // `message-log-changed`, so a message to a chat the user never opened now
-  // shows up here while they are looking at this list.
-  const [logSlots, setLogSlots] = createSignal<{ readonly [groupIdHex: string]: PersistedGroup }>(
-    {},
-  );
-
-  async function reloadIncomingIds(): Promise<void> {
-    const s = auth.state();
-    if (s.kind !== "session") return;
-    const accountIdB64 = s.account.accountId;
-    const deviceKey = await getDeviceKey(accountIdB64);
-    if (deviceKey === null) return;
-    const log = await loadMessageLog(accountIdB64, deviceKey);
-    if (log === null) return;
-    setLogSlots(log.groups);
-  }
-
-  onMount(() => {
-    void reloadIncomingIds();
-    // G-8: the badge used to refresh only on its next mount. Subscribe to
-    // message-log changes (a message written from another tab / the Chat
-    // route / the background receive) so it reloads live. Same-account filter
-    // so an unrelated account's write (multi-account on one browser) is
-    // ignored.
-    const unsubscribe = subscribeMessageLogChanged((account) => {
-      const s = auth.state();
-      if (s.kind === "session" && s.account.accountId === account) {
-        void reloadIncomingIds();
-      }
-    });
-    onCleanup(unsubscribe);
-  });
-
-  /** Unread count + preview for one row — the rule lives in
-   *  `summarizeGroupSlot`: rows above the later of the cross-device read cursor
-   *  and the newest row this device's chat view has shown. */
-  function summaryFor(groupIdBytes: Uint8Array): ChatListSummary {
-    const hex = syncGroupIdHex(groupIdBytes);
-    const cursor = sync.readCursors()[hex];
-    let syncedReadUpTo: bigint | null = null;
-    if (cursor !== undefined && cursor.upToMessageId.length >= 8) {
-      let id = 0n;
-      for (let i = 0; i < 8; i += 1) {
-        id = (id << 8n) | BigInt(cursor.upToMessageId[i] as number);
-      }
-      syncedReadUpTo = id;
-    }
-    return summarizeGroupSlot(logSlots()[hex], syncedReadUpTo);
-  }
-
-  function unreadFor(groupIdBytes: Uint8Array): number {
-    return summaryFor(groupIdBytes).unread;
-  }
-
-  /** Pinned → top, archived → bottom, otherwise stable on
-   *  creation order. */
-  const sortedGroups = (): readonly ActiveGroup[] => {
-    const flagsMap = sync.flags();
-    const items = [...props.groups()];
-    items.sort((a, b) => {
-      const fa = flagsMap[syncGroupIdHex(a.group.groupId)];
-      const fb = flagsMap[syncGroupIdHex(b.group.groupId)];
-      const aPinned = fa?.pinned === true;
-      const bPinned = fb?.pinned === true;
-      if (aPinned !== bPinned) return aPinned ? -1 : 1;
-      const aArchived = fa?.archived === true;
-      const bArchived = fb?.archived === true;
-      if (aArchived !== bArchived) return aArchived ? 1 : -1;
-      return 0;
-    });
-    return items;
-  };
-
-  /**
-   * ADR-0045 UX §6.2.4 — the chat-list row's one muted line, or `null` while
-   * the reader is still a member.
-   *
-   * Read straight off `Group.isActive`, with no memo in between and no
-   * invalidation of its own: this list re-renders on the same signals that
-   * drive it today, and the state it reports is TERMINAL, so there is no
-   * window in which a stale read matters. A torn handle reads as still a
-   * member — an unreadable group is not evidence of an eviction, and the copy
-   * this chooses is a claim about fact rather than about capability.
-   *
-   * The `left` / `removed` distinction deliberately does NOT reach this line
-   * (§6.2.4 gives it one string): the list is a glance surface and the
-   * distinction belongs in the transcript's terminal row, where the durable
-   * record is read.
-   */
-  const endedLine = (g: ActiveGroup): string | null =>
-    chatListLine(
-      membershipState({
-        isActive: readIsActive(g.group),
-        // Not consulted: `chatListLine` returns the same string either way.
-        leaveRequestedAtMs: undefined,
-      }),
-    );
-
-  async function toggleFlag(
-    g: ActiveGroup,
-    field: "pinned" | "muted" | "archived",
-  ): Promise<void> {
-    const groupId = g.group.groupId;
-    const key = syncGroupIdHex(groupId);
-    const cur = sync.flags()[key];
-    const next = {
-      pinned: cur?.pinned ?? false,
-      muted: cur?.muted ?? false,
-      archived: cur?.archived ?? false,
-      unreadOverride: cur?.unreadOverride ?? false,
-    };
-    next[field] = !next[field];
-    try {
-      await sync.setFlags(groupId, next);
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.warn(`setFlags(${field}) failed`, err);
-    }
-  }
-
-  return (
-    <section style={panelStyle()}>
-      <h2 style={{ "margin-top": 0 }}>
-        Active MLS groups
-        <Show when={props.groups().length > 0}>
-          <span
-            style={{
-              "margin-left": "0.5rem",
-              color: "var(--surface-muted)",
-              "font-weight": "normal",
-              "font-size": "0.9rem",
-            }}
-          >
-            ({props.groups().length})
-          </span>
-        </Show>
-      </h2>
-      <Show
-        when={props.groups().length > 0}
-        fallback={
-          <p style={{ color: "var(--surface-muted)" }}>
-            No active groups. Start one above with "Start MLS group" —
-            groups other people add you to appear here automatically.
-          </p>
-        }
-      >
-        <ul style={listStyle()}>
-          <For each={sortedGroups()}>
-            {(g) => {
-              const key = syncGroupIdHex(g.group.groupId);
-              const flags = (): {
-                pinned: boolean;
-                muted: boolean;
-                archived: boolean;
-              } => {
-                const f = sync.flags()[key];
-                return {
-                  pinned: f?.pinned === true,
-                  muted: f?.muted === true,
-                  archived: f?.archived === true,
-                };
-              };
-              return (
-                <li
-                  style={{
-                    ...rowStyle(),
-                    "align-items": "center",
-                    opacity: flags().archived ? "0.6" : "1",
-                  }}
-                >
-                  <div style={{ flex: 1 }}>
-                    <strong>
-                      <Show when={flags().pinned}>📌 </Show>
-                      {chatLabel(g)}
-                      <Show when={flags().muted}>
-                        <span
-                          style={{
-                            "margin-left": "0.4rem",
-                            color: "var(--surface-muted)",
-                            "font-size": "0.85rem",
-                          }}
-                          title="Muted on this account"
-                        >
-                          🔇
-                        </span>
-                      </Show>
-                      <Show when={flags().archived}>
-                        <span
-                          style={{
-                            "margin-left": "0.4rem",
-                            color: "var(--surface-muted)",
-                            "font-size": "0.85rem",
-                          }}
-                          title="Archived on this account"
-                        >
-                          📦
-                        </span>
-                      </Show>
-                    </strong>
-                    <div
-                      style={{
-                        color: "var(--surface-muted)",
-                        "font-size": "0.85rem",
-                      }}
-                    >
-                      {g.group.memberCount} member
-                      {g.group.memberCount === 1 ? "" : "s"} · seat #
-                      {g.group.ownLeafIndex}
-                    </div>
-                    {/* ADR-0045 UX §6.2.4 — the chat STAYS in the list and
-                        gains one muted line.
-
-                        It stays because removing it would delete a transcript
-                        the user still has, with no warning, as a side effect
-                        of something somebody else did — the single worst thing
-                        in this design's reach. The row keeps its position, its
-                        label and its flags: `pinned` / `muted` / `archived`
-                        are deliberately untouched, because auto-archiving
-                        would be the client silently reorganising the user's
-                        list on their behalf, and archive is a decision, not a
-                        consequence.
-
-                        Web has no secondary line on this row today, so it
-                        gains one rather than reusing one (both natives already
-                        have a last-message-preview slot). That is a
-                        per-platform IMPLEMENTATION difference, not a design
-                        divergence: the line, its wording and its muted
-                        treatment are identical everywhere. It joins the row's
-                        accessible label rather than becoming a separate stop.
-
-                        The row also goes QUIET — see the unread badge below,
-                        which is suppressed for the same reason: a badge
-                        asserts a conversation that can still move. */}
-                    {/* The newest message, one line — for a chat the user
-                        has not opened too, since the background receive files
-                        its rows into the log. Replaced by the ended line below
-                        once the membership is over. */}
-                    <Show when={endedLine(g) === null && summaryFor(g.group.groupId).preview}>
-                      {(preview) => (
-                        <div
-                          data-testid="chat-preview"
-                          style={{
-                            color: "var(--surface-muted)",
-                            "font-size": "0.85rem",
-                            overflow: "hidden",
-                            "text-overflow": "ellipsis",
-                            "white-space": "nowrap",
-                            "max-width": "28rem",
-                          }}
-                        >
-                          {summaryFor(g.group.groupId).previewIsOwn ? "You: " : ""}
-                          {preview()}
-                        </div>
-                      )}
-                    </Show>
-                    <Show when={endedLine(g)}>
-                      {(line) => (
-                        <div
-                          style={{
-                            color: "var(--surface-muted)",
-                            "font-size": "0.85rem",
-                          }}
-                        >
-                          {line()}
-                        </div>
-                      )}
-                    </Show>
-                  </div>
-                  <div
-                    style={{
-                      display: "flex",
-                      gap: "0.3rem",
-                      "align-items": "center",
-                    }}
-                  >
-                    {/* ADR-0045 UX §6.2.4 / §6.2.11 — the row goes QUIET. An
-                        unread badge asserts a conversation that can still
-                        move, and this one cannot: nothing new will ever
-                        decrypt, so whatever count is standing is frozen at the
-                        moment of the eviction and would sit there for good. */}
-                    <Show
-                      when={
-                        unreadFor(g.group.groupId) > 0 && endedLine(g) === null
-                      }
-                    >
-                      <span
-                        title={`${unreadFor(g.group.groupId)} unread`}
-                        style={{
-                          "min-width": "1.5rem",
-                          "text-align": "center",
-                          padding: "0.1rem 0.4rem",
-                          "border-radius": "999px",
-                          background: flags().muted
-                            ? "var(--surface-muted)"
-                            : "var(--accent)",
-                          color: flags().muted
-                            ? "var(--surface)"
-                            : "var(--accent-fg)",
-                          "font-size": "0.75rem",
-                          "font-weight": "600",
-                        }}
-                      >
-                        {unreadFor(g.group.groupId) >= 100
-                          ? "99+"
-                          : unreadFor(g.group.groupId)}
-                      </span>
-                    </Show>
-                    <button
-                      type="button"
-                      title={flags().pinned ? "Unpin" : "Pin"}
-                      onClick={() => {
-                        void toggleFlag(g, "pinned");
-                      }}
-                      style={iconBtnStyle(flags().pinned)}
-                    >
-                      📌
-                    </button>
-                    <button
-                      type="button"
-                      title={flags().muted ? "Unmute" : "Mute"}
-                      onClick={() => {
-                        void toggleFlag(g, "muted");
-                      }}
-                      style={iconBtnStyle(flags().muted)}
-                    >
-                      🔇
-                    </button>
-                    <button
-                      type="button"
-                      title={flags().archived ? "Unarchive" : "Archive"}
-                      onClick={() => {
-                        void toggleFlag(g, "archived");
-                      }}
-                      style={iconBtnStyle(flags().archived)}
-                    >
-                      📦
-                    </button>
-                    <A
-                      href={paths.chat(
-                        base64UrlEncodeNoPad(g.group.groupId),
-                      )}
-                      style={{
-                        padding: "0.4rem 0.8rem",
-                        background: "var(--accent)",
-                        color: "var(--accent-fg)",
-                        "border-radius": "var(--radius-sm)",
-                        "text-decoration": "none",
-                      }}
-                    >
-                      Open chat
-                    </A>
-                  </div>
-                </li>
-              );
-            }}
-          </For>
-        </ul>
-      </Show>
-    </section>
-  );
-}
-
-/** Round inline toggle button. `active` = filled background
- *  for the on-state; off-state shows a muted outline. The
- *  state across devices comes via DeviceGroupSync flags map. */
-function iconBtnStyle(active: boolean): JSX.CSSProperties {
-  return {
-    width: "1.8rem",
-    height: "1.8rem",
-    padding: "0",
-    "border-radius": "var(--radius-sm)",
-    border: active
-      ? "1px solid var(--accent)"
-      : "1px solid var(--surface-muted)",
-    background: active ? "var(--accent)" : "transparent",
-    color: active ? "var(--accent-fg)" : "var(--surface-muted)",
-    cursor: "pointer",
-    "font-size": "0.9rem",
-    "line-height": "1",
-  };
 }
 
 interface PendingPanelProps {

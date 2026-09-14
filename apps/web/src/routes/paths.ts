@@ -37,8 +37,16 @@ export const paths = {
   home: "/",
   /** Contact list and add-contact entry point. */
   contacts: "/contacts",
-  /** The viewer's own profile name (ADR-0048). */
-  profile: "/profile",
+  /** Settings — Profile · Security · Appearance · Data · Account. */
+  settings: "/settings",
+  /** Settings sub-sections; `settings` itself lands on Profile. */
+  settingsSection(section: "profile" | "security" | "appearance" | "data" | "account"): string {
+    return `/settings/${section}`;
+  },
+  /** The viewer's own profile name (ADR-0048) — the first Settings section. */
+  profile: "/settings/profile",
+  /** Calls — recent calls, create a call link, join with a link. */
+  calls: "/calls",
   /**
    * Developer probe — runs the "Hello core" round-trip from 1.16a.
    * Kept off the main shell intentionally; users should never land

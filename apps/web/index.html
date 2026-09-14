@@ -7,10 +7,10 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="theme-color" content="#0a0a0a" />
+    <meta name="theme-color" content="#3730a3" />
     <meta
       name="description"
-      content="Lakko — secure E2EE messenger. Web client (skeleton)."
+      content="Lakko. Private messaging, end-to-end encrypted by default."
     />
 
     <!-- Phase 1.17 will add SRI hashes + a strict CSP header. The
@@ -21,10 +21,13 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
     <!-- Phase 1.16f2 — PWA manifest + Apple-side equivalents. The
          service worker registered from main.tsx precaches the app
          shell; the manifest declares install metadata. -->
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon.png" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <link rel="manifest" href="/manifest.webmanifest" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-title" content="Lakko" />
-    <meta name="apple-mobile-web-app-status-bar-style" content="black" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
 
     <title>Lakko</title>
   </head>

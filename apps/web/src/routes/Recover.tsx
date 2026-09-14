@@ -63,6 +63,7 @@ import { requireValidUsername } from "../profile/username-field";
 import { createSignal, Match, Show, Switch, type JSX } from "solid-js";
 import { A, useNavigate } from "@solidjs/router";
 import { paths } from "./paths";
+import { AuthLayout } from "../ui/AuthLayout";
 import { useAuth } from "../auth/AuthContext";
 import { AuthHttpError } from "../auth/client";
 import { normalizeTotpCode } from "../auth/totp-code";
@@ -177,10 +178,9 @@ export default function Recover(): JSX.Element {
   }
 
   return (
-    <div class="auth-shell">
-      <section class="auth-card">
-        <h1>Recover account</h1>
-        <p style={{ color: "var(--surface-muted)", "margin-top": 0 }}>
+    <AuthLayout>
+        <h1>Recover your account</h1>
+        <p class="auth-lede">
           Choose how to prove this account is yours. Your{" "}
           <strong>24-word phrase</strong> or <strong>another signed-in
           device</strong> restores your full identity — your contacts keep
@@ -232,8 +232,7 @@ export default function Recover(): JSX.Element {
             />
           </Match>
         </Switch>
-      </section>
-    </div>
+    </AuthLayout>
   );
 }
 
@@ -794,7 +793,7 @@ function RecoverForm(props: RecoverFormProps): JSX.Element {
         </button>
       </form>
       <p class="form-footer">
-        Remembered your password? <A href={paths.login}>Log in</A>.
+        Remembered your password? <A href={paths.login}>Log in</A>
       </p>
     </>
   );

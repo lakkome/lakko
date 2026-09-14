@@ -36,6 +36,7 @@ import {
   type DisplayNameCheck,
   type UsernameCheck,
 } from "../profile/rules";
+import { AuthLayout } from "../ui/AuthLayout";
 
 export default function Signup(): JSX.Element {
   const auth = useAuth();
@@ -105,8 +106,7 @@ export default function Signup(): JSX.Element {
   }
 
   return (
-    <div class="auth-shell">
-      <section class="auth-card">
+    <AuthLayout>
         <SignupForm
           username={username}
           setUsername={setUsername}
@@ -122,8 +122,7 @@ export default function Signup(): JSX.Element {
           error={error}
           onSubmit={onSubmit}
         />
-      </section>
-    </div>
+    </AuthLayout>
   );
 }
 
@@ -150,12 +149,10 @@ interface SignupFormProps {
 function SignupForm(props: SignupFormProps): JSX.Element {
   return (
     <>
-      <h1>Create a Lakko account</h1>
-      <p style={{ color: "var(--surface-muted)", "margin-top": 0 }}>
-        OPAQUE-PAKE registration. The password never leaves your
-        browser — the server only sees an OPRF-blinded envelope.
-        After signup you will be shown a 24-word recovery phrase
-        once; write it down before continuing.
+      <h1>Create your account</h1>
+      <p class="auth-lede">
+        Your password never leaves your device. You will get a 24-word recovery
+        phrase to write down.
       </p>
       <form onSubmit={props.onSubmit}>
         <label>
@@ -247,11 +244,11 @@ function SignupForm(props: SignupFormProps): JSX.Element {
             !maySaveDisplayName(props.displayNameCheck())
           }
         >
-          {props.busy() ? "Creating account…" : "Sign up"}
+          {props.busy() ? "Creating account…" : "Create account"}
         </button>
       </form>
       <p class="form-footer">
-        Already have an account? <A href={paths.login}>Log in</A>.
+        Already have an account? <A href={paths.login}>Log in</A>
       </p>
     </>
   );

@@ -86,9 +86,8 @@ export default function Devices(): JSX.Element {
     <article>
       <h1>Devices</h1>
       <p style={{ color: "var(--surface-muted)", "margin-top": 0 }}>
-        Link a second device to this account. The pairing happens
-        end-to-end-encrypted: the server sees only the rendezvous
-        pseudonym + opaque MLS bytes, never identity material.
+        Link another phone, tablet or computer to this account. Linking is
+        end-to-end encrypted; Lakko's servers cannot read it.
       </p>
       <Show
         when={session() !== null}
@@ -277,11 +276,8 @@ function DevicesListView(props: {
   return (
     <div>
       <p>
-        These are the devices currently linked to your account.
-        Removing a device revokes its access via an MLS commit
-        broadcast on the DeviceGroup journal — the revoked device
-        can no longer decrypt any subsequent traffic on this
-        account.
+        The devices linked to your account. A removed device loses access to
+        your messages from that moment on.
       </p>
       <Switch>
         <Match when={state().kind === "loading"}>
@@ -490,9 +486,8 @@ function PairView(props: {
   return (
     <div>
       <p>
-        Show this QR code to your already-paired device. It scans
-        it, runs the MLS handshake, and your new device joins the
-        DeviceGroup.
+        Scan this code with a device that is already signed in. Once it
+        confirms, this device joins your account.
       </p>
       <Switch>
         <Match when={state().kind === "idle"}>
@@ -1029,10 +1024,9 @@ function TotpEnrollView(): JSX.Element {
         </Match>
         <Match when={state().kind === "already-enabled"}>
           <p class="form-info">
-            An authenticator is already enabled for this account.
-            Replacing a confirmed authenticator from a signed-in
-            session is refused by design — a stolen session must not
-            be able to swap your recovery factor.
+            An authenticator is already enabled for this account. It cannot be
+            replaced from a signed-in session; recover with your phrase or
+            another device first, so a stolen session cannot swap it.
           </p>
         </Match>
         <Match when={state().kind === "unavailable"}>
@@ -1337,9 +1331,9 @@ function ContactEnrollView(): JSX.Element {
         </Match>
         <Match when={state().kind === "already-enabled"}>
           <p class="form-info">
-            A confirmed contact is already enabled for this account.
-            Replacing it from a signed-in session is refused by design — a
-            stolen session must not be able to swap your recovery factor.
+            A recovery contact is already set for this account. It cannot be
+            replaced from a signed-in session; recover with your phrase or
+            another device first, so a stolen session cannot swap it.
           </p>
         </Match>
         <Match when={state().kind === "unavailable"}>

@@ -4,8 +4,8 @@
 /**
  * "Create call link" — mints a `/c/` call-invite link (ADR-0032).
  *
- * A call link is independent of any chat, so this lives on Home rather than
- * in a chat header. The owner shares the link and hosts the call from the
+ * A call link is independent of any chat, so this lives under Calls rather
+ * than in a chat header. The owner shares the link and hosts the call from the
  * `/c/<slug>` landing ("Start call" navigates there; `JoinCall.tsx` asks the
  * app-level call host to found and host when the visitor is the capability
  * owner, so the call survives leaving that screen). Anyone holding the link
@@ -123,17 +123,9 @@ export default function CreateCallLinkPanel(): JSX.Element {
   }
 
   return (
-    <section
-      style={{
-        background: "var(--surface-elevated)",
-        border: "1px solid var(--surface-border)",
-        "border-radius": "var(--radius-md)",
-        padding: "1rem",
-        margin: "1rem 0",
-      }}
-    >
-      <h2 style={{ "margin-top": 0 }}>Create call link</h2>
-      <p style={{ color: "var(--surface-muted)", "margin-top": 0 }}>
+    <section class="lk-card">
+      <h2>Create a call link</h2>
+      <p class="lk-card-desc">
         Anyone with the link can ask to join. You host the call and admit
         people as they arrive. Calls are end-to-end encrypted.
       </p>
