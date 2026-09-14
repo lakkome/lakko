@@ -115,6 +115,12 @@ public final class InviteIntake: ObservableObject {
         callJoinAutoResume = false
     }
 
+    /// ADR-0032 — park a call link again (the "Open" of a running link call's
+    /// status line), exactly as if its URL had just been tapped.
+    public func parkCallJoin(slug: String) {
+        pendingCallJoinSlug = slug
+    }
+
     /// ADR-0032 — arm the auto-resume flag before a guest signup, so the
     /// re-mounted landing continues the join once the session lands.
     public func armCallJoinAutoResume() {

@@ -35,12 +35,8 @@ import Contacts from "./Contacts";
 import Settings from "./Settings";
 import Calls from "./Calls";
 import Call from "./Call";
-import {
-  ChannelsList,
-  ChannelSubscribe,
-  ChannelView,
-  NewChannel,
-} from "./Channels";
+import { ChannelSubscribe, ChannelView, NewChannel } from "./Channels";
+import ChannelsLayout, { ChannelsIndex } from "./ChannelsLayout";
 import Chat from "./Chat";
 import DevProbe from "./DevProbe";
 import Devices from "./Devices";
@@ -51,8 +47,6 @@ import NotFound from "./NotFound";
 import {
   callJoinRoutePattern,
   callRoutePattern,
-  channelRoutePattern,
-  channelSubscribeRoutePattern,
   chatRoutePattern,
   groupJoinRoutePattern,
   inviteRoutePattern,
@@ -137,13 +131,19 @@ export const routes: RouteDefinition[] = [
       // it over a live call). Wrapping decouples Call's prop type
       // from the router's RouteSectionProps signature.
       { path: callRoutePattern, component: () => <Call /> },
-      { path: paths.channels, component: ChannelsList },
-      { path: paths.channelNew, component: NewChannel },
-      // Subscribe route MUST be matched BEFORE the
-      // generic `/channels/:id` pattern so `:id` does not
-      // swallow the trailing `/subscribe` segment.
-      { path: channelSubscribeRoutePattern, component: ChannelSubscribe },
-      { path: channelRoutePattern, component: ChannelView },
+      // Channels: the list pane stays mounted across every /channels route.
+      {
+        path: paths.channels,
+        component: ChannelsLayout,
+        children: [
+          { path: "/", component: ChannelsIndex },
+          { path: "/new", component: NewChannel },
+          // Subscribe route MUST be matched BEFORE the generic `/:id`
+          // pattern so `:id` does not swallow the trailing `/subscribe`.
+          { path: "/:id/subscribe", component: ChannelSubscribe },
+          { path: "/:id", component: ChannelView },
+        ],
+      },
       { path: paths.dev, component: DevProbe },
       { path: paths.devices, component: Devices },
     ],

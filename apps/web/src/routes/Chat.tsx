@@ -405,7 +405,7 @@ export default function Chat(): JSX.Element {
   };
 
   return (
-    <article>
+    <article class="lk-chat">
       <Show
         when={auth.identitySecrets() !== null}
         fallback={<NeedsReauth />}
@@ -4682,8 +4682,23 @@ function ChatView(props: {
     }
   }
 
+  // The timeline scrolls in its own region. Follow new rows while the reader
+  // is at (or near) the bottom; leave the position alone once they have
+  // scrolled up to read.
+  let scrollEl: HTMLDivElement | undefined;
+  let stickToBottom = true;
+  createEffect(() => {
+    rows().length;
+    const el = scrollEl;
+    if (el === undefined || !stickToBottom) return;
+    requestAnimationFrame(() => {
+      el.scrollTop = el.scrollHeight;
+    });
+  });
+
   return (
     <div
+      class="lk-chat-body"
       onDragEnter={onDragEnter}
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
@@ -4691,9 +4706,6 @@ function ChatView(props: {
         void onDrop(e);
       }}
       style={{
-        display: "flex",
-        "flex-direction": "column",
-        gap: "1rem",
         position: "relative",
         // Subtle outline + accent tint while a file drag hovers
         // anywhere over the chat body. The inner content stays
@@ -4844,6 +4856,15 @@ function ChatView(props: {
         </div>
       </header>
 
+      <div
+        class="lk-chat-scroll"
+        ref={scrollEl}
+        onScroll={() => {
+          const el = scrollEl;
+          if (el === undefined) return;
+          stickToBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+        }}
+      >
       {/* The in-call UI and the remote audio sinks of both call kinds are the
           call host's (`calls/CallHostContext.tsx`), rendered on every screen. */}
 
@@ -4958,14 +4979,8 @@ function ChatView(props: {
             e.preventDefault();
             void onAddMember();
           }}
-          style={{
-            display: "flex",
-            gap: "0.5rem",
-            padding: "0.75rem",
-            border: "1px solid var(--surface-border)",
-            "border-radius": "var(--radius-md)",
-            background: "var(--surface-elevated)",
-          }}
+          class="lk-card"
+          style={{ "flex-direction": "row", "align-items": "center", gap: "8px" }}
         >
           <input
             type="text"
@@ -4999,26 +5014,8 @@ function ChatView(props: {
           button. The own-leaf row gets a "(you)" badge instead
           of a Remove button (can't kick yourself). */}
       <Show when={membersOpen()}>
-        <section
-          aria-label="Members"
-          style={{
-            padding: "0.5rem 0.75rem",
-            border: "1px solid var(--surface-border)",
-            "border-radius": "var(--radius-md)",
-            background: "var(--surface-elevated)",
-          }}
-        >
-          <h2
-            style={{
-              "font-size": "0.85rem",
-              "text-transform": "uppercase",
-              "letter-spacing": "0.05em",
-              color: "var(--surface-muted)",
-              margin: "0 0 0.5rem 0",
-            }}
-          >
-            Members ({members().length})
-          </h2>
+        <section aria-label="Members" class="lk-card" style={{ gap: "8px" }}>
+          <h2>Members ({members().length})</h2>
           {/* ADR-0045 UX §5.1 — the pending notice. TOP of the panel, above
               everything, and rendered only once at least one request is past
               the quiet window: the owner is rank 0 and sweeps its own request
@@ -5610,15 +5607,10 @@ function ChatView(props: {
                         ? label()
                         : `${label()}, ${annotation()?.replace(/\.$/, "")}`
                     }
-                    style={{
-                      display: "flex",
-                      "align-items": "center",
-                      gap: "0.5rem",
-                      padding: "0.35rem 0.5rem",
-                      "border-radius": "var(--radius-sm)",
-                      background: "var(--surface-bg)",
-                    }}
+                    class="lk-row"
+                    style={{ padding: "8px 10px", gap: "10px" }}
                   >
+                    <Avatar label={label()} id={memberKeyB64} size="sm" />
                     <span
                       style={{
                         display: "flex",
@@ -5666,8 +5658,8 @@ function ChatView(props: {
                               !adminPubkeys().has(hexOf(m.sigPubkey)),
                             );
                           }}
+                          class="ghost small"
                           disabled={busy()}
-                          style={{ "font-size": "0.8rem" }}
                         >
                           {adminPubkeys().has(hexOf(m.sigPubkey))
                             ? "Remove admin"
@@ -5686,11 +5678,9 @@ function ChatView(props: {
                           onClick={() => {
                             void onRemoveMember(m.leafIndex);
                           }}
+                          class="ghost small"
                           disabled={busy() || annotation() !== null}
-                          style={{
-                            "font-size": "0.8rem",
-                            color: "var(--error)",
-                          }}
+                          style={{ color: "var(--danger)" }}
                         >
                           Remove
                         </button>
@@ -6402,6 +6392,8 @@ function ChatView(props: {
           </div>
         )}
       </Show>
+
+      </div>
 
       <Show when={!membershipEnded()}>
       {/* ADR-0047 UX §6 — the permission-denied card and the short hints. */}

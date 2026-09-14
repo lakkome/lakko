@@ -24,25 +24,15 @@ import me.lakko.app.chat.UploadStage
 import me.lakko.app.chat.ChatMessage
 import me.lakko.app.chat.ChatRepository
 import me.lakko.app.chat.ChatThread
-import me.lakko.app.calls.CallJwtClient
-import me.lakko.app.calls.CallSession
-import me.lakko.app.calls.CallUiState
-import me.lakko.app.calls.SfuCallSession
-import me.lakko.app.calls.SfuCallUi
-import me.lakko.app.calls.SfuConfig
+import me.lakko.app.calls.CallKind
+import me.lakko.app.calls.GroupCallStartOutcome
 import me.lakko.app.devices.sync.DeviceGroupSyncRepository
-import me.lakko.app.contacts.AcceptedContactsStore
 import uniffi.lakko_ffi_uniffi.AttachmentRef
-import uniffi.lakko_ffi_uniffi.FfiCallEndReason
-import uniffi.lakko_ffi_uniffi.FfiCallMediaFlags
-import uniffi.lakko_ffi_uniffi.FfiCallSignalingBody
-import uniffi.lakko_ffi_uniffi.composeCallSignaling
 import uniffi.lakko_ffi_uniffi.GroupMember
 import uniffi.lakko_ffi_uniffi.OutgoingOwner
 import uniffi.lakko_ffi_uniffi.Role
 import uniffi.lakko_ffi_uniffi.membershipRefusalRetryMaySucceed
 import uniffi.lakko_ffi_uniffi.RoleTable
-import uniffi.lakko_ffi_uniffi.sfuPeerTag
 
 /**
  * State + dispatcher for the per-thread [ChatScreen].
@@ -82,6 +72,18 @@ public class ChatViewModel(
      *  and keep running when this chat is not on screen. `null` in tests — the
      *  1x1 call button then does nothing. */
     private val callHost: me.lakko.app.calls.OneToOneCallHost<*>? = null,
+    /** The process-wide group-call host ([me.lakko.app.calls.AppCallHost.group]).
+     *  The group call does not live in this view model either: it keeps
+     *  running, and keeps its key current, when this chat is not on screen.
+     *  `null` in tests — the group call buttons then report that calls are
+     *  unavailable. */
+    private val groupCallHost: me.lakko.app.calls.GroupCallHost? = null,
+    /** The call occupying the app's one call slot
+     *  ([me.lakko.app.calls.AppCallHost.occupant]); `null` in tests. */
+    callOccupant: StateFlow<CallKind?>? = null,
+    /** Ends whatever call occupies the slot (the busy notice's "End current
+     *  call"). */
+    private val endCurrentCall: () -> Unit = {},
 ) : ViewModel() {
 
     private val composer: MutableStateFlow<ComposerState> =
@@ -273,66 +275,9 @@ public class ChatViewModel(
                     scheduleReadReceipt(highestMessageIdFor(repoState))
                 }
         }
-        // G-18 / ADR-0029 — mid-call call-key rotation. While an SFU group
-        // call is live, re-derive the per-call seed on each repo emission
-        // (an emission follows every poll that may have applied an
-        // epoch-advancing commit — add / remove / update) and rekey the
-        // call. `SfuCallUi.rekey` no-ops when the seed is unchanged, so this
-        // only rotates on an actual epoch advance; the decryptors keep the
-        // previous key for the overlap window so in-flight frames still
-        // open, then drop it (forward secrecy). Fail-closed: a null
-        // derivation keeps the current seed — never a downgrade (invariant
-        // #4). The body returns immediately when no SFU call is live, so
-        // there is no exporter cost outside a call.
-        viewModelScope.launch {
-            repo.state.collect {
-                val handle = mutableActiveSfuCall.value ?: return@collect
-                val callId = activeSfuCallId ?: return@collect
-                val key = repo.deriveCallKey(groupIdHex = groupIdHex, callId = callId)
-                if (key != null) {
-                    handle.rekey(key.seed)
-                }
-            }
-        }
-        // ADR-0032 piece B — mid-call camera-on bridge for the SFU group call.
-        // The store-driven `CallScreen` is presented WITHOUT a session (only
-        // `sfuCallUiState`), so the camera button only flips the store's local
-        // `camOn`; mirror it onto the live SFU session here (the analog of the
-        // web `Chat.tsx` camera effect). camOn TRUE -> `publishVideo` (acquire
-        // the camera + SFrame-seal + renegotiate); FALSE -> disable the track.
-        // On a publishVideo failure revert the toggle — fail-safe, the call
-        // stays up audio-only (invariant #4; publishVideo never leaves a
-        // half-added plaintext sender behind). `publishVideo` is idempotent +
-        // in-flight-guarded, so a redundant emission is a cheap no-op.
-        viewModelScope.launch {
-            sfuCallUiState.participants
-                .map { list -> list.firstOrNull { it.isLocal }?.camOn ?: false }
-                .distinctUntilChanged()
-                .collect { camOn ->
-                    val handle = mutableActiveSfuCall.value ?: return@collect
-                    if (camOn) {
-                        try {
-                            handle.publishVideo()
-                        } catch (err: Throwable) {
-                            sfuCallUiState.setCamera(false)
-                            android.util.Log.w(
-                                "ChatViewModel",
-                                "SFU mid-call publishVideo failed — reverting camera",
-                                err,
-                            )
-                        }
-                    } else {
-                        handle.setCameraEnabled(false)
-                    }
-                }
-        }
-        // The 1x1 call host must know when this device is in a group call:
-        // a 1x1 offer is then answered busy rather than rung.
-        viewModelScope.launch {
-            mutableActiveSfuCall.collect { sfu ->
-                callHost?.setGroupCallActive(groupCallHostKey, sfu != null)
-            }
-        }
+        // The group call — its mid-call rekey (G-18 / ADR-0029), its camera and
+        // microphone, and the 1x1 host's busy flag — lives in the app-level
+        // `GroupCallHost` now, so none of it stops when this chat does.
         // Incoming 1x1 call signaling is NOT attached here any more: the
         // repository hands every one-to-one body, from every poll of every
         // group, to the app-level call host.
@@ -353,10 +298,6 @@ public class ChatViewModel(
         repo.setThreadOnScreen(groupIdHex, onScreen)
     }
 
-    /** This view model's key in [me.lakko.app.calls.OneToOneCallHost.setGroupCallActive]. */
-    private val groupCallHostKey: String
-        get() = "sfu-$groupIdHex"
-
 
     /** Tap-to-call from the chat header. G3-2-prejoin-join: this
      *  now only PREPARES the session — it builds it and arms the
@@ -372,52 +313,28 @@ public class ChatViewModel(
         // the prejoin; the app-level overlay presents it. Refused while any
         // other call is up — one call at a time.
         if (!host.startOutgoing(groupIdHex)) {
-            mutableCallNotice.value = "Another call is in progress."
+            showBusyNotice(me.lakko.app.calls.CallVerb.START)
         }
     }
 
     // -------------------------------------------------------------
-    // SFU multi-party group call (>2 members)
-    // -------------------------------------------------------------
-
-    private val mutableActiveSfuCall: MutableStateFlow<SfuCallUi?> =
-        MutableStateFlow(null)
-
-    /** Active multi-party SFU group call for this thread, or `null`. A
-     *  group chat (>2 members) routes through this; a 1x1 chat stays on
-     *  [activeCall]. The UI presents the call overlay (driven by
-     *  [sfuCallUiState]) while this is non-null. */
-    public val activeSfuCall: StateFlow<SfuCallUi?> = mutableActiveSfuCall.asStateFlow()
-
-    /** The [CallUiState] the active SFU call drives (roster / phase /
-     *  E2EE). The Compose overlay observes this while [activeSfuCall] is
-     *  non-null. Reused across calls. */
-    public val sfuCallUiState: CallUiState = CallUiState()
-
-    /** G-18 / ADR-0029 — the raw call-id of the active SFU group call, held
-     *  so the mid-call rekey trigger can re-derive the per-call seed at the
-     *  new MLS epoch (`exportSecret("lakko/call/v1", callId, 32)`). `null`
-     *  when no SFU call is live. Read only while [activeSfuCall] is
-     *  non-null. */
-    private var activeSfuCallId: ByteArray? = null
-
-    // -------------------------------------------------------------
-    // Group-call announce / join (the ongoing-group-call ledger)
+    // Calls — the one call slot
     //
-    // The rules live in `me.lakko.app.calls.GroupCallLedger`; the records live
-    // in the repository (so a chat that is not open still learns of a call).
-    // What is here is publishing this device's own signals and projecting the
-    // ledger into the chat's Join banner.
+    // Every call (1x1, group, call link) lives in the app-level host
+    // (`me.lakko.app.calls.AppCallHost`) and is drawn from the activity root, so
+    // leaving this chat neither hides nor ends it. This chat reads the slot to
+    // hide its call buttons, asks the host to start or join, and projects the
+    // group-call ledger into its Join banner.
     // -------------------------------------------------------------
 
-    /** This device's MLS leaf in the active SFU group call, captured with the
-     *  call key. `null` when no SFU group call is up. */
-    private var activeSfuCallLeaf: UInt? = null
-
-    /** `true` once this device has published `GroupCallJoin` for the active
-     *  call, so the matching `GroupCallLeave` goes out on hang-up and a
-     *  re-emitted `Connected` phase does not publish a second join. */
-    private var groupCallJoinPublished: Boolean = false
+    /**
+     * The call occupying the app's one call slot — any chat's 1x1 call, a group
+     * call anywhere, or a call-link call — or `null` when it is free. While it
+     * is set the header's call buttons are hidden: returning to the chat of a
+     * live call shows that call (the host's in-call screen), never an offer to
+     * start a second one.
+     */
+    public val callOccupant: StateFlow<CallKind?> = callOccupant ?: MutableStateFlow(null)
 
     private val mutableJoinableGroupCall: MutableStateFlow<JoinableGroupCall?> =
         MutableStateFlow(null)
@@ -442,19 +359,17 @@ public class ChatViewModel(
         viewModelScope.launch {
             combine(
                 repo.groupCalls.map { it[groupIdHex] }.distinctUntilChanged(),
-                mutableActiveSfuCall,
-                oneToOneCall,
-            ) { record, sfu, oneToOne -> Triple(record, sfu, oneToOne) }
-                .collectLatest { (record, sfu, oneToOne) ->
+                this@ChatViewModel.callOccupant,
+                groupCallHost?.slot ?: MutableStateFlow(null),
+            ) { record, occupant, groupSlot -> Triple(record, occupant, groupSlot) }
+                .collectLatest { (record, occupant, groupSlot) ->
                     while (true) {
                         val now = System.currentTimeMillis()
                         val joinable = me.lakko.app.calls.joinableGroupCall(
                             record = record,
                             nowMs = now,
-                            anyCallActive = sfu != null || oneToOne != null,
-                            activeGroupCallIdHex = activeSfuCallId?.let {
-                                me.lakko.app.calls.callIdHexOf(it)
-                            },
+                            anyCallActive = occupant != null,
+                            activeGroupCallIdHex = groupSlot?.callIdHex,
                         )
                         mutableJoinableGroupCall.value = joinable?.let {
                             JoinableGroupCall(
@@ -468,31 +383,11 @@ public class ChatViewModel(
                     }
                 }
         }
-
-        // Publish `GroupCallJoin` for this device once its SFU session reaches
-        // Connected — the contract counts a participant from the moment it is
-        // actually in the room, not from the moment it tapped Join.
-        viewModelScope.launch {
-            sfuCallUiState.phase.collect { phase ->
-                if (phase != CallUiState.CallPhase.Connected) return@collect
-                if (mutableActiveSfuCall.value == null || groupCallJoinPublished) return@collect
-                val callId = activeSfuCallId ?: return@collect
-                val leaf = activeSfuCallLeaf ?: return@collect
-                groupCallJoinPublished = true
-                publishGroupCallSignal(
-                    FfiCallSignalingBody.GroupJoin(
-                        callId = callId,
-                        leafIndex = leaf,
-                        joinedAtMs = System.currentTimeMillis().toULong(),
-                    ),
-                )
-            }
-        }
     }
 
     /** `true` when this chat has >2 MLS members — the call button then
      *  routes through the SFU group-call path; a 2-member chat stays on
-     *  the 1x1 P2P [CallSession]. A `null` member count (no handle yet)
+     *  the 1x1 P2P call. A `null` member count (no handle yet)
      *  reads as a 1x1. */
     public val isGroupChat: Boolean
         get() = (repo.memberCount(groupIdHex) ?: 0) > 2
@@ -1768,14 +1663,38 @@ public class ChatViewModel(
      *  join. `null` when there is nothing to say. Cleared by [dismissCallNotice]. */
     public val callNotice: StateFlow<String?> = mutableCallNotice.asStateFlow()
 
+    private val mutableCallNoticeOffersEnd: MutableStateFlow<Boolean> = MutableStateFlow(false)
+
+    /** The [callNotice] is a busy refusal: offer to end the call occupying the
+     *  slot, since the refusal is otherwise the whole outcome. */
+    public val callNoticeOffersEndCurrentCall: StateFlow<Boolean> = mutableCallNoticeOffersEnd.asStateFlow()
+
     public fun dismissCallNotice() {
         mutableCallNotice.value = null
+        mutableCallNoticeOffersEnd.value = false
     }
 
     /** Surface a call failure the user would otherwise only see as nothing
      *  happening. */
     public fun showCallNotice(message: String) {
+        mutableCallNoticeOffersEnd.value = false
         mutableCallNotice.value = message
+    }
+
+    /** The busy notice's "End current call". */
+    public fun onEndCurrentCall() {
+        dismissCallNotice()
+        endCurrentCall()
+    }
+
+    private fun showBusyNotice(verb: me.lakko.app.calls.CallVerb) {
+        val occupant = callOccupant.value
+        if (occupant == null) {
+            showCallNotice("Another call is in progress.")
+            return
+        }
+        mutableCallNotice.value = me.lakko.app.calls.callBusyMessage(occupant, verb)
+        mutableCallNoticeOffersEnd.value = true
     }
 
     /**
@@ -1802,276 +1721,49 @@ public class ChatViewModel(
     }
 
     /**
-     * Start a multi-party SFU group call for this (group) chat and announce it.
-     *
-     * Mints the call-admission JWT, derives the per-call SFrame seed + leaf from
-     * the MLS exporter, publishes `GroupCallStart` to the group journal so every
-     * member's chat offers Join, and connects through [SfuCallUi]. Fails closed
-     * (a notice + no call) on any missing prerequisite — SFU URL, session token,
-     * or call-key derivation (security invariant #4 — never fall back to
-     * non-E2EE).
+     * Start a multi-party SFU group call for this (group) chat and announce it,
+     * through the app-level host: it mints the admission JWT, derives the
+     * per-call SFrame seed from the MLS exporter, publishes `GroupCallStart` and
+     * connects. Refused while any call occupies the slot; fails closed (a notice,
+     * no call) on any missing prerequisite (security invariant #4).
      */
     public fun startGroupCall(video: Boolean = false) {
-        if (mutableActiveSfuCall.value != null || callHost?.hasCall == true) return
-        val prerequisites = groupCallPrerequisites("startGroupCall") ?: return
-        connectGroupCall(
-            base = prerequisites.first,
-            token = prerequisites.second,
-            callIdBytes = CallSession.mintCallId(),
-            video = video,
-            initiator = true,
-        )
+        requestGroupCall(video = video, joinCallIdHex = null)
     }
 
     /**
      * Join the live group call recorded for this chat (the banner's Join and the
-     * header buttons while a call is in progress).
-     *
-     * Polls the group once first, so the call key is derived at the epoch the
-     * other participants are at; the mid-call rekey collector then follows any
-     * later commit exactly as it does for the initiator. A call that stopped
-     * being live between the tap and here is simply not joined — silently
+     * header buttons while a call is in progress). A call that stopped being
+     * live between the tap and the host's check is simply not joined — silently
      * starting a different call would surprise the user.
      */
     public fun joinGroupCall(video: Boolean = false) {
-        if (mutableActiveSfuCall.value != null || callHost?.hasCall == true) return
         val record = liveGroupCallRecord() ?: run {
-            mutableCallNotice.value = "That group call has ended."
+            showCallNotice("That group call has ended.")
             return
         }
-        val callIdBytes = me.lakko.app.calls.callIdBytesOf(record.callIdHex) ?: return
-        val prerequisites = groupCallPrerequisites("joinGroupCall") ?: return
-        connectGroupCall(
-            base = prerequisites.first,
-            token = prerequisites.second,
-            callIdBytes = callIdBytes,
-            video = video,
-            initiator = false,
-        )
+        requestGroupCall(video = video, joinCallIdHex = record.callIdHex)
     }
 
-    /** The SFU base URL and the session bearer, or `null` (with a notice) when
-     *  either is missing. */
-    private fun groupCallPrerequisites(caller: String): Pair<String, String>? {
-        val base = SfuConfig.baseUrl ?: run {
-            android.util.Log.w(
-                "ChatViewModel",
-                "$caller: SFU URL not configured (lakko.sfu.url) — refusing",
-            )
-            mutableCallNotice.value = "Group calls are not configured in this build."
-            return null
+    private fun requestGroupCall(video: Boolean, joinCallIdHex: String?) {
+        val host = groupCallHost ?: run {
+            showCallNotice("Group calls are not available right now.")
+            return
         }
-        val token = sessionTokenProvider() ?: run {
-            android.util.Log.w(
-                "ChatViewModel",
-                "$caller: no session token — re-authenticate to start a group call",
-            )
-            mutableCallNotice.value = "Sign in again to use group calls."
-            return null
-        }
-        return base to token
-    }
-
-    private fun connectGroupCall(
-        base: String,
-        token: String,
-        callIdBytes: ByteArray,
-        video: Boolean,
-        initiator: Boolean,
-    ) {
-        val callIdHex = me.lakko.app.calls.callIdHexOf(callIdBytes)
-        groupCallJoinPublished = false
-        // Mark connecting up front so the externally-driven CallScreen
-        // never flashes the prejoin (Join) screen for an auto-connecting
-        // SFU call — the overlay appears only once `activeSfuCall` flips
-        // non-null, by which point the phase is already Connecting.
-        sfuCallUiState.setPhase(CallUiState.CallPhase.Connecting)
         viewModelScope.launch {
-            if (!initiator) {
-                // Best effort: when the chat screen's own long poll is already
-                // in flight this returns at once, and that poll is what keeps the
-                // epoch current anyway.
-                try {
-                    repo.pollGroup(groupIdHex)
-                } catch (cause: Throwable) {
-                    android.util.Log.w("ChatViewModel", "joinGroupCall: pre-join poll failed", cause)
+            when (val outcome = host.start(groupIdHex, video = video, joinCallIdHex = joinCallIdHex)) {
+                GroupCallStartOutcome.Connected,
+                GroupCallStartOutcome.AlreadyInThisCall,
+                -> Unit
+                is GroupCallStartOutcome.Busy -> {
+                    mutableCallNotice.value = outcome.message
+                    mutableCallNoticeOffersEnd.value = true
                 }
-            }
-            val key = repo.deriveCallKey(groupIdHex = groupIdHex, callId = callIdBytes)
-            if (key == null) {
-                android.util.Log.w(
-                    "ChatViewModel",
-                    "group call: call-key derivation failed — refusing per invariant #4",
-                )
-                mutableCallNotice.value = "Could not set up call encryption, so the call did not start."
-                sfuCallUiState.setPhase(CallUiState.CallPhase.Ended(System.currentTimeMillis()))
-                return@launch
-            }
-            val ownLeaf = key.localLeaf.toUInt()
-            val jwt = CallJwtClient()
-            var announced = false
-            try {
-                jwt.setSessionToken(token)
-                val minted = jwt.mint(callId = callIdHex)
-                if (initiator) {
-                    // After the admission mint (so a refused mint announces
-                    // nothing) and before connecting (so members see the call as
-                    // soon as it exists).
-                    announced = publishGroupCallSignal(
-                        FfiCallSignalingBody.GroupStart(
-                            callId = callIdBytes,
-                            initiatorLeaf = ownLeaf,
-                            createdAtMs = System.currentTimeMillis().toULong(),
-                            media = FfiCallMediaFlags(audio = true, video = video),
-                        ),
-                    )
-                }
-                val config = SfuCallSession.Config(
-                    sfuBaseUrl = base,
-                    jwt = minted.jwt,
-                    seed = key.seed,
-                    localLeaf = key.localLeaf,
-                    audio = true,
-                    video = video,
-                )
-                val handle = SfuCallUi(
-                    applicationContext = repo.context,
-                    config = config,
-                    scope = viewModelScope,
-                    ui = sfuCallUiState,
-                    resolveDisplayName = peerDisplayNameResolver(callIdHex),
-                )
-                // G-18 / ADR-0029 — retain the call-id BEFORE the handle
-                // goes live so the mid-call rekey collector (which guards on
-                // `activeSfuCall != null`) can re-derive the seed at a new
-                // epoch.
-                activeSfuCallId = callIdBytes
-                activeSfuCallLeaf = ownLeaf
-                mutableActiveSfuCall.value = handle
-                handle.connect()
-            } catch (cause: Throwable) {
-                android.util.Log.w("ChatViewModel", "group call connect failed", cause)
-                mutableActiveSfuCall.value?.hangUp()
-                mutableActiveSfuCall.value = null
-                activeSfuCallId = null
-                activeSfuCallLeaf = null
-                sfuCallUiState.setPhase(CallUiState.CallPhase.Ended(System.currentTimeMillis()))
-                mutableCallNotice.value = "The call could not connect."
-                val joined = groupCallJoinPublished
-                groupCallJoinPublished = false
-                if (announced || joined) {
-                    leaveGroupCall(callIdBytes, ownLeaf, joined)
-                }
-            } finally {
-                jwt.close()
+                GroupCallStartOutcome.Ended -> showCallNotice("That group call has ended.")
+                is GroupCallStartOutcome.Failed -> showCallNotice(outcome.message)
             }
         }
     }
-
-    /**
-     * ADR-0021 — precompute the per-call peer_tag -> contact label map once over
-     * the persisted accepted contacts, so the SFU roster resolves to the
-     * identifier the rest of the app shows. The tag is re-derived locally (the
-     * SFU never sends a name); a collision falls back to the pseudonym.
-     */
-    private fun peerDisplayNameResolver(callIdHex: String): (String, String, String) -> String {
-        val tagToLabel = HashMap<String, String>()
-        val collidedTags = HashSet<String>()
-        for (c in AcceptedContactsStore.load(repo.context)) {
-            val accountId = c.request.fromAccountId ?: continue
-            val accountIdHex =
-                accountId.joinToString("") { "%02x".format(it.toInt() and 0xff) }
-            val tag = sfuPeerTag(callId = callIdHex, accountId = accountIdHex)
-            if (tagToLabel.containsKey(tag)) {
-                collidedTags.add(tag)
-            } else {
-                // ADR-0048 — the one resolver (rename, profile name, verified
-                // @username, fingerprint).
-                tagToLabel[tag] = profileNames.resolve(c.request.fromPubkey).primary
-            }
-        }
-        return { _, pseudonym, peerTag ->
-            if (peerTag.isNotEmpty() && !collidedTags.contains(peerTag) &&
-                tagToLabel.containsKey(peerTag)
-            ) {
-                tagToLabel.getValue(peerTag)
-            } else if (pseudonym.isEmpty()) {
-                "Peer"
-            } else {
-                pseudonym.take(8)
-            }
-        }
-    }
-
-    /** Hang up the active SFU group call, clear it, and tell the group this
-     *  device left (ending the call when it was the last one in it). */
-    public fun hangUpGroupCall() {
-        val callId = activeSfuCallId
-        val leaf = activeSfuCallLeaf
-        val joined = groupCallJoinPublished
-        mutableActiveSfuCall.value?.hangUp()
-        mutableActiveSfuCall.value = null
-        activeSfuCallId = null
-        activeSfuCallLeaf = null
-        groupCallJoinPublished = false
-        if (callId != null && leaf != null) {
-            viewModelScope.launch { leaveGroupCall(callId, leaf, joined) }
-        }
-    }
-
-    /**
-     * Publish `GroupCallLeave` (when this device had announced itself as joined),
-     * then `CallEnd` when the ledger shows nobody else in that call.
-     */
-    private suspend fun leaveGroupCall(callId: ByteArray, ownLeaf: UInt, joined: Boolean) {
-        if (joined) {
-            publishGroupCallSignal(
-                FfiCallSignalingBody.GroupLeave(
-                    callId = callId,
-                    leafIndex = ownLeaf,
-                    reason = FfiCallEndReason.HUNG_UP,
-                ),
-            )
-        }
-        val record = repo.groupCalls.value[groupIdHex]
-        if (me.lakko.app.calls.shouldEndGroupCallAfterLeave(
-                record = record,
-                leftCallIdHex = me.lakko.app.calls.callIdHexOf(callId),
-                ownLeaf = ownLeaf,
-            )
-        ) {
-            publishGroupCallSignal(
-                FfiCallSignalingBody.End(callId = callId, reason = FfiCallEndReason.HUNG_UP),
-            )
-        }
-    }
-
-    /**
-     * Compose + publish one group-call body through the locked call-signaling
-     * publish path, then fold it into this device's own ledger record (it will
-     * never receive its own application message back). Returns `false` — and
-     * leaves the ledger alone — when the publish did not happen, so the local
-     * record never claims more than the group was told.
-     */
-    private suspend fun publishGroupCallSignal(body: FfiCallSignalingBody): Boolean {
-        val bytes = try {
-            composeCallSignaling(body)
-        } catch (cause: Throwable) {
-            android.util.Log.w("ChatViewModel", "group call signaling: compose failed", cause)
-            return false
-        }
-        try {
-            repo.publishApplicationMessage(groupIdHex = groupIdHex, plaintextBytes = bytes)
-        } catch (cause: Throwable) {
-            android.util.Log.w("ChatViewModel", "group call signaling: publish failed", cause)
-            return false
-        }
-        me.lakko.app.calls.groupCallSignalOf(body)?.let { signal ->
-            repo.applyGroupCallSignal(groupIdHex, signal, System.currentTimeMillis())
-        }
-        return true
-    }
-
 
     // -------------------------------------------------------------
     // Phase 2a3e2b-Android — cross-device draft sync
@@ -2859,8 +2551,8 @@ public class ChatViewModel(
      * non-null type.
      *
      * That is exactly what used to happen: the collectors lived in an `init`
-     * block near the top of the class and read `mutableActiveSfuCall` and
-     * `sfuCallUiState` (declared hundreds of lines further down) on their first
+     * block near the top of the class and read the group-call state then kept
+     * here (declared hundreds of lines further down) on their first
      * emission. The NPE was thrown inside the coroutine, reached the main
      * thread's uncaught-exception handler, and killed the process every time a
      * chat was opened. Moving the reads one by one is not enough — the retry
@@ -2878,10 +2570,8 @@ public class ChatViewModel(
 
     override fun onCleared() {
         super.onCleared()
-        // Only the group-call busy flag is this view model's to withdraw from
-        // the 1x1 call host. A 1x1 call deliberately outlives the chat it
-        // started in, so nothing here touches it.
-        callHost?.setGroupCallActive(groupCallHostKey, false)
+        // Every call deliberately outlives the chat it started in (it lives in
+        // the app-level call host), so nothing here touches one.
         // Only close a client that was actually built.
         if (gifClientLazy.isInitialized()) gifClient.close()
     }

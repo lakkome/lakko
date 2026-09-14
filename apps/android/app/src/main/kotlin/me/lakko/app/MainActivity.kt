@@ -29,6 +29,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import androidx.lifecycle.viewmodel.compose.viewModel
 import me.lakko.app.auth.AuthRepository
 import me.lakko.app.auth.AuthState
@@ -39,6 +41,7 @@ import me.lakko.app.contacts.InviteIntake
 import me.lakko.app.push.LakkoMessagingService
 import me.lakko.app.push.PushIntake
 import me.lakko.app.ui.auth.LoginScreen
+import me.lakko.app.ui.call.LinkCallNoticeBar
 import me.lakko.app.ui.call.OneToOneCallOverlay
 import me.lakko.app.ui.auth.LoginViewModel
 import me.lakko.app.ui.auth.RecoverScreen
@@ -135,14 +138,19 @@ class MainActivity : ComponentActivity() {
         // joinGroupFromWelcome, and the order of construction
         // makes the dependency obvious in the call site.
         val chatRepository = ChatRepository(applicationContext)
-        // The 1x1 call lives in a process-wide host, not in a chat screen: it
-        // must ring whichever screen is showing and survive leaving the chat.
-        // Every poll of every group hands one-to-one call signaling to it. An
-        // activity recreate builds a new repository, so the port and the hook
-        // are re-attached here each time.
+        // Every call lives in the process-wide call host, not in a screen: the
+        // 1x1 call must ring whichever screen is showing, and no call — 1x1,
+        // group or call link — may end or vanish because its screen went away.
+        // Every poll of every group hands one-to-one call signaling to it, and
+        // every settled group reaches the group-call rekey. An activity
+        // recreate builds a new repository, so the wiring is re-attached here
+        // each time.
+        me.lakko.app.calls.AppCallHost.attach(
+            applicationContext = applicationContext,
+            repository = chatRepository,
+            sessionTokenProvider = { authRepository.identitySecrets.value?.sessionToken },
+        )
         val callHost = me.lakko.app.calls.AppCallHost.instance
-        callHost.attach(me.lakko.app.calls.ChatRepositoryCallPort(applicationContext, chatRepository))
-        chatRepository.oneToOneCallInbound = callHost::deliver
         val contactsRepository = ContactsRepository(
             authRepo = authRepository,
             // G-4 (ADR-0016) — the app context backs the persistent
@@ -340,19 +348,25 @@ private fun AppRoot(
     val state by authRepository.state.collectAsStateWithLifecycle()
 
     // ADR-0032 (G-21/G-22) — a tapped `https://lakko.me/c/<slug>` multi-joiner
-    // call-invite link takes over the whole screen with the PUBLIC JoinCall
-    // landing, in ANY auth state (an anonymous visitor gets the guest-join
-    // path). This gates before the auth-state router so a guest mid-onboarding
-    // (auth flips to SaveFreshPhrase) stays inside the JoinCall context instead
-    // of falling into the top-level SaveFreshPhraseRoot.
+    // call-invite link opens the PUBLIC JoinCall landing, in ANY auth state (an
+    // anonymous visitor gets the guest-join path). Without a session it takes
+    // over the whole screen, gated before the auth-state router so a guest
+    // mid-onboarding (auth flips to SaveFreshPhrase) stays inside the JoinCall
+    // context instead of falling into the top-level SaveFreshPhraseRoot. With a
+    // session it is drawn ABOVE the session screens instead (see the end of
+    // this function): the session root keeps running underneath — its receive
+    // loop is what answers a 1x1 offer busy during the link call.
     val pendingCallJoinSlug by inviteIntake.pendingCallJoinSlug.collectAsStateWithLifecycle()
     val callSlug = pendingCallJoinSlug
-    if (callSlug != null) {
+    val appContext = LocalContext.current.applicationContext
+    if (callSlug != null && state !is AuthState.Session) {
         me.lakko.app.ui.call.JoinCallRoot(
             authRepository = authRepository,
             slug = callSlug,
-            applicationContext = LocalContext.current.applicationContext,
+            applicationContext = appContext,
             onExit = { inviteIntake.consumeCallJoin() },
+            host = me.lakko.app.calls.AppCallHost.link,
+            endCurrentCall = { me.lakko.app.calls.AppCallHost.endCurrentCall() },
         )
         return
     }
@@ -424,6 +438,49 @@ private fun AppRoot(
                 )
             }
         }
+    }
+
+    if (state is AuthState.Session) {
+        // The call surfaces, above every session screen — including the `/c/`
+        // landing, which is drawn first. Rendered from the process-wide host,
+        // so a destination change never hides or ends a call.
+        val profileDirectory = remember(chatRepository) {
+            me.lakko.app.profile.ProfileDirectory.get(chatRepository.context)
+        }
+        val nameVersion by profileDirectory.version.collectAsStateWithLifecycle()
+        androidx.compose.foundation.layout.Box(modifier = Modifier.fillMaxSize()) {
+            if (callSlug != null) {
+                androidx.activity.compose.BackHandler { inviteIntake.consumeCallJoin() }
+                me.lakko.app.ui.call.JoinCallRoot(
+                    authRepository = authRepository,
+                    slug = callSlug,
+                    applicationContext = appContext,
+                    onExit = { inviteIntake.consumeCallJoin() },
+                    host = me.lakko.app.calls.AppCallHost.link,
+                    endCurrentCall = { me.lakko.app.calls.AppCallHost.endCurrentCall() },
+                )
+            }
+            // The 1x1 call's ringing banner and in-call screen.
+            OneToOneCallOverlay(
+                host = callHost,
+                nameForGroup = { groupIdHex ->
+                    nameVersion.let {
+                        chatRepository.oneToOnePeerKey(groupIdHex)?.let { key ->
+                            profileDirectory.resolve(key).primary
+                        }
+                    }
+                },
+            )
+            // A call-link call that is connecting, waiting to be admitted, or
+            // just ended, on screens other than its landing.
+            LinkCallNoticeBar(
+                host = me.lakko.app.calls.AppCallHost.link,
+                onOpen = { slug -> inviteIntake.publishCallJoin(slug) },
+            )
+        }
+        // The group call's and the call-link call's in-call screens.
+        me.lakko.app.ui.call.GroupCallOverlay(host = me.lakko.app.calls.AppCallHost.group)
+        me.lakko.app.ui.call.LinkCallOverlay(host = me.lakko.app.calls.AppCallHost.link)
     }
 
     // ADR-0037 (G-11) — rollback-gate overlays, shown OVER any auth state (the
@@ -595,6 +652,44 @@ private fun SessionRoot(
         }
     }
 
+    // The call lane: the group of a hosted group call keeps being long-polled
+    // while the app is in the background, so a commit that lands during the
+    // call is applied — and the call key rotated (G-18 / ADR-0029) — even with
+    // the chat closed. In the foreground the loop above polls it; a chat screen
+    // that is open polls it itself (in the background too), so the lane stands
+    // aside for both and a group is never long-polled twice.
+    LaunchedEffect(lifecycleOwner, chatRepository) {
+        kotlinx.coroutines.flow.combine(
+            me.lakko.app.calls.AppCallHost.group.slot
+                .map { it?.groupIdHex }
+                .distinctUntilChanged(),
+            lifecycleOwner.lifecycle.currentStateFlow
+                .map { it.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED) }
+                .distinctUntilChanged(),
+            chatRepository.screenPolledGroups,
+        ) { callGroup, foreground, screenPolled ->
+            callGroup?.takeIf { !foreground && it !in screenPolled }
+        }
+            .distinctUntilChanged()
+            .collectLatest { laneGroup ->
+                if (laneGroup == null) return@collectLatest
+                while (true) {
+                    val startedAt = android.os.SystemClock.elapsedRealtime()
+                    try {
+                        chatRepository.pollGroup(laneGroup, waitSecs = APP_LONG_POLL_SECS)
+                    } catch (cancel: kotlinx.coroutines.CancellationException) {
+                        throw cancel
+                    } catch (_: Throwable) {
+                        kotlinx.coroutines.delay(APP_POLL_RETRY_BACKOFF_MS)
+                    }
+                    val elapsed = android.os.SystemClock.elapsedRealtime() - startedAt
+                    if (elapsed < APP_POLL_MIN_ITERATION_MS) {
+                        kotlinx.coroutines.delay(APP_POLL_MIN_ITERATION_MS - elapsed)
+                    }
+                }
+            }
+    }
+
     // Observe pending invite slugs (1.15e11). When a deep
     // link arrives — either at cold start (MainActivity's
     // onCreate published it before SessionRoot mounted) or
@@ -657,12 +752,6 @@ private fun SessionRoot(
         pushIntake.consume()
     }
 
-    // ADR-0048 UX §5 — the caller's resolved name for the call overlay.
-    val profileDirectory = remember(chatRepository) {
-        me.lakko.app.profile.ProfileDirectory.get(chatRepository.context)
-    }
-    val nameVersion by profileDirectory.version.collectAsStateWithLifecycle()
-
     androidx.compose.foundation.layout.Box(modifier = Modifier.fillMaxSize()) {
     when (val current = destination) {
         SessionDestination.Home -> HomeScreen(
@@ -675,13 +764,13 @@ private fun SessionRoot(
             onOpenAntiCensorship = { destination = SessionDestination.AntiCensorship },
             onOpenProfile = { destination = SessionDestination.Profile },
             onLogout = {
-                callHost.reset()
+                me.lakko.app.calls.AppCallHost.reset()
                 contactsRepository.clear()
                 chatRepository.clear()
                 authRepository.logout()
             },
             onForgetDevice = {
-                callHost.reset()
+                me.lakko.app.calls.AppCallHost.reset()
                 contactsRepository.clear()
                 // Note: chat.forgetDevice() BEFORE
                 // auth.forgetDevice() — see the file-level
@@ -750,6 +839,9 @@ private fun SessionRoot(
                             contactsRepository.resolveVerifiedRecipient(username)
                         },
                         callHost = callHost,
+                        groupCallHost = me.lakko.app.calls.AppCallHost.group,
+                        callOccupant = me.lakko.app.calls.AppCallHost.occupant,
+                        endCurrentCall = { me.lakko.app.calls.AppCallHost.endCurrentCall() },
                     )
                 },
             )
@@ -873,20 +965,6 @@ private fun SessionRoot(
             )
         }
     }
-
-    // The 1x1 call's ringing banner and in-call screen, above every screen
-    // above. Rendered from the process-wide host, so leaving a chat or
-    // switching screens never hides or ends a call.
-    OneToOneCallOverlay(
-        host = callHost,
-        nameForGroup = { groupIdHex ->
-            nameVersion.let {
-                chatRepository.oneToOnePeerKey(groupIdHex)?.let { key ->
-                    profileDirectory.resolve(key).primary
-                }
-            }
-        },
-    )
     }
 }
 

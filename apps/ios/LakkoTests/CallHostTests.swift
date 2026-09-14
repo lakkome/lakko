@@ -232,21 +232,39 @@ final class CallHostTests: XCTestCase {
         XCTAssertEqual(host.activeGroupIdHex, groupA)
     }
 
-    func testAnOfferDuringAGroupCallIsAnsweredBusyAndTheOwnerIsHeldWeakly() async {
+    func testAnOfferDuringAGroupOrLinkCallIsAnsweredBusy() async {
         let h = Harness(nowMs: t0)
         let host = makeHost(h)
-        var owner: NSObject? = NSObject()
-        host.noteGroupCall(owner: owner!, active: true)
+        var other: CallKind? = .group
+        host.otherCallOccupant = { other }
         host.receive(row(offer(callA), group: groupA, id: 1, atMs: t0))
         await host.whenPublishesSettle()
         XCTAssertNil(host.activeCall)
         XCTAssertEqual(endReasons(h).map(\.2), [.busy])
 
-        // The owner going away without saying so must not leave the device busy.
-        owner = nil
-        XCTAssertFalse(host.groupCallBusy)
+        other = .link
         host.receive(row(offer(callB), group: groupB, id: 2, atMs: t0))
+        await host.whenPublishesSettle()
+        XCTAssertNil(host.activeCall, "a live call-link call holds the slot too")
+        XCTAssertEqual(endReasons(h).map(\.2), [.busy, .busy])
+
+        // The other call ending frees the slot.
+        other = nil
+        XCTAssertFalse(host.otherCallBusy)
+        host.receive(row(offer(callB), group: groupB, id: 3, atMs: t0))
         XCTAssertEqual(host.activeCall?.state, .ringing)
+    }
+
+    func testStartingAOneToOneCallDuringAGroupCallIsRefusedWithAReason() {
+        let h = Harness(nowMs: t0)
+        let host = makeHost(h)
+        host.otherCallOccupant = { .group }
+        host.startOutgoingCall(groupIdHex: groupA)
+        XCTAssertNil(host.activeCall)
+        XCTAssertFalse(host.callStarting)
+        XCTAssertEqual(
+            host.callError,
+            "You are already in a group call. End it before you start another one.")
     }
 
     // MARK: - C-11 and C-12
@@ -277,7 +295,7 @@ final class CallHostTests: XCTestCase {
                 CallHostRouting.decide(
                     row: row(body, group: groupA, id: 9, atMs: t0), nowMs: t0,
                     active: .init(callIdHex: CallHostRouting.hex(callA), groupIdHex: groupA),
-                    endedCallIds: [], groupCallBusy: false),
+                    endedCallIds: [], otherCallBusy: false),
                 .drop)
         }
     }

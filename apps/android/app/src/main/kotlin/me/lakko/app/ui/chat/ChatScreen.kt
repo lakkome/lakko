@@ -85,7 +85,6 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.foundation.background
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import me.lakko.app.ui.call.CallScreen
 import kotlinx.coroutines.Dispatchers
 import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.delay
@@ -287,20 +286,19 @@ public fun ChatScreen(
 
 
 
-    // Phase 3a10 — call surface. The 1x1 call (any chat's) is app-level: its
-    // ringing banner and in-call screen are drawn by `OneToOneCallOverlay` in
-    // `MainActivity`, above every screen, so they survive leaving this chat.
-    // This screen only reads the slot to hide its call buttons.
-    val activeCall by viewModel.oneToOneCall.collectAsStateWithLifecycle()
-    // SFU multi-party group call (>2 members). Mutually exclusive with
-    // the 1x1 call — the call button routes to exactly one.
-    val activeSfuCall by viewModel.activeSfuCall.collectAsStateWithLifecycle()
+    // Phase 3a10 — call surface. Every call (any chat's 1x1 call, a group call,
+    // a call-link call) is app-level: the ringing banner and the in-call screens
+    // are drawn from `MainActivity`'s root, above every screen, so they survive
+    // leaving this chat. This screen only reads the one call slot to hide its
+    // call buttons and keep media capture out of the way.
+    val callOccupant by viewModel.callOccupant.collectAsStateWithLifecycle()
 
     // Every way into a call asks for the microphone (and, for video, the
     // camera) first; the denial dialogs are mounted by the gate itself.
     val callPermissions = me.lakko.app.ui.call.rememberCallPermissionGate()
     val joinableGroupCall by viewModel.joinableGroupCall.collectAsStateWithLifecycle()
     val callNotice by viewModel.callNotice.collectAsStateWithLifecycle()
+    val callNoticeOffersEnd by viewModel.callNoticeOffersEndCurrentCall.collectAsStateWithLifecycle()
 
     // ADR-0047 — the media runtime for this chat: decrypted files, the one
     // voice player, the played marks. Scoped to this screen, so every
@@ -325,7 +323,7 @@ public fun ChatScreen(
     }
     val pendingMedia by viewModel.pendingMedia.collectAsStateWithLifecycle()
     val recorder = rememberRecordController(mediaHub) { take -> viewModel.sendRecordedTake(take) }
-    val callOwnsMedia = activeCall != null || activeSfuCall != null
+    val callOwnsMedia = callOccupant != null
     SideEffect { recorder.inCall = callOwnsMedia }
     // UX spec §4 — the picker: composer mode (insert, stays open) or reaction
     // mode for one message (react, closes). `null` when closed.
@@ -364,13 +362,13 @@ public fun ChatScreen(
             // enough: a call control asserts a live E2EE session, and there is
             // not one. Folded into `callActive` because the two reasons to hide
             // them are the same rendering decision.
-            callActive = activeCall != null || activeSfuCall != null || membershipEnded,
+            callActive = callOccupant != null || membershipEnded,
             onNavigateBack = onNavigateBack,
             onRefresh = viewModel::onRefreshClicked,
             // A live group call on this chat is JOINED rather than
             // duplicated; otherwise a group chat (>2 MLS members) starts a
             // multi-party SFU call and a 1x1 chat the P2P CallSession. The
-            // buttons are hidden (callActive) while either kind of call is up.
+            // buttons are hidden (callActive) while any call occupies the slot.
             onStartCall = {
                 callPermissions.request(video = false) { v -> viewModel.onCallButton(video = v) }
             },
@@ -410,7 +408,16 @@ public fun ChatScreen(
                 title = { Text("Call") },
                 text = { Text(notice) },
                 confirmButton = {
-                    TextButton(onClick = viewModel::dismissCallNotice) { Text("OK") }
+                    if (callNoticeOffersEnd) {
+                        TextButton(onClick = viewModel::onEndCurrentCall) { Text("End current call") }
+                    } else {
+                        TextButton(onClick = viewModel::dismissCallNotice) { Text("OK") }
+                    }
+                },
+                dismissButton = if (callNoticeOffersEnd) {
+                    { TextButton(onClick = viewModel::dismissCallNotice) { Text("Cancel") } }
+                } else {
+                    null
                 },
             )
         }
@@ -422,34 +429,9 @@ public fun ChatScreen(
             MembersSheet(viewModel = viewModel, onChatDeleted = onNavigateBack)
         }
 
-        // The 1x1 call's ringing banner and in-call screen are NOT drawn
-        // here: see `OneToOneCallOverlay`, mounted app-wide by `MainActivity`.
-
-        // SFU multi-party group call — presented full-screen over the
-        // chat while live. Unlike the 1x1 path there is no prejoin: the
-        // session auto-connects (phase is driven to Connecting before
-        // the overlay appears), so `CallScreen` gets the externally
-        // driven `sfuCallUiState` (NO `session` — the SfuCallUi adapter
-        // owns the state) and no prejoin callbacks. End routes to
-        // `hangUpGroupCall`, which clears `activeSfuCall` and drops this
-        // Dialog.
-        if (activeSfuCall != null) {
-            Dialog(
-                onDismissRequest = { /* exit only via End button */ },
-                properties = DialogProperties(
-                    usePlatformDefaultWidth = false,
-                    dismissOnBackPress = false,
-                    dismissOnClickOutside = false,
-                ),
-            ) {
-                Box(modifier = Modifier.fillMaxSize()) {
-                    CallScreen(
-                        onExit = { viewModel.hangUpGroupCall() },
-                        state = viewModel.sfuCallUiState,
-                    )
-                }
-            }
-        }
+        // No call is drawn here: the 1x1, group and call-link in-call screens
+        // are mounted app-wide by `MainActivity`, so leaving this chat never
+        // hides or ends a call and returning to it shows the live call.
 
         if (!state.threadKnown) {
             // The chat list opened this screen for a group that

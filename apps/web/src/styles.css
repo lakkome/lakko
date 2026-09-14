@@ -388,7 +388,7 @@ a:focus-visible {
 @media (max-width: 720px) {
   .app-shell {
     grid-template-columns: 1fr;
-    grid-template-rows: 1fr auto;
+    grid-template-rows: minmax(0, 1fr) auto;
   }
   .app-shell > main {
     order: 0;
@@ -1055,12 +1055,41 @@ a.lk-row.active {
   background: var(--surface-hover);
 }
 
+/* The chat fills the main pane: header, a scrolling timeline region, and the
+   composer pinned at the bottom. */
+.lk-main > article.lk-chat {
+  padding: 0;
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.lk-chat > :not(.lk-chat-body) {
+  padding: 24px 32px;
+}
+.lk-chat-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.lk-chat-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
 .lk-chat-head {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding-bottom: 12px;
+  padding: 10px 16px 10px 24px;
+  background: var(--surface-elevated);
   border-bottom: 1px solid var(--surface-border);
+  flex: 0 0 auto;
 }
 .lk-chat-title {
   flex: 1;
@@ -1093,17 +1122,13 @@ a.lk-row.active {
 }
 
 .lk-composer {
-  position: sticky;
-  bottom: 0;
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 10px 0 0;
-  margin: 0 -8px;
-  padding-left: 8px;
-  padding-right: 8px;
+  padding: 10px 16px 14px;
   border-top: 1px solid var(--surface-border);
-  background: var(--surface-bg);
+  background: var(--surface-elevated);
+  flex: 0 0 auto;
 }
 .lk-composer .lk-icon-button {
   width: 40px;

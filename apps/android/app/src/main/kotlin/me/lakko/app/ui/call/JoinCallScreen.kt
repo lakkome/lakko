@@ -6,16 +6,16 @@ package me.lakko.app.ui.call
 import android.content.Context
 import android.util.Log
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
@@ -26,24 +26,29 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import me.lakko.app.auth.AuthRepository
 import me.lakko.app.auth.AuthState
 import me.lakko.app.auth.IdentitySecrets
-import me.lakko.app.calls.CallUiState
-import me.lakko.app.calls.MultiJoinerCall
+import me.lakko.app.calls.CallVerb
+import me.lakko.app.calls.LinkCallHost
+import me.lakko.app.calls.LinkCallPhase
+import me.lakko.app.calls.LinkCallRequest
+import me.lakko.app.calls.LinkCallSlot
+import me.lakko.app.calls.LinkCallStartOutcome
 import me.lakko.app.calls.ParsedCallInvite
-import me.lakko.app.calls.SfuConfig
+import me.lakko.app.calls.callIdHexOf
 import me.lakko.app.calls.hexKey
+import me.lakko.app.calls.linkCallOccupiesSlot
 import me.lakko.app.calls.parseCallInviteSlug
 import me.lakko.app.discovery.DiscoveryClient
 import me.lakko.app.discovery.DiscoveryHttpError
 import me.lakko.app.ui.auth.SaveFreshPhraseScreen
-import me.lakko.sframe.SFrameAvailability
 import uniffi.lakko_ffi_uniffi.CallInviteCapability
 import uniffi.lakko_ffi_uniffi.Identity
 
@@ -52,15 +57,17 @@ import uniffi.lakko_ffi_uniffi.Identity
  * Android twin of `apps/web/src/routes/JoinCall.tsx`.
  *
  * Whoever opens a `/c/<slug>` call link lands here. The screen decodes +
- * verifies the [CallInviteCapability] (owner's Ed25519 signature), then drives
- * the ADR-0032 owner-founds flow via [MultiJoinerCall]:
+ * verifies the [CallInviteCapability] (owner's Ed25519 signature) and asks the
+ * app-level [LinkCallHost] for the call; from then on it shows the host's state
+ * for it. The call itself (the ADR-0032 owner-founds flow via
+ * [me.lakko.app.calls.MultiJoinerCall]) lives in the host, so leaving this
+ * screen does not end it, and a second link cannot start a second call:
  *
  *   * If the visitor IS the owner (its identity signature key matches the
- *     capability's owner key), it FOUNDS + hosts the call
- *     ([MultiJoinerCall.host]).
+ *     capability's owner key), it FOUNDS + hosts the call.
  *   * Otherwise it JOINS: mint a fresh KeyPackage, connect to the SFU room,
- *     relay the KeyPackage to the acting committer, and wait for the Welcome
- *     ([MultiJoinerCall.join]). Until the Welcome lands the screen shows a
+ *     relay the KeyPackage to the acting committer, and wait for the Welcome.
+ *     Until the Welcome lands the screen shows a
  *     "waiting for the owner to admit you" state (invariant #4 — no media
  *     before the group is joined). If no committer responds within the
  *     admission window the call is dead (owner left / call ended).
@@ -127,6 +134,8 @@ data class JoinCallUiState(
     val guestName: String = GUEST_NAME_DEFAULT,
     /** The reason the typed guest name fails the rule, or `null`. */
     val guestNameError: String? = null,
+    /** Why Join was refused while another call holds the one call slot. */
+    val busyMessage: String? = null,
 )
 
 /** ADR-0048 UX §4 — the guest name field's prefill. */
@@ -137,57 +146,46 @@ class JoinCallViewModel(
     private val authRepository: AuthRepository,
     private val applicationContext: Context,
     private val slug: String,
+    private val host: LinkCallHost,
+    private val endCurrentCallAction: () -> Unit,
 ) : ViewModel() {
 
-    private val _uiState = MutableStateFlow(JoinCallUiState())
-    val uiState: StateFlow<JoinCallUiState> = _uiState.asStateFlow()
+    /** This screen's own state before (or instead of) the host's call. */
+    private val local = MutableStateFlow(JoinCallUiState())
 
-    /** The shared call-UI state the in-call [me.lakko.app.ui.call.CallScreen]
-     *  renders once the call is live. Owned here for the screen's lifetime. */
-    val callUiState: CallUiState = CallUiState()
+    /** Landing UI snapshot: the local state, with the phase of the host's call
+     *  for this link when it holds one. */
+    val uiState: StateFlow<JoinCallUiState> =
+        combine(local, host.slot) { l, slot -> l.withHostSlot(slot) }
+            .stateIn(viewModelScope, SharingStarted.Eagerly, JoinCallUiState())
 
-    private var call: MultiJoinerCall? = null
-    /** The canonical Identity built for this call's lifetime; freed on exit. */
-    private var callIdentity: Identity? = null
     /** The join to resume once a guest account's session has landed. */
     private var pendingJoin: DecodedCall? = null
 
-    // FINDING 5: synchronous double-tap latches (set BEFORE any suspend), so a
-    // rapid second tap can't mint a SECOND guest account or start a second
-    // call.
+    // FINDING 5: a synchronous double-tap latch (set BEFORE any suspend), so a
+    // rapid second tap can't mint a SECOND guest account. A second call is
+    // prevented by the host, which refuses a call while one holds the slot.
     private var mintingGuest = false
-    private var beginning = false
 
     init {
         viewModelScope.launch {
             val d = decode(slug)
-            _uiState.value = _uiState.value.copy(loading = false, decoded = d)
+            local.update { it.copy(loading = false, decoded = d) }
         }
-        // ADR-0032 piece B — mid-call camera-on bridge. The in-call
-        // [CallScreen] is presented WITHOUT a session (only [callUiState]), so
-        // the camera button only flips the store's local `camOn`; mirror it
-        // onto the live [MultiJoinerCall] here (the analog of the web camera
-        // effect). camOn TRUE -> `publishVideo` (acquire + SFrame-seal +
-        // renegotiate); FALSE -> disable the track. On a failure revert the
-        // toggle — fail-safe, the call stays up audio-only (invariant #4).
-        viewModelScope.launch {
-            callUiState.participants
-                .map { list -> list.firstOrNull { it.isLocal }?.camOn ?: false }
-                .distinctUntilChanged()
-                .collect { camOn ->
-                    val c = call ?: return@collect
-                    if (camOn) {
-                        try {
-                            c.publishVideo()
-                        } catch (err: Throwable) {
-                            callUiState.setCamera(false)
-                            Log.w("JoinCall", "mid-call publishVideo failed — reverting camera", err)
-                        }
-                    } else {
-                        c.setCameraEnabled(false)
-                    }
-                }
+    }
+
+    private fun JoinCallUiState.withHostSlot(slot: LinkCallSlot?): JoinCallUiState {
+        val d = decoded ?: return this
+        if (slot == null || slot.callIdHex != callIdHexOf(d.callId)) return this
+        val phase = when (slot.phase) {
+            LinkCallPhase.STARTING -> JoinCallPhase.Starting
+            LinkCallPhase.WAITING -> JoinCallPhase.Waiting
+            LinkCallPhase.LIVE -> JoinCallPhase.Live
+            LinkCallPhase.ENDED -> JoinCallPhase.Ended
+            LinkCallPhase.DEAD -> JoinCallPhase.Dead
+            LinkCallPhase.ERROR -> JoinCallPhase.Error
         }
+        return copy(phase = phase, error = if (phase == JoinCallPhase.Error) slot.errorMessage ?: error else error)
     }
 
     private suspend fun decode(slug: String): DecodedCall? {
@@ -238,10 +236,29 @@ class JoinCallViewModel(
     /** ADR-0048 UX §4 — the guest name field, checked against the core's rule. */
     fun onGuestNameChange(value: String) {
         val check = me.lakko.app.profile.checkDisplayName(value)
-        _uiState.value = _uiState.value.copy(
-            guestName = value,
-            guestNameError = (check as? me.lakko.app.profile.DisplayNameCheck.Invalid)?.problem?.copy,
-        )
+        local.update {
+            it.copy(
+                guestName = value,
+                guestNameError = (check as? me.lakko.app.profile.DisplayNameCheck.Invalid)?.problem?.copy,
+            )
+        }
+    }
+
+    /** This screen is showing the call; the host does not repeat its status
+     *  elsewhere meanwhile. Returns the release. */
+    fun claimLanding(): () -> Unit {
+        val release = host.claimLanding()
+        return {
+            release()
+            // An outcome seen here is not repeated on the next screen either.
+            val slot = host.slot.value
+            val d = local.value.decoded
+            if (slot != null && d != null && slot.callIdHex == callIdHexOf(d.callId) &&
+                !linkCallOccupiesSlot(slot.phase)
+            ) {
+                host.dismissOutcome()
+            }
+        }
     }
 
     /** Tap Join: use the live session if there is one, else create a guest
@@ -250,10 +267,17 @@ class JoinCallViewModel(
      *  video link, camera) permission; [videoAllowed] is `false` when the
      *  camera was refused and the user chose audio only. */
     fun onStart(videoAllowed: Boolean = true) {
-        val decoded = _uiState.value.decoded ?: return
+        val decoded = uiState.value.decoded ?: return
         // A video link joined after the camera was refused joins audio only
         // (the user chose that in the permission dialog).
         val d = if (videoAllowed) decoded else decoded.copy(mediaVideo = false)
+        local.update { it.copy(busyMessage = null) }
+        // Refuse before minting a guest account for a call that could not start.
+        val busy = host.busyMessage(if (d.isOwner) CallVerb.START else CallVerb.JOIN, callIdHexOf(d.callId))
+        if (busy != null) {
+            local.update { it.copy(busyMessage = busy) }
+            return
+        }
         val secrets = authRepository.identitySecrets.value
         if (secrets != null) {
             viewModelScope.launch { beginJoin(d, secrets) }
@@ -265,7 +289,7 @@ class JoinCallViewModel(
         // makes a rapid double-tap idempotent — never two guest accounts.
         if (mintingGuest) return
         mintingGuest = true
-        _uiState.value = _uiState.value.copy(phase = JoinCallPhase.Starting, error = null)
+        local.update { it.copy(phase = JoinCallPhase.Starting, error = null) }
         pendingJoin = d
         viewModelScope.launch {
             try {
@@ -273,10 +297,7 @@ class JoinCallViewModel(
             } catch (err: Throwable) {
                 mintingGuest = false // allow a retry after a failed mint
                 pendingJoin = null
-                _uiState.value = _uiState.value.copy(
-                    phase = JoinCallPhase.Error,
-                    error = err.message ?: err.toString(),
-                )
+                local.update { it.copy(phase = JoinCallPhase.Error, error = err.message ?: err.toString()) }
             }
         }
     }
@@ -290,7 +311,7 @@ class JoinCallViewModel(
         // ADR-0048 UX §4 — the guest account now exists: record the name it
         // asked for as its own profile (no username). A name the rule refuses
         // is not stored; the guest can set one later in Settings -> Profile.
-        val nameCheck = me.lakko.app.profile.checkDisplayName(_uiState.value.guestName)
+        val nameCheck = me.lakko.app.profile.checkDisplayName(local.value.guestName)
         if (nameCheck is me.lakko.app.profile.DisplayNameCheck.Valid) {
             try {
                 val updated = me.lakko.app.profile.applyOwnNameChange(
@@ -309,114 +330,58 @@ class JoinCallViewModel(
         viewModelScope.launch { beginJoin(d, secrets) }
     }
 
-    /** Run the actual ADR-0032 host/join now that a live session exists. */
+    /** Hand the ADR-0032 host / join to the app-level call host. */
     private suspend fun beginJoin(d: DecodedCall, secrets: IdentitySecrets) {
-        // Synchronous latch (FINDING 5): guard against a rapid double-tap
-        // starting two SFU sessions before `call` is assigned.
-        if (call != null || beginning) return
-        beginning = true
-
-        val base = SfuConfig.baseUrl
-        if (base == null) {
-            beginning = false
-            _uiState.value = _uiState.value.copy(
-                phase = JoinCallPhase.Error,
-                error = "This client has no SFU endpoint — set lakko.sfu.url and rebuild.",
-            )
-            return
-        }
-        // Fail-closed: no SFrame native shim => no call (invariant #4).
-        if (!SFrameAvailability.isCallingAvailable) {
-            beginning = false
-            _uiState.value = _uiState.value.copy(
-                phase = JoinCallPhase.Error,
-                error = "Secure media encryption is unavailable on this device.",
-            )
-            return
-        }
-        _uiState.value = _uiState.value.copy(phase = JoinCallPhase.Starting, error = null)
-
-        // Build the canonical identity for the call's lifetime.
-        val identity = try {
-            Identity.fromSeed(secrets.accountIdentitySeed)
-        } catch (e: Throwable) {
-            beginning = false
-            _uiState.value = _uiState.value.copy(
-                phase = JoinCallPhase.Error,
-                error = "Re-authenticate to join this call (no live identity).",
-            )
-            return
-        }
-        callIdentity = identity
-
-        val opts = MultiJoinerCall.Options(
-            applicationContext = applicationContext,
-            identity = identity,
-            callId = d.callId,
-            ownerAccountId = d.ownerAccountId,
-            ownerSignatureKey = d.ownerSignatureKey,
-            sfuBaseUrl = base,
-            sessionToken = secrets.sessionToken,
-            audio = true,
-            video = d.mediaVideo,
-            ui = callUiState,
-            scope = viewModelScope,
-            onJoined = {
-                _uiState.value = _uiState.value.copy(phase = JoinCallPhase.Live)
-            },
-            onEnded = {
-                _uiState.value = _uiState.value.copy(phase = JoinCallPhase.Ended)
-            },
-            onNoCommitter = {
-                call = null
-                _uiState.value = _uiState.value.copy(phase = JoinCallPhase.Dead)
-            },
-            onError = { err ->
-                _uiState.value = _uiState.value.copy(
-                    phase = JoinCallPhase.Error,
-                    error = err.message ?: err.toString(),
-                )
-            },
+        local.update { it.copy(phase = JoinCallPhase.Starting, error = null, busyMessage = null) }
+        val outcome = host.start(
+            LinkCallRequest(
+                callId = d.callId,
+                ownerAccountId = d.ownerAccountId,
+                ownerSignatureKey = d.ownerSignatureKey,
+                mediaVideo = d.mediaVideo,
+                isOwner = d.isOwner,
+                slug = slug,
+                accountIdentitySeed = secrets.accountIdentitySeed,
+                sessionToken = secrets.sessionToken,
+            ),
         )
-
-        try {
-            call = if (d.isOwner) {
-                // Owner founds + hosts; onJoined fires synchronously in host().
-                MultiJoinerCall.host(opts)
-            } else {
-                // Joiner connects signaling-only + relays its KeyPackage; sit
-                // in "waiting" until the Welcome arrives (onJoined -> Live).
-                val c = MultiJoinerCall.join(opts)
-                if (_uiState.value.phase == JoinCallPhase.Starting) {
-                    _uiState.value = _uiState.value.copy(phase = JoinCallPhase.Waiting)
-                }
-                c
-            }
-        } catch (err: Throwable) {
-            beginning = false // start failed (call unset) — allow a retry
-            identity.close()
-            callIdentity = null
-            _uiState.value = _uiState.value.copy(
-                phase = JoinCallPhase.Error,
-                error = err.message ?: err.toString(),
-            )
+        when (outcome) {
+            // The host's slot is what this screen shows from here on.
+            LinkCallStartOutcome.Started,
+            LinkCallStartOutcome.AlreadyInThisCall,
+            -> local.update { it.copy(phase = JoinCallPhase.Idle) }
+            is LinkCallStartOutcome.Busy ->
+                local.update { it.copy(phase = JoinCallPhase.Idle, busyMessage = outcome.message) }
+            is LinkCallStartOutcome.Failed ->
+                local.update { it.copy(phase = JoinCallPhase.Error, error = outcome.message) }
         }
     }
 
-    /** Tear down the call + free the call identity. Idempotent. */
-    fun onExit() {
-        call?.hangUp()
-        call = null
-        callIdentity?.close()
-        callIdentity = null
-        callUiState.reset()
+    /** The host's slot holds this link's call (so there is a call to cancel). */
+    fun hostHoldsThisCall(state: JoinCallUiState): Boolean {
+        val d = state.decoded ?: return false
+        val slot = host.slot.value ?: return false
+        return slot.callIdHex == callIdHexOf(d.callId) && linkCallOccupiesSlot(slot.phase)
     }
 
-    override fun onCleared() {
-        call?.hangUp()
-        call = null
-        callIdentity?.close()
-        callIdentity = null
+    /** Stop waiting to be admitted (or leave the call). */
+    fun onCancel() {
+        host.leave()
+    }
+
+    /** The busy notice's "End current call". */
+    fun onEndCurrentCall() {
+        endCurrentCallAction()
+        local.update { it.copy(busyMessage = null) }
+    }
+
+    /** Forget a failed attempt and offer Join again. */
+    fun onTryAgain() {
+        val slot = host.slot.value
+        val d = local.value.decoded
+        if (slot != null && d != null && slot.callIdHex == callIdHexOf(d.callId)) host.dismissOutcome()
+        mintingGuest = false
+        local.update { it.copy(phase = JoinCallPhase.Idle, error = null) }
     }
 }
 
@@ -433,6 +398,8 @@ fun JoinCallRoot(
     slug: String,
     applicationContext: Context,
     onExit: () -> Unit,
+    host: LinkCallHost,
+    endCurrentCall: () -> Unit,
 ) {
     val authState by authRepository.state.collectAsStateWithLifecycle()
     val vm: JoinCallViewModel = viewModel(
@@ -440,7 +407,7 @@ fun JoinCallRoot(
         factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T =
-                JoinCallViewModel(authRepository, applicationContext, slug) as T
+                JoinCallViewModel(authRepository, applicationContext, slug, host, endCurrentCall) as T
         },
     )
 
@@ -475,26 +442,21 @@ fun JoinCallScreen(
     viewModel: JoinCallViewModel,
     onExit: () -> Unit,
 ) {
-    val ui by viewModel.uiState.collectAsState()
+    val ui by viewModel.uiState.collectAsStateWithLifecycle()
     // Hosting or joining a call link needs the microphone, and the camera for
     // a video link — asked here, before any account is minted or any SFU
     // connection opened.
     val callPermissions = rememberCallPermissionGate()
 
-    // Once live, the shared in-call UI takes the whole screen.
-    if (ui.phase == JoinCallPhase.Live) {
-        Box(modifier = Modifier.fillMaxSize()) {
-            CallScreen(
-                onExit = {
-                    viewModel.onExit()
-                    onExit()
-                },
-                state = viewModel.callUiState,
-            )
-        }
-        return
+    // While this screen is up it shows the host's state for its call itself, so
+    // the host does not repeat it as a status line. A live call is shown by the
+    // app-level in-call screen, above this one.
+    DisposableEffect(viewModel) {
+        val release = viewModel.claimLanding()
+        onDispose { release() }
     }
 
+    Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -522,6 +484,15 @@ fun JoinCallScreen(
                     style = MaterialTheme.typography.bodyMedium,
                     fontFamily = if (host.isFingerprint) FontFamily.Monospace else FontFamily.Default,
                 )
+                ui.busyMessage?.let { message ->
+                    Text(text = message, color = MaterialTheme.colorScheme.error)
+                    androidx.compose.foundation.layout.Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Button(onClick = viewModel::onEndCurrentCall) { Text("End current call") }
+                        TextButton(onClick = onExit) { Text("Go back") }
+                    }
+                }
                 when (ui.phase) {
                     JoinCallPhase.Idle -> {
                         // ADR-0048 UX §4 — a guest (no session) is asked for a
@@ -547,9 +518,36 @@ fun JoinCallScreen(
                         ) {
                             Text(if (decoded.isOwner) "Start call" else "Join call")
                         }
+                        if (ui.busyMessage == null) {
+                            TextButton(onClick = onExit) { Text("Go back") }
+                        }
                     }
-                    JoinCallPhase.Starting -> Text("Connecting…")
-                    JoinCallPhase.Waiting -> Text("Waiting for the owner to admit you…")
+                    JoinCallPhase.Starting -> {
+                        Text("Connecting…")
+                        // Only once the host holds the call; a guest sign-up in
+                        // flight has nothing to cancel yet.
+                        if (viewModel.hostHoldsThisCall(ui)) {
+                            TextButton(onClick = viewModel::onCancel) { Text("Cancel") }
+                        }
+                    }
+                    JoinCallPhase.Waiting -> {
+                        Text("Waiting for the owner to admit you…")
+                        Text(
+                            text = "You can leave this screen; you will join when you are admitted.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        androidx.compose.foundation.layout.Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            TextButton(onClick = viewModel::onCancel) { Text("Cancel") }
+                            TextButton(onClick = onExit) { Text("Go back") }
+                        }
+                    }
+                    JoinCallPhase.Live -> {
+                        Text("You are in this call.")
+                        TextButton(onClick = onExit) { Text("Go back") }
+                    }
                     JoinCallPhase.Dead -> {
                         Text("This call has ended or isn't active.")
                         TextButton(onClick = onExit) { Text("Go back") }
@@ -563,12 +561,16 @@ fun JoinCallScreen(
                             text = "Failed: ${ui.error ?: "unknown error"}",
                             color = MaterialTheme.colorScheme.error,
                         )
-                        TextButton(onClick = onExit) { Text("Go back") }
+                        androidx.compose.foundation.layout.Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            TextButton(onClick = viewModel::onTryAgain) { Text("Try again") }
+                            TextButton(onClick = onExit) { Text("Go back") }
+                        }
                     }
-                    // Live is handled above.
-                    JoinCallPhase.Live -> Unit
                 }
             }
         }
+    }
     }
 }

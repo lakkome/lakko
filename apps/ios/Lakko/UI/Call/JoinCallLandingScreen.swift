@@ -10,7 +10,9 @@ import SwiftUI
 ///
 /// Whoever opens a `https://lakko.me/c/<slug>` call link lands here. The screen
 /// decodes + verifies the `CallInviteCapability` (owner's Ed25519 signature),
-/// then drives the ADR-0032 owner-founds flow via ``MultiJoinerCall``:
+/// then asks the app-level ``LinkCallHost`` for the call and shows the host's
+/// state for it. The host owns the ``MultiJoinerCall`` — so the call survives
+/// this screen being replaced — and runs the ADR-0032 owner-founds flow:
 ///
 ///   * If the visitor IS the owner (its identity signature key matches the
 ///     capability's owner key), it FOUNDS + hosts the call
@@ -34,8 +36,9 @@ import SwiftUI
 @MainActor
 public final class JoinCallLandingViewModel: ObservableObject {
 
-    /// The landing screen's own state machine. `waiting` is the ADR-0032
-    /// joiner-side pre-admission phase; `dead` is the no-live-committer timeout.
+    /// What the landing shows. `waiting` is the ADR-0032 joiner-side
+    /// pre-admission phase; `dead` is the no-live-committer timeout; `busy` is
+    /// a refusal because another call holds the one call slot.
     public enum Phase: Equatable {
         case idle
         case starting
@@ -43,6 +46,7 @@ public final class JoinCallLandingViewModel: ObservableObject {
         case live
         case ended
         case dead
+        case busy(String)
         case error(String)
     }
 
@@ -57,36 +61,55 @@ public final class JoinCallLandingViewModel: ObservableObject {
         /// `true` when the local identity IS the capability owner. Always false
         /// for an anonymous visitor.
         let isOwner: Bool
+
+        var callIdHex: String { callId.map { String(format: "%02x", $0) }.joined() }
     }
 
-    @Published public private(set) var phase: Phase = .idle
+    /// What this screen itself is doing, before the call is the host's — the
+    /// guest sign-up, a refusal, a failure before the host held the call.
+    @Published private var localPhase: Phase = .idle
     @Published public private(set) var decoded: Decoded?
     @Published public private(set) var loading = true
     /// ADR-0048 / UX spec §4 — a guest (no session) is asked for a name here,
     /// prefilled `Guest`. It becomes the new account's own profile.
     @Published public var guestName: String = "Guest"
 
-    /// The shared in-call state the orchestrator populates + `CallScreen` reads.
-    let ui = CallUiState()
-
     private let slug: String
     private let authRepository: AuthRepository
     private let intake: InviteIntake
-    private var call: MultiJoinerCall?
+    /// The call itself lives here, app-wide, so it survives this screen.
+    let linkCallHost: LinkCallHost
     private var didDecode = false
-    /// Piece B — observes the call's local `camOn` on `ui` and drives the
-    /// mid-call camera-on onto the `MultiJoinerCall` (the SFU `CallScreen` is
-    /// presented UI-only here too). Mirror of the ChatViewModel bridge.
-    private var cameraCancellable: AnyCancellable?
+    private var hostSubscription: AnyCancellable?
     // Synchronous double-tap latches (set BEFORE any await), so a rapid second
     // tap can't mint a SECOND guest account or start a second call (Hardening 3).
     private var mintingGuest = false
     private var beginning = false
 
-    public init(slug: String, authRepository: AuthRepository, intake: InviteIntake) {
+    init(slug: String, authRepository: AuthRepository, intake: InviteIntake, linkCallHost: LinkCallHost) {
         self.slug = slug
         self.authRepository = authRepository
         self.intake = intake
+        self.linkCallHost = linkCallHost
+        // The host's slot is what this screen shows once the call is started.
+        hostSubscription = linkCallHost.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+    }
+
+    /// The phase shown: the host's, once the host holds this link's call (or
+    /// its outcome); this screen's own before that.
+    public var phase: Phase {
+        guard let decoded, let slot = linkCallHost.slot(forCallIdHex: decoded.callIdHex) else {
+            return localPhase
+        }
+        switch slot.phase {
+        case .starting: return .starting
+        case .waiting: return .waiting
+        case .live: return .live
+        case .ended: return .ended
+        case .dead: return .dead
+        case .error: return .error(slot.errorMessage ?? "The call failed.")
+        }
     }
 
     // MARK: - Lifecycle
@@ -110,10 +133,25 @@ public final class JoinCallLandingViewModel: ObservableObject {
         }
     }
 
+    /// The landing appeared / disappeared — while it shows the call's state, no
+    /// status line for it is shown anywhere else.
+    func setVisible(_ visible: Bool) {
+        linkCallHost.noteLanding(visible: visible)
+    }
+
     /// Tap Join: use the live session if there is one, else create a guest
     /// account first (username-less full account) and resume after the phrase is
     /// saved.
     public func onStart(_ decoded: Decoded) async {
+        if let mine = linkCallHost.slot(forCallIdHex: decoded.callIdHex),
+           LinkCallHostRules.occupiesSlot(mine.phase) {
+            return
+        }
+        // Refuse before minting a guest account for a call that could not start.
+        if let busy = linkCallHost.busyMessage(verb: decoded.isOwner ? .start : .join) {
+            localPhase = .busy(busy)
+            return
+        }
         if authRepository.identitySecrets != nil {
             await beginJoin(decoded)
             return
@@ -124,12 +162,12 @@ public final class JoinCallLandingViewModel: ObservableObject {
         // a rapid double-tap idempotent — never two guest accounts.
         if mintingGuest { return }
         if let nameError = guestNameError {
-            phase = .error(nameError)
+            localPhase = .error(nameError)
             return
         }
         let nameSnapshot = guestName
         mintingGuest = true
-        phase = .starting
+        localPhase = .starting
         // Arm auto-resume BEFORE the await so the re-mounted landing continues.
         intake.armCallJoinAutoResume()
         do {
@@ -149,7 +187,7 @@ public final class JoinCallLandingViewModel: ObservableObject {
             mintingGuest = false // allow a retry after a failed mint
             intake.clearCallJoin() // clears the auto-resume flag too
             // Re-park the slug so the landing stays reachable for the retry.
-            phase = .error(error.localizedDescription)
+            localPhase = .error(error.localizedDescription)
         }
     }
 
@@ -166,14 +204,39 @@ public final class JoinCallLandingViewModel: ObservableObject {
     /// `true` when this device has no session, so joining creates a guest.
     public var joinsAsGuest: Bool { authRepository.identitySecrets == nil }
 
-    /// Dismiss / exit the landing — tear down the call + drop the parked slug so
-    /// AppRoot returns to the prior destination.
+    /// Leave this screen. A call still starting or waiting for admission keeps
+    /// going (its status shows on every other screen); an outcome already shown
+    /// here is forgotten.
     public func exit() {
-        cameraCancellable?.cancel()
-        cameraCancellable = nil
-        call?.hangUp()
-        call = nil
+        if let decoded, let slot = linkCallHost.slot(forCallIdHex: decoded.callIdHex),
+           !LinkCallHostRules.occupiesSlot(slot.phase) {
+            linkCallHost.dismissOutcome()
+        }
         intake.clearCallJoin()
+    }
+
+    /// Cancel this link's call and leave the screen.
+    public func cancelCall() {
+        if let decoded, linkCallHost.slot(forCallIdHex: decoded.callIdHex) != nil {
+            linkCallHost.leave()
+        }
+        intake.clearCallJoin()
+    }
+
+    /// End the call that holds the slot, after a busy refusal, and offer this
+    /// link again.
+    public func endCurrentCall() {
+        linkCallHost.endCurrentCall()
+        localPhase = .idle
+    }
+
+    /// Back to the start button after a failure.
+    public func tryAgain() {
+        if let decoded, linkCallHost.slot(forCallIdHex: decoded.callIdHex) != nil {
+            linkCallHost.dismissOutcome()
+        }
+        beginning = false
+        localPhase = .idle
     }
 
     // MARK: - Decode
@@ -219,142 +282,42 @@ public final class JoinCallLandingViewModel: ObservableObject {
 
     // MARK: - Begin
 
-    /// Run the actual ADR-0032 host/join now that a live session exists.
+    /// Hand the ADR-0032 host / join to the app-level ``LinkCallHost`` now that
+    /// a live session exists.
     private func beginJoin(_ decoded: Decoded) async {
-        // Synchronous latch (Hardening 3): guard against a rapid double-tap
-        // starting two SFU sessions before `call` is assigned past the first
-        // `await`.
-        if call != nil || beginning { return }
+        // Synchronous latch (Hardening 3): a rapid double-tap must not reach the
+        // host twice before its slot is written. The host is idempotent for the
+        // same call too (`alreadyInThisCall`).
+        if beginning { return }
         beginning = true
-        guard let secrets = authRepository.identitySecrets else {
-            beginning = false
-            phase = .error("Re-authenticate to join this call (no live session).")
-            return
-        }
-        guard let base = SfuConfig.baseUrl else {
-            beginning = false
-            phase = .error("This client has no SFU endpoint — set LakkoSfuUrl and rebuild.")
-            return
-        }
-        let identity: Identity
-        do {
-            identity = try Identity.fromSeed(seed: secrets.accountIdentitySeed)
-        } catch {
-            beginning = false
-            phase = .error("Could not rebuild the identity for this call.")
-            return
-        }
-        phase = .starting
-        // Settle the microphone permission before the SFU session exists, so a
-        // denial is an explained refusal instead of a call nobody can hear.
-        guard await MicrophonePermission.ensureGranted() else {
-            beginning = false
-            phase = .error(MicrophonePermission.deniedMessage)
-            return
-        }
-        // A video call link starts the camera at connect. The link's media is
-        // the creator's choice, not this user's, so a denied camera joins with
-        // audio only — no capture is started — and the call log says why.
-        let cameraAllowed = await CameraPermission.ensureGranted(forVideo: decoded.mediaVideo)
-        let joinWithVideo = decoded.mediaVideo && cameraAllowed
-
-        let options = MultiJoinerCall.Options(
-            identity: identity,
-            callId: decoded.callId,
-            ownerAccountId: decoded.ownerAccountId,
-            ownerSignatureKey: decoded.ownerSignatureKey,
-            sfuBaseUrl: base,
-            sessionToken: secrets.sessionToken,
-            audio: true,
-            video: joinWithVideo,
-            resolveDisplayName: nil,
-            authBaseUrl: nil
+        localPhase = .starting
+        let outcome = await linkCallHost.start(
+            LinkCallHost.Request(
+                slug: slug,
+                callId: decoded.callId,
+                ownerAccountId: decoded.ownerAccountId,
+                ownerSignatureKey: decoded.ownerSignatureKey,
+                mediaVideo: decoded.mediaVideo,
+                isOwner: decoded.isOwner
+            )
         )
-        let callbacks = MultiJoinerCall.Callbacks(
-            onJoined: { [weak self] in self?.phase = .live },
-            onLive: nil,
-            onEnded: { [weak self] in self?.phase = .ended },
-            onNoCommitter: { [weak self] in
-                self?.call = nil
-                self?.phase = .dead
-            },
-            onError: { [weak self] error in
-                self?.phase = .error(error.localizedDescription)
-            }
-        )
-
-        do {
-            if decoded.isOwner {
-                // Owner founds + hosts; `onJoined` fires synchronously inside host().
-                call = try await MultiJoinerCall.host(options: options, ui: ui, callbacks: callbacks)
-            } else {
-                // Joiner connects signaling-only + relays its KeyPackage; sit in
-                // "waiting" until the Welcome arrives (onJoined → "live").
-                call = try await MultiJoinerCall.join(options: options, ui: ui, callbacks: callbacks)
-                if phase == .starting { phase = .waiting }
-            }
-            if decoded.mediaVideo && !cameraAllowed {
-                ui.addSystemEvent(CameraPermission.deniedMessage)
-            }
-            // Piece B — bridge the mid-call camera toggle onto the call now that
-            // it exists (a no-op for a joiner until it has joined + published).
-            observeCameraToggle()
-        } catch {
-            beginning = false // start failed (call unset) — allow a retry
-            phase = .error(error.localizedDescription)
-        }
-    }
-
-    // MARK: - Mid-call camera-on bridge (piece B)
-
-    /// Bridge the call's local `camOn` (flipped by the in-call camera button,
-    /// which only drives `ui` because the SFU `CallScreen` is presented
-    /// UI-only) onto the `MultiJoinerCall`. Mirror of the ChatViewModel +
-    /// web `Chat.tsx` camera effect.
-    private func observeCameraToggle() {
-        cameraCancellable = ui.$participants
-            .map { $0.first(where: { $0.isLocal })?.camOn ?? false }
-            .removeDuplicates()
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] camOn in
-                MainActor.assumeIsolated {
-                    self?.applyCameraToggle(camOn)
-                }
-            }
-    }
-
-    private func applyCameraToggle(_ camOn: Bool) {
-        guard let call else { return }
-        if camOn {
-            Task { @MainActor [weak self] in
-                // The in-call control already settled the permission; this is
-                // the layered half (see `ChatViewModel.applySfuCameraToggle`).
-                guard await CameraPermission.ensureGranted() else {
-                    guard let self else { return }
-                    self.ui.setCamera(false)
-                    self.ui.addSystemEvent(CameraPermission.deniedMessage)
-                    return
-                }
-                do {
-                    try await call.publishVideo()
-                } catch {
-                    guard let self else { return }
-                    // Fail-safe (invariant #4): revert the toggle + surface the
-                    // reason; the call stays up audio-only.
-                    self.ui.setCamera(false)
-                    self.ui.addSystemEvent(
-                        "Could not start the camera: \(error.localizedDescription)"
-                    )
-                    NSLog("multi-joiner call: publishVideo failed: %@", String(describing: error))
-                }
-            }
-        } else {
-            call.setCameraEnabled(false)
+        beginning = false
+        switch outcome {
+        case .started, .alreadyInThisCall:
+            // The host's slot is what this screen shows from here on.
+            localPhase = .idle
+        case .busy(let message):
+            localPhase = .busy(message)
+        case .failed(let message):
+            localPhase = .error(message)
         }
     }
 }
 
 /// The landing view for a tapped `/c/<slug>` multi-joiner call-invite link.
+///
+/// It never shows the live call itself: that is the root's full-screen call
+/// (`CallHostOverlay`), on this screen and every other one.
 public struct JoinCallLandingScreen: View {
     @StateObject private var viewModel: JoinCallLandingViewModel
     private let onDone: () -> Void
@@ -365,22 +328,10 @@ public struct JoinCallLandingScreen: View {
     }
 
     public var body: some View {
-        Group {
-            if viewModel.phase == .live {
-                // Live call: present the shared in-call UI, driven by the same
-                // CallUiState the orchestrator populates.
-                CallScreen(
-                    externalState: viewModel.ui,
-                    onExit: {
-                        viewModel.exit()
-                        onDone()
-                    }
-                )
-            } else {
-                panel
-            }
-        }
-        .task { await viewModel.onAppear() }
+        panel
+            .task { await viewModel.onAppear() }
+            .onAppear { viewModel.setVisible(true) }
+            .onDisappear { viewModel.setVisible(false) }
     }
 
     @ViewBuilder
@@ -431,10 +382,23 @@ public struct JoinCallLandingScreen: View {
             .disabled(viewModel.joinsAsGuest && viewModel.guestNameError != nil)
             // No login required: a joiner with no session gets a full,
             // username-less guest account (signupGuest) on tap.
+            closeButton
         case .starting:
             ProgressView("Connecting…")
+            runningButtons
         case .waiting:
             ProgressView("Waiting for the owner to admit you…")
+            Text("You can leave this screen; you will join when you are admitted.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            runningButtons
+        case .live:
+            Text("You are in this call.")
+            Button("Back") {
+                viewModel.exit()
+                onDone()
+            }
         case .dead:
             Text("This call has ended or isn't active.")
                 .multilineTextAlignment(.center)
@@ -443,13 +407,38 @@ public struct JoinCallLandingScreen: View {
             Text("The call has ended.")
                 .multilineTextAlignment(.center)
             closeButton
+        case .busy(let message):
+            Text(message)
+                .multilineTextAlignment(.center)
+            Button("End current call") { viewModel.endCurrentCall() }
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
+            closeButton
         case .error(let message):
             Text("Failed: \(message)")
                 .foregroundStyle(.red)
                 .multilineTextAlignment(.center)
+            Button("Try again") { viewModel.tryAgain() }
+                .buttonStyle(.bordered)
             closeButton
-        case .live:
-            EmptyView() // handled above
+        }
+    }
+
+    /// A call starting or waiting for admission: leave the screen with the call
+    /// still going, or cancel it.
+    @ViewBuilder
+    private var runningButtons: some View {
+        HStack(spacing: 12) {
+            Button("Back") {
+                viewModel.exit()
+                onDone()
+            }
+            .buttonStyle(.bordered)
+            Button("Cancel", role: .destructive) {
+                viewModel.cancelCall()
+                onDone()
+            }
+            .buttonStyle(.bordered)
         }
     }
 

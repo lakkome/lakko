@@ -166,6 +166,11 @@ public fun CallScreen(
     onPrejoinCancel: (() -> Unit)? = null,
     /** ADR-0048 — the remote participant's resolved name for a 1x1 session. */
     remoteName: String? = null,
+    /** The End button for a call the app-level host drives through [state]
+     *  alone (a group or call-link call): the host leaves the call and the
+     *  session's own closed transition shows the ended state. `null` keeps the
+     *  session hang-up (1x1) or, with no session, the mock end. */
+    onEndCall: (() -> Unit)? = null,
 ) {
     // One sound controller per CallScreen lifetime; released
     // in the same DisposableEffect that resets the UI state so
@@ -262,7 +267,13 @@ public fun CallScreen(
             // end-call + mic/camera toggles to the real session
             // when one drives the screen; mock-state fallback
             // otherwise.
-            onEndCall = { if (session != null) session.hangUp() else state.endCall() },
+            onEndCall = {
+                when {
+                    session != null -> session.hangUp()
+                    onEndCall != null -> onEndCall()
+                    else -> state.endCall()
+                }
+            },
             onSetMic = { on -> if (session != null) session.setMicrophoneEnabled(on) else state.setMic(on) },
             // G3-2-call-controls + ADR-0032 piece B2b — camera routing. With a
             // real session, turning the camera ON runs `addLocalVideo()`

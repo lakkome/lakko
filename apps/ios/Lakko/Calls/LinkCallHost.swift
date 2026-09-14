@@ -84,6 +84,9 @@ final class LinkCallHost: ObservableObject {
     /// kept until the call screen is dismissed.
     @Published private(set) var presentation: CallUiState?
     @Published private(set) var presentationId: String?
+    /// The link slug of the presented call, so dismissing the screen can take
+    /// the user back from that link's landing.
+    private(set) var presentationSlug: String?
     /// A landing screen is on screen (it shows the call itself, so no notice).
     @Published private(set) var landingShowing: Bool = false
 
@@ -234,6 +237,7 @@ final class LinkCallHost: ObservableObject {
         if phase == .live, presentation == nil, let ui {
             presentation = ui
             presentationId = current.callIdHex
+            presentationSlug = current.slug
         }
         if !LinkCallHostRules.occupiesSlot(phase) {
             // Over on its own: drop the session and keep the outcome for the
@@ -269,6 +273,7 @@ final class LinkCallHost: ObservableObject {
         if occupiesSlot { leave() } else { dismissOutcome() }
         presentation = nil
         presentationId = nil
+        presentationSlug = nil
     }
 
     /// Logout / account switch.
@@ -276,6 +281,7 @@ final class LinkCallHost: ObservableObject {
         leave()
         presentation = nil
         presentationId = nil
+        presentationSlug = nil
         ui = nil
     }
 

@@ -452,6 +452,9 @@ final class GroupCallHost: ObservableObject {
     /// failure keeps the current seed (invariant #4); a group this device is no
     /// longer in ends the call locally.
     func groupMlsSettled(_ groupIdHex: String) {
+        // Every send and every poll of every group drains a chain; without a
+        // session on this group there is nothing to decide, so skip the reads.
+        guard handle != nil, activeCall?.groupIdHex == groupIdHex else { return }
         let call = activeCall
         let currentEpoch = ports.epoch(groupIdHex)
         let action = GroupCallHostRules.decideEpochChange(

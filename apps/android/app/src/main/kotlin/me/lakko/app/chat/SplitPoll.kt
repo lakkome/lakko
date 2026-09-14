@@ -178,7 +178,7 @@ internal class GroupLocks(private val onDrain: (groupIdHex: String) -> Unit = {}
 
     /** The mutex for [groupIdHex], created on first use. */
     fun forGroup(groupIdHex: String): Mutex =
-        locks.getOrPut(groupIdHex) { DrainNotifyingMutex { onDrain(groupIdHex) } }
+        locks.getOrPut(groupIdHex) { DrainNotifyingMutex(onDrain = { onDrain(groupIdHex) }) }
 
     /** `true` while a region on [groupIdHex] holds its lock or waits for it. */
     fun isBusy(groupIdHex: String): Boolean = locks[groupIdHex]?.isBusy == true

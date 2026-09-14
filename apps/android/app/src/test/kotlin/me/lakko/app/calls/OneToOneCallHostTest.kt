@@ -277,7 +277,7 @@ class OneToOneCallHostTest {
     @Test
     fun `a live group call makes this device busy for a 1x1 offer`() = runTest {
         val h = harness()
-        h.host.setGroupCallActive("sfu-$groupA", true)
+        h.host.setOtherCallActive("group", true)
         h.host.deliver(groupB, 1, offer(call1), iso(t0))
         runCurrent()
         assertNull(h.host.active.value)

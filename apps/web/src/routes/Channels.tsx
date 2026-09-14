@@ -93,13 +93,14 @@ import {
 import {
   DiscoveryHttpError,
   registerChannelHandle,
-  resolveChannelIdOrHandle,
 } from "../channels/channel-discovery";
 import { DsClient } from "../ds/client";
 import { useAuth } from "../auth/AuthContext";
 import { channelsActions, channelsState } from "../state/channels-state";
 import { loadWasm, type Wasm } from "../wasm";
 import { paths } from "./paths";
+import { Avatar } from "../ui/Avatar";
+import { Icon } from "../ui/icons";
 
 // ============================================================================
 // Shared handle / policy types for the publisher-tools panels
@@ -174,7 +175,8 @@ function textBubble(text: string): JSX.Element {
   return (
     <div
       style={{
-        "font-size": "14px",
+        "font-size": "15px",
+        "line-height": "22px",
         color: COLOURS.textPrimary,
         "white-space": "pre-wrap",
         "word-break": "break-word",
@@ -203,199 +205,6 @@ function renderPostBody(decoded: PostDecode | undefined): JSX.Element {
     "[unreadable — wrong seed, tampered ciphertext, or a different signing key]",
   );
 }
-
-// ============================================================================
-// ChannelsList — `/channels`
-// ============================================================================
-
-const ChannelsList: Component = () => {
-  const navigate = useNavigate();
-
-  // G4-5: subscribe entry point. Accepts EITHER a typed `@handle`
-  // (resolved to a channel id via OPRF discovery) OR a pasted
-  // 32-char hex channel id (used verbatim). Both land on the same
-  // subscribe page.
-  const [findInput, setFindInput] = createSignal("");
-  const [findBusy, setFindBusy] = createSignal(false);
-  const [findError, setFindError] = createSignal<string | null>(null);
-
-  async function onFind(): Promise<void> {
-    if (findBusy()) return;
-    const raw = findInput().trim();
-    if (raw.length === 0) return;
-    setFindBusy(true);
-    setFindError(null);
-    try {
-      const idHex = await resolveChannelIdOrHandle(raw);
-      if (idHex === null) {
-        setFindError(
-          `No channel found for ${raw.startsWith("@") ? raw : `@${raw}`}.`,
-        );
-        setFindBusy(false);
-        return;
-      }
-      navigate(paths.channelSubscribe(idHex));
-    } catch (err) {
-      setFindError(`Lookup failed: ${String(err)}`);
-      setFindBusy(false);
-    }
-  }
-
-  return (
-    <div
-      style={{
-        padding: "24px 32px",
-        "max-width": "720px",
-        color: COLOURS.textPrimary,
-      }}
-    >
-      <header
-        style={{
-          display: "flex",
-          "justify-content": "space-between",
-          "align-items": "center",
-          "margin-bottom": "20px",
-        }}
-      >
-        <h1 style={{ margin: "0", "font-size": "22px", "font-weight": "600" }}>
-          Channels
-        </h1>
-        <button
-          type="button"
-          onClick={(): void => navigate(paths.channelNew)}
-          style={{
-            "background-color": COLOURS.accentBlue,
-            color: COLOURS.accentFg,
-            border: "none",
-            "border-radius": "8px",
-            padding: "8px 14px",
-            "font-size": "14px",
-            "font-weight": "500",
-            cursor: "pointer",
-          }}
-        >
-          + New channel
-        </button>
-      </header>
-
-      <form
-        onSubmit={(e): void => {
-          e.preventDefault();
-          void onFind();
-        }}
-        style={{
-          display: "flex",
-          "flex-direction": "column",
-          gap: "8px",
-          "margin-bottom": "20px",
-        }}
-      >
-        <div style={{ display: "flex", gap: "8px" }}>
-          <input
-            type="text"
-            value={findInput()}
-            placeholder="@handle or channel id"
-            autocapitalize="none"
-            autocomplete="off"
-            spellcheck={false}
-            onInput={(e): void => {
-              setFindInput(e.currentTarget.value);
-            }}
-            style={{
-              flex: "1",
-              padding: "9px 12px",
-              "background-color": COLOURS.surface,
-              color: COLOURS.textPrimary,
-              border: `1px solid ${COLOURS.border}`,
-              "border-radius": "8px",
-              "font-size": "14px",
-            }}
-          />
-          <button
-            type="submit"
-            disabled={findBusy() || findInput().trim().length === 0}
-            style={{
-              "background-color": COLOURS.surface,
-              color: COLOURS.textPrimary,
-              border: `1px solid ${COLOURS.border}`,
-              "border-radius": "8px",
-              padding: "9px 14px",
-              "font-size": "14px",
-              cursor: findBusy() ? "wait" : "pointer",
-              "white-space": "nowrap",
-            }}
-          >
-            {findBusy() ? "Finding…" : "Find & subscribe"}
-          </button>
-        </div>
-        <Show when={findError() !== null}>
-          <div
-            style={{
-              "font-size": "13px",
-              color: COLOURS.destructive,
-            }}
-          >
-            {findError()}
-          </div>
-        </Show>
-      </form>
-
-      <Show
-        when={channelsState.channels().length > 0}
-        fallback={
-          <p style={{ color: COLOURS.textSecondary, "line-height": "1.6" }}>
-            No channels yet. Create one to start broadcasting, or paste an
-            invite link to subscribe.
-          </p>
-        }
-      >
-        <ul style={{ "list-style": "none", padding: "0", margin: "0" }}>
-          <For each={channelsState.channels()}>
-            {(c): JSX.Element => (
-              <li
-                style={{
-                  padding: "14px 16px",
-                  "background-color": COLOURS.surface,
-                  border: `1px solid ${COLOURS.border}`,
-                  "border-radius": "12px",
-                  "margin-bottom": "8px",
-                  cursor: "pointer",
-                }}
-                onClick={(): void => navigate(paths.channel(c.id))}
-              >
-                <div
-                  style={{ "font-weight": "600", "margin-bottom": "4px" }}
-                >
-                  {c.localName || "(unnamed)"}
-                </div>
-                <Show when={c.localDescription !== ""}>
-                  <div
-                    style={{
-                      "font-size": "13px",
-                      color: COLOURS.textSecondary,
-                      "margin-bottom": "6px",
-                    }}
-                  >
-                    {c.localDescription}
-                  </div>
-                </Show>
-                <div
-                  style={{
-                    "font-size": "12px",
-                    color: COLOURS.textSecondary,
-                    "font-family": "monospace",
-                  }}
-                >
-                  {c.id.slice(0, 8)}…{c.id.slice(-8)}
-                </div>
-              </li>
-            )}
-          </For>
-        </ul>
-      </Show>
-    </div>
-  );
-};
 
 // ============================================================================
 // NewChannel — `/channels/new`
@@ -570,17 +379,15 @@ const NewChannel: Component = () => {
   return (
     <div
       style={{
-        padding: "20px",
-        "max-width": "520px",
-        margin: "0 auto",
+        padding: "24px 32px",
+        "max-width": "560px",
         color: COLOURS.textPrimary,
-        "min-height": "100vh",
-        "background-color": COLOURS.background,
       }}
     >
-      <h1 style={{ margin: "0 0 20px 0", "font-size": "22px" }}>
-        New channel
-      </h1>
+      <div class="lk-page-head">
+        <h1>New channel</h1>
+        <p>The name and description stay on this device; only ciphertext reaches the server.</p>
+      </div>
       <form
         onSubmit={(e): void => {
           e.preventDefault();
@@ -594,7 +401,7 @@ const NewChannel: Component = () => {
       >
         <label style={{ display: "flex", "flex-direction": "column", gap: "6px" }}>
           <span style={{ "font-size": "13px", color: COLOURS.textSecondary }}>
-            Name (local only — never sent to the server)
+            Name
           </span>
           <input
             type="text"
@@ -615,7 +422,7 @@ const NewChannel: Component = () => {
         </label>
         <label style={{ display: "flex", "flex-direction": "column", gap: "6px" }}>
           <span style={{ "font-size": "13px", color: COLOURS.textSecondary }}>
-            Description (optional, local only)
+            Description (optional)
           </span>
           <textarea
             rows={3}
@@ -637,9 +444,8 @@ const NewChannel: Component = () => {
         </label>
         <label style={{ display: "flex", "flex-direction": "column", gap: "6px" }}>
           <span style={{ "font-size": "13px", color: COLOURS.textSecondary }}>
-            Public @handle (optional — others can subscribe by it
-            instead of the raw id; only its OPRF hash reaches the
-            server)
+            Public @handle (optional). Others can find and subscribe to the
+            channel by it.
           </span>
           <input
             type="text"
@@ -913,80 +719,38 @@ const ChannelView: Component = () => {
     >
       <button
         type="button"
+        class="ghost small lk-narrow-only"
+        style={{ "margin-bottom": "12px" }}
         onClick={(): void => navigate(paths.channels)}
-        style={{
-          background: "transparent",
-          color: COLOURS.textSecondary,
-          border: "none",
-          padding: "0 0 12px 0",
-          cursor: "pointer",
-          "font-size": "13px",
-        }}
       >
-        ← All channels
+        <Icon name="back" size={16} />
+        Channels
       </button>
-      <h1 style={{ margin: "0 0 4px 0", "font-size": "22px" }}>
-        {channelMeta().localName}
-      </h1>
-      <div
-        style={{
-          "font-size": "12px",
-          color: COLOURS.textSecondary,
-          "font-family": "monospace",
-          "margin-bottom": "12px",
-        }}
-      >
-        {params.id}
-      </div>
-      <Show when={channelMeta().localDescription !== ""}>
-        <p
-          style={{
-            margin: "0 0 14px 0",
-            color: COLOURS.textSecondary,
-            "line-height": "1.6",
-          }}
-        >
-          {channelMeta().localDescription}
-        </p>
-      </Show>
-      <div
-        style={{
-          "font-size": "13px",
-          color: COLOURS.textSecondary,
-          "margin-bottom": "20px",
-        }}
-      >
-        Server epoch:{" "}
-        <strong style={{ color: COLOURS.textPrimary, "font-family": "monospace" }}>
-          {data()?.epoch ?? "…"}
-        </strong>
+      <div class="lk-page-head" style={{ "flex-direction": "row", "align-items": "center", gap: "12px" }}>
+        <Avatar label={channelMeta().localName || "?"} id={params.id} size="lg" />
+        <div style={{ "min-width": 0 }}>
+          <h1 style={{ "font-size": "22px", "line-height": "28px" }}>{channelMeta().localName}</h1>
+          <p style={{ "font-size": "13px" }}>
+            <Show when={channelMeta().localDescription !== ""} fallback={<code>{params.id}</code>}>
+              {channelMeta().localDescription}
+            </Show>
+            {" · key epoch "}
+            {data()?.epoch ?? "…"}
+          </p>
+        </div>
       </div>
 
       <Show
         when={channelsState.keysByChannel().get(params.id) !== undefined}
         fallback={
-          <div
-            style={{
-              "margin-bottom": "20px",
-              padding: "12px",
-              "background-color": COLOURS.surface,
-              color: COLOURS.textSecondary,
-              "border-radius": "8px",
-              "font-size": "13px",
-              "line-height": "1.6",
-            }}
-          >
-            No local publisher keys for this channel — you cannot
-            publish to it from this device. To read posts as a
-            subscriber instead,{" "}
-            <a
-              href={paths.channelSubscribe(params.id)}
-              style={{ color: COLOURS.accentBlue }}
-            >
-              open the subscribe page
-            </a>
-            .
-          </div>
+          <section class="lk-card" style={{ "margin-bottom": "20px" }}>
+            <h2>Read-only on this device</h2>
+            <p class="lk-card-desc">
+              This device holds no publishing keys for the channel. To read
+              its posts,{" "}
+              <a href={paths.channelSubscribe(params.id)}>subscribe</a>.
+            </p>
+          </section>
         }
       >
         <form
@@ -994,6 +758,7 @@ const ChannelView: Component = () => {
             e.preventDefault();
             void onPublish();
           }}
+          class="lk-card"
           style={{ "margin-bottom": "20px" }}
         >
           <textarea
@@ -1019,7 +784,6 @@ const ChannelView: Component = () => {
           />
           <div
             style={{
-              "margin-top": "10px",
               display: "flex",
               "justify-content": "flex-end",
             }}
@@ -1062,7 +826,7 @@ const ChannelView: Component = () => {
         <PublisherToolsPanel channelIdHex={params.id} />
       </Show>
 
-      <h2 style={{ margin: "0 0 12px 0", "font-size": "16px" }}>Posts</h2>
+      <h2 style={{ margin: "0 0 12px 0" }}>Posts</h2>
       <Show
         when={data() !== undefined && data()!.posts.length > 0}
         fallback={
@@ -1081,25 +845,25 @@ const ChannelView: Component = () => {
             {(p): JSX.Element => (
               <li
                 style={{
-                  padding: "12px",
+                  padding: "14px 16px",
                   "background-color": COLOURS.surface,
-                  "border-radius": "8px",
-                  "margin-bottom": "8px",
+                  border: `1px solid ${COLOURS.border}`,
+                  "border-radius": "12px",
+                  "margin-bottom": "10px",
+                  "max-width": "640px",
                 }}
               >
+                {renderPostBody(decodedByCursor().get(p.cursor))}
                 <div
                   style={{
-                    display: "flex",
-                    "justify-content": "space-between",
                     "font-size": "12px",
                     color: COLOURS.textSecondary,
-                    "margin-bottom": "6px",
+                    "margin-top": "8px",
+                    "text-align": "right",
                   }}
                 >
-                  <span>cursor {p.cursor}</span>
-                  <span>{new Date(p.serverTsMs).toISOString()}</span>
+                  {new Date(p.serverTsMs).toLocaleString()}
                 </div>
-                {renderPostBody(decodedByCursor().get(p.cursor))}
               </li>
             )}
           </For>
@@ -2225,17 +1989,12 @@ const ChannelSubscribe: Component = () => {
     >
       <button
         type="button"
+        class="ghost small lk-narrow-only"
+        style={{ "margin-bottom": "12px" }}
         onClick={(): void => navigate(paths.channels)}
-        style={{
-          background: "transparent",
-          color: COLOURS.textSecondary,
-          border: "none",
-          padding: "0 0 12px 0",
-          cursor: "pointer",
-          "font-size": "13px",
-        }}
       >
-        ← All channels
+        <Icon name="back" size={16} />
+        Channels
       </button>
       <h1 style={{ margin: "0 0 4px 0", "font-size": "22px" }}>Subscribe</h1>
       <div
@@ -2310,7 +2069,7 @@ const ChannelSubscribe: Component = () => {
         </Show>
       </div>
 
-      <h2 style={{ margin: "0 0 12px 0", "font-size": "16px" }}>Posts</h2>
+      <h2 style={{ margin: "0 0 12px 0" }}>Posts</h2>
       <Show
         when={bootstrap() === "active" && posts().length > 0}
         fallback={
@@ -2333,25 +2092,25 @@ const ChannelSubscribe: Component = () => {
             {(p): JSX.Element => (
               <li
                 style={{
-                  padding: "12px",
+                  padding: "14px 16px",
                   "background-color": COLOURS.surface,
-                  "border-radius": "8px",
-                  "margin-bottom": "8px",
+                  border: `1px solid ${COLOURS.border}`,
+                  "border-radius": "12px",
+                  "margin-bottom": "10px",
+                  "max-width": "640px",
                 }}
               >
+                {renderPostBody(decodedByCursor().get(p.cursor))}
                 <div
                   style={{
-                    display: "flex",
-                    "justify-content": "space-between",
                     "font-size": "12px",
                     color: COLOURS.textSecondary,
-                    "margin-bottom": "6px",
+                    "margin-top": "8px",
+                    "text-align": "right",
                   }}
                 >
-                  <span>cursor {p.cursor}</span>
-                  <span>{new Date(p.serverTsMs).toISOString()}</span>
+                  {new Date(p.serverTsMs).toLocaleString()}
                 </div>
-                {renderPostBody(decodedByCursor().get(p.cursor))}
               </li>
             )}
           </For>
@@ -2365,4 +2124,4 @@ const ChannelSubscribe: Component = () => {
 // Module exports
 // ============================================================================
 
-export { ChannelsList, NewChannel, ChannelView, ChannelSubscribe };
+export { NewChannel, ChannelView, ChannelSubscribe };

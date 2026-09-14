@@ -72,7 +72,7 @@ public struct ChatScreen: View {
 
     /// ADR-0047 §6 — the call owns the audio session and the camera.
     private var callLive: Bool {
-        viewModel.activeCall != nil || viewModel.activeSfuCall != nil
+        viewModel.activeCall != nil || viewModel.anyCallInProgress
     }
 
     public var body: some View {
@@ -113,10 +113,11 @@ public struct ChatScreen: View {
     @ViewBuilder
     private var chatBody: some View {
         VStack(spacing: 0) {
-            // The 1x1 call's ringing banner and full-screen call are no longer
-            // here: they are presented app-wide from the root view
-            // (`CallHostOverlay`), so a call rings on any screen and survives
-            // leaving this chat.
+            // No call is presented here: the 1x1 ringing banner and every
+            // full-screen call (1x1, group, call link) are presented app-wide
+            // from the root view (`CallHostOverlay`), so a call rings on any
+            // screen and survives leaving this chat. Returning to the chat of a
+            // live group call shows that call, never a second one.
             // A live group call on this chat that this device is not in.
             // Liveness is time-based (a call nobody joined stops being
             // joinable after a minute, any call after four hours), so the
@@ -128,7 +129,9 @@ public struct ChatScreen: View {
                         affordance: viewModel.groupCallAffordance(
                             nowMs: Int64(context.date.timeIntervalSince1970 * 1000)
                         ),
-                        busy: viewModel.callStarting,
+                        busy: viewModel.groupCallStarting,
+                        // One call at a time: a live call anywhere withdraws Join.
+                        joinAvailable: !viewModel.anyCallInProgress,
                         onJoin: { video in viewModel.joinOngoingGroupCall(video: video) }
                     )
                 }
@@ -174,21 +177,6 @@ public struct ChatScreen: View {
         .onDisappear {
             // ADR-0024 — leaving the thread stops advertising typing.
             viewModel.screenVisible = false
-        }
-        // SFU group call — present the in-call UI over the chat,
-        // driven by the `CallUiState` the `SfuCallUi` adapter updates.
-        // Dismissing (or the call ending) hangs the SFU session up.
-        .fullScreenCover(
-            isPresented: Binding(
-                get: { viewModel.activeSfuCall != nil },
-                set: { presented in
-                    if !presented { viewModel.hangUpGroupCall() }
-                }
-            )
-        ) {
-            CallScreen(externalState: viewModel.sfuCallUiState) {
-                viewModel.hangUpGroupCall()
-            }
         }
         .navigationTitle(headline)
         .navigationBarTitleDisplayMode(.inline)
@@ -240,10 +228,7 @@ public struct ChatScreen: View {
                     Image(systemName: "phone.fill")
                 }
                 .accessibilityLabel(callButtonLabel(video: false))
-                .disabled(
-                    viewModel.oneToOneCallBusy || viewModel.activeSfuCall != nil
-                        || viewModel.callStarting
-                )
+                .disabled(viewModel.chatCallAction == .unavailable)
             }
             // Video-call button — starts the call with the local
             // camera published (`config.video`). Group chats publish
@@ -257,26 +242,9 @@ public struct ChatScreen: View {
                     Image(systemName: "video.fill")
                 }
                 .accessibilityLabel(callButtonLabel(video: true))
-                .disabled(
-                    viewModel.oneToOneCallBusy || viewModel.activeSfuCall != nil
-                        || viewModel.callStarting
-                )
+                .disabled(viewModel.chatCallAction == .unavailable)
             }
             }
-        }
-        .alert(
-            "Call",
-            isPresented: Binding(
-                get: { viewModel.callError != nil },
-                set: { presented in
-                    if !presented { viewModel.dismissCallError() }
-                }
-            ),
-            presenting: viewModel.callError
-        ) { _ in
-            Button("OK", role: .cancel) { viewModel.dismissCallError() }
-        } message: { message in
-            Text(message)
         }
         .sheet(isPresented: $viewModel.membersPanelOpen) {
             // ADR-0045 UX §6.2.4 — a deleted chat's row is gone from the
@@ -592,6 +560,7 @@ public struct ChatScreen: View {
     private struct GroupCallBanner: View {
         let affordance: GroupCallAffordance
         let busy: Bool
+        let joinAvailable: Bool
         let onJoin: (Bool) -> Void
 
         var body: some View {
@@ -623,7 +592,7 @@ public struct ChatScreen: View {
                             .buttonStyle(.bordered)
                             .tint(.white)
                     }
-                    .disabled(busy)
+                    .disabled(busy || !joinAvailable)
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 10)

@@ -46,8 +46,8 @@ import uniffi.lakko_ffi_uniffi.FfiCallSignalingBody
  *    to launch a coroutine per row, so an ICE candidate could be handled before
  *    the offer's session existed and be dropped.
  *  - **One call at a time.** A fresh offer while a call occupies the slot (or
- *    a group call is live on this device) is answered `End{busy}` so the caller
- *    stops ringing.
+ *    a group call or call-link call is starting or live on this device) is
+ *    answered `End{busy}` so the caller stops ringing.
  *  - **The stale-offer rule.** An offer whose DS row is older than
  *    [STALE_OFFER_MS] does not ring and is not answered busy — nobody is waiting
  *    on it. An unreadable row timestamp counts as stale.
@@ -167,7 +167,7 @@ internal fun routeOneToOneSignaling(
     nowMs: Long,
     occupant: OneToOneSlotKey?,
     endedCallIds: Set<String>,
-    groupCallBusy: Boolean,
+    otherCallBusy: Boolean,
 ): OneToOneRoute {
     val callIdHex = when (body) {
         is FfiCallSignalingBody.Offer -> callIdHexOf(body.callId)
@@ -187,7 +187,7 @@ internal fun routeOneToOneSignaling(
     if (body !is FfiCallSignalingBody.Offer) return OneToOneRoute.DROP
     if (callIdHex in endedCallIds) return OneToOneRoute.DROP
     if (isStaleOffer(rowCreatedAtMs, nowMs)) return OneToOneRoute.DROP
-    if (occupant != null || groupCallBusy) return OneToOneRoute.BUSY
+    if (occupant != null || otherCallBusy) return OneToOneRoute.BUSY
     return OneToOneRoute.RING
 }
 
@@ -272,10 +272,10 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
     /**
      * Prepare an outgoing call in [groupIdHex]: the session is built and keyed
      * but not dialed (the prejoin). Returns `false` when a call already
-     * occupies the slot or a group call is live; the consumer re-checks.
+     * occupies the slot or another kind of call is live; the consumer re-checks.
      */
     public fun startOutgoing(groupIdHex: String): Boolean {
-        if (hasCall || groupCalls.isNotEmpty()) return false
+        if (hasCall || otherCalls.isNotEmpty()) return false
         send(Event.StartOutgoing(groupIdHex))
         return true
     }
@@ -301,11 +301,16 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
     /** The app came to (or left) the foreground. */
     public fun setForeground(foreground: Boolean): Unit = send(Event.Foreground(foreground))
 
-    private val groupCalls: MutableSet<String> = ConcurrentHashMap.newKeySet()
+    private val otherCalls: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
-    /** A group (SFU) call identified by [key] is live on this device, or no longer. */
-    public fun setGroupCallActive(key: String, active: Boolean) {
-        if (active) groupCalls.add(key) else groupCalls.remove(key)
+    /**
+     * Another kind of call — a group (SFU) call or a call-link call, identified
+     * by [key] — occupies the one call slot on this device, or no longer does.
+     * While any does, an offer is answered busy and [startOutgoing] refuses
+     * (`CallSlot.kt`).
+     */
+    public fun setOtherCallActive(key: String, active: Boolean) {
+        if (active) otherCalls.add(key) else otherCalls.remove(key)
     }
 
     /** Logout / forget device: hang up, forget every call, start clean. */
@@ -444,7 +449,7 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
             nowMs = now,
             occupant = occupant(now),
             endedCallIds = ended,
-            groupCallBusy = groupCalls.isNotEmpty(),
+            otherCallBusy = otherCalls.isNotEmpty(),
         )
         when (route) {
             OneToOneRoute.DROP -> Unit
@@ -520,7 +525,7 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
     }
 
     private suspend fun onStartOutgoing(groupIdHex: String) {
-        if (occupant(clock()) != null || groupCalls.isNotEmpty()) return
+        if (occupant(clock()) != null || otherCalls.isNotEmpty()) return
         val p = port ?: return
         clearSlot()
         val callId = ByteArray(CALL_ID_BYTES).also { SecureRandom().nextBytes(it) }
@@ -584,7 +589,7 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
             nowMs = now,
             occupant = liveSlot()?.let { OneToOneSlotKey(it.call.groupIdHex, it.callIdHex) },
             endedCallIds = ended,
-            groupCallBusy = groupCalls.isNotEmpty(),
+            otherCallBusy = otherCalls.isNotEmpty(),
         )
         when (route) {
             OneToOneRoute.RING -> {
