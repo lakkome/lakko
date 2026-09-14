@@ -19,6 +19,7 @@
  */
 import { createSignal, For, Show, type JSX } from "solid-js";
 import { useAuth } from "./AuthContext";
+import { AuthLayout } from "../ui/AuthLayout";
 import {
   DEFAULT_SHARE_COUNT,
   DEFAULT_THRESHOLD,
@@ -34,16 +35,14 @@ export default function SignupPhrasePrompt(): JSX.Element {
   const auth = useAuth();
   const [acknowledged, setAcknowledged] = createSignal(false);
   return (
-    <div class="auth-shell">
-      <section class="auth-card">
+    <AuthLayout>
         <RecoveryPhrasePanel
           phrase={auth.signupPhrase() ?? ""}
           acknowledged={acknowledged}
           setAcknowledged={setAcknowledged}
           onAcknowledge={() => auth.acknowledgeSignupPhrase()}
         />
-      </section>
-    </div>
+    </AuthLayout>
   );
 }
 
@@ -63,7 +62,7 @@ function RecoveryPhrasePanel(props: PhrasePanelProps): JSX.Element {
   return (
     <>
       <h1>Save your recovery phrase</h1>
-      <p style={{ color: "var(--surface-muted)", "margin-top": 0 }}>
+      <p class="auth-lede">
         These 24 words are the <strong>only way</strong> to recover
         your account if you forget your password. Write them down
         on paper, in order. Do not screenshot them. Do not store
@@ -71,18 +70,7 @@ function RecoveryPhrasePanel(props: PhrasePanelProps): JSX.Element {
       </p>
 
       <ol
-        style={{
-          display: "grid",
-          "grid-template-columns": "repeat(2, minmax(0, 1fr))",
-          gap: "0.25rem 0.75rem",
-          padding: "1rem 1rem 1rem 2.5rem",
-          margin: "1rem 0",
-          background: "var(--surface-bg)",
-          border: "1px solid var(--surface-border)",
-          "border-radius": "var(--radius-sm)",
-          "font-family": "ui-monospace, SFMono-Regular, Menlo, monospace",
-          "font-size": "0.95rem",
-        }}
+        class="lk-phrase"
       >
         {words().map((w) => (
           <li>{w}</li>
@@ -118,7 +106,7 @@ function RecoveryPhrasePanel(props: PhrasePanelProps): JSX.Element {
         disabled={!props.acknowledged()}
         onClick={props.onAcknowledge}
       >
-        Done — take me to Lakko
+        Done
       </button>
     </>
   );

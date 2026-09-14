@@ -1015,6 +1015,24 @@ a.lk-row.active {
 .auth-card .form-footer + .form-footer {
   margin-top: -10px;
 }
+/* The 24-word recovery phrase. */
+.lk-phrase {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 20px;
+  padding: 14px 14px 14px 40px;
+  margin: 0;
+  background: var(--surface-sunken);
+  border-radius: var(--radius-md);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 15px;
+  line-height: 22px;
+}
+.lk-phrase li::marker {
+  color: var(--surface-muted);
+  font-size: 12px;
+}
+
 /* Public landings (/i/, /g/, /c/): the logo, then one card. */
 .public-shell {
   min-height: 100%;

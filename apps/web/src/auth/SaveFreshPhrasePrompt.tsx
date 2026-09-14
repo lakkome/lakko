@@ -24,6 +24,7 @@
  */
 import { createSignal, For, Show, type JSX } from "solid-js";
 import { useAuth } from "./AuthContext";
+import { AuthLayout } from "../ui/AuthLayout";
 
 export default function SaveFreshPhrasePrompt(): JSX.Element {
   const auth = useAuth();
@@ -59,8 +60,7 @@ export default function SaveFreshPhrasePrompt(): JSX.Element {
   }
 
   return (
-    <div class="auth-shell">
-      <section class="auth-card">
+    <AuthLayout>
         {/* ADR-0032 guest signup lands here too (no username, and nothing was
             replaced) — the "new identity / contacts re-verify" copy below is
             only true for the ADR-0017 lost-everything path. */}
@@ -69,7 +69,7 @@ export default function SaveFreshPhrasePrompt(): JSX.Element {
           fallback={
             <>
               <h1>Save your recovery phrase</h1>
-              <p style={{ color: "var(--surface-muted)", "margin-top": 0 }}>
+              <p class="auth-lede">
                 Your account was created without a password. These 24 words are
                 the <strong>only way</strong> to get back into it on another
                 device or after clearing this browser. Write them down on paper,
@@ -80,7 +80,7 @@ export default function SaveFreshPhrasePrompt(): JSX.Element {
           }
         >
           <h1>Save your new recovery phrase</h1>
-          <p style={{ color: "var(--surface-muted)", "margin-top": 0 }}>
+          <p class="auth-lede">
             You created a brand-new secure identity for{" "}
             <strong>@{username()}</strong>. These 24 words are the{" "}
             <strong>only way</strong> to recover this new identity if you
@@ -102,18 +102,7 @@ export default function SaveFreshPhrasePrompt(): JSX.Element {
         </Show>
 
         <ol
-          style={{
-            display: "grid",
-            "grid-template-columns": "repeat(2, minmax(0, 1fr))",
-            gap: "0.25rem 0.75rem",
-            padding: "1rem 1rem 1rem 2.5rem",
-            margin: "1rem 0",
-            background: "var(--surface-bg)",
-            border: "1px solid var(--surface-border)",
-            "border-radius": "var(--radius-sm)",
-            "font-family": "ui-monospace, SFMono-Regular, Menlo, monospace",
-            "font-size": "0.95rem",
-          }}
+          class="lk-phrase"
         >
           <For each={words()}>{(w) => <li>{w}</li>}</For>
         </ol>
@@ -150,9 +139,8 @@ export default function SaveFreshPhrasePrompt(): JSX.Element {
           disabled={!acknowledged() || busy()}
           onClick={() => void onDone()}
         >
-          {busy() ? "Finishing…" : "Done — take me to Lakko"}
+          {busy() ? "Finishing…" : "Done"}
         </button>
-      </section>
-    </div>
+    </AuthLayout>
   );
 }

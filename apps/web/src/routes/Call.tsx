@@ -64,6 +64,7 @@ import {
 import { CallSoundController } from "../calls/CallSoundController";
 import { showsSafetyNumber } from "../calls/safety-pill";
 import { paths } from "./paths";
+import { Icon } from "../ui/icons";
 
 // ============================================================================
 // Theme tokens (dark)
@@ -162,7 +163,8 @@ const E2eePill: Component = () => {
             "font-weight": "600",
           }}
         >
-          🔒 …
+          <Icon name="lock" size={14} />
+          <span>…</span>
         </div>
       }
     >
@@ -184,7 +186,8 @@ const E2eePill: Component = () => {
             "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
         }}
       >
-        🔒 {e().shortFingerprint}
+        <Icon name="lock" size={14} />
+        <span>{e().shortFingerprint}</span>
       </div>
     </Show>
   );
@@ -350,8 +353,8 @@ const ParticipantTile: Component<TileProps> = (props) => {
               "justify-content": "center",
               "font-size": props.large ? "5rem" : "2.5rem",
               "font-weight": "600",
-              color: COLOURS.textPrimary,
-              "background-color": "#27272A",
+              color: "#a5b4fc",
+              "background-color": "#26295a",
             }}
           >
             {props.participant.displayName.slice(0, 1).toUpperCase() || "?"}
@@ -371,7 +374,7 @@ const ParticipantTile: Component<TileProps> = (props) => {
                 position: "absolute",
                 inset: "0",
                 "background-image":
-                  "linear-gradient(135deg, #1f2937, #111827, #0b0f19)",
+                  "linear-gradient(135deg, #1e1b4b, #171b2e, #0f1220)",
                 display: "flex",
                 "align-items": "center",
                 "justify-content": "center",
@@ -464,7 +467,7 @@ const ParticipantTile: Component<TileProps> = (props) => {
             "pointer-events": "none",
           }}
         >
-          🔇
+          <Icon name="micOff" size={14} />
         </div>
       </Show>
 
@@ -499,7 +502,7 @@ const ParticipantTile: Component<TileProps> = (props) => {
             "border-radius": "6px",
           }}
         >
-          ✋
+          <Icon name="hand" size={14} />
         </div>
       </Show>
 
@@ -525,7 +528,7 @@ const ParticipantTile: Component<TileProps> = (props) => {
             title="Muted"
             style={{ color: COLOURS.mutedRed, "font-size": "0.9rem" }}
           >
-            🔇
+            <Icon name="micOff" size={14} />
           </span>
         </Show>
         <span
@@ -545,7 +548,7 @@ const ParticipantTile: Component<TileProps> = (props) => {
             title="Pinned"
             style={{ color: COLOURS.accentBlue, "font-size": "0.8rem" }}
           >
-            📌
+            <Icon name="pin" size={14} />
           </span>
         </Show>
       </div>
@@ -584,10 +587,10 @@ const PrejoinScreen: Component<{ onJoin: () => void }> = (props) => {
       }}
     >
       <h1 style={{ margin: "0", "font-size": "1.5rem", "font-weight": "600" }}>
-        Join Call
+        Ready to join?
       </h1>
       <p style={{ margin: "0", color: COLOURS.textSecondary }}>
-        Set up your camera and microphone
+        Check your camera and microphone first.
       </p>
 
       {/* Video preview box — same gradient placeholder as the
@@ -618,7 +621,7 @@ const PrejoinScreen: Component<{ onJoin: () => void }> = (props) => {
                 color: COLOURS.textSecondary,
               }}
             >
-              📷
+              <Icon name="videoOff" size={48} strokeWidth={1.4} />
             </div>
           }
         >
@@ -627,7 +630,7 @@ const PrejoinScreen: Component<{ onJoin: () => void }> = (props) => {
               position: "absolute",
               inset: "0",
               "background-image":
-                "linear-gradient(135deg, #1f2937, #111827, #0b0f19)",
+                "linear-gradient(135deg, #1e1b4b, #171b2e, #0f1220)",
               display: "flex",
               "align-items": "center",
               "justify-content": "center",
@@ -703,7 +706,7 @@ const PrejoinScreen: Component<{ onJoin: () => void }> = (props) => {
               color: COLOURS.textPrimary,
             }}
           >
-            {previewCamOn() ? "🎥" : "📷"}
+            <Icon name={previewCamOn() ? "video" : "videoOff"} size={18} />
           </button>
           <button
             type="button"
@@ -725,7 +728,7 @@ const PrejoinScreen: Component<{ onJoin: () => void }> = (props) => {
               color: COLOURS.textPrimary,
             }}
           >
-            {previewMicOn() ? "🎤" : "🔇"}
+            <Icon name={previewMicOn() ? "mic" : "micOff"} size={18} />
           </button>
         </div>
       </div>
@@ -749,7 +752,7 @@ const PrejoinScreen: Component<{ onJoin: () => void }> = (props) => {
           "font-size": "1rem",
           "font-weight": "600",
           cursor: "pointer",
-          "box-shadow": "0 2px 8px rgba(59, 130, 246, 0.4)",
+          "box-shadow": "0 2px 8px rgba(129, 140, 248, 0.35)",
         }}
       >
         Join
@@ -774,7 +777,7 @@ const WaitingMessage: Component = () => (
       left: "50%",
       transform: "translate(-50%, -50%)",
       padding: "16px 24px",
-      "background-color": "rgba(26, 26, 26, 0.9)",
+      "background-color": "rgba(23, 27, 46, 0.92)",
       border: `1px solid ${COLOURS.border}`,
       "border-radius": "12px",
       color: COLOURS.textPrimary,
@@ -831,7 +834,7 @@ const Spinner: Component<{ size?: number; colour?: string }> = (props) => {
 
 interface ButtonProps {
   label: string;
-  glyph: string;
+  glyph: JSX.Element;
   active: boolean;
   destructive?: boolean;
   /** Show a spinner in place of the glyph + make the button
@@ -910,7 +913,7 @@ const ControlsBar: Component = () => {
     >
       <CircleButton
         label={local()?.micOn === true ? "Mute microphone" : "Unmute microphone"}
-        glyph={local()?.micOn === true ? "🎤" : "🔇"}
+        glyph={<Icon name={local()?.micOn === true ? "mic" : "micOff"} size={22} />}
         active={local()?.micOn === false}
         onClick={(): void => callActions.setMic(local()?.micOn !== true)}
       />
@@ -922,7 +925,7 @@ const ControlsBar: Component = () => {
               ? "Stop camera"
               : "Start camera"
         }
-        glyph={local()?.camOn === true ? "🎥" : "📷"}
+        glyph={<Icon name={local()?.camOn === true ? "video" : "videoOff"} size={22} />}
         active={local()?.camOn === false}
         // B2a — the acquire+renegotiate is async; show a spinner + disable
         // (prevents a spam-tap while the session in-flight-guards).
@@ -937,7 +940,7 @@ const ControlsBar: Component = () => {
       <Show when={callState.hasMultipleCameras() && local()?.camOn === true}>
         <CircleButton
           label="Switch camera"
-          glyph="🔄"
+          glyph={<Icon name="refresh" size={22} />}
           active={false}
           onClick={(): void => {
             // Cycle to the next video input (front/back on mobile). The
@@ -975,7 +978,7 @@ const ControlsBar: Component = () => {
       </Show>
       <CircleButton
         label="Participants"
-        glyph="👥"
+        glyph={<Icon name="contacts" size={22} />}
         active={callState.participantListOpen()}
         onClick={(): void =>
           callActions.setParticipantListOpen(!callState.participantListOpen())
@@ -985,7 +988,7 @@ const ControlsBar: Component = () => {
         label={
           local()?.handRaised === true ? "Lower hand" : "Raise hand"
         }
-        glyph="✋"
+        glyph={<Icon name="hand" size={22} />}
         active={local()?.handRaised === true}
         onClick={(): void =>
           callActions.setHandRaised(local()?.handRaised !== true)
@@ -997,7 +1000,7 @@ const ControlsBar: Component = () => {
             ? "Stop sharing screen"
             : "Share screen"
         }
-        glyph="🖥️"
+        glyph={<Icon name="monitor" size={22} />}
         active={local()?.screenSharing === true}
         onClick={(): void =>
           callActions.setScreenSharing(local()?.screenSharing !== true)
@@ -1006,13 +1009,13 @@ const ControlsBar: Component = () => {
       <ChatToggleButton />
       <CircleButton
         label="Settings"
-        glyph="⚙️"
+        glyph={<Icon name="settings" size={22} />}
         active={callState.settingsOpen()}
         onClick={(): void => callActions.setSettingsOpen(!callState.settingsOpen())}
       />
       <CircleButton
         label="End call"
-        glyph="📞"
+        glyph={<Icon name="phoneEnd" size={22} />}
         active={false}
         destructive={true}
         onClick={(): void => callActions.endCall()}
@@ -1035,7 +1038,7 @@ const ChatToggleButton: Component = () => (
             ? `Chat (${callState.chatUnreadCount()} unread)`
             : "Chat"
       }
-      glyph="💬"
+      glyph={<Icon name="chat" size={22} />}
       active={callState.chatOpen()}
       onClick={(): void => callActions.setChatOpen(!callState.chatOpen())}
     />
@@ -1390,7 +1393,7 @@ const ParticipantList: Component = () => (
             "font-size": "1.25rem",
           }}
         >
-          ✕
+          <Icon name="close" size={18} />
         </button>
       </div>
       <ul style={{ "list-style": "none", margin: "0", padding: "0" }}>
@@ -1412,7 +1415,7 @@ const ParticipantList: Component = () => (
               </span>
               <Show when={p.handRaised}>
                 <span title="Hand raised" aria-label="Hand raised">
-                  ✋
+                  <Icon name="hand" size={14} />
                 </span>
               </Show>
               <Show when={!p.micOn}>
@@ -1421,12 +1424,12 @@ const ParticipantList: Component = () => (
                   aria-label="Muted"
                   style={{ color: COLOURS.mutedRed }}
                 >
-                  🔇
+                  <Icon name="micOff" size={14} />
                 </span>
               </Show>
               <Show when={p.screenSharing}>
                 <span title="Sharing screen" aria-label="Sharing screen">
-                  🖥️
+                  <Icon name="monitor" size={14} />
                 </span>
               </Show>
             </li>
@@ -1456,7 +1459,7 @@ const PhaseBanner: Component = () => (
             : callState.phase().kind === "ended"
               ? COLOURS.endCallRed
               : COLOURS.accentBlue,
-        color: "#0F0F0F",
+        color: "#0f1220",
         padding: "6px 14px",
         "border-radius": "6px",
         "font-size": "0.85rem",
@@ -1506,7 +1509,7 @@ const CallEndedOverlay: Component<{ onDismiss: () => void }> = (props) => {
       style={{
         position: "absolute",
         inset: "0",
-        "background-color": "rgba(15, 15, 15, 0.85)",
+        "background-color": "rgba(15, 18, 32, 0.88)",
         "z-index": "30",
         display: "flex",
         "flex-direction": "column",
