@@ -294,6 +294,8 @@ import {
   type ReadWatermarkMap,
 } from "../chat/presence-ops";
 import { paths } from "./paths";
+import { Avatar } from "../ui/Avatar";
+import { Icon } from "../ui/icons";
 
 /** A timeline entry — verified incoming events PLUS optimistic
  *  outbound bubbles that haven't been confirmed yet.
@@ -423,7 +425,7 @@ export default function Chat(): JSX.Element {
             <ChatView
               entry={entry() as ActiveGroup}
               requireIdentity={requireIdentity}
-              onLeave={() => navigate(paths.contacts)}
+              onLeave={() => navigate(paths.home)}
             />
           )}
         </Show>
@@ -4732,73 +4734,28 @@ function ChatView(props: {
           </span>
         </div>
       </Show>
-      <header
-        style={{
-          display: "flex",
-          "align-items": "center",
-          "justify-content": "space-between",
-          gap: "0.75rem",
-        }}
-      >
-        <div>
+      <header class="lk-chat-head">
+        <button
+          type="button"
+          class="lk-icon-button lk-narrow-only"
+          aria-label="Back to chats"
+          title="Back to chats"
+          onClick={props.onLeave}
+        >
+          <Icon name="back" size={20} />
+        </button>
+        <Avatar label={resolvePeerName()} id={props.entry.groupIdB64} />
+        <div class="lk-chat-title">
           {/* ADR-0021 follow-up: show the linked contact's user-chosen
               name in the chat header (falls back to the chat label). */}
-          <h1 style={{ margin: 0 }}>{resolvePeerName()}</h1>
-          <div
-            style={{
-              color: "var(--surface-muted)",
-              "font-size": "0.9rem",
-              "margin-top": "0.25rem",
-            }}
-          >
-            {memberCount()} member
-            {memberCount() === 1 ? "" : "s"} · seat #
-            {props.entry.group.ownLeafIndex}
+          <h1>{resolvePeerName()}</h1>
+          <div class="lk-chat-sub">
+            {memberCount()} member{memberCount() === 1 ? "" : "s"}
           </div>
         </div>
-        <div style={{ display: "flex", gap: "0.5rem", "flex-wrap": "wrap" }}>
-          <button
-            type="button"
-            onClick={() => {
-              setMembersOpen(!membersOpen());
-              setNotice(null);
-              setError(null);
-              // Bump version so the panel reads fresh data
-              // when it opens (covers the case where new
-              // commits arrived between the last refresh and
-              // this click).
-              setMembersVersion(membersVersion() + 1);
-            }}
-            disabled={busy()}
-          >
-            {membersOpen() ? "Hide members" : "Members"}
-          </button>
-          {/* ADR-0022 — only owner/admin (or an open/legacy group) sees the
-              add affordance; a plain member's add would be refused by peers. */}
-          <Show when={canManageMembers()}>
-            <button
-              type="button"
-              onClick={() => {
-                setAddMemberOpen(!addMemberOpen());
-                setNotice(null);
-                setError(null);
-              }}
-              disabled={busy()}
-            >
-              {addMemberOpen() ? "Cancel add" : "Add member"}
-            </button>
-          </Show>
-          <button
-            type="button"
-            onClick={() => {
-              void refresh();
-            }}
-            disabled={busy()}
-          >
-            {busy() ? "Refreshing…" : "Refresh"}
-          </button>
-          {/* Phase 3a8 — call button. Visible whenever no
-              call is active in this thread.
+        <div class="lk-chat-actions">
+          {/* Phase 3a8 — call buttons. Visible whenever no call is active in
+              this thread.
 
               ADR-0045 UX §6.2.8 item 4 — and GONE once this device's
               membership has ended. The per-call SFrame seed comes from
@@ -4814,21 +4771,75 @@ function ChatView(props: {
                 camera sealed like the audio track; 1×1 -> P2P DTLS-SRTP. */}
             <button
               type="button"
+              class="lk-icon-button"
+              title={callAffordance() === "join-group" ? "Join call" : "Call"}
+              aria-label={callAffordance() === "join-group" ? "Join call" : "Call"}
               onClick={() => onCallButton(false)}
               disabled={busy()}
             >
-              {callAffordance() === "join-group" ? "📞 Join call" : "📞 Call"}
+              <Icon name="phone" size={20} />
             </button>
             <button
               type="button"
+              class="lk-icon-button"
+              title={callAffordance() === "join-group" ? "Join with video" : "Video call"}
+              aria-label={callAffordance() === "join-group" ? "Join with video" : "Video call"}
               onClick={() => onCallButton(true)}
               disabled={busy()}
             >
-              {callAffordance() === "join-group" ? "📹 Join with video" : "📹 Video"}
+              <Icon name="video" size={20} />
             </button>
           </Show>
-          <button type="button" onClick={props.onLeave}>
-            Back to Contacts
+          {/* ADR-0022 — only owner/admin (or an open/legacy group) sees the
+              add affordance; a plain member's add would be refused by peers. */}
+          <Show when={canManageMembers()}>
+            <button
+              type="button"
+              class="lk-icon-button"
+              title="Add member"
+              aria-label="Add member"
+              aria-pressed={addMemberOpen()}
+              onClick={() => {
+                setAddMemberOpen(!addMemberOpen());
+                setNotice(null);
+                setError(null);
+              }}
+              disabled={busy()}
+            >
+              <Icon name="plus" size={20} />
+            </button>
+          </Show>
+          <button
+            type="button"
+            class="lk-icon-button"
+            title="Members"
+            aria-label="Members"
+            aria-pressed={membersOpen()}
+            onClick={() => {
+              setMembersOpen(!membersOpen());
+              setNotice(null);
+              setError(null);
+              // Bump version so the panel reads fresh data
+              // when it opens (covers the case where new
+              // commits arrived between the last refresh and
+              // this click).
+              setMembersVersion(membersVersion() + 1);
+            }}
+            disabled={busy()}
+          >
+            <Icon name="contacts" size={20} />
+          </button>
+          <button
+            type="button"
+            class="lk-icon-button"
+            title={busy() ? "Refreshing…" : "Refresh"}
+            aria-label="Refresh"
+            onClick={() => {
+              void refresh();
+            }}
+            disabled={busy()}
+          >
+            <Icon name="refresh" size={20} />
           </button>
         </div>
       </header>
@@ -6396,16 +6407,7 @@ function ChatView(props: {
       {/* ADR-0047 UX §6 — the permission-denied card and the short hints. */}
       <RecorderNotices recorder={recorder} />
       <VideoNoteOverlay recorder={recorder} />
-      <form
-        onSubmit={onSend}
-        style={{
-          display: "flex",
-          gap: "0.5rem",
-          "padding-top": "0.5rem",
-          "border-top": "1px solid var(--surface-border)",
-          position: "relative",
-        }}
-      >
+      <form onSubmit={onSend} class="lk-composer">
         <Show when={composerPickerOpen() && !recorderBusy(recorder)}>
           <EmojiPicker
             mode="compose"
@@ -6425,21 +6427,15 @@ function ChatView(props: {
             upload, and the label drives the click for a tidy
             chrome-less control. */}
         <label
+          class="lk-icon-button"
           style={{
-            display: "inline-flex",
-            "align-items": "center",
-            "justify-content": "center",
-            padding: "0 0.6rem",
-            border: "1px solid var(--surface-border)",
-            "border-radius": "var(--radius-md)",
-            background: "var(--surface-elevated)",
             cursor: uploading() ? "wait" : "pointer",
             opacity: uploading() ? 0.6 : 1,
           }}
           aria-label="Attach files"
           title={`Attach files (up to ${formatAttachmentSize(MAX_ATTACHMENT_BYTES)} each)`}
         >
-          📎
+          <Icon name="clip" size={20} />
           <input
             type="file"
             multiple
@@ -6453,10 +6449,11 @@ function ChatView(props: {
         {/* ADR-0047 UX §4 — the smiley button left of the text field. */}
         <button
           type="button"
-          class="lakko-icon-btn"
+          class="lk-icon-button"
           data-picker-toggle
           aria-label="Emoji and GIFs"
           aria-expanded={composerPickerOpen()}
+          aria-pressed={composerPickerOpen()}
           title="Emoji and GIFs"
           onMouseDown={(e) => e.preventDefault()}
           onClick={() => {
@@ -6464,10 +6461,11 @@ function ChatView(props: {
             setComposerPickerOpen(!composerPickerOpen());
           }}
         >
-          🙂
+          <Icon name="smile" size={20} />
         </button>
         <input
           ref={composerInput}
+          class="lk-composer-input"
           type="text"
           placeholder="Message"
           autocomplete="off"
@@ -6494,14 +6492,16 @@ function ChatView(props: {
           fallback={<RecordButton recorder={recorder} />}
         >
         <button
-          class="primary"
+          class="lk-icon-button accent lk-send"
           type="submit"
+          aria-label="Send"
+          title="Send"
           disabled={
             uploading() ||
             (input().length === 0 && pendingAttachments().length === 0)
           }
         >
-          Send
+          <Icon name="send" size={18} />
         </button>
         </Show>
       </form>
@@ -6775,20 +6775,19 @@ function ChatBubbleBody(props: {
 
   const bubbleStyle = isIncoming
     ? {
-        padding: "0.5rem 0.75rem",
-        background: "var(--surface-elevated)",
-        border: "1px solid var(--surface-border)",
-        "border-radius": "var(--radius-md)",
+        padding: "8px 12px",
+        background: "var(--surface-sunken)",
+        "border-radius": "18px 18px 18px 4px",
         "align-self": "flex-start",
-        "max-width": "75%",
+        "max-width": "min(75%, 560px)",
       }
     : {
-        padding: "0.5rem 0.75rem",
+        padding: "8px 12px",
         background: "var(--accent)",
         color: "var(--accent-fg)",
-        "border-radius": "var(--radius-md)",
+        "border-radius": "18px 18px 4px 18px",
         "align-self": "flex-end",
-        "max-width": "75%",
+        "max-width": "min(75%, 560px)",
         // A pending media message keeps full opacity: its upload ring is the
         // progress signal, and a dimmed video would read as disabled.
         opacity: props.ack === "pending" && props.mediaLocalKey === undefined ? 0.7 : 1,

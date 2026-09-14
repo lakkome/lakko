@@ -113,19 +113,21 @@ type PublisherGroupHandle = Awaited<ReturnType<typeof openPublisherGroup>>;
 type ChannelRotationPolicy = ReturnType<Wasm["channelRotationPolicyDefault"]>;
 
 // ============================================================================
-// Theme tokens — mirror Call.tsx's palette so the channels
-// surface feels visually contiguous with the rest of the app.
+// Theme tokens — the design-system variables from `styles.css`, so the
+// channels surface follows the light / dark theme with the rest of the app.
+// (This used to be a hardcoded dark palette copied from Call.tsx.)
 // ============================================================================
 
 const COLOURS = {
-  background: "#0F0F0F",
-  surface: "#1A1A1A",
-  surfaceHover: "#202020",
-  border: "#2A2A2A",
-  textPrimary: "#FAFAFA",
-  textSecondary: "#A1A1AA",
-  accentBlue: "#3B82F6",
-  destructive: "#DC2626",
+  background: "var(--surface-bg)",
+  surface: "var(--surface-elevated)",
+  surfaceHover: "var(--surface-hover)",
+  border: "var(--surface-border)",
+  textPrimary: "var(--surface-fg)",
+  textSecondary: "var(--surface-muted)",
+  accentBlue: "var(--accent)",
+  accentFg: "var(--accent-fg)",
+  destructive: "var(--danger)",
 } as const;
 
 // ============================================================================
@@ -242,12 +244,9 @@ const ChannelsList: Component = () => {
   return (
     <div
       style={{
-        padding: "20px",
+        padding: "24px 32px",
         "max-width": "720px",
-        margin: "0 auto",
         color: COLOURS.textPrimary,
-        "min-height": "100vh",
-        "background-color": COLOURS.background,
       }}
     >
       <header
@@ -266,7 +265,7 @@ const ChannelsList: Component = () => {
           onClick={(): void => navigate(paths.channelNew)}
           style={{
             "background-color": COLOURS.accentBlue,
-            color: "#fff",
+            color: COLOURS.accentFg,
             border: "none",
             "border-radius": "8px",
             padding: "8px 14px",
@@ -355,9 +354,10 @@ const ChannelsList: Component = () => {
             {(c): JSX.Element => (
               <li
                 style={{
-                  padding: "14px",
+                  padding: "14px 16px",
                   "background-color": COLOURS.surface,
-                  "border-radius": "8px",
+                  border: `1px solid ${COLOURS.border}`,
+                  "border-radius": "12px",
                   "margin-bottom": "8px",
                   cursor: "pointer",
                 }}
@@ -666,7 +666,7 @@ const NewChannel: Component = () => {
             style={{
               padding: "10px 12px",
               "background-color": COLOURS.destructive,
-              color: "#fff",
+              color: COLOURS.accentFg,
               "border-radius": "8px",
               "font-size": "13px",
             }}
@@ -696,7 +696,7 @@ const NewChannel: Component = () => {
             style={{
               padding: "9px 16px",
               "background-color": COLOURS.accentBlue,
-              color: "#fff",
+              color: COLOURS.accentFg,
               border: "none",
               "border-radius": "8px",
               cursor: busy() ? "wait" : "pointer",
@@ -750,7 +750,7 @@ const NewChannel: Component = () => {
             style={{
               padding: "10px 12px",
               "background-color": COLOURS.destructive,
-              color: "#fff",
+              color: COLOURS.accentFg,
               "border-radius": "8px",
               "font-size": "13px",
             }}
@@ -906,12 +906,9 @@ const ChannelView: Component = () => {
   return (
     <div
       style={{
-        padding: "20px",
+        padding: "24px 32px",
         "max-width": "720px",
-        margin: "0 auto",
         color: COLOURS.textPrimary,
-        "min-height": "100vh",
-        "background-color": COLOURS.background,
       }}
     >
       <button
@@ -1032,7 +1029,7 @@ const ChannelView: Component = () => {
               disabled={publishBusy() || composeText().trim().length === 0}
               style={{
                 "background-color": COLOURS.accentBlue,
-                color: "#fff",
+                color: COLOURS.accentFg,
                 border: "none",
                 "border-radius": "8px",
                 padding: "9px 16px",
@@ -1051,7 +1048,7 @@ const ChannelView: Component = () => {
                 "margin-top": "10px",
                 padding: "10px 12px",
                 "background-color": COLOURS.destructive,
-                color: "#fff",
+                color: COLOURS.accentFg,
                 "border-radius": "8px",
                 "font-size": "13px",
               }}
@@ -1393,7 +1390,7 @@ const RotationPanel: Component<{
         }}
         style={{
           "background-color": COLOURS.accentBlue,
-          color: "#fff",
+          color: COLOURS.accentFg,
           border: "none",
           "border-radius": "6px",
           padding: "6px 12px",
@@ -1411,7 +1408,7 @@ const RotationPanel: Component<{
             "margin-top": "8px",
             padding: "8px 10px",
             "background-color": COLOURS.destructive,
-            color: "#fff",
+            color: COLOURS.accentFg,
             "border-radius": "6px",
             "font-size": "12px",
           }}
@@ -1896,7 +1893,7 @@ const SubscribersPanel: Component<{ readonly channelIdHex: string }> = (
           style={{
             padding: "8px 10px",
             "background-color": COLOURS.destructive,
-            color: "#fff",
+            color: COLOURS.accentFg,
             "border-radius": "6px",
             "font-size": "12px",
             "margin-bottom": "8px",
@@ -1995,7 +1992,7 @@ const SubscribersPanel: Component<{ readonly channelIdHex: string }> = (
                     disabled={busyPk() === pk}
                     style={{
                       "background-color": COLOURS.accentBlue,
-                      color: "#fff",
+                      color: COLOURS.accentFg,
                       border: "none",
                       "border-radius": "6px",
                       padding: "4px 10px",
@@ -2221,12 +2218,9 @@ const ChannelSubscribe: Component = () => {
   return (
     <div
       style={{
-        padding: "20px",
+        padding: "24px 32px",
         "max-width": "720px",
-        margin: "0 auto",
         color: COLOURS.textPrimary,
-        "min-height": "100vh",
-        "background-color": COLOURS.background,
       }}
     >
       <button

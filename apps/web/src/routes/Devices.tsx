@@ -42,6 +42,7 @@ import {
   For,
   type JSX,
 } from "solid-js";
+import { Icon } from "../ui/icons";
 import { useAuth } from "../auth/AuthContext";
 import { AuthClient, AuthHttpError } from "../auth/client";
 import { normalizeTotpCode } from "../auth/totp-code";
@@ -84,11 +85,14 @@ export default function Devices(): JSX.Element {
 
   return (
     <article>
-      <h1>Devices</h1>
-      <p style={{ color: "var(--surface-muted)", "margin-top": 0 }}>
-        Link another phone, tablet or computer to this account. Linking is
-        end-to-end encrypted; Lakko's servers cannot read it.
-      </p>
+      <div class="lk-page lk-stack">
+      <div class="lk-page-head">
+        <h1>Devices</h1>
+        <p>
+          Link another phone, tablet or computer to this account. Linking is
+          end-to-end encrypted; Lakko's servers cannot read it.
+        </p>
+      </div>
       <Show
         when={session() !== null}
         fallback={
@@ -97,43 +101,29 @@ export default function Devices(): JSX.Element {
           </p>
         }
       >
-        <div style={{ display: "flex", gap: "0.5rem", "margin-bottom": "1rem" }}>
-          <button
-            type="button"
-            class={tab() === "list" ? "primary" : ""}
-            onClick={() => setTab("list")}
-          >
-            Your devices
-          </button>
-          <button
-            type="button"
-            class={tab() === "pair" ? "primary" : ""}
-            onClick={() => setTab("pair")}
-          >
-            Pair this device
-          </button>
-          <button
-            type="button"
-            class={tab() === "scan" ? "primary" : ""}
-            onClick={() => setTab("scan")}
-          >
-            Add a device
-          </button>
-          <button
-            type="button"
-            class={tab() === "totp" ? "primary" : ""}
-            onClick={() => setTab("totp")}
-          >
-            Authenticator
-          </button>
-          <button
-            type="button"
-            class={tab() === "contact" ? "primary" : ""}
-            onClick={() => setTab("contact")}
-          >
-            Email or phone
-          </button>
+        <div class="lk-segmented" role="tablist" aria-label="Devices">
+          {(
+            [
+              ["list", "Your devices"],
+              ["pair", "Pair this device"],
+              ["scan", "Add a device"],
+              ["totp", "Authenticator"],
+              ["contact", "Email or phone"],
+            ] as const
+          ).map(([id, label]) => (
+            <label>
+              <input
+                type="radio"
+                name="devices-tab"
+                value={id}
+                checked={tab() === id}
+                onChange={() => setTab(id)}
+              />
+              {label}
+            </label>
+          ))}
         </div>
+        <section class="lk-card">
         <Switch>
           <Match when={tab() === "list"}>
             <DevicesListView
@@ -160,7 +150,9 @@ export default function Devices(): JSX.Element {
             <ContactEnrollView />
           </Match>
         </Switch>
+        </section>
       </Show>
+      </div>
     </article>
   );
 }
@@ -295,37 +287,26 @@ function DevicesListView(props: {
                 <ul style={{ "list-style": "none", padding: 0, margin: 0 }}>
                   <For each={devices}>
                     {(device) => (
-                      <li
-                        style={{
-                          display: "flex",
-                          "align-items": "center",
-                          "justify-content": "space-between",
-                          padding: "0.5rem 0",
-                          "border-bottom":
-                            "1px solid var(--surface-muted)",
-                        }}
-                      >
-                        <div>
-                          <div style={{ "font-family": "monospace" }}>
-                            #{device.leafIndex}{" "}
+                      <li class="lk-card-row">
+                        <span class="lk-card-row-icon">
+                          <Icon name="devices" size={18} />
+                        </span>
+                        <div class="lk-card-row-body">
+                          <span class="lk-card-row-title">
+                            {device.isSelf ? "This device" : `Device #${device.leafIndex}`}
+                          </span>
+                          <span class="lk-card-row-sub" style={{ "font-family": "ui-monospace, monospace" }}>
                             {hexPrefix(device.signaturePublicKey, 8)}
-                          </div>
-                          <Show when={device.isSelf}>
-                            <small style={{ color: "var(--surface-muted)" }}>
-                              this device
-                            </small>
-                          </Show>
+                          </span>
                         </div>
                         <Show
                           when={!device.isSelf}
-                          fallback={
-                            <span style={{ color: "var(--surface-muted)" }}>
-                              —
-                            </span>
-                          }
+                          fallback={<span />}
                         >
                           <button
                             type="button"
+                            class="ghost small"
+                            style={{ color: "var(--danger)" }}
                             disabled={removingLeaf !== null}
                             onClick={() => void remove(device.leafIndex)}
                           >

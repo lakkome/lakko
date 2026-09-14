@@ -94,15 +94,10 @@ final class CallHost: ObservableObject {
     /// Hex call ids of 1x1 calls that ended here. Such a call never rings again.
     private(set) var endedCallIds: Set<String> = []
 
-    /// Group (SFU) calls in progress, owned by chat view models. Weak, so a
-    /// view model that SwiftUI discarded mid-call cannot leave this device
-    /// permanently "busy".
-    private var groupCallOwners: [WeakOwner] = []
-
-    private final class WeakOwner {
-        weak var value: AnyObject?
-        init(_ value: AnyObject) { self.value = value }
-    }
+    /// The group (SFU) or call-link call occupying the app's one call slot, if
+    /// any. Wired by the composition root (``CallSlotWiring``) to
+    /// ``GroupCallHost`` and ``LinkCallHost``, which own those calls app-wide.
+    var otherCallOccupant: @MainActor () -> CallKind? = { nil }
 
     private var stateSubscription: AnyCancellable?
     private var phaseTimer: CallHostTimer?
@@ -134,16 +129,15 @@ final class CallHost: ObservableObject {
         }
     }
 
-    // MARK: - Group-call busy
+    // MARK: - One call slot
 
-    /// A chat view model's group (SFU) call started or ended. While any is live
-    /// a 1x1 offer is answered busy.
-    func noteGroupCall(owner: AnyObject, active: Bool) {
-        groupCallOwners.removeAll { $0.value == nil || $0.value === owner }
-        if active { groupCallOwners.append(WeakOwner(owner)) }
-    }
+    /// A group or call-link call holds the slot. While it does, a 1x1 offer is
+    /// answered busy and a 1x1 start is refused.
+    var otherCallBusy: Bool { otherCallOccupant() != nil }
 
-    var groupCallBusy: Bool { groupCallOwners.contains { $0.value != nil } }
+    /// A 1x1 call holds the slot: being prepared, ringing, dialing, live or
+    /// ending, or a start past its tap.
+    var occupiesSlot: Bool { hasLiveCall || callStarting }
 
     /// A 1x1 call occupies the slot (anything short of `.done`).
     var hasLiveCall: Bool {
@@ -167,7 +161,7 @@ final class CallHost: ObservableObject {
             nowMs: ports.nowMs(),
             active: active,
             endedCallIds: endedCallIds,
-            groupCallBusy: groupCallBusy
+            otherCallBusy: otherCallBusy
         )
         switch action {
         case .drop:
@@ -195,7 +189,11 @@ final class CallHost: ObservableObject {
     /// (deriving + arming the SFrame key) WITHOUT dialing: it sits in `.idle`,
     /// which the call screen shows as the prejoin; Join dials.
     func startOutgoingCall(groupIdHex: String) {
-        guard !hasLiveCall, !callStarting, !groupCallBusy else { return }
+        guard !hasLiveCall, !callStarting else { return }
+        if let other = otherCallOccupant() {
+            callError = CallSlot.busyMessage(other, verb: .start)
+            return
+        }
         callStarting = true
         Task { @MainActor [weak self] in
             guard let self else { return }
@@ -204,7 +202,7 @@ final class CallHost: ObservableObject {
                 self.callError = MicrophonePermission.deniedMessage
                 return
             }
-            guard !self.hasLiveCall, !self.groupCallBusy else { return }
+            guard !self.hasLiveCall, !self.otherCallBusy else { return }
             _ = self.install(callId: self.ports.mintCallId(), groupIdHex: groupIdHex)
         }
     }
@@ -248,6 +246,22 @@ final class CallHost: ObservableObject {
         activeCall?.hangUp(reason: .hungUp)
     }
 
+    /// End the 1x1 call in the slot, whatever state it is in — the "End
+    /// current call" affordance of a refused start elsewhere.
+    func endCurrentCall() {
+        guard let call = activeCall else { return }
+        switch call.state {
+        case .ringing:
+            call.declineCall()
+        case .idle:
+            clearFinishedCall()
+        case .outgoing, .connecting, .connected:
+            call.hangUp(reason: .hungUp)
+        case .ending, .done:
+            break
+        }
+    }
+
     /// Clear the slot once the "Call ended" overlay is dismissed (or a prejoin
     /// is cancelled).
     func clearFinishedCall() {
@@ -269,7 +283,6 @@ final class CallHost: ObservableObject {
         clearSlot()
         seenRows.removeAll()
         endedCallIds.removeAll()
-        groupCallOwners.removeAll()
         callError = nil
     }
 

@@ -67,3 +67,38 @@ enum CallSlot {
         return "You are already in \(what). End it before you \(action) another one."
     }
 }
+
+/// Connects the three app-level call hosts so each can see the one call slot.
+///
+/// Every host keeps its own call; none holds another strongly. Done once by the
+/// composition root, and by tests that exercise the slot across kinds.
+@MainActor
+enum CallSlotWiring {
+
+    static func wire(oneToOne: CallHost, group: GroupCallHost, link: LinkCallHost) {
+        let occupant: @MainActor () -> CallKind? = { [weak oneToOne, weak group, weak link] in
+            CallSlot.occupant(
+                oneToOneInCall: oneToOne?.occupiesSlot ?? false,
+                groupCallActive: group?.occupiesSlot ?? false,
+                linkCallActive: link?.occupiesSlot ?? false
+            )
+        }
+        oneToOne.otherCallOccupant = { [weak group, weak link] in
+            CallSlot.occupant(
+                oneToOneInCall: false,
+                groupCallActive: group?.occupiesSlot ?? false,
+                linkCallActive: link?.occupiesSlot ?? false
+            )
+        }
+        group.slotOccupant = occupant
+        link.slotOccupant = occupant
+        link.endCurrentCall = { [weak oneToOne, weak group, weak link] in
+            switch occupant() {
+            case .oneToOne?: oneToOne?.endCurrentCall()
+            case .group?: group?.leave(hungUp: true)
+            case .link?: link?.leave()
+            case nil: break
+            }
+        }
+    }
+}

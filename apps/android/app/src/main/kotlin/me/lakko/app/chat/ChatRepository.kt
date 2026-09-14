@@ -221,7 +221,37 @@ public class ChatRepository(
      * Lives in [GroupLocks] rather than as a bare map field so the per-group
      * property it provides can be driven by a host test — see `SplitPoll.kt`.
      */
-    private val groupLocks: GroupLocks = GroupLocks()
+    private val groupLocks: GroupLocks = GroupLocks(onDrain = { groupIdHex -> notifyGroupMlsIdle(groupIdHex) })
+
+    /** Observers of [addGroupMlsIdleListener]. */
+    private val groupMlsIdleListeners =
+        java.util.concurrent.CopyOnWriteArrayList<(groupIdHex: String) -> Unit>()
+
+    /**
+     * Observe every moment a group's MLS work SETTLES — its per-group lock has
+     * been released with no region holding it or waiting for it. See
+     * [GroupLocks] for why this is the one point that may read a group's epoch
+     * on behalf of something outside the chat screen, and why it never fires
+     * between two queued regions.
+     *
+     * Called synchronously from the releasing coroutine, on whatever thread it
+     * runs on: a listener must only hand the event off, and must not take the
+     * group's lock itself. Returns the unsubscribe.
+     */
+    public fun addGroupMlsIdleListener(listener: (groupIdHex: String) -> Unit): () -> Unit {
+        groupMlsIdleListeners += listener
+        return { groupMlsIdleListeners -= listener }
+    }
+
+    private fun notifyGroupMlsIdle(groupIdHex: String) {
+        for (listener in groupMlsIdleListeners) {
+            try {
+                listener(groupIdHex)
+            } catch (cause: Throwable) {
+                android.util.Log.w("ChatRepository", "group MLS idle listener failed", cause)
+            }
+        }
+    }
 
     /** The [groupLocks] entry for [groupIdHex], creating it on first use. */
     private fun groupLock(groupIdHex: String): Mutex = groupLocks.forGroup(groupIdHex)
@@ -899,6 +929,101 @@ public class ChatRepository(
                 }
             }
         }
+    }
+
+    /**
+     * G-18 / ADR-0029 — one consistent read of [groupIdHex] for the app-level
+     * group-call host: membership, epoch, and the per-call seed at that epoch.
+     *
+     * Taken under [providerLock] alone (never the per-group lock, so it can be
+     * called from a [addGroupMlsIdleListener] hand-off), and `settled` is judged
+     * inside that same region: a region on the group that had not started by
+     * then must take the provider lock before it can move the epoch, so it
+     * cannot move it under this read; one that had started makes `settled`
+     * false and reports its own drain later.
+     */
+    public suspend fun readSettledCallKey(
+        groupIdHex: String,
+        callId: ByteArray,
+    ): me.lakko.app.calls.SettledGroupRead {
+        val identity = canonicalIdentity.get()
+            ?: return me.lakko.app.calls.SettledGroupRead.notJoined()
+        return providerLock.withLock {
+            val record = groups[groupIdHex]
+            if (record == null) {
+                me.lakko.app.calls.SettledGroupRead.notJoined()
+            } else {
+                val settled = !groupLocks.isBusy(groupIdHex)
+                val isActive = readIsActive { record.group.isActive() }
+                val epoch = try {
+                    record.group.epoch()
+                } catch (_: Throwable) {
+                    null
+                }
+                var seed: ByteArray? = null
+                var leaf: Int? = null
+                if (isActive != false) {
+                    try {
+                        seed = record.group.exportSecret(identity, "lakko/call/v1", callId, 32u)
+                        leaf = record.group.ownLeafIndex().toInt()
+                    } catch (cause: Throwable) {
+                        android.util.Log.w("ChatRepository", "readSettledCallKey: exporter failed", cause)
+                        seed = null
+                        leaf = null
+                    }
+                }
+                me.lakko.app.calls.SettledGroupRead(
+                    joined = true,
+                    isActive = isActive,
+                    settled = settled,
+                    epoch = epoch,
+                    seed = seed,
+                    localLeaf = leaf,
+                )
+            }
+        }
+    }
+
+    /** Is the recorded group call [callIdHex] in [groupIdHex] still live? */
+    internal fun isGroupCallLive(groupIdHex: String, callIdHex: String, nowMs: Long): Boolean {
+        val record = groupCalls.value[groupIdHex] ?: return false
+        return record.callIdHex == callIdHex && me.lakko.app.calls.isGroupCallLive(record, nowMs)
+    }
+
+    /** The joined leaves of the recorded group call [callIdHex], or `null` when
+     *  the record is gone or names another call. */
+    internal fun groupCallJoinedLeaves(groupIdHex: String, callIdHex: String): Set<UInt>? =
+        groupCalls.value[groupIdHex]?.takeIf { it.callIdHex == callIdHex }?.joinedLeaves
+
+    /**
+     * Compose + publish one group-call body through the locked call-signaling
+     * publish path, then fold it into this device's own ledger record (it never
+     * receives its own application message back). Returns `false` — and leaves
+     * the ledger alone — when the publish did not happen, so the local record
+     * never claims more than the group was told.
+     */
+    internal suspend fun publishGroupCallSignal(
+        groupIdHex: String,
+        body: uniffi.lakko_ffi_uniffi.FfiCallSignalingBody,
+    ): Boolean {
+        val bytes = try {
+            uniffi.lakko_ffi_uniffi.composeCallSignaling(body)
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "group call signaling: compose failed", cause)
+            return false
+        }
+        try {
+            publishApplicationMessage(groupIdHex = groupIdHex, plaintextBytes = bytes)
+        } catch (cause: kotlinx.coroutines.CancellationException) {
+            throw cause
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "group call signaling: publish failed", cause)
+            return false
+        }
+        me.lakko.app.calls.groupCallSignalOf(body)?.let { signal ->
+            applyGroupCallSignal(groupIdHex, signal, System.currentTimeMillis())
+        }
+        return true
     }
 
     /**

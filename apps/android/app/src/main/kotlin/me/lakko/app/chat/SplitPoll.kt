@@ -5,6 +5,7 @@ package me.lakko.app.chat
 
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.supervisorScope
@@ -149,12 +150,38 @@ internal suspend fun <T> runSplitPoll(
  * It does NOT guard the shared OpenMLS provider — every group's state lives in
  * ONE provider, and `snapshotStorage` / `restoreStorage` are whole-provider
  * operations. That needs a separate global lock, held strictly INSIDE this one.
+ *
+ * ## The drain report
+ *
+ * Every region that can move a group's MLS epoch runs under this lock: the
+ * poll's apply half (the open chat's own long poll AND the app-level all-groups
+ * poll for chats that are not open), the create-commit paths, the ADR-0045 sweep
+ * and its owed verdict, and the ADR-0040 F1 reset inside a commit. A group's
+ * lock with nobody holding it and nobody waiting for it is therefore the one
+ * place that can say "the epoch may have changed, and nothing is half-way
+ * through changing it", whatever screen is showing. [onDrain] is that report;
+ * the app-level group-call host uses it to rotate a live call's SFrame key on
+ * an epoch advance (G-18 / ADR-0029). Before, only a chat view model collector
+ * noticed an advance, and it read the epoch whenever the repository emitted —
+ * including while a commit on the same group sat eagerly merged and not yet
+ * published (ADR-0040), an epoch the F1 reset may still roll back.
+ *
+ * It fires only on DRAIN, never between two queued regions: between them the
+ * next one may already have merged a commit it has not published. The listener
+ * is called synchronously from the releasing coroutine, AFTER the lock is
+ * released, so it must not take this lock itself (its own drain would report
+ * again) and should only hand the event off. [isBusy] lets a reader confirm, at
+ * the moment it reads, that no region has started since.
  */
-internal class GroupLocks {
-    private val locks = ConcurrentHashMap<String, Mutex>()
+internal class GroupLocks(private val onDrain: (groupIdHex: String) -> Unit = {}) {
+    private val locks = ConcurrentHashMap<String, DrainNotifyingMutex>()
 
     /** The mutex for [groupIdHex], created on first use. */
-    fun forGroup(groupIdHex: String): Mutex = locks.getOrPut(groupIdHex) { Mutex() }
+    fun forGroup(groupIdHex: String): Mutex =
+        locks.getOrPut(groupIdHex) { DrainNotifyingMutex { onDrain(groupIdHex) } }
+
+    /** `true` while a region on [groupIdHex] holds its lock or waits for it. */
+    fun isBusy(groupIdHex: String): Boolean = locks[groupIdHex]?.isBusy == true
 
     /** Drop every mutex — account switch / logout hygiene. */
     fun clear() {
@@ -163,6 +190,68 @@ internal class GroupLocks {
 
     /** How many groups have a mutex. Diagnostics + tests. */
     val size: Int get() = locks.size
+}
+
+/**
+ * A [Mutex] that counts the regions holding or waiting for it and calls
+ * [onDrain] whenever that count returns to zero — see [GroupLocks].
+ *
+ * Counting starts BEFORE a region waits, so a region queued behind the holder
+ * keeps the count above zero when the holder releases: the holder's release is
+ * not a drain, the queued region's is. A waiter cancelled while suspended is
+ * uncounted on the way out. The deprecated `onLock` select clause is delegated
+ * uncounted; nothing in this app selects on a group lock.
+ */
+internal class DrainNotifyingMutex(
+    private val onDrain: () -> Unit,
+    private val inner: Mutex = Mutex(),
+) : Mutex by inner {
+    private val pending = AtomicInteger(0)
+
+    /** A region holds this lock or is waiting for it. */
+    val isBusy: Boolean get() = pending.get() > 0
+
+    override suspend fun lock(owner: Any?) {
+        pending.incrementAndGet()
+        try {
+            inner.lock(owner)
+        } catch (error: Throwable) {
+            release()
+            throw error
+        }
+    }
+
+    override fun tryLock(owner: Any?): Boolean {
+        pending.incrementAndGet()
+        val acquired = try {
+            inner.tryLock(owner)
+        } catch (error: Throwable) {
+            release()
+            throw error
+        }
+        if (!acquired) release()
+        return acquired
+    }
+
+    override fun unlock(owner: Any?) {
+        inner.unlock(owner)
+        release()
+    }
+
+    private fun release() {
+        if (pending.decrementAndGet() == 0) {
+            try {
+                onDrain()
+            } catch (error: Throwable) {
+                // A listener can never affect the lock or its caller.
+                try {
+                    android.util.Log.w("GroupLocks", "drain listener failed", error)
+                } catch (_: Throwable) {
+                    // No Android logger (host unit tests).
+                }
+            }
+        }
+    }
 }
 
 /**

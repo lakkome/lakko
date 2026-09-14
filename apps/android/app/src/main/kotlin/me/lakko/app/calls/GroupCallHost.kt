@@ -1,0 +1,531 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+package me.lakko.app.calls
+
+import java.security.SecureRandom
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import uniffi.lakko_ffi_uniffi.FfiCallEndReason
+import uniffi.lakko_ffi_uniffi.FfiCallMediaFlags
+import uniffi.lakko_ffi_uniffi.FfiCallSignalingBody
+
+/**
+ * The app-level owner of the group (SFU) call — the Kotlin counterpart of the
+ * group slot in `apps/web/src/calls/CallHostContext.tsx`. The decisions live in
+ * `GroupCallHostRules.kt`; what is here is the state and the effects.
+ *
+ * ## What it guarantees
+ *
+ *  - **The call outlives the chat.** The SFU session, its UI state, the
+ *    group-control publishes and the hang-up live here, on the process scope
+ *    ([AppCallHost]). A chat asks [start] and reads [slot]; the in-call screen
+ *    is drawn from the activity root, so a destination change, a push tap or a
+ *    `/c/` link never hides or orphans the call.
+ *  - **One call at a time.** [start] refuses while any call occupies the slot
+ *    ([decideGroupCallStart]); [onSlotChanged] tells the 1x1 host, which then
+ *    answers an incoming offer `End{busy}`.
+ *  - **The key follows the epoch while the chat is closed.** [onGroupSettled]
+ *    is fed from `ChatRepository.addGroupMlsIdleListener`, which reports a
+ *    group only when its per-group lock drains — after the open chat's poll,
+ *    the app-level all-groups poll, a commit or the committer sweep, never
+ *    between two queued regions. The read is re-checked as settled under the
+ *    provider lock ([SettledGroupRead.settled]); an unsettled or unreadable
+ *    state keeps the current key (fail-closed, invariant #4), and a group this
+ *    device has left ends the call locally ([decideGroupCallEpochChange]).
+ *
+ * ## Threading
+ *
+ * Public entry points are called on the main thread; the production scope runs
+ * on `Dispatchers.Main.immediate`, so every state change happens there.
+ * [onGroupSettled] may be called from any thread and only launches onto the
+ * scope. Settled reads are serialised, so a later read can never be overtaken
+ * by an earlier one.
+ */
+
+/** What the host needs from a live SFU session. [SfuCallUi] implements it in production. */
+public interface GroupCallSessionHandle {
+    /** The SFU session reported `FAILED`. */
+    public val failed: Boolean
+
+    public suspend fun connect()
+
+    public fun hangUp()
+
+    public fun rekey(seed: ByteArray)
+
+    public suspend fun publishVideo()
+
+    public fun setCameraEnabled(on: Boolean)
+
+    public fun setMicrophoneEnabled(on: Boolean)
+}
+
+/** One read of a group for the host: membership, epoch, and the call seed at that epoch. */
+public class SettledGroupRead(
+    /** The group is in the repository. */
+    public val joined: Boolean,
+    /** `Group.isActive`, `null` when it cannot be read. */
+    public val isActive: Boolean?,
+    /** No region on the group held or awaited its lock when this was read. */
+    public val settled: Boolean,
+    /** The group's epoch, `null` when it cannot be read. */
+    public val epoch: ULong?,
+    /** `exportSecret("lakko/call/v1", callId, 32)` at [epoch], `null` when it failed. */
+    public val seed: ByteArray?,
+    /** This device's leaf in the group, `null` with [seed]. */
+    public val localLeaf: Int?,
+) {
+    public companion object {
+        public fun notJoined(): SettledGroupRead =
+            SettledGroupRead(joined = false, isActive = null, settled = true, epoch = null, seed = null, localLeaf = null)
+    }
+}
+
+/** The inputs of a new SFU session. */
+public class GroupCallSessionRequest(
+    public val groupIdHex: String,
+    public val callIdHex: String,
+    public val sfuBaseUrl: String,
+    public val jwt: String,
+    public val seed: ByteArray,
+    public val localLeaf: Int,
+    public val video: Boolean,
+)
+
+/** The platform effects the host drives. */
+public interface GroupCallPort {
+    public fun sfuBaseUrl(): String?
+
+    public fun sessionToken(): String?
+
+    /** `Group.isActive`, `null` when unknown or not joined. */
+    public fun isGroupActive(groupIdHex: String): Boolean?
+
+    /** Bring the group up to date before joining a call in it. May throw. */
+    public suspend fun syncGroup(groupIdHex: String)
+
+    public fun isCallLive(groupIdHex: String, callIdHex: String, nowMs: Long): Boolean
+
+    public fun recordJoinedLeaves(groupIdHex: String, callIdHex: String): Set<UInt>?
+
+    public suspend fun readSettledGroup(groupIdHex: String, callId: ByteArray): SettledGroupRead
+
+    /** The call-admission JWT. May throw. */
+    public suspend fun mintCallJwt(sessionToken: String, callIdHex: String): String
+
+    /** Publish a group-call body to the group and fold it into the local record. */
+    public suspend fun publishSignal(groupIdHex: String, body: FfiCallSignalingBody): Boolean
+
+    public fun createSession(request: GroupCallSessionRequest, ui: CallUiState): GroupCallSessionHandle
+}
+
+/** The group call in the host's slot. */
+public data class GroupCallSlot(
+    val groupIdHex: String,
+    val callIdHex: String,
+    /** `true` until the SFU session exists. */
+    val starting: Boolean,
+)
+
+/** What a start / join came to. */
+public sealed interface GroupCallStartOutcome {
+    public data object Connected : GroupCallStartOutcome
+
+    /** This call is already starting or live here; nothing new was done. */
+    public data object AlreadyInThisCall : GroupCallStartOutcome
+
+    /** Another call occupies the slot; nothing was done. */
+    public data class Busy(val message: String) : GroupCallStartOutcome
+
+    /** The call to join is no longer live. */
+    public data object Ended : GroupCallStartOutcome
+
+    public data class Failed(val message: String) : GroupCallStartOutcome
+}
+
+public class GroupCallHost(
+    private val scope: CoroutineScope,
+    /** The call occupying the slot other than a group call, or `null`. */
+    private val otherOccupant: () -> CallKind?,
+    /** Called with whether a group call now occupies the slot. */
+    private val onSlotChanged: (occupied: Boolean) -> Unit,
+    private val clock: () -> Long = { System.currentTimeMillis() },
+    private val warn: (String, Throwable?) -> Unit = ::logGroupCallWarning,
+) {
+    @Volatile
+    private var port: GroupCallPort? = null
+
+    /** Install the platform effects. Re-attaching (an activity recreate) replaces them. */
+    public fun attach(port: GroupCallPort) {
+        this.port = port
+    }
+
+    /** The in-call UI state the hosted group call drives. */
+    public val ui: CallUiState = CallUiState()
+
+    private val mutableSlot = MutableStateFlow<GroupCallSlot?>(null)
+
+    /** The group call starting or live on this device, or `null`. */
+    public val slot: StateFlow<GroupCallSlot?> = mutableSlot.asStateFlow()
+
+    private val mutableOverlay = MutableStateFlow(false)
+
+    /** The in-call screen is up: from the moment the session exists until the
+     *  screen's own exit after the call ended. */
+    public val overlayVisible: StateFlow<Boolean> = mutableOverlay.asStateFlow()
+
+    private class Active(
+        val groupIdHex: String,
+        val callId: ByteArray,
+        val callIdHex: String,
+        val ownLeaf: UInt,
+        val initiator: Boolean,
+        var joinPublished: Boolean = false,
+        var keyedEpoch: ULong?,
+        var connected: Boolean = false,
+    )
+
+    private var active: Active? = null
+    private var handle: GroupCallSessionHandle? = null
+    private var starting = false
+
+    /** Bumped by [reset]: a start that straddles it abandons itself. */
+    private var generation = 0L
+    private val settleLock = Mutex()
+
+    /** A group call is starting or live. */
+    public val occupiesSlot: Boolean
+        get() = starting || mutableSlot.value != null
+
+    init {
+        // SFU session lifecycle -> the group journal and the leave path.
+        scope.launch {
+            ui.phase.collect { phase ->
+                val a = active ?: return@collect
+                val h = handle ?: return@collect
+                when (phase) {
+                    CallUiState.CallPhase.Connected -> if (!a.joinPublished) {
+                        a.joinPublished = true
+                        val p = port ?: return@collect
+                        scope.launch {
+                            p.publishSignal(
+                                a.groupIdHex,
+                                FfiCallSignalingBody.GroupJoin(
+                                    callId = a.callId,
+                                    leafIndex = a.ownLeaf,
+                                    joinedAtMs = clock().toULong(),
+                                ),
+                            )
+                        }
+                    }
+                    // The session closed or failed on its own (the user's End
+                    // goes through [leave], which releases the handle first).
+                    is CallUiState.CallPhase.Ended ->
+                        leaveWith(if (h.failed) GroupLeaveReason.ERROR else GroupLeaveReason.HUNG_UP)
+                    else -> Unit
+                }
+            }
+        }
+        // Mid-call camera-on: the in-call screen has no session, so its camera
+        // button only flips the store; mirror it onto the session. A failure
+        // reverts the toggle and the call stays up audio-only (invariant #4).
+        scope.launch {
+            ui.participants
+                .map { list -> list.firstOrNull { it.isLocal }?.camOn ?: false }
+                .distinctUntilChanged()
+                .collect { camOn ->
+                    val h = handle ?: return@collect
+                    if (camOn) {
+                        try {
+                            h.publishVideo()
+                        } catch (cancel: CancellationException) {
+                            throw cancel
+                        } catch (error: Throwable) {
+                            ui.setCamera(false)
+                            warn("group call: mid-call publishVideo failed, camera reverted", error)
+                        }
+                    } else {
+                        h.setCameraEnabled(false)
+                    }
+                }
+        }
+        // The microphone button likewise.
+        scope.launch {
+            ui.participants
+                .map { list -> list.firstOrNull { it.isLocal }?.micOn }
+                .distinctUntilChanged()
+                .collect { micOn -> if (micOn != null) handle?.setMicrophoneEnabled(micOn) }
+        }
+    }
+
+    /**
+     * Start (`joinCallIdHex == null`) or join a group call in [groupIdHex].
+     * Never throws for a refusal or a failure; the outcome says what happened.
+     * The work runs on the host scope, so a caller that goes away mid-start
+     * does not leave a half-built call behind.
+     */
+    public suspend fun start(groupIdHex: String, video: Boolean, joinCallIdHex: String?): GroupCallStartOutcome =
+        scope.async { runStart(groupIdHex, video, joinCallIdHex) }.await()
+
+    /** Leave the group call this device is in (publishes Leave / End as owed). */
+    public fun leave() {
+        leaveWith(GroupLeaveReason.HUNG_UP)
+    }
+
+    /** The in-call screen's exit, after the ended state was shown. */
+    public fun onOverlayExit() {
+        if (handle != null) leaveWith(GroupLeaveReason.HUNG_UP)
+        if (!starting) mutableOverlay.value = false
+    }
+
+    /** [groupIdHex]'s MLS work settled. Safe from any thread. */
+    public fun onGroupSettled(groupIdHex: String) {
+        scope.launch { settle(groupIdHex) }
+    }
+
+    /** Sign-out: nothing can be published any more, tear down locally. */
+    public fun reset() {
+        generation += 1
+        release()
+        mutableOverlay.value = false
+    }
+
+    private suspend fun runStart(groupIdHex: String, video: Boolean, joinCallIdHex: String?): GroupCallStartOutcome {
+        val p = port ?: return GroupCallStartOutcome.Failed("Group calls are not available right now.")
+        val other = otherOccupant()
+        val occupant = callSlotOccupant(
+            oneToOneInCall = other == CallKind.ONE_TO_ONE,
+            groupCallActive = occupiesSlot,
+            linkCallActive = other == CallKind.LINK,
+        )
+        val current = mutableSlot.value?.let { it.groupIdHex to it.callIdHex }
+        when (val decision = decideGroupCallStart(occupant, current, groupIdHex, joinCallIdHex)) {
+            GroupCallStartDecision.Start -> Unit
+            GroupCallStartDecision.AlreadyInThisCall -> return GroupCallStartOutcome.AlreadyInThisCall
+            is GroupCallStartDecision.Busy -> return GroupCallStartOutcome.Busy(decision.message)
+        }
+        val initiator = joinCallIdHex == null
+        val callId = if (initiator) {
+            ByteArray(CALL_ID_BYTES).also { SecureRandom().nextBytes(it) }
+        } else {
+            callIdBytesOf(joinCallIdHex!!)?.takeIf { it.size == CALL_ID_BYTES }
+                ?: return GroupCallStartOutcome.Failed("That group call could not be read.")
+        }
+        val callIdHex = callIdHexOf(callId)
+        val gen = generation
+        // One call at a time, app-wide, from here on.
+        starting = true
+        setSlot(GroupCallSlot(groupIdHex, callIdHex, starting = true))
+        ui.reset()
+        // An auto-connecting call: never flash the prejoin.
+        ui.setPhase(CallUiState.CallPhase.Connecting)
+        try {
+            val base = p.sfuBaseUrl() ?: run {
+                warn("group call: SFU URL not configured (lakko.sfu.url), refusing", null)
+                return GroupCallStartOutcome.Failed("Group calls are not configured in this build.")
+            }
+            val token = p.sessionToken()
+                ?: return GroupCallStartOutcome.Failed("Sign in again to use group calls.")
+            if (!initiator) {
+                // Derive the key at the epoch the other participants are at, and
+                // see a `CallEnd` already on the journal before joining.
+                try {
+                    p.syncGroup(groupIdHex)
+                } catch (cancel: CancellationException) {
+                    throw cancel
+                } catch (error: Throwable) {
+                    warn("group call: pre-join sync failed, joining on the state in hand", error)
+                }
+                if (!p.isCallLive(groupIdHex, callIdHex, clock())) return GroupCallStartOutcome.Ended
+            }
+            if (p.isGroupActive(groupIdHex) == false) {
+                return GroupCallStartOutcome.Failed("You are no longer a member of this chat.")
+            }
+            val read = p.readSettledGroup(groupIdHex, callId)
+            val seed = read.seed
+            val leaf = read.localLeaf
+            if (!read.joined || seed == null || leaf == null) {
+                // Invariant #4: no key, no call.
+                warn("group call: call-key derivation failed, refusing", null)
+                return GroupCallStartOutcome.Failed("Could not set up call encryption, so the call did not start.")
+            }
+            val jwt = p.mintCallJwt(token, callIdHex)
+            if (gen != generation) return GroupCallStartOutcome.Failed("The call was cancelled.")
+            if (initiator) {
+                // After the admission mint (a refused mint announces nothing) and
+                // before connecting (members see the call as soon as it exists).
+                val announced = p.publishSignal(
+                    groupIdHex,
+                    FfiCallSignalingBody.GroupStart(
+                        callId = callId,
+                        initiatorLeaf = leaf.toUInt(),
+                        createdAtMs = clock().toULong(),
+                        media = FfiCallMediaFlags(audio = true, video = video),
+                    ),
+                )
+                if (!announced) {
+                    return GroupCallStartOutcome.Failed("The call could not be announced to the group.")
+                }
+            }
+            if (gen != generation) return GroupCallStartOutcome.Failed("The call was cancelled.")
+            // Set before any further suspension, so a failure from here on
+            // reaches the leave path — which publishes the End an initiator owes.
+            val a = Active(
+                groupIdHex = groupIdHex,
+                callId = callId,
+                callIdHex = callIdHex,
+                ownLeaf = leaf.toUInt(),
+                initiator = initiator,
+                keyedEpoch = read.epoch,
+            )
+            active = a
+            val h = p.createSession(
+                GroupCallSessionRequest(
+                    groupIdHex = groupIdHex,
+                    callIdHex = callIdHex,
+                    sfuBaseUrl = base,
+                    jwt = jwt,
+                    seed = seed,
+                    localLeaf = leaf,
+                    video = video,
+                ),
+                ui,
+            )
+            handle = h
+            starting = false
+            setSlot(GroupCallSlot(groupIdHex, callIdHex, starting = false))
+            mutableOverlay.value = true
+            h.connect()
+            if (active !== a) return GroupCallStartOutcome.Failed("The call ended while it was connecting.")
+            a.connected = true
+            // A drain that arrived while connecting found no peer connection to
+            // rekey; catch up now that the session can take a new key.
+            settle(groupIdHex)
+            return GroupCallStartOutcome.Connected
+        } catch (cancel: CancellationException) {
+            release()
+            throw cancel
+        } catch (error: Throwable) {
+            warn("group call: connect failed", error)
+            if (active != null) leaveWith(GroupLeaveReason.ERROR)
+            return GroupCallStartOutcome.Failed("The call could not connect.")
+        } finally {
+            starting = false
+            if (active == null && handle == null) {
+                if (mutableSlot.value?.callIdHex == callIdHex) setSlot(null)
+                ui.setPhase(CallUiState.CallPhase.Ended(clock()))
+            }
+        }
+    }
+
+    private suspend fun settle(groupIdHex: String) {
+        settleLock.withLock {
+            val a = active ?: return
+            val h = handle ?: return
+            if (a.groupIdHex != groupIdHex || !a.connected) return
+            val p = port ?: return
+            val read = try {
+                p.readSettledGroup(groupIdHex, a.callId)
+            } catch (cancel: CancellationException) {
+                throw cancel
+            } catch (error: Throwable) {
+                warn("group call: settled read failed, keeping the current key", error)
+                return
+            }
+            if (active !== a) return
+            when (
+                decideGroupCallEpochChange(
+                    callGroupIdHex = a.groupIdHex,
+                    settledGroupIdHex = groupIdHex,
+                    groupJoined = read.joined,
+                    isActive = read.isActive,
+                    settled = read.settled,
+                    keyedEpoch = a.keyedEpoch,
+                    currentEpoch = read.epoch,
+                )
+            ) {
+                GroupCallEpochAction.NONE -> Unit
+                // Nothing can be published to a group this device has left.
+                GroupCallEpochAction.END_LOCALLY -> release()
+                GroupCallEpochAction.REKEY -> {
+                    // Fail closed: a re-derivation failure keeps the current key.
+                    val seed = read.seed ?: return
+                    h.rekey(seed)
+                    a.keyedEpoch = read.epoch
+                }
+            }
+        }
+    }
+
+    /** Leave the call and tell the group what [planGroupCallLeave] decides. */
+    private fun leaveWith(reason: GroupLeaveReason) {
+        val p = port
+        val a = active ?: run {
+            release()
+            return
+        }
+        val failed = handle?.failed == true
+        val joinedLeaves = p?.recordJoinedLeaves(a.groupIdHex, a.callIdHex)
+        release()
+        val plan = planGroupCallLeave(
+            reason = reason,
+            sessionFailed = failed,
+            joinPublished = a.joinPublished,
+            initiator = a.initiator,
+            ownLeaf = a.ownLeaf,
+            recordJoinedLeaves = joinedLeaves,
+        )
+        if (p == null || (!plan.publishLeave && !plan.publishEnd)) return
+        val ffiReason = when (plan.leaveReason) {
+            GroupLeaveReason.HUNG_UP -> FfiCallEndReason.HUNG_UP
+            GroupLeaveReason.ERROR -> FfiCallEndReason.ERROR
+        }
+        scope.launch {
+            if (plan.publishLeave) {
+                p.publishSignal(a.groupIdHex, FfiCallSignalingBody.GroupLeave(a.callId, a.ownLeaf, ffiReason))
+            }
+            if (plan.publishEnd) {
+                p.publishSignal(a.groupIdHex, FfiCallSignalingBody.End(a.callId, ffiReason))
+            }
+        }
+    }
+
+    /** Take the call out of the slot and tear the session down. Synchronous and
+     *  idempotent, so the several paths that can end a call act once. */
+    private fun release() {
+        val h = handle
+        active = null
+        // Cleared BEFORE `hangUp`: the session's closed transition moves the UI
+        // to Ended, and the phase observer must find no handle left.
+        handle = null
+        h?.hangUp()
+        if (!starting) setSlot(null)
+    }
+
+    private fun setSlot(next: GroupCallSlot?) {
+        mutableSlot.value = next
+        onSlotChanged(next != null || starting)
+    }
+
+    private companion object {
+        const val CALL_ID_BYTES = 16
+    }
+}
+
+private fun logGroupCallWarning(message: String, error: Throwable?) {
+    try {
+        android.util.Log.w("GroupCallHost", message, error)
+    } catch (_: Throwable) {
+        // No Android logger (host unit tests).
+    }
+}

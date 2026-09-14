@@ -40,7 +40,10 @@ import {
   base64Decode,
   base64Encode,
   base64UrlDecodeNoPad,
+  base64UrlEncodeNoPad,
 } from "../auth/account-id";
+import { Avatar } from "../ui/Avatar";
+import { Icon } from "../ui/icons";
 import {
   ContactsClient,
   ContactsError,
@@ -105,18 +108,16 @@ export default function Contacts(): JSX.Element {
   });
 
   return (
-    <article>
-      <h1>Contacts</h1>
-      <Show
-        when={identity() !== null}
-        fallback={<NeedsReauth />}
-      >
-        <ConnectedContacts
-          client={client}
-          username={accountUsername() ?? ""}
-        />
-      </Show>
-    </article>
+    <Show
+      when={identity() !== null}
+      fallback={
+        <article>
+          <NeedsReauth />
+        </article>
+      }
+    >
+      <ConnectedContacts client={client} username={accountUsername() ?? ""} />
+    </Show>
   );
 }
 
@@ -169,10 +170,7 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
         searchInput(),
         introBytes,
       );
-      setSendNotice(
-        `Request sent to @${result.recipientUsername} ` +
-          `(DS id ${result.messageId}).`,
-      );
+      setSendNotice(`Request sent to @${result.recipientUsername}.`);
       setSearchInput("");
       setIntroInput("");
     } catch (err) {
@@ -334,56 +332,191 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
     setAccepted(upsertAccepted({ ...contact, displayName: newName.trim() }));
   }
 
+  // ---- layout: the list pane + the detail / add pane ----------------
+  const [selectedKey, setSelectedKey] = createSignal<string | null>(null);
+  const [adding, setAdding] = createSignal(false);
+  const [filter, setFilter] = createSignal("");
+  const selected = (): AcceptedContact | undefined =>
+    accepted().find((c) => c.signaturePubkeyB64 === selectedKey());
+  const filtered = (): AcceptedContact[] => {
+    const q = filter().trim().toLowerCase();
+    if (q.length === 0) return accepted();
+    return accepted().filter((c) =>
+      profiles.resolve(c.signaturePubkeyB64).listLabel.toLowerCase().includes(q),
+    );
+  };
+  /** The 1x1 chat with this contact, if this device holds one: linked at
+   *  accept, or found by its two-member roster. */
+  const chatWith = (c: AcceptedContact): string | null => {
+    if (c.groupIdB64 !== undefined) {
+      return paths.chat(base64UrlEncodeNoPad(base64Decode(c.groupIdB64)));
+    }
+    const own = chats.identity();
+    const ownB64 = own === null ? null : base64Encode(own.signaturePublicKey);
+    for (const g of chats.groups()) {
+      let keys: string[] = [];
+      try {
+        keys = (g.group.members() as Array<{ signaturePublicKey: Uint8Array }>).map((m) =>
+          base64Encode(m.signaturePublicKey),
+        );
+      } catch {
+        continue;
+      }
+      if (keys.length === 2 && keys.includes(c.signaturePubkeyB64) && keys.includes(ownB64 ?? "")) {
+        return paths.chat(base64UrlEncodeNoPad(g.group.groupId));
+      }
+    }
+    return null;
+  };
+
   return (
-    <>
-      <p style={{ color: "var(--surface-muted)", "margin-top": 0 }}>
-        Signed in as <strong>@{props.username}</strong>. Requests
-        you send and receive are end-to-end encrypted; the
-        server only sees ciphertext + routing pseudonyms.
-      </p>
-
-      <SendPanel
-        searchCheck={searchCheck}
-        searchInput={searchInput}
-        setSearchInput={setSearchInput}
-        introInput={introInput}
-        setIntroInput={setIntroInput}
-        busy={sendBusy}
-        error={sendError}
-        notice={sendNotice}
-        onSubmit={onSend}
-        onStartGroup={() => {
-          void onStartGroup();
-        }}
-      />
-
-      <InvitePanel />
-
-      <ActiveInvitesPanel />
-
-      <PendingPanel
-        pending={mailbox.pending}
-        busy={mailbox.busy}
-        error={() => acceptError() ?? mailbox.error()}
-        onRefresh={() => {
-          setAcceptError(null);
-          void mailbox.refresh();
-        }}
-        onAccept={onAccept}
-        onDecline={onDecline}
-      />
-
-
-      <AcceptedPanel
-        accepted={accepted}
-        myPubkey={() => {
-          const id = chats.identity();
-          return id?.signaturePublicKey ?? null;
-        }}
-        onRemove={onRemoveAccepted}
-        onRename={onRenameAccepted}
-      />
-    </>
+    <div class="lk-split" data-open={selected() !== undefined || adding() ? "true" : "false"}>
+      <aside class="lk-pane" aria-label="Contacts">
+        <div class="lk-pane-head">
+          <h1>Contacts</h1>
+          <button
+            type="button"
+            class="lk-icon-button accent"
+            title="Add contact"
+            aria-label="Add contact"
+            aria-pressed={adding()}
+            onClick={() => {
+              setSelectedKey(null);
+              setAdding(true);
+            }}
+          >
+            <Icon name="plus" size={18} />
+          </button>
+        </div>
+        <div class="lk-search">
+          <Icon name="search" size={18} />
+          <input
+            type="search"
+            placeholder="Search"
+            aria-label="Search contacts"
+            value={filter()}
+            onInput={(e) => setFilter(e.currentTarget.value)}
+          />
+        </div>
+        <div class="lk-pane-body">
+          <PendingRows
+            pending={mailbox.pending}
+            busy={mailbox.busy}
+            error={() => acceptError() ?? mailbox.error()}
+            onRefresh={() => {
+              setAcceptError(null);
+              void mailbox.refresh();
+            }}
+            onAccept={onAccept}
+            onDecline={onDecline}
+          />
+          <Show
+            when={accepted().length > 0}
+            fallback={
+              <Show when={mailbox.pending().length === 0}>
+                <div class="lk-empty">
+                  <Icon name="contacts" size={40} strokeWidth={1.4} />
+                  <strong>No contacts yet</strong>
+                  <span>Add someone by username, or share your invite link.</span>
+                  <button type="button" class="primary" onClick={() => setAdding(true)}>
+                    Add contact
+                  </button>
+                </div>
+              </Show>
+            }
+          >
+            <div class="lk-section-label">Contacts</div>
+            <For each={filtered()}>
+              {(c) => (
+                <div
+                  class="lk-row"
+                  role="button"
+                  tabIndex={0}
+                  classList={{ selected: selectedKey() === c.signaturePubkeyB64 }}
+                  onClick={() => {
+                    setAdding(false);
+                    setSelectedKey(c.signaturePubkeyB64);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      setAdding(false);
+                      setSelectedKey(c.signaturePubkeyB64);
+                    }
+                  }}
+                >
+                  <Avatar
+                    label={profiles.resolve(c.signaturePubkeyB64).listLabel}
+                    id={c.signaturePubkeyB64}
+                  />
+                  <div class="lk-row-body">
+                    <span class="lk-row-title">{profiles.resolve(c.signaturePubkeyB64).listLabel}</span>
+                    <span class="lk-row-sub">{profiles.resolve(c.signaturePubkeyB64).fingerprint}</span>
+                  </div>
+                </div>
+              )}
+            </For>
+          </Show>
+        </div>
+      </aside>
+      <div class="lk-main">
+        <Show
+          when={selected()}
+          fallback={
+            <article>
+              <div class="lk-page lk-stack" style={{ "max-width": "560px" }}>
+                <button
+                  type="button"
+                  class="ghost small lk-narrow-only"
+                  style={{ "align-self": "flex-start" }}
+                  onClick={() => setAdding(false)}
+                >
+                  <Icon name="back" size={16} />
+                  Contacts
+                </button>
+                <div class="lk-page-head">
+                  <h1>Add a contact</h1>
+                  <p>Requests are end-to-end encrypted; Lakko's servers cannot read them.</p>
+                </div>
+                <SendPanel
+                  searchCheck={searchCheck}
+                  searchInput={searchInput}
+                  setSearchInput={setSearchInput}
+                  introInput={introInput}
+                  setIntroInput={setIntroInput}
+                  busy={sendBusy}
+                  error={sendError}
+                  notice={sendNotice}
+                  onSubmit={onSend}
+                  onStartGroup={() => {
+                    void onStartGroup();
+                  }}
+                />
+                <InvitePanel />
+                <ActiveInvitesPanel />
+              </div>
+            </article>
+          }
+        >
+          {(c) => (
+            <ContactDetail
+              contact={c()}
+              chatHref={chatWith(c())}
+              myPubkey={() => {
+                const id = chats.identity();
+                return id?.signaturePublicKey ?? null;
+              }}
+              onBack={() => setSelectedKey(null)}
+              onRemove={() => {
+                onRemoveAccepted(c());
+                setSelectedKey(null);
+              }}
+              onRename={(name) => onRenameAccepted(c(), name)}
+            />
+          )}
+        </Show>
+      </div>
+    </div>
   );
 }
 
@@ -406,9 +539,9 @@ interface SendPanelProps {
 
 function SendPanel(props: SendPanelProps): JSX.Element {
   return (
-    <section style={panelStyle()}>
-      <h2 style={{ "margin-top": 0 }}>Find someone</h2>
-      <form onSubmit={props.onSubmit}>
+    <section class="lk-card">
+      <h2>Add by username</h2>
+      <form onSubmit={props.onSubmit} class="lk-stack" style={{ gap: "12px" }}>
         <label>
           Username
           <input
@@ -656,12 +789,11 @@ function InvitePanel(): JSX.Element {
   }
 
   return (
-    <section style={panelStyle()}>
-      <h2 style={{ "margin-top": 0 }}>Generate invite link</h2>
-      <p style={{ color: "var(--surface-muted)", "margin-top": 0 }}>
-        Anyone holding the link can send you a ContactRequest.
-        Short pointer URLs by default; falls back to inline-bytes
-        if the discovery service is unreachable.
+    <section class="lk-card">
+      <h2>Invite link</h2>
+      <p class="lk-card-desc">
+        Share it with someone you want to hear from. Anyone who opens the link
+        can send you a contact request.
       </p>
 
       <Show
@@ -872,9 +1004,9 @@ function ActiveInvitesPanel(): JSX.Element {
   }
 
   return (
-    <section style={panelStyle()}>
-      <h2 style={{ "margin-top": 0 }}>
-        Active invites
+    <section class="lk-card">
+      <h2>
+        Active invite links
         <Show when={loadStatus() === "loaded" && invites().length > 0}>
           <span
             style={{
@@ -888,9 +1020,8 @@ function ActiveInvitesPanel(): JSX.Element {
           </span>
         </Show>
       </h2>
-      <p style={{ color: "var(--surface-muted)", "margin-top": 0 }}>
-        Lists every live invite-link this account has issued — across
-        all your devices. Tap Refresh to pull the current state.
+      <p class="lk-card-desc">
+        Every link this account has issued, on any of your devices.
       </p>
 
       <div style={{ display: "flex", gap: "0.5rem", "margin-bottom": "0.75rem" }}>
@@ -913,7 +1044,7 @@ function ActiveInvitesPanel(): JSX.Element {
         when={loadStatus() === "loaded"}
         fallback={
           <p style={{ color: "var(--surface-muted)" }}>
-            Click Refresh to load your live invites.
+            Refresh to load your links.
           </p>
         }
       >
@@ -921,8 +1052,7 @@ function ActiveInvitesPanel(): JSX.Element {
           when={invites().length > 0}
           fallback={
             <p style={{ color: "var(--surface-muted)" }}>
-              No live invites — every link has been revoked or
-              expired.
+              No active links.
             </p>
           }
         >
@@ -1085,7 +1215,7 @@ function GeneratedUrlPanel(props: {
   );
 }
 
-interface PendingPanelProps {
+interface PendingRowsProps {
   readonly pending: () => readonly IncomingContactRequest[];
   readonly busy: () => boolean;
   readonly error: () => string | null;
@@ -1094,190 +1224,93 @@ interface PendingPanelProps {
   readonly onDecline: (r: IncomingContactRequest) => void;
 }
 
-function PendingPanel(props: PendingPanelProps): JSX.Element {
+/** Incoming contact requests at the top of the list pane, each with Accept /
+ *  Ignore in place. */
+function PendingRows(props: PendingRowsProps): JSX.Element {
   const profiles = useProfiles();
   return (
-    <section style={panelStyle()}>
-      <header
-        style={{
-          display: "flex",
-          "align-items": "center",
-          "justify-content": "space-between",
-          gap: "0.5rem",
-        }}
-      >
-        <h2 style={{ margin: 0 }}>
-          Pending
-          <Show when={props.pending().length > 0}>
-            <span
-              style={{
-                "margin-left": "0.5rem",
-                color: "var(--surface-muted)",
-                "font-weight": "normal",
-                "font-size": "0.9rem",
-              }}
-            >
-              ({props.pending().length})
-            </span>
-          </Show>
-        </h2>
+    <>
+      <div class="lk-section-label" style={{ display: "flex", "align-items": "center", "justify-content": "space-between" }}>
+        <span>
+          Requests
+          <Show when={props.pending().length > 0}> ({props.pending().length})</Show>
+        </span>
         <button
           type="button"
-          onClick={props.onRefresh}
+          class="lk-icon-button"
+          style={{ width: "28px", height: "28px" }}
+          title="Check for new requests"
+          aria-label="Check for new requests"
           disabled={props.busy()}
+          onClick={props.onRefresh}
         >
-          {props.busy() ? "Refreshing…" : "Refresh"}
+          <Icon name="refresh" size={14} />
         </button>
-      </header>
-      {props.error() !== null && (
-        <div class="form-error">{props.error()}</div>
-      )}
+      </div>
+      <Show when={props.error() !== null}>
+        <div class="form-error" style={{ padding: "0 12px 8px" }}>{props.error()}</div>
+      </Show>
       <Show
         when={props.pending().length > 0}
-        fallback={
-          <p style={{ color: "var(--surface-muted)" }}>
-            No incoming contact requests.
-          </p>
-        }
+        fallback={<div class="form-info" style={{ padding: "0 12px 8px" }}>No new requests.</div>}
       >
-        <ul style={listStyle()}>
-          <For each={props.pending()}>
-            {(req) => (
-              <li style={rowStyle()}>
-                <div style={{ flex: 1, "min-width": 0 }}>
-                  <div>
-                    {/* ADR-0048 UX §5 — `Alice Petrova · @alice wants to
-                        connect`, or the verified username / fingerprint when
-                        that is all there is. */}
-                    <strong>{profiles.resolve(req.fromPubkey).listLabel}</strong>{" "}
-                    wants to connect
-                  </div>
-                  <Show when={req.intro !== null && req.intro !== ""}>
-                    <div
-                      style={{
-                        "margin-top": "0.25rem",
-                        "white-space": "pre-wrap",
-                      }}
-                    >
-                      {req.intro}
-                    </div>
-                  </Show>
-                  <div
-                    style={{
-                      color: "var(--surface-muted)",
-                      "font-size": "0.85rem",
-                      "margin-top": "0.25rem",
-                    }}
-                  >
-                    {req.createdAt}
-                  </div>
-                </div>
-                <div style={{ display: "flex", gap: "0.5rem" }}>
+        <For each={props.pending()}>
+          {(req) => (
+            <div class="lk-row" style={{ "align-items": "flex-start" }}>
+              <Avatar label={profiles.resolve(req.fromPubkey).listLabel} id={base64Encode(req.fromPubkey)} />
+              <div class="lk-row-body">
+                <span class="lk-row-title">{profiles.resolve(req.fromPubkey).listLabel}</span>
+                <span class="lk-row-sub" style={{ "white-space": "normal" }}>
+                  {req.intro !== null && req.intro !== "" ? req.intro : "wants to connect"}
+                </span>
+                <div class="lk-actions" style={{ "margin-top": "6px" }}>
                   <button
-                    class="primary"
+                    class="primary small"
                     type="button"
+                    disabled={props.busy()}
                     onClick={() => {
                       void props.onAccept(req);
                     }}
                   >
                     Accept
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => props.onDecline(req)}
-                  >
-                    Decline
+                  <button class="small" type="button" onClick={() => props.onDecline(req)}>
+                    Ignore
                   </button>
                 </div>
-              </li>
-            )}
-          </For>
-        </ul>
+              </div>
+            </div>
+          )}
+        </For>
       </Show>
-    </section>
+    </>
   );
 }
 
-interface AcceptedPanelProps {
-  readonly accepted: () => AcceptedContact[];
-  /** Local user's Ed25519 verifying key (32 bytes) — required to
-   *  compute safety numbers against accepted contacts. Read from
-   *  the chat provider's `identity()`; `null` only while that
-   *  identity signal has not resolved yet (the AcceptedRow falls
-   *  back to "safety number unavailable" for that window). */
-  readonly myPubkey: () => Uint8Array | null;
-  readonly onRemove: (c: AcceptedContact) => void;
-  /** Set this contact's user-chosen display name (ADR-0021 follow-up).
-   *  A blank name resets it to the key-fingerprint default. */
-  readonly onRename: (c: AcceptedContact, newName: string) => void;
-}
-
-function AcceptedPanel(props: AcceptedPanelProps): JSX.Element {
-  return (
-    <section style={panelStyle()}>
-      <h2 style={{ "margin-top": 0 }}>
-        Contacts
-        <Show when={props.accepted().length > 0}>
-          <span
-            style={{
-              "margin-left": "0.5rem",
-              color: "var(--surface-muted)",
-              "font-weight": "normal",
-              "font-size": "0.9rem",
-            }}
-          >
-            ({props.accepted().length})
-          </span>
-        </Show>
-      </h2>
-      <Show
-        when={props.accepted().length > 0}
-        fallback={
-          <p style={{ color: "var(--surface-muted)" }}>
-            No accepted contacts yet.
-          </p>
-        }
-      >
-        <ul style={listStyle()}>
-          <For each={props.accepted()}>
-            {(c) => (
-              <AcceptedRow
-                contact={c}
-                myPubkey={props.myPubkey}
-                onRemove={() => props.onRemove(c)}
-                onRename={(name) => props.onRename(c, name)}
-              />
-            )}
-          </For>
-        </ul>
-      </Show>
-    </section>
-  );
-}
-
-/** Single accepted-contact row with a "Show safety number"
- *  toggle (Phase 1.9b3 — ADR-0005 §13.5). The safety number is
- *  computed lazily on first toggle: BLAKE3 is fast but `loadWasm`
- *  has a one-time module-instantiate cost we don't want to pay
- *  on every row mount. */
-interface AcceptedRowProps {
+interface ContactDetailProps {
   readonly contact: AcceptedContact;
+  /** The route of the 1x1 chat with this contact, or `null` when this device
+   *  holds none (the Message button is then not offered). */
+  readonly chatHref: string | null;
   readonly myPubkey: () => Uint8Array | null;
+  readonly onBack: () => void;
   readonly onRemove: () => void;
   /** Set this contact's display name; a blank value resets to the
    *  key-fingerprint default (ADR-0021 follow-up). */
   readonly onRename: (newName: string) => void;
 }
 
-function AcceptedRow(props: AcceptedRowProps): JSX.Element {
+/** The selected contact: name, actions, the safety number (Phase 1.9b3,
+ *  ADR-0005 §13.5, computed lazily on first reveal), rename and remove. */
+function ContactDetail(props: ContactDetailProps): JSX.Element {
   const profiles = useProfiles();
+  const navigate = useNavigate();
   const resolved = (): ReturnType<typeof profiles.resolve> =>
     profiles.resolve(props.contact.signaturePubkeyB64);
   const [open, setOpen] = createSignal(false);
   const [number, setNumber] = createSignal<string | null>(null);
   const [busy, setBusy] = createSignal(false);
   const [err, setErr] = createSignal<string | null>(null);
-  // ADR-0021 follow-up: inline display-name editor.
   const [editing, setEditing] = createSignal(false);
   const [draft, setDraft] = createSignal("");
 
@@ -1294,15 +1327,14 @@ function AcceptedRow(props: AcceptedRowProps): JSX.Element {
     if (number() !== null) return;
     const my = props.myPubkey();
     if (my === null) {
-      setErr("safety number unavailable — sign in again to compute");
+      setErr("Sign in again to compute the safety number.");
       return;
     }
     setBusy(true);
     setErr(null);
     try {
       const their = base64Decode(props.contact.signaturePubkeyB64);
-      const n = await computeSafetyNumber(my, their);
-      setNumber(n);
+      setNumber(await computeSafetyNumber(my, their));
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
@@ -1313,115 +1345,147 @@ function AcceptedRow(props: AcceptedRowProps): JSX.Element {
   async function toggle(): Promise<void> {
     const next = !open();
     setOpen(next);
-    if (next) {
-      await ensureNumber();
-    }
+    if (next) await ensureNumber();
   }
 
   return (
-    <li style={rowStyle()}>
-      <div style={{ flex: 1 }}>
-        <Show when={editing()} fallback={<strong>{resolved().listLabel}</strong>}>
-          <div style={{ display: "flex", gap: "0.25rem", "align-items": "center" }}>
-            <input
-              type="text"
-              value={draft()}
-              placeholder="Your name for this contact (blank = their own)"
-              aria-label="Your name for this contact"
-              onInput={(e) => setDraft(e.currentTarget.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") saveEdit();
-                if (e.key === "Escape") setEditing(false);
-              }}
-              style={{ flex: 1, "font-size": "0.9rem" }}
-            />
-            <button type="button" onClick={saveEdit}>
-              Save
-            </button>
-            <button type="button" onClick={() => setEditing(false)}>
-              Cancel
-            </button>
-          </div>
-        </Show>
-        <div
-          style={{
-            color: "var(--surface-muted)",
-            "font-size": "0.85rem",
-            "font-family": "ui-monospace, monospace",
-          }}
+    <article>
+      <div class="lk-page lk-stack" style={{ "max-width": "560px" }}>
+        <button
+          type="button"
+          class="ghost small lk-narrow-only"
+          style={{ "align-self": "flex-start" }}
+          onClick={props.onBack}
         >
-          Fingerprint {resolved().fingerprint}
-        </div>
-        {/* ADR-0048 UX §6 — a rename wins everywhere, so the detail says what
-            the person calls themselves; a failed username claim is noted here
-            and nowhere else. */}
-        <Show when={resolved().theirName}>
-          {(their) => (
-            <div style={{ color: "var(--surface-muted)", "font-size": "0.85rem" }}>
-              Their name: {their()}
-            </div>
-          )}
-        </Show>
-        <Show when={resolved().usernameNotVerified}>
-          <div style={{ color: "var(--surface-muted)", "font-size": "0.85rem" }}>
-            Username not verified
-          </div>
-        </Show>
-        <Show when={open()}>
-          <div
-            style={{
-              "margin-top": "0.5rem",
-              padding: "0.5rem 0.75rem",
-              background: "var(--surface-canvas)",
-              border: "1px solid var(--surface-border)",
-              "border-radius": "var(--radius-sm)",
-              "font-size": "0.85rem",
-            }}
-          >
-            <div style={{ color: "var(--surface-muted)", "margin-bottom": "0.25rem" }}>
-              Safety number — compare these digits with your
-              contact out-of-band (voice / video / paper). If they
-              match, your pinned identity keys agree.
-            </div>
-            <Show when={number() !== null} fallback={
-              <div style={{ color: "var(--surface-muted)" }}>
-                {busy() ? "computing…" : (err() ?? "—")}
+          <Icon name="back" size={16} />
+          Contacts
+        </button>
+        <div style={{ display: "flex", "flex-direction": "column", "align-items": "center", gap: "12px" }}>
+          <Avatar label={resolved().listLabel} id={props.contact.signaturePubkeyB64} size="xl" />
+          <Show
+            when={editing()}
+            fallback={
+              <div style={{ "text-align": "center" }}>
+                <h1 style={{ margin: 0 }}>{resolved().listLabel}</h1>
+                <Show when={resolved().theirName}>
+                  {(their) => <div class="form-info">Calls themselves {their()}</div>}
+                </Show>
+                <Show when={resolved().usernameNotVerified}>
+                  <div class="form-info">Username not verified</div>
+                </Show>
               </div>
-            }>
-              <code style={{ "font-size": "1rem", "line-height": "1.5" }}>
-                {number()}
-              </code>
-            </Show>
-          </div>
-        </Show>
-      </div>
-      <div style={{ display: "flex", "flex-direction": "column", gap: "0.25rem" }}>
-        <button
-          type="button"
-          onClick={() => {
-            void toggle();
-          }}
-          disabled={busy()}
-        >
-          {open() ? "Hide safety number" : "Show safety number"}
-        </button>
-        <button
-          type="button"
-          onClick={() => {
-            if (editing()) {
-              setEditing(false);
-            } else {
-              startEdit();
             }
-          }}
-        >
-          {editing() ? "Close" : "Rename"}
-        </button>
-        <button type="button" onClick={props.onRemove}>
-          Remove
-        </button>
+          >
+            <div class="lk-actions" style={{ "flex-wrap": "nowrap", width: "100%" }}>
+              <input
+                type="text"
+                value={draft()}
+                placeholder="Your name for this contact (blank = their own)"
+                aria-label="Your name for this contact"
+                onInput={(e) => setDraft(e.currentTarget.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") saveEdit();
+                  if (e.key === "Escape") setEditing(false);
+                }}
+                style={{ flex: 1 }}
+              />
+              <button type="button" class="primary" onClick={saveEdit}>
+                Save
+              </button>
+              <button type="button" class="ghost" onClick={() => setEditing(false)}>
+                Cancel
+              </button>
+            </div>
+          </Show>
+          <div class="lk-actions">
+            <Show when={props.chatHref}>
+              {(href) => (
+                <button type="button" class="primary" onClick={() => navigate(href())}>
+                  <Icon name="chat" size={18} />
+                  Message
+                </button>
+              )}
+            </Show>
+            <button type="button" onClick={() => (editing() ? setEditing(false) : startEdit())}>
+              <Icon name="compose" size={18} />
+              Rename
+            </button>
+          </div>
+        </div>
+
+        <section class="lk-card">
+          <h2>Security</h2>
+          <div class="lk-card-row">
+            <span class="lk-card-row-icon">
+              <Icon name="shield" size={18} />
+            </span>
+            <div class="lk-card-row-body">
+              <span class="lk-card-row-title">Safety number</span>
+              <span class="lk-card-row-sub">
+                Compare it with {resolved().name} in person or on a call. Matching
+                numbers mean you are talking to each other and nobody in between.
+              </span>
+            </div>
+            <button
+              type="button"
+              class="ghost small lk-card-row-action"
+              style={{ color: "var(--accent)" }}
+              disabled={busy()}
+              onClick={() => {
+                void toggle();
+              }}
+            >
+              {open() ? "Hide" : "Show"}
+            </button>
+          </div>
+          <Show when={open()}>
+            <div
+              style={{
+                padding: "12px 14px",
+                background: "var(--surface-sunken)",
+                "border-radius": "var(--radius-sm)",
+                "text-align": "center",
+              }}
+            >
+              <Show
+                when={number() !== null}
+                fallback={<span class="form-info">{busy() ? "Computing…" : (err() ?? "")}</span>}
+              >
+                <code style={{ "font-size": "17px", "line-height": "1.6", background: "transparent", "letter-spacing": "0.04em" }}>
+                  {number()}
+                </code>
+              </Show>
+            </div>
+          </Show>
+          <div class="lk-card-row">
+            <span class="lk-card-row-icon">
+              <Icon name="key" size={18} />
+            </span>
+            <div class="lk-card-row-body">
+              <span class="lk-card-row-title">Key fingerprint</span>
+              <span class="lk-card-row-sub" style={{ "font-family": "ui-monospace, monospace" }}>
+                {resolved().fingerprint}
+              </span>
+            </div>
+          </div>
+          <div class="lk-card-row">
+            <span class="lk-card-row-icon">
+              <Icon name="check" size={18} />
+            </span>
+            <div class="lk-card-row-body">
+              <span class="lk-card-row-title">Added</span>
+              <span class="lk-card-row-sub">{new Date(props.contact.acceptedAtMs).toLocaleString()}</span>
+            </div>
+          </div>
+        </section>
+
+        <div style={{ display: "flex", "justify-content": "center" }}>
+          <button type="button" class="danger" onClick={props.onRemove}>
+            Remove contact
+          </button>
+        </div>
       </div>
-    </li>
+    </article>
   );
 }
 

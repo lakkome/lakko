@@ -46,8 +46,9 @@ struct InboundCallRow: Equatable {
 ///     active call AND arrive on the group that call lives in. The same 16-byte
 ///     call id on a different group's journal is not this call.
 ///   * **One call at a time.** A fresh offer for a different call while one is
-///     ringing, being prepared, live, or while a group (SFU) call is running is
-///     answered `End{busy}` so the caller stops ringing, never silently dropped.
+///     ringing, being prepared, live, or while a group (SFU) or call-link call
+///     holds the app's one call slot (``CallSlot``) is answered `End{busy}` so
+///     the caller stops ringing, never silently dropped.
 ///   * **Stale offers do not ring.** An offer whose DS row is older than
 ///     ``staleOfferMs`` does not ring and is not answered busy either: the
 ///     caller gave up long ago and nobody is waiting on a reply.
@@ -94,14 +95,15 @@ enum CallHostRouting {
     ///     (no session, or a session that has reached `.done`).
     ///   - endedCallIds: hex call ids of 1x1 calls that ended on this device
     ///     this session.
-    ///   - groupCallBusy: a group (SFU) call is starting or live on this device.
+    ///   - otherCallBusy: a group (SFU) or call-link call is starting, waiting or
+    ///     live on this device.
     @MainActor
     static func decide(
         row: InboundCallRow,
         nowMs: Int64,
         active: ActiveCall?,
         endedCallIds: Set<String>,
-        groupCallBusy: Bool
+        otherCallBusy: Bool
     ) -> Action {
         let callIdHex = hex(CallSession.callId(of: row.body))
         let forActive = active.map {
@@ -118,7 +120,7 @@ enum CallHostRouting {
             if forActive { return .apply }
             if endedCallIds.contains(callIdHex) { return .drop }
             if isStaleOffer(createdAt: row.createdAt, nowMs: nowMs) { return .drop }
-            if active != nil || groupCallBusy { return .busy }
+            if active != nil || otherCallBusy { return .busy }
             return .ring
         }
     }

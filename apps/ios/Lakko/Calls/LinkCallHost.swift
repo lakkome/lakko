@@ -1,0 +1,411 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+import Combine
+import Foundation
+import LakkoCore
+
+/// A running call-link call as ``LinkCallHost`` drives it. ``MultiJoinerCall``
+/// in production; a fake in tests.
+@MainActor
+protocol LinkCallHandle: AnyObject {
+    /// Tear the call down. Idempotent.
+    func hangUp()
+    /// Gate the local microphone track. Touches no UI state.
+    func setMicrophoneTrackEnabled(_ on: Bool)
+    func setCameraEnabled(_ on: Bool)
+    func publishVideo() async throws
+    var sessionState: SfuCallSession.State { get }
+}
+
+extension MultiJoinerCall: LinkCallHandle {}
+
+/// The app-level owner of the ADR-0032 call-link call — the link slot beside
+/// ``CallHost`` (1x1) and ``GroupCallHost``.
+///
+/// Created once per process and presented from the signed-in root, so the call
+/// outlives `JoinCallLandingScreen` (which only decodes the link, runs the guest
+/// sign-up, asks this host for the call and shows its state). See
+/// ``LinkCallHostRules`` for the defects this closes and for every decision.
+@MainActor
+final class LinkCallHost: ObservableObject {
+
+    /// What starting the call needs from the link.
+    struct Request: Equatable {
+        let slug: String
+        let callId: Data
+        let ownerAccountId: Data
+        let ownerSignatureKey: Data
+        let mediaVideo: Bool
+        let isOwner: Bool
+    }
+
+    /// Everything the host needs from outside, injectable for tests.
+    struct Ports {
+        /// The live session's identity seed + token, `nil` without a session.
+        var session: @MainActor () -> (identitySeed: Data, sessionToken: String)?
+        var sfuBaseUrl: @MainActor () -> String?
+        var microphoneGranted: @MainActor () async -> Bool
+        var cameraGranted: @MainActor (_ video: Bool) async -> Bool
+        /// Found (owner) or join (joiner) the call. Callbacks may fire before
+        /// this returns (the owner reports `onJoined` from inside `host`).
+        var startCall: @MainActor (
+            _ request: Request,
+            _ session: (identitySeed: Data, sessionToken: String),
+            _ sfuBaseUrl: String,
+            _ video: Bool,
+            _ ui: CallUiState,
+            _ callbacks: MultiJoinerCall.Callbacks
+        ) async throws -> LinkCallHandle
+    }
+
+    /// The link call in the slot.
+    struct Slot: Equatable {
+        let callIdHex: String
+        let slug: String
+        let isOwner: Bool
+        var phase: LinkCallHostRules.Phase
+        var errorMessage: String?
+    }
+
+    enum StartOutcome: Equatable {
+        case started
+        case alreadyInThisCall
+        case busy(message: String)
+        case failed(message: String)
+    }
+
+    // MARK: - Published state
+
+    /// The call in the link slot — including an outcome (ended / dead / error)
+    /// kept for the user until dismissed.
+    @Published private(set) var slot: Slot?
+    /// The in-call state the root presents full-screen once the call is live,
+    /// kept until the call screen is dismissed.
+    @Published private(set) var presentation: CallUiState?
+    @Published private(set) var presentationId: String?
+    /// A landing screen is on screen (it shows the call itself, so no notice).
+    @Published private(set) var landingShowing: Bool = false
+
+    /// The call occupying the app's one call slot, across all three kinds.
+    var slotOccupant: @MainActor () -> CallKind? = { nil }
+    /// End whatever call occupies the slot (the busy refusal's affordance).
+    var endCurrentCall: @MainActor () -> Void = {}
+
+    // MARK: - Internals
+
+    private let ports: Ports
+    private var handle: LinkCallHandle?
+    private var ui: CallUiState?
+    /// The attempt the slot belongs to. A report from an older attempt — one
+    /// the user already left — never touches the slot.
+    private var attempt: UUID?
+    private var controls: Set<AnyCancellable> = []
+    private var landingCount = 0
+
+    init(ports: Ports) {
+        self.ports = ports
+    }
+
+    /// The link call is starting, waiting for admission or live.
+    var occupiesSlot: Bool {
+        slot.map { LinkCallHostRules.occupiesSlot($0.phase) } ?? false
+    }
+
+    /// The copy a refusal would show right now, or `nil` when a call may start.
+    func busyMessage(verb: CallSlot.Verb) -> String? {
+        slotOccupant().map { CallSlot.busyMessage($0, verb: verb) }
+    }
+
+    /// The slot, when it belongs to `callIdHex`.
+    func slot(forCallIdHex callIdHex: String) -> Slot? {
+        slot?.callIdHex == callIdHex ? slot : nil
+    }
+
+    /// A landing screen appeared / disappeared.
+    func noteLanding(visible: Bool) {
+        landingCount = max(0, landingCount + (visible ? 1 : -1))
+        let showing = landingCount > 0
+        if showing != landingShowing { landingShowing = showing }
+    }
+
+    /// What to show about the call away from its landing.
+    var notice: LinkCallHostRules.Notice? {
+        LinkCallHostRules.notice(
+            phase: slot?.phase,
+            landingShowing: landingShowing,
+            errorMessage: slot?.errorMessage
+        )
+    }
+
+    // MARK: - Start
+
+    func start(_ request: Request) async -> StartOutcome {
+        let callIdHex = request.callId.map { String(format: "%02x", $0) }.joined()
+        // No suspension between this decision and the slot write below, so a
+        // double tap finds the slot taken (`alreadyInThisCall`) rather than
+        // starting twice.
+        let decision = LinkCallHostRules.decideStart(
+            occupant: slotOccupant() ?? (occupiesSlot ? .link : nil),
+            activeLinkCallIdHex: occupiesSlot ? slot?.callIdHex : nil,
+            requestedCallIdHex: callIdHex,
+            verb: request.isOwner ? .start : .join
+        )
+        switch decision {
+        case .alreadyInThisCall:
+            return .alreadyInThisCall
+        case .busy(let message):
+            return .busy(message: message)
+        case .start:
+            break
+        }
+        guard let session = ports.session() else {
+            return .failed(message: "Re-authenticate to join this call (no live session).")
+        }
+        guard let base = ports.sfuBaseUrl() else {
+            return .failed(message: "This client has no SFU endpoint — set LakkoSfuUrl and rebuild.")
+        }
+
+        let attempt = UUID()
+        self.attempt = attempt
+        controls.removeAll()
+        handle = nil
+        let ui = CallUiState()
+        self.ui = ui
+        slot = Slot(
+            callIdHex: callIdHex,
+            slug: request.slug,
+            isOwner: request.isOwner,
+            phase: .starting,
+            errorMessage: nil
+        )
+
+        // Settle the microphone permission before the SFU session exists, so a
+        // denial is an explained refusal instead of a call nobody can hear.
+        guard await ports.microphoneGranted() else {
+            apply(attempt, .error, errorMessage: MicrophonePermission.deniedMessage)
+            return .failed(message: MicrophonePermission.deniedMessage)
+        }
+        // A video call link starts the camera at connect. The link's media is
+        // the creator's choice, not this user's, so a denied camera joins with
+        // audio only and the call log says why.
+        let cameraAllowed = await ports.cameraGranted(request.mediaVideo)
+        guard self.attempt == attempt, occupiesSlot else { return .started }
+        let joinWithVideo = request.mediaVideo && cameraAllowed
+
+        let callbacks = MultiJoinerCall.Callbacks(
+            onJoined: { [weak self] in self?.apply(attempt, .joined) },
+            onLive: nil,
+            onEnded: { [weak self] in self?.apply(attempt, .ended) },
+            onNoCommitter: { [weak self] in self?.apply(attempt, .noCommitter) },
+            onError: { [weak self] error in
+                self?.apply(attempt, .error, errorMessage: error.localizedDescription)
+            }
+        )
+        let started: LinkCallHandle
+        do {
+            started = try await ports.startCall(request, session, base, joinWithVideo, ui, callbacks)
+        } catch {
+            apply(attempt, .error, errorMessage: error.localizedDescription)
+            return .failed(message: error.localizedDescription)
+        }
+        guard self.attempt == attempt, occupiesSlot else {
+            // Left, replaced, or already over while the start was in flight.
+            started.hangUp()
+            return .started
+        }
+        handle = started
+        bindControls(ui: ui, handle: started)
+        apply(attempt, .signalingOpen(owner: request.isOwner))
+        if request.mediaVideo && !cameraAllowed {
+            ui.addSystemEvent(CameraPermission.deniedMessage)
+        }
+        return .started
+    }
+
+    /// Fold one orchestrator report into the slot.
+    private func apply(_ attempt: UUID, _ event: LinkCallHostRules.Event, errorMessage: String? = nil) {
+        guard self.attempt == attempt, var current = slot else { return }
+        let phase = LinkCallHostRules.reduce(current.phase, event)
+        guard phase != current.phase else { return }
+        current.phase = phase
+        if phase == .error { current.errorMessage = errorMessage ?? current.errorMessage }
+        slot = current
+        if phase == .live, presentation == nil, let ui {
+            presentation = ui
+            presentationId = current.callIdHex
+        }
+        if !LinkCallHostRules.occupiesSlot(phase) {
+            // Over on its own: drop the session and keep the outcome for the
+            // user to see.
+            controls.removeAll()
+            let h = handle
+            handle = nil
+            h?.hangUp()
+        }
+    }
+
+    // MARK: - Leaving
+
+    /// Leave the link call: no outcome to show, the user chose it.
+    func leave() {
+        attempt = nil
+        controls.removeAll()
+        let h = handle
+        handle = nil
+        slot = nil
+        h?.hangUp()
+    }
+
+    /// Forget an outcome (ended / dead / error) the user has seen.
+    func dismissOutcome() {
+        guard let slot, !LinkCallHostRules.occupiesSlot(slot.phase) else { return }
+        self.slot = nil
+    }
+
+    /// The call screen was dismissed. Leaves the call if it is somehow still
+    /// up, and forgets an outcome the screen already showed.
+    func dismissPresentation() {
+        if occupiesSlot { leave() } else { dismissOutcome() }
+        presentation = nil
+        presentationId = nil
+    }
+
+    /// Logout / account switch.
+    func reset() {
+        leave()
+        presentation = nil
+        presentationId = nil
+        ui = nil
+    }
+
+    // MARK: - Controls
+
+    /// Mic, camera and the screen's `ended` phase. The controls act only once
+    /// the call is live: a joiner still waiting for its Welcome has published
+    /// nothing (invariant #4) and must not start announcing camera state to a
+    /// room it has not been admitted to.
+    private func bindControls(ui: CallUiState, handle: LinkCallHandle) {
+        controls.removeAll()
+        ui.$participants
+            .compactMap { $0.first(where: { $0.isLocal })?.micOn }
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self, weak handle] micOn in
+                MainActor.assumeIsolated {
+                    guard let self, let handle, self.isLive(handle) else { return }
+                    handle.setMicrophoneTrackEnabled(micOn)
+                }
+            }
+            .store(in: &controls)
+        ui.$participants
+            .compactMap { $0.first(where: { $0.isLocal })?.camOn }
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self, weak handle] camOn in
+                MainActor.assumeIsolated {
+                    guard let self, let handle, self.isLive(handle) else { return }
+                    self.applyCamera(camOn, handle: handle, ui: ui)
+                }
+            }
+            .store(in: &controls)
+        ui.$phase
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self, weak handle] phase in
+                MainActor.assumeIsolated {
+                    guard case .ended = phase,
+                          let self, let handle, self.handle === handle else { return }
+                    // A session that is still up means the user is ending it; one
+                    // already closed ended on its own, and `onEnded` kept that
+                    // outcome for the user to see.
+                    if handle.sessionState != .closed && handle.sessionState != .failed {
+                        self.leave()
+                    }
+                }
+            }
+            .store(in: &controls)
+    }
+
+    private func isLive(_ handle: LinkCallHandle) -> Bool {
+        self.handle === handle && slot?.phase == .live
+    }
+
+    private func applyCamera(_ camOn: Bool, handle: LinkCallHandle, ui: CallUiState) {
+        guard camOn else {
+            handle.setCameraEnabled(false)
+            return
+        }
+        Task { @MainActor [weak self] in
+            // The in-call control already settled the permission; this is the
+            // layered half.
+            guard await self?.ports.cameraGranted(true) ?? false else {
+                ui.setCamera(false)
+                ui.addSystemEvent(CameraPermission.deniedMessage)
+                return
+            }
+            do {
+                try await handle.publishVideo()
+            } catch {
+                // Fail-safe (invariant #4): revert the toggle and say why; the
+                // call stays up audio-only.
+                ui.setCamera(false)
+                ui.addSystemEvent("Could not start the camera: \(error.localizedDescription)")
+                NSLog("multi-joiner call: publishVideo failed: %@", String(describing: error))
+            }
+        }
+    }
+}
+
+// MARK: - Production ports
+
+extension LinkCallHost {
+    static func live(authRepository: AuthRepository) -> LinkCallHost {
+        LinkCallHost(ports: Ports(
+            session: { [weak authRepository] in
+                guard let secrets = authRepository?.identitySecrets else { return nil }
+                return (secrets.accountIdentitySeed, secrets.sessionToken)
+            },
+            sfuBaseUrl: { SfuConfig.baseUrl },
+            microphoneGranted: { await MicrophonePermission.ensureGranted() },
+            cameraGranted: { video in await CameraPermission.ensureGranted(forVideo: video) },
+            startCall: { request, session, base, video, ui, callbacks in
+                let identity: Identity
+                do {
+                    identity = try Identity.fromSeed(seed: session.identitySeed)
+                } catch {
+                    throw LinkCallHostError.identityUnavailable
+                }
+                let options = MultiJoinerCall.Options(
+                    identity: identity,
+                    callId: request.callId,
+                    ownerAccountId: request.ownerAccountId,
+                    ownerSignatureKey: request.ownerSignatureKey,
+                    sfuBaseUrl: base,
+                    sessionToken: session.sessionToken,
+                    audio: true,
+                    video: video,
+                    resolveDisplayName: nil,
+                    authBaseUrl: nil
+                )
+                if request.isOwner {
+                    // Owner founds + hosts; `onJoined` fires inside `host`.
+                    return try await MultiJoinerCall.host(options: options, ui: ui, callbacks: callbacks)
+                }
+                // Joiner connects signaling-only + relays its KeyPackage, then
+                // waits for the Welcome (`onJoined`).
+                return try await MultiJoinerCall.join(options: options, ui: ui, callbacks: callbacks)
+            }
+        ))
+    }
+}
+
+enum LinkCallHostError: Error, LocalizedError {
+    case identityUnavailable
+
+    var errorDescription: String? {
+        switch self {
+        case .identityUnavailable:
+            return "Could not rebuild the identity for this call."
+        }
+    }
+}

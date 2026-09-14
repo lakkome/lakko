@@ -356,6 +356,16 @@ final class MultiJoinerCall {
         ui.setMic(on)
     }
 
+    /// Gate the local microphone track only — for a caller that already
+    /// reflects the choice in `ui` (the app-level ``LinkCallHost``).
+    func setMicrophoneTrackEnabled(_ on: Bool) {
+        session.setMicrophoneEnabled(on)
+    }
+
+    /// The SFU session's lifecycle state. Lets a caller tell the user ending
+    /// the call (session still up) from the session closing on its own.
+    var sessionState: SfuCallSession.State { session.state }
+
     /// Enable / disable the local camera.
     func setCameraEnabled(_ on: Bool) {
         session.setCameraEnabled(on)

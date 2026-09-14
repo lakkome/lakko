@@ -1038,6 +1038,99 @@ a.lk-row.active {
   }
 }
 
+/* ------------------------------------------------------------------ chat */
+
+.lk-narrow-only {
+  display: none;
+}
+@media (max-width: 900px) {
+  .lk-narrow-only {
+    display: inline-flex;
+  }
+}
+.lk-row[role="button"] {
+  cursor: pointer;
+}
+.lk-row[role="button"]:hover {
+  background: var(--surface-hover);
+}
+
+.lk-chat-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--surface-border);
+}
+.lk-chat-title {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.lk-chat-title h1 {
+  font-size: 16px;
+  line-height: 22px;
+  margin: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.lk-chat-sub {
+  font-size: 13px;
+  color: var(--surface-muted);
+}
+.lk-chat-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+.lk-chat-actions .lk-icon-button {
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+}
+
+.lk-composer {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 0 0;
+  margin: 0 -8px;
+  padding-left: 8px;
+  padding-right: 8px;
+  border-top: 1px solid var(--surface-border);
+  background: var(--surface-bg);
+}
+.lk-composer .lk-icon-button {
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+}
+.lk-composer .lk-send {
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+.lk-composer .lk-send:hover:not(:disabled) {
+  background: var(--accent-strong);
+}
+.lk-composer-input {
+  flex: 1;
+  min-height: 42px;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: var(--surface-sunken);
+  padding: 0 16px;
+}
+.lk-composer-input:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  outline-offset: 0;
+}
+
 /*
  * ADR-0023 — per-message action strip (React / Edit / Delete).
  * Hidden by default; revealed when the hosting bubble (`<li>`)

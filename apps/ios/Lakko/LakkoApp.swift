@@ -51,6 +51,15 @@ struct LakkoApp: App {
     /// on every screen and a call survives leaving its chat.
     @StateObject private var callHost: CallHost
 
+    /// Process-scoped group (SFU) call host — the group call outlives the chat
+    /// it was started from and rekeys on every epoch advance, whatever screen
+    /// is showing.
+    @StateObject private var groupCallHost: GroupCallHost
+
+    /// Process-scoped call-link (ADR-0032) call host — the call outlives its
+    /// landing screen.
+    @StateObject private var linkCallHost: LinkCallHost
+
     /// Process-scoped foreground receive for every group whose chat is not
     /// open. Without it nothing but the open chat was ever polled.
     @StateObject private var foregroundReceive: ForegroundReceiveHolder
@@ -106,11 +115,22 @@ struct LakkoApp: App {
         let chat = ChatRepository()
         let host = CallHost.live(repository: chat)
         host.attach(to: chat)
+        let groupHost = GroupCallHost.live(
+            repository: chat,
+            sessionTokenProvider: { [weak auth] in auth?.identitySecrets?.sessionToken }
+        )
+        groupHost.attach(to: chat)
+        let linkHost = LinkCallHost.live(authRepository: auth)
+        // One call at a time, across the three kinds.
+        CallSlotWiring.wire(oneToOne: host, group: groupHost, link: linkHost)
         self._chatRepository = StateObject(wrappedValue: chat)
         self._callHost = StateObject(wrappedValue: host)
+        self._groupCallHost = StateObject(wrappedValue: groupHost)
+        self._linkCallHost = StateObject(wrappedValue: linkHost)
         self._foregroundReceive = StateObject(
             wrappedValue: ForegroundReceiveHolder(
-                scheduler: ForegroundReceiveScheduler.live(repository: chat, callHost: host)
+                scheduler: ForegroundReceiveScheduler.live(
+                    repository: chat, callHost: host, groupCallHost: groupHost)
             )
         )
     }
@@ -122,6 +142,8 @@ struct LakkoApp: App {
                 .environmentObject(contactsRepository)
                 .environmentObject(chatRepository)
                 .environmentObject(callHost)
+                .environmentObject(groupCallHost)
+                .environmentObject(linkCallHost)
                 .environmentObject(deviceGroupSync)
                 .environmentObject(inviteIntake)
                 // Universal Links — iOS invokes this whenever the
@@ -194,6 +216,8 @@ struct AppRoot: View {
     @EnvironmentObject private var contactsRepository: ContactsRepository
     @EnvironmentObject private var chatRepository: ChatRepository
     @EnvironmentObject private var callHost: CallHost
+    @EnvironmentObject private var groupCallHost: GroupCallHost
+    @EnvironmentObject private var linkCallHost: LinkCallHost
     @EnvironmentObject private var deviceGroupSync: DeviceGroupSyncRepository
     @EnvironmentObject private var inviteIntake: InviteIntake
 
@@ -278,7 +302,8 @@ struct AppRoot: View {
                         viewModel: JoinCallLandingViewModel(
                             slug: callSlug,
                             authRepository: authRepository,
-                            intake: inviteIntake
+                            intake: inviteIntake,
+                            linkCallHost: linkCallHost
                         ),
                         onDone: {}
                     )
@@ -305,6 +330,8 @@ struct AppRoot: View {
                 // No session, no call: end anything live and forget the
                 // session's call bookkeeping.
                 callHost.reset()
+                groupCallHost.reset()
+                linkCallHost.reset()
             }
 
         case .session(let account):
@@ -333,12 +360,20 @@ struct AppRoot: View {
                     contactsRepository: contactsRepository,
                     chatRepository: chatRepository,
                     callHost: callHost,
+                    groupCallHost: groupCallHost,
+                    linkCallHost: linkCallHost,
                     inviteIntake: inviteIntake
                 )
             }
-            // The 1x1 call, app-wide: the ringing banner above every signed-in
-            // screen and the full-screen call over it.
-            .callHostOverlay(callHost)
+            // Every call, app-wide: the 1x1 ringing banner and a call link's
+            // status above every signed-in screen, and the one full-screen call
+            // (1x1, group or link) over them.
+            .callHostOverlay(
+                oneToOne: callHost,
+                group: groupCallHost,
+                link: linkCallHost,
+                inviteIntake: inviteIntake
+            )
 
         case .needsRecoveryPhrase(let account):
             // ADR-0017 fresh-device fail-safe. The user authenticated
@@ -386,6 +421,8 @@ private struct SessionRoot: View {
     let contactsRepository: ContactsRepository
     let chatRepository: ChatRepository
     let callHost: CallHost
+    let groupCallHost: GroupCallHost
+    let linkCallHost: LinkCallHost
     @EnvironmentObject var deviceGroupSync: DeviceGroupSyncRepository
     @ObservedObject var inviteIntake: InviteIntake
 
@@ -400,6 +437,8 @@ private struct SessionRoot: View {
         contactsRepository: ContactsRepository,
         chatRepository: ChatRepository,
         callHost: CallHost,
+        groupCallHost: GroupCallHost,
+        linkCallHost: LinkCallHost,
         inviteIntake: InviteIntake
     ) {
         self.account = account
@@ -407,6 +446,8 @@ private struct SessionRoot: View {
         self.contactsRepository = contactsRepository
         self.chatRepository = chatRepository
         self.callHost = callHost
+        self.groupCallHost = groupCallHost
+        self.linkCallHost = linkCallHost
         self.inviteIntake = inviteIntake
         // Wire the chat bridge on the contacts repository so
         // refreshInbox can forward Welcomes + acceptInviteLink can
@@ -466,7 +507,8 @@ private struct SessionRoot: View {
                     viewModel: JoinCallLandingViewModel(
                         slug: callSlug,
                         authRepository: authRepository,
-                        intake: inviteIntake
+                        intake: inviteIntake,
+                        linkCallHost: linkCallHost
                     ),
                     onDone: {}
                 )
@@ -533,6 +575,7 @@ private struct SessionRoot: View {
                                 repository: chatRepository,
                                 groupIdHex: groupIdHex,
                                 callHost: callHost,
+                                groupCallHost: groupCallHost,
                                 sessionTokenProvider: {
                                     authRepository.identitySecrets?.sessionToken
                                 },

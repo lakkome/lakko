@@ -38,9 +38,11 @@ import Foundation
 ///   * **Failure backoff** per group, so a journal that keeps failing is not
 ///     retried every sweep.
 ///
-/// A live 1x1 call's group gets a dedicated long poll for the duration of the
-/// call (``Ports/callGroup``) when its chat is not open: an answer or ICE
-/// candidate delayed by a sweep interval stalls the connection.
+/// A live call's group gets a dedicated long poll for the duration of the call
+/// (``Ports/callGroup``) when its chat is not open: for a 1x1 call an answer or
+/// ICE candidate delayed by a sweep interval stalls the connection, and for a
+/// group call a commit delayed by one leaves media sealed under a key the
+/// newest members no longer derive.
 ///
 /// ## Pausing
 ///
@@ -70,7 +72,7 @@ final class ForegroundReceiveScheduler {
         var isExcluded: @MainActor (_ groupIdHex: String) -> Bool
         /// One poll. Returns `true` when it consumed rows (so more may follow).
         var poll: @MainActor (_ groupIdHex: String, _ waitSecs: Int) async throws -> Bool
-        /// The group of a live 1x1 call, if any.
+        /// The group of a live 1x1 or group call, if any.
         var callGroup: @MainActor () -> String?
         /// Sleep; returns early (without throwing) when the task is cancelled.
         var sleepMs: (_ ms: Int64) async -> Void
@@ -280,7 +282,11 @@ final class GroupBackoff {
 // MARK: - Production ports
 
 extension ForegroundReceiveScheduler {
-    static func live(repository: ChatRepository, callHost: CallHost) -> ForegroundReceiveScheduler {
+    static func live(
+        repository: ChatRepository,
+        callHost: CallHost,
+        groupCallHost: GroupCallHost
+    ) -> ForegroundReceiveScheduler {
         ForegroundReceiveScheduler(ports: Ports(
             groups: { [weak repository] in repository?.receivableGroupIds() ?? [] },
             isExcluded: { [weak repository] groupIdHex in
@@ -292,9 +298,13 @@ extension ForegroundReceiveScheduler {
                 try await repository.pollGroup(groupIdHex: groupIdHex, waitSecs: waitSecs)
                 return repository.journalCursor(groupIdHex: groupIdHex) != before
             },
-            callGroup: { [weak callHost] in
-                guard let callHost, callHost.hasLiveCall else { return nil }
-                return callHost.activeGroupIdHex
+            callGroup: { [weak callHost, weak groupCallHost] in
+                if let callHost, callHost.hasLiveCall, let group = callHost.activeGroupIdHex {
+                    return group
+                }
+                // A group call's group, so an epoch advance reaches the call's
+                // key promptly (G-18 / ADR-0029) while its chat is closed.
+                return groupCallHost?.liveGroupIdHex
             },
             sleepMs: { ms in
                 try? await Task.sleep(nanoseconds: UInt64(max(0, ms)) * 1_000_000)
