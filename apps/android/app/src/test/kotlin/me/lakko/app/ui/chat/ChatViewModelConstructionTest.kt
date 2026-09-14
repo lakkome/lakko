@@ -82,7 +82,7 @@ class ChatViewModelConstructionTest {
             )
             // The collectors are live, not merely absent: the call surfaces the
             // first init block reads are the ones the screen then observes.
-            assertNull(vm.activeSfuCall.value)
+            assertNull(vm.callOccupant.value)
             assertNull(vm.joinableGroupCall.value)
         } finally {
             thread.uncaughtExceptionHandler = previousHandler

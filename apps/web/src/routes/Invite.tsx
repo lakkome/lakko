@@ -64,6 +64,7 @@ import { useChats } from "../chat/ChatContext";
 import { useProfiles } from "../profile/ProfileContext";
 import { loadWasm } from "../wasm";
 import { paths } from "./paths";
+import { PublicLayout } from "../ui/PublicLayout";
 
 interface DecodedInvite {
   cap: WasmInviteCapability;
@@ -155,11 +156,9 @@ export default function Invite(): JSX.Element {
   });
 
   return (
-    <article style={pageStyle()}>
+    <PublicLayout>
       <Show when={decoded.loading}>
-        <section style={panelStyle()}>
-          <p>Loading invite…</p>
-        </section>
+        <p class="form-info">Loading invite…</p>
       </Show>
       <Show when={!decoded.loading && decoded() === null}>
         <InvalidInvitePanel />
@@ -177,7 +176,7 @@ export default function Invite(): JSX.Element {
           />
         </Show>
       </Show>
-    </article>
+    </PublicLayout>
   );
 }
 
@@ -187,12 +186,11 @@ export default function Invite(): JSX.Element {
 
 function InvalidInvitePanel(): JSX.Element {
   return (
-    <section style={panelStyle()}>
-      <h1 style={{ "margin-top": 0 }}>This invite link is invalid</h1>
+    <section class="lk-stack" style={{ gap: "12px" }}>
+      <h1>This invite link is invalid</h1>
       <p>
-        The URL is malformed, the capability signature did not verify, or
-        the capability bytes have been tampered with. Ask the inviter
-        for a fresh link.
+        The link is broken or was changed on the way. Ask the person who
+        invited you for a new one.
       </p>
       <p>
         <A href={paths.home}>Go to Lakko home</A>
@@ -210,13 +208,13 @@ function NeedsAuthPanel(props: { slug: string }): JSX.Element {
   // signup — easy to lose when copy-pasting from email.
   const returnTo = paths.invite(props.slug);
   return (
-    <section style={panelStyle()}>
-      <h1 style={{ "margin-top": 0 }}>Sign up or log in to accept</h1>
+    <section class="lk-stack" style={{ gap: "12px" }}>
+      <h1>Someone wants to connect on Lakko</h1>
       <p>
-        This invite link needs a Lakko account to claim. Create one
-        below — you'll come back here automatically after sign-up.
+        You need an account to accept. Create one, or log in, and you will
+        come back here automatically.
       </p>
-      <div style={{ display: "flex", gap: "0.75rem", "margin-top": "1rem" }}>
+      <div class="lk-actions">
         <A href={buildAuthUrlWithReturn(paths.signup, returnTo)}>
           <button class="primary" type="button">
             Sign up
@@ -226,9 +224,6 @@ function NeedsAuthPanel(props: { slug: string }): JSX.Element {
           <button type="button">Log in</button>
         </A>
       </div>
-      <p style={{ color: "var(--surface-muted)", "font-size": "0.85rem", "margin-top": "1rem" }}>
-        Slug: <code>{props.slug.slice(0, 16)}…</code>
-      </p>
     </section>
   );
 }
@@ -345,23 +340,19 @@ function ConnectPanel(props: {
           // This was the LAST use. We still send the
           // ContactRequest, but surface the milestone in the
           // notice copy below.
-          setNotice(
-            `Last use claimed — sending ContactRequest to ${labelOrFingerprint}…`,
-          );
+          setNotice(`Sending your request to ${labelOrFingerprint}…`);
         }
       }
 
       const introBytes = new TextEncoder().encode(intro());
-      const result = await props.client.sendContactRequestToBundle(
+      await props.client.sendContactRequestToBundle(
         auth.identitySecrets(),
         cap.ownerAccountId,
         cap.ownerSignaturePubkey,
         cap.ownerX25519Pubkey,
         introBytes,
       );
-      setNotice(
-        `ContactRequest sent to ${labelOrFingerprint} (DS id ${result.messageId}).`,
-      );
+      setNotice(`Request sent to ${labelOrFingerprint}.`);
       // Brief pause so the user reads the notice; then navigate
       // to /contacts where the accepted-state UI lives.
       window.setTimeout(props.onDone, 1500);
@@ -373,15 +364,15 @@ function ConnectPanel(props: {
   }
 
   return (
-    <section style={panelStyle()}>
-      <h1 style={{ "margin-top": 0 }}>Connect with {labelOrFingerprint}?</h1>
-      <dl style={{ display: "grid", "grid-template-columns": "auto 1fr", gap: "0.4rem 1rem", margin: "1rem 0" }}>
-        <dt style={termStyle()}>Inviter fingerprint</dt>
-        <dd style={defStyle()}>
+    <section class="lk-stack" style={{ gap: "12px" }}>
+      <h1>Connect with {labelOrFingerprint}?</h1>
+      <dl>
+        <dt>Inviter fingerprint</dt>
+        <dd>
           <code>{props.invite.fingerprintShort}</code>
         </dd>
-        <dt style={termStyle()}>Safety number</dt>
-        <dd style={defStyle()}>
+        <dt>Safety number</dt>
+        <dd>
           <code
             style={{
               "font-size": "0.9rem",
@@ -400,22 +391,19 @@ function ConnectPanel(props: {
               opacity: 0.75,
             }}
           >
-            <strong>Verify out-of-band before accepting.</strong> Ask
-            the inviter for their safety number through a channel you
-            already trust (Signal, in person, phone). A mismatch
-            means this link is from someone else — typically a
-            substitution attack where an attacker swapped the URL.
+            <strong>Check it before you accept.</strong> Ask the person for
+            their safety number in a way you already trust (in person, on a
+            call). If it does not match, this link came from someone else.
           </p>
         </dd>
-        <dt style={termStyle()}>Expiry</dt>
-        <dd style={defStyle()}>{describeExpiry(cap.expiryMs, nowMs)}</dd>
-        <dt style={termStyle()}>Uses allowed</dt>
-        <dd style={defStyle()}>{describeMaxUses(cap.maxUses)}</dd>
+        <dt>Expiry</dt>
+        <dd>{describeExpiry(cap.expiryMs, nowMs)}</dd>
+        <dt>Uses allowed</dt>
+        <dd>{describeMaxUses(cap.maxUses)}</dd>
         <Show when={cap.bootstrapReferral}>
-          <dt style={termStyle()}>Type</dt>
-          <dd style={defStyle()}>
-            Referral link — your ContactRequest auto-sends on
-            arrival; no intro needed.
+          <dt>Type</dt>
+          <dd>
+            Referral link: your request is sent automatically.
           </dd>
         </Show>
       </dl>
@@ -428,35 +416,30 @@ function ConnectPanel(props: {
 
       <Show when={exhausted() === "exhausted"}>
         <div class="form-error" role="alert">
-          This invite has been used up — its <code>max_uses</code> ceiling
-          was reached. Ask the inviter for a fresh link.
+          This link has been used up. Ask the person for a new one.
         </div>
       </Show>
 
       <Show when={exhausted() === "not-found"}>
         <div class="form-error" role="alert">
-          This invite is no longer valid — the inviter may have revoked it,
-          or it expired between page load and click. Ask for a fresh link.
+          This link is no longer valid. Ask the person for a new one.
         </div>
       </Show>
 
       <Show when={exhausted() === "already-consumed"}>
         <div class="form-notice" role="status">
-          You've already accepted this invite — your ContactRequest is
-          on its way to <strong>{labelOrFingerprint}</strong>. No need
-          to send another one. Check your <strong>Contacts</strong>
-          page for the response.
+          You have already accepted this invite. Your request is on its way to{" "}
+          <strong>{labelOrFingerprint}</strong>; check Contacts for the reply.
         </div>
       </Show>
 
-      <label style={{ display: "block", "margin-top": "1rem" }}>
-        <span>Intro message (optional)</span>
+      <label>
+        Intro message (optional)
         <input
           type="text"
           value={intro()}
           onInput={(e) => setIntro(e.currentTarget.value)}
-          placeholder="hey, this is alice"
-          style={{ width: "100%", "margin-top": "0.25rem" }}
+          placeholder="Hi, this is Alice from the workshop"
           disabled={expired || busy() || exhausted() !== null}
         />
       </label>
@@ -464,7 +447,7 @@ function ConnectPanel(props: {
       {error() !== null && <div class="form-error">{error()}</div>}
       {notice() !== null && <div class="form-notice">{notice()}</div>}
 
-      <div style={{ display: "flex", gap: "0.5rem", "margin-top": "1rem" }}>
+      <div class="lk-actions">
         <button
           class="primary"
           type="button"
@@ -513,36 +496,6 @@ function shortFingerprintFor(pubkey: Uint8Array): string {
     hex += (pubkey[i] ?? 0).toString(16).padStart(2, "0");
   }
   return hex.slice(0, 12);
-}
-
-function pageStyle(): JSX.CSSProperties {
-  return {
-    "max-width": "32rem",
-    margin: "0 auto",
-    padding: "1rem",
-  };
-}
-
-function panelStyle(): JSX.CSSProperties {
-  return {
-    background: "var(--surface-elevated)",
-    border: "1px solid var(--surface-border)",
-    "border-radius": "var(--radius-md)",
-    padding: "1.25rem",
-  };
-}
-
-function termStyle(): JSX.CSSProperties {
-  return {
-    color: "var(--surface-muted)",
-    "font-size": "0.85rem",
-  };
-}
-
-function defStyle(): JSX.CSSProperties {
-  return {
-    margin: 0,
-  };
 }
 
 function formatError(err: unknown): string {

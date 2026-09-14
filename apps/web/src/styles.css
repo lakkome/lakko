@@ -1015,6 +1015,52 @@ a.lk-row.active {
 .auth-card .form-footer + .form-footer {
   margin-top: -10px;
 }
+/* Public landings (/i/, /g/, /c/): the logo, then one card. */
+.public-shell {
+  min-height: 100%;
+  background: var(--auth-ground);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 20px;
+  padding: 32px 16px;
+}
+.public-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--surface-fg);
+}
+.public-brand img {
+  border-radius: 11px;
+  display: block;
+}
+.public-card {
+  max-width: 520px;
+}
+.public-card h1 {
+  font-size: 22px;
+  line-height: 28px;
+}
+.public-card dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 8px 16px;
+  margin: 0;
+}
+.public-card dt {
+  font-size: 13px;
+  color: var(--surface-muted);
+}
+.public-card dd {
+  margin: 0;
+  min-width: 0;
+}
+
 @media (max-width: 900px) {
   .auth-shell {
     grid-template-columns: 1fr;

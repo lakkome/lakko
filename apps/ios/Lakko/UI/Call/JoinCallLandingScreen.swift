@@ -80,6 +80,7 @@ public final class JoinCallLandingViewModel: ObservableObject {
     /// The call itself lives here, app-wide, so it survives this screen.
     let linkCallHost: LinkCallHost
     private var didDecode = false
+    private let landingToken = UUID()
     private var hostSubscription: AnyCancellable?
     // Synchronous double-tap latches (set BEFORE any await), so a rapid second
     // tap can't mint a SECOND guest account or start a second call (Hardening 3).
@@ -136,7 +137,7 @@ public final class JoinCallLandingViewModel: ObservableObject {
     /// The landing appeared / disappeared — while it shows the call's state, no
     /// status line for it is shown anywhere else.
     func setVisible(_ visible: Bool) {
-        linkCallHost.noteLanding(visible: visible)
+        linkCallHost.noteLanding(landingToken, visible: visible)
     }
 
     /// Tap Join: use the live session if there is one, else create a guest

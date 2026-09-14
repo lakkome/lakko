@@ -56,6 +56,7 @@ import {
   JOIN_WAIT_SECONDARY,
 } from "../chat/unapplied-requests";
 import { paths } from "./paths";
+import { PublicLayout } from "../ui/PublicLayout";
 import { joinGroupAuthLinks } from "./join-group-auth";
 
 type JoinPhase = "idle" | "requesting" | "waiting" | "joined" | "error";
@@ -177,22 +178,22 @@ export default function JoinGroup() {
   }
 
   return (
-    <article style={{ "max-width": "32rem", margin: "2rem auto", padding: "1rem" }}>
-      <h1>Join group</h1>
+    <PublicLayout>
+      <h1>Join a group</h1>
       <Show when={decoded.loading}>
         <p>Loading invite…</p>
       </Show>
       <Show when={!decoded.loading && (decoded() === null || decoded()?.valid === false)}>
         <p>This invite link is invalid or has expired.</p>
-        <A href={paths.home}>Go home</A>
+        <A href={paths.home}>Open Lakko</A>
       </Show>
       <Show when={!decoded.loading && decoded() !== null && decoded()?.valid === true}>
         <Show
           when={auth.state().kind === "session" && auth.identitySecrets() !== null}
           fallback={
             <>
-              <p>Sign up or log in to request to join this group.</p>
-              <div style={{ display: "flex", gap: "0.75rem" }}>
+              <p>You need an account to ask to join. Create one, or log in.</p>
+              <div class="lk-actions">
                 <A href={joinGroupAuthLinks(params.slug).signup}>
                   <button class="primary" type="button">
                     Sign up
@@ -209,7 +210,7 @@ export default function JoinGroup() {
             Invited by: <code>{decoded()?.fingerprint}</code>
           </p>
           <Show when={phase() === "idle"}>
-            <button type="button" onClick={() => void onRequest(decoded()!)}>
+            <button type="button" class="primary" onClick={() => void onRequest(decoded()!)}>
               Request to join
             </button>
           </Show>
@@ -237,6 +238,6 @@ export default function JoinGroup() {
           </Show>
         </Show>
       </Show>
-    </article>
+    </PublicLayout>
   );
 }

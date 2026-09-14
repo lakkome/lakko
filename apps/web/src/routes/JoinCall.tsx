@@ -69,6 +69,7 @@ import { callIdHex } from "../calls/call-signaling-dispatch";
 import { hexKey } from "../calls/multi-joiner-election";
 import { linkCallOccupiesSlot, type LinkCallPhase } from "../calls/link-call-host";
 import { paths } from "./paths";
+import { PublicLayout } from "../ui/PublicLayout";
 
 /** What this screen shows: its own pre-call states (`idle`, and `starting`
  *  while a guest account is being created) until the host holds this call,
@@ -294,10 +295,8 @@ export default function JoinCall() {
   return (
     <Switch
       fallback={
-        <article
-          style={{ "max-width": "32rem", margin: "2rem auto", padding: "1rem" }}
-        >
-          <h1>Join call</h1>
+        <PublicLayout>
+          <h1>{decoded()?.isOwner ? "Start your call" : "Join a call"}</h1>
           <Show when={decoded.loading}>
             <p>Loading call link…</p>
           </Show>
@@ -308,7 +307,7 @@ export default function JoinCall() {
             }
           >
             <p>This call link is invalid or has expired.</p>
-            <A href={paths.home}>Go home</A>
+            <A href={paths.home}>Open Lakko</A>
           </Show>
           <Show
             when={
@@ -357,6 +356,7 @@ export default function JoinCall() {
               </Show>
               <button
                 type="button"
+                class="primary"
                 disabled={isAnonymousVisitor() && !maySaveDisplayName(guestNameCheck())}
                 onClick={() => void onStart(decoded()!)}
               >
@@ -381,12 +381,12 @@ export default function JoinCall() {
               <p>You are in this call.</p>
             </Show>
             <Show when={phase() === "dead"}>
-              <p>This call has ended or isn't active.</p>
-              <A href={paths.home}>Go home</A>
+              <p>This call has ended or is not active.</p>
+              <A href={paths.home}>Open Lakko</A>
             </Show>
             <Show when={phase() === "ended"}>
               <p>The call has ended.</p>
-              <A href={paths.home}>Go home</A>
+              <A href={paths.home}>Open Lakko</A>
             </Show>
             <Show when={phase() === "error"}>
               <p style={{ color: "var(--error)" }}>Failed: {shownError()}</p>
@@ -395,7 +395,7 @@ export default function JoinCall() {
               </button>
             </Show>
           </Show>
-        </article>
+        </PublicLayout>
       }
     >
       {/* Guest onboarding: after signupGuest the auth state is

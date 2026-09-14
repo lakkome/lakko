@@ -232,10 +232,11 @@ public class LinkCallHost(
         // The screen only exits once the session ended; a slot still claiming the
         // call would otherwise hold it with nothing left to show or end it. An
         // ordinary end was just shown on the in-call screen, so it is not
-        // repeated as a status line.
+        // repeated as a status line — unless a landing is showing the call, which
+        // then says it ended and forgets it when it closes.
         if (occupiesSlot) {
             leave()
-        } else if (mutableSlot.value?.phase == LinkCallPhase.ENDED) {
+        } else if (mutableSlot.value?.phase == LinkCallPhase.ENDED && mutableLandingClaims.value == 0) {
             dismissOutcome()
         }
     }

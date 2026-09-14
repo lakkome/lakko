@@ -104,7 +104,9 @@ final class LinkCallHost: ObservableObject {
     /// the user already left — never touches the slot.
     private var attempt: UUID?
     private var controls: Set<AnyCancellable> = []
-    private var landingCount = 0
+    /// The landings currently on screen. A set of tokens rather than a count,
+    /// so a repeated `onAppear` cannot leave the notice hidden for good.
+    private var visibleLandings: Set<UUID> = []
 
     init(ports: Ports) {
         self.ports = ports
@@ -125,10 +127,14 @@ final class LinkCallHost: ObservableObject {
         slot?.callIdHex == callIdHex ? slot : nil
     }
 
-    /// A landing screen appeared / disappeared.
-    func noteLanding(visible: Bool) {
-        landingCount = max(0, landingCount + (visible ? 1 : -1))
-        let showing = landingCount > 0
+    /// The landing identified by `token` appeared / disappeared.
+    func noteLanding(_ token: UUID, visible: Bool) {
+        if visible {
+            visibleLandings.insert(token)
+        } else {
+            visibleLandings.remove(token)
+        }
+        let showing = !visibleLandings.isEmpty
         if showing != landingShowing { landingShowing = showing }
     }
 

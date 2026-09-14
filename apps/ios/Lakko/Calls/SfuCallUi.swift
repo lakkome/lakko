@@ -62,7 +62,7 @@ final class SfuCallUi {
     /// Optional observer for the mid-call camera-on lifecycle (piece B) —
     /// the analog of the web `onVideoPublishState`. Set it to drive a
     /// camera-button spinner. The fail-safe revert itself is driven by
-    /// ``publishVideo()``'s throw (the ChatViewModel catches it), not by this.
+    /// ``publishVideo()``'s throw (``GroupCallHost`` catches it), not by this.
     var onVideoPublishState: ((SfuCallSession.VideoPublishState) -> Void)? {
         get { videoStateRelay.handler }
         set { videoStateRelay.handler = newValue }

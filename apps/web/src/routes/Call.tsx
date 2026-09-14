@@ -69,19 +69,21 @@ import { paths } from "./paths";
 // Theme tokens (dark)
 // ============================================================================
 
+// The call screen is always dark (video), so these are the design system's
+// dark-theme values as literals rather than the theme-following variables.
 const COLOURS = {
-  background: "#0F0F0F",
-  surface: "#1A1A1A",
-  surfaceHover: "#202020",
-  border: "#2A2A2A",
-  textPrimary: "#FAFAFA",
-  textSecondary: "#A1A1AA",
-  accentBlue: "#3B82F6",
-  endCallRed: "#DC2626",
-  mutedRed: "#EF4444",
-  qualityGreen: "#10B981",
-  qualityYellow: "#FBBF24",
-  qualityRed: "#EF4444",
+  background: "#0f1220",
+  surface: "#171b2e",
+  surfaceHover: "#1c2136",
+  border: "#2a3145",
+  textPrimary: "#e6e9f4",
+  textSecondary: "#9aa3bd",
+  accentBlue: "#818cf8",
+  endCallRed: "#dc2626",
+  mutedRed: "#f87171",
+  qualityGreen: "#4ade80",
+  qualityYellow: "#f59e0b",
+  qualityRed: "#f87171",
 } as const;
 
 function colourForQuality(tier: QualityTier): string {

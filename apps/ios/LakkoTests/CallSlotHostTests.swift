@@ -806,10 +806,12 @@ final class LinkCallHostTests: XCTestCase {
         let h = Harness()
         let host = makeHost(h)
         _ = await host.start(request(0x0A, owner: false))
-        host.noteLanding(visible: true)
+        let landing = UUID()
+        host.noteLanding(landing, visible: true)
+        host.noteLanding(landing, visible: true)
         XCTAssertNil(host.notice)
-        host.noteLanding(visible: false)
-        XCTAssertEqual(host.notice?.actions, [.open, .cancel])
+        host.noteLanding(landing, visible: false)
+        XCTAssertEqual(host.notice?.actions, [.open, .cancel], "a repeated appear is still one landing")
     }
 }
 

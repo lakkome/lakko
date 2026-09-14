@@ -1115,15 +1115,8 @@ const RotationPanel: Component<{
   });
 
   return (
-    <div
-      style={{
-        "margin-bottom": "20px",
-        padding: "12px",
-        "background-color": COLOURS.surface,
-        "border-radius": "8px",
-      }}
-    >
-      <h2 style={{ margin: "0 0 6px 0", "font-size": "15px" }}>Key rotation</h2>
+    <section class="lk-card" style={{ "margin-bottom": "20px" }}>
+      <h2>Key rotation</h2>
       <p
         style={{
           margin: "0 0 8px 0",
@@ -1180,7 +1173,7 @@ const RotationPanel: Component<{
           {error()}
         </div>
       </Show>
-    </div>
+    </section>
   );
 };
 
@@ -1308,26 +1301,8 @@ const CoPublishersPanel: Component<{
   });
 
   return (
-    <div
-      style={{
-        margin: "0.6rem 0 0 0",
-        padding: "0.5rem",
-        border: "1px dashed var(--surface-border)",
-        "border-radius": "var(--radius-sm)",
-        background: "var(--surface-bg)",
-      }}
-    >
-      <h3
-        style={{
-          "font-size": "0.8rem",
-          "text-transform": "uppercase",
-          "letter-spacing": "0.04em",
-          color: "var(--surface-muted)",
-          margin: "0 0 0.4rem 0",
-        }}
-      >
-        Co-publishers
-      </h3>
+    <section class="lk-card" style={{ "margin-bottom": "20px" }}>
+      <h2>Co-publishers</h2>
       <button
         type="button"
         disabled={busy()}
@@ -1473,7 +1448,7 @@ const CoPublishersPanel: Component<{
           {error()}
         </p>
       </Show>
-    </div>
+    </section>
   );
 };
 
@@ -1612,14 +1587,7 @@ const SubscribersPanel: Component<{ readonly channelIdHex: string }> = (
   });
 
   return (
-    <div
-      style={{
-        "margin-bottom": "20px",
-        padding: "12px",
-        "background-color": COLOURS.surface,
-        "border-radius": "8px",
-      }}
-    >
+    <section class="lk-card" style={{ "margin-bottom": "20px" }}>
       <div
         style={{
           display: "flex",
@@ -1628,7 +1596,7 @@ const SubscribersPanel: Component<{ readonly channelIdHex: string }> = (
           "margin-bottom": "8px",
         }}
       >
-        <h2 style={{ margin: "0", "font-size": "15px" }}>
+        <h2 style={{ margin: "0" }}>
           Subscribers{" "}
           <span style={{ color: COLOURS.textSecondary, "font-weight": "400" }}>
             ({subs()?.length ?? "…"})
@@ -1773,7 +1741,7 @@ const SubscribersPanel: Component<{ readonly channelIdHex: string }> = (
           </For>
         </ul>
       </Show>
-    </div>
+    </section>
   );
 };
 

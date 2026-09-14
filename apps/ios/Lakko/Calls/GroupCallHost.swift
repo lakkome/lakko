@@ -355,16 +355,9 @@ final class GroupCallHost: ObservableObject {
     /// dismissed.
     func leave(hungUp: Bool = true) {
         guard let call = releaseSession() else { return }
-        let plan0 = GroupCallHostRules.planLeave(
-            hungUp: hungUp,
-            joinPublished: call.joinPublished,
-            initiator: call.initiator,
-            callId: call.callId,
-            ownLeaf: call.ownLeaf,
-            record: nil
-        )
-        // Nothing this device could have to say.
-        guard plan0.publishLeave || plan0.publishEnd else { return }
+        // A device that neither joined nor announced the call has nothing to
+        // say about it (see `planLeave`), so it need not read the journal.
+        guard call.joinPublished || call.initiator else { return }
         Task { @MainActor [weak self] in
             await self?.announceDeparture(call: call, hungUp: hungUp)
         }
