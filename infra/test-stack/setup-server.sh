@@ -24,7 +24,7 @@ TURN_URIS="${TURN_URIS:-}"
 
 ENV_DIR=/etc/lakko-test
 ENV_FILE=$ENV_DIR/lakko.env
-DBS=(auth ds discovery push_gw)
+DBS=(auth ds discovery push_gw channels)
 
 id lakkotest >/dev/null 2>&1 || useradd --system --home-dir /var/lib/lakko-test --shell /usr/sbin/nologin lakkotest
 install -d -m 755 -o root -g root /opt/lakko-test /opt/lakko-test/bin
@@ -50,6 +50,7 @@ LAKKO_AUTH_DATABASE_URL=mysql://lakko_test:${DB_PASS}@127.0.0.1:3306/lakko_test_
 LAKKO_DS_DATABASE_URL=mysql://lakko_test:${DB_PASS}@127.0.0.1:3306/lakko_test_ds
 LAKKO_DISCOVERY_DATABASE_URL=mysql://lakko_test:${DB_PASS}@127.0.0.1:3306/lakko_test_discovery
 LAKKO_PUSH_GW_DATABASE_URL=mysql://lakko_test:${DB_PASS}@127.0.0.1:3306/lakko_test_push_gw
+LAKKO_CHANNELS_DATABASE_URL=mysql://lakko_test:${DB_PASS}@127.0.0.1:3306/lakko_test_channels
 
 LAKKO_SESSION_TOKEN_SECRET=$(openssl rand -base64 32)
 LAKKO_TOTP_ENC_KEY=$(openssl rand -base64 32)
@@ -109,6 +110,14 @@ if ! grep -q '^LAKKO_WEBPUSH_VAPID_PUBLIC_KEY_B64URL=' $ENV_FILE; then
 fi
 
 DB_PASS=$(grep -m1 '^LAKKO_AUTH_DATABASE_URL=' $ENV_FILE | sed -E 's#^.*lakko_test:([^@]+)@.*#\1#')
+
+# The channels service arrived after the first servers were set up: an env
+# file from before it keeps its secrets and gains only this line.
+if ! grep -q '^LAKKO_CHANNELS_DATABASE_URL=' $ENV_FILE; then
+  echo "LAKKO_CHANNELS_DATABASE_URL=mysql://lakko_test:${DB_PASS}@127.0.0.1:3306/lakko_test_channels" >> $ENV_FILE
+  echo "channels database URL added to the env file"
+fi
+
 {
   for d in "${DBS[@]}"; do
     echo "CREATE DATABASE IF NOT EXISTS lakko_test_$d CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"

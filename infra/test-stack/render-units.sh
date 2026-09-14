@@ -13,7 +13,7 @@ REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT="${1:?usage: render-units.sh <output-dir>}"
 mkdir -p "$OUT"
 
-SERVICES=(auth ds storage discovery push-gw gif-proxy sfu)
+SERVICES=(auth ds storage discovery push-gw gif-proxy channels sfu)
 
 for svc in "${SERVICES[@]}"; do
   if [[ $svc == sfu ]]; then src=lakko-sfu.service; else src="lakko-svc-$svc.service"; fi

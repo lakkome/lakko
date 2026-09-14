@@ -24,7 +24,7 @@ HERE="$REPO/infra/test-stack"
 DOMAIN="${LAKKO_TEST_DOMAIN:-test.lakko.me}"
 SSH_TARGET="${LAKKO_TEST_SSH:-root@$DOMAIN}"
 OUT="$REPO/target/test-stack"
-SERVICES=(auth ds storage discovery push-gw gif-proxy sfu)
+SERVICES=(auth ds storage discovery push-gw gif-proxy channels sfu)
 
 # accept-new records the host key on first contact and still refuses a changed one.
 SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new)
@@ -96,7 +96,7 @@ REMOTE
 
 log "health checks"
 failed=0
-for path in api/auth/health api/ds/health api/storage/health api/discovery/health api/push/health sfu/health; do
+for path in api/auth/health api/ds/health api/storage/health api/discovery/health api/push/health api/channels/health sfu/health; do
   code=000
   for _ in $(seq 1 15); do
     code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' "https://$DOMAIN/$path" || true)

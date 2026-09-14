@@ -34,11 +34,11 @@ incremental.
 | Units | `lakko-test-<service>.service`, `lakko-test.target` (rendered from `infra/systemd` by `render-units.sh` on every deploy) |
 | Environment and secrets | `/etc/lakko-test/lakko.env` (root:lakkotest 640, generated on the server) |
 | Web Push VAPID keys | `/etc/lakko-test/vapid_private.pem` (PKCS#8, 640) and `vapid_public.b64url` (read by `deploy.sh` for the web build) |
-| Databases | `lakko_test_{auth,ds,discovery,push_gw}`, user `lakko_test` |
+| Databases | `lakko_test_{auth,ds,discovery,push_gw,channels}`, user `lakko_test` |
 | Blobs | `/var/lib/lakko-test/blobs` |
 | Web client | `/var/www/lakko-test-web` |
 | nginx | `/etc/nginx/sites-available/lakko-test` from `nginx/lakko-test.conf` |
-| Ports | services on `127.0.0.1:8081-8085,8091`, SFU signaling `127.0.0.1:7880`, SFU media UDP `43210` public |
+| Ports | services on `127.0.0.1:8081-8086,8091`, SFU signaling `127.0.0.1:7880`, SFU media UDP `43210` public |
 
 Logs: `journalctl -u lakko-test-<service>`.
 
