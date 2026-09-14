@@ -74,8 +74,11 @@ export interface AcceptedContact {
    *  the receive path doesn't always have it (it lives in the
    *  identity bundle, not in the ContactRequest itself). */
   x25519PubkeyB64?: string;
-  /** User-chosen display label. Defaults to a fingerprint hex
-   *  prefix on accept; the user can edit later. */
+  /** The viewer's LOCAL RENAME of this contact (ADR-0048 §5, precedence
+   *  1). Empty string = no rename, which is the value on accept: the name
+   *  shown then comes from the contact's own profile, their verified
+   *  username, or the key fingerprint, via `profile/resolver.ts`. Never sent
+   *  anywhere. */
   displayName: string;
   /** When the user accepted the request (ms since epoch). */
   acceptedAtMs: number;
@@ -358,6 +361,37 @@ export function peerContactByMemberPubkeys(
   return undefined;
 }
 
+const acceptedListeners = new Set<() => void>();
+
+/** ADR-0048 — subscribe to changes of the accepted list (an accept, a rename,
+ *  a removal), so a view resolving names re-reads the local renames. Returns
+ *  the unsubscribe. Same-page only. */
+export function subscribeAcceptedChanged(listener: () => void): () => void {
+  acceptedListeners.add(listener);
+  return () => acceptedListeners.delete(listener);
+}
+
+function notifyAcceptedChanged(): void {
+  for (const l of acceptedListeners) {
+    try {
+      l();
+    } catch {
+      // A failing listener must not break the write that triggered it.
+    }
+  }
+}
+
+/** ADR-0048 — the local renames, keyed by base64 signature key. Contacts
+ *  with no rename are absent. */
+export function loadRenames(): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const c of loadAccepted()) {
+    const name = c.displayName.trim();
+    if (name.length > 0) out.set(c.signaturePubkeyB64, name);
+  }
+  return out;
+}
+
 /** Append (or replace by `signaturePubkeyB64`) an accepted
  *  contact and persist. Returns the new list. */
 export function upsertAccepted(contact: AcceptedContact): AcceptedContact[] {
@@ -370,6 +404,7 @@ export function upsertAccepted(contact: AcceptedContact): AcceptedContact[] {
       ? [...current.accepted, contact]
       : current.accepted.map((a, i) => (i === existing ? contact : a));
   save({ ...current, accepted: next });
+  notifyAcceptedChanged();
   return next;
 }
 
@@ -381,6 +416,7 @@ export function removeAccepted(signaturePubkeyB64: string): AcceptedContact[] {
     (a) => a.signaturePubkeyB64 !== signaturePubkeyB64,
   );
   save({ ...current, accepted: next });
+  notifyAcceptedChanged();
   return next;
 }
 
@@ -394,6 +430,7 @@ export function clearAll(): void {
   if (typeof localStorage === "undefined") return;
   localStorage.removeItem(STORAGE_KEY);
   localStorage.removeItem(LEGACY_STORAGE_KEY_V1);
+  notifyAcceptedChanged();
 }
 
 // ----------------------------------------------------------------------------
@@ -626,8 +663,10 @@ export function readLogVersion(accountIdB64: string): number | undefined {
   return load().pins[accountIdB64]?.pinnedLogVersion;
 }
 
-/** Render a short human-readable hex prefix for a public key.
- *  Used as the default `displayName` on accept. */
+/** Render a short hex prefix for a public key (8 hex chars, unseparated).
+ *  NOT a display label: a person is labelled through
+ *  `profile/resolver.ts`, whose fingerprint fallback is `a1b2 c3d4` with no
+ *  `@` (ADR-0048). */
 export function fingerprintShort(pubkey: Uint8Array): string {
   let out = "";
   for (let i = 0; i < Math.min(pubkey.length, 4); i++) {

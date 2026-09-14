@@ -400,7 +400,10 @@ public func membershipRefusalReason(of error: Error) -> FfiRefusalReason? {
             case .Identity, .KeyPackage, .Group, .Message, .Exporter, .Codec, .Unsupported,
                 .Auth, .AuthAlreadyFinalized, .Mnemonic, .Pow, .Discovery,
                 .DiscoveryAlreadyFinalized, .Contacts, .Crypto, .Attachment, .Shamir, .Backup,
-                .BackupHeadStale, .Channels, .Call, .Sfu, .Transport, .Release, .LockPoisoned:
+                .BackupHeadStale, .Channels, .Call, .Sfu, .Transport, .Release, .LockPoisoned,
+                .UsernameEmpty, .UsernameTooShort, .UsernameTooLong, .UsernameInvalidCharacters,
+                .DisplayNameLineBreak, .DisplayNameControlOrFormatCharacter,
+                .DisplayNameTooLong, .DisplayNameTooManyBytes:
                 return nil
             }
         }

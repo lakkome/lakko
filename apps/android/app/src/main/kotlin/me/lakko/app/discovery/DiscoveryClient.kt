@@ -30,6 +30,8 @@ import me.lakko.app.auth.base64Encode
 import me.lakko.app.auth.base64UrlEncodeNoPad
 import me.lakko.app.auth.base64UrlDecodeNoPad
 import me.lakko.app.auth.solvePow
+import me.lakko.app.config.ApiEndpoints
+import me.lakko.app.config.ApiService
 import me.lakko.app.transport.AntiCensorshipEngine
 import uniffi.lakko_ffi_uniffi.OprfBlinder
 import uniffi.lakko_ffi_uniffi.computeJoinerInviteTag
@@ -84,6 +86,13 @@ public class DiscoveryClient(
      *  [Dispatchers.Default]; override to a `TestDispatcher`
      *  inside `runTest`. */
     private val powDispatcher: CoroutineDispatcher = Dispatchers.Default,
+    /** The signed-in session's token for the three rate-limited reads
+     *  (`/discovery/oprf`, `/discovery/lookup`, `/discovery/channel/lookup`)
+     *  when this client carries no [sessionToken] of its own. Discovery only
+     *  uses it to charge those reads to the account instead of the shared
+     *  per-IP bucket; it is never attached to any other request. Defaults to
+     *  [AmbientSessionToken]. */
+    private val rateLimitToken: () -> String? = { AmbientSessionToken.current },
 ) : AutoCloseable {
 
     private val json = Json {
@@ -141,7 +150,7 @@ public class DiscoveryClient(
 
     /** `POST /discovery/oprf`. */
     public suspend fun oprfEvaluate(req: OprfRequest): OprfResponse =
-        doPost("/discovery/oprf") {
+        doPost("/discovery/oprf", rateLimited = true) {
             contentType(ContentType.Application.Json)
             setBody(req)
         }
@@ -159,7 +168,7 @@ public class DiscoveryClient(
      * any other non-2xx.
      */
     public suspend fun lookupRaw(req: LookupRequest): LookupResponse? =
-        doPostNullableOn404("/discovery/lookup") {
+        doPostNullableOn404("/discovery/lookup", rateLimited = true) {
             contentType(ContentType.Application.Json)
             setBody(req)
         }
@@ -181,7 +190,7 @@ public class DiscoveryClient(
      * namespace (G4-5, ADR-0010).
      */
     public suspend fun channelLookupRaw(req: ChannelLookupRequest): ChannelLookupResponse? =
-        doPostNullableOn404("/discovery/channel/lookup") {
+        doPostNullableOn404("/discovery/channel/lookup", rateLimited = true) {
             contentType(ContentType.Application.Json)
             setBody(req)
         }
@@ -1472,12 +1481,29 @@ public class DiscoveryClient(
     // -----------------------------------------------------------------
 
     /**
+     * The `Authorization` header value for a request, or `null`.
+     *
+     * The client's own [sessionToken] always wins. [rateLimited] marks the
+     * three reads discovery rate-limits (`/discovery/oprf`,
+     * `/discovery/lookup`, `/discovery/channel/lookup`): with a token the
+     * server charges the account, without one the source IP, which everyone
+     * behind a NAT shares. For those, a client carrying no token of its own
+     * falls back to the signed-in session's ([rateLimitToken]). Protected
+     * writes never take that fallback.
+     */
+    private fun bearerHeader(rateLimited: Boolean): String? {
+        val token = sessionToken ?: if (rateLimited) rateLimitToken() else null
+        return token?.let { "Bearer $it" }
+    }
+
+    /**
      * One-shot POST. Reified `Res` so kotlinx-serialization can
      * decode the response body without runtime reflection. The
      * lambda configures method-specific bits (body, content-type).
      */
     private suspend inline fun <reified Res : Any> doPost(
         endpoint: String,
+        rateLimited: Boolean = false,
         crossinline configure: HttpRequestBuilder.() -> Unit,
     ): Res {
         val url = "$baseUrl$endpoint"
@@ -1486,7 +1512,7 @@ public class DiscoveryClient(
         // the inline lambda doesn't try to capture `this` —
         // `@Volatile` reads are atomic but the field-access
         // shape still confuses inlining.
-        val authHeader = sessionToken?.let { "Bearer $it" }
+        val authHeader = bearerHeader(rateLimited)
         val response: HttpResponse = try {
             client.post(url) {
                 if (authHeader != null) {
@@ -1516,10 +1542,11 @@ public class DiscoveryClient(
      */
     private suspend inline fun <reified Res : Any> doPostNullableOn404(
         endpoint: String,
+        rateLimited: Boolean = false,
         crossinline configure: HttpRequestBuilder.() -> Unit,
     ): Res? {
         val url = "$baseUrl$endpoint"
-        val authHeader = sessionToken?.let { "Bearer $it" }
+        val authHeader = bearerHeader(rateLimited)
         val response: HttpResponse = try {
             client.post(url) {
                 if (authHeader != null) {
@@ -1576,12 +1603,13 @@ public class DiscoveryClient(
 
     public companion object {
         /**
-         * Default discovery service URL — the Android emulator
-         * loopback alias for the host machine, port `8084`
-         * matching the `LAKKO_BIND` dev setup for
-         * `lakko-svc-discovery`.
+         * Default discovery service URL — `<LAKKO_API_BASE_URL>/discovery`
+         * ([ApiEndpoints]), or the Android emulator loopback alias +
+         * the dev `lakko-svc-discovery` bind (`http://10.0.2.2:8084`)
+         * when the build carries no API base URL.
          */
-        public const val DEFAULT_BASE_URL: String = "http://10.0.2.2:8084"
+        public val DEFAULT_BASE_URL: String
+            get() = ApiEndpoints.baseUrlFor(ApiService.DISCOVERY)
 
         /** Raw 16-byte UUIDv7. */
         private const val ACCOUNT_ID_LEN: Int = 16

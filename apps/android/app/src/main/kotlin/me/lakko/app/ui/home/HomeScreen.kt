@@ -41,6 +41,8 @@ public fun HomeScreen(
     onOpenPasskeys: () -> Unit,
     onOpenDevices: () -> Unit,
     onOpenAntiCensorship: () -> Unit,
+    /** ADR-0048 — Settings -> Profile. Defaults to a no-op for previews. */
+    onOpenProfile: () -> Unit = {},
     onLogout: () -> Unit,
     onForgetDevice: () -> Unit,
     modifier: Modifier = Modifier,
@@ -72,6 +74,15 @@ public fun HomeScreen(
             fontFamily = FontFamily.Monospace,
         )
         Spacer(Modifier.height(32.dp))
+        // ADR-0048 UX §4 — the own profile name lives here, with the other
+        // settings surfaces.
+        OutlinedButton(
+            onClick = onOpenProfile,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text("Profile")
+        }
+        Spacer(Modifier.height(8.dp))
         Button(
             onClick = onOpenContacts,
             modifier = Modifier.fillMaxWidth(),
@@ -126,6 +137,10 @@ public fun HomeScreen(
         ) {
             Text("Anti-censorship")
         }
+        Spacer(Modifier.height(8.dp))
+        // ADR-0047 / UX spec §3 — autoplay downloads media, so it is off until
+        // the user turns it on.
+        me.lakko.app.ui.chat.AutoplayVideoNotesSetting()
         Spacer(Modifier.height(16.dp))
         Text(
             text = "Contacts (1.15e) and 1×1 chat (1.15f) are live. Accept on a " +

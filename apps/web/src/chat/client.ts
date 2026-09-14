@@ -91,6 +91,12 @@ import {
 import { tryDecodeSecretEnvelope } from "../push/group-routing";
 import { DurableCursorGate } from "./durable-cursor";
 import {
+  consumeOwnPublished,
+  isOwnPublished,
+  markOwnPublished,
+} from "./own-published";
+import { sniffProfile, type ReceivedProfile } from "../profile/profile-envelope";
+import {
   resolveMemberIdentity,
   type MemberIdentity,
   type RosterMember,
@@ -288,6 +294,10 @@ export type IncomingChatEvent =
        *  iteration; the call surface loads it lazily on
        *  its own mount. */
       payloadBytes: Uint8Array;
+      /** MLS-authenticated sender leaf of the frame, when it named
+       *  one. The group-call record refuses a `groupStart` /
+       *  `groupJoin` / `groupLeave` whose claimed leaf differs. */
+      senderLeaf?: number | undefined;
       createdAt: string;
     }
   | {
@@ -347,6 +357,24 @@ export type IncomingChatEvent =
       /** The DS row's timestamp — the beacon's age, which is the half of
        *  the freshness question the bytes deliberately do not carry. */
       createdAt: string;
+    }
+  | {
+      /** ADR-0048 — a member's profile (display name + claimed username).
+       *  Never a timeline bubble: the receive loop files it in the profile
+       *  store under `senderKey` and nothing else.
+       *
+       *  `profile` is `undefined` when the domain matched but the envelope
+       *  failed its bounds — the core refuses a bad profile as a whole, so the
+       *  row is dropped rather than stored or rendered. */
+      kind: "profile";
+      messageId: number;
+      profile: ReceivedProfile | undefined;
+      /** Diagnostic only. */
+      senderLeaf: number | undefined;
+      /** The sender's signature key resolved at receipt (C-68) — the ONLY key
+       *  a profile may be filed under. `undefined` ⇒ the profile is dropped. */
+      senderKey: MemberIdentity | undefined;
+      createdAt: string;
     };
 
 /**
@@ -364,6 +392,13 @@ export interface PollCursorRef {
   read(): number;
   /** Advance the cursor. Called under the lock, only on the applied path. */
   advance(to: number): void;
+  /** Called under the lock once the batch has passed the stale check, before
+   *  its first row is applied. The place to snapshot state the caller diffs
+   *  against the post-apply state (the ADR-0043 membership baseline): a
+   *  snapshot taken before the fetch would, under a long poll, predate
+   *  whatever another path applied while this one was parked on the network,
+   *  and the diff would report that change a second time. */
+  beforeApply?(): void;
 }
 
 /** What one `pollMessages` attempt did. */
@@ -665,6 +700,10 @@ export class ChatClient {
       throw new ChatError("DS publish failed", err);
     }
     this.ownPublishedIds.add(publish.id);
+    // ADR-0048 — shared with every other ChatClient on this page, so a
+    // service envelope published outside the chat route (a profile right
+    // after a Welcome) is still recognised as an echo there.
+    markOwnPublished(base64Encode(groupId), publish.id);
 
     // 1.20e — fan a wake out to every device subscribed to
     // this group. Fire-and-forget — failures here would not
@@ -816,10 +855,10 @@ export class ChatClient {
    *
    * The FETCH stays OUTSIDE the lock. It touches no MLS state, and parking a DS
    * round-trip behind a commit publish is G-37's own defect at a per-group blast
-   * radius. Web's poll uses `waitSecs = 0` today, so there is no long poll to
-   * protect — the split is kept anyway, for the same reason Android keeps it:
-   * the moment a long poll is turned on, a lock that spanned the fetch would
-   * stall every send on the group for its full duration.
+   * radius. It matters on web too: the chat route's automatic receive loop
+   * long-polls (`waitSecs` = `LONG_POLL_WAIT_SECS`, see `ds/long-poll-loop.ts`),
+   * and a lock that spanned that fetch would stall every send on the group
+   * for the full parked duration.
    *
    * ## The cursor moves INSIDE the lock, or not at all
    *
@@ -849,14 +888,22 @@ export class ChatClient {
     after: number,
     waitSecs = 0,
     cursorRef?: PollCursorRef,
+    signal?: AbortSignal,
   ): Promise<PollMessagesResult> {
     const myIdentity = await this.resolveIdentity(identity);
 
     const groupId: Uint8Array = group.groupId;
-    // The FETCH — deliberately outside the lock.
+    // The FETCH — deliberately outside the lock. `signal` aborts only this
+    // half: once a batch is in hand it is applied (or dropped as stale) under
+    // the lock like any other, because abandoning a fetched batch mid-apply is
+    // exactly the torn state the lock exists to prevent.
     let raw;
     try {
-      raw = await this.ds.fetchGroup(groupId, { after, waitSecs });
+      raw = await this.ds.fetchGroup(groupId, {
+        after,
+        waitSecs,
+        ...(signal !== undefined ? { signal } : {}),
+      });
     } catch (err) {
       throw new ChatError("DS fetch failed", err);
     }
@@ -887,6 +934,7 @@ export class ChatClient {
         // backward.
         return { events: [], cursor: current, hasMore: false, outcome: "cursor-moved" };
       }
+      cursorRef.beforeApply?.();
     }
 
     const events: IncomingChatEvent[] = [];
@@ -896,12 +944,16 @@ export class ChatClient {
     // the batch gets re-fetched, our own row would then be handed to OpenMLS,
     // and every subsequent poll would log a `CannotDecryptOwnMessage` for it.
     const matchedEchoes: number[] = [];
+    const groupIdB64 = base64Encode(group.groupId);
     for (const message of raw.messages) {
       cursor = message.id;
       // Drop our own echoes — the DS doesn't dedupe and
       // OpenMLS can't decrypt them on the sender side at the
       // same epoch.
-      if (this.ownPublishedIds.has(message.id)) {
+      if (
+        this.ownPublishedIds.has(message.id) ||
+        isOwnPublished(groupIdB64, message.id)
+      ) {
         matchedEchoes.push(message.id);
         continue;
       }
@@ -954,7 +1006,10 @@ export class ChatClient {
         cursorRef?.advance(cursor);
         // Consume the echo registry entries only now: on the held path they
         // stay armed so the re-fetched batch still suppresses our own rows.
-        for (const id of matchedEchoes) this.ownPublishedIds.delete(id);
+        for (const id of matchedEchoes) {
+          this.ownPublishedIds.delete(id);
+          consumeOwnPublished(groupIdB64, id);
+        }
       },
     );
     if (verdict === "held") {
@@ -1036,13 +1091,16 @@ export async function toEvent(
     // envelopes are JSON (the first byte is `{` / 0x7B). The
     // discriminator is cheap + unambiguous because the
     // proto's first wire tag is field 10 (offer) ... field
-    // 13 (end) — first byte ∈ {0x52, 0x5A, 0x62, 0x6A},
-    // none of which is 0x7B.
+    // 16 (group_leave) — see `looksLikeCallSignaling` for the
+    // table — none of which is 0x7B.
     if (looksLikeCallSignaling(bytes)) {
       return {
         kind: "callSignaling",
         messageId,
         payloadBytes: bytes,
+        // The MLS-authenticated sender, so a group-control body that
+        // names a leaf other than its own sender can be refused.
+        senderLeaf,
         createdAt,
       };
     }
@@ -1080,6 +1138,23 @@ export async function toEvent(
         senderLeaf,
         createdAt,
       };
+    }
+    // ADR-0048 — a profile envelope, before the chat parser for the same
+    // reason as the two arms above: the lossy-UTF-8 fallback would render it
+    // as a bubble carrying the sender's name. A domain match that fails its
+    // bounds is dropped here too (`profile: undefined`), never parsed as chat.
+    {
+      const sniff = sniffProfile(await loadWasm(), bytes);
+      if (sniff.kind !== "none") {
+        return {
+          kind: "profile",
+          messageId,
+          profile: sniff.kind === "profile" ? sniff.profile : undefined,
+          senderLeaf,
+          senderKey,
+          createdAt,
+        };
+      }
     }
     // ADR-0023 — feed the application bytes through the
     // structured body parser, which surfaces the chat / edit /
@@ -1154,30 +1229,47 @@ export async function toEvent(
 
 /**
  * Cheap discriminator: are these bytes a call-signaling
- * proto? Returns `true` when the first byte matches one of
- * the `CallSignalingPayload.body` oneof field tags
- * (0x52 / 0x5A / 0x62 / 0x6A) AND the bytes are NOT JSON
- * (which would start with `{` / 0x7B). Cheap enough to run
- * on every `Application` row in the poll batch.
+ * proto? Returns `true` when the leading bytes are one of
+ * the `CallSignalingPayload.body` oneof field tags. Cheap
+ * enough to run on every `Application` row in the poll batch.
  *
- * Wire layout for the first byte of an embedded
- * `CallSignalingPayload`:
+ * Wire layout of the leading tag of an embedded
+ * `CallSignalingPayload` (wire type 2, `(field << 3) | 2`):
  *
- *   field 10 (offer)        → tag = (10 << 3) | 2 = 0x52
- *   field 11 (answer)       → tag = (11 << 3) | 2 = 0x5A
- *   field 12 (candidate)    → tag = (12 << 3) | 2 = 0x62
- *   field 13 (end)          → tag = (13 << 3) | 2 = 0x6A
+ *   field 10 (offer)        → 0x52
+ *   field 11 (answer)       → 0x5A
+ *   field 12 (candidate)    → 0x62
+ *   field 13 (end)          → 0x6A
+ *   field 14 (group_start)  → 0x72
+ *   field 15 (group_join)   → 0x7A
+ *   field 16 (group_leave)  → 0x82 0x01  (the tag is 130, a two-byte varint)
  *
- * Chat envelopes are JSON and start with `{` (0x7B). The
- * sets don't overlap. A false positive on a non-JSON,
- * non-signaling future-envelope shape is still harmless —
- * the caller's downstream `parseCallSignaling` rejects with
- * a proto-decode error and the caller swallows.
+ * The three group-control arms were missing, so a group-call
+ * start / join / leave fell through to `parseBodyEnvelope`,
+ * whose lossy-UTF-8 fallback rendered it as a garbage chat
+ * bubble. The background mirror in `public/sw-push-decrypt.js`
+ * carries the same table and must stay in step.
+ *
+ * Chat envelopes are JSON and start with `{` (0x7B); the
+ * `lakko/…` service envelopes start with `l` (0x6C). Neither
+ * overlaps. A false positive on some future non-JSON shape is
+ * harmless — the call dispatcher's `parseCallSignaling`
+ * rejects it and the row is dropped.
  */
 function looksLikeCallSignaling(bytes: Uint8Array): boolean {
   if (bytes.length === 0) return false;
   const first = bytes[0] as number;
-  return first === 0x52 || first === 0x5a || first === 0x62 || first === 0x6a;
+  if (
+    first === 0x52 ||
+    first === 0x5a ||
+    first === 0x62 ||
+    first === 0x6a ||
+    first === 0x72 ||
+    first === 0x7a
+  ) {
+    return true;
+  }
+  return first === 0x82 && bytes.length > 1 && bytes[1] === 0x01;
 }
 
 /**

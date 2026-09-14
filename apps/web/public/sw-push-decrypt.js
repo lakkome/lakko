@@ -108,6 +108,12 @@ const PREVIEW_MAX_CHARS = 140;
  *   preview path — the SW never emits a beacon and never folds a
  *   committer verdict, which it structurally cannot (C-59). Optional so
  *   an older deps object still loads.
+ * @property {(bytes: Uint8Array) => any} [decodeProfileEnvelope]
+ *   ADR-0048 — the fail-closed profile-envelope codec. THROWS an `Error`
+ *   carrying a `profileError` code when the bytes are not a well-formed
+ *   profile; `wrongDomain` is the only "not a profile" answer. Used ONLY to
+ *   classify the row out of the preview path — the SW never stores a
+ *   received profile (C-59). Optional so an older deps object still loads.
  * @property {() => number} [committerBeaconEnvelopeLen]
  *   ADR-0045 — the exact on-wire length of a beacon envelope, read from
  *   the FFI rather than hand-copied into each client (the drift class
@@ -144,6 +150,11 @@ const PREVIEW_MAX_CHARS = 140;
  * @property {(accountId: string, groupHex: string) => Promise<number | null>} [startCursor]
  *   The app's last-persisted per-group cursor (READ-ONLY), if available. Used as
  *   the fetch start so intervening commits are replayed and the epoch stays right.
+ * @property {(accountId: string, deviceKey: any, senderKeyB64: string) => Promise<string | null>} [lookupSenderName]
+ *   ADR-0048 — READ-ONLY: the name this device ALREADY resolves for a sender
+ *   (local rename, profile name, verified username), from the encrypted
+ *   profile row the app wrote. `null` when nothing is known. Never fetches or
+ *   verifies anything. Optional; any throw is treated as unknown.
  * @property {(...args: any[]) => any} [saveSnapshot]     FORBIDDEN — never called (test guard).
  * @property {(...args: any[]) => any} [saveMessageLog]   FORBIDDEN — never called (test guard).
  * @property {(...args: any[]) => any} [advanceCursor]    FORBIDDEN — never called (test guard).
@@ -304,6 +315,8 @@ export async function decryptPushPreview(wake, deps) {
     //    frame, a role-refused commit) is skipped — never guessed.
     /** @type {PushPreview | null} */
     let latest = null;
+    /** @type {string | null} */
+    let latestSenderKeyB64 = null;
     for (const message of messages) {
       let processed;
       try {
@@ -317,6 +330,27 @@ export async function decryptPushPreview(wake, deps) {
       const preview = previewFromProcessed(deps.wasm, processed);
       if (preview !== null) {
         latest = { title: "Lakko", body: preview, tag: groupHex };
+        // ADR-0048 / C-68 — resolve the sender's KEY now, against the roster
+        // of the epoch this frame decrypted at; a leaf resolved later could
+        // name whoever took the slot.
+        latestSenderKeyB64 = senderKeyOf(group, processed);
+      }
+    }
+    // ADR-0048 UX §5 — title the notification with a name this device
+    // already knows. A read of what the app stored; never a lookup.
+    if (
+      latest !== null &&
+      latestSenderKeyB64 !== null &&
+      typeof deps.lookupSenderName === "function"
+    ) {
+      let name = null;
+      try {
+        name = await deps.lookupSenderName(accountId, deviceKey, latestSenderKeyB64);
+      } catch {
+        name = null;
+      }
+      if (typeof name === "string" && name.length > 0) {
+        latest = { ...latest, title: name };
       }
     }
     return latest;
@@ -362,13 +396,21 @@ const COMMITTER_BEACON_FIRST_BYTE = 0x6c;
 /**
  * Cheap discriminator: are these bytes a prost-encoded
  * `CallSignalingPayload`? Mirrors `looksLikeCallSignaling` in
- * `src/chat/client.ts`. `true` when the first byte matches one of the
- * `body` oneof field tags:
+ * `src/chat/client.ts` — the two tables must stay in step. `true` when
+ * the leading bytes are one of the `body` oneof field tags
+ * (wire type 2, `(field << 3) | 2`):
  *
- *   field 10 (offer)     → tag = (10 << 3) | 2 = 0x52
- *   field 11 (answer)    → tag = (11 << 3) | 2 = 0x5A
- *   field 12 (candidate) → tag = (12 << 3) | 2 = 0x62
- *   field 13 (end)       → tag = (13 << 3) | 2 = 0x6A
+ *   field 10 (offer)       → 0x52
+ *   field 11 (answer)      → 0x5A
+ *   field 12 (candidate)   → 0x62
+ *   field 13 (end)         → 0x6A
+ *   field 14 (group_start) → 0x72
+ *   field 15 (group_join)  → 0x7A
+ *   field 16 (group_leave) → 0x82 0x01 (tag 130, a two-byte varint)
+ *
+ * Without the three group-control arms a group-call start / join /
+ * leave fell through to `parseBodyEnvelope`'s lossy-UTF-8 fallback and
+ * surfaced as a notification of binary garbage.
  *
  * Chat envelopes are JSON and start with `{` (0x7B) — no overlap.
  *
@@ -378,7 +420,17 @@ const COMMITTER_BEACON_FIRST_BYTE = 0x6c;
 function looksLikeCallSignaling(bytes) {
   if (bytes.length === 0) return false;
   const first = bytes[0];
-  return first === 0x52 || first === 0x5a || first === 0x62 || first === 0x6a;
+  if (
+    first === 0x52 ||
+    first === 0x5a ||
+    first === 0x62 ||
+    first === 0x6a ||
+    first === 0x72 ||
+    first === 0x7a
+  ) {
+    return true;
+  }
+  return first === 0x82 && bytes.length > 1 && bytes[1] === 0x01;
 }
 
 /**
@@ -410,7 +462,104 @@ function isServiceEnvelope(wasm, bytes) {
   if (isPushRoutingSecretEnvelope(wasm, bytes)) return true;
   // 3. Committer-liveness beacon (ADR-0045).
   if (isCommitterBeaconEnvelope(wasm, bytes)) return true;
+  // 4. Profile (ADR-0048).
+  if (isProfileEnvelope(wasm, bytes)) return true;
   return false;
+}
+
+/**
+ * First byte of the ADR-0048 profile domain separator (`'l'` of
+ * `"lakko/profile/v1\0"`). Deliberately its own constant, like the two above.
+ */
+const PROFILE_ENVELOPE_FIRST_BYTE = 0x6c;
+
+/**
+ * Arm 4 of {@link isServiceEnvelope} — the ADR-0048 profile envelope.
+ *
+ * Unfiltered, the lossy-UTF-8 fallback would put the domain string, the
+ * sender's name and username into a notification body.
+ *
+ * The verdict is the codec's, read through its stable `profileError` code
+ * rather than a hand-copied domain: a decode that SUCCEEDS is a profile, and a
+ * decode that throws anything but `wrongDomain` is a domain match with a body
+ * out of bounds — which the core refuses as a whole, and which is suppressed
+ * here too rather than rendered. A throw with no code, or `wrongDomain`, is
+ * not a profile and falls through to the normal parse.
+ *
+ * The profile is never kept: classification ONLY (C-59).
+ *
+ * @param {DecryptWasm} wasm
+ * @param {Uint8Array} bytes
+ * @returns {boolean}
+ */
+function isProfileEnvelope(wasm, bytes) {
+  if (bytes.length === 0 || bytes[0] !== PROFILE_ENVELOPE_FIRST_BYTE) return false;
+  if (typeof wasm.decodeProfileEnvelope !== "function") return false;
+  let decoded;
+  try {
+    decoded = wasm.decodeProfileEnvelope(bytes);
+  } catch (err) {
+    const code =
+      err !== null && typeof err === "object" ? /** @type {any} */ (err).profileError : undefined;
+    return typeof code === "string" && code !== "wrongDomain";
+  }
+  freeQuietly(decoded);
+  return true;
+}
+
+/**
+ * ADR-0048 / C-68 — the base64 signature key of a processed frame's sender,
+ * read from the throwaway group's roster, or `null`.
+ *
+ * @param {any} group
+ * @param {any} processed
+ * @returns {string | null}
+ */
+function senderKeyOf(group, processed) {
+  const leaf = processed?.senderLeaf;
+  if (typeof leaf !== "number") return null;
+  let members;
+  try {
+    members = group.members();
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(members)) return null;
+  for (const m of members) {
+    if (m?.leafIndex === leaf && m.signaturePublicKey instanceof Uint8Array) {
+      return bytesToBase64(m.signaturePublicKey);
+    }
+  }
+  return null;
+}
+
+/**
+ * ADR-0048 §5 — the name a notification may show for `senderKeyB64`, from the
+ * decrypted profile-row payload the app wrote (`src/profile/profile-idb.ts`),
+ * or `null`. The same precedence as `src/profile/resolver.ts` minus its last
+ * step: local rename → profile name → VERIFIED username. There is no
+ * fingerprint fallback here — an unknown sender keeps the generic title.
+ *
+ * Pure; exported for `sw.js` and the tests.
+ *
+ * @param {any} payload
+ * @param {string} senderKeyB64
+ * @returns {string | null}
+ */
+export function senderNameFromProfileRow(payload, senderKeyB64) {
+  if (payload === null || typeof payload !== "object" || payload.v !== 1) return null;
+  const rename = payload.r?.[senderKeyB64];
+  if (typeof rename === "string" && rename.trim().length > 0) return rename.trim();
+  const profile = payload.p?.[senderKeyB64];
+  if (profile === null || typeof profile !== "object") return null;
+  if (typeof profile.d === "string" && profile.d.length > 0) return profile.d;
+  if (typeof profile.u === "string" && profile.u.length > 0) {
+    const verdict = payload.vf?.[`${senderKeyB64}|${profile.u}`];
+    if (verdict !== null && typeof verdict === "object" && verdict.s === "verified") {
+      return `@${profile.u}`;
+    }
+  }
+  return null;
 }
 
 /**
@@ -577,6 +726,13 @@ function previewFromProcessed(wasm, processed) {
 function truncate(text) {
   if (text.length <= PREVIEW_MAX_CHARS) return text;
   return `${text.slice(0, PREVIEW_MAX_CHARS - 1)}…`;
+}
+
+/** Standard-alphabet base64 of raw bytes (matches `auth/account-id`). */
+function bytesToBase64(bytes) {
+  let s = "";
+  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i] ?? 0);
+  return btoa(s);
 }
 
 /** `true` when every char of `s` is a lowercase hex digit. */

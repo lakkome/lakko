@@ -896,6 +896,14 @@ public struct CallScreen: View {
     /// screen — the call is already connecting when presented.
     private let externallyDriven: Bool
     let onExit: () -> Void
+    /// A camera start this screen refused because camera access is denied
+    /// (``CameraPermission``). Shown as an alert; `nil` when none.
+    @State private var permissionMessage: String?
+
+    /// `true` when the camera controls drive a real call (a 1x1 session, or
+    /// an externally driven SFU call), so turning the camera on must settle
+    /// the camera permission first. The mock design route has no camera.
+    private var gatesCamera: Bool { session != nil || externallyDriven }
 
     public init(session: CallSession? = nil, onExit: @escaping () -> Void) {
         self.session = session
@@ -927,7 +935,17 @@ public struct CallScreen: View {
                         // audio-only; iOS carries the camera choice.
                         if let session = session {
                             _ = displayName
-                            session.dial(audio: micOn, video: camOn)
+                            // Settle the camera permission before the dial
+                            // starts a capture: a denied camera refuses with
+                            // an explanation, and the user can turn the
+                            // camera off and join with audio only.
+                            Task { @MainActor in
+                                guard await CameraPermission.ensureGranted(forVideo: camOn) else {
+                                    permissionMessage = CameraPermission.deniedMessage
+                                    return
+                                }
+                                session.dial(audio: micOn, video: camOn)
+                            }
                             return
                         }
                         // Mock design route — no session injected.
@@ -1013,6 +1031,51 @@ public struct CallScreen: View {
             sessionBindings.removeAll()
             state.reset()
         }
+        .alert(
+            "Camera unavailable",
+            isPresented: Binding(
+                get: { permissionMessage != nil },
+                set: { if !$0 { permissionMessage = nil } }
+            ),
+            presenting: permissionMessage
+        ) { _ in
+            Button("OK", role: .cancel) { permissionMessage = nil }
+        } message: { message in
+            Text(message)
+        }
+    }
+
+    /// Drive the camera choice onto whatever owns the call. Turning the
+    /// camera ON reaches here only after ``CameraPermission`` granted it
+    /// (see the `onSetCamera` control).
+    private func applyCamera(_ on: Bool) {
+        guard let session else {
+            // Mock route, or an externally driven SFU call whose owner
+            // observes `camOn` on the state and drives its session.
+            state.setCamera(on)
+            return
+        }
+        guard on else {
+            session.setCameraEnabled(false)
+            return
+        }
+        // 1×1 mid-call camera-on (piece B2b): addLocalVideo acquires + adds a
+        // video track + renegotiates the first time (a call started
+        // audio-only), and re-enables an existing sender after. Idempotent +
+        // in-flight-guarded. On a capture failure revert the toggle + log the
+        // reason — fail-safe, the call stays up audio-only (invariant #4).
+        // Mirror of the web Chat.tsx camera effect.
+        Task {
+            do {
+                try await session.addLocalVideo()
+            } catch {
+                state.setCamera(false)
+                NSLog(
+                    "CallScreen: addLocalVideo failed: %@",
+                    String(describing: error)
+                )
+            }
+        }
     }
 
     private var callView: some View {
@@ -1085,33 +1148,18 @@ public struct CallScreen: View {
                         }
                     },
                     onSetCamera: { on in
-                        if let session {
-                            if on {
-                                // 1×1 mid-call camera-on (piece B2b):
-                                // addLocalVideo acquires + adds a video track +
-                                // renegotiates the first time (a call started
-                                // audio-only), and re-enables an existing sender
-                                // after. Idempotent + in-flight-guarded. On a
-                                // capture failure revert the toggle + log the
-                                // reason — fail-safe, the call stays up
-                                // audio-only (invariant #4). Mirror of the web
-                                // Chat.tsx camera effect.
-                                Task {
-                                    do {
-                                        try await session.addLocalVideo()
-                                    } catch {
-                                        state.setCamera(false)
-                                        NSLog(
-                                            "CallScreen: addLocalVideo failed: %@",
-                                            String(describing: error)
-                                        )
-                                    }
+                        if on && gatesCamera {
+                            // Camera on: settle the permission first. A denial
+                            // leaves the camera off and explains why.
+                            Task { @MainActor in
+                                guard await CameraPermission.ensureGranted() else {
+                                    permissionMessage = CameraPermission.deniedMessage
+                                    return
                                 }
-                            } else {
-                                session.setCameraEnabled(false)
+                                applyCamera(true)
                             }
                         } else {
-                            state.setCamera(on)
+                            applyCamera(on)
                         }
                     }
                 )

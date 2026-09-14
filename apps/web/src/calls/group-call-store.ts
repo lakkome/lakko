@@ -1,0 +1,109 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+/**
+ * The group-call records (`group-call-record.ts`) of every chat, held for the
+ * whole page instead of inside one chat view.
+ *
+ * The records used to be a signal inside `routes/Chat.tsx`, fed only by that
+ * chat's receive loop. A `GroupCallStart` for a chat that was not open was
+ * applied by nobody — and once the background receive consumes that row the
+ * journal cursor has moved past it, so opening the chat later would never learn
+ * the call exists. Both receive paths now fold group-control bodies into this
+ * store (through the call host's single queue), and the chat view reads it.
+ *
+ * Reactive: `recordsFor` reads a version signal, so a Solid computation that
+ * calls it re-runs when any chat's records change. Persisted to tab-scoped
+ * storage under the same key the chat view always used, so a reload keeps a
+ * call whose start row the persisted cursor is already past.
+ */
+import { createSignal } from "solid-js";
+
+import {
+  deserializeGroupCalls,
+  NO_GROUP_CALLS,
+  pruneGroupCalls,
+  reduceGroupCalls,
+  serializeGroupCalls,
+  selectLiveGroupCall,
+  type GroupCallEvent,
+  type GroupCallRecord,
+  type GroupCallRecords,
+} from "./group-call-record";
+
+const records = new Map<string, GroupCallRecords>();
+const [version, setVersion] = createSignal(0);
+
+function key(accountId: string, groupIdB64: string): string {
+  return `${accountId}|${groupIdB64}`;
+}
+
+function storageKey(accountId: string, groupIdB64: string): string {
+  return `lakko:group-calls:${accountId}:${groupIdB64}`;
+}
+
+function load(accountId: string, groupIdB64: string): GroupCallRecords {
+  const k = key(accountId, groupIdB64);
+  const cached = records.get(k);
+  if (cached !== undefined) return cached;
+  let loaded: GroupCallRecords = NO_GROUP_CALLS;
+  try {
+    loaded = deserializeGroupCalls(
+      globalThis.sessionStorage?.getItem(storageKey(accountId, groupIdB64)) ?? null,
+    );
+  } catch {
+    loaded = NO_GROUP_CALLS;
+  }
+  records.set(k, loaded);
+  return loaded;
+}
+
+/** The records for one chat. Reactive. */
+export function groupCallsFor(accountId: string, groupIdB64: string): GroupCallRecords {
+  version();
+  return load(accountId, groupIdB64);
+}
+
+/** Fold one event into one chat's records and persist the result. */
+export function applyGroupCallEventFor(
+  accountId: string,
+  groupIdB64: string,
+  event: GroupCallEvent,
+  nowMs: number,
+): void {
+  const current = load(accountId, groupIdB64);
+  const next = pruneGroupCalls(reduceGroupCalls(current, event), nowMs);
+  if (next === current) return;
+  records.set(key(accountId, groupIdB64), next);
+  try {
+    globalThis.sessionStorage?.setItem(
+      storageKey(accountId, groupIdB64),
+      serializeGroupCalls(next),
+    );
+  } catch {
+    // Storage full / blocked: the in-memory record still drives this tab.
+  }
+  setVersion(version() + 1);
+}
+
+/** Every chat of `accountId` that has a live group call at `nowMs`. Reactive
+ *  over the chats already loaded into memory in this page. */
+export function liveGroupCallsFor(
+  accountId: string,
+  groupIdB64s: readonly string[],
+  nowMs: number,
+): { readonly groupIdB64: string; readonly call: GroupCallRecord }[] {
+  version();
+  const out: { groupIdB64: string; call: GroupCallRecord }[] = [];
+  for (const g of groupIdB64s) {
+    const live = selectLiveGroupCall(load(accountId, g), nowMs);
+    if (live !== null) out.push({ groupIdB64: g, call: live });
+  }
+  return out;
+}
+
+/** Sign-out: drop the in-memory copies (tab storage is cleared with the tab). */
+export function clearGroupCallStore(): void {
+  records.clear();
+  setVersion(version() + 1);
+}

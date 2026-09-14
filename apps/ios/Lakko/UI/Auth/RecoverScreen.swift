@@ -109,6 +109,7 @@ private struct RecoverForm: View {
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled(true)
                         .disabled(viewModel.busy)
+                    UsernameRuleHint(input: viewModel.username)
                 }
             }
 

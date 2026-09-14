@@ -135,6 +135,10 @@ public data class ProcessedRow(
     val text: String,
     /** Number of attachment refs (chat only). */
     val attachmentCount: Int,
+    /** ADR-0048 — the sender's name, when this device ALREADY knows one
+     *  better than a fingerprint (read from the stored profiles; never
+     *  fetched or verified here). `null` otherwise. */
+    val senderName: String? = null,
 )
 
 /** The notification preview the FMS renders when the decrypt succeeds. */
@@ -324,7 +328,9 @@ public suspend fun decryptPushPreview(
                 continue
             }
             val body = previewBodyOf(processed) ?: continue
-            latest = PushPreview(title = "Lakko", body = body, tag = realGroupHex)
+            // ADR-0048 UX §5 — the sender's resolved name when it is already
+            // known on this device; the generic title otherwise.
+            latest = PushPreview(title = processed?.senderName ?: "Lakko", body = body, tag = realGroupHex)
         }
         return latest
     } finally {

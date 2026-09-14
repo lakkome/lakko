@@ -30,7 +30,7 @@ import LakkoCore
 /// See `docs/security/calls.md` C-15..C-23 for the invariants the
 /// underlying primitives preserve.
 public final class CallJwtClient: @unchecked Sendable {
-    public static let defaultBaseURL = "http://127.0.0.1:8081"
+    public static var defaultBaseURL: String { ApiEndpoints.baseURL(for: .auth) }
 
     /// Default JWKS cache TTL per ADR-0008 — 24 h.
     public static let defaultJwksTtl: TimeInterval = 24 * 60 * 60

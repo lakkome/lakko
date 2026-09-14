@@ -11,9 +11,11 @@ import me.lakko.app.chat.MessageLogStore
 import me.lakko.app.chat.PersistedAttachment
 import me.lakko.app.chat.PersistedGroup
 import me.lakko.app.chat.PersistedMessage
+import me.lakko.app.chat.PersistedThumb
 import uniffi.lakko_ffi_uniffi.HistoryAttachment
 import uniffi.lakko_ffi_uniffi.HistoryMessageDirection
 import uniffi.lakko_ffi_uniffi.HistoryPlaceholder
+import uniffi.lakko_ffi_uniffi.HistoryThumb
 import uniffi.lakko_ffi_uniffi.StructuredHistoryGroup
 import uniffi.lakko_ffi_uniffi.StructuredHistoryMessage
 import uniffi.lakko_ffi_uniffi.decodeHistoryPlaceholder
@@ -210,6 +212,10 @@ public object HistoryBundleCodec {
     /** Encode a local-store message row into the canonical
      *  cross-platform placeholder bytes via the shared Rust core. */
     private fun encodePlaceholder(m: PersistedMessage): ByteArray {
+        // ADR-0047 §5 — placeholder version 2 carries the media metadata, so a
+        // voice message, video note or GIF restores as itself on the new
+        // device. The core applies the envelope's bounds on encode and decode.
+        // The local `played` marker is never transferred.
         val attachments = m.attachments.map { a ->
             HistoryAttachment(
                 blobId = Base64.decode(a.blobIdB64, Base64.NO_WRAP),
@@ -218,6 +224,12 @@ public object HistoryBundleCodec {
                 size = a.size,
                 mime = a.mime,
                 name = a.name,
+                kind = a.kind,
+                durationMs = a.durationMs,
+                waveform = a.waveformB64?.let { runCatching { Base64.decode(it, Base64.NO_WRAP) }.getOrNull() },
+                width = a.width,
+                height = a.height,
+                thumb = a.thumb?.let(::historyThumb),
             )
         }
         val placeholder = HistoryPlaceholder(
@@ -243,6 +255,22 @@ public object HistoryBundleCodec {
                 mime = a.mime,
                 size = a.size,
                 name = a.name,
+                kind = a.kind,
+                durationMs = a.durationMs,
+                waveformB64 = a.waveform?.takeIf { it.isNotEmpty() }?.let { Base64.encodeToString(it, Base64.NO_WRAP) },
+                width = a.width,
+                height = a.height,
+                thumb = a.thumb?.let { t ->
+                    PersistedThumb(
+                        blobIdB64 = Base64.encodeToString(t.blobId, Base64.NO_WRAP),
+                        keyB64 = Base64.encodeToString(t.key, Base64.NO_WRAP),
+                        nonceB64 = Base64.encodeToString(t.nonce, Base64.NO_WRAP),
+                        mime = t.mime,
+                        size = t.size,
+                        width = t.width,
+                        height = t.height,
+                    )
+                },
             )
         }
         return PersistedMessage(
@@ -251,6 +279,24 @@ public object HistoryBundleCodec {
             text = placeholder.text,
             attachments = attachments,
             createdAt = placeholder.createdAt,
+        )
+    }
+
+    /** A stored poster frame as the placeholder's thumb; `null` when a byte
+     *  field no longer decodes (the attachment itself survives). */
+    private fun historyThumb(t: PersistedThumb): HistoryThumb? {
+        val blobId = runCatching { Base64.decode(t.blobIdB64, Base64.NO_WRAP) }.getOrNull()
+        val key = runCatching { Base64.decode(t.keyB64, Base64.NO_WRAP) }.getOrNull()
+        val nonce = runCatching { Base64.decode(t.nonceB64, Base64.NO_WRAP) }.getOrNull()
+        if (blobId?.size != 32 || key?.size != 32 || nonce?.size != 12) return null
+        return HistoryThumb(
+            blobId = blobId,
+            key = key,
+            nonce = nonce,
+            size = t.size,
+            mime = t.mime,
+            width = t.width,
+            height = t.height,
         )
     }
 

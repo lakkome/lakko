@@ -27,6 +27,7 @@ import me.lakko.app.transparency.verifyRotationChain
 import uniffi.lakko_ffi_uniffi.ContactAck
 import uniffi.lakko_ffi_uniffi.ContactRequest
 import uniffi.lakko_ffi_uniffi.FfiException
+import uniffi.lakko_ffi_uniffi.FfiProfile
 import uniffi.lakko_ffi_uniffi.IdentityPseudonym
 import uniffi.lakko_ffi_uniffi.composeContactAck
 import uniffi.lakko_ffi_uniffi.composeContactRequest
@@ -143,6 +144,9 @@ public class ContactsClient(
         senderSignaturePubkey: ByteArray,
         recipientUsername: String,
         introMessage: ByteArray,
+        /** ADR-0048 §2 — the sender's own profile, carried inside the sealed
+         *  envelope so the recipient sees who is asking. `null` = none. */
+        senderProfile: FfiProfile? = null,
     ): SendResult {
         // 1. Resolve the username.
         val lookup = try {
@@ -224,6 +228,7 @@ public class ContactsClient(
             recipientSignaturePubkey = recipientSignaturePub,
             recipientX25519Pubkey = recipientX25519Pub,
             introMessage = introMessage,
+            senderProfile = senderProfile,
         )
 
         return SendResult(
@@ -291,6 +296,54 @@ public class ContactsClient(
     }
 
     /**
+     * ADR-0048 §3 — resolve a username to the `account_id` discovery holds for
+     * it, or `null` when nobody registered it. A plain lookup: it seals
+     * nothing, so it runs no gate. Network / server failures throw
+     * [ContactsError].
+     */
+    public suspend fun lookupAccountId(username: String): ByteArray? =
+        try {
+            discovery.lookup(username).account
+        } catch (e: DiscoveryHttpError) {
+            throw ContactsError.wrap(e)
+        } catch (e: DiscoveryNetworkError) {
+            throw ContactsError.wrap(e)
+        } catch (e: DiscoveryClientArgError) {
+            throw ContactsError.wrap(e)
+        }
+
+    /**
+     * ADR-0048 §3 — the signature public key the identity bundle of
+     * [accountId] currently names, or `null` when there is no bundle or its
+     * key is not a 32-byte value.
+     *
+     * Deliberately NOT [verifyBundleAccountKey]: displaying a username is a
+     * read, and the pin gate PINS a first-ever key as a side effect (TOFU). A
+     * username check that merely rendered a name would otherwise decide which
+     * key a later contact request or add-member trusts. The G-4 gate stays on
+     * the paths that seal to a key ([sendContactRequest],
+     * [resolveVerifiedRecipient]); this one reads and compares, as iOS and web
+     * do. The pin store is never read or written here.
+     */
+    public suspend fun fetchPublishedSignatureKey(accountId: ByteArray): ByteArray? {
+        val bundle = try {
+            discovery.identityFetch(accountId)
+        } catch (e: DiscoveryHttpError) {
+            throw ContactsError.wrap(e)
+        } catch (e: DiscoveryNetworkError) {
+            throw ContactsError.wrap(e)
+        } catch (e: DiscoveryClientArgError) {
+            throw ContactsError.wrap(e)
+        } ?: return null
+        val key = try {
+            base64Decode(bundle.signature_pubkey)
+        } catch (_: IllegalArgumentException) {
+            return null
+        }
+        return key.takeIf { it.size == SIGNATURE_KEY_LEN }
+    }
+
+    /**
      * Send a [ContactRequest] directly against a known recipient
      * bundle — i.e. **without** going through the discovery
      * `lookup → identityFetch` round-trip.
@@ -319,6 +372,8 @@ public class ContactsClient(
         recipientSignaturePubkey: ByteArray,
         recipientX25519Pubkey: ByteArray,
         introMessage: ByteArray,
+        /** ADR-0048 §2 — the sender's own profile; see [sendContactRequest]. */
+        senderProfile: FfiProfile? = null,
     ): SendResult {
         val publish = composeAndPublishContactRequest(
             senderSigningSeed = senderSigningSeed,
@@ -327,6 +382,7 @@ public class ContactsClient(
             recipientSignaturePubkey = recipientSignaturePubkey,
             recipientX25519Pubkey = recipientX25519Pubkey,
             introMessage = introMessage,
+            senderProfile = senderProfile,
         )
         return SendResult(
             recipientUsername = "",
@@ -790,6 +846,7 @@ public class ContactsClient(
         recipientSignaturePubkey: ByteArray,
         recipientX25519Pubkey: ByteArray,
         introMessage: ByteArray,
+        senderProfile: FfiProfile?,
     ): PublishedRequest {
         // Recipient mailbox pseudonym = BLAKE3(domain || their pubkey).
         val recipientPseudonym =
@@ -818,6 +875,10 @@ public class ContactsClient(
                 fromPseudonym = senderPseudonym,
                 validAfterMs = validAfterMs,
                 privacyPassToken = privacyPassToken,
+                // ADR-0048 §2 — sealed to the recipient with the intro; the DS
+                // sees only ciphertext. A profile the composer refuses throws
+                // here and the request is not sent (never a weakened form).
+                profile = senderProfile,
                 introMessage = introMessage,
             )
         } catch (e: FfiException) {
@@ -1007,13 +1068,25 @@ public class ContactsClient(
                     // Arc releases on every exit (including the
                     // unseal-throw path).
                     val request = parsed.use { req ->
+                        // ADR-0048 §2 — the sealed plaintext carries the
+                        // sender's profile ahead of the intro. A profile that
+                        // failed its bounds opens as `null` with the intro
+                        // intact; the request is still authentic.
+                        var senderProfile: me.lakko.app.profile.PeerProfile? = null
                         val intro: String? = try {
-                            val plaintext = req.openEnvelope(myX25519Secret)
+                            val opened = req.openEnvelope(myX25519Secret)
+                            senderProfile = opened.profile?.let { p ->
+                                me.lakko.app.profile.PeerProfile(
+                                    displayName = p.displayName,
+                                    username = p.username,
+                                    updatedAtMs = p.updatedAtMs,
+                                )
+                            }
                             // UTF-8 decode with replacement-on-
                             // error so malformed bytes still
                             // surface as the best-effort string
                             // we can show.
-                            String(plaintext, Charsets.UTF_8)
+                            String(opened.introMessage, Charsets.UTF_8)
                         } catch (_: FfiException) {
                             // Envelope didn't decrypt for our
                             // X25519 secret. Could be a malicious
@@ -1031,6 +1104,7 @@ public class ContactsClient(
                             validAfterMs = req.validAfterMs(),
                             intro = intro,
                             createdAt = message.createdAt,
+                            profile = senderProfile,
                         )
                     }
                     events.add(IncomingMailboxEvent.ContactRequest(request))
@@ -1104,6 +1178,11 @@ public data class IncomingContactRequest(
      *  payload. */
     val intro: String?,
     val createdAt: String,
+    /** ADR-0048 §2 — the sender's profile from the sealed envelope, bound to
+     *  [fromPubkey] (which the request signature authenticates). A CLAIM: its
+     *  username is shown only once verified. `null` when none was carried, it
+     *  failed its bounds, or the envelope did not open. */
+    val profile: me.lakko.app.profile.PeerProfile? = null,
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
@@ -1114,7 +1193,8 @@ public data class IncomingContactRequest(
             fromPseudonym.contentEquals(other.fromPseudonym) &&
             validAfterMs == other.validAfterMs &&
             intro == other.intro &&
-            createdAt == other.createdAt
+            createdAt == other.createdAt &&
+            profile == other.profile
     }
 
     override fun hashCode(): Int {
@@ -1125,6 +1205,7 @@ public data class IncomingContactRequest(
         result = 31 * result + validAfterMs.hashCode()
         result = 31 * result + (intro?.hashCode() ?: 0)
         result = 31 * result + createdAt.hashCode()
+        result = 31 * result + (profile?.hashCode() ?: 0)
         return result
     }
 }
@@ -1378,6 +1459,9 @@ public class LogRollbackDetected(
  *  (`version(1) ‖ old(32) ‖ new(32) ‖ issued(8) ‖ expires(8) ‖
  *  sig(64)` = 145). */
 private const val SUPERSESSION_PROOF_LEN = 1 + 32 + 32 + 8 + 8 + 64
+
+/** Length of an Ed25519 signature public key in an identity bundle. */
+private const val SIGNATURE_KEY_LEN = 32
 
 /** Byte offset of the big-endian i64 `expires_at` field within a
  *  supersession proof: after version(1) + old(32) + new(32) +

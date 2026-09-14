@@ -75,6 +75,35 @@ export interface PersistedAttachment {
    *  attachments aren't a thing. */
   readonly sizeStr: string;
   readonly name: string | null;
+  /**
+   * ADR-0047 media metadata, copied from the received envelope. Every field
+   * is optional so a row written before they existed reads unchanged (a
+   * file chip); `persisted-attachment.ts` re-checks each bound on read.
+   */
+  readonly kind?: string | null;
+  readonly durationMs?: number | null;
+  /** Base64url of at most 128 waveform bytes. */
+  readonly waveformB64?: string | null;
+  readonly width?: number | null;
+  readonly height?: number | null;
+  readonly thumb?: PersistedThumb | null;
+  /**
+   * UX spec §8 — "played" is LOCAL state: this device has started playing
+   * the message. Never sent, never part of a history bundle. Absent means
+   * unplayed.
+   */
+  readonly played?: boolean;
+}
+
+/** ADR-0047 — a persisted poster-frame reference. */
+export interface PersistedThumb {
+  readonly blobIdB64: string;
+  readonly keyB64: string;
+  readonly nonceB64: string;
+  readonly mime: string | null;
+  readonly sizeStr: string;
+  readonly width: number | null;
+  readonly height: number | null;
 }
 
 export interface PersistedMessage {
@@ -108,6 +137,14 @@ export interface PersistedGroup {
   /** DS journal cursor (stringified i64). */
   readonly cursor: string;
   readonly messages: readonly PersistedMessage[];
+  /**
+   * The newest DS id this device's chat view has displayed (stringified). The
+   * chat list counts incoming rows above it — and above the cross-device read
+   * cursor, when that has arrived — as unread. Absent for a chat never opened
+   * on this device, whose every incoming row is unread. See
+   * `background-log.ts`.
+   */
+  readonly lastViewedMessageId?: string;
 }
 
 /** Wire shape of the encrypted blob, post-decrypt + JSON-parse. */
@@ -253,6 +290,43 @@ export async function loadMessageLog(
   } catch {
     return null;
   }
+}
+
+/** Per-account tail of the in-page write chain — see {@link updateMessageLog}. */
+const writeChains = new Map<string, Promise<unknown>>();
+
+/**
+ * Read-modify-write the message log for `accountIdB64`, serialized against
+ * every other `updateMessageLog` call for the same account in this page.
+ *
+ * The log is ONE blob per account holding every group, and two paths now write
+ * it: the open chat view and the background receive for the chats that are not
+ * open. Unserialized, a write for one group that read the blob before another
+ * path's write for a different group landed would put the older blob back and
+ * erase that group's new rows — rows MLS forward secrecy can never decrypt
+ * again. `mutate` receives what is on disk (or `null`) and returns the payload
+ * to write, or `null` to write nothing.
+ *
+ * Not serialized across tabs: two tabs on one account each hold their own MLS
+ * provider and already diverge, which is a larger problem than this lock.
+ */
+export function updateMessageLog(
+  accountIdB64: string,
+  deviceKey: CryptoKey,
+  mutate: (current: MessageLogPayload | null) => MessageLogPayload | null,
+): Promise<void> {
+  const prev = writeChains.get(accountIdB64) ?? Promise.resolve();
+  const run = prev.then(async () => {
+    const current = await loadMessageLog(accountIdB64, deviceKey);
+    const next = mutate(current);
+    if (next !== null) await saveMessageLog(accountIdB64, deviceKey, next);
+  });
+  const tail = run.catch(() => undefined);
+  writeChains.set(accountIdB64, tail);
+  void tail.then(() => {
+    if (writeChains.get(accountIdB64) === tail) writeChains.delete(accountIdB64);
+  });
+  return run;
 }
 
 /**

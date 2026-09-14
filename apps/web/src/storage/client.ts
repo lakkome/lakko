@@ -182,6 +182,62 @@ export class StorageClient {
   }
 
   /**
+   * ADR-0047 — [`putBlob`] with upload progress, for the timeline's
+   * determinate uploading ring. `fetch` exposes no upload progress, so this
+   * uses `XMLHttpRequest` where the environment has it and falls back to
+   * `putBlob` (reporting only completion) where it does not. Same URL, same
+   * body, same success statuses, same error types.
+   */
+  async putBlobWithProgress(
+    blobId: Uint8Array,
+    ciphertext: Uint8Array,
+    onProgress?: (fraction: number) => void,
+  ): Promise<void> {
+    if (onProgress === undefined || typeof XMLHttpRequest === "undefined") {
+      await this.putBlob(blobId, ciphertext);
+      onProgress?.(1);
+      return;
+    }
+    if (blobId.length !== BLOB_ID_LEN) {
+      throw new StorageClientArgError(
+        `blobId must be ${BLOB_ID_LEN} bytes (got ${blobId.length})`,
+      );
+    }
+    if (ciphertext.length === 0) {
+      throw new StorageClientArgError("ciphertext must be non-empty");
+    }
+    if (ciphertext.length > MAX_BLOB_BYTES) {
+      throw new StorageClientArgError(
+        `ciphertext exceeds the ${MAX_BLOB_BYTES}-byte ceiling ` +
+          `(got ${ciphertext.length} bytes)`,
+      );
+    }
+    const endpoint = `/blob/${blobIdHex(blobId)}`;
+    const url = `${this.baseUrl}${endpoint}`;
+    await new Promise<void>((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("PUT", url);
+      xhr.setRequestHeader("content-type", "application/octet-stream");
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable && e.total > 0) {
+          onProgress(Math.min(1, e.loaded / e.total));
+        }
+      };
+      xhr.onload = () => {
+        if (xhr.status === 200 || xhr.status === 201) {
+          onProgress(1);
+          resolve();
+        } else {
+          reject(new StorageHttpError(xhr.status, endpoint, String(xhr.responseText ?? "")));
+        }
+      };
+      xhr.onerror = () => reject(new StorageNetworkError(endpoint, "xhr error"));
+      xhr.onabort = () => reject(new StorageNetworkError(endpoint, "xhr aborted"));
+      xhr.send(new Blob([ciphertext.slice()], { type: "application/octet-stream" }));
+    });
+  }
+
+  /**
    * `GET /blob/<hex>` — fetch ciphertext. Returns the raw bytes on
    * 200, `null` on 404 (the typed not-found path so the UI can
    * surface "attachment missing" without an exception). Throws on

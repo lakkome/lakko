@@ -18,6 +18,8 @@ import { useAuth } from "../auth/AuthContext";
 import { forgetDeviceConfirmation } from "../auth/destructive-confirm";
 import { requestConfirm } from "./confirm-dialog";
 import { cycleTheme, useTheme } from "./theme";
+import { autoplayVideoNotes, setAutoplayVideoNotes } from "../media/media-prefs";
+import { CallHostView } from "../calls/CallHostContext";
 
 /**
  * Layout wrapper rendered around every protected route. The actual
@@ -73,6 +75,8 @@ export function AppShell(props: { children?: JSX.Element }): JSX.Element {
         </A>
         <A href={paths.contacts}>Contacts</A>
         <A href={paths.channels}>Channels</A>
+        {/* ADR-0048 UX §7 — Settings → Profile lives in the shell menu. */}
+        <A href={paths.profile}>Profile</A>
 
         <div class="nav-spacer" />
         <div class="nav-footer">
@@ -108,10 +112,27 @@ export function AppShell(props: { children?: JSX.Element }): JSX.Element {
             >
               Theme: {useTheme()}
             </button>
+            {/* ADR-0047 UX §3 — incoming video notes autoplay muted only when
+                this is on. Default off: autoplay downloads media. */}
+            <button
+              type="button"
+              role="switch"
+              aria-checked={autoplayVideoNotes()}
+              onClick={() => setAutoplayVideoNotes(!autoplayVideoNotes())}
+              style={{ "font-size": "0.85rem" }}
+            >
+              Autoplay video notes: {autoplayVideoNotes() ? "On" : "Off"}
+            </button>
           </div>
         </div>
       </nav>
       <main>{props.children}</main>
+      {/* The call UI — the 1x1 ringing banner, the in-call overlay and remote
+          audio of a 1x1 or group call, the banner for a group call in a chat
+          that is not open — on every authenticated screen, outside the routed
+          content so a route change neither hides a ringing call nor unmounts a
+          live one. */}
+      <CallHostView />
     </div>
   );
 }
@@ -124,7 +145,11 @@ function SessionLabel(): JSX.Element {
     <span>
       {(() => {
         const s = auth.state();
-        if (s.kind === "session") return `Signed in as @${s.account.username}`;
+        if (s.kind === "session") {
+          return s.account.username.length > 0
+            ? `Signed in as @${s.account.username}`
+            : "Signed in (guest)";
+        }
         if (s.kind === "loading") return "Restoring session…";
         return "Anonymous";
       })()}

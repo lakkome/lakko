@@ -68,9 +68,12 @@ services:
       LAKKO_SFU_BIND: "0.0.0.0:7880"
       LAKKO_SFU_METRICS_BIND: "0.0.0.0:9641"
       # MEDIA ON — the whole point of this stack. A fixed UDP port so the CI
-      # firewall / runner can predict it; str0m advertises the host address as
-      # the ICE candidate.
+      # firewall / runner can predict it. An unspecified bind cannot itself be
+      # an ICE host candidate (str0m rejects 0.0.0.0, and the SFU now refuses to
+      # start rather than advertise nothing), so the address the browsers on
+      # this same host dial is given explicitly.
       LAKKO_SFU_MEDIA_BIND: "0.0.0.0:43210"
+      LAKKO_SFU_MEDIA_ADVERTISE_IP: "127.0.0.1"
       RUST_LOG: "info,lakko_svc_sfu=debug,lakko_call_jwt=info"
     # No in-container healthcheck: the runtime image ships no wget/curl (only
     # ca-certificates + libssl3 + tini). Under host networking the WORKFLOW

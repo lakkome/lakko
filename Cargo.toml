@@ -38,6 +38,7 @@ members = [
     "services/channels",
     "services/ds",
     "services/storage",
+    "services/gif-proxy",
     "services/edge",
     "services/discovery",
     "services/obfs-proxy",

@@ -451,6 +451,16 @@ internal fun membershipRefusalReason(error: Throwable): FfiRefusalReason? {
                 is FfiException.Transport,
                 is FfiException.Release,
                 is FfiException.LockPoisoned,
+                // ADR-0048 — name-rule refusals (username / display name).
+                // Input errors, never membership refusals.
+                is FfiException.UsernameEmpty,
+                is FfiException.UsernameTooShort,
+                is FfiException.UsernameTooLong,
+                is FfiException.UsernameInvalidCharacters,
+                is FfiException.DisplayNameLineBreak,
+                is FfiException.DisplayNameControlOrFormatCharacter,
+                is FfiException.DisplayNameTooLong,
+                is FfiException.DisplayNameTooManyBytes,
                 -> null
             }
         }

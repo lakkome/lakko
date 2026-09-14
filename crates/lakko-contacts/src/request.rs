@@ -5,9 +5,9 @@
 //!
 //! Sender Alice composes a request for recipient Bob:
 //!
-//! 1. Encrypts the optional intro message to Bob's identity public
-//!    key via [`crate::envelope`] sealed-box (HPKE-equivalent over
-//!    X25519 + ChaCha20-Poly1305).
+//! 1. Encrypts her optional profile (ADR-0048) and the optional intro
+//!    message to Bob's identity public key via [`crate::envelope`]
+//!    sealed-box (HPKE-equivalent over X25519 + ChaCha20-Poly1305).
 //! 2. Wraps the result in a `ContactRequest` carrying her own
 //!    identity public key, a per-recipient pseudonym, and a
 //!    `valid_after_ms` freshness anchor.
@@ -19,8 +19,41 @@
 //!
 //! 1. Decodes the wire format.
 //! 2. Verifies the signature against `from_pubkey`.
-//! 3. Opens the sealed envelope with his identity X25519 private key.
+//! 3. Opens the sealed envelope with his identity X25519 private key,
+//!    recovering Alice's profile (if any) and the intro message.
 //! 4. Surfaces the request to UI: Accept / Decline / Block / Ignore.
+//!
+//! ## Sealed plaintext (ADR-0048 §2)
+//!
+//! The bytes inside `sealed_envelope` are a length-prefixed pair:
+//!
+//! ```text
+//! u16be        profile_len          — 0 = no profile
+//! [..]         profile envelope     — crate::profile wire, `profile_len` bytes
+//! [..]         intro message        — everything that remains (may be empty)
+//! ```
+//!
+//! There is no dual format: nothing is deployed, so a sealed plaintext
+//! without the prefix is simply malformed.
+//!
+//! **Who the profile belongs to.** The envelope carries no identity.
+//! The recipient binds the profile to `from_pubkey`, which the request
+//! signature authenticates, and treats every field as that sender's
+//! claim — the username is shown only after discovery verification
+//! (ADR-0048 §3).
+//!
+//! **A malformed profile does not drop the request.** When the framing
+//! is intact but the profile bytes fail [`crate::profile::decode_profile`]
+//! (an out-of-bounds name, a look-alike username, a future version),
+//! [`open_envelope`] returns the intro with the profile `None`: the
+//! request itself is still authentic and still wanted, and the recipient
+//! falls back to the fingerprint exactly as it would for a sender with
+//! no profile. A **framing** error is different — a `profile_len` that
+//! overruns the plaintext, or a plaintext shorter than the prefix, leaves
+//! no defined boundary for the intro, so the open fails with
+//! [`ContactError::InvalidEncoding`]. Only a sender with the recipient's
+//! public key and its own signing key can produce either, since the
+//! plaintext is AEAD-authenticated inside a signed request.
 //!
 //! ## Wire format (manual codec)
 //!
@@ -88,6 +121,7 @@ use lakko_crypto::signing::{Signature, SigningKey, VerifyingKey, PUBLIC_KEY_LEN,
 
 use crate::envelope;
 use crate::error::{ContactError, Result};
+use crate::profile::{compose_profile, decode_profile, Profile};
 use crate::pseudonym::{decode_pseudonym, PSEUDONYM_LEN};
 
 /// Current `compose`d schema version (Phase 1.9b2 — Privacy
@@ -117,6 +151,10 @@ pub const ACCOUNT_ID_LEN: usize = 16;
 /// 65535 would otherwise decode — we cap earlier so callers see
 /// a clean [`ContactError::InvalidEncoding`] instead.
 pub const MAX_PRIVACY_PASS_TOKEN_LEN: usize = 2048;
+
+/// Byte length of the `profile_len` prefix at the head of the sealed
+/// plaintext (see the module docs).
+pub const PROFILE_LEN_PREFIX_LEN: usize = 2;
 
 /// AAD bound to the sealed envelope. Domain-separates this envelope
 /// from any future non-contact-request use of the same primitive.
@@ -168,7 +206,8 @@ pub struct ContactRequest {
 ///
 /// The sender supplies their Ed25519 signing key (for authentication),
 /// the recipient's X25519 public key (for sealed-envelope encryption),
-/// an optional intro message body, and an optional Privacy Pass
+/// an optional profile (ADR-0048), an optional intro message body, and
+/// an optional Privacy Pass
 /// attestation token (Phase 1.9b2). `from_pseudonym` should be
 /// freshly generated per-recipient (use
 /// [`crate::pseudonym::PerRelationship::derive`] with a one-shot
@@ -186,6 +225,9 @@ pub struct ContactRequest {
 ///   impossible for valid inputs).
 /// * [`ContactError::InvalidEncoding`] when
 ///   `privacy_pass_token.len() > MAX_PRIVACY_PASS_TOKEN_LEN`.
+/// * [`ContactError::InvalidArgument`] when `profile` violates a bound —
+///   the same bounds the recipient's decoder enforces, so a conforming
+///   sender never seals a profile the recipient would drop.
 pub fn compose(
     sender_signing: &SigningKey,
     sender_account_id: &[u8; ACCOUNT_ID_LEN],
@@ -193,6 +235,7 @@ pub fn compose(
     from_pseudonym: [u8; PSEUDONYM_LEN],
     valid_after_ms: u64,
     privacy_pass_token: &[u8],
+    profile: Option<&Profile>,
     intro_message: &[u8],
 ) -> Result<Vec<u8>> {
     if privacy_pass_token.len() > MAX_PRIVACY_PASS_TOKEN_LEN {
@@ -201,7 +244,8 @@ pub fn compose(
             privacy_pass_token.len(),
         )));
     }
-    let sealed_envelope = envelope::seal(recipient_x25519_pub, ENVELOPE_AAD, intro_message)?;
+    let sealed_plaintext = frame_sealed_plaintext(profile, intro_message)?;
+    let sealed_envelope = envelope::seal(recipient_x25519_pub, ENVELOPE_AAD, &sealed_plaintext)?;
 
     let from_pubkey = sender_signing.verifying_key();
     let mut wire = encode_signing_prefix(
@@ -337,14 +381,69 @@ pub fn decode_and_verify(wire: &[u8]) -> Result<ContactRequest> {
 /// Decrypt the sealed envelope on a previously-verified
 /// [`ContactRequest`] using the recipient's X25519 private key.
 ///
+/// Returns `(profile, intro_message)`. The profile, when present, is the
+/// sender's claim bound to `req.from_pubkey` — see the module docs. A
+/// profile that fails its bounds yields `None` with the intro intact.
+///
 /// # Errors
 ///
 /// - [`ContactError::WrongRecipient`] — envelope was sealed for a
 ///   different recipient (or tampered with after sealing).
 /// - [`ContactError::InvalidEncoding`] — envelope wire format is
-///   malformed.
-pub fn open_envelope(req: &ContactRequest, recipient_priv: &X25519SecretKey) -> Result<Vec<u8>> {
-    envelope::open(recipient_priv, ENVELOPE_AAD, &req.sealed_envelope)
+///   malformed, or the sealed plaintext's profile framing is.
+pub fn open_envelope(
+    req: &ContactRequest,
+    recipient_priv: &X25519SecretKey,
+) -> Result<(Option<Profile>, Vec<u8>)> {
+    let plaintext = envelope::open(recipient_priv, ENVELOPE_AAD, &req.sealed_envelope)?;
+    let (profile, intro) = split_sealed_plaintext(&plaintext)?;
+    Ok((profile, intro.to_vec()))
+}
+
+/// Build the sealed plaintext `profile_len ‖ profile ‖ intro`.
+fn frame_sealed_plaintext(profile: Option<&Profile>, intro_message: &[u8]) -> Result<Vec<u8>> {
+    let profile_bytes = match profile {
+        Some(p) => compose_profile(p)
+            .map_err(|e| ContactError::InvalidArgument(format!("profile: {e}")))?,
+        None => Vec::new(),
+    };
+    // A composed profile is at most `PROFILE_ENVELOPE_MAX_LEN` bytes, far
+    // below `u16::MAX`; checked rather than cast all the same.
+    let profile_len = u16::try_from(profile_bytes.len())
+        .map_err(|_| ContactError::InvalidArgument("profile envelope too large".to_string()))?;
+    let mut out =
+        Vec::with_capacity(PROFILE_LEN_PREFIX_LEN + profile_bytes.len() + intro_message.len());
+    out.extend_from_slice(&profile_len.to_be_bytes());
+    out.extend_from_slice(&profile_bytes);
+    out.extend_from_slice(intro_message);
+    Ok(out)
+}
+
+/// Split an opened sealed plaintext into `(profile, intro)`.
+///
+/// Framing errors are errors; a well-framed but invalid profile is
+/// `None` (see the module docs for why the two differ).
+fn split_sealed_plaintext(plaintext: &[u8]) -> Result<(Option<Profile>, &[u8])> {
+    let mut cur = plaintext;
+    let len_bytes: [u8; PROFILE_LEN_PREFIX_LEN] = take_n(&mut cur, PROFILE_LEN_PREFIX_LEN)?
+        .try_into()
+        .map_err(|_| ContactError::InvalidEncoding("profile length prefix".to_string()))?;
+    let profile_len = usize::from(u16::from_be_bytes(len_bytes));
+    let profile_bytes = take_n(&mut cur, profile_len)?;
+    let profile = if profile_bytes.is_empty() {
+        None
+    } else {
+        match decode_profile(profile_bytes) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                // The reason code only: the profile's content is the
+                // sender's personal data and never reaches a log.
+                tracing::warn!(reason = %e.code(), "contact request carried an invalid profile; opening without it");
+                None
+            },
+        }
+    };
+    Ok((profile, cur))
 }
 
 // ============================================================================
@@ -495,6 +594,7 @@ mod tests {
             pseudonym,
             1_000_000,
             b"",
+            None,
             b"hi bob",
         )
         .unwrap();
@@ -506,7 +606,8 @@ mod tests {
         assert_eq!(req.valid_after_ms, 1_000_000);
         assert!(req.privacy_pass_token.is_empty());
 
-        let intro = open_envelope(&req, &bob).unwrap();
+        let (profile, intro) = open_envelope(&req, &bob).unwrap();
+        assert_eq!(profile, None);
         assert_eq!(intro, b"hi bob");
     }
 
@@ -528,6 +629,7 @@ mod tests {
             [0u8; PSEUDONYM_LEN],
             0,
             b"",
+            None,
             b"",
         )
         .unwrap();
@@ -558,7 +660,12 @@ mod tests {
         let valid_after_ms = 12345_u64;
         let intro = b"legacy hi";
 
-        let sealed_envelope = envelope::seal(&bob.public_key(), ENVELOPE_AAD, intro).unwrap();
+        let sealed_envelope = envelope::seal(
+            &bob.public_key(),
+            ENVELOPE_AAD,
+            &frame_sealed_plaintext(None, intro).unwrap(),
+        )
+        .unwrap();
         let from_pubkey = alice.verifying_key();
         let signed_prefix =
             encode_signing_prefix_v1(&from_pubkey, &pseudonym, valid_after_ms, &sealed_envelope);
@@ -570,7 +677,7 @@ mod tests {
         assert_eq!(req.from_account_id, None);
         assert_eq!(req.from_pseudonym, pseudonym);
         assert_eq!(req.valid_after_ms, valid_after_ms);
-        let opened = open_envelope(&req, &bob).unwrap();
+        let (_, opened) = open_envelope(&req, &bob).unwrap();
         assert_eq!(opened, intro);
     }
 
@@ -587,11 +694,12 @@ mod tests {
             pseudonym,
             0,
             b"",
+            None,
             b"",
         )
         .unwrap();
         let req = decode_and_verify(&wire).unwrap();
-        let intro = open_envelope(&req, &bob).unwrap();
+        let (_, intro) = open_envelope(&req, &bob).unwrap();
         assert_eq!(intro, b"");
     }
 
@@ -607,6 +715,7 @@ mod tests {
             [0u8; PSEUDONYM_LEN],
             0,
             b"",
+            None,
             b"intro",
         )
         .unwrap();
@@ -631,6 +740,7 @@ mod tests {
             pseudonym,
             0,
             b"",
+            None,
             b"intro",
         )
         .unwrap();
@@ -656,6 +766,7 @@ mod tests {
             pseudonym,
             0,
             b"",
+            None,
             b"secret",
         )
         .unwrap();
@@ -680,6 +791,7 @@ mod tests {
             [0u8; PSEUDONYM_LEN],
             0,
             b"",
+            None,
             b"private",
         )
         .unwrap();
@@ -700,6 +812,7 @@ mod tests {
             [0u8; PSEUDONYM_LEN],
             0,
             b"",
+            None,
             b"x",
         )
         .unwrap();
@@ -721,6 +834,7 @@ mod tests {
             [0u8; PSEUDONYM_LEN],
             0,
             b"",
+            None,
             b"x",
         )
         .unwrap();
@@ -741,6 +855,7 @@ mod tests {
             [0u8; PSEUDONYM_LEN],
             0,
             b"",
+            None,
             b"x",
         )
         .unwrap();
@@ -764,6 +879,7 @@ mod tests {
             pseudonym,
             0,
             b"",
+            None,
             b"intro",
         )
         .unwrap();
@@ -774,6 +890,7 @@ mod tests {
             pseudonym,
             0,
             b"",
+            None,
             b"intro",
         )
         .unwrap();
@@ -800,6 +917,7 @@ mod tests {
             [0xAB; PSEUDONYM_LEN],
             0,
             token,
+            None,
             b"hello",
         )
         .unwrap();
@@ -807,7 +925,7 @@ mod tests {
         let req = decode_and_verify(&wire).unwrap();
         assert_eq!(req.privacy_pass_token.as_slice(), token);
 
-        let opened = open_envelope(&req, &bob).unwrap();
+        let (_, opened) = open_envelope(&req, &bob).unwrap();
         assert_eq!(opened, b"hello");
     }
 
@@ -827,6 +945,7 @@ mod tests {
             [0u8; PSEUDONYM_LEN],
             0,
             token,
+            None,
             b"",
         )
         .unwrap();
@@ -858,6 +977,7 @@ mod tests {
             [0u8; PSEUDONYM_LEN],
             0,
             &huge,
+            None,
             b"",
         )
         .unwrap_err();
@@ -879,7 +999,12 @@ mod tests {
         let valid_after_ms = 42_u64;
         let intro = b"v2 envelope";
 
-        let sealed_envelope = envelope::seal(&bob.public_key(), ENVELOPE_AAD, intro).unwrap();
+        let sealed_envelope = envelope::seal(
+            &bob.public_key(),
+            ENVELOPE_AAD,
+            &frame_sealed_plaintext(None, intro).unwrap(),
+        )
+        .unwrap();
         let from_pubkey = alice.verifying_key();
         let signed_prefix = encode_signing_prefix_v2(
             &from_pubkey,
@@ -900,7 +1025,159 @@ mod tests {
             req.privacy_pass_token.is_empty(),
             "v2 wire should produce an empty token on v3 decode",
         );
-        let opened = open_envelope(&req, &bob).unwrap();
+        let (_, opened) = open_envelope(&req, &bob).unwrap();
         assert_eq!(opened, intro);
+    }
+
+    // ========================================================
+    // ADR-0048 — profile in the sealed plaintext
+    // ========================================================
+
+    fn alice_profile() -> Profile {
+        Profile {
+            display_name: Some("Alice Petrova".to_string()),
+            username: Some("alice".to_string()),
+            updated_at_ms: 1_700_000_000_000,
+        }
+    }
+
+    /// Seal `plaintext` as-is (bypassing `compose`'s framing) inside an
+    /// otherwise-valid, correctly signed v3 request.
+    fn signed_request_sealing(plaintext: &[u8]) -> ContactRequest {
+        let alice = sender();
+        let bob = recipient_x25519();
+        let sealed_envelope = envelope::seal(&bob.public_key(), ENVELOPE_AAD, plaintext).unwrap();
+        let mut wire = encode_signing_prefix(
+            &alice.verifying_key(),
+            &sender_account_id(),
+            &[0u8; PSEUDONYM_LEN],
+            0,
+            b"",
+            &sealed_envelope,
+        );
+        let signature = alice.sign(&wire);
+        wire.extend_from_slice(&signature.to_bytes());
+        decode_and_verify(&wire).unwrap()
+    }
+
+    #[test]
+    fn profile_and_intro_round_trip() {
+        let alice = sender();
+        let bob = recipient_x25519();
+        let wire = compose(
+            &alice,
+            &sender_account_id(),
+            &bob.public_key(),
+            [0u8; PSEUDONYM_LEN],
+            0,
+            b"",
+            Some(&alice_profile()),
+            b"hi bob",
+        )
+        .unwrap();
+        let req = decode_and_verify(&wire).unwrap();
+        let (profile, intro) = open_envelope(&req, &bob).unwrap();
+        assert_eq!(profile, Some(alice_profile()));
+        assert_eq!(intro, b"hi bob");
+    }
+
+    #[test]
+    fn profile_with_empty_intro_round_trips() {
+        let bob = recipient_x25519();
+        let wire = compose(
+            &sender(),
+            &sender_account_id(),
+            &bob.public_key(),
+            [0u8; PSEUDONYM_LEN],
+            0,
+            b"",
+            Some(&alice_profile()),
+            b"",
+        )
+        .unwrap();
+        let (profile, intro) = open_envelope(&decode_and_verify(&wire).unwrap(), &bob).unwrap();
+        assert_eq!(profile, Some(alice_profile()));
+        assert!(intro.is_empty());
+    }
+
+    #[test]
+    fn sealed_plaintext_framing_is_pinned() {
+        let framed = frame_sealed_plaintext(Some(&alice_profile()), b"intro").unwrap();
+        let profile_wire = crate::profile::compose_profile(&alice_profile()).unwrap();
+        let len = u16::try_from(profile_wire.len()).unwrap();
+        assert_eq!(&framed[..2], &len.to_be_bytes());
+        assert_eq!(&framed[2..2 + profile_wire.len()], profile_wire.as_slice());
+        assert_eq!(&framed[2 + profile_wire.len()..], b"intro");
+        // No profile: a zero prefix, then the intro verbatim.
+        assert_eq!(frame_sealed_plaintext(None, b"x").unwrap(), b"\x00\x00x");
+    }
+
+    #[test]
+    fn compose_refuses_an_out_of_bounds_profile() {
+        let mut bad = alice_profile();
+        bad.username = Some("p\u{430}vel".to_string());
+        let err = compose(
+            &sender(),
+            &sender_account_id(),
+            &recipient_x25519().public_key(),
+            [0u8; PSEUDONYM_LEN],
+            0,
+            b"",
+            Some(&bad),
+            b"hi",
+        )
+        .unwrap_err();
+        assert!(matches!(err, ContactError::InvalidArgument(_)));
+    }
+
+    /// The decision this carrier makes: a well-framed but invalid profile
+    /// is dropped, the authentic request and its intro are kept.
+    #[test]
+    fn a_malformed_profile_opens_the_request_without_it() {
+        let bob = recipient_x25519();
+        // A profile whose name carries a right-to-left override.
+        let name = "Alice\u{202E}".as_bytes();
+        let mut bad_profile = crate::profile::PROFILE_ENVELOPE_DOMAIN_V1.to_vec();
+        bad_profile.push(crate::profile::PROFILE_VERSION_V1);
+        bad_profile.extend_from_slice(&0u64.to_be_bytes());
+        bad_profile.push(u8::try_from(name.len()).unwrap());
+        bad_profile.extend_from_slice(name);
+        bad_profile.push(0);
+        // Control: the same bytes are refused by the profile decoder.
+        assert!(crate::profile::decode_profile(&bad_profile).is_err());
+
+        for garbage in [bad_profile.clone(), b"not a profile at all".to_vec()] {
+            let mut plaintext = u16::try_from(garbage.len()).unwrap().to_be_bytes().to_vec();
+            plaintext.extend_from_slice(&garbage);
+            plaintext.extend_from_slice(b"hi bob");
+            let req = signed_request_sealing(&plaintext);
+            let (profile, intro) = open_envelope(&req, &bob).unwrap();
+            assert_eq!(profile, None);
+            assert_eq!(intro, b"hi bob");
+        }
+    }
+
+    /// Framing errors, unlike profile errors, leave no intro boundary and
+    /// fail the open.
+    #[test]
+    fn broken_framing_fails_the_open() {
+        let bob = recipient_x25519();
+        for plaintext in [
+            Vec::new(),
+            vec![0x00],
+            // Declares 10 profile bytes, carries 3.
+            vec![0x00, 0x0A, 1, 2, 3],
+            // A raw, unframed intro: "le" reads as a 27749-byte profile.
+            b"legacy hi".to_vec(),
+        ] {
+            let req = signed_request_sealing(&plaintext);
+            assert!(
+                matches!(
+                    open_envelope(&req, &bob),
+                    Err(ContactError::InvalidEncoding(_))
+                ),
+                "{plaintext:?}"
+            );
+        }
     }
 }

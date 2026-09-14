@@ -75,6 +75,10 @@ public enum AttachmentBridge {
         bytes: Data,
         mime: String?,
         name: String?,
+        /// ADR-0047 — the optional media metadata (kind, duration, waveform,
+        /// dimensions, poster thumb) carried on the returned ref. `nil` for a
+        /// plain file.
+        media: MediaAttachmentMeta? = nil,
         storage: StorageClient = StorageClient(),
         /// Polish 1.x — coarse-grained stage callback the
         /// composer surface drives off to render
@@ -83,7 +87,10 @@ public enum AttachmentBridge {
         /// function's thread context; callers that mutate
         /// `@MainActor` state must hop back to MainActor
         /// inside their closure.
-        onStage: (@Sendable (UploadStage) -> Void)? = nil
+        onStage: (@Sendable (UploadStage) -> Void)? = nil,
+        /// ADR-0047 — fraction of the ciphertext PUT sent so far (0...1),
+        /// for the timeline's determinate upload ring. Off the main actor.
+        onProgress: (@Sendable (Double) -> Void)? = nil
     ) async throws -> AttachmentRef {
         guard bytes.count <= maxAttachmentBytes else {
             throw AttachmentBridgeError.tooLarge(
@@ -107,7 +114,8 @@ public enum AttachmentBridge {
         do {
             try await storage.putBlob(
                 blobId: enc.blobId,
-                ciphertext: enc.ciphertext
+                ciphertext: enc.ciphertext,
+                progress: onProgress
             )
         } catch {
             throw AttachmentBridgeError.upload(error)
@@ -123,7 +131,87 @@ public enum AttachmentBridge {
             nonce: enc.nonce,
             mime: (mime?.isEmpty ?? true) ? nil : mime,
             size: UInt64(bytes.count),
-            name: (name?.isEmpty ?? true) ? nil : name
+            name: (name?.isEmpty ?? true) ? nil : name,
+            kind: media?.kind,
+            durationMs: media?.durationMs,
+            waveform: media?.waveform,
+            width: media?.width,
+            height: media?.height,
+            thumb: media?.thumb
+        )
+    }
+
+    /// ADR-0047 — the file-backed sibling of
+    /// ``encryptAndUpload(bytes:mime:name:media:storage:onStage:onProgress:)``
+    /// for a recording this device just made. The size ceiling is checked
+    /// from the file's attributes before any byte is read.
+    public static func encryptAndUpload(
+        fileURL: URL,
+        mime: String?,
+        name: String?,
+        media: MediaAttachmentMeta?,
+        storage: StorageClient = StorageClient(),
+        onProgress: (@Sendable (Double) -> Void)? = nil
+    ) async throws -> AttachmentRef {
+        let attributes = try? FileManager.default.attributesOfItem(atPath: fileURL.path)
+        if let size = (attributes?[.size] as? NSNumber)?.intValue, size > maxAttachmentBytes {
+            throw AttachmentBridgeError.tooLarge(got: size, max: maxAttachmentBytes)
+        }
+        let bytes = try Data(contentsOf: fileURL, options: .mappedIfSafe)
+        return try await encryptAndUpload(
+            bytes: bytes,
+            mime: mime,
+            name: name,
+            media: media,
+            storage: storage,
+            onProgress: onProgress
+        )
+    }
+
+    /// ADR-0047 §1 — `ThumbRef.size` is at most this many bytes; the core
+    /// drops a larger thumb, so a client refuses to upload one.
+    public static let maxThumbBytes = 256 * 1024
+
+    /// ADR-0047 — encrypt and upload a video-note poster frame as its own blob
+    /// under its own CEK, returning the ``ThumbRef`` to embed on the note.
+    public static func encryptAndUploadThumb(
+        bytes: Data,
+        mime: String,
+        width: UInt32?,
+        height: UInt32?,
+        storage: StorageClient = StorageClient()
+    ) async throws -> ThumbRef {
+        guard !bytes.isEmpty, bytes.count <= maxThumbBytes else {
+            throw AttachmentBridgeError.tooLarge(got: bytes.count, max: maxThumbBytes)
+        }
+        let ref = try await encryptAndUpload(bytes: bytes, mime: mime, name: nil, storage: storage)
+        return ThumbRef(
+            blobId: ref.blobId,
+            key: ref.key,
+            nonce: ref.nonce,
+            mime: mime,
+            size: UInt64(bytes.count),
+            width: width,
+            height: height
+        )
+    }
+
+    /// ADR-0047 — download and authenticate a poster thumb. Same AEAD open as
+    /// any attachment: a forged or truncated blob fails before a byte returns.
+    public static func downloadAndDecrypt(
+        thumb: ThumbRef,
+        storage: StorageClient = StorageClient()
+    ) async throws -> Data {
+        try await downloadAndDecrypt(
+            ref: AttachmentRef(
+                blobId: thumb.blobId,
+                key: thumb.key,
+                nonce: thumb.nonce,
+                mime: thumb.mime,
+                size: thumb.size,
+                name: nil
+            ),
+            storage: storage
         )
     }
 
@@ -259,17 +347,53 @@ public enum AttachmentBridge {
     }
 
     /// `true` when the ref's MIME type is one the chat UI knows
-    /// how to inline-preview. Currently: the four core web
-    /// image formats. SVG is deliberately excluded — an
-    /// attacker-supplied SVG can carry JS / runtime markup, and
-    /// even though iOS doesn't render SVG as a web view, the
-    /// safe path is to deny preview consistently across formats
-    /// that can / cannot tile.
+    /// how to inline-preview as an image. Decided by the core's
+    /// ADR-0047 allowlist (`inlineMediaType(mime:)`) — the four web
+    /// image formats, parameters ignored. SVG is never on it — an
+    /// attacker-supplied SVG can carry script / runtime markup.
     public static func isInlinePreviewable(_ ref: AttachmentRef) -> Bool {
-        guard let m = ref.mime else { return false }
-        return m == "image/jpeg" || m == "image/png"
-            || m == "image/webp" || m == "image/gif"
+        InlineMedia.inlineType(mime: ref.mime) == .image
     }
+
+    /// A filename that is safe to join onto a local directory, derived from
+    /// the ref's `name`.
+    ///
+    /// `name` is chosen by the SENDER and arrives inside an MLS application
+    /// message, so every member of a group controls it. Joined onto a
+    /// directory verbatim, `../Library/Preferences/x` walks out of the temp
+    /// directory and overwrites app-private files when the recipient taps
+    /// Save. This keeps only the last path component (splitting on both `/`
+    /// and `\`), drops control and format characters (the latter include the
+    /// right-to-left override that disguises an extension), trims, caps the
+    /// length, and falls back when nothing usable is left — including `.` and
+    /// `..`, which are path components rather than names.
+    public static func safeFileName(_ raw: String?, fallback: String) -> String {
+        guard let raw else { return fallback }
+        let lastComponent = raw.split(
+            omittingEmptySubsequences: false,
+            whereSeparator: { $0 == "/" || $0 == "\\" }
+        ).last.map(String.init) ?? ""
+        var cleaned = String.UnicodeScalarView()
+        for scalar in lastComponent.unicodeScalars {
+            switch scalar.properties.generalCategory {
+            case .control, .format:
+                continue
+            default:
+                cleaned.append(scalar)
+            }
+        }
+        var name = String(cleaned).trimmingCharacters(in: .whitespacesAndNewlines)
+        if name.count > maxSafeFileNameLength {
+            name = String(name.prefix(maxSafeFileNameLength))
+        }
+        if name.isEmpty || name == "." || name == ".." {
+            return fallback
+        }
+        return name
+    }
+
+    /// Upper bound on `safeFileName`'s output, in characters.
+    public static let maxSafeFileNameLength = 128
 
     /// Lowercase hex of an arbitrary byte buffer — used by the
     /// UI for the short-fallback filename when an attachment
@@ -288,6 +412,36 @@ public enum AttachmentBridge {
     }
 
     private static let hexAlphabet: [Character] = Array("0123456789abcdef")
+}
+
+/// ADR-0047 §1 — the optional media metadata an attachment carries. Every
+/// field is bounded by `lakko-attachments`, which drops an out-of-bound value
+/// rather than failing the envelope; this client never produces one.
+public struct MediaAttachmentMeta: Equatable, Sendable {
+    /// `voice`, `video_note` or `gif`.
+    public var kind: String
+    public var durationMs: UInt32?
+    /// At most 128 amplitude bytes.
+    public var waveform: Data?
+    public var width: UInt32?
+    public var height: UInt32?
+    public var thumb: ThumbRef?
+
+    public init(
+        kind: String,
+        durationMs: UInt32? = nil,
+        waveform: Data? = nil,
+        width: UInt32? = nil,
+        height: UInt32? = nil,
+        thumb: ThumbRef? = nil
+    ) {
+        self.kind = kind
+        self.durationMs = durationMs
+        self.waveform = waveform
+        self.width = width
+        self.height = height
+        self.thumb = thumb
+    }
 }
 
 /// Coarse-grained pipeline stage reported through

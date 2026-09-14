@@ -39,6 +39,9 @@ public final class ContactsRepository: ObservableObject {
             // as before.
             if state.accepted != oldValue.accepted {
                 AcceptedContactsStore.save(state.accepted)
+                // ADR-0048 — a local rename is the first rung of the display
+                // name precedence everywhere, so the resolver must see it.
+                ProfileDirectory.shared.setRenames(from: state.accepted)
             }
         }
     }
@@ -122,6 +125,7 @@ public final class ContactsRepository: ObservableObject {
             senderAccountId: secrets.accountId,
             senderSignaturePubkey: identity.signaturePublicKey(),
             recipientUsername: recipientUsername,
+            profile: ProfileDirectory.shared.ownProfileForRequest(),
             introMessage: Data(introMessage.utf8)
         )
         let sent = SentContactRequest(
@@ -148,6 +152,11 @@ public final class ContactsRepository: ObservableObject {
 
     // MARK: - Poll
 
+    /// User-visible copy for a Welcome this device could not join. Short
+    /// enough for the inbox footer's two-line limit.
+    static let welcomeJoinFailureMessage =
+        "A chat you were added to could not be opened. Ask to be added again."
+
     /// Poll the stranger inbox for new ContactRequest / Welcome
     /// envelopes. Updates ``ContactsState/pending`` with any new
     /// requests + bumps the cursor.
@@ -173,10 +182,20 @@ public final class ContactsRepository: ObservableObject {
             state = state.with(requiresReauth: true)
             return
         }
+        // Secrets are present, so any earlier "sign in again" verdict is
+        // stale (e.g. a poll that ran before a login in this process).
+        if state.requiresReauth {
+            state = state.with(requiresReauth: false, lastError: state.lastError)
+        }
         let isManualRefresh = waitSecs == 0
         if isManualRefresh {
             state = state.with(refreshing: true, lastError: nil)
         }
+        // A Welcome that fails to join is otherwise invisible: the cursor has
+        // already moved past it, so it is never retried and the chat simply
+        // never appears. Remember the failure so this poll's final state can
+        // say so.
+        var welcomeJoinFailure: String?
         do {
             let client = clientFactory()
             let identity = try Identity.fromSeed(seed: secrets.accountIdentitySeed)
@@ -191,6 +210,14 @@ public final class ContactsRepository: ObservableObject {
                 switch event {
                 case .contactRequest(let req):
                     newPending.append(req)
+                    // ADR-0048 §3 — a request's profile is bound to its
+                    // `fromPubkey`, which the request signature authenticated.
+                    // Kept only when strictly newer than what is held, so a
+                    // replayed old request never rolls a name back.
+                    if let profile = req.profile {
+                        ProfileDirectory.shared.acceptReceived(
+                            profile, signatureKeyB64: base64Encode(req.fromPubkey))
+                    }
                 case .welcome(_, let welcomeBytes, _):
                     // 1.14f4 wires `ChatRepository.joinGroupFromWelcome`
                     // here. Best-effort: a single bad Welcome
@@ -198,12 +225,16 @@ public final class ContactsRepository: ObservableObject {
                     // the cursor for the rest of the events.
                     // Cursor has already advanced so we won't
                     // re-process this row on the next poll.
+                    // `joinGroupFromWelcome` republishes this device's
+                    // KeyPackage on success AND failure, so the directory
+                    // never keeps serving a KeyPackage the Welcome consumed.
                     if let chatRepository = chatRepository {
                         do {
                             _ = try await chatRepository
                                 .joinGroupFromWelcome(welcomeBytes: welcomeBytes)
                         } catch {
-                            // best-effort
+                            NSLog("contacts inbox: joining a chat from a Welcome failed: \(error)")
+                            welcomeJoinFailure = Self.welcomeJoinFailureMessage
                         }
                     }
                     continue
@@ -224,11 +255,18 @@ public final class ContactsRepository: ObservableObject {
                     continue
                 }
             }
+            // Keep a join failure visible across the background long-poll
+            // loop (whose next quiet poll would otherwise clear it within
+            // seconds); a manual refresh is the user acknowledging it.
+            let carriedJoinFailure = !isManualRefresh
+                && state.lastError == Self.welcomeJoinFailureMessage
+                ? Self.welcomeJoinFailureMessage
+                : nil
             state = state.with(
                 pending: state.pending + newPending,
                 cursor: pollResult.cursor,
                 refreshing: false,
-                lastError: nil
+                lastError: welcomeJoinFailure ?? carriedJoinFailure
             )
         } catch {
             // Background long-polls surface failures on the
@@ -605,6 +643,7 @@ public final class ContactsRepository: ObservableObject {
                 recipientAccountId: inviterAccountId,
                 recipientSignaturePubkey: inviterSigPubkey,
                 recipientX25519Pubkey: inviterX25519Pubkey,
+                profile: ProfileDirectory.shared.ownProfileForRequest(),
                 introMessage: Data()
             )
         } catch {

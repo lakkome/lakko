@@ -268,3 +268,69 @@ describe("the pre-existing service-envelope arms still work", () => {
     ]);
   });
 });
+
+describe("group-call control bodies are call signaling, never chat", () => {
+  // The call-signaling sniffer knew fields 10..13 (0x52 / 0x5A / 0x62 / 0x6A)
+  // and nothing past them, so a GroupCallStart (field 14, 0x72), GroupCallJoin
+  // (field 15, 0x7A) and GroupCallLeave (field 16, the two-byte tag 0x82 0x01)
+  // fell through to `parseBodyEnvelope` and rendered as a garbage bubble.
+  // Every fixture is produced by the real wasm composer.
+  const callId = new Uint8Array(16).fill(0x42);
+
+  function groupBodies(): Record<string, Uint8Array> {
+    return {
+      groupStart: wasm.composeGroupCallStartSignaling(callId, 3, 1_700_000_000_000n, true, true),
+      groupJoin: wasm.composeGroupCallJoinSignaling(callId, 3, 1_700_000_000_500n),
+      groupLeave: wasm.composeGroupCallLeaveSignaling(callId, 3, "hungUp"),
+    };
+  }
+
+  it("the leading bytes are the tags the sniffer keys on", () => {
+    const b = groupBodies();
+    expect(b["groupStart"]?.[0]).toBe(0x72);
+    expect(b["groupJoin"]?.[0]).toBe(0x7a);
+    expect([b["groupLeave"]?.[0], b["groupLeave"]?.[1]]).toEqual([0x82, 0x01]);
+  });
+
+  it("would render as a chat bubble without the arm (the defect)", () => {
+    // `parseBodyEnvelope`'s lossy-UTF-8 fallback is correct on its own terms;
+    // this pins that the filter, not the parser, is what keeps these out.
+    for (const bytes of Object.values(groupBodies())) {
+      const parsed = wasm.parseBodyEnvelope(bytes);
+      expect(parsed.kind).toBe("chat");
+    }
+  });
+
+  it("each group body is classified as call signaling and round-trips", async () => {
+    const b = groupBodies();
+    for (const [kind, bytes] of Object.entries(b)) {
+      const [ev] = await classify(bytes);
+      expect(ev?.kind, kind).toBe("callSignaling");
+      if (ev?.kind !== "callSignaling") throw new Error("unreachable");
+      // The sender leaf rides along so the record can refuse a body that
+      // speaks for a leaf other than its own sender.
+      expect(ev.senderLeaf).toBe(3);
+      const parsed = wasm.parseCallSignaling(ev.payloadBytes);
+      expect(parsed.kind).toBe(kind);
+      expect(Array.from(parsed.callId)).toEqual(Array.from(callId));
+    }
+  });
+
+  it("a mixed batch keeps the chat rows as chat", async () => {
+    const b = groupBodies();
+    const events = await classify(
+      chatEnvelope("before"),
+      b["groupStart"] as Uint8Array,
+      b["groupJoin"] as Uint8Array,
+      b["groupLeave"] as Uint8Array,
+      chatEnvelope("after"),
+    );
+    expect(events.map((e) => e.kind)).toEqual([
+      "application",
+      "callSignaling",
+      "callSignaling",
+      "callSignaling",
+      "application",
+    ]);
+  });
+});

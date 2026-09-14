@@ -7,6 +7,8 @@ import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.engine.HttpClientEngine
 import io.ktor.client.engine.okhttp.OkHttp
+import me.lakko.app.config.ApiEndpoints
+import me.lakko.app.config.ApiService
 import me.lakko.app.transport.AntiCensorshipEngine
 import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
@@ -313,9 +315,11 @@ public class DsClient(
     }
 
     public companion object {
-        /** DS service URL — Android emulator loopback alias, port
-         *  `8082` matching the dev `lakko-svc-ds` bind. */
-        public const val DEFAULT_BASE_URL: String = "http://10.0.2.2:8082"
+        /** DS service URL — `<LAKKO_API_BASE_URL>/ds` ([ApiEndpoints]),
+         *  or the Android emulator loopback alias + the dev
+         *  `lakko-svc-ds` bind (`http://10.0.2.2:8082`) without one. */
+        public val DEFAULT_BASE_URL: String
+            get() = ApiEndpoints.baseUrlFor(ApiService.DS)
 
         /** 32-byte pseudonym (BLAKE3 output length used by every
          *  variant in [me.lakko.app...] — see 1.15e2). */

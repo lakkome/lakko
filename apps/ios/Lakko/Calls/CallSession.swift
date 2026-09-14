@@ -95,6 +95,9 @@ public final class CallSession: ObservableObject {
     private var makingOffer = false
     private var isSettingRemoteAnswerPending = false
     private var negotiationReady = false
+    /// Remote ICE candidates held until the remote description is set (a
+    /// ringing call has no peer connection yet).
+    private var remoteCandidates = RemoteCandidateBuffer()
     private var addingVideo = false
 
     /// Stored remote SDP offer between `.ringing` → `.connecting`.
@@ -670,6 +673,9 @@ public final class CallSession: ObservableObject {
     ) async {
         do {
             let answerSdp = try await rtc.createAnswer(remoteOfferSdp: offerSdp)
+            // `createAnswer` set the remote offer: candidates held while the
+            // call rang can go in now.
+            await applyBufferedRemoteCandidates(to: rtc)
             let bytes = try composeCallSignaling(
                 body: .answer(
                     callId: callId,
@@ -687,6 +693,22 @@ public final class CallSession: ObservableObject {
         } catch {
             NSLog("acceptCall answer-build failed: %@", String(describing: error))
             endLocal(reason: .error)
+        }
+    }
+
+    /// Apply, in arrival order, the remote candidates held until the remote
+    /// description was set.
+    private func applyBufferedRemoteCandidates(to rtc: WebRTCPeerConnection) async {
+        let held = remoteCandidates.markRemoteDescriptionApplied()
+        for candidate in held {
+            await rtc.addRemoteCandidate(
+                sdpMid: candidate.sdpMid,
+                sdpMLineIndex: candidate.sdpMLineIndex,
+                candidate: candidate.candidate
+            )
+        }
+        if remoteCandidates.dropped > 0 {
+            NSLog("CallSession: %d remote ICE candidate(s) over the buffer cap were dropped", remoteCandidates.dropped)
         }
     }
 
@@ -733,6 +755,7 @@ public final class CallSession: ObservableObject {
                 Task { [weak self] in
                     do {
                         try await rtc.applyRemoteAnswer(sdp)
+                        await self?.applyBufferedRemoteCandidates(to: rtc)
                         // Arm the mid-call renegotiation drive now the
                         // initial exchange is applied on our side (B2b).
                         self?.negotiationReady = true
@@ -762,26 +785,34 @@ public final class CallSession: ObservableObject {
                 }
             }
         case .iceCandidate(let cid, let candidate, let sdpMid, let sdpMLineIndex):
-            guard cid == callId else { return }
-            guard let rtc = rtc else { return }
+            guard cid == callId, state != .done else { return }
             // sdpMLineIndex on the wire is UInt32; WebRTC's
             // RTCIceCandidate takes Int32. The valid range
             // for an SDP m-line index is 0..255 in practice,
             // so the cast is loss-free.
-            let mLineIndex = Int32(bitPattern: sdpMLineIndex)
-            Task { await rtc.addRemoteCandidate(
+            let remote = RemoteIceCandidate(
                 sdpMid: sdpMid,
-                sdpMLineIndex: mLineIndex,
+                sdpMLineIndex: Int32(bitPattern: sdpMLineIndex),
                 candidate: candidate
+            )
+            // Before the remote description is applied (ringing, or the SDP
+            // still being set) the candidate is kept, not dropped; it is
+            // applied in order once the description lands.
+            if remoteCandidates.offer(remote) { return }
+            guard let rtc = rtc else { return }
+            Task { await rtc.addRemoteCandidate(
+                sdpMid: remote.sdpMid,
+                sdpMLineIndex: remote.sdpMLineIndex,
+                candidate: remote.candidate
             ) }
         case .groupStart, .groupJoin, .groupLeave:
-            // Group-call signaling (Phase 3c2) is handled by
-            // the in-chat joinable-call card dispatcher, not
-            // by the 1×1 `CallSession`. Ignore here — the
-            // chat-route owner filters these away from the
-            // 1×1 sink before they reach this method, but
-            // the exhaustive-switch contract requires us to
-            // name the cases.
+            // Group-call signaling (Phase 3c2) folds into the
+            // repository's per-chat group-call record
+            // (`ChatRepository.routeCallSignaling` via
+            // `CallSignalingRoute`, C-11), never into the 1×1
+            // `CallSession`. It cannot reach this method; the
+            // exhaustive-switch contract requires naming the
+            // cases.
             break
         case .end(let cid, let reason):
             guard cid == callId, state != .done else { return }
@@ -928,6 +959,7 @@ public final class CallSession: ObservableObject {
         self.negotiationReady = false
         self.makingOffer = false
         self.isSettingRemoteAnswerPending = false
+        self.remoteCandidates.reset()
         self.addingVideo = false
         // B2a — a fresh call starts with no camera-on in flight.
         setVideoPublishState(.off)

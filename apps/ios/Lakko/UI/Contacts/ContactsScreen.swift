@@ -27,6 +27,12 @@ public struct ContactsScreen: View {
     public var onBack: () -> Void
     public var onOpenChat: (String) -> Void
 
+    /// ADR-0032 call links — the session the owner signs the capability with,
+    /// and the intake that routes "Start call" into the `/c/` owner host flow.
+    @EnvironmentObject private var authRepository: AuthRepository
+    @EnvironmentObject private var inviteIntake: InviteIntake
+    @State private var createCallLinkPresented = false
+
     public init(
         viewModel: ContactsViewModel,
         onBack: @escaping () -> Void,
@@ -47,6 +53,7 @@ public struct ContactsScreen: View {
                         sendForm
                         actionsRow
                         inviteSection
+                        callLinkSection
                         activeInvitesSection
                         pendingSection
                         acceptedSection
@@ -64,6 +71,22 @@ public struct ContactsScreen: View {
                 GeneratedInviteSheet(invite: wrapper.invite) {
                     viewModel.dismissGeneratedInvite()
                 }
+            }
+            .sheet(isPresented: $createCallLinkPresented) {
+                CreateCallLinkSheet(
+                    authRepository: authRepository,
+                    onDismiss: { createCallLinkPresented = false },
+                    onStartCall: { url in
+                        createCallLinkPresented = false
+                        // Park the link exactly as a tapped `/c/<slug>` would:
+                        // AppRoot swaps to `JoinCallLandingScreen`, which
+                        // recognises this device as the owner and offers
+                        // "Start call" (the owner host flow).
+                        if let parsed = URL(string: url) {
+                            inviteIntake.handle(parsed)
+                        }
+                    }
+                )
             }
             .navigationTitle("Contacts")
             .navigationBarTitleDisplayMode(.inline)
@@ -112,6 +135,7 @@ public struct ContactsScreen: View {
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled(true)
                 .disabled(viewModel.sending)
+            UsernameRuleHint(input: viewModel.usernameInput)
             TextField("Optional intro", text: $viewModel.introInput, axis: .vertical)
                 .textFieldStyle(.roundedBorder)
                 .lineLimit(2...4)
@@ -139,7 +163,7 @@ public struct ContactsScreen: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
-            .disabled(viewModel.sending)
+            .disabled(viewModel.sending || viewModel.usernameHint != nil)
         }
     }
 
@@ -278,6 +302,35 @@ public struct ContactsScreen: View {
         }
     }
 
+    /// ADR-0032 — "Call links". A `/c/` link is its own call, independent of
+    /// any chat, so it sits beside the contact invite link rather than in a
+    /// chat header.
+    private var callLinkSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Call links")
+                    .font(.headline)
+                Spacer()
+                Button {
+                    createCallLinkPresented = true
+                } label: {
+                    HStack {
+                        Image(systemName: "phone.badge.plus")
+                        Text("Create call link")
+                    }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+            Text(
+                "Create a link to an end-to-end-encrypted call that people can " +
+                "join without being in a chat with you."
+            )
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+        }
+    }
+
     /// Phase 1.18d2b-list — "Active invites" panel.
     ///
     /// Server-authoritative list of every live invite this owner
@@ -377,12 +430,15 @@ private struct PendingRequestRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            // The sender's pubkey hex is the most reliable handle
-            // we have until 1.14e+ wires reverse-lookup from
-            // pubkey → username via discovery.
-            Text(shortFingerprint(request.fromPubkey))
-                .font(.system(.body, design: .monospaced))
-                .textSelection(.enabled)
+            // ADR-0048 — who is asking, from the profile the request carried
+            // (bound to its signed `fromPubkey`): `Alice Petrova · @alice`,
+            // or `@alice`, or the fingerprint when that is all there is. The
+            // username appears only once verified.
+            ResolvedName(signatureKey: request.fromPubkey) { resolved in
+                Text("\(resolved.listLabel) wants to connect")
+                    .font(resolved.source == .fingerprint ? .system(.body, design: .monospaced) : .body)
+                    .textSelection(.enabled)
+            }
             if let intro = request.intro, !intro.isEmpty {
                 Text(intro)
                     .font(.body)
@@ -408,21 +464,6 @@ private struct PendingRequestRow: View {
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
-    /// Short hex fingerprint — first 8 bytes of the 32-byte
-    /// pubkey, formatted as `xxxx:xxxx:xxxx:xxxx`. Same surface
-    /// the Android side renders so the user has a stable visual
-    /// hook to compare across devices (OOB verification lands
-    /// post-MVP).
-    private func shortFingerprint(_ pubkey: Data) -> String {
-        let bytes = pubkey.prefix(8)
-        let hex = bytes.map { String(format: "%02x", $0) }.joined()
-        var out = ""
-        for (i, ch) in hex.enumerated() {
-            if i > 0 && i % 4 == 0 { out.append(":") }
-            out.append(ch)
-        }
-        return out
-    }
 }
 
 private struct AcceptedContactRow: View {
@@ -434,25 +475,20 @@ private struct AcceptedContactRow: View {
 
     @State private var renaming = false
     @State private var draftName = ""
+    @State private var showingDetails = false
 
     var body: some View {
         HStack {
             VStack(alignment: .leading, spacing: 4) {
-                // Primary label: the user-chosen name when set, else the
-                // short pubkey fingerprint (monospaced when it IS the
-                // fingerprint, so it reads as a key rather than a name).
-                Text(entry.displayLabel)
-                    .font(
-                        entry.displayName == nil
-                            ? .system(.body, design: .monospaced)
-                            : .body
-                    )
-                // When a name is set, keep the fingerprint visible as a
-                // secondary line — it stays the identity the user verifies.
-                if entry.displayName != nil {
-                    Text(entry.shortFingerprintLabel)
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundStyle(.secondary)
+                // ADR-0048 — one resolver: rename, then their profile name,
+                // then their VERIFIED username, then the fingerprint (no `@`).
+                // A verified username sits under a name (`Alice · @alice`).
+                ResolvedName(signatureKey: entry.request.fromPubkey) { resolved in
+                    Text(resolved.listLabel)
+                        .font(resolved.source == .fingerprint ? .system(.body, design: .monospaced) : .body)
+                    if showingDetails {
+                        ContactDetailLines(resolved: resolved, fullFingerprint: entry.shortFingerprintLabel)
+                    }
                 }
                 if entry.groupIdHex == nil {
                     Text("Chat creation failed — retry from Chats")
@@ -465,6 +501,11 @@ private struct AcceptedContactRow: View {
                 }
             }
             Spacer()
+            Button(action: { showingDetails.toggle() }) {
+                Image(systemName: showingDetails ? "info.circle.fill" : "info.circle")
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel(showingDetails ? "Hide contact details" : "Show contact details")
             Button(action: {
                 draftName = entry.displayName ?? ""
                 renaming = true
@@ -488,10 +529,35 @@ private struct AcceptedContactRow: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text(
-                "Shown in chats and group-call rosters. "
-                    + "Leave blank to use the key fingerprint."
+                "Only you see this name, in chats and call rosters. "
+                    + "Leave blank to use the name they set."
             )
         }
+    }
+}
+
+/// ADR-0048 / UX spec §6 — the contact-detail lines: the person's own name
+/// when a local rename overrides it, a quiet "Username not verified" when
+/// their claimed username failed, and the key fingerprint, labelled.
+struct ContactDetailLines: View {
+    let resolved: ResolvedDisplayName
+    let fullFingerprint: String
+
+    var body: some View {
+        if let theirName = resolved.theirName {
+            Text("Their name: \(theirName)")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+        if resolved.usernameNotVerified {
+            Text("Username not verified")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+        Text("Key fingerprint: \(fullFingerprint)")
+            .font(.system(.caption, design: .monospaced))
+            .foregroundStyle(.secondary)
+            .textSelection(.enabled)
     }
 }
 

@@ -39,6 +39,33 @@ options:
   groupSortPosition: top
   generateEmptyDirectories: true
 
+# Per-build-configuration deployment endpoints. Every target inherits these
+# build settings; the Info.plist blocks below expand them into keys the
+# Swift code reads at runtime, so switching deployments is a build setting,
+# never a code change. Override one build without editing this file with
+# `xcodebuild ... LAKKO_API_BASE_URL=https://api.lakko.me`.
+#
+#   * LAKKO_API_BASE_URL -> Info.plist `LakkoApiBaseUrl` (app + NSE). The
+#     native API base every REST client derives its service base from
+#     (`ApiEndpoints`): `<base>/auth`, `/ds`, `/storage`, `/discovery`,
+#     `/push-gw`, `/channels`, `/gifs`. EMPTY -> each client keeps its
+#     localhost development bind, and a Release build logs a warning.
+#       Debug:   https://test.lakko.me/native (the test stack)
+#       Release: empty until a production release sets it
+#   * LAKKO_SFU_URL -> Info.plist `LakkoSfuUrl` (`SfuConfig`). The SFU
+#     WebSocket origin; the client appends `/v1/connect`. EMPTY -> group
+#     calls refuse with a clear message.
+#       Debug:   wss://test.lakko.me/sfu
+#       Release: empty
+settings:
+  configs:
+    Debug:
+      LAKKO_API_BASE_URL: "https://test.lakko.me/native"
+      LAKKO_SFU_URL: "wss://test.lakko.me/sfu"
+    Release:
+      LAKKO_API_BASE_URL: ""
+      LAKKO_SFU_URL: ""
+
 # Single iOS app target — `Lakko`. The SwiftUI source lives at
 # `apps/ios/Lakko/` (committed); the `Info.plist` is
 # auto-synthesized by xcodegen from the `info` block below
@@ -75,6 +102,10 @@ targets:
         # production `me.lakko` bundle on the same device.
         CFBundleDisplayName: Lakko
         UILaunchScreen: {}  # blank launch screen
+        # Deployment endpoints, expanded from the per-configuration build
+        # settings at the top of this file.
+        LakkoApiBaseUrl: "$(LAKKO_API_BASE_URL)"
+        LakkoSfuUrl: "$(LAKKO_SFU_URL)"
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
         # KT-log S3d — transparency-log integration config (mirror of
@@ -154,6 +185,12 @@ targets:
         LakkoAppStoreUrl: ""
         LakkoCurrentRelease: "1"
         LakkoReleaseCheckDevOverride: "false"
+        # ADR-0047 §4 — the GIF proxy base URL (`services/gif-proxy`, whose
+        # routes start with `/gifs/`). A per-feature OVERRIDE: EMPTY → the
+        # API base URL's `/gifs` (`LakkoApiBaseUrl`), else
+        # `GifClient.defaultBaseURL` (`http://localhost:8091`, a local proxy
+        # the simulator reaches on the Mac).
+        LakkoGifProxyUrl: ""
         # G-29 — background contact-inbox refresh. `BGAppRefreshTask`
         # (registered on the scene via `.backgroundTask(.appRefresh(_:))`
         # in LakkoApp, scheduled by `ContactBackgroundRefresh`) needs the
@@ -171,24 +208,25 @@ targets:
         # aligned with what the user sees in the Devices → "Add
         # a device" screen.
         NSCameraUsageDescription: >-
-          Lakko uses the camera to scan a QR codes from devices
-          you want to link to your account and to capture
-          video for in-call streams. The camera is never
-          recorded server-side — every call frame is end-to-end
-          encrypted under SFrame keys derived from the call's
-          MLS group.
+          Lakko uses the camera to scan QR codes from devices
+          you want to link to your account, to capture video for
+          in-call streams, and to record video messages you
+          choose to send. Everything the camera captures is
+          end-to-end encrypted on your device before it is sent.
         # G3-1 — microphone access for in-call audio capture
         # via `RTCAudioTrack`. iOS refuses to instantiate the
         # `AVAudioSession` shared instance for capture without
         # this string; without it `RTCPeerConnection.addTrack`
         # silently produces a track that delivers zero samples.
+        # ADR-0047 — the microphone also records voice messages and the
+        # sound of video notes, so the string no longer claims the mic is
+        # only used during calls.
         NSMicrophoneUsageDescription: >-
-          Lakko uses the microphone to capture your voice for
-          end-to-end-encrypted calls. The mic is only on while
-          you are in a call and the captured audio is never
-          recorded server-side — every call frame is encrypted
-          under SFrame keys derived from the call's MLS group
-          before it leaves your device.
+          Lakko uses the microphone for end-to-end-encrypted calls
+          and to record voice messages and video messages you
+          choose to send. The mic is only on while you are in a
+          call or recording a message, and everything it captures
+          is encrypted on your device before it is sent.
         # `UIRequiredDeviceCapabilities` left at default — every
         # device the deployment target accepts has the same
         # baseline (arm64, OpenGL ES 2.0).
@@ -373,6 +411,11 @@ targets:
       - path: Lakko/Shared/KeychainWrapKey.swift
         type: file
         buildPhase: sources
+      # The build's API base URL resolver, so the NSE's DS fetch follows
+      # the same deployment as the app (Foundation only).
+      - path: Lakko/Shared/ApiEndpoints.swift
+        type: file
+        buildPhase: sources
       - path: Lakko/Auth/AccountIdentitySeedStore.swift
         type: file
         buildPhase: sources
@@ -398,10 +441,12 @@ targets:
       path: LakkoNotificationService/Info.plist
       properties:
         CFBundleDisplayName: Lakko Notifications
-        # ADR-0041 Phase 3 — DS base URL the NSE's slim `URLSession` fetch
-        # uses. EMPTY → `NseConfig.dsBaseURL` falls back to the app's
-        # `DsClient` default (`http://localhost:8082`); a deployment sets it
-        # per build configuration to point the NSE at the real DS.
+        # The same API base URL as the app, so `NseConfig.dsBaseURL`
+        # resolves to `<base>/ds` exactly like the app's `DsClient`.
+        LakkoApiBaseUrl: "$(LAKKO_API_BASE_URL)"
+        # ADR-0041 Phase 3 — optional DS base URL override for the NSE's slim
+        # `URLSession` fetch. EMPTY → `NseConfig.dsBaseURL` uses
+        # `LakkoApiBaseUrl` above, else `http://localhost:8082`.
         LakkoDsUrl: ""
         # `NSExtension` block now lives in `properties` so
         # xcodegen owns the entire Info.plist (previous

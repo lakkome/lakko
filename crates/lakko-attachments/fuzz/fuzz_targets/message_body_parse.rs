@@ -11,11 +11,20 @@
 //! decoders (`decode_blob_id` / `decode_key` / `decode_nonce`, each a
 //! base64 decode + fixed length check). Any panic / overflow /
 //! slice-out-of-bounds here is a vulnerability.
+//!
+//! ADR-0047: the same bytes also drive the media-metadata surface — the
+//! lenient `kind` / `duration_ms` / `waveform` / `width` / `height` /
+//! `thumb` decode and its bounds — through
+//! `fuzz_api::media_metadata_within_bounds`, a property oracle asserted
+//! here: every media field that survives parse is within its bound, and
+//! re-composing the parsed refs then parsing again yields the same refs.
 
 #![no_main]
 
+use lakko_attachments::fuzz_api::{media_metadata_within_bounds, parse_message_body};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
-    let _ = lakko_attachments::fuzz_api::parse_message_body(data);
+    let _ = parse_message_body(data);
+    assert!(media_metadata_within_bounds(data));
 });

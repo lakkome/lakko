@@ -81,10 +81,14 @@ public struct ChatListScreen: View {
                 Button(action: { onOpenChat(thread.groupIdHex) }) {
                     ThreadRow(
                         thread: thread,
+                        title: viewModel.peerName(groupIdHex: thread.groupIdHex),
                         flags: deviceGroupSync.flags[thread.groupIdHex],
-                        unread: Self.unreadCount(
-                            thread: thread,
-                            cursor: deviceGroupSync.readCursors[thread.groupIdHex]
+                        unread: UnreadCounting.displayed(
+                            local: thread.unread,
+                            cursorDerived: Self.unreadCount(
+                                thread: thread,
+                                cursor: deviceGroupSync.readCursors[thread.groupIdHex]
+                            )
                         )
                     )
                 }
@@ -104,19 +108,17 @@ public struct ChatListScreen: View {
     /// Outgoing rows never count — the sender already "read"
     /// them by composing.
     ///
-    /// Returns 0 when `cursor` is `nil` and the thread has no
-    /// rows at all (treats "no cursor" the same as "everything
-    /// read"; otherwise an empty cursor would flip every prior
-    /// row to unread on the first attach which spams the UI
-    /// during cold start). A future sprint can refine the
-    /// "first attach" semantics — for now the read-cursor
-    /// broadcast on chat-mount lands within 1.5 s and the
-    /// badge clears.
+    /// Returns `nil` when no read cursor has been broadcast for the thread, so
+    /// the list falls back to the local count of messages the foreground
+    /// receive applied while the chat was closed (``UnreadCounting``). Counting
+    /// every prior row against a missing cursor would flip the whole history to
+    /// unread on a cold start.
     private static func unreadCount(
         thread: ChatThread,
         cursor: ReadCursorState?
-    ) -> Int {
-        let cursorId = cursor.map { Self.decodeBeI64($0.upToMessageId) } ?? Int64.max
+    ) -> Int? {
+        guard let cursor else { return nil }
+        let cursorId = Self.decodeBeI64(cursor.upToMessageId)
         return thread.messages.reduce(0) { acc, msg in
             if msg.direction == .outgoing { return acc }
             if msg.messageId > cursorId { return acc + 1 }
@@ -232,6 +234,9 @@ public struct ChatListScreen: View {
 
 private struct ThreadRow: View {
     let thread: ChatThread
+    /// ADR-0048 — the other person's resolved name for a 1x1 chat, `nil` for a
+    /// group (which keeps its group label).
+    let title: String?
     /// Phase 2a3e2c-iOS — cross-device flags snapshot for this
     /// thread. `nil` until a `Flags` payload lands.
     let flags: FlagsState?
@@ -248,13 +253,16 @@ private struct ThreadRow: View {
                             .font(.caption)
                             .foregroundStyle(.orange)
                     }
-                    // First 16 chars of the hex id —
-                    // placeholder for the username surface
-                    // that 1.14f4 lights up via
-                    // ContactsRepository.accepted's stored
-                    // peer pubkey.
-                    Text(thread.groupIdHex.prefix(16) + "…")
-                        .font(.system(.body, design: .monospaced))
+                    if let title {
+                        Text(title)
+                            .font(.body)
+                            .lineLimit(1)
+                    } else {
+                        // A group keeps its label: the first 16 chars of the
+                        // hex id.
+                        Text(thread.groupIdHex.prefix(16) + "…")
+                            .font(.system(.body, design: .monospaced))
+                    }
                     if flags?.muted == true {
                         Image(systemName: "bell.slash.fill")
                             .font(.caption)
@@ -363,5 +371,17 @@ public final class ChatListViewModel: ObservableObject {
                 self?.threads = threads
             }
             .store(in: &cancellables)
+        // ADR-0048 — a profile or a verdict arriving renames rows in place.
+        ProfileDirectory.shared.$revision
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+    }
+
+    /// ADR-0048 — the other person's resolved name for a 1x1 chat.
+    func peerName(groupIdHex: String) -> String? {
+        repository.oneToOnePeerSignatureKey(groupIdHex: groupIdHex)
+            .map { ProfileDirectory.shared.resolve(signatureKey: $0).name }
     }
 }

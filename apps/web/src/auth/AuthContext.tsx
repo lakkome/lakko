@@ -22,12 +22,11 @@
  *      WebCrypto handle survives the round-trip; the bytes
  *      never leave the keystore.
  *
- * On `AuthProvider` mount we look both up. If both are present,
- * we restore state directly to `session` — no password re-entry
- * required. The OPAQUE export key bytes themselves are NOT
- * persisted; they live in memory only for the duration of the
- * signup / login call and drop the moment the device key has
- * been derived.
+ * On `AuthProvider` mount we look both up, together with the
+ * session token and the AccountIdentity seed wrapped under the
+ * device key, and restore the full session when every piece is
+ * present — no password re-entry required — or land in `anon`
+ * otherwise (`silent-restore.ts`).
  *
  * `logout()` keeps both layers in place — re-auth via password
  * stays cheap. `forgetDevice()` wipes both — full reset, requires
@@ -64,6 +63,8 @@ import { AuthClient } from "./client";
 import type { ContactKind } from "./wire";
 import { base64Decode, base64Encode } from "./account-id";
 import { resolveRecoverAccount } from "./recover-resolution";
+import { decideSilentRestore } from "./silent-restore";
+import { createKeyPackagePublisher } from "../chat/keypackage-publisher";
 import {
   deriveDeviceRootKey,
   deriveDeviceRootKeyFromIdentitySeed,
@@ -126,10 +127,17 @@ import { clearLeaveRequestedForAccount } from "../chat/membership-ended";
 // this device defer to a candidate it has no current evidence about.
 import { clearBeaconObservationsForAccount } from "../chat/committer-beacon";
 import { deleteMessageLog } from "../chat/message-log-store";
+import { deleteProfileRow } from "../profile/profile-idb";
+import { clearOwnProfile } from "../profile/own-profile";
 import { rehydrateMlsState } from "../chat/rehydrate";
 import { subscribeToPush, unsubscribeFromPush } from "../push/subscribe";
 import { bootstrapBackupFromPhraseString } from "../backup/bootstrap";
-import { deletePhrase } from "../backup/phrase-store";
+import { deletePhrase, getPhrase } from "../backup/phrase-store";
+import {
+  clearSignupPhraseOwed,
+  isSignupPhraseOwed,
+  markSignupPhraseOwed,
+} from "./phrase-gate";
 import { deleteFloor } from "../backup/floor-store";
 import { restoreFromServerBackupFromPhraseString } from "../backup/restore";
 import type { Identity as WasmIdentity } from "../../wasm/lakko_ffi_wasm";
@@ -223,17 +231,16 @@ export class IdentityVerificationUnavailable extends Error {
 
 /** Identity secrets held in memory for the current session.
  *
- *  Populated whenever the user has just authenticated (signup,
- *  login, recover) — those flows have the OPAQUE export key in
- *  scope and can derive the Identity. **Empty after a
- *  page reload** that restored the session via the IDB device
- *  root key (1.16c3c2) — the export key is not persisted, so
- *  the secrets cannot be re-derived without a password.
+ *  Populated whenever a session lands: an explicit signup / login /
+ *  recover, and a page reload that restores the session from the
+ *  secrets persisted under the device key (`silent-restore.ts` — the
+ *  session token and the ADR-0017 AccountIdentity seed). A reload that
+ *  cannot restore every piece lands in `anon`, so `state().kind ===
+ *  "session"` with these secrets `null` is no longer a resting state.
  *
  *  Operations that need to sign on behalf of the user
  *  (`ContactsClient.sendContactRequest`, MLS commits, …) require
- *  this to be set; surface a "please re-enter your password"
- *  prompt when it's `null`.
+ *  this to be set.
  *
  *  The bytes themselves are held — not a `wasm.Identity`
  *  instance — because:
@@ -285,6 +292,17 @@ export interface AuthApi {
    *  session lands. Kept off the `AuthState` object so it is not
    *  threaded through the route guards. */
   readonly freshPhrase: Accessor<string | null>;
+  /** The recovery phrase a signup just generated, until the user acknowledges
+   *  it; `null` otherwise. While non-null BOTH route guards render the phrase
+   *  screen instead of any route (see `phrase-gate.ts` for the defect this
+   *  closes: the anonymous guard used to navigate home the moment signup
+   *  landed the session, before the phrase was ever shown). Survives a reload
+   *  and a sign-out/sign-in on this device: the fact that it is owed is kept in
+   *  storage and the phrase is read back from the device-key-wrapped cache. */
+  readonly signupPhrase: Accessor<string | null>;
+  /** The user has written the signup phrase down. Clears it (memory and the
+   *  owed marker); the guards then render the route they wrap. */
+  acknowledgeSignupPhrase(): void;
   /** ADR-0017 defence-in-depth — a non-null value means this account's
    *  published identity did NOT match this device's at login (someone
    *  replaced it; the ACCESS-hijack signature). Surfaced as a dismissible
@@ -292,6 +310,15 @@ export interface AuthApi {
   readonly identityAlert: Accessor<IdentityAlert | null>;
   /** Dismiss the identity-changed security banner. */
   dismissIdentityAlert(): void;
+  /** Publish a fresh MLS KeyPackage for the signed-in account: mint it from
+   *  the canonical identity, persist the snapshot holding its private key
+   *  (fail-closed — no durable key, no upload), then upload it. Single-flight:
+   *  requests made while a publish runs collapse into one trailing publish.
+   *  Called at every session start and after every mailbox Welcome attempt,
+   *  because a Welcome consumes the KeyPackage it was built on (see
+   *  `chat/keypackage-publisher.ts`). Rejects when there is no session or any
+   *  step fails. */
+  republishKeyPackage(): Promise<void>;
   /** Run the OPAQUE-PAKE registration flow.
    *
    *  Throws on network / server errors (the form surfaces them).
@@ -648,6 +675,9 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   // closure until the session is finished.
   const [pendingFreshPhrase, setPendingFreshPhrase] =
     createSignal<PendingFreshPhrase | null>(null);
+  // The signup recovery phrase awaiting acknowledgement — see
+  // `AuthApi.signupPhrase` and `phrase-gate.ts`.
+  const [signupPhrase, setSignupPhrase] = createSignal<string | null>(null);
   // ADR-0017 defence-in-depth (lakko-security Phase-3A follow-up (i)):
   // a non-null value means this device's canonical AccountIdentity did
   // NOT match the account's currently-published bundle at login — i.e.
@@ -676,14 +706,154 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   // state doesn't bleed across user sessions on the same tab.
   const chats = useChats();
 
+  // The account the KeyPackage publisher publishes for. Set the moment a
+  // canonical identity is installed for a session, cleared on logout /
+  // forgetDevice. Held outside `identitySecrets` because the session-start
+  // publish runs BEFORE those secrets are exposed to the UI.
+  let keyPackageAccount: {
+    readonly accountIdBytes: Uint8Array;
+    readonly accountIdB64: string;
+  } | null = null;
+  const keyPackagePublisher = createKeyPackagePublisher<{
+    readonly accountIdBytes: Uint8Array;
+    readonly accountIdB64: string;
+    readonly identity: WasmIdentity;
+  }>({
+    resolveContext: () => {
+      const account = keyPackageAccount;
+      const identity = chats.identity();
+      if (account === null || identity === null) {
+        throw new Error("no active session to publish a KeyPackage for");
+      }
+      return { ...account, identity };
+    },
+    createKeyPackage: (ctx) => ctx.identity.createKeyPackage(),
+    persistDurable: (ctx) =>
+      chats.persistSnapshotDurable(ctx.accountIdB64, ctx.identity),
+    upload: (ctx, keyPackage) =>
+      discovery.uploadKeyPackage(ctx.accountIdBytes, keyPackage),
+  });
+
+  /** Session-start KeyPackage publish on the explicit auth flows. Awaited
+   *  there (those flows already waited on the KeyPackage upload before), but
+   *  never fatal: the session still lands, and the next session start or
+   *  Welcome retries it. */
+  async function publishKeyPackageBestEffort(context: string): Promise<void> {
+    try {
+      await keyPackagePublisher.publish();
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(`KeyPackage publish (${context}) failed`, err);
+    }
+  }
+
+  /**
+   * ADR-0017 defence-in-depth self-check, then re-publish the identity bundle.
+   *
+   * Observes what the directory currently holds for this account BEFORE
+   * re-publishing: a DIFFERENT signature key there means someone replaced it
+   * (the ACCESS-hijack signature), which raises the dismissible alert, and the
+   * re-publish below heals it.
+   *
+   * `skipUploadIfUnchanged` is the silent-reload mode: the bundle is
+   * deterministic from the phrase seed, so when the directory already serves
+   * exactly these keys a re-upload changes nothing and only costs a
+   * proof-of-work solve on every reload. When the directory could not be read
+   * the upload is skipped too — the next explicit sign-in re-publishes
+   * unconditionally, as it always has.
+   */
+  async function refreshPublishedIdentity(
+    canonical: WasmIdentity,
+    accountIdBytes: Uint8Array,
+    skipUploadIfUnchanged: boolean,
+  ): Promise<void> {
+    let current: Awaited<ReturnType<DiscoveryClient["identityFetch"]>> | undefined;
+    try {
+      current = await discovery.identityFetch(accountIdBytes);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("self-identity consistency check failed", err);
+      current = undefined;
+    }
+    // A logout (or another sign-in) while the fetch was out: this identity is
+    // no longer the session's, so it must neither alert nor publish.
+    if (chats.identity() !== canonical) return;
+    const signatureMatches =
+      current !== undefined &&
+      current !== null &&
+      bytesEqual(base64Decode(current.signature_pubkey), canonical.signaturePublicKey);
+    if (current !== undefined && current !== null && !signatureMatches) {
+      setIdentityAlert({ kind: "published-identity-changed" });
+    }
+    if (skipUploadIfUnchanged) {
+      if (current === undefined) return;
+      if (
+        signatureMatches &&
+        current !== null &&
+        bytesEqual(base64Decode(current.x25519_pubkey), canonical.x25519PublicKey)
+      ) {
+        return;
+      }
+    }
+    try {
+      await uploadIdentityBundle(discovery, accountIdBytes, canonical);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("identity bundle refresh failed", err);
+    }
+  }
+
   /**
    * ADR-0017 — finish a session once the canonical AccountIdentity
    * (phrase) seed is in hand: build the canonical Identity from the
    * seed, rehydrate MLS, refresh the published bundle, persist the
    * snapshot, set the in-memory secrets, and flip to `session`.
-   * Shared by the warm same-device login / passkey paths and the
-   * fresh-device `provideRecoveryPhrase` completion.
+   * Shared by the warm same-device login / passkey paths, the
+   * fresh-device `provideRecoveryPhrase` completion, and the silent
+   * reload restore (`silentRestore`).
+   *
+   * `silentRestore` changes only what happens AFTER the canonical identity
+   * and its MLS state are in place: the session lands at once, and the
+   * directory self-check, the bundle re-publish (skipped when unchanged) and
+   * the KeyPackage publish run in the background. A reload must not sit on a
+   * "Restoring session" screen for a proof-of-work solve, and it must not
+   * prompt for notification permission without a user gesture, so push
+   * subscription is left to the explicit sign-in flows (a subscription the
+   * browser already holds survives the reload anyway).
    */
+  /**
+   * If this account still owes the signup phrase screen (the user reloaded, or
+   * signed out, before acknowledging it), load the phrase back from the
+   * device-key-wrapped cache so the guards show it again before any route.
+   *
+   * Runs BEFORE a session lands, so there is no moment in which the app renders
+   * past an owed phrase. Best-effort in the one direction it can be: a phrase
+   * that is owed but no longer readable (the backup bootstrap never cached it,
+   * or the device key changed) cannot be shown, and is logged rather than
+   * blocking the account forever.
+   */
+  async function restoreOwedSignupPhrase(accountIdB64: string): Promise<void> {
+    const storage = typeof localStorage === "undefined" ? undefined : localStorage;
+    if (!isSignupPhraseOwed(storage, accountIdB64)) return;
+    try {
+      const deviceKey = await getDeviceKey(accountIdB64);
+      const cached = deviceKey === null ? null : await getPhrase(accountIdB64, deviceKey);
+      if (cached === null) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          "signup recovery phrase is owed but not readable on this device; it cannot be shown again",
+        );
+        return;
+      }
+      const phrase = new TextDecoder().decode(cached.phrase);
+      cached.phrase.fill(0);
+      setSignupPhrase(phrase);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("reading the owed signup recovery phrase failed", err);
+    }
+  }
+
   async function finishCanonicalSession(args: {
     wasm: Wasm;
     accountIdentitySeed: Uint8Array;
@@ -693,51 +863,59 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     sessionToken: string;
     sessionExpiresAtMs: number;
     username: string;
+    silentRestore?: boolean;
   }): Promise<void> {
     const canonical = args.wasm.Identity.fromSeed(args.accountIdentitySeed);
     chats.setIdentity(canonical);
+    keyPackageAccount = {
+      accountIdBytes: args.accountIdBytes,
+      accountIdB64: args.accountIdB64,
+    };
+    discovery.setSessionToken(args.sessionToken);
 
+    // Rehydrate BEFORE any KeyPackage is minted: `restoreStorage` REPLACES the
+    // provider storage, so a KeyPackage created earlier would lose its private
+    // key to it.
     await rehydrateMlsState(chats, args.accountIdB64);
 
-    // ADR-0017 defence-in-depth (lakko-security Phase-3A follow-up (i)) —
-    // BEFORE re-publishing our own bundle, observe what is currently
-    // published. If a DIFFERENT identity is on file for this account, it
-    // means someone replaced it (the ACCESS-hijack signature: an attacker
-    // minted a fresh identity via the lost-everything path). Raise a
-    // dismissible alert so the owner finds out even if the attacker acted
-    // first. Best-effort: a 404 (nothing published yet — fresh signup) or a
-    // fetch error never alerts (the recover-path fail-closed gates own the
-    // refuse-vs-alert distinction; this is a passive self-check). The
-    // re-publish just below then heals the owner's published identity.
+    // ADR-0017 defence-in-depth (lakko-security Phase-3A follow-up (i)) — the
+    // self-check + re-publish lives in `refreshPublishedIdentity`. Best-effort:
+    // a 404 (nothing published yet — fresh signup) or a fetch error never
+    // alerts (the recover-path fail-closed gates own the refuse-vs-alert
+    // distinction; this is a passive self-check).
     setIdentityAlert(null);
-    try {
-      const current = await discovery.identityFetch(args.accountIdBytes);
-      if (
-        current !== null &&
-        !bytesEqual(
-          base64Decode(current.signature_pubkey),
-          canonical.signaturePublicKey,
-        )
-      ) {
-        setIdentityAlert({ kind: "published-identity-changed" });
-      }
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.warn("self-identity consistency check failed", err);
+
+    await restoreOwedSignupPhrase(args.accountIdB64);
+
+    if (args.silentRestore === true) {
+      setIdentitySecrets({
+        accountId: args.accountIdBytes,
+        exportKey: args.exportKey,
+        accountIdentitySeed: args.accountIdentitySeed,
+        sessionToken: args.sessionToken,
+        sessionExpiresAtMs: args.sessionExpiresAtMs,
+      });
+      setPendingRecovery(null);
+      setState({
+        kind: "session",
+        account: { accountId: args.accountIdB64, username: args.username },
+      });
+      void (async (): Promise<void> => {
+        await refreshPublishedIdentity(canonical, args.accountIdBytes, true);
+        if (chats.identity() !== canonical) return;
+        // A KeyPackage on every session start, reload included: the one the
+        // directory serves may have been consumed by a Welcome this device
+        // processed in an earlier page lifetime.
+        await publishKeyPackageBestEffort("session restore");
+      })();
+      return;
     }
 
-    try {
-      await uploadIdentityBundle(discovery, args.accountIdBytes, canonical);
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.warn("identity bundle refresh failed", err);
-    }
-    try {
-      await chats.persistSnapshot(args.accountIdB64);
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.warn("post-login MLS snapshot failed", err);
-    }
+    await refreshPublishedIdentity(canonical, args.accountIdBytes, false);
+    // Create -> durable persist -> upload (see `chat/keypackage-publisher.ts`).
+    // The persist inside it also captures the rehydrated state, which is what
+    // the separate post-login snapshot write used to do.
+    await publishKeyPackageBestEffort("sign-in");
 
     setIdentitySecrets({
       accountId: args.accountIdBytes,
@@ -884,29 +1062,105 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   }
 
   onMount(() => {
-    // Phase 1.13c: hydrate both the AuthState AND the persisted
-    // session token in one IDB round-trip — the token requires the
-    // device key to decrypt, which `hydrateFromStorage` already
-    // probes. Installing the token on the DiscoveryClient lets
-    // protected reads (e.g. invite consume) work for a returning
-    // user without forcing a password re-entry. The export key is
-    // NOT persisted, so signing-requiring flows (sendContactRequest,
-    // MLS commits) still surface the standard "please re-enter
-    // password" prompt.
-    void hydrateFromStorage().then(({ state, sessionToken }) => {
-      setState(state);
-      if (sessionToken !== null) {
-        discovery.setSessionToken(sessionToken);
-      }
-    });
+    // A reload restores the whole session from what this browser already
+    // holds under the device key — session token, AccountIdentity seed, MLS
+    // snapshot — or lands in `anon`. Never the old half state (`session` with
+    // no secrets in memory), which rendered a "re-enter your password" panel
+    // whose link `/login` bounced straight back home. The decision rule and
+    // the security trade-off live in `silent-restore.ts`.
+    //
+    // The state stays `loading` until this settles, so no route renders a
+    // signed-out or half-signed-in view in between.
+    void restoreSessionOnLoad();
   });
+
+  async function restoreSessionOnLoad(): Promise<void> {
+    const probe = await probeStoredSecrets();
+    const decision = decideSilentRestore({
+      cachedAccount: probe.cachedAccount,
+      deviceKeyPresent: probe.deviceKey !== null,
+      sessionToken: probe.sessionToken,
+      identitySeedPresent: probe.identitySeed !== null,
+      nowMs: Date.now(),
+    });
+    // An explicit sign-in that completed while the probe was reading IDB
+    // owns the state now; a late restore must not overwrite it.
+    if (state().kind !== "loading") {
+      probe.identitySeed?.fill(0);
+      return;
+    }
+    if (decision.kind === "anon") {
+      setState({ kind: "anon" });
+      return;
+    }
+    if (
+      decision.kind === "anon-cached" ||
+      probe.deviceKey === null ||
+      probe.identitySeed === null
+    ) {
+      probe.identitySeed?.fill(0);
+      // (The handle checks only narrow the types: a `restore` decision is
+      // made only when both are present.)
+      setState({ kind: "anon", cachedUsername: decision.username });
+      return;
+    }
+    const seed = probe.identitySeed;
+    try {
+      // The cached export key is an auth-factor cache only (ADR-0017); it is
+      // restored when present so the in-memory secrets match what a password
+      // sign-in on this device would hold, and left empty otherwise — the
+      // ACCESS-only convention the recovery landings already use.
+      let exportKey: Uint8Array = new Uint8Array(0);
+      try {
+        exportKey =
+          (await getExportKey(decision.accountIdB64, probe.deviceKey)) ?? exportKey;
+      } catch {
+        exportKey = new Uint8Array(0);
+      }
+      const wasm = await loadWasm();
+      await finishCanonicalSession({
+        wasm,
+        accountIdentitySeed: seed,
+        accountIdBytes: base64Decode(decision.accountIdB64),
+        accountIdB64: decision.accountIdB64,
+        exportKey,
+        sessionToken: decision.sessionToken,
+        sessionExpiresAtMs: decision.sessionExpiresAtMs,
+        username: decision.username,
+        silentRestore: true,
+      });
+    } catch (err) {
+      // Never a half state: undo whatever the restore installed and land
+      // signed out, with the username pre-filled for `/login`.
+      // eslint-disable-next-line no-console
+      console.warn("session restore on load failed; signing out", err);
+      keyPackageAccount = null;
+      chats.clear();
+      setIdentitySecrets(null);
+      discovery.setSessionToken(null);
+      seed.fill(0);
+      setState({ kind: "anon", cachedUsername: decision.username });
+    }
+  }
 
   const api: AuthApi = {
     state,
     identitySecrets,
     freshPhrase: () => pendingFreshPhrase()?.phrase ?? null,
+    signupPhrase,
+    acknowledgeSignupPhrase() {
+      const s = state();
+      if (s.kind === "session") {
+        clearSignupPhraseOwed(
+          typeof localStorage === "undefined" ? undefined : localStorage,
+          s.account.accountId,
+        );
+      }
+      setSignupPhrase(null);
+    },
     identityAlert,
     dismissIdentityAlert: () => setIdentityAlert(null),
+    republishKeyPackage: () => keyPackagePublisher.publish(),
     async signup(username, password) {
       const trimmed = username.trim();
       if (trimmed.length === 0) {
@@ -1047,6 +1301,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // logout/forgetDevice. ADR-0017: seeded from the phrase seed.
       const canonical = wasm.Identity.fromSeed(accountIdentitySeed);
       chats.setIdentity(canonical);
+      keyPackageAccount = { accountIdBytes: result.accountId, accountIdB64 };
 
       // 1.16e6c3: rehydrate prior MLS state if any. For signup
       // this is a no-op (brand-new accountId, no snapshot row),
@@ -1089,17 +1344,13 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         signupGenesisAttest,
       );
 
-      // 1.16e6c1: persist the freshly-built provider state
-      // (the just-uploaded KeyPackage's private key material)
-      // so a peer's Welcome can be opened after a reload.
-      // Best-effort — a snapshot failure here shouldn't block
-      // the user from getting into a working session.
-      try {
-        await chats.persistSnapshot(accountIdB64);
-      } catch (err) {
-        // eslint-disable-next-line no-console
-        console.warn("initial MLS snapshot failed", err);
-      }
+      // The first KeyPackage: create -> durable persist -> upload, so a
+      // published package always has its private key on disk and a peer's
+      // Welcome can be opened after a reload. Never fatal — the account
+      // already exists server-side, so failing the signup here would strand
+      // a username the user can no longer claim; the next session start (or
+      // Welcome) republishes.
+      await publishKeyPackageBestEffort("signup");
 
       // 1.16d3c: hand off the export key for in-memory use by
       // ContactsClient + similar. Cleared on logout.
@@ -1114,6 +1365,17 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         sessionToken: result.sessionToken,
         sessionExpiresAtMs: result.sessionExpiresAtMs,
       });
+      // The phrase becomes pending BEFORE the session lands, so the route
+      // guards never see a signed-in state without it: `/signup` sits in
+      // `<RequireAnonymous>`, which used to navigate home on this very
+      // transition and unmount the phrase panel before it rendered. The owed
+      // marker keeps the screen coming back across a reload until the user
+      // acknowledges it (see `phrase-gate.ts`).
+      markSignupPhraseOwed(
+        typeof localStorage === "undefined" ? undefined : localStorage,
+        accountIdB64,
+      );
+      setSignupPhrase(result.recoveryPhrase);
       setState({
         kind: "session",
         account: { accountId: accountIdB64, username: normalisedUsername },
@@ -2218,6 +2480,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // (pre-recovery) Identity if anything was lingering.
         const canonical = wasm.Identity.fromSeed(accountIdentitySeed);
         chats.setIdentity(canonical);
+        keyPackageAccount = { accountIdBytes, accountIdB64 };
 
         // 1.16e6c3: rehydrate path is a guaranteed no-op here —
         // we just deleted the snapshot row above — but routing
@@ -2265,19 +2528,14 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           );
         }
         try {
-          // Proof-less re-publish (account key unchanged). Refreshes
-          // the KeyPackage + clears any stale server proof column.
+          // Proof-less re-publish (account key unchanged).
           await uploadIdentityBundle(discovery, accountIdBytes, canonical);
         } catch (err) {
           // eslint-disable-next-line no-console
           console.warn("post-recover identity bundle upload failed", err);
         }
-        try {
-          await chats.persistSnapshot(accountIdB64);
-        } catch (err) {
-          // eslint-disable-next-line no-console
-          console.warn("post-recover MLS snapshot failed", err);
-        }
+        // Fresh KeyPackage: create -> durable persist -> upload.
+        await publishKeyPackageBestEffort("recover");
 
         // 1.16d3c: stash the new export key so ContactsClient
         // works without a re-login round-trip.
@@ -2398,6 +2656,11 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
                       err,
                     );
                   }
+                  // `restoreStorage` REPLACED the provider, so the
+                  // KeyPackage published a moment ago lost its private
+                  // key — the directory is serving a package this device
+                  // can no longer open. Publish a new one.
+                  void publishKeyPackageBestEffort("post-restore");
                 } catch (err) {
                   // eslint-disable-next-line no-console
                   console.warn(
@@ -2566,6 +2829,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // Drop the in-memory Identity secrets — the user just
       // signed out.
       const cached = loadPersisted();
+      keyPackageAccount = null;
       setIdentitySecrets(null);
       // ADR-0017: drop any parked recovery / fresh-phrase context so a
       // stashed seed cannot linger past a sign-out. Zeroize the
@@ -2576,6 +2840,10 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         fresh.seed.fill(0);
         setPendingFreshPhrase(null);
       }
+      // The phrase leaves memory with the session. The owed marker stays: the
+      // phrase is still unacknowledged, and the next sign-in on this device
+      // shows it again (`restoreOwedSignupPhrase`).
+      setSignupPhrase(null);
       // Phase 1.5b: drop the bearer token so a subsequent
       // protected write surfaces a clean 401 instead of silently
       // using a stale token.
@@ -2610,6 +2878,15 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     },
     async forgetDevice() {
       const cached = loadPersisted();
+      // The device-key-wrapped phrase cache is wiped below, so an owed phrase
+      // can no longer be shown on this device; drop the marker and the copy.
+      setSignupPhrase(null);
+      if (cached !== null) {
+        clearSignupPhraseOwed(
+          typeof localStorage === "undefined" ? undefined : localStorage,
+          cached.accountIdB64,
+        );
+      }
       // Order matters: clear the IDB key BEFORE clearing the
       // localStorage marker. If we crash between, an IDB key
       // without a localStorage marker is harmless on next mount;
@@ -2658,6 +2935,15 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         } catch {
           // best-effort
         }
+        // ADR-0048 — drop the encrypted received-profile row and this
+        // device's own profile name for the account. Same leave-nothing-behind
+        // contract as the message log.
+        try {
+          await deleteProfileRow(cached.accountIdB64);
+        } catch {
+          // best-effort
+        }
+        clearOwnProfile(cached.accountIdB64);
         // Phase 1.13c: drop the persisted session token too. The
         // ciphertext is unreadable without the device key just
         // wiped, but a stale row would confuse the rehydrate
@@ -2756,6 +3042,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // 1.16e5: drop active MLS group state.
       // 1.16e6c1: also free()s the canonical Identity.
       chats.clear();
+      keyPackageAccount = null;
       setIdentitySecrets(null);
       // ADR-0017: drop any parked recovery / fresh-phrase context.
       // Zeroize the fresh-phrase seed before dropping the reference.
@@ -2777,91 +3064,76 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
 }
 
 /**
- * Inspect localStorage + IndexedDB and resolve the appropriate
- * initial `AuthState`:
+ * Read, without prompting for anything, every stored secret a page-load
+ * restore needs: the plaintext `(accountId, username)` marker, the
+ * non-extractable device root key, the persisted session token (the store
+ * already drops expired rows) and the ADR-0017 AccountIdentity seed. Every
+ * read that fails — IDB unreachable (private mode, quota), a decrypt failure
+ * after a device-key rotation, a tampered row — reads as "absent", so the
+ * decision in `silent-restore.ts` lands in `anon` rather than crashing the
+ * app or restoring from a partial set.
  *
- *   * No localStorage record → fresh device, `anon`.
- *   * localStorage but no IDB key → cached identity, password
- *     re-entry required, `anon` with `cachedUsername`.
- *   * Both present → resume `session` directly, no password.
+ * The caller owns the returned seed bytes and must zero them when it does not
+ * use them.
  */
-/**
- * Probes localStorage + IDB to recover the most-complete state
- * we can without prompting for a password:
- *
- *   - `(accountId, username)` cache → drives the auth state branch.
- *   - Device key in IDB → required for any AES-GCM-wrapped material.
- *   - Persisted session token in IDB → returned alongside the state
- *     so the caller can install it on the DiscoveryClient. Phase
- *     1.13c added this; pre-1.13c builds drop straight to
- *     `sessionToken: null`.
- */
-async function hydrateFromStorage(): Promise<{
-  state: AuthState;
-  sessionToken: string | null;
+async function probeStoredSecrets(): Promise<{
+  cachedAccount: { accountIdB64: string; username: string } | null;
+  deviceKey: CryptoKey | null;
+  sessionToken: { token: string; expiresAtMs: number } | null;
+  identitySeed: Uint8Array | null;
 }> {
   const cached = loadPersisted();
   if (cached === null) {
-    return { state: { kind: "anon" }, sessionToken: null };
+    return { cachedAccount: null, deviceKey: null, sessionToken: null, identitySeed: null };
   }
-  let key: CryptoKey | null = null;
+  const cachedAccount = {
+    accountIdB64: cached.accountIdB64,
+    username: cached.username,
+  };
+  let deviceKey: CryptoKey | null = null;
   try {
-    key = await getDeviceKey(cached.accountIdB64);
+    deviceKey = await getDeviceKey(cached.accountIdB64);
   } catch {
-    // IDB unreachable (private mode in some browsers, quota
-    // exhaustion, …). Treat as "no key cached" and ask for the
-    // password again rather than crash the app.
-    key = null;
+    deviceKey = null;
   }
-  if (key === null) {
-    return {
-      state: { kind: "anon", cachedUsername: cached.username },
-      sessionToken: null,
-    };
+  if (deviceKey === null) {
+    return { cachedAccount, deviceKey: null, sessionToken: null, identitySeed: null };
   }
-
-  // Phase 1.13c: try to recover the persisted session token. The
-  // store handles its own expiry probe (cheap unencrypted column
-  // + post-decrypt belt-and-suspenders) so we just consume the
-  // result. A decrypt failure (device key rotated, ciphertext
-  // tampered) surfaces as null — same UX as a missing row.
-  let sessionToken: string | null = null;
+  let sessionToken: { token: string; expiresAtMs: number } | null = null;
   try {
-    const persisted = await getSessionToken(cached.accountIdB64, key);
-    sessionToken = persisted?.sessionToken ?? null;
+    const persisted = await getSessionToken(cached.accountIdB64, deviceKey);
+    sessionToken =
+      persisted === null
+        ? null
+        : {
+            token: persisted.sessionToken,
+            expiresAtMs: persisted.sessionExpiresAtMs,
+          };
   } catch {
     sessionToken = null;
   }
-
-  return {
-    state: {
-      kind: "session",
-      account: { accountId: cached.accountIdB64, username: cached.username },
-    },
-    sessionToken,
-  };
+  let identitySeed: Uint8Array | null = null;
+  if (sessionToken !== null) {
+    try {
+      identitySeed = await getAccountIdentitySeed(cached.accountIdB64, deviceKey);
+    } catch {
+      identitySeed = null;
+    }
+  }
+  return { cachedAccount, deviceKey, sessionToken, identitySeed };
 }
 
 /**
- * Publish everything the directory needs to know about this
- * account: the identity bundle (Ed25519 + X25519 pubkeys,
- * deterministic from the export key — 1.16d3b2) and the MLS
- * KeyPackage (random per call — 1.16e2). Both upserts run in
- * parallel; the calls are independent and the server is
- * idempotent on either side.
+ * Publish the account's public identity bundle (Ed25519 + X25519 pubkeys,
+ * deterministic from the phrase seed — 1.16d3b2, ADR-0017).
  *
- * **Pre-1.16e6c1 footgun fixed.** This used to spin up a
- * throwaway `Identity.fromSeed(exportKey)` and drop it after
- * the upload. That worked for the public-key fields (Ed25519
- * + X25519 are deterministic, so re-derivation reproduces them
- * byte-for-byte), but `createKeyPackage` mints **new private
- * key material per call** and writes it into the provider's
- * storage. Discarding that provider meant any peer who later
- * sent a Welcome targeting our published KeyPackage would hit
- * "init key not in keystore" on our side. We now require the
- * caller to pass the **canonical** Identity that ChatProvider
- * is holding — so the freshly-generated init / leaf private
- * keys land in the provider we'll snapshot at persist time.
+ * This used to publish the MLS KeyPackage too, in parallel, BEFORE the
+ * snapshot holding the KeyPackage's private key was persisted — and from
+ * temporary identities on the guest-signup and fresh-mint paths, whose
+ * providers were freed right after. The KeyPackage now has its own
+ * fail-closed, single-flight path (`chat/keypackage-publisher.ts`, reached
+ * through `keyPackagePublisher` in `AuthProvider`): create from the
+ * CANONICAL identity, persist durably, then upload.
  *
  * G-4 (ADR-0016): `supersessionProof`, when present, is the
  * old-key-signed proof bridging an AccountIdentity rotation
@@ -2894,29 +3166,14 @@ async function uploadIdentityBundle(
   leafAuth?: Uint8Array | string,
   genesisAttest?: Uint8Array | string,
 ): Promise<void> {
-  // 1.16e2: generate a fresh KeyPackage. RFC 9420 forward
-  // secrecy on new groups argues for one-shot init_keys; in
-  // practice we publish a freshly-randomised one on every
-  // login, and the Phase-1 server just upserts.
-  const keyPackageBytes = identity.createKeyPackage();
-
-  // Run both uploads in parallel. They're independent — the
-  // identity bundle and the KeyPackage live in different
-  // tables, neither depends on the other's success. If one
-  // fails the caller gets the failure (Promise.all rejects on
-  // first); we deliberately do not swallow either error
-  // silently because both are required for a usable account.
-  await Promise.all([
-    discovery.uploadIdentityBundle(
-      accountId,
-      identity.signaturePublicKey,
-      identity.x25519PublicKey,
-      supersessionProof,
-      leafAuth,
-      genesisAttest,
-    ),
-    discovery.uploadKeyPackage(accountId, keyPackageBytes),
-  ]);
+  await discovery.uploadIdentityBundle(
+    accountId,
+    identity.signaturePublicKey,
+    identity.x25519PublicKey,
+    supersessionProof,
+    leafAuth,
+    genesisAttest,
+  );
 }
 
 /**

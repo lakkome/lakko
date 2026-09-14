@@ -19,6 +19,8 @@ import { paths } from "./paths";
 import { useAuth } from "../auth/AuthContext";
 import { readReturnUrl } from "../auth/return-url";
 import { WebauthnClient } from "../auth/webauthn-client";
+import { UsernameHint } from "../profile/UsernameHint";
+import { requireValidUsername } from "../profile/username-field";
 
 export default function Login(): JSX.Element {
   const auth = useAuth();
@@ -44,9 +46,17 @@ export default function Login(): JSX.Element {
   async function onSubmit(e: SubmitEvent): Promise<void> {
     e.preventDefault();
     setError(null);
+    // ADR-0048 §4 — a name that fails the username rule is never looked up.
+    let canonical: string;
+    try {
+      canonical = await requireValidUsername(username());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      return;
+    }
     setBusy(true);
     try {
-      await auth.login(username().trim(), password());
+      await auth.login(canonical, password());
       // 1.18e — honour `?return=<path>` from the URL so an anon
       // visitor who clicked "Log in" from the invite landing
       // (`/i/:slug`) lands back there after auth. Validated
@@ -109,6 +119,7 @@ export default function Login(): JSX.Element {
               disabled={busy()}
             />
           </label>
+          <UsernameHint value={username} />
           <label>
             Password
             <input

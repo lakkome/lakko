@@ -44,7 +44,16 @@ struct LakkoApp: App {
     /// Process-scoped ``ChatRepository`` (1.14f2). Owns the
     /// canonical MLS Identity for the session + per-group
     /// `Group` handles + snapshot persistence.
-    @StateObject private var chatRepository = ChatRepository()
+    @StateObject private var chatRepository: ChatRepository
+
+    /// Process-scoped 1x1 call host. Claims the repository's call-signaling
+    /// feed and is presented from the signed-in root, so an incoming call rings
+    /// on every screen and a call survives leaving its chat.
+    @StateObject private var callHost: CallHost
+
+    /// Process-scoped foreground receive for every group whose chat is not
+    /// open. Without it nothing but the open chat was ever polled.
+    @StateObject private var foregroundReceive: ForegroundReceiveHolder
 
     /// Process-scoped ``DeviceGroupSyncRepository``
     /// (Phase 2a3e2b-iOS). Holds the per-session DeviceGroup
@@ -80,6 +89,11 @@ struct LakkoApp: App {
         // state.
         SFrameAvailability.shared.runBootProbe()
 
+        // ADR-0047 — decrypted media is written to a per-chat temp directory
+        // that is removed when the chat closes; a crash skips that, so remove
+        // anything left behind before any chat can open.
+        MediaTempFiles.sweepStale()
+
         // `@StateObject` cannot reference another `@StateObject` in
         // its default initializer, so we hand-roll the wiring
         // inside `init`: build the AuthRepository first, then feed
@@ -89,6 +103,16 @@ struct LakkoApp: App {
         self._contactsRepository = StateObject(
             wrappedValue: ContactsRepository(authRepository: auth)
         )
+        let chat = ChatRepository()
+        let host = CallHost.live(repository: chat)
+        host.attach(to: chat)
+        self._chatRepository = StateObject(wrappedValue: chat)
+        self._callHost = StateObject(wrappedValue: host)
+        self._foregroundReceive = StateObject(
+            wrappedValue: ForegroundReceiveHolder(
+                scheduler: ForegroundReceiveScheduler.live(repository: chat, callHost: host)
+            )
+        )
     }
 
     var body: some Scene {
@@ -97,6 +121,7 @@ struct LakkoApp: App {
                 .environmentObject(authRepository)
                 .environmentObject(contactsRepository)
                 .environmentObject(chatRepository)
+                .environmentObject(callHost)
                 .environmentObject(deviceGroupSync)
                 .environmentObject(inviteIntake)
                 // Universal Links — iOS invokes this whenever the
@@ -141,6 +166,14 @@ struct LakkoApp: App {
                     if phase == .background {
                         ContactBackgroundRefresh.schedule()
                     }
+                    // The foreground receive runs only while the app is active;
+                    // becoming active again sweeps at once, so an offer that
+                    // arrived while backgrounded rings if it is still fresh.
+                    foregroundReceive.scheduler.setForeground(phase == .active)
+                }
+                .task {
+                    foregroundReceive.scheduler.start()
+                    foregroundReceive.scheduler.setForeground(scenePhase == .active)
                 }
         }
         // G-29 — `BGAppRefreshTask` handler. iOS launches this opportunistically;
@@ -160,6 +193,7 @@ struct AppRoot: View {
     @EnvironmentObject private var authRepository: AuthRepository
     @EnvironmentObject private var contactsRepository: ContactsRepository
     @EnvironmentObject private var chatRepository: ChatRepository
+    @EnvironmentObject private var callHost: CallHost
     @EnvironmentObject private var deviceGroupSync: DeviceGroupSyncRepository
     @EnvironmentObject private var inviteIntake: InviteIntake
 
@@ -266,6 +300,11 @@ struct AppRoot: View {
                 // forgetDevice) tears down the cross-device sync
                 // runtime so the next login bootstraps fresh.
                 deviceGroupSync.clear()
+                // ADR-0048 — no account, no own profile to publish.
+                ProfileDirectory.shared.deactivate()
+                // No session, no call: end anything live and forget the
+                // session's call bookkeeping.
+                callHost.reset()
             }
 
         case .session(let account):
@@ -293,9 +332,13 @@ struct AppRoot: View {
                     authRepository: authRepository,
                     contactsRepository: contactsRepository,
                     chatRepository: chatRepository,
+                    callHost: callHost,
                     inviteIntake: inviteIntake
                 )
             }
+            // The 1x1 call, app-wide: the ringing banner above every signed-in
+            // screen and the full-screen call over it.
+            .callHostOverlay(callHost)
 
         case .needsRecoveryPhrase(let account):
             // ADR-0017 fresh-device fail-safe. The user authenticated
@@ -342,6 +385,7 @@ private struct SessionRoot: View {
     let authRepository: AuthRepository
     let contactsRepository: ContactsRepository
     let chatRepository: ChatRepository
+    let callHost: CallHost
     @EnvironmentObject var deviceGroupSync: DeviceGroupSyncRepository
     @ObservedObject var inviteIntake: InviteIntake
 
@@ -355,12 +399,14 @@ private struct SessionRoot: View {
         authRepository: AuthRepository,
         contactsRepository: ContactsRepository,
         chatRepository: ChatRepository,
+        callHost: CallHost,
         inviteIntake: InviteIntake
     ) {
         self.account = account
         self.authRepository = authRepository
         self.contactsRepository = contactsRepository
         self.chatRepository = chatRepository
+        self.callHost = callHost
         self.inviteIntake = inviteIntake
         // Wire the chat bridge on the contacts repository so
         // refreshInbox can forward Welcomes + acceptInviteLink can
@@ -435,6 +481,7 @@ private struct SessionRoot: View {
                         onOpenPasskeys: { destination = .passkeys },
                         onOpenDevices: { destination = .devices },
                         onOpenAntiCensorship: { destination = .antiCensorship },
+                        onOpenProfile: { destination = .profile },
                         onLogout: authRepository.logout,
                         onForgetDevice: authRepository.forgetDevice
                     )
@@ -459,9 +506,10 @@ private struct SessionRoot: View {
                     // needs the canonical AccountIdentity (phrase) seed to
                     // build the MLS PublisherGroup (same seed the chat +
                     // devices surfaces read from `identitySecrets`). A
-                    // session restored from disk without a re-login has no
-                    // in-memory seed, so we surface a sign-in-again hint
-                    // rather than presenting a screen that cannot publish.
+                    // session always carries the seed now (the relaunch
+                    // restore lands it too); the hint is a defensive
+                    // fallback rather than presenting a screen that cannot
+                    // publish.
                     if let seed = authRepository.identitySecrets?.accountIdentitySeed {
                         ChannelsRootScreen(
                             accountIdentitySeed: seed,
@@ -484,6 +532,7 @@ private struct SessionRoot: View {
                             viewModel: ChatViewModel(
                                 repository: chatRepository,
                                 groupIdHex: groupIdHex,
+                                callHost: callHost,
                                 sessionTokenProvider: {
                                     authRepository.identitySecrets?.sessionToken
                                 },
@@ -507,6 +556,15 @@ private struct SessionRoot: View {
                         authRepository: authRepository,
                         onBack: { destination = .home }
                     )
+                case .profile:
+                    // ADR-0048 — Settings -> Profile. A saved name is
+                    // published into every group this device is in.
+                    ProfileSettingsScreen(
+                        viewModel: ProfileSettingsViewModel(
+                            publishToAllGroups: { await chatRepository.publishOwnProfileToAllGroups() }
+                        ),
+                        onBack: { destination = .home }
+                    )
                 case .antiCensorship:
                     NavigationStack {
                         AntiCensorshipSettingsView(
@@ -518,18 +576,28 @@ private struct SessionRoot: View {
             }
         }
         // Bootstrap the ChatRepository whenever the auth
-        // repository has fresh `identitySecrets`. The publisher
-        // fires on every login/signup/recover; bootstrap is
+        // repository has `identitySecrets`. The publisher fires on
+        // every login/signup/recover AND on a relaunch that restored
+        // the session from the Keychain (`AuthRepository.rehydrate`),
+        // so this runs at every session start; bootstrap is
         // idempotent for the same account id, so re-running on a
-        // body re-evaluation is harmless. **NOT** populated on a
-        // session-restore from disk — the export key isn't
-        // persisted, so the user has to re-login for MLS-side
-        // operations to work. The chat screens render but
-        // `sendMessage` will throw with a clear error until the
-        // bootstrap lands.
+        // body re-evaluation is harmless.
         .task(id: authRepository.identitySecrets?.accountId) {
             if let secrets = authRepository.identitySecrets {
+                // ADR-0048 — the profile directory first: the chat bootstrap
+                // can join groups, and a join publishes the own profile.
+                ProfileDirectory.shared.activate(
+                    accountIdB64: base64Encode(secrets.accountId),
+                    username: account.username
+                )
                 chatRepository.bootstrap(secrets: secrets)
+                // Publish a KeyPackage minted on the long-lived identity
+                // the bootstrap just built, so a Welcome sent to it can be
+                // opened here. Every session start: discovery holds one
+                // KeyPackage per account and a Welcome consumes it. Fire
+                // and forget — it persists before uploading and coalesces
+                // with the republish every Welcome join requests.
+                chatRepository.republishKeyPackage()
                 // Phase 2a3e2b — wire the cross-device sync
                 // runtime alongside the chat bootstrap so the
                 // poll loop starts at the same moment the chat
@@ -537,6 +605,17 @@ private struct SessionRoot: View {
                 deviceGroupSync.bootstrap(secrets: secrets)
             }
         }
+    }
+}
+
+/// Owns the foreground receive scheduler for the process. A class, so the
+/// `App` can hold it as a `@StateObject` and it is built exactly once.
+@MainActor
+final class ForegroundReceiveHolder: ObservableObject {
+    let scheduler: ForegroundReceiveScheduler
+
+    init(scheduler: ForegroundReceiveScheduler) {
+        self.scheduler = scheduler
     }
 }
 
@@ -549,6 +628,7 @@ private enum SessionDestination: Equatable {
     case passkeys
     case devices
     case antiCensorship
+    case profile
 }
 
 /// Anonymous-state router — three destinations (Signup / Login /

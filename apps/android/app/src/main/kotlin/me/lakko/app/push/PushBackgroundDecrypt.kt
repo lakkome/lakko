@@ -81,6 +81,14 @@ internal fun buildBackgroundDecryptDeps(
     val appContext = context.applicationContext
     val knownGroups = KnownGroupsStore(appContext)
     val pushRoutes = PushRouteStore(appContext)
+    // ADR-0048 — READ-ONLY names for the notification title: loaded once from
+    // what the app already stored. No write, no verification, no network
+    // (C-59). A load failure just means the generic title.
+    val names: me.lakko.app.profile.ProfileNameSnapshot? = try {
+        me.lakko.app.profile.ProfileNameSnapshot.load(appContext)
+    } catch (_: Throwable) {
+        null
+    }
     return object : PushDecryptDeps {
         override fun lookupRoute(pushGidHex: String): Pair<String, String>? =
             try {
@@ -131,7 +139,7 @@ internal fun buildBackgroundDecryptDeps(
                     identity.close()
                     null
                 } else {
-                    RealThrowawayGroup(identity, group)
+                    RealThrowawayGroup(identity, group, names)
                 }
             } catch (_: Throwable) {
                 try {
@@ -178,6 +186,8 @@ internal fun buildBackgroundDecryptDeps(
 private class RealThrowawayGroup(
     private val identity: Identity,
     private val group: Group,
+    /** ADR-0048 — read-only name lookup, or `null`. */
+    private val names: me.lakko.app.profile.ProfileNameSnapshot?,
 ) : ThrowawayGroup {
 
     override fun process(payload: ByteArray): ProcessedRow? {
@@ -229,7 +239,26 @@ private class RealThrowawayGroup(
             kind = kind,
             text = body.text,
             attachmentCount = body.attachments.size,
+            senderName = senderNameOf(app.senderLeaf),
         )
+    }
+
+    /**
+     * ADR-0048 — the sender's already-known name. The leaf is resolved to a
+     * signature key against the throwaway roster right after the apply (the
+     * epoch the message was sealed at, C-68), then looked up in the read-only
+     * snapshot. A fingerprint-only result is not a name worth a title.
+     */
+    private fun senderNameOf(senderLeaf: UInt?): String? {
+        val lookup = names ?: return null
+        val leaf = senderLeaf ?: return null
+        return try {
+            val member = group.members().firstOrNull { it.leafIndex == leaf } ?: return null
+            val resolved = lookup.resolve(java.util.Base64.getEncoder().encodeToString(member.signaturePublicKey))
+            resolved.primary.takeIf { !resolved.isFingerprint }
+        } catch (_: Throwable) {
+            null
+        }
     }
 
     /**

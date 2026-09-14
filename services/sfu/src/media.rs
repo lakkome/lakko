@@ -102,7 +102,7 @@
 //! headless half — six SFrame stacks pinning one golden wire
 //! vector — is done.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use std::collections::HashMap;
@@ -147,6 +147,159 @@ pub enum MediaError {
     /// wire-level [`crate::protocol::ErrorCode::BadIceCandidate`].
     #[error("ICE candidate parse failed: {0}")]
     BadIceCandidate(String),
+    /// The media socket has no address the SFU can
+    /// advertise as its ICE host candidate — see
+    /// [`AdvertiseError`]. Raised by
+    /// [`spawn_media_task_advertising`] before the socket is
+    /// bound, so a misconfigured SFU never starts a media
+    /// plane no client could reach.
+    #[error("media advertise address: {0}")]
+    AdvertiseAddress(#[from] AdvertiseError),
+}
+
+/// Why an address cannot be (or cannot resolve to) the
+/// SFU's advertised ICE host candidate.
+///
+/// The SFU publishes exactly one local candidate per peer,
+/// a `typ host` candidate built by `str0m::Candidate::host`.
+/// str0m's ICE agent (`is` 0.9) refuses to build one on an
+/// unspecified, multicast, broadcast or IPv4 link-local IP,
+/// so any of those would leave every SDP answer without an
+/// SFU candidate and no client could ever connect media.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum AdvertiseError {
+    /// The media socket binds an unspecified address
+    /// (`0.0.0.0` / `::`) and no advertise IP was supplied.
+    /// Binding every interface is fine; advertising "every
+    /// interface" is not an address a client can dial.
+    #[error(
+        "media bind IP {bind} is unspecified and cannot be advertised as an ICE host \
+         candidate; supply the IP clients reach this socket on"
+    )]
+    UnspecifiedBind {
+        /// The unspecified bind IP.
+        bind: IpAddr,
+    },
+    /// The bind IP (used as the advertised IP because no
+    /// explicit one was supplied) is not a usable host
+    /// candidate address.
+    #[error("media bind IP {ip} cannot be advertised as an ICE host candidate: {reason}")]
+    BindNotAdvertisable {
+        /// The rejected IP.
+        ip: IpAddr,
+        /// Which rule rejected it.
+        reason: &'static str,
+    },
+    /// The explicit advertise IP is not a usable host
+    /// candidate address.
+    #[error("advertise IP {ip} cannot be an ICE host candidate: {reason}")]
+    AdvertiseNotAdvertisable {
+        /// The rejected IP.
+        ip: IpAddr,
+        /// Which rule rejected it.
+        reason: &'static str,
+    },
+    /// The advertise IP is a different address family from
+    /// the bind IP. A candidate in one family can never pair
+    /// with traffic on a socket of the other, and an
+    /// IPv6-bound socket would hand str0m IPv4-mapped source
+    /// addresses that match no remote candidate.
+    #[error("advertise IP {advertise} is a different address family from media bind IP {bind}")]
+    FamilyMismatch {
+        /// The bind IP.
+        bind: IpAddr,
+        /// The advertise IP.
+        advertise: IpAddr,
+    },
+}
+
+/// `None` when `ip` can be an ICE host candidate address,
+/// otherwise the rule that rejects it.
+///
+/// Mirrors the check str0m's ICE agent applies inside
+/// `Candidate::host` (unspecified / multicast / broadcast /
+/// IPv4 link-local) and additionally refuses IPv6 unicast
+/// link-local (`fe80::/10`, which needs a scope id no SDP
+/// candidate carries) and IPv4-mapped IPv6 forms of the
+/// rejected IPv4 addresses. Loopback is allowed: it is the
+/// dev and test configuration.
+#[must_use]
+pub fn advertisable_ip_problem(ip: IpAddr) -> Option<&'static str> {
+    match ip {
+        IpAddr::V4(v4) => {
+            if v4.is_unspecified() {
+                Some("unspecified address")
+            } else if v4.is_multicast() {
+                Some("multicast address")
+            } else if v4.is_broadcast() {
+                Some("broadcast address")
+            } else if v4.is_link_local() {
+                Some("link-local address")
+            } else {
+                None
+            }
+        },
+        IpAddr::V6(v6) => {
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return advertisable_ip_problem(IpAddr::V4(mapped));
+            }
+            if v6.is_unspecified() {
+                Some("unspecified address")
+            } else if v6.is_multicast() {
+                Some("multicast address")
+            } else if (v6.segments()[0] & 0xffc0) == 0xfe80 {
+                // fe80::/10 unicast link-local, spelled out
+                // because `Ipv6Addr::is_unicast_link_local`
+                // is newer than the workspace MSRV.
+                Some("link-local address")
+            } else {
+                None
+            }
+        },
+    }
+}
+
+/// Resolve the IP the SFU advertises as its ICE host
+/// candidate from the media socket's bind IP and an
+/// optional explicit advertise IP.
+///
+/// - An explicit advertise IP wins (it may differ from a
+///   concrete bind IP, e.g. a private interface behind a
+///   1:1 NAT), provided it is itself advertisable and the
+///   same address family as the bind IP.
+/// - Without one, a concrete bind IP is advertised as-is.
+/// - Without one, an unspecified bind IP is refused: there
+///   is nothing honest to advertise.
+///
+/// # Errors
+///
+/// [`AdvertiseError`] naming the rule that refused.
+pub fn resolve_advertise_ip(
+    bind_ip: IpAddr,
+    advertise_ip: Option<IpAddr>,
+) -> Result<IpAddr, AdvertiseError> {
+    if let Some(ip) = advertise_ip {
+        if let Some(reason) = advertisable_ip_problem(ip) {
+            return Err(AdvertiseError::AdvertiseNotAdvertisable { ip, reason });
+        }
+        if ip.is_ipv4() != bind_ip.is_ipv4() {
+            return Err(AdvertiseError::FamilyMismatch {
+                bind: bind_ip,
+                advertise: ip,
+            });
+        }
+        return Ok(ip);
+    }
+    if bind_ip.is_unspecified() {
+        return Err(AdvertiseError::UnspecifiedBind { bind: bind_ip });
+    }
+    if let Some(reason) = advertisable_ip_problem(bind_ip) {
+        return Err(AdvertiseError::BindNotAdvertisable {
+            ip: bind_ip,
+            reason,
+        });
+    }
+    Ok(bind_ip)
 }
 
 /// Result alias.
@@ -639,8 +792,10 @@ impl MediaPeer {
     }
 
     /// Register a host candidate that points at the
-    /// SFU's bound UDP socket. The candidate is baked
-    /// into the SDP answer the next call to
+    /// address clients reach the SFU's UDP socket on (the
+    /// advertised address, see
+    /// [`spawn_media_task_advertising`]). The candidate is
+    /// baked into the SDP answer the next call to
     /// [`Self::accept_offer`] produces.
     ///
     /// # Errors
@@ -1347,11 +1502,39 @@ impl MediaTaskHandle {
     }
 }
 
+/// Spawn the media event-loop task, advertising the bind
+/// IP as the SFU's ICE host candidate.
+///
+/// Equivalent to [`spawn_media_task_advertising`] with no
+/// explicit advertise IP, so it refuses an unspecified
+/// `bind_addr` (`0.0.0.0` / `::`) — use the advertising
+/// variant for that.
+///
+/// # Errors
+///
+/// As [`spawn_media_task_advertising`].
+pub async fn spawn_media_task(
+    bind_addr: SocketAddr,
+    peers: PeerRegistry,
+) -> MediaResult<(MediaTaskHandle, SocketAddr)> {
+    spawn_media_task_advertising(bind_addr, None, peers).await
+}
+
 /// Spawn the media event-loop task. Binds a
 /// `tokio::net::UdpSocket` at `bind_addr` (typically
-/// the value of `LAKKO_SFU_MEDIA_BIND`), captures its
-/// local address, and returns the handle the signaling
-/// layer uses to push commands.
+/// the value of `LAKKO_SFU_MEDIA_BIND`), resolves the
+/// address the SFU advertises as its ICE host candidate,
+/// and returns the handle the signaling layer uses to push
+/// commands together with that **advertised** address.
+///
+/// The advertised address is `advertise_ip` (typically
+/// `LAKKO_SFU_MEDIA_ADVERTISE_IP`) or, when that is `None`,
+/// the bind IP — combined with the port the socket actually
+/// bound (so `:0` resolves to the OS-picked port). For a
+/// concrete bind IP without an advertise IP it equals the
+/// socket's local address. See [`resolve_advertise_ip`] for
+/// the refusal rules; resolution happens before the socket
+/// is bound.
 ///
 /// The task is a single tokio future driven by a
 /// `select!` over three sources:
@@ -1382,22 +1565,29 @@ impl MediaTaskHandle {
 ///
 /// # Errors
 ///
-/// [`MediaError::Str0m`] on UDP-bind failure (wrong
-/// permission, port already in use, etc.).
-pub async fn spawn_media_task(
+/// - [`MediaError::AdvertiseAddress`] when no advertisable
+///   host-candidate address can be resolved (an unspecified
+///   bind without an advertise IP, an unusable advertise
+///   IP, or an address-family mismatch).
+/// - [`MediaError::Str0m`] on UDP-bind failure (wrong
+///   permission, port already in use, etc.).
+pub async fn spawn_media_task_advertising(
     bind_addr: SocketAddr,
+    advertise_ip: Option<IpAddr>,
     peers: PeerRegistry,
 ) -> MediaResult<(MediaTaskHandle, SocketAddr)> {
+    let host_ip = resolve_advertise_ip(bind_addr.ip(), advertise_ip)?;
     let socket = tokio::net::UdpSocket::bind(bind_addr)
         .await
         .map_err(|e| MediaError::Str0m(format!("UDP bind {bind_addr}: {e}")))?;
     let local_addr = socket
         .local_addr()
         .map_err(|e| MediaError::Str0m(format!("UDP local_addr: {e}")))?;
+    let advertise_addr = SocketAddr::new(host_ip, local_addr.port());
 
     let (tx, rx) = tokio::sync::mpsc::channel::<MediaCommand>(MEDIA_COMMAND_CAPACITY);
-    tokio::spawn(run_media_loop(socket, local_addr, rx, peers));
-    Ok((MediaTaskHandle { tx }, local_addr))
+    tokio::spawn(run_media_loop(socket, advertise_addr, rx, peers));
+    Ok((MediaTaskHandle { tx }, advertise_addr))
 }
 
 /// Spawn a media task **without** binding the UDP
@@ -1422,11 +1612,11 @@ pub fn spawn_media_task_no_socket() -> MediaTaskHandle {
 }
 
 /// Process one command against `router`. If
-/// `local_addr` is `Some`, the per-peer host candidate
+/// `advertise_addr` is `Some`, the per-peer host candidate
 /// is registered before [`MediaPeer::accept_offer`] so
-/// the answer's `a=candidate:` line points at the SFU's
-/// bound socket.
-fn handle_command(router: &mut MediaRouter, cmd: MediaCommand, local_addr: Option<SocketAddr>) {
+/// the answer's `a=candidate:` line points at the address
+/// clients reach the SFU's socket on.
+fn handle_command(router: &mut MediaRouter, cmd: MediaCommand, advertise_addr: Option<SocketAddr>) {
     match cmd {
         MediaCommand::AcceptOffer {
             peer_id,
@@ -1439,13 +1629,27 @@ fn handle_command(router: &mut MediaRouter, cmd: MediaCommand, local_addr: Optio
             // call-scoped (cross-call isolation). Idempotent
             // across the peer's offers.
             peer.set_call_id(call_id);
-            // Best-effort: if the host candidate fails
-            // we still try to accept the offer; the
-            // resulting answer just won't carry our
-            // address, which is observable to the
-            // client as a failed connectivity check.
-            if let Some(addr) = local_addr {
-                let _ = peer.add_local_host_candidate(addr);
+            // The host candidate is the SFU's ONLY local
+            // candidate, so an answer without it can never
+            // connect media. Refuse the offer and log at
+            // error level rather than shipping an answer
+            // the client would only discover is dead after
+            // an ICE timeout. `spawn_media_task_advertising`
+            // resolves an advertisable address up front, so
+            // reaching this branch means that validation and
+            // str0m's candidate rules have drifted apart.
+            if let Some(addr) = advertise_addr {
+                if let Err(e) = peer.add_local_host_candidate(addr) {
+                    tracing::error!(
+                        peer = %peer.id(),
+                        candidate_addr = %addr,
+                        error = %e,
+                        "media: SFU host candidate rejected; refusing SDP offer \
+                         (an answer without it could never connect media)"
+                    );
+                    let _ = reply.send(Err(e));
+                    return;
+                }
             }
             let res = peer.accept_offer(&offer_sdp);
             // If the receiver dropped, the originating
@@ -1485,9 +1689,14 @@ fn handle_command(router: &mut MediaRouter, cmd: MediaCommand, local_addr: Optio
 /// The main event loop. Lives in its own function so it
 /// can be unit-tested in isolation (future sub-sprint:
 /// a synthetic-client integration test in step 5).
+///
+/// `advertise_addr` is the address published as every
+/// peer's host candidate (see
+/// [`spawn_media_task_advertising`]), NOT necessarily the
+/// socket's local address.
 async fn run_media_loop(
     socket: tokio::net::UdpSocket,
-    local_addr: SocketAddr,
+    advertise_addr: SocketAddr,
     mut rx: tokio::sync::mpsc::Receiver<MediaCommand>,
     peers: PeerRegistry,
 ) {
@@ -1534,7 +1743,7 @@ async fn run_media_loop(
             biased; // prioritise commands so a fast signaling layer is not starved by busy traffic
             cmd = rx.recv() => {
                 match cmd {
-                    Some(cmd) => handle_command(&mut router, cmd, Some(local_addr)),
+                    Some(cmd) => handle_command(&mut router, cmd, Some(advertise_addr)),
                     None => return, // all senders dropped — task is done
                 }
             }
@@ -1543,12 +1752,31 @@ async fn run_media_loop(
                     let Ok(contents) = (buf[..n]).try_into() else {
                         continue;
                     };
+                    // `destination` MUST be the advertised
+                    // host-candidate address, not the socket's
+                    // local address. str0m's ICE agent (`is`
+                    // 0.9, `stun_server_handle_request`) drops
+                    // an inbound STUN binding request unless
+                    // some Host/Relayed local candidate has
+                    // `addr() == destination` — so with an
+                    // unspecified bind (local addr
+                    // `0.0.0.0:port`) or a NATed bind (local
+                    // addr private, candidate public) every
+                    // connectivity check would be discarded as
+                    // "unknown interface" and ICE could never
+                    // nominate a pair. This is one UDP socket
+                    // carrying one candidate, so every datagram
+                    // it receives is, by construction, traffic
+                    // for that candidate. (`Transmit::source`
+                    // is the mirror image and is ignored by
+                    // `write_transmit`: `send_to` lets the OS
+                    // pick the egress address.)
                     let input = Input::Receive(
                         Instant::now(),
                         Receive {
                             proto: Protocol::Udp,
                             source,
-                            destination: local_addr,
+                            destination: advertise_addr,
                             contents,
                         },
                     );
@@ -2385,6 +2613,191 @@ mod tests {
             err,
             MediaCommandError::Media(MediaError::BadSdp(_))
         ));
+    }
+
+    /// Without an advertise IP, a concrete bind IP is what
+    /// the SFU advertises — today's behaviour for a bind
+    /// such as `10.0.0.5:43210` or `127.0.0.1:0`.
+    #[test]
+    fn resolve_advertise_ip_uses_a_concrete_bind_ip() {
+        let bind: IpAddr = "10.0.0.5".parse().unwrap();
+        assert_eq!(resolve_advertise_ip(bind, None), Ok(bind));
+        let v6: IpAddr = "2001:db8::5".parse().unwrap();
+        assert_eq!(resolve_advertise_ip(v6, None), Ok(v6));
+    }
+
+    /// An unspecified bind (`0.0.0.0` / `::`) without an
+    /// advertise IP is refused — the defect this guards is
+    /// str0m silently refusing the `0.0.0.0` host candidate
+    /// and every SDP answer shipping without one.
+    #[test]
+    fn resolve_advertise_ip_refuses_an_unspecified_bind_without_advertise() {
+        for bind in ["0.0.0.0", "::"] {
+            let bind: IpAddr = bind.parse().unwrap();
+            assert_eq!(
+                resolve_advertise_ip(bind, None),
+                Err(AdvertiseError::UnspecifiedBind { bind }),
+            );
+        }
+    }
+
+    /// An explicit advertise IP wins over the bind IP —
+    /// both for an unspecified bind and for a concrete one
+    /// (a private interface behind a 1:1 NAT).
+    #[test]
+    fn resolve_advertise_ip_prefers_the_explicit_advertise_ip() {
+        let public: IpAddr = "203.0.113.7".parse().unwrap();
+        for bind in ["0.0.0.0", "10.0.0.5"] {
+            let bind: IpAddr = bind.parse().unwrap();
+            assert_eq!(resolve_advertise_ip(bind, Some(public)), Ok(public));
+        }
+        let v6: IpAddr = "2001:db8::7".parse().unwrap();
+        assert_eq!(
+            resolve_advertise_ip("::".parse().unwrap(), Some(v6)),
+            Ok(v6)
+        );
+    }
+
+    /// Every address str0m would refuse as a host candidate
+    /// (plus the IPv6 link-local and IPv4-mapped forms it
+    /// would not) is refused as an advertise IP.
+    #[test]
+    fn resolve_advertise_ip_refuses_unusable_advertise_ips() {
+        let any_v4: IpAddr = "0.0.0.0".parse().unwrap();
+        let any_v6: IpAddr = "::".parse().unwrap();
+        for (bind, bad) in [
+            (any_v4, "0.0.0.0"),
+            (any_v4, "224.0.0.1"),
+            (any_v4, "255.255.255.255"),
+            (any_v4, "169.254.10.20"),
+            (any_v6, "::"),
+            (any_v6, "ff02::1"),
+            (any_v6, "fe80::1"),
+            (any_v6, "::ffff:0.0.0.0"),
+        ] {
+            let ip: IpAddr = bad.parse().unwrap();
+            assert!(
+                matches!(
+                    resolve_advertise_ip(bind, Some(ip)),
+                    Err(AdvertiseError::AdvertiseNotAdvertisable { ip: got, .. }) if got == ip
+                ),
+                "{bad} must be refused as an advertise IP"
+            );
+        }
+    }
+
+    /// A concrete but unusable bind IP is refused when it
+    /// would be advertised as-is.
+    #[test]
+    fn resolve_advertise_ip_refuses_an_unusable_concrete_bind() {
+        let bind: IpAddr = "169.254.1.1".parse().unwrap();
+        assert!(matches!(
+            resolve_advertise_ip(bind, None),
+            Err(AdvertiseError::BindNotAdvertisable { .. })
+        ));
+    }
+
+    /// The advertise IP must be the bind IP's family.
+    #[test]
+    fn resolve_advertise_ip_refuses_a_family_mismatch() {
+        let cases = [("0.0.0.0", "2001:db8::7"), ("::", "203.0.113.7")];
+        for (bind, advertise) in cases {
+            let bind: IpAddr = bind.parse().unwrap();
+            let advertise: IpAddr = advertise.parse().unwrap();
+            assert_eq!(
+                resolve_advertise_ip(bind, Some(advertise)),
+                Err(AdvertiseError::FamilyMismatch { bind, advertise }),
+            );
+        }
+    }
+
+    /// The validation agrees with str0m on the addresses
+    /// the SFU is expected to advertise: every IP this
+    /// module accepts builds a `str0m::Candidate::host`,
+    /// and every IP str0m refuses is refused here too. If a
+    /// str0m bump tightens its rules, this fails before a
+    /// deployment ships answers without a candidate.
+    #[test]
+    fn advertisable_ip_problem_agrees_with_str0m_host_candidate_rules() {
+        for ip in [
+            "127.0.0.1",
+            "10.0.0.5",
+            "203.0.113.7",
+            "::1",
+            "2001:db8::7",
+            "0.0.0.0",
+            "224.0.0.1",
+            "255.255.255.255",
+            "169.254.10.20",
+            "::",
+            "ff02::1",
+        ] {
+            let ip: IpAddr = ip.parse().unwrap();
+            let str0m_accepts = Candidate::host(SocketAddr::new(ip, 5000), Protocol::Udp).is_ok();
+            assert_eq!(
+                advertisable_ip_problem(ip).is_none(),
+                str0m_accepts,
+                "validation and str0m disagree on {ip}"
+            );
+        }
+    }
+
+    /// `spawn_media_task` on an unspecified bind refuses
+    /// to start instead of running a media plane whose SDP
+    /// answers would carry no SFU candidate.
+    #[tokio::test]
+    async fn spawn_media_task_refuses_an_unspecified_bind_without_advertise() {
+        let peers = crate::peer::PeerRegistry::new();
+        let result = spawn_media_task("0.0.0.0:0".parse().unwrap(), peers).await;
+        assert!(matches!(
+            result,
+            Err(MediaError::AdvertiseAddress(
+                AdvertiseError::UnspecifiedBind { .. }
+            ))
+        ));
+    }
+
+    /// An unspecified bind plus an advertise IP starts, and
+    /// the returned address is the advertise IP with the
+    /// OS-picked port — the address clients must dial.
+    #[tokio::test]
+    async fn spawn_media_task_advertising_returns_the_advertised_addr() {
+        let peers = crate::peer::PeerRegistry::new();
+        let (_handle, addr) = spawn_media_task_advertising(
+            "0.0.0.0:0".parse().unwrap(),
+            Some("127.0.0.1".parse().unwrap()),
+            peers,
+        )
+        .await
+        .expect("unspecified bind with an advertise IP starts");
+        assert_eq!(addr.ip(), "127.0.0.1".parse::<IpAddr>().unwrap());
+        assert_ne!(addr.port(), 0, "OS-picked port must be non-zero");
+    }
+
+    /// A host candidate str0m refuses fails the offer out
+    /// loud instead of shipping an answer without one (the
+    /// `let _ =` this replaced). Driven through
+    /// `handle_command` directly with an address that
+    /// bypassed `resolve_advertise_ip`.
+    #[tokio::test]
+    async fn rejected_host_candidate_fails_the_offer() {
+        let mut router = MediaRouter::new();
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        handle_command(
+            &mut router,
+            MediaCommand::AcceptOffer {
+                peer_id: pid("alice"),
+                call_id: "test-call".to_owned(),
+                offer_sdp: "never parsed".to_owned(),
+                reply,
+            },
+            Some("0.0.0.0:43210".parse().unwrap()),
+        );
+        let res = rx.await.expect("reply sent");
+        assert!(
+            matches!(&res, Err(MediaError::Str0m(msg)) if msg.contains("host candidate")),
+            "expected the host-candidate refusal, got {res:?}"
+        );
     }
 
     /// `forward_media_data` on a freshly-constructed

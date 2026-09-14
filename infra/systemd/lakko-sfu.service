@@ -49,6 +49,12 @@ Group=lakkome
 #                            to start without it)
 #  - LAKKO_SFU_MEDIA_BIND   (e.g. 0.0.0.0:43210 — public UDP media
 #                            socket; unset => signaling-only, no RTP)
+#  - LAKKO_SFU_MEDIA_ADVERTISE_IP (the VPS's public IP, bare, no port
+#                            — the ICE host candidate every SDP answer
+#                            carries; REQUIRED with a 0.0.0.0 / [::]
+#                            media bind, the service refuses to start
+#                            without it; defaults to the bind IP when
+#                            the bind is a concrete address)
 #  - optional: LAKKO_SFU_JWKS_REFRESH_SECS,
 #    LAKKO_SFU_HANDSHAKE_TIMEOUT_SECS, LAKKO_SFU_PEER_MSG_RATE_PER_SEC
 EnvironmentFile=/etc/lakko/lakko.env

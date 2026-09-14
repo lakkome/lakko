@@ -530,6 +530,12 @@ export class MultiJoinerCall {
         // for us is a broadcast MLS commit an existing member must apply.
         this.onMaybeCommit(env.payload);
         break;
+      case K.Profile:
+        // ADR-0048 — a profile belongs to a chat group's MLS application
+        // stream, never to the SFU relay. One arriving here is dropped: it is
+        // not a commit, and the call roster names people through the ADR-0021
+        // peer tag, not through relayed profiles.
+        break;
       default:
         break;
     }

@@ -66,6 +66,7 @@ fn test_config() -> Config {
         // Signaling-only — the integration tests exercise
         // the WS fanout, not the media half.
         media_bind: None,
+        media_advertise_ip: None,
     }
 }
 

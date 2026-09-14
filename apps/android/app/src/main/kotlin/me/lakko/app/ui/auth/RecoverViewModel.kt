@@ -45,7 +45,24 @@ public class RecoverViewModel(
     private val discoveryClientFactory: () -> me.lakko.app.discovery.DiscoveryClient = {
         me.lakko.app.discovery.DiscoveryClient()
     },
+    /** ADR-0048 §4 — the core's username rule (`validateUsername`). */
+    private val validateUsername: (String) -> String =
+        { uniffi.lakko_ffi_uniffi.validateUsername(it) },
 ) : ViewModel() {
+
+    /**
+     * ADR-0048 §4 — gate a typed username before any lookup: the normalised
+     * name, or `null` after surfacing the rule's reason as the form error.
+     */
+    private fun usernameOrRefuse(typed: String): String? =
+        when (val decision = me.lakko.app.profile.searchDecision(typed, validateUsername)) {
+            is me.lakko.app.profile.SearchDecision.Lookup -> decision.normalized
+            is me.lakko.app.profile.SearchDecision.Refuse -> {
+                mutableState.update { it.copy(error = decision.message) }
+                null
+            }
+        }
+
 
     private val mutableState: MutableStateFlow<RecoverUiState> =
         MutableStateFlow(RecoverUiState())
@@ -133,11 +150,12 @@ public class RecoverViewModel(
             }
             return
         }
+        val lookupName = usernameOrRefuse(typed) ?: return
         mutableState.update { it.copy(busy = true, error = null) }
         viewModelScope.launch {
             try {
                 val resolved = discoveryClientFactory().use { discovery ->
-                    discovery.lookup(typed)
+                    discovery.lookup(lookupName)
                 }
                 val account = resolved.account
                 if (account == null) {
@@ -315,6 +333,14 @@ public class RecoverViewModel(
             }
         }
 
+        // ADR-0048 §4 — a typed username must pass the rule before the
+        // fresh-device path resolves it through discovery.
+        val typedUsername = snapshot.username.trim()
+        val recoverUsername = if (typedUsername.isEmpty()) {
+            null
+        } else {
+            usernameOrRefuse(typedUsername) ?: return
+        }
         mutableState.update { it.copy(busy = true, error = null) }
         viewModelScope.launch {
             val passwordBytes = snapshot.password.toByteArray(Charsets.UTF_8)
@@ -326,7 +352,7 @@ public class RecoverViewModel(
                 repo.recover(
                     resolvedPhrase,
                     passwordBytes,
-                    username = snapshot.username.trim().ifEmpty { null },
+                    username = recoverUsername,
                 )
                 // `repo.recover` already flipped AuthState to
                 // Session. The screen will be replaced by the
@@ -392,13 +418,14 @@ public class RecoverViewModel(
         val snapshot = mutableState.value
         if (snapshot.busy) return  // ignore double-tap
 
-        val user = (cachedUsername ?: snapshot.username).trim()
-        if (user.isEmpty()) {
+        val typedUser = (cachedUsername ?: snapshot.username).trim()
+        if (typedUser.isEmpty()) {
             mutableState.update {
                 it.copy(error = "Enter the username of the account to recover.")
             }
             return
         }
+        val user = usernameOrRefuse(typedUser) ?: return
         val normalized = normalizeTotpCode(snapshot.totpCode)
         if (normalized == null) {
             mutableState.update {
@@ -453,13 +480,14 @@ public class RecoverViewModel(
         val snapshot = mutableState.value
         if (snapshot.busy) return  // ignore double-tap
 
-        val user = (cachedUsername ?: snapshot.username).trim()
-        if (user.isEmpty()) {
+        val typedUser = (cachedUsername ?: snapshot.username).trim()
+        if (typedUser.isEmpty()) {
             mutableState.update {
                 it.copy(error = "Enter the username of the account to recover.")
             }
             return
         }
+        val user = usernameOrRefuse(typedUser) ?: return
         // Light client-side shape check — saves a PoW solve on an
         // obviously-malformed contact. The server is authoritative.
         if (!isPlausibleContact(snapshot.contactKind, snapshot.contact)) {

@@ -127,8 +127,8 @@ pub(crate) struct WebPushConfig {
     /// VAPID private key parsed from PEM. Used to sign the per-
     /// request ES256 JWT.
     encoding_key: EncodingKey,
-    /// `mailto:` URI identifying the operator — appears as the
-    /// `sub` claim on the VAPID JWT. RFC 8292 requires it.
+    /// `mailto:` or `https:` URI identifying the operator — appears as
+    /// the `sub` claim on the VAPID JWT (RFC 8292 §2.1).
     subject: String,
 }
 
@@ -143,16 +143,17 @@ impl WebPushConfig {
         let pub_b64url = std::env::var("LAKKO_WEBPUSH_VAPID_PUBLIC_KEY_B64URL").ok()?;
         let subject = std::env::var("LAKKO_WEBPUSH_VAPID_SUBJECT").ok()?;
 
-        // `jsonwebtoken` accepts both SEC1 and PKCS#8 EC PEM. Both
-        // are common outputs from `openssl ecparam` / `openssl
-        // pkcs8`; supporting both means operators don't have to
-        // pick.
+        // The key must be PKCS#8 (`-----BEGIN PRIVATE KEY-----`). A SEC1
+        // key straight from `openssl ecparam -genkey`
+        // (`-----BEGIN EC PRIVATE KEY-----`) is refused with
+        // InvalidKeyFormat — observed on the test server — so convert it
+        // with `openssl pkcs8 -topk8 -nocrypt`.
         let encoding_key = match EncodingKey::from_ec_pem(priv_pem.as_bytes()) {
             Ok(k) => k,
             Err(e) => {
                 tracing::warn!(
                     error = %e,
-                    "VAPID private key does not parse as EC PEM — falling back to LogOnly",
+                    "VAPID private key does not parse as a PKCS#8 EC PEM (BEGIN PRIVATE KEY) — falling back to LogOnly",
                 );
                 return None;
             },

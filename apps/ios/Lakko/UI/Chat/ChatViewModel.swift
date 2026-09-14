@@ -263,9 +263,10 @@ public final class ChatViewModel: ObservableObject {
     private var draftBroadcastWork: DispatchWorkItem?
     private var didSeedDraft: Bool = false
 
-    public init(
+    init(
         repository: ChatRepository,
         groupIdHex: String,
+        callHost: CallHost? = nil,
         sessionTokenProvider: @escaping () -> String? = { nil },
         resolveRecipient: @escaping (String) async throws
             -> (accountId: Data, signaturePubkey: Data) = { _ in
@@ -276,6 +277,10 @@ public final class ChatViewModel: ObservableObject {
     ) {
         self.repository = repository
         self.groupIdHex = groupIdHex
+        // The composition root passes the app-level host. A view model built
+        // without one (previews) gets a host of its own that is NOT attached to
+        // the repository's signaling feed, so it can never steal it.
+        self.callHost = callHost ?? CallHost.live(repository: repository)
         self.sessionTokenProvider = sessionTokenProvider
         self.resolveRecipient = resolveRecipient
         sync(state: repository.state)
@@ -285,16 +290,23 @@ public final class ChatViewModel: ObservableObject {
                 self?.sync(state: newState)
             }
             .store(in: &cancellables)
-        // Phase 3a9 — attach a call-signaling sink to the
-        // repository. The closure runs on the main actor
-        // because the repository's poll loop already
-        // dispatches results on @MainActor.
-        repository.callSignalingSink = { [weak self] hex, payloadBytes in
-            guard hex == groupIdHex else { return }
-            Task { @MainActor in
-                self?.handleIncomingCallSignaling(payloadBytes: payloadBytes)
+        // The 1x1 call lives in the app-level ``CallHost`` (fed by every receive
+        // path, presented from the root view). This screen only reads it to
+        // disable its own call controls while a call is up, so it re-renders
+        // when the host changes.
+        self.callHost.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+        // Group-call record — kept by the repository (so it is fed whichever
+        // chat is open); this screen only mirrors its own chat's entry.
+        repository.$groupCalls
+            .map { $0[groupIdHex] }
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] record in
+                self?.ongoingGroupCall = record
             }
-        }
+            .store(in: &cancellables)
         // ADR-0024 — attach the chat-status sink: inbound typing +
         // read-receipt signals for THIS thread fold into ephemeral
         // typing state + a monotone read watermark (no bubble). The
@@ -326,6 +338,14 @@ public final class ChatViewModel: ObservableObject {
                 guard let self = self, self.screenVisible else { return }
                 self.maybePublishReadReceipt()
             }
+            .store(in: &cancellables)
+        // ADR-0048 — every name this screen shows is resolved through the
+        // profile directory; a profile or a username verdict arriving must
+        // re-render them in place.
+        ProfileDirectory.shared.$revision
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
     }
 
@@ -445,14 +465,13 @@ public final class ChatViewModel: ObservableObject {
 
     // MARK: - Phase 3a9 — call surface helpers
 
-    /// Tap-to-call from the chat header. Mints a fresh
-    /// `call_id` and builds the session (deriving + arming the
-    /// SFrame key) but does NOT dial yet — the session sits in
-    /// `.idle`, which `driveFrom` maps to the prejoin phase.
-    /// The user picks mic / camera on the prejoin screen and the
-    /// Join button calls `CallSession.dial` (G3-1-prejoin-join).
+    /// Tap-to-call from the chat header. Hands off to the app-level
+    /// ``CallHost``, which settles the microphone permission, mints a fresh
+    /// `call_id` and builds the session (deriving + arming the SFrame key)
+    /// without dialing — the session sits in `.idle`, which the root call
+    /// screen shows as the prejoin; Join dials (G3-1-prejoin-join).
     public func startCall(audio: Bool = true, video: Bool = false) {
-        guard activeCall == nil else { return }
+        guard !oneToOneCallBusy, !callStarting, activeSfuCall == nil else { return }
         // ADR-0045 UX §6.2.8 item 4 / §6.2.11 — every exporter-backed
         // affordance GOES once the membership has ended, and failing closed is
         // not enough on its own. The per-call SFrame seed comes from
@@ -464,117 +483,82 @@ public final class ChatViewModel: ObservableObject {
         // half.
         guard !membershipHasEnded else { return }
         _ = (audio, video)
-        let callId = CallSession.mintCallId()
-        let session = makeSession(callId: callId)
-        activeCall = session
+        callHost.startOutgoingCall(groupIdHex: groupIdHex)
     }
 
-    /// Accept the in-flight inbound call.
-    public func acceptIncomingCall() {
-        activeCall?.acceptCall()
+    /// Dismiss the call error alert.
+    public func dismissCallError() {
+        callError = nil
     }
 
-    /// Decline the in-flight inbound call.
-    public func declineIncomingCall() {
-        activeCall?.declineCall()
+    /// ``ChatScreen``'s long-poll `.task` started: this chat is open and polls
+    /// itself, so the foreground receive skips it and what it applies is read.
+    func chatScreenOpened() {
+        repository.chatScreenOpened(groupIdHex: groupIdHex)
     }
 
-    /// Hang up the active call.
-    public func hangUpCall() {
-        activeCall?.hangUp(reason: .hungUp)
+    /// The matching close for ``chatScreenOpened()``.
+    func chatScreenClosed() {
+        repository.chatScreenClosed(groupIdHex: groupIdHex)
     }
 
-    /// Clear the overlay after a `done` transition. Called
-    /// from the SwiftUI overlay's dismiss action.
-    public func clearFinishedCall() {
-        if activeCall?.state == .done {
-            activeCall = nil
-        }
-    }
-
-    private func makeSession(callId: Data) -> CallSession {
-        // Capture the repository + groupIdHex for the
-        // outbound publish callback. We can't depend on
-        // ContextsRepository here (the chat client is
-        // owned by `ChatRepository`); the publish goes
-        // straight through the repository's `publishGroup`
-        // path via a thin helper.
-        let session = CallSession(callId: callId) { [weak self] bytes in
-            guard let self = self else { return }
-            Task { @MainActor in
-                await self.publishCallSignaling(bytes)
-            }
-        }
-        // G3-1-call-key — derive the per-call SFrame seed from
-        // the chat group's MLS exporter and arm the session
-        // BEFORE it dials / accepts. Both directions go through
-        // `makeSession`, so this single call covers the outgoing
-        // (`startCall`) and the incoming (`handleIncomingCallSignaling`)
-        // paths. Without the seed, `attachSFrame` refuses the
-        // call per security invariant #4 (no non-E2EE fallback);
-        // a failed derivation leaves the seed unset, which is the
-        // correct fail-closed outcome (the call simply refuses).
-        if let key = repository.deriveCallKey(groupIdHex: groupIdHex, callId: callId) {
-            session.setCallKey(seed: key.seed, localLeaf: key.localLeaf)
-        } else {
-            NSLog(
-                "makeSession: call-key derivation failed — " +
-                "call will refuse per security invariant #4"
-            )
-        }
-        return session
-    }
-
+    /// Publish call-signaling plaintext through the repository's serialized
+    /// application-message path. Returns `false` (and logs) on failure.
     @MainActor
-    private func publishCallSignaling(_ bytes: Data) async {
+    @discardableResult
+    private func publishCallSignaling(_ bytes: Data) async -> Bool {
         do {
             try await repository.publishApplicationMessage(
                 groupIdHex: groupIdHex,
                 plaintextBytes: bytes
             )
+            return true
         } catch {
             NSLog("publishCallSignaling failed: %@", error.localizedDescription)
-        }
-    }
-
-    private func handleIncomingCallSignaling(payloadBytes: Data) {
-        do {
-            let parsed = try parseCallSignaling(plaintext: payloadBytes)
-            let bodyCallId = CallSession.callId(of: parsed)
-            // Spin up an answerer session for a first-seen
-            // inbound offer; otherwise route into the active
-            // session if call_ids match.
-            if activeCall == nil {
-                if case .offer = parsed {
-                    let session = makeSession(callId: bodyCallId)
-                    activeCall = session
-                    session.applyIncomingSignaling(parsed)
-                }
-                return
-            }
-            guard let session = activeCall, session.callId == bodyCallId else {
-                // Stale signaling for a different call_id —
-                // drop silently.
-                return
-            }
-            session.applyIncomingSignaling(parsed)
-        } catch {
-            NSLog("parseCallSignaling failed: %@", error.localizedDescription)
+            return false
         }
     }
 
     // MARK: - Phase 3a9 — call surface
 
-    /// Active 1×1 call for this thread. `nil` when no call.
-    /// Published so the SwiftUI overlay re-renders on every
-    /// state transition.
-    @Published public private(set) var activeCall: CallSession?
+    /// The app-level 1x1 call host (shared by every chat screen).
+    let callHost: CallHost
+
+    /// The app's active 1x1 call, on any chat, or `nil`. Read-only here: the
+    /// root view presents and drives it.
+    public var activeCall: CallSession? { callHost.activeCall }
+
+    /// A 1x1 call is live or being started anywhere in the app — this chat's
+    /// call controls stand down, since there is one call at a time.
+    var oneToOneCallBusy: Bool { callHost.hasLiveCall || callHost.callStarting }
+
+    /// A call entry point could not proceed (microphone denied, no SFU
+    /// endpoint, no session, key derivation or connect failure). The screen
+    /// shows it as an alert; ``dismissCallError()`` clears it.
+    @Published public private(set) var callError: String?
+
+    /// `true` while a call start / join is past its tap but not yet holding a
+    /// session — the permission prompt, the poll, the JWT mint. Disables every
+    /// call control so a second tap cannot start a second call.
+    @Published private(set) var callStarting: Bool = false
+
+    /// This chat's ongoing group call as the repository observed it on the
+    /// journal, or `nil`. Liveness is time-dependent, so the screen evaluates
+    /// ``groupCallAffordance(nowMs:)`` rather than reading this directly.
+    @Published private(set) var ongoingGroupCall: OngoingGroupCall?
 
     /// Active multi-party SFU group call for this thread (`nil` when
     /// none). A group chat (>2 members) routes through this; a 1×1 chat
     /// stays on `activeCall`. Published so the UI presents the call
     /// overlay driven by `sfuCallUiState`.
-    @Published private(set) var activeSfuCall: SfuCallUi?
+    @Published private(set) var activeSfuCall: SfuCallUi? {
+        didSet {
+            // One call at a time: while this group call is up, a 1x1 offer on
+            // any chat is answered busy. Weakly held by the host, so a view
+            // model SwiftUI discards mid-call cannot leave the device busy.
+            callHost.noteGroupCall(owner: self, active: activeSfuCall != nil)
+        }
+    }
 
     /// The `CallUiState` the active SFU call drives (roster / phase /
     /// E2EE). The SwiftUI overlay observes this while `activeSfuCall`
@@ -585,14 +569,29 @@ public final class ChatViewModel: ObservableObject {
     /// G-18 / ADR-0029 — the `call_id` of the active SFU group call,
     /// retained so a mid-call MLS epoch change can re-derive the per-call
     /// seed with the SAME call_id (the exporter context) at the new
-    /// epoch. Set in `startGroupCall`, cleared in `hangUpGroupCall`.
+    /// epoch. Set in `connectGroupCall`, cleared in `hangUpGroupCall`.
     private var activeGroupCallId: Data?
+
+    /// This device's leaf in the active group call, captured with the seed —
+    /// the `leaf_index` of the `GroupCallJoin` / `GroupCallLeave` it announces.
+    private var activeGroupCallLeaf: UInt32?
+
+    /// `true` once this device's own `GroupCallJoin` for the active call went
+    /// out, so a hang-up announces a matching `GroupCallLeave` and never a
+    /// leave for a join nobody saw.
+    private var activeGroupCallJoinAnnounced = false
+
+    /// `true` when this device announced the active group call. Only a device
+    /// that announced the call or announced a join may declare it over: a
+    /// joiner whose connect failed must not end a call someone else started
+    /// and has not joined yet.
+    private var activeGroupCallIsInitiator = false
 
     /// Piece B — observes the SFU call's local `camOn` flag on
     /// `sfuCallUiState` and drives the mid-call camera-on onto the session
     /// (the SFU `CallScreen` is presented UI-only, so the camera button
     /// only flips the store; this bridges that to `publishVideo` /
-    /// `setCameraEnabled`). Set up in `startGroupCall`, cancelled in
+    /// `setCameraEnabled`). Set up in `connectGroupCall`, cancelled in
     /// `hangUpGroupCall`. Mirror of the web `Chat.tsx` camera effect.
     private var sfuCameraCancellable: AnyCancellable?
 
@@ -604,100 +603,306 @@ public final class ChatViewModel: ObservableObject {
         (repository.memberCount(groupIdHex: groupIdHex) ?? 0) > 2
     }
 
-    /// Start a multi-party SFU group call for this (group) chat. Mints
-    /// the call-admission JWT, derives the per-call SFrame seed + leaf
-    /// from the MLS exporter, and connects through `SfuCallUi`. Fails
-    /// closed (NSLog + no call) on any missing prerequisite — SFU URL,
-    /// session token, or call-key derivation.
-    func startGroupCall(video: Bool = false) {
-        // ADR-0045 UX §6.2.8 item 4 — see `startCall(audio:video:)`.
-        guard !membershipHasEnded else { return }
-        guard activeSfuCall == nil, activeCall == nil else { return }
-        guard let base = SfuConfig.baseUrl else {
-            NSLog("startGroupCall: SFU URL not configured (LakkoSfuUrl) — refusing")
-            return
-        }
-        guard let token = sessionTokenProvider() else {
-            NSLog("startGroupCall: no session token — re-authenticate to start a group call")
-            return
-        }
-        let callIdBytes = CallSession.mintCallId()
-        let callIdHex = callIdBytes.map { String(format: "%02x", $0) }.joined()
-        guard let key = repository.deriveCallKey(groupIdHex: groupIdHex, callId: callIdBytes) else {
-            NSLog("startGroupCall: call-key derivation failed — refusing per invariant #4")
-            return
-        }
-        // G-18 / ADR-0029 — retain the call_id so a mid-call epoch change
-        // re-derives the seed with the same exporter context.
-        activeGroupCallId = callIdBytes
-        let jwt = CallJwtClient()
-        jwt.setSessionToken(token)
-        Task { @MainActor in
-            do {
-                let minted = try await jwt.mint(callId: callIdHex, role: .participant)
-                let config = SfuCallSession.Config(
-                    sfuBaseUrl: base,
-                    jwt: minted.jwt,
-                    seed: key.seed,
-                    localLeaf: key.localLeaf,
-                    audio: true,
-                    video: video
-                )
-                // ADR-0021 — precompute the per-call peer_tag -> contact
-                // label map once, so the SFU roster resolves to the
-                // identifier the rest of the app shows for that contact.
-                // The tag is re-derived locally (the SFU never sends a
-                // name); a tag collision falls back to the pseudonym.
-                var tagToLabel: [String: String] = [:]
-                var collidedTags = Set<String>()
-                for c in AcceptedContactsStore.load() {
-                    guard let accountId = c.request.fromAccountId else { continue }
-                    let accountIdHex = accountId
-                        .map { String(format: "%02x", $0) }
-                        .joined()
-                    let tag = sfuPeerTag(callId: callIdHex, accountId: accountIdHex)
-                    if tagToLabel[tag] != nil {
-                        collidedTags.insert(tag)
-                    } else {
-                        // Prefer the user-chosen display name; fall back to
-                        // the short pubkey fingerprint (ADR-0021 follow-up).
-                        tagToLabel[tag] = c.displayLabel
-                    }
-                }
-                let resolveDisplayName: (String, String, String) -> String = {
-                    _, pseudonym, peerTag in
-                    if !peerTag.isEmpty, !collidedTags.contains(peerTag),
-                        let label = tagToLabel[peerTag] {
-                        return label
-                    }
-                    return pseudonym.isEmpty ? "Peer" : String(pseudonym.prefix(8))
-                }
-                let handle = SfuCallUi(
-                    config: config,
-                    ui: sfuCallUiState,
-                    resolveDisplayName: resolveDisplayName
-                )
-                activeSfuCall = handle
-                observeSfuCameraToggle()
-                try await handle.connect()
-            } catch {
-                NSLog("startGroupCall failed: %@", error.localizedDescription)
-                sfuCameraCancellable?.cancel()
-                sfuCameraCancellable = nil
-                activeSfuCall?.hangUp()
-                activeSfuCall = nil
-                activeGroupCallId = nil
-            }
+    /// The banner / toolbar decision at `nowMs`: is there a live group call on
+    /// this chat that this device is not in?
+    func groupCallAffordance(nowMs: Int64 = ChatRepository.nowMs()) -> GroupCallAffordance {
+        GroupCallAffordance.of(
+            record: ongoingGroupCall,
+            activeGroupCallId: activeGroupCallId,
+            nowMs: nowMs
+        )
+    }
+
+    /// The toolbar call buttons. A live group call this device is not in is
+    /// JOINED rather than competed with by a second call id; otherwise a group
+    /// chat starts an SFU call and a 1x1 chat a P2P one.
+    func onCallButton(video: Bool) {
+        if case .joinable = groupCallAffordance() {
+            joinOngoingGroupCall(video: video)
+        } else if isGroupChat {
+            startGroupCall(video: video)
+        } else {
+            startCall(audio: true, video: video)
         }
     }
 
-    /// Hang up the active SFU group call + clear it.
+    /// Start a multi-party SFU group call for this (group) chat. Mints
+    /// the call-admission JWT, derives the per-call SFrame seed + leaf
+    /// from the MLS exporter, announces the call to the group
+    /// (`GroupCallStart`), and connects through `SfuCallUi`. A live call
+    /// already on this chat is joined instead. Fails closed (``callError`` +
+    /// no call) on any missing prerequisite — microphone, SFU URL, session
+    /// token, or call-key derivation.
+    func startGroupCall(video: Bool = false) {
+        if case .joinable = groupCallAffordance() {
+            joinOngoingGroupCall(video: video)
+            return
+        }
+        beginGroupCall(existingCallId: nil, video: video)
+    }
+
+    /// Join the live group call the banner shows. Polls the group once first
+    /// so the exporter seed is derived at the epoch the other participants
+    /// are at; a later epoch change is absorbed by the mid-call rekey
+    /// (``maybeRekeyActiveGroupCall()``).
+    func joinOngoingGroupCall(video: Bool = false) {
+        guard case .joinable(let callId, _, _) = groupCallAffordance() else { return }
+        beginGroupCall(existingCallId: callId, video: video)
+    }
+
+    /// The one path both a new group call and a join take.
+    ///
+    /// - Parameter existingCallId: `nil` to mint a call id and announce it,
+    ///   else the live call to join.
+    private func beginGroupCall(existingCallId: Data?, video: Bool) {
+        // ADR-0045 UX §6.2.8 item 4 — see `startCall(audio:video:)`.
+        guard !membershipHasEnded else { return }
+        guard activeSfuCall == nil, !oneToOneCallBusy, !callStarting else { return }
+        callStarting = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.callStarting = false }
+            await self.connectGroupCall(existingCallId: existingCallId, video: video)
+        }
+    }
+
+    private func connectGroupCall(existingCallId: Data?, video: Bool) async {
+        guard await MicrophonePermission.ensureGranted() else {
+            callError = MicrophonePermission.deniedMessage
+            return
+        }
+        // A video start or join captures the camera at connect; settle that
+        // permission before anything is announced or connected.
+        guard await CameraPermission.ensureGranted(forVideo: video) else {
+            callError = CameraPermission.deniedMessage
+            return
+        }
+        guard let base = SfuConfig.baseUrl else {
+            NSLog("group call: SFU URL not configured (LakkoSfuUrl) — refusing")
+            callError = "Group calls are not available: this build has no SFU endpoint."
+            return
+        }
+        guard let token = sessionTokenProvider() else {
+            NSLog("group call: no session token — refusing")
+            callError = "Sign in again to start or join a group call."
+            return
+        }
+        let isJoin = existingCallId != nil
+        if isJoin {
+            // Bring the epoch current before deriving the seed, so the joiner
+            // does not arm a key from an epoch the room has already left.
+            try? await repository.pollGroup(groupIdHex: groupIdHex, waitSecs: 0)
+        }
+        guard activeSfuCall == nil, !oneToOneCallBusy, !membershipHasEnded else { return }
+        let callIdBytes = existingCallId ?? CallSession.mintCallId()
+        let callIdHex = callIdBytes.map { String(format: "%02x", $0) }.joined()
+        guard let key = repository.deriveCallKey(groupIdHex: groupIdHex, callId: callIdBytes) else {
+            NSLog("group call: call-key derivation failed — refusing per invariant #4")
+            callError = "Could not derive the call key for this chat."
+            return
+        }
+        let jwt = CallJwtClient()
+        jwt.setSessionToken(token)
+        let minted: String
+        do {
+            minted = try await jwt.mint(callId: callIdHex, role: .participant).jwt
+        } catch {
+            NSLog("group call: JWT mint failed: %@", error.localizedDescription)
+            callError = "Could not get admission to the call: \(error.localizedDescription)"
+            return
+        }
+        guard activeSfuCall == nil, !oneToOneCallBusy else { return }
+        // G-18 / ADR-0029 — retain the call_id so a mid-call epoch change
+        // re-derives the seed with the same exporter context.
+        activeGroupCallId = callIdBytes
+        activeGroupCallLeaf = key.localLeaf
+        activeGroupCallJoinAnnounced = false
+        activeGroupCallIsInitiator = !isJoin
+        if !isJoin {
+            // Announce the call before connecting, so a member that opens the
+            // chat while this device negotiates already sees a joinable call.
+            let startedAtMs = ChatRepository.nowMs()
+            if let bytes = try? composeCallSignaling(
+                body: .groupStart(
+                    callId: callIdBytes,
+                    initiatorLeaf: key.localLeaf,
+                    createdAtMs: UInt64(max(0, startedAtMs)),
+                    media: FfiCallMediaFlags(audio: true, video: video)
+                )
+            ), await publishCallSignaling(bytes) {
+                repository.applyGroupCallSignal(
+                    groupIdHex: groupIdHex,
+                    signal: .start(
+                        callId: callIdBytes,
+                        initiatorLeaf: key.localLeaf,
+                        createdAtMs: UInt64(max(0, startedAtMs)),
+                        audio: true,
+                        video: video
+                    ),
+                    atMs: startedAtMs
+                )
+            } else {
+                // Not announced: nobody could join, so the call is refused
+                // rather than connected as an invisible room.
+                activeGroupCallId = nil
+                activeGroupCallLeaf = nil
+                activeGroupCallIsInitiator = false
+                callError = "Could not announce the call to this chat. Try again."
+                return
+            }
+        }
+        let config = SfuCallSession.Config(
+            sfuBaseUrl: base,
+            jwt: minted,
+            seed: key.seed,
+            localLeaf: key.localLeaf,
+            audio: true,
+            video: video
+        )
+        let handle = SfuCallUi(
+            config: config,
+            ui: sfuCallUiState,
+            resolveDisplayName: makeSfuDisplayNameResolver(callIdHex: callIdHex)
+        )
+        activeSfuCall = handle
+        observeSfuCameraToggle()
+        do {
+            try await handle.connect()
+        } catch {
+            // The call may already have been hung up while `connect` was in
+            // flight; that teardown is not a failure worth reporting.
+            guard activeGroupCallId == callIdBytes else { return }
+            NSLog("group call connect failed: %@", error.localizedDescription)
+            callError = "Could not connect to the call: \(error.localizedDescription)"
+            hangUpGroupCall()
+            return
+        }
+        // The call may have been hung up while `connect` was in flight.
+        guard activeGroupCallId == callIdBytes else { return }
+        guard let bytes = try? composeCallSignaling(
+            body: .groupJoin(
+                callId: callIdBytes,
+                leafIndex: key.localLeaf,
+                joinedAtMs: UInt64(max(0, ChatRepository.nowMs()))
+            )
+        ), await publishCallSignaling(bytes) else { return }
+        repository.applyGroupCallSignal(
+            groupIdHex: groupIdHex,
+            signal: .join(callId: callIdBytes, leafIndex: key.localLeaf),
+            atMs: ChatRepository.nowMs()
+        )
+        if activeGroupCallId == callIdBytes {
+            activeGroupCallJoinAnnounced = true
+        } else {
+            // A hang-up landed while the join was publishing and ran without
+            // knowing the join went out — announce the matching leave now.
+            await announceDeparture(
+                callId: callIdBytes, leaf: key.localLeaf, joinAnnounced: true, mayEndCall: false)
+        }
+    }
+
+    /// ADR-0021 — the per-call peer_tag -> contact label resolver, so the SFU
+    /// roster shows the identifier the rest of the app shows for that contact.
+    /// The tag is re-derived locally (the SFU never sends a name); a tag
+    /// collision falls back to the pseudonym.
+    private func makeSfuDisplayNameResolver(
+        callIdHex: String
+    ) -> (String, String, String) -> String {
+        var tagToLabel: [String: String] = [:]
+        var collidedTags = Set<String>()
+        let profiles = ProfileDirectory.shared
+        for c in AcceptedContactsStore.load() {
+            guard let accountId = c.request.fromAccountId else { continue }
+            let accountIdHex = accountId
+                .map { String(format: "%02x", $0) }
+                .joined()
+            let tag = sfuPeerTag(callId: callIdHex, accountId: accountIdHex)
+            if tagToLabel[tag] != nil {
+                collidedTags.insert(tag)
+            } else {
+                // ADR-0048 — the one resolver: rename, profile name,
+                // verified username, fingerprint. Call tiles show the name
+                // only.
+                tagToLabel[tag] = profiles.resolve(signatureKey: c.request.fromPubkey).name
+            }
+        }
+        return { _, pseudonym, peerTag in
+            if !peerTag.isEmpty, !collidedTags.contains(peerTag),
+                let label = tagToLabel[peerTag] {
+                return label
+            }
+            return pseudonym.isEmpty ? "Peer" : String(pseudonym.prefix(8))
+        }
+    }
+
+    /// Hang up the active SFU group call + clear it, then tell the group:
+    /// `GroupCallLeave` for this device, and `CallEnd` when nobody else is
+    /// recorded as still in the call.
     func hangUpGroupCall() {
         sfuCameraCancellable?.cancel()
         sfuCameraCancellable = nil
         activeSfuCall?.hangUp()
         activeSfuCall = nil
+        let callId = activeGroupCallId
+        let leaf = activeGroupCallLeaf
+        let joinAnnounced = activeGroupCallJoinAnnounced
+        let wasInitiator = activeGroupCallIsInitiator
         activeGroupCallId = nil
+        activeGroupCallLeaf = nil
+        activeGroupCallJoinAnnounced = false
+        activeGroupCallIsInitiator = false
+        guard let callId, let leaf else { return }
+        Task { @MainActor [weak self] in
+            await self?.announceDeparture(
+                callId: callId,
+                leaf: leaf,
+                joinAnnounced: joinAnnounced,
+                mayEndCall: joinAnnounced || wasInitiator
+            )
+        }
+    }
+
+    private func announceDeparture(
+        callId: Data,
+        leaf: UInt32,
+        joinAnnounced: Bool,
+        mayEndCall: Bool
+    ) async {
+        guard joinAnnounced || mayEndCall else { return }
+        // Read the journal once so the "anyone else still in?" decision below
+        // sees joins that landed while this device was in the call.
+        try? await repository.pollGroup(groupIdHex: groupIdHex, waitSecs: 0)
+        if joinAnnounced,
+           let bytes = try? composeCallSignaling(
+               body: .groupLeave(callId: callId, leafIndex: leaf, reason: .hungUp)
+           ) {
+            await publishCallSignaling(bytes)
+            repository.applyGroupCallSignal(
+                groupIdHex: groupIdHex,
+                signal: .leave(callId: callId, leafIndex: leaf),
+                atMs: ChatRepository.nowMs()
+            )
+        }
+        guard mayEndCall else { return }
+        let record = repository.groupCalls[groupIdHex]
+        let nobodyLeft: Bool
+        if let record {
+            // A record for a DIFFERENT call means this call lost the tie-break;
+            // this device knows nothing about who is in its own room then, so
+            // it does not declare that room over.
+            nobodyLeft = record.callId == callId && record.joinedLeaves.isEmpty
+        } else {
+            nobodyLeft = true
+        }
+        guard nobodyLeft,
+              let bytes = try? composeCallSignaling(body: .end(callId: callId, reason: .hungUp))
+        else { return }
+        await publishCallSignaling(bytes)
+        repository.applyGroupCallSignal(
+            groupIdHex: groupIdHex,
+            signal: .end(callId: callId),
+            atMs: ChatRepository.nowMs()
+        )
     }
 
     /// Piece B — bridge the SFU call's local `camOn` (flipped by the in-call
@@ -723,6 +928,15 @@ public final class ChatViewModel: ObservableObject {
         guard let handle = activeSfuCall else { return }
         if camOn {
             Task { @MainActor [weak self] in
+                // The in-call control already settled the permission; this is
+                // the layered half, so a camOn flip from anywhere else can
+                // never start a capture the user has not allowed.
+                guard await CameraPermission.ensureGranted() else {
+                    guard let self else { return }
+                    self.sfuCallUiState.setCamera(false)
+                    self.sfuCallUiState.addSystemEvent(CameraPermission.deniedMessage)
+                    return
+                }
                 do {
                     try await handle.publishVideo()
                 } catch {
@@ -1258,14 +1472,24 @@ public final class ChatViewModel: ObservableObject {
     func memberLabel(_ member: GroupMember) -> String {
         let isYou = ownLeafIndex == member.leafIndex
         let suffix = isYou ? " (you)" : ""
-        for c in AcceptedContactsStore.load()
-        where c.request.fromPubkey == member.signaturePublicKey {
-            return c.displayLabel + suffix
-        }
-        let fp = member.signaturePublicKey.prefix(4)
-            .map { String(format: "%02x", $0) }
-            .joined()
-        return "Member " + fp + suffix
+        // ADR-0048 — the member list has room for the verified username under
+        // the name, so it shows the list form (`Alice Petrova · @alice`); the
+        // resolver already falls back to the fingerprint WITHOUT `@`.
+        return ProfileDirectory.shared.resolve(signatureKey: member.signaturePublicKey).listLabel + suffix
+    }
+
+    /// ADR-0048 — the bare resolved name for a signature key (base64), for
+    /// surfaces with no room for a username: bubbles, typing, reactions,
+    /// call tiles. `nil` for a key that is not base64.
+    func personName(signatureKeyB64: MemberIdentity) -> String? {
+        ProfileDirectory.shared.resolve(signatureKeyB64: signatureKeyB64)?.name
+    }
+
+    /// ADR-0048 — the resolved name of the other person in a 1x1 chat, or `nil`
+    /// for a group (whose header keeps its group label) or an unreadable roster.
+    var oneToOnePeerName: String? {
+        repository.oneToOnePeerSignatureKey(groupIdHex: groupIdHex)
+            .map { ProfileDirectory.shared.resolve(signatureKey: $0).name }
     }
 
     /// Resolve the typed `@username` (G-4-verified) and add it to this group:
@@ -1273,9 +1497,14 @@ public final class ChatViewModel: ObservableObject {
     /// Fail-closed — a resolve / verify / publish failure surfaces an error and
     /// leaves the group untouched.
     func onAddMember() {
-        let raw = addMemberInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        let username = raw.hasPrefix("@") ? String(raw.dropFirst()) : raw
-        guard !username.isEmpty else { return }
+        // ADR-0048 §4 — no lookup for a name that fails the username rule; the
+        // reason is already on screen under the field.
+        guard case .valid(let username) = checkUsername(addMemberInput) else {
+            if let message = checkUsername(addMemberInput).inlineMessage {
+                membershipError = message
+            }
+            return
+        }
         guard !membershipBusy else { return }
         membershipBusy = true
         membershipError = nil
@@ -2315,14 +2544,8 @@ public final class ChatViewModel: ObservableObject {
         guard let member = roster.first(
             where: { base64Encode($0.signaturePublicKey) == identity })
         else { return nil }
-        for c in AcceptedContactsStore.load()
-        where c.request.fromPubkey == member.signaturePublicKey {
-            return c.displayLabel
-        }
-        let fp = member.signaturePublicKey.prefix(4)
-            .map { String(format: "%02x", $0) }
-            .joined()
-        return "Member " + fp
+        // ADR-0048 — the one resolver, name only (no room for a username).
+        return ProfileDirectory.shared.resolve(signatureKey: member.signaturePublicKey).name
     }
 
     // MARK: ADR-0024 — send side
@@ -2505,6 +2728,33 @@ public final class ChatViewModel: ObservableObject {
         } catch {
             sendError = "Attachment failed: \(error)"
         }
+    }
+
+    /// ADR-0047 — what the per-chat media runtime needs, as closures over the
+    /// long-lived repository and this chat's id, never over this view model:
+    /// `ChatScreen` keeps its ``ChatMediaController`` across re-renders that
+    /// hand it a fresh view model.
+    public func mediaPort() -> ChatMediaController.Port {
+        let repository = repository
+        let groupIdHex = groupIdHex
+        return ChatMediaController.Port(
+            sendAttachment: { ref in
+                try await repository.sendMessage(
+                    groupIdHex: groupIdHex,
+                    plaintext: "",
+                    attachments: [ref]
+                )
+            },
+            sessionToken: sessionTokenProvider
+        )
+    }
+
+    /// ADR-0047 §4 — react with any single emoji grapheme from the picker.
+    /// The picker can only produce those; this re-checks before anything is
+    /// composed, so a malformed value never reaches the wire.
+    func reactFromPicker(to message: ChatMessage, emoji: String) {
+        guard EmojiIndex.isSingleEmojiGrapheme(emoji) else { return }
+        react(to: message, emoji: emoji)
     }
 
     /// Drop a staged attachment from the pending tray. Index

@@ -16,6 +16,7 @@ infra/
 │   ├── lakko-svc-auth.service          # OPAQUE-PAKE + WebAuthn
 │   ├── lakko-svc-ds.service            # MLS Delivery Service
 │   ├── lakko-svc-storage.service       # ciphertext blob proxy
+│   ├── lakko-svc-gif-proxy.service     # GIPHY search + media proxy (ADR-0047)
 │   ├── lakko-svc-discovery.service     # username OPRF lookup
 │   ├── lakko-svc-push-gw.service       # APNs / FCM / VAPID
 │   └── lakko-svc-channels.service      # Phase 4 broadcast backend
@@ -45,6 +46,7 @@ infra/
 | discovery | 127.0.0.1:8084 | `journalctl -u lakko-svc-discovery` |
 | push-gw | 127.0.0.1:8085 | `journalctl -u lakko-svc-push-gw` |
 | channels | 127.0.0.1:8086 | `journalctl -u lakko-svc-channels` |
+| gif-proxy | 127.0.0.1:8091 | `journalctl -u lakko-svc-gif-proxy` |
 
 system-nginx listens on 80/443 → reverse proxies to 127.0.0.1:808X. Services are not exposed externally.
 
@@ -392,8 +394,8 @@ Two `server_name`s share one nginx config (`infra/nginx/sites-available/lakko.co
 |---|---|---|
 | `lakko.me` | `/`, `/assets/*`, `/sw.js`, `/manifest.webmanifest` | The web SPA root + hashed assets + the service worker + the PWA manifest |
 | `lakko.me` | `/.well-known/lakko-release` (ADR-0038) | The signed "update available" manifest — a raw 89-byte Ed25519 blob served from a **separate** root `/var/www/lakko-release/` (NOT the SPA root) with `Cache-Control: no-store` |
-| `lakko.me` | `/api/auth/*`, `/api/ds/*`, `/api/discovery/*`, `/api/storage/*` (1.19c1), `/api/push/*` (1.20b) | Same-origin proxy to the backend services so the web client's `connect-src 'self'` CSP stays valid |
-| `api.lakko.me` | `/auth/*`, `/ds/*`, `/storage/*`, `/discovery/*`, `/push-gw/*` | Canonical external API entry point for the iOS / Android / Tauri clients (different CSP boundary; CORS not needed because Lakko clients never cross the `lakko.me ↔ api.lakko.me` origin pair) |
+| `lakko.me` | `/api/auth/*`, `/api/ds/*`, `/api/discovery/*`, `/api/storage/*` (1.19c1), `/api/push/*` (1.20b), `/api/gifs/*` (ADR-0047) | Same-origin proxy to the backend services so the web client's `connect-src 'self'` CSP stays valid |
+| `api.lakko.me` | `/auth/*`, `/ds/*`, `/storage/*`, `/discovery/*`, `/push-gw/*`, `/gifs/*` | Canonical external API entry point for the iOS / Android / Tauri clients (different CSP boundary; CORS not needed because Lakko clients never cross the `lakko.me ↔ api.lakko.me` origin pair) |
 
 Every `/api/*` path on `lakko.me` must be mirrored against a real upstream — the **vite dev proxy in `apps/web/vite.config.ts` is the source of truth for what the client expects**. If you add a new dev-proxy entry, the matching production `location /api/...` block here is mandatory. The 1.22 smoke probe will catch a missing route by failing the corresponding `/api/.../health` assertion.
 

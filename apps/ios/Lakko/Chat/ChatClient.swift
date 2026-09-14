@@ -483,15 +483,16 @@ public final class ChatClient {
             // Phase 3a8/9 — sniff for call-signaling proto
             // bytes before running the chat-envelope parser.
             // Cheap unambiguous discriminator: the proto's
-            // first wire tag is one of 0x52 / 0x5A / 0x62 /
-            // 0x6A (CallSignalingPayload.body oneof fields
-            // 10..13); the chat envelope starts with `{`
-            // (0x7B). No overlap.
+            // first wire tag is one of the CallSignalingPayload
+            // body oneof tags (fields 10..16, see
+            // `looksLikeCallSignaling`); the chat envelope
+            // starts with `{` (0x7B). No overlap.
             if Self.looksLikeCallSignaling(data) {
                 return .callSignaling(
                     messageId: messageId,
                     payloadBytes: data,
-                    createdAt: createdAt
+                    createdAt: createdAt,
+                    senderLeaf: senderLeaf
                 )
             }
             // ADR-0042 — sniff for a push-routing-secret distribution
@@ -539,6 +540,21 @@ public final class ChatClient {
             // read. It is still the same synchronous region, hence still the
             // same epoch.
             let senderKey = senderLeaf.flatMap(resolveSender)
+            // ADR-0048 — sniff for a profile envelope before the chat parser,
+            // for the same reason as the beacon arm above: the lossy-UTF-8
+            // fallback would otherwise render it as a bubble reading
+            // `lakko/profile/v1` plus binary. Placed AFTER the identity
+            // resolution because a profile is bound to exactly that identity —
+            // the signature key the sender leaf names in the epoch the message
+            // was sealed at (C-68), never to anything the payload says.
+            if let profile = Self.decodeProfileIfEnvelope(data) {
+                return .profile(
+                    messageId: messageId,
+                    profile: profile,
+                    senderKey: senderKey,
+                    createdAt: createdAt
+                )
+            }
             // ADR-0023: feed the application bytes through the
             // structured ``parseBodyEnvelope(bytes:)`` surface,
             // which branches a plain chat message from an
@@ -663,14 +679,62 @@ public final class ChatClient {
 
     /// Phase 3a8/9 — cheap byte-sniff for the
     /// `CallSignalingPayload` proto. Returns `true` when
-    /// the first byte matches one of the oneof body tags
-    /// (0x52 / 0x5A / 0x62 / 0x6A for fields 10..13). Chat
-    /// envelopes start with `{` (0x7B); the sets don't
-    /// overlap. A false positive downstream surfaces as a
-    /// proto-decode error and the caller swallows.
-    private static func looksLikeCallSignaling(_ bytes: Data) -> Bool {
+    /// the payload opens with one of the oneof body tags:
+    ///
+    ///   * 0x52 / 0x5A / 0x62 / 0x6A — the 1x1 bodies, fields 10..13
+    ///     (offer / answer / candidate / end), matched on the first byte alone
+    ///     as they always have been;
+    ///   * 0x72 / 0x7A — `GroupCallStart` (14) / `GroupCallJoin` (15);
+    ///   * 0x82 0x01 — `GroupCallLeave` (16), whose tag
+    ///     `(16 << 3) | 2 = 130` no longer fits one varint byte.
+    ///
+    /// The group tags were missing, so a group-call body fell through to
+    /// `parseBodyEnvelope`'s lossy-UTF-8 fallback and rendered as a garbage
+    /// chat bubble. They are matched on their FRAMING, not the first byte:
+    /// `0x72` / `0x7A` are ASCII `r` / `z`, so a first-byte rule would swallow
+    /// every legacy plain-text body that starts with one. See
+    /// ``isFramedGroupCallBody(_:tagLength:)``.
+    ///
+    /// Chat envelopes start with `{` (0x7B). A false positive downstream
+    /// surfaces as a proto-decode error and the caller swallows. Byte-for-byte
+    /// the same rule as the NSE's `nseLooksLikeCallSignaling`.
+    static func looksLikeCallSignaling(_ bytes: Data) -> Bool {
         guard let first = bytes.first else { return false }
-        return first == 0x52 || first == 0x5A || first == 0x62 || first == 0x6A
+        switch first {
+        case 0x52, 0x5A, 0x62, 0x6A:
+            return true
+        case 0x72, 0x7A:
+            return isFramedGroupCallBody(bytes, tagLength: 1)
+        case 0x82:
+            return bytes.count >= 2
+                && bytes[bytes.startIndex + 1] == 0x01
+                && isFramedGroupCallBody(bytes, tagLength: 2)
+        default:
+            return false
+        }
+    }
+
+    /// `tag || varint(len) || body`, where the body is EXACTLY the rest of the
+    /// payload and opens with the 16-byte `call_id` field every group-call
+    /// message carries first (`0x0A 0x10`). That is the whole of a prost
+    /// `CallSignalingPayload` holding one group body, and no plain text has
+    /// that shape by accident.
+    static func isFramedGroupCallBody(_ bytes: Data, tagLength: Int) -> Bool {
+        var index = bytes.startIndex + tagLength
+        var length = 0
+        var shift = 0
+        while true {
+            // At most three varint bytes — far beyond any group body's size.
+            guard index < bytes.endIndex, shift <= 14 else { return false }
+            let byte = bytes[index]
+            index += 1
+            length |= Int(byte & 0x7F) << shift
+            if byte & 0x80 == 0 { break }
+            shift += 7
+        }
+        // 18 = the call_id field alone (tag + length + 16 bytes).
+        guard length >= 18, bytes.endIndex - index == length else { return false }
+        return bytes[index] == 0x0A && bytes[index + 1] == 0x10
     }
 
     /// First byte of the ADR-0045 committer-beacon domain separator (`'l'` of
@@ -700,6 +764,31 @@ public final class ChatClient {
     /// beacon this build does not understand is NOT silently swallowed here;
     /// it falls through to the chat parser like any other unrecognised
     /// plaintext.
+    /// ADR-0048 — the profile carried by this application plaintext, or `nil`
+    /// when it is not a well-formed profile envelope.
+    ///
+    /// The first-byte peek only keeps an FFI call off the path for a chat
+    /// envelope (which opens with `{`); `decodeProfileEnvelope` is the whole
+    /// verdict — domain, version, and every field bound. An envelope that
+    /// fails a bound is refused as a whole and falls through to the chat parser
+    /// like any other unrecognised plaintext, the same stance the beacon arm
+    /// takes for an unknown version and the rule the NotificationService filter
+    /// applies, so the timeline and the notification agree.
+    static func decodeProfileIfEnvelope(_ bytes: Data) -> ProfileClaim? {
+        guard bytes.first == profileEnvelopeFirstByte,
+              let decoded = try? decodeProfileEnvelope(plaintext: bytes)
+        else { return nil }
+        return ProfileClaim(
+            displayName: decoded.displayName,
+            username: decoded.username,
+            updatedAtMs: decoded.updatedAtMs
+        )
+    }
+
+    /// First byte of the ADR-0048 profile domain separator (`'l'` of
+    /// `"lakko/profile/v1"`). Decides nothing on its own.
+    private static let profileEnvelopeFirstByte: UInt8 = 0x6C
+
     static func looksLikeCommitterBeacon(_ bytes: Data) -> Bool {
         guard bytes.count == committerBeaconLen,
               bytes.first == committerBeaconFirstByte
@@ -796,7 +885,10 @@ public enum IncomingChatEvent: Equatable {
     /// MLS application message. The chat repository
     /// dispatches it into the ``CallSession`` state machine
     /// instead of the chat timeline.
-    case callSignaling(messageId: Int64, payloadBytes: Data, createdAt: String)
+    ///
+    /// `senderLeaf` is the MLS-authenticated sender of the row: a group-call
+    /// body naming any other leaf is dropped by the record's router.
+    case callSignaling(messageId: Int64, payloadBytes: Data, createdAt: String, senderLeaf: UInt32?)
     /// ADR-0027 (G-3) — an external-join *request*: a non-member posted an
     /// external Add proposal to this group's journal and the MLS core retained
     /// it pending an owner / admin approval. Carries the joiner's leaf
@@ -806,6 +898,16 @@ public enum IncomingChatEvent: Equatable {
     /// `group.pendingExternalJoins()`, is the source of truth; this event is
     /// the nudge that a new request landed).
     case externalJoinRequest(messageId: Int64, joinerSignatureKey: Data, retained: Bool, createdAt: String)
+    /// ADR-0048 — a member's profile (display name + claimed username).
+    /// Never a timeline bubble. `senderKey` is the MLS sender leaf resolved to
+    /// a signature key at receipt (C-68); a `nil` sender means the profile has
+    /// no authenticated identity to bind to and is dropped.
+    case profile(
+        messageId: Int64,
+        profile: ProfileClaim,
+        senderKey: MemberIdentity?,
+        createdAt: String
+    )
     /// ADR-0042 — an in-group push-routing-secret distribution envelope
     /// (the group OWNER broadcast the group's `push_routing_secret`). Never
     /// a timeline bubble: the receive loop persists the secret + subscribes

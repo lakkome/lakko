@@ -12,6 +12,13 @@
 //!     evaluation and returns the 64-byte OPRF hash that goes
 //!     into `/discovery/{register, lookup}` as `oprf_hash`.
 //!
+//!   * [`validateUsername`] — the ADR-0048 §4 username rule
+//!     (normalise, then ASCII `[a-z0-9_]`, 3 to 32 characters). Throws
+//!     an `Error` carrying a stable `usernameError` code property
+//!     (`"empty"` / `"tooShort"` / `"tooLong"` / `"invalidCharacters"`).
+//!     `OprfBlinder.blind` runs the same rule and throws the same way,
+//!     so a non-conforming name can be neither registered nor looked up.
+//!
 //!   * [`normalizeUsername`] — pure helper exposed for
 //!     UI-side use (display the canonical form back to the user
 //!     before submission, run client-side dedup of the contact
@@ -19,8 +26,8 @@
 //!     the normalisation rules.
 
 use lakko_discovery_client::{
-    normalize_username as inner_normalize, DiscoveryClientError, OprfBlinder as InnerBlinder,
-    OPRF_HASH_LEN,
+    normalize_username as inner_normalize, validate_username as inner_validate,
+    DiscoveryClientError, OprfBlinder as InnerBlinder, UsernameError, OPRF_HASH_LEN,
 };
 use std::sync::Mutex;
 use wasm_bindgen::prelude::*;
@@ -30,6 +37,33 @@ use wasm_bindgen::prelude::*;
 /// and avoid hinting at which structural failure occurred.
 fn discovery_err(e: DiscoveryClientError) -> JsError {
     JsError::new(&format!("{e}"))
+}
+
+/// The value thrown for a username that fails the ADR-0048 §4 rule: a real
+/// `Error` (so `instanceof Error` and `.message` behave as for every other
+/// throw here) carrying the stable reason as an own `usernameError`
+/// property. A client selects copy from `err.usernameError`, never from the
+/// message; the message never contains the input.
+pub(crate) fn username_error_value(reason: UsernameError) -> JsValue {
+    let err = js_sys::Error::new(&reason.to_string());
+    // Best-effort, as in `mls.rs`: a failed property write must not replace
+    // the error being reported.
+    let _ = js_sys::Reflect::set(
+        err.as_ref(),
+        &JsValue::from_str("usernameError"),
+        &JsValue::from_str(reason.code()),
+    );
+    err.into()
+}
+
+/// Map a blinder failure to the thrown value: the typed username refusal
+/// keeps its code, everything else is a plain error with the same message
+/// style as before.
+fn blind_err(e: DiscoveryClientError) -> JsValue {
+    match e {
+        DiscoveryClientError::InvalidUsername(reason) => username_error_value(reason),
+        other => js_sys::Error::new(&other.to_string()).into(),
+    }
 }
 
 fn already_finalized() -> JsError {
@@ -50,6 +84,21 @@ fn lock_poisoned() -> JsError {
 #[must_use]
 pub fn normalize_username(input: &str) -> String {
     inner_normalize(input)
+}
+
+/// Normalise `input` and require the ADR-0048 §4 username rule — ASCII
+/// `[a-z0-9_]`, 3 to 32 characters. Returns the normalised form.
+///
+/// For signup and search fields as the user types: show the reason, and
+/// never send a lookup for a name that fails.
+///
+/// # Errors
+///
+/// Throws an `Error` whose `usernameError` property is `"empty"`,
+/// `"tooShort"`, `"tooLong"` or `"invalidCharacters"`.
+#[wasm_bindgen(js_name = validateUsername)]
+pub fn validate_username(input: &str) -> Result<String, JsValue> {
+    inner_validate(input).map_err(username_error_value)
 }
 
 /// Client-side OPRF blinder — JS handle.
@@ -90,12 +139,13 @@ impl OprfBlinder {
     ///
     /// # Errors
     ///
-    /// Throws if the input reduces to an empty string after
-    /// normalisation, or if the underlying OPRF blinding fails
+    /// Throws an `Error` with a `usernameError` code property when the
+    /// name fails the ADR-0048 §4 rule (empty after normalisation
+    /// included), or a plain `Error` if the underlying OPRF blinding fails
     /// (extremely unlikely — would indicate a broken RNG).
     #[wasm_bindgen(js_name = blind)]
-    pub fn blind(username: &str) -> Result<OprfBlinder, JsError> {
-        let (blinder, blinded_b64) = InnerBlinder::blind(username).map_err(discovery_err)?;
+    pub fn blind(username: &str) -> Result<OprfBlinder, JsValue> {
+        let (blinder, blinded_b64) = InnerBlinder::blind(username).map_err(blind_err)?;
         Ok(Self {
             inner: Mutex::new(Some(blinder)),
             blinded_b64,
@@ -112,8 +162,9 @@ impl OprfBlinder {
     ///
     /// # Errors
     ///
-    /// Same as [`Self::blind`] — throws on an empty-after-normalisation
-    /// handle or an OPRF blinding failure.
+    /// Throws on an empty-after-normalisation handle or an OPRF blinding
+    /// failure. The ADR-0048 §4 username rule is NOT applied: `@channel`
+    /// handles are a separate namespace with their own policy.
     #[wasm_bindgen(js_name = blindChannel)]
     pub fn blind_channel(handle: &str) -> Result<OprfBlinder, JsError> {
         let (blinder, blinded_b64) = InnerBlinder::blind_channel(handle).map_err(discovery_err)?;
@@ -178,6 +229,14 @@ mod tests {
         let blinder = OprfBlinder::blind("  @Alice  ").expect("blind");
         let normalised = blinder.normalized_username().expect("getter");
         assert_eq!(normalised, "alice");
+    }
+
+    /// Success path only: the throw path builds a `js_sys::Error`, which is
+    /// a wasm-bindgen import that panics off wasm32. The reasons themselves
+    /// are covered in `lakko-discovery-client` and `lakko-contacts`.
+    #[test]
+    fn validate_username_returns_the_normalised_form() {
+        assert_eq!(validate_username("@Bob_42").expect("valid"), "bob_42");
     }
 
     #[test]

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Username normalisation.
+//! Username normalisation and the username character-set rule.
 //!
 //! Pinned at this layer because plaintext usernames never reach
 //! the server — any drift between client and server on what
@@ -10,25 +10,47 @@
 //!
 //! The transformation is, in order:
 //!
-//!   1. Trim ASCII whitespace at the edges (so `"\t@alice\n"`
+//!   1. Trim whitespace at the edges (so `"\t@alice\n"`
 //!      reaches step 2 as `"@alice"`).
 //!   2. Strip a single leading `@` if present (so the UI can
 //!      accept either `alice` or `@alice`).
 //!   3. Trim again (catches `"@ alice"` → `"alice"`).
 //!   4. NFKC-normalise (canonical-decompose, then
-//!      canonical-compose; collapses compatibility variants).
+//!      canonical-compose; collapses compatibility variants, so
+//!      fullwidth `ａｌｉｃｅ` becomes `alice`).
 //!   5. Lowercase per Unicode `Default_Lowercase`.
 //!
-//! What we deliberately do NOT do:
+//! ## The character-set rule (ADR-0048 §4)
 //!
-//!   * Strip internal whitespace — usernames containing internal
-//!     spaces are a UI choice, not a normalisation choice.
-//!   * Reject confusable / homograph characters (e.g. `paypal`
-//!     vs `paypaI`). That is a UI / discovery-policy concern,
-//!     not a normalisation concern, and surfacing a "looks like"
-//!     error here would let an attacker probe the wordspace.
-//!   * Apply IDNA (Punycode) — usernames are not domain names.
+//! [`validate_username`] then requires the normalised form to be
+//! ASCII `[a-z0-9_]`, 3 to 32 characters. The rule itself is
+//! [`lakko_contacts::username::check_canonical_username`] — one
+//! definition shared with the profile decoder, so the name a client
+//! registers and the name a client agrees to display can never be
+//! judged by two different rules.
+//!
+//! **This reverses this module's earlier stance.** It used to say
+//! that rejecting confusable / homograph characters was "a UI /
+//! discovery-policy concern, not a normalisation concern", and that
+//! surfacing a "looks like" error here would let an attacker probe
+//! the wordspace. Both halves are answered by the new rule:
+//!
+//!   * It is not a "looks like" check. Nothing compares one name to
+//!     another; the alphabet simply has no look-alikes in it. ADR-0048
+//!     makes a verified `@username` an identity disambiguator shown
+//!     beside a display name, and a displayed `@pavel` that is really
+//!     `@pаvel` (Cyrillic `а`) is exactly the impersonation that makes
+//!     a username worse than no username. A policy the server cannot
+//!     see (it only ever holds a blinded hash) has to be enforced where
+//!     every client passes: here, and in the blinder that calls it.
+//!   * It reveals nothing about the wordspace. The verdict depends only
+//!     on the string typed, never on what is registered.
+//!
+//! What normalisation still deliberately does NOT do: strip internal
+//! whitespace (the rule refuses it instead) or apply IDNA (usernames
+//! are not domain names).
 
+use lakko_contacts::username::{check_canonical_username, UsernameError};
 use unicode_normalization::UnicodeNormalization;
 
 /// Map the user-typed string to the canonical form whose OPRF
@@ -55,9 +77,75 @@ pub fn normalize_username(input: &str) -> String {
     nfkc.to_lowercase()
 }
 
+/// Normalise `input` and require the result to satisfy the ADR-0048 §4
+/// username rule — ASCII `[a-z0-9_]`, 3 to 32 characters. Returns the
+/// normalised (canonical) form.
+///
+/// This is what every username entry point must run: signup, search, and
+/// — by construction, since the blinder calls it — every OPRF register
+/// and lookup.
+///
+/// # Errors
+///
+/// A [`UsernameError`] reason code — [`UsernameError::Empty`],
+/// [`UsernameError::TooShort`], [`UsernameError::TooLong`] or
+/// [`UsernameError::InvalidCharacters`]. None carries the offending
+/// character, so an error is safe to log.
+pub fn validate_username(input: &str) -> Result<String, UsernameError> {
+    let normalised = normalize_username(input);
+    check_canonical_username(&normalised)?;
+    Ok(normalised)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_accepts_and_normalises() {
+        assert_eq!(validate_username("alice").unwrap(), "alice");
+        assert_eq!(validate_username("Alice").unwrap(), "alice");
+        assert_eq!(validate_username("@bob_42").unwrap(), "bob_42");
+        assert_eq!(validate_username("  @Bob_42 ").unwrap(), "bob_42");
+        // Fullwidth letters fold to ASCII under NFKC, so they are accepted
+        // as the ASCII name they normalise to.
+        assert_eq!(
+            validate_username("\u{ff41}\u{ff4c}\u{ff49}\u{ff43}\u{ff45}").unwrap(),
+            "alice"
+        );
+        assert_eq!(validate_username(&"a".repeat(32)).unwrap(), "a".repeat(32));
+        assert_eq!(validate_username("abc").unwrap(), "abc");
+    }
+
+    #[test]
+    fn validate_rejects_with_typed_reasons() {
+        assert_eq!(validate_username(""), Err(UsernameError::Empty));
+        assert_eq!(validate_username("@"), Err(UsernameError::Empty));
+        assert_eq!(validate_username("   "), Err(UsernameError::Empty));
+        assert_eq!(
+            validate_username("al"),
+            Err(UsernameError::TooShort { min: 3 })
+        );
+        assert_eq!(
+            validate_username(&"a".repeat(33)),
+            Err(UsernameError::TooLong { max: 32 })
+        );
+        for bad in [
+            "p\u{430}vel", // Cyrillic а
+            "ali-ce",
+            "ali.ce",
+            "ali ce",
+            "alice\u{1F600}",
+            "\u{1F600}\u{1F600}\u{1F600}",
+            "\u{0430}\u{043d}\u{043d}\u{0430}", // анна
+        ] {
+            assert_eq!(
+                validate_username(bad),
+                Err(UsernameError::InvalidCharacters),
+                "{bad:?}"
+            );
+        }
+    }
 
     #[test]
     fn strips_leading_at() {

@@ -1,0 +1,147 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+import Foundation
+
+/// ADR-0048 §2 — when this device publishes its own profile into a group.
+///
+/// Three triggers, and they are not equal:
+///
+///   * **Joining a group** (a Welcome join, founding a chat, accepting a
+///     request): publish now. A group this device just entered has never heard
+///     its name.
+///   * **Changing the profile**: publish now, into every group. Holding a
+///     change back would leave peers on the old name for no gain.
+///   * **The group gained a member**: republish, but throttled and jittered
+///     per group. A newcomer cannot read earlier epochs, so it would otherwise
+///     never learn existing names — and yet every existing member sees the same
+///     add at the same moment, so an unjittered republish is a synchronised
+///     burst of one message per member.
+///
+/// ## The growth republish
+///
+/// At most one per group per ``minIntervalMs``, delayed by a uniform
+/// `0...maxJitterMs` on top. A second growth while one is scheduled coalesces
+/// into it (the one republish carries the current profile to every newcomer).
+/// When the scheduled republish fires it is SKIPPED if any publish to that
+/// group completed after the growth was noted: the per-group send path is
+/// serialised with the receive path that applied the add, so such a publish
+/// was sealed at an epoch that already includes the newcomer.
+///
+/// The send is the same locked application-message path the other service
+/// envelopes use (committer beacon, push routing secret), so a profile can
+/// never straddle an epoch change.
+@MainActor
+final class ProfilePublisher {
+    /// Minimum spacing between two publishes to one group caused by growth.
+    nonisolated static let minIntervalMs: Int64 = 30_000
+    /// Upper bound of the uniform jitter added to a growth republish.
+    nonisolated static let maxJitterMs: Int64 = 10_000
+
+    struct Ports {
+        /// Seal and publish `bytes` as an MLS application message in the group.
+        var send: @MainActor (_ groupIdHex: String, _ bytes: Data) async throws -> Void
+        /// The current own-profile envelope, or `nil` when there is nothing to
+        /// publish (no active account).
+        var envelope: @MainActor () -> Data?
+        /// Whether this device can still send into the group (not evicted).
+        var canSend: @MainActor (_ groupIdHex: String) -> Bool
+        var nowMs: @MainActor () -> Int64
+        /// A uniform value in `0...maxJitterMs`.
+        var jitterMs: @MainActor () -> Int64
+        var sleep: @MainActor (_ ms: Int64) async -> Void
+    }
+
+    private let ports: Ports
+    /// Wall-clock time of the last completed publish, per group.
+    private var lastPublishedAtMs: [String: Int64] = [:]
+    /// Monotone counter stamped on each completed publish, per group — the
+    /// "did anything go out after the growth" test uses this, not the clock, so
+    /// two events in one millisecond still order.
+    private var publishSequence: UInt64 = 0
+    private var lastPublishSequence: [String: UInt64] = [:]
+    private var scheduled: [String: Task<Void, Never>] = [:]
+
+    init(ports: Ports) {
+        self.ports = ports
+    }
+
+    /// Publish into `groupIdHex` now (join / change). Best-effort: a failed
+    /// send is logged and forgotten — the next trigger carries the profile.
+    func publishNow(groupIdHex: String) async {
+        guard ports.canSend(groupIdHex), let bytes = ports.envelope() else { return }
+        do {
+            try await ports.send(groupIdHex, bytes)
+            publishSequence &+= 1
+            lastPublishSequence[groupIdHex] = publishSequence
+            lastPublishedAtMs[groupIdHex] = ports.nowMs()
+        } catch {
+            NSLog("ADR-0048 profile publish failed: \(error)")
+        }
+    }
+
+    /// Publish into every group in `groupIdHexes` now (profile change).
+    func publishToAll(groupIdHexes: [String]) async {
+        for groupIdHex in groupIdHexes {
+            await publishNow(groupIdHex: groupIdHex)
+        }
+    }
+
+    /// The group gained a member. Schedules the throttled, jittered republish,
+    /// or coalesces into the one already scheduled. Returns the scheduled task
+    /// so a caller (a test) can await it.
+    @discardableResult
+    func noteGrowth(groupIdHex: String) -> Task<Void, Never>? {
+        if let pending = scheduled[groupIdHex] { return pending }
+        let delay = Self.growthDelayMs(
+            nowMs: ports.nowMs(),
+            lastPublishedAtMs: lastPublishedAtMs[groupIdHex],
+            jitterMs: min(max(ports.jitterMs(), 0), Self.maxJitterMs)
+        )
+        let sequenceAtNote = lastPublishSequence[groupIdHex] ?? 0
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.ports.sleep(delay)
+            self.scheduled[groupIdHex] = nil
+            guard !Task.isCancelled else { return }
+            if (self.lastPublishSequence[groupIdHex] ?? 0) > sequenceAtNote { return }
+            await self.publishNow(groupIdHex: groupIdHex)
+        }
+        scheduled[groupIdHex] = task
+        return task
+    }
+
+    /// Cancel everything scheduled and forget all timing (account switch).
+    func reset() {
+        scheduled.values.forEach { $0.cancel() }
+        scheduled = [:]
+        lastPublishedAtMs = [:]
+        lastPublishSequence = [:]
+    }
+
+    /// How long to wait before a growth republish: whatever remains of the
+    /// ``minIntervalMs`` since the last publish (nothing when there was none),
+    /// plus the jitter.
+    nonisolated static func growthDelayMs(nowMs: Int64, lastPublishedAtMs: Int64?, jitterMs: Int64) -> Int64 {
+        let throttle: Int64
+        if let last = lastPublishedAtMs {
+            // Clamped above too: a wall clock that stepped backwards must not
+            // turn the throttle into an arbitrarily long silence.
+            throttle = min(max(0, last &+ minIntervalMs &- nowMs), minIntervalMs)
+        } else {
+            throttle = 0
+        }
+        return throttle &+ jitterMs
+    }
+}
+
+/// Did the group GAIN a member between two roster snapshots?
+///
+/// A set difference over member signature keys, never a count: a poll batch can
+/// carry a Remove and an Add together, leaving the count unchanged while a
+/// newcomer who has never heard anyone's name is now in the group. An
+/// unreadable snapshot (`nil`) is never evidence of growth.
+func membershipGrew(previousMemberKeys: [String]?, currentMemberKeys: [String]?) -> Bool {
+    guard let previous = previousMemberKeys, let current = currentMemberKeys else { return false }
+    return !Set(current).subtracting(previous).isEmpty
+}

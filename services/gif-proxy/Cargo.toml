@@ -1,0 +1,54 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-svc-gif-proxy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Stateless GIPHY search + media proxy for signed-in accounts (ADR-0047)"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "lakko-svc-gif-proxy"
+path = "src/main.rs"
+
+[dependencies]
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+futures.workspace = true
+
+axum = "0.8"
+
+# Session-token verification — the same HMAC secret
+# (`LAKKO_SESSION_TOKEN_SECRET`) `services/auth` issues and
+# `services/storage` / `services/ds` / `services/discovery` verify.
+lakko-auth-token.workspace = true
+
+# Outbound HTTPS to GIPHY. Same version + rustls posture as every other
+# service that already depends on reqwest (auth, channels, discovery,
+# push-gw, sfu, transparency), so it adds no new crate to the graph.
+# No `gzip` / `brotli` feature: the proxy never decompresses an upstream
+# body, so a compressed bomb cannot expand past the size caps.
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+] }
+
+# .env loading — debug builds only; production uses systemd
+# `EnvironmentFile=/etc/lakko/lakko.env`.
+dotenvy = "0.15"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

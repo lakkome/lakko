@@ -59,7 +59,13 @@ import type {
   ParsedDeviceGroupPayload,
 } from "../../../wasm/lakko_ffi_wasm";
 
-import { ensureDeviceGroup, persistDeviceGroupSnapshot } from "../lifecycle";
+import {
+  ensureDeviceGroup,
+  persistDeviceGroupSnapshot,
+  persistDeviceGroupSnapshotWithCursor,
+} from "../lifecycle";
+import { getDeviceGroupJournalCursor } from "../device-group-snapshot-store";
+import { applyDeviceJournalBatch, startingCursor } from "./journal-batch";
 import { decodeJournalEntry, encodeJournalEntry } from "../journal-envelope";
 import { fetchDeviceAttestKey } from "../../auth/device-attest-key";
 import { mintHlc } from "./hlc";
@@ -167,6 +173,13 @@ export function DeviceGroupSyncProvider(props: {
   let group: WasmDeviceGroup | null = null;
   let pollAbort: AbortController | null = null;
   let activeAccountIdB64: string | null = null;
+  /** DS ids of the journal rows THIS provider published this page lifetime.
+   *  The DS does not de-duplicate, so each comes straight back on the next
+   *  poll; the loop skips it by id instead of handing OpenMLS a message it
+   *  cannot decrypt (`CannotDecryptOwnMessage`). Exact by construction: no
+   *  other device's row can carry an id this device got from its own publish.
+   *  See `sync/journal-batch.ts`. */
+  const ownPublishedIds = new Set<number>();
 
   // ----- Lifecycle: session ↔ anon transitions --------------------
 
@@ -271,6 +284,7 @@ export function DeviceGroupSyncProvider(props: {
       identity = null;
     }
     activeAccountIdB64 = null;
+    ownPublishedIds.clear();
     setReady(false);
     setDrafts({});
     setFlags({});
@@ -289,7 +303,18 @@ export function DeviceGroupSyncProvider(props: {
   ): Promise<void> {
     const ds = new DsClient();
     const groupId = g.groupId();
+    // Resume where the last persisted batch left off, instead of re-reading
+    // the whole journal on every page load. The cursor is stored in the same
+    // row and write as the snapshot the provider was just restored from, so it
+    // never names a row that snapshot has not consumed.
     let cursor = 0;
+    try {
+      cursor = startingCursor(await getDeviceGroupJournalCursor(accountIdB64));
+    } catch (err) {
+      // Unreadable: start from the beginning. Re-reading is the safe direction.
+      // eslint-disable-next-line no-console
+      console.warn("DeviceGroup journal cursor read failed; starting from 0", err);
+    }
 
     while (!signal.aborted) {
       let raw;
@@ -331,60 +356,62 @@ export function DeviceGroupSyncProvider(props: {
         attestVk = new Uint8Array(32);
       }
 
-      let mutated = false;
-      for (const message of raw.messages) {
-        cursor = message.id;
-        // Unwrap the DeviceGroup journal envelope (the commit / message plus
-        // any removal attestation that travelled with it).
-        let entry;
-        try {
-          entry = decodeJournalEntry(message.payload);
-        } catch (err) {
-          // eslint-disable-next-line no-console
-          console.warn("DeviceGroup journal envelope decode failed", message.id, err);
-          continue;
-        }
-        const attestation = entry.attestation ?? new Uint8Array(0);
-        let processed;
-        try {
-          // Refuse-to-apply an unattested removal under the policy.
-          processed = g.processIncomingVerifyingRemovals(
+      const batch = await applyDeviceJournalBatch(raw.messages, cursor, {
+        isOwnEcho: (rowId) => ownPublishedIds.has(rowId),
+        apply: async (message) => {
+          // Unwrap the DeviceGroup journal envelope (the commit / message plus
+          // any removal attestation that travelled with it).
+          const entry = decodeJournalEntry(message.payload);
+          const attestation = entry.attestation ?? new Uint8Array(0);
+          // Refuse-to-apply an unattested removal under the policy. A throw —
+          // bad frame / wrong epoch / a removal refused for want of a valid
+          // attestation — is logged by `onApplyError` and the batch goes on.
+          const processed = g.processIncomingVerifyingRemovals(
             id,
             entry.message,
             attestation,
             attestVk,
             BigInt(Math.floor(Date.now() / 1000)),
           );
-        } catch (err) {
-          // Bad frame / wrong epoch / our own echo at the wrong epoch / a
-          // removal refused for want of a valid attestation — log + skip.
-          // Cursor still advances.
-          // eslint-disable-next-line no-console
-          console.warn("DeviceGroup processIncomingVerifyingRemovals failed", message.id, err);
-          continue;
-        }
-        mutated = true;
-        if (processed.kind === "Application") {
-          const data = processed.applicationData;
-          if (data === undefined) continue;
-          try {
-            const wasm = await loadWasm();
-            const parsed = wasm.parseDeviceGroupPayload(data);
-            applyParsed(parsed);
-          } catch (err) {
-            // eslint-disable-next-line no-console
-            console.warn("parseDeviceGroupPayload failed", err);
+          if (processed.kind === "Application") {
+            const data = processed.applicationData;
+            if (data === undefined) return;
+            try {
+              const wasm = await loadWasm();
+              const parsed = wasm.parseDeviceGroupPayload(data);
+              applyParsed(parsed);
+            } catch (err) {
+              // eslint-disable-next-line no-console
+              console.warn("parseDeviceGroupPayload failed", err);
+            }
           }
-        }
-        // Commit / Proposal / ExternalJoinProposal — no
-        // application-state effect; we already advanced the
-        // ratchet inside processIncoming.
-      }
-
-      if (mutated) {
-        // Persist the post-batch snapshot so subsequent app
-        // launches pick up the new epoch + counter state.
-        await persistDeviceGroupSnapshot(id, accountIdB64, deviceKey);
+          // Commit / Proposal / ExternalJoinProposal — no application-state
+          // effect; the ratchet already advanced inside the process call.
+        },
+        // The snapshot and the position it has consumed, in one write. A
+        // failure holds the cursor (the rows come back next poll) rather than
+        // recording a position the durable state has not reached.
+        persist: (to) =>
+          persistDeviceGroupSnapshotWithCursor(id, accountIdB64, deviceKey, to),
+        onApplyError: (message, err) => {
+          // eslint-disable-next-line no-console
+          console.warn("DeviceGroup journal row not applied", message.id, err);
+        },
+        onPersistError: (err) => {
+          // eslint-disable-next-line no-console
+          console.warn(
+            "DeviceGroup snapshot + cursor persist failed; holding the cursor",
+            err,
+          );
+        },
+      });
+      if (batch.persisted) {
+        cursor = batch.nextCursor;
+        // Past the cursor on disk now, so these ids can never come back.
+        for (const echoId of batch.skippedOwnEchoes) ownPublishedIds.delete(echoId);
+      } else if (raw.messages.length > 0) {
+        // Held: give storage a moment before the same rows are fetched again.
+        await sleepCancellable(2000, signal);
       }
     }
   }
@@ -461,7 +488,13 @@ export function DeviceGroupSyncProvider(props: {
     const ds = new DsClient();
     // G-13 (ADR-0015): wrap in the journal envelope (application messages
     // carry no attestation).
-    await ds.publishGroup(group.groupId(), encodeJournalEntry(wireBytes, null));
+    const published = await ds.publishGroup(
+      group.groupId(),
+      encodeJournalEntry(wireBytes, null),
+    );
+    // The DS hands this row straight back to the receive loop; remember its id
+    // so the loop skips it rather than failing to decrypt its own message.
+    ownPublishedIds.add(published.id);
     const deviceKey = await getDeviceKey(activeAccountIdB64);
     if (deviceKey !== null) {
       await persistDeviceGroupSnapshot(

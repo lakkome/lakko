@@ -14,6 +14,8 @@ import me.lakko.app.auth.AuthClientArgError
 import me.lakko.app.auth.AuthHttpError
 import me.lakko.app.auth.AuthNetworkError
 import me.lakko.app.auth.AuthRepository
+import me.lakko.app.discovery.DiscoveryHttpError
+import me.lakko.app.discovery.DiscoveryNetworkError
 
 /**
  * State + dispatcher for the [LoginScreen].
@@ -30,6 +32,9 @@ import me.lakko.app.auth.AuthRepository
 public class LoginViewModel(
     private val repo: AuthRepository,
     cachedUsername: String? = null,
+    /** ADR-0048 §4 — the core's username rule (`validateUsername`). */
+    private val validateUsername: (String) -> String =
+        { uniffi.lakko_ffi_uniffi.validateUsername(it) },
 ) : ViewModel() {
 
     private val mutableState: MutableStateFlow<LoginUiState> =
@@ -59,12 +64,21 @@ public class LoginViewModel(
     public fun onSubmit() {
         val snapshot = mutableState.value
         if (snapshot.busy) return  // ignore double-tap
+        // ADR-0048 §4 — a username failing the rule cannot exist, so no
+        // lookup and no OPAQUE round-trip is spent on it.
+        val username = when (val decision = me.lakko.app.profile.searchDecision(snapshot.username, validateUsername)) {
+            is me.lakko.app.profile.SearchDecision.Refuse -> {
+                mutableState.update { it.copy(error = decision.message) }
+                return
+            }
+            is me.lakko.app.profile.SearchDecision.Lookup -> decision.normalized
+        }
 
         mutableState.update { it.copy(busy = true, error = null) }
         viewModelScope.launch {
             val passwordBytes = snapshot.password.toByteArray(Charsets.UTF_8)
             try {
-                repo.login(snapshot.username, passwordBytes)
+                repo.login(username, passwordBytes)
                 // `repo.login` flipped the AuthState; the screen
                 // will be replaced by the home destination on the
                 // next recomposition. Clear the password field so
@@ -89,6 +103,26 @@ public class LoginViewModel(
                     it.copy(
                         busy = false,
                         error = "Network error. Check your connection and try again.",
+                    )
+                }
+            } catch (_: DiscoveryNetworkError) {
+                // A device that does not know the account resolves the username
+                // through discovery first; its transport failure reads the same.
+                mutableState.update {
+                    it.copy(
+                        busy = false,
+                        error = "Network error. Check your connection and try again.",
+                    )
+                }
+            } catch (err: DiscoveryHttpError) {
+                mutableState.update {
+                    it.copy(
+                        busy = false,
+                        error = when (err.status) {
+                            429 -> "Too many attempts. Please wait a moment and retry."
+                            in 500..599 -> "Server error. Please try again shortly."
+                            else -> "Login failed (${err.status})."
+                        },
                     )
                 }
             } catch (err: Throwable) {

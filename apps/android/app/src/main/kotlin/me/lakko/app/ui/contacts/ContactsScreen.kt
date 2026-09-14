@@ -52,6 +52,9 @@ import me.lakko.app.contacts.AcceptedContact
 import me.lakko.app.contacts.GeneratedInvite
 import me.lakko.app.contacts.IncomingContactRequest
 import me.lakko.app.contacts.SentContactRequest
+import me.lakko.app.profile.ProfileDirectory
+import me.lakko.app.profile.ResolvedName
+import me.lakko.app.profile.requestCardTitle
 
 /**
  * Compose Contacts screen — search + send + pending / accepted /
@@ -85,9 +88,20 @@ public fun ContactsScreen(
      *  ChatScreen for the given group. `null` when 1.15f4c's
      *  chat-bridge wiring isn't active (tests). */
     onOpenChat: ((groupIdHex: String) -> Unit)? = null,
+    /** "Start call" on a call link this device created: hands the link's `/c/`
+     *  slug to the JoinCall landing, where this account is the owner and hosts
+     *  the call. `null` hides the button (tests). */
+    onStartCallLink: ((slug: String) -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val callLinks by viewModel.callLinks.collectAsStateWithLifecycle()
+    // ADR-0048 — every name on this screen comes from the one resolver; the
+    // version flow recomposes a row in place when a profile arrives or a
+    // username verifies.
+    val appContext = LocalContext.current.applicationContext
+    val directory = remember(appContext) { ProfileDirectory.get(appContext) }
+    val nameVersion by directory.version.collectAsStateWithLifecycle()
 
     // Auto-refresh on first arrival + continuous long-poll
     // while the screen is visible. The `LaunchedEffect(Unit)`
@@ -111,6 +125,18 @@ public fun ContactsScreen(
                 delay(POLL_RETRY_BACKOFF_MS)
             }
         }
+    }
+
+    if (callLinks.formOpen) {
+        CreateCallLinkDialog(
+            state = callLinks,
+            onMediaChange = viewModel::onCallLinkMediaChange,
+            onExpiryChange = viewModel::onCallLinkExpiryChange,
+            onMaxUsesChange = viewModel::onCallLinkMaxUsesChange,
+            onLabelChange = viewModel::onCallLinkLabelChange,
+            onCreate = viewModel::onCreateCallLink,
+            onDismiss = viewModel::onDismissCallLinkForm,
+        )
     }
 
     Column(
@@ -149,6 +175,15 @@ public fun ContactsScreen(
             )
 
             Spacer(Modifier.height(24.dp))
+            CallLinkSection(
+                state = callLinks,
+                onCreateClicked = viewModel::onOpenCallLinkForm,
+                onCopyClicked = { link -> copyToClipboard(context, link.url) },
+                onShareClicked = { link -> launchShareIntent(context, link.url) },
+                onStartCallClicked = onStartCallLink?.let { start -> { link -> start(link.slug) } },
+            )
+
+            Spacer(Modifier.height(24.dp))
             ActiveInvitesSection(
                 loaded = state.activeInvitesLoaded,
                 invites = state.activeInvites,
@@ -164,6 +199,7 @@ public fun ContactsScreen(
             Spacer(Modifier.height(24.dp))
             SendSection(
                 usernameInput = state.usernameInput,
+                usernameError = state.usernameError,
                 introInput = state.introInput,
                 sending = state.sending,
                 error = state.sendError,
@@ -184,6 +220,7 @@ public fun ContactsScreen(
             Spacer(Modifier.height(24.dp))
             PendingSection(
                 pending = state.pending,
+                nameOf = { key -> nameVersion.let { directory.resolve(key) } },
                 onAccept = viewModel::onAcceptClicked,
                 onDecline = viewModel::onDeclineClicked,
             )
@@ -191,6 +228,8 @@ public fun ContactsScreen(
             Spacer(Modifier.height(24.dp))
             AcceptedSection(
                 accepted = state.accepted,
+                nameOf = { key -> nameVersion.let { directory.resolve(key) } },
+                onOpenDetail = { key -> directory.ensureVerified(key) },
                 onOpenChat = onOpenChat,
                 onRename = viewModel::onRenameContactClicked,
             )
@@ -265,6 +304,206 @@ private fun ReauthPanel() {
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+    }
+}
+
+// =============================================================================
+// Call links (ADR-0032 `/c/<slug>`)
+// =============================================================================
+
+@Composable
+private fun CallLinkSection(
+    state: CallLinkUiState,
+    onCreateClicked: () -> Unit,
+    onCopyClicked: (CreatedCallLink) -> Unit,
+    onShareClicked: (CreatedCallLink) -> Unit,
+    onStartCallClicked: ((CreatedCallLink) -> Unit)?,
+) {
+    SectionHeader(title = "Call links", count = state.created.size)
+    Spacer(Modifier.height(4.dp))
+    Text(
+        text = "Create a link anyone can open to join a call you host. The call " +
+            "is not tied to a chat.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    Spacer(Modifier.height(8.dp))
+    OutlinedButton(
+        onClick = onCreateClicked,
+        modifier = Modifier.fillMaxWidth(),
+    ) { Text("Create call link") }
+
+    if (state.created.isNotEmpty()) {
+        Spacer(Modifier.height(12.dp))
+        for (link in state.created) {
+            CallLinkRow(
+                link = link,
+                onCopyClicked = { onCopyClicked(link) },
+                onShareClicked = { onShareClicked(link) },
+                onStartCallClicked = onStartCallClicked?.let { start -> { start(link) } },
+            )
+            Spacer(Modifier.height(8.dp))
+        }
+    }
+}
+
+@Composable
+private fun CallLinkRow(
+    link: CreatedCallLink,
+    onCopyClicked: () -> Unit,
+    onShareClicked: () -> Unit,
+    onStartCallClicked: (() -> Unit)?,
+) {
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant,
+        ),
+        shape = RoundedCornerShape(8.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            val kind = if (link.video) "Video call" else "Audio call"
+            Text(
+                text = if (link.label.isEmpty()) kind else "${link.label} · $kind",
+                style = MaterialTheme.typography.titleSmall,
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = link.url,
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+                maxLines = 2,
+            )
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = onCopyClicked,
+                    modifier = Modifier.weight(1f),
+                ) { Text("Copy") }
+                OutlinedButton(
+                    onClick = onShareClicked,
+                    modifier = Modifier.weight(1f),
+                ) { Text("Share") }
+                if (onStartCallClicked != null) {
+                    Button(
+                        onClick = onStartCallClicked,
+                        modifier = Modifier.weight(1f),
+                    ) { Text("Start call") }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CreateCallLinkDialog(
+    state: CallLinkUiState,
+    onMediaChange: (me.lakko.app.calls.CallMediaPreset) -> Unit,
+    onExpiryChange: (me.lakko.app.calls.CallInviteExpiryPreset) -> Unit,
+    onMaxUsesChange: (me.lakko.app.calls.CallInviteMaxUsesPreset) -> Unit,
+    onLabelChange: (String) -> Unit,
+    onCreate: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Create call link") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Call", style = MaterialTheme.typography.labelLarge)
+                ChoiceRow(
+                    options = listOf(
+                        me.lakko.app.calls.CallMediaPreset.Audio to "Audio",
+                        me.lakko.app.calls.CallMediaPreset.AudioVideo to "Video",
+                    ),
+                    selected = state.media,
+                    enabled = !state.creating,
+                    onSelect = onMediaChange,
+                )
+                Text("Expires after", style = MaterialTheme.typography.labelLarge)
+                ChoiceRow(
+                    options = listOf(
+                        me.lakko.app.calls.CallInviteExpiryPreset.OneHour to "1 hour",
+                        me.lakko.app.calls.CallInviteExpiryPreset.OneDay to "24 hours",
+                        me.lakko.app.calls.CallInviteExpiryPreset.SevenDays to "7 days",
+                    ),
+                    selected = state.expiry,
+                    enabled = !state.creating,
+                    onSelect = onExpiryChange,
+                )
+                Text("Can be used", style = MaterialTheme.typography.labelLarge)
+                ChoiceRow(
+                    options = listOf(
+                        me.lakko.app.calls.CallInviteMaxUsesPreset.Single to "Once",
+                        me.lakko.app.calls.CallInviteMaxUsesPreset.Ten to "10 times",
+                        me.lakko.app.calls.CallInviteMaxUsesPreset.Unlimited to "Unlimited",
+                    ),
+                    selected = state.maxUses,
+                    enabled = !state.creating,
+                    onSelect = onMaxUsesChange,
+                )
+                OutlinedTextField(
+                    value = state.label,
+                    onValueChange = onLabelChange,
+                    label = { Text("Label (optional)") },
+                    singleLine = true,
+                    enabled = !state.creating,
+                    keyboardOptions = KeyboardOptions(
+                        capitalization = KeyboardCapitalization.Sentences,
+                    ),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                if (state.creating) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(
+                            modifier = Modifier
+                                .height(18.dp)
+                                .width(18.dp),
+                            strokeWidth = 2.dp,
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "Creating the link. This can take a few seconds.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
+                state.error?.let { error ->
+                    Text(
+                        text = error,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = onCreate, enabled = !state.creating) {
+                Text(if (state.creating) "Creating…" else "Create")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = !state.creating) { Text("Cancel") }
+        },
+    )
+}
+
+@Composable
+private fun <T> ChoiceRow(
+    options: List<Pair<T, String>>,
+    selected: T,
+    enabled: Boolean,
+    onSelect: (T) -> Unit,
+) {
+    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        for ((value, text) in options) {
+            androidx.compose.material3.FilterChip(
+                selected = value == selected,
+                onClick = { onSelect(value) },
+                label = { Text(text) },
+                enabled = enabled,
+            )
+        }
     }
 }
 
@@ -547,6 +786,7 @@ private fun launchShareIntent(context: Context, url: String) {
 @Composable
 private fun SendSection(
     usernameInput: String,
+    usernameError: String?,
     introInput: String,
     sending: Boolean,
     error: String?,
@@ -566,6 +806,9 @@ private fun SendSection(
         label = { Text("Username (e.g. alice)") },
         singleLine = true,
         enabled = !sending,
+        // ADR-0048 §4 — the rule's reason as the user types.
+        isError = usernameError != null,
+        supportingText = usernameError?.let { reason -> { Text(reason) } },
         keyboardOptions = KeyboardOptions(
             capitalization = KeyboardCapitalization.None,
             autoCorrect = false,
@@ -622,6 +865,7 @@ private fun SendSection(
 @Composable
 private fun PendingSection(
     pending: List<IncomingContactRequest>,
+    nameOf: (ByteArray) -> ResolvedName,
     onAccept: (Long) -> Unit,
     onDecline: (Long) -> Unit,
 ) {
@@ -636,7 +880,7 @@ private fun PendingSection(
     // vertical-scroll Column would Compose-warning + duplicate
     // the gesture detector.
     for (req in pending) {
-        PendingRow(req = req, onAccept = onAccept, onDecline = onDecline)
+        PendingRow(req = req, name = nameOf(req.fromPubkey), onAccept = onAccept, onDecline = onDecline)
         Spacer(Modifier.height(8.dp))
     }
 }
@@ -644,6 +888,7 @@ private fun PendingSection(
 @Composable
 private fun PendingRow(
     req: IncomingContactRequest,
+    name: ResolvedName,
     onAccept: (Long) -> Unit,
     onDecline: (Long) -> Unit,
 ) {
@@ -655,10 +900,12 @@ private fun PendingRow(
         modifier = Modifier.fillMaxWidth(),
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
+            // ADR-0048 UX §5 — `Alice Petrova · @alice wants to connect`, or
+            // `@alice` / the fingerprint when that is all there is.
             Text(
-                text = "From pubkey ${shortHex(req.fromPubkey)}",
+                text = requestCardTitle(name),
                 style = MaterialTheme.typography.bodyMedium,
-                fontFamily = FontFamily.Monospace,
+                fontFamily = if (name.isFingerprint) FontFamily.Monospace else FontFamily.Default,
             )
             if (req.intro != null && req.intro.isNotBlank()) {
                 Spacer(Modifier.height(4.dp))
@@ -685,6 +932,9 @@ private fun PendingRow(
 @Composable
 private fun AcceptedSection(
     accepted: List<AcceptedContact>,
+    nameOf: (ByteArray) -> ResolvedName,
+    /** A contact detail opened: retry verifying its username if unresolved. */
+    onOpenDetail: (signatureKeyB64: String) -> Unit,
     onOpenChat: ((groupIdHex: String) -> Unit)?,
     /** (messageId, newName) — a blank name clears the override
      *  (ADR-0021 follow-up: editable per-contact display name). */
@@ -709,27 +959,27 @@ private fun AcceptedSection(
                 .fillMaxWidth()
                 .padding(vertical = 4.dp),
         ) {
+            val name = nameOf(c.request.fromPubkey)
             Column(modifier = Modifier.weight(1f)) {
-                // Primary label: the user-chosen name when set, else the
-                // short pubkey fingerprint (monospaced when it IS the
-                // fingerprint, so it reads as a key rather than a name).
+                // ADR-0048 UX §3 — the resolved name (rename, profile name,
+                // verified @username, fingerprint); monospaced when it IS the
+                // fingerprint, so it reads as a key rather than a name.
                 Text(
-                    text = c.displayLabel,
+                    text = name.primary,
                     style = MaterialTheme.typography.bodyMedium,
-                    fontFamily =
-                        if (c.displayName == null) {
-                            FontFamily.Monospace
-                        } else {
-                            FontFamily.Default
-                        },
+                    fontFamily = if (name.isFingerprint) FontFamily.Monospace else FontFamily.Default,
                 )
-                // When a name is set, keep the fingerprint visible as a
-                // secondary line — it stays the identity the user verifies.
-                if (c.displayName != null) {
+                // The verified username (or the fingerprint) under the name
+                // disambiguates two contacts with the same name.
+                if (!name.isFingerprint) {
                     Text(
-                        text = c.shortFingerprintLabel,
+                        text = name.verifiedUsername?.let { "@$it" } ?: name.fingerprint,
                         style = MaterialTheme.typography.bodySmall,
-                        fontFamily = FontFamily.Monospace,
+                        fontFamily = if (name.verifiedUsername != null) {
+                            FontFamily.Default
+                        } else {
+                            FontFamily.Monospace
+                        },
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
@@ -737,10 +987,11 @@ private fun AcceptedSection(
             TextButton(
                 onClick = {
                     draftName = c.displayName ?: ""
+                    onOpenDetail(java.util.Base64.getEncoder().encodeToString(c.request.fromPubkey))
                     editing = c
                 },
             ) {
-                Text("Rename")
+                Text("Details")
             }
             // "Open chat" affordance — shown only when the
             // 1.15f4c bridge wired the chat handshake at
@@ -767,14 +1018,39 @@ private fun AcceptedSection(
 
     val target = editing
     if (target != null) {
+        val detail = nameOf(target.request.fromPubkey)
         AlertDialog(
             onDismissRequest = { editing = null },
-            title = { Text("Rename contact") },
+            title = { Text(detail.primary) },
             text = {
                 Column {
+                    // ADR-0048 UX §6 — the contact detail: username (only when
+                    // verified), the person's own name when a rename overrides
+                    // it, a quiet line when a username claim failed, and the
+                    // fingerprint labelled as such.
+                    detail.verifiedUsername?.let { user ->
+                        Text(text = "@$user", style = MaterialTheme.typography.bodyMedium)
+                    }
+                    detail.theirName?.let { theirs ->
+                        Text(text = "Their name: $theirs", style = MaterialTheme.typography.bodySmall)
+                    }
+                    if (detail.usernameNotVerified) {
+                        Text(
+                            text = "Username not verified",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                     Text(
-                        text = "Shown in chats and group-call rosters. " +
-                            "Leave blank to use the key fingerprint.",
+                        text = "Fingerprint ${detail.fingerprint}",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        text = "Your name for this contact. Only you see it; " +
+                            "leave blank to use their own name.",
                         style = MaterialTheme.typography.bodySmall,
                     )
                     Spacer(Modifier.height(8.dp))
@@ -782,7 +1058,7 @@ private fun AcceptedSection(
                         value = draftName,
                         onValueChange = { draftName = it },
                         singleLine = true,
-                        label = { Text("Display name") },
+                        label = { Text("Rename") },
                     )
                 }
             },
@@ -798,7 +1074,7 @@ private fun AcceptedSection(
             },
             dismissButton = {
                 TextButton(onClick = { editing = null }) {
-                    Text("Cancel")
+                    Text("Close")
                 }
             },
         )
@@ -876,18 +1152,3 @@ private fun EmptyHint(text: String) {
  *  to absorb a 503 burst, short enough that a transient blip
  *  doesn't degrade UX noticeably. */
 private const val POLL_RETRY_BACKOFF_MS: Long = 5_000L
-
-/** Short hex preview of a 32-byte public key — first 6 + last 4
- *  hex chars, separated by an ellipsis. Useful as a row label
- *  while the username-resolution layer doesn't carry handles
- *  back from the inbox side. */
-private fun shortHex(bytes: ByteArray): String {
-    val full = StringBuilder(bytes.size * 2)
-    for (b in bytes) {
-        val v = b.toInt() and 0xFF
-        full.append("0123456789abcdef"[v ushr 4])
-        full.append("0123456789abcdef"[v and 0x0F])
-    }
-    if (full.length <= 12) return full.toString()
-    return "${full.substring(0, 6)}…${full.substring(full.length - 4)}"
-}

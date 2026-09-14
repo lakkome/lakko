@@ -7,6 +7,8 @@ import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.engine.HttpClientEngine
 import io.ktor.client.engine.okhttp.OkHttp
+import me.lakko.app.config.ApiEndpoints
+import me.lakko.app.config.ApiService
 import me.lakko.app.transport.AntiCensorshipEngine
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.HttpRequestBuilder
@@ -919,21 +921,14 @@ public class AuthClient(
 
     public companion object {
         /**
+         * `<LAKKO_API_BASE_URL>/auth` ([ApiEndpoints]). With no API
+         * base URL in the build it is `http://10.0.2.2:8081` —
          * `10.0.2.2` is the canonical "host machine from inside the
-         * Android emulator" loopback alias — every Google AVD maps
-         * it to the workstation running adb. Port 8081 matches the
-         * `LAKKO_BIND` dev setup in [CLAUDE.md][1] for
-         * `lakko-svc-auth`.
-         *
-         * On a physical device on the same Wi-Fi as the dev
-         * workstation, pass the workstation's LAN IP via the
-         * [AuthClient] constructor instead. Production deployments
-         * use the `https://api-dev.lakko.me` Cloudflare tunnel
-         * URL via the same constructor parameter.
-         *
-         * [1]: ../../../../../../../../../CLAUDE.md
+         * Android emulator" loopback alias, port 8081 the
+         * `lakko-svc-auth` dev bind.
          */
-        public const val DEFAULT_BASE_URL: String = "http://10.0.2.2:8081"
+        public val DEFAULT_BASE_URL: String
+            get() = ApiEndpoints.baseUrlFor(ApiService.AUTH)
 
         private const val ACCOUNT_ID_LEN: Int = 16
 

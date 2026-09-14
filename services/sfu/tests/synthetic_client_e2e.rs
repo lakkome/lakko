@@ -64,6 +64,14 @@
 //!   `poll_output → UdpSocket::send_to` path — without
 //!   it the SFU side of the DTLS handshake stops mid-
 //!   way and the test times out.
+//! - The production bind shape, an unspecified
+//!   `0.0.0.0` media socket plus an advertise IP
+//!   ([`unspecified_bind_with_advertise_ip_completes_handshake`]):
+//!   the answer must carry the advertised candidate, and
+//!   the receive path must hand str0m that candidate's
+//!   address (not the socket's `0.0.0.0` local address)
+//!   as each datagram's destination, or str0m discards
+//!   every connectivity check.
 
 #![cfg(test)]
 
@@ -71,7 +79,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use lakko_svc_sfu::media::{spawn_media_task, MediaTaskHandle};
+use lakko_svc_sfu::media::{spawn_media_task, spawn_media_task_advertising, MediaTaskHandle};
 use lakko_svc_sfu::peer::{Peer, PeerId, PeerRegistry};
 use lakko_svc_sfu::protocol::ServerFrame;
 use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
@@ -494,6 +502,84 @@ async fn synthetic_client_completes_handshake_with_media_task() {
         client.is_connected(),
     );
     assert!(client.is_alive(), "Rtc must stay alive after handshake");
+}
+
+/// The production bind shape: the media socket binds
+/// every interface (`0.0.0.0:0`) and advertises
+/// `127.0.0.1` as its ICE host candidate. The synthetic
+/// client must complete ICE + DTLS against it.
+///
+/// Two independent defects are pinned here, and each makes
+/// this test fail on its own:
+///
+/// 1. Building the host candidate from the socket's local
+///    address: str0m refuses `0.0.0.0` as a host candidate,
+///    so the SDP answer carries no `a=candidate:` line and
+///    the client has nothing to dial.
+/// 2. Handing str0m the socket's local address
+///    (`0.0.0.0:port`) as each inbound datagram's
+///    destination: str0m's ICE agent drops a STUN binding
+///    request whose destination matches no local candidate,
+///    so the client's checks are discarded and ICE never
+///    nominates a pair even though the answer advertised
+///    the right address.
+#[tokio::test]
+async fn unspecified_bind_with_advertise_ip_completes_handshake() {
+    let peers = PeerRegistry::new();
+    let (media, sfu_addr) = spawn_media_task_advertising(
+        "0.0.0.0:0".parse().unwrap(),
+        Some("127.0.0.1".parse().unwrap()),
+        peers,
+    )
+    .await
+    .expect("unspecified bind with an advertise IP starts");
+    assert!(
+        sfu_addr.ip().is_loopback(),
+        "the returned address is the advertised one, got {sfu_addr}"
+    );
+
+    let mut client = SyntheticClient::new().await;
+    let client_id = lakko_svc_sfu::peer::PeerId::fresh();
+
+    let (offer_sdp, pending, _mid) = client.create_audio_publisher_offer();
+    let answer_sdp = media
+        .accept_offer(
+            client_id.clone(),
+            "unspecified-bind-test-call".to_owned(),
+            offer_sdp,
+        )
+        .await
+        .expect("SFU accepts a real str0m-produced SDP offer");
+    let expected_candidate = format!("127.0.0.1 {} typ host", sfu_addr.port());
+    assert!(
+        answer_sdp
+            .lines()
+            .any(|l| l.starts_with("a=candidate:") && l.contains(&expected_candidate)),
+        "SDP answer must advertise the host candidate {sfu_addr}; answer was:\n{answer_sdp}"
+    );
+    client
+        .accept_answer(pending, &answer_sdp)
+        .expect("client applies the SFU's SDP answer");
+
+    let connected = drive_until_connected(&mut client, sfu_addr).await;
+    assert!(
+        connected,
+        "synthetic client failed to reach ICE Connected against a 0.0.0.0-bound SFU \
+         advertising {sfu_addr} within {HANDSHAKE_DEADLINE:?}; alive={}",
+        client.is_alive(),
+    );
+}
+
+/// An unspecified bind WITHOUT an advertise IP refuses to
+/// start — the media plane never comes up in a shape whose
+/// answers would carry no SFU candidate.
+#[tokio::test]
+async fn unspecified_bind_without_advertise_ip_refuses_to_start() {
+    let result = spawn_media_task("0.0.0.0:0".parse().unwrap(), PeerRegistry::new()).await;
+    assert!(
+        result.is_err(),
+        "an unspecified media bind with nothing to advertise must not start"
+    );
 }
 
 /// Wall-clock budget for the full two-client cross-fanout

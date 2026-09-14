@@ -176,10 +176,11 @@ async fn main() -> Result<()> {
 ///     - `LAKKO_FCM_SA_PATH` — path to the service-account JSON
 ///       Google Cloud issues.
 /// - Web Push (`ProviderKind::WebPush`):
-///     - `LAKKO_WEBPUSH_VAPID_PRIVATE_KEY_PEM` — EC PEM (P-256).
+///     - `LAKKO_WEBPUSH_VAPID_PRIVATE_KEY_PEM` — P-256 private key as a
+///       PKCS#8 PEM (`BEGIN PRIVATE KEY`); a SEC1 `BEGIN EC PRIVATE KEY` is refused.
 ///     - `LAKKO_WEBPUSH_VAPID_PUBLIC_KEY_B64URL` — base64url-no-pad
 ///       of the uncompressed P-256 point (65 bytes).
-///     - `LAKKO_WEBPUSH_VAPID_SUBJECT` — `mailto:` URI.
+///     - `LAKKO_WEBPUSH_VAPID_SUBJECT` — `mailto:` or `https:` URI.
 /// - UnifiedPush (`ProviderKind::UnifiedPush`): none — always
 ///   wired, the subscription endpoint URL itself is the capability.
 fn resolve_providers() -> HashMap<ProviderKind, Box<dyn Provider>> {

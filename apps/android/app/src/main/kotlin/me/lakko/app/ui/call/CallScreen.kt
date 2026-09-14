@@ -164,6 +164,8 @@ public fun CallScreen(
     // `null` on the mock design path (Join seeds mock state).
     onPrejoinJoin: ((micOn: Boolean, camOn: Boolean) -> Unit)? = null,
     onPrejoinCancel: (() -> Unit)? = null,
+    /** ADR-0048 — the remote participant's resolved name for a 1x1 session. */
+    remoteName: String? = null,
 ) {
     // One sound controller per CallScreen lifetime; released
     // in the same DisposableEffect that resets the UI state so
@@ -188,7 +190,7 @@ public fun CallScreen(
     // seedMockState() path runs as before.
     LaunchedEffect(session) {
         if (session != null) {
-            state.driveFrom(session)
+            state.driveFrom(session, remoteName = remoteName.orEmpty())
         }
     }
 

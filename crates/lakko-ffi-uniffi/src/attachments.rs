@@ -95,6 +95,73 @@ pub struct AttachmentRef {
     pub size: u64,
     /// Optional human-visible filename.
     pub name: Option<String>,
+    /// ADR-0047 — `"voice"`, `"video_note"`, `"gif"`, another (unknown)
+    /// value that renders as a file, or `None` for a plain file. Chooses
+    /// the bubble only; inline playback is decided by [`inline_media_type`]
+    /// on `mime`, never by this.
+    #[uniffi(default = None)]
+    pub kind: Option<String>,
+    /// ADR-0047 — playback length in ms. Survives only on a `voice`
+    /// (<= 15 min) or `video_note` (<= 60 s) ref; dropped otherwise.
+    #[uniffi(default = None)]
+    pub duration_ms: Option<u32>,
+    /// ADR-0047 — raw amplitude bytes, 1..=128. Out of bound is dropped.
+    #[uniffi(default = None)]
+    pub waveform: Option<Vec<u8>>,
+    /// ADR-0047 — pixel width, 1..=4096. Out of bound is dropped.
+    #[uniffi(default = None)]
+    pub width: Option<u32>,
+    /// ADR-0047 — pixel height, 1..=4096. Out of bound is dropped.
+    #[uniffi(default = None)]
+    pub height: Option<u32>,
+    /// ADR-0047 — the poster-frame blob (video note still).
+    #[uniffi(default = None)]
+    pub thumb: Option<ThumbRef>,
+}
+
+/// ADR-0047 — a poster-frame blob attached to an [`AttachmentRef`]: its
+/// own encrypted blob on the storage service, under its own CEK. Mirror
+/// of [`lakko_attachments::ThumbRef`] with raw bytes over the FFI.
+#[derive(uniffi::Record, Clone)]
+pub struct ThumbRef {
+    /// Raw 32-byte SHA-256 blob id.
+    pub blob_id: Vec<u8>,
+    /// Raw 32-byte CEK.
+    pub key: Vec<u8>,
+    /// Raw 12-byte AEAD nonce.
+    pub nonce: Vec<u8>,
+    /// Optional MIME type of the poster (check with [`inline_media_type`]).
+    pub mime: Option<String>,
+    /// Plaintext size in bytes, 1..=256 KiB; out of bound drops the thumb.
+    pub size: u64,
+    /// Pixel width, 1..=4096. Out of bound is dropped.
+    #[uniffi(default = None)]
+    pub width: Option<u32>,
+    /// Pixel height, 1..=4096. Out of bound is dropped.
+    #[uniffi(default = None)]
+    pub height: Option<u32>,
+}
+
+/// ADR-0047 — how an attachment may be rendered inline. Mirror of
+/// [`lakko_attachments::InlineMediaType`].
+#[derive(uniffi::Enum, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum InlineMediaType {
+    /// Render as an image.
+    Image,
+    /// Play as audio.
+    Audio,
+    /// Play as video.
+    Video,
+}
+
+impl From<inner::InlineMediaType> for InlineMediaType {
+    fn from(t: inner::InlineMediaType) -> Self {
+        match t {
+            inner::InlineMediaType::Image => Self::Image,
+            inner::InlineMediaType::Audio => Self::Audio,
+            inner::InlineMediaType::Video => Self::Video,
+        }
+    }
 }
 
 /// Output of [`parse_envelope`]: the user-visible text + zero or
@@ -183,27 +250,25 @@ pub fn compose_envelope(
             // Validate field lengths up front so a wrong-shape
             // input fails fast at the FFI rather than at JSON
             // parse on the other side.
-            if r.blob_id.len() != inner::BLOB_ID_LEN {
-                return Err(FfiError::Attachment(format!(
-                    "blob_id length {} != {}",
-                    r.blob_id.len(),
-                    inner::BLOB_ID_LEN
-                )));
-            }
-            if r.key.len() != inner::ATTACHMENT_KEY_LEN {
-                return Err(FfiError::Attachment(format!(
-                    "key length {} != {}",
-                    r.key.len(),
-                    inner::ATTACHMENT_KEY_LEN
-                )));
-            }
-            if r.nonce.len() != inner::ATTACHMENT_NONCE_LEN {
-                return Err(FfiError::Attachment(format!(
-                    "nonce length {} != {}",
-                    r.nonce.len(),
-                    inner::ATTACHMENT_NONCE_LEN
-                )));
-            }
+            check_byte_fields("", &r.blob_id, &r.key, &r.nonce)?;
+            let thumb = r
+                .thumb
+                .map(|t| -> Result<inner::ThumbRef, FfiError> {
+                    check_byte_fields("thumb ", &t.blob_id, &t.key, &t.nonce)?;
+                    Ok(inner::ThumbRef {
+                        blob_id: B64.encode(&t.blob_id),
+                        key: B64.encode(&t.key),
+                        nonce: B64.encode(&t.nonce),
+                        mime: t.mime,
+                        size: t.size,
+                        width: t.width,
+                        height: t.height,
+                    })
+                })
+                .transpose()?;
+            // ADR-0047 bounds on the media fields are applied inside
+            // `inner::compose`: an out-of-bound value is dropped, not an
+            // error, exactly as every receiver would drop it.
             Ok(inner::AttachmentRef {
                 blob_id: B64.encode(&r.blob_id),
                 key: B64.encode(&r.key),
@@ -211,10 +276,26 @@ pub fn compose_envelope(
                 mime: r.mime,
                 size: r.size,
                 name: r.name,
+                kind: r.kind,
+                duration_ms: r.duration_ms,
+                waveform: r.waveform.map(|w| B64.encode(w)),
+                width: r.width,
+                height: r.height,
+                thumb,
             })
         })
         .collect::<Result<_, _>>()?;
     inner::compose(&text, inner_refs).map_err(Into::into)
+}
+
+/// ADR-0047 — the inline-playback allowlist: how an attachment with this
+/// MIME type may be rendered inline, or `None` for a file chip. Decided
+/// by MIME alone (parameters after `;` ignored, case-insensitive); never
+/// pass `kind` here.
+#[uniffi::export]
+#[must_use]
+pub fn inline_media_type(mime: String) -> Option<InlineMediaType> {
+    inner::inline_media_type(&mime).map(Into::into)
 }
 
 /// Decode an MLS Application message JSON envelope. Returns the
@@ -232,29 +313,13 @@ pub fn compose_envelope(
 #[must_use]
 pub fn parse_envelope(bytes: Vec<u8>) -> ParsedEnvelope {
     let (text, refs) = inner::parse(&bytes);
+    // Malformed refs are skipped silently rather than failing the whole
+    // envelope parse — the rest of the attachments may still be useful,
+    // and the application path can decide whether a count-mismatch is a
+    // user-visible issue.
     ParsedEnvelope {
         text,
-        attachments: refs
-            .into_iter()
-            .filter_map(|r| {
-                // Skip malformed refs silently rather than failing
-                // the whole envelope parse — the rest of the
-                // attachments may still be useful, and the
-                // application path can decide whether a
-                // count-mismatch is a user-visible issue.
-                let blob_id = r.decode_blob_id().ok()?;
-                let key = r.decode_key().ok()?;
-                let nonce = r.decode_nonce().ok()?;
-                Some(AttachmentRef {
-                    blob_id: blob_id.to_vec(),
-                    key: key.as_bytes().to_vec(),
-                    nonce: nonce.to_vec(),
-                    mime: r.mime,
-                    size: r.size,
-                    name: r.name,
-                })
-            })
-            .collect(),
+        attachments: refs_to_ffi(refs),
     }
 }
 
@@ -425,6 +490,10 @@ fn refs_to_ffi(refs: Vec<inner::AttachmentRef>) -> Vec<AttachmentRef> {
             let blob_id = r.decode_blob_id().ok()?;
             let key = r.decode_key().ok()?;
             let nonce = r.decode_nonce().ok()?;
+            // ADR-0047 media fields arrive already bounded by the core
+            // parser; a thumb that still fails to decode is dropped alone.
+            let waveform = r.decode_waveform();
+            let thumb = r.thumb.as_ref().and_then(thumb_to_ffi);
             Some(AttachmentRef {
                 blob_id: blob_id.to_vec(),
                 key: key.as_bytes().to_vec(),
@@ -432,9 +501,49 @@ fn refs_to_ffi(refs: Vec<inner::AttachmentRef>) -> Vec<AttachmentRef> {
                 mime: r.mime,
                 size: r.size,
                 name: r.name,
+                kind: r.kind,
+                duration_ms: r.duration_ms,
+                waveform,
+                width: r.width,
+                height: r.height,
+                thumb,
             })
         })
         .collect()
+}
+
+fn thumb_to_ffi(t: &inner::ThumbRef) -> Option<ThumbRef> {
+    Some(ThumbRef {
+        blob_id: t.decode_blob_id().ok()?.to_vec(),
+        key: t.decode_key().ok()?.as_bytes().to_vec(),
+        nonce: t.decode_nonce().ok()?.to_vec(),
+        mime: t.mime.clone(),
+        size: t.size,
+        width: t.width,
+        height: t.height,
+    })
+}
+
+/// Wrong-length raw byte fields fail the compose call (a caller bug),
+/// with `prefix` naming a nested ref (`"thumb "`).
+fn check_byte_fields(
+    prefix: &str,
+    blob_id: &[u8],
+    key: &[u8],
+    nonce: &[u8],
+) -> Result<(), FfiError> {
+    for (field, got, want) in [
+        ("blob_id", blob_id.len(), inner::BLOB_ID_LEN),
+        ("key", key.len(), inner::ATTACHMENT_KEY_LEN),
+        ("nonce", nonce.len(), inner::ATTACHMENT_NONCE_LEN),
+    ] {
+        if got != want {
+            return Err(FfiError::Attachment(format!(
+                "{prefix}{field} length {got} != {want}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn vec_to_aead_key(bytes: &[u8]) -> Result<AeadKey, FfiError> {
@@ -522,6 +631,7 @@ mod tests {
             mime: Some("image/png".to_string()),
             size: 11,
             name: Some("cat.png".to_string()),
+            ..bare_media()
         };
         let bytes = compose_envelope("look".to_string(), vec![attachment.clone()]).unwrap();
         let parsed = parse_envelope(bytes);
@@ -539,11 +649,7 @@ mod tests {
     fn compose_rejects_wrong_length_byte_field() {
         let bad = AttachmentRef {
             blob_id: vec![0u8; 16], // wrong length — 32 expected
-            key: vec![0u8; 32],
-            nonce: vec![0u8; 12],
-            mime: None,
-            size: 0,
-            name: None,
+            ..bare_media()
         };
         let err = compose_envelope("x".to_string(), vec![bad]).unwrap_err();
         match err {
@@ -619,5 +725,127 @@ mod tests {
         let body = parse_body_envelope(compose_read_receipt_envelope(1042).unwrap());
         assert_eq!(body.kind, MessageBodyKind::ReadReceipt);
         assert_eq!(body.target, Some(1042));
+    }
+
+    // ---- ADR-0047 ----
+
+    /// A well-formed ref with no media metadata, for struct-update syntax.
+    fn bare_media() -> AttachmentRef {
+        AttachmentRef {
+            blob_id: vec![0u8; 32],
+            key: vec![0u8; 32],
+            nonce: vec![0u8; 12],
+            mime: None,
+            size: 0,
+            name: None,
+            kind: None,
+            duration_ms: None,
+            waveform: None,
+            width: None,
+            height: None,
+            thumb: None,
+        }
+    }
+
+    fn thumb_from(bytes: &[u8]) -> ThumbRef {
+        let enc = encrypt_attachment(bytes.to_vec()).unwrap();
+        ThumbRef {
+            blob_id: enc.blob_id,
+            key: enc.key,
+            nonce: enc.nonce,
+            mime: Some("image/jpeg".to_string()),
+            size: bytes.len() as u64,
+            width: Some(240),
+            height: Some(240),
+        }
+    }
+
+    #[test]
+    fn media_fields_round_trip_through_both_parsers() {
+        let enc = encrypt_attachment(b"note bytes".to_vec()).unwrap();
+        let thumb = thumb_from(b"poster");
+        let r = AttachmentRef {
+            blob_id: enc.blob_id,
+            key: enc.key,
+            nonce: enc.nonce,
+            mime: Some("video/mp4".to_string()),
+            size: 10,
+            name: Some("note-1.mp4".to_string()),
+            kind: Some("video_note".to_string()),
+            duration_ms: Some(9000),
+            waveform: Some(vec![1, 2, 3]),
+            width: Some(480),
+            height: Some(480),
+            thumb: Some(thumb.clone()),
+        };
+        let bytes = compose_envelope("c".to_string(), vec![r.clone()]).unwrap();
+        for got in [
+            parse_envelope(bytes.clone()).attachments,
+            parse_body_envelope(bytes).attachments,
+        ] {
+            let got = &got[0];
+            assert_eq!(got.kind, r.kind);
+            assert_eq!(got.duration_ms, Some(9000));
+            assert_eq!(got.waveform, Some(vec![1, 2, 3]));
+            assert_eq!((got.width, got.height), (Some(480), Some(480)));
+            let t = got.thumb.as_ref().unwrap();
+            assert_eq!(
+                (&t.blob_id, &t.key, &t.nonce),
+                (&thumb.blob_id, &thumb.key, &thumb.nonce)
+            );
+            assert_eq!(
+                (t.size, t.width, t.height, &t.mime),
+                (6, Some(240), Some(240), &thumb.mime)
+            );
+        }
+    }
+
+    #[test]
+    fn out_of_bound_media_fields_are_dropped_not_errors() {
+        let r = AttachmentRef {
+            kind: Some("voice".to_string()),
+            duration_ms: Some(15 * 60 * 1000 + 1),
+            waveform: Some(vec![0u8; 129]),
+            width: Some(4097),
+            height: Some(10),
+            ..bare_media()
+        };
+        let parsed = parse_envelope(compose_envelope("c".to_string(), vec![r]).unwrap());
+        let got = &parsed.attachments[0];
+        assert_eq!(got.kind.as_deref(), Some("voice"));
+        assert_eq!((got.duration_ms, got.waveform.as_ref()), (None, None));
+        assert_eq!((got.width, got.height), (None, Some(10)));
+    }
+
+    #[test]
+    fn compose_rejects_wrong_length_thumb_byte_field() {
+        let mut thumb = thumb_from(b"poster");
+        thumb.nonce = vec![0u8; 5];
+        let r = AttachmentRef {
+            thumb: Some(thumb),
+            ..bare_media()
+        };
+        match compose_envelope("x".to_string(), vec![r]).unwrap_err() {
+            FfiError::Attachment(msg) => assert!(msg.contains("thumb nonce length"), "{msg}"),
+            other => panic!("expected Attachment, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inline_media_type_follows_the_core_allowlist() {
+        assert_eq!(
+            inline_media_type("audio/mp4".to_string()),
+            Some(InlineMediaType::Audio)
+        );
+        assert_eq!(
+            inline_media_type("video/mp4;codecs=avc1".to_string()),
+            Some(InlineMediaType::Video)
+        );
+        assert_eq!(
+            inline_media_type("image/gif".to_string()),
+            Some(InlineMediaType::Image)
+        );
+        assert_eq!(inline_media_type("image/svg+xml".to_string()), None);
+        assert_eq!(inline_media_type("text/html".to_string()), None);
     }
 }

@@ -34,13 +34,12 @@ import Foundation
 ///
 /// ## Default base URL
 ///
-/// `http://localhost:8085` — iOS simulator loopback + port
-/// `8085` matching `lakko-svc-push-gw`'s dev bind. Override
-/// for physical devices (LAN IP) and production (Cloudflare
-/// tunnel URL).
+/// `<LakkoApiBaseUrl>/push-gw` (``ApiEndpoints``); with no API
+/// base URL, `http://localhost:8085` — iOS simulator loopback +
+/// port `8085` matching `lakko-svc-push-gw`'s dev bind.
 public final class PushClient {
 
-    public static let defaultBaseURL: String = "http://localhost:8085"
+    public static var defaultBaseURL: String { ApiEndpoints.baseURL(for: .pushGw) }
 
     /// Raw device pseudonym length — 32 bytes, 64 lowercase hex
     /// chars on the wire (mirror of `services/push-gw`'s

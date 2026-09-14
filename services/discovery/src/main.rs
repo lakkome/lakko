@@ -64,6 +64,13 @@
 //!   identity to the transparency log, closing the S2 best-effort
 //!   fail-open gap. Spawned ONLY when the transparency integration is
 //!   armed (`LAKKO_TRANSPARENCY_URL` set); `0` disables the sweep.
+//! - `LAKKO_DISCOVERY_RATE_LIMIT_PER_MINUTE` / `_BURST` — per-IP bucket for
+//!   requests without a valid session token on the OPRF / lookup endpoints
+//!   (default 60 / 10).
+//! - `LAKKO_DISCOVERY_ACCOUNT_RATE_LIMIT_PER_MINUTE` / `_BURST` — per-account
+//!   bucket for requests with one (default 60 / 10).
+//! - `LAKKO_DISCOVERY_AUTHENTICATED_IP_RATE_LIMIT_PER_MINUTE` / `_BURST` —
+//!   per-IP ceiling for requests with one (default 600 / 100).
 //! - `RUST_LOG` — `tracing-subscriber` env-filter spec.
 //!
 //! ## Endpoints
@@ -148,11 +155,11 @@ pub(crate) struct AppState {
     /// the auth-token crate's `verify` consumes this on every
     /// protected request via the `auth::require_session` middleware.
     pub(crate) session_token_secret: Arc<TokenSecret>,
-    /// G-discovery-ratelimit: per-IP token-bucket
-    /// limiter for the anonymous OPRF + lookup
-    /// endpoints. Defense in depth on top of the
-    /// existing PoW gate.
-    pub(crate) rate_limiter: Arc<rate_limit::RateLimiter>,
+    /// G-discovery-ratelimit: token-bucket limits for the
+    /// anonymous OPRF + lookup endpoints — per account plus a
+    /// per-IP ceiling with a session token, per IP without one.
+    /// Defense in depth on top of the existing PoW gate.
+    pub(crate) rate_limits: Arc<rate_limit::DiscoveryLimits>,
     /// ADR-0017 defence-in-depth (lakko-security Phase-3A follow-up (ii))
     /// — the per-account cool-down (seconds) between UNPROVEN
     /// AccountIdentity changes to a NEW key, blunting attacker churn on the
@@ -165,6 +172,47 @@ pub(crate) struct AppState {
     /// entirely). A best-effort POST on every identity-key CHANGE; never
     /// fails the discovery upload (decision E, fail-open).
     pub(crate) transparency: Option<transparency_log::TransparencyClient>,
+}
+
+/// G-discovery-ratelimit: token buckets on the anonymous OPRF / lookup
+/// endpoints. Defaults are `rate_limit::DEFAULT_*`; each is overridable via env.
+fn rate_limits_from_env(session_token_secret: Arc<TokenSecret>) -> rate_limit::DiscoveryLimits {
+    let env_limit = |rate_var: &'static str, burst_var: &'static str, rate: f64, burst: f64| {
+        rate_limit::Limit {
+            per_minute: parse_env_f64(rate_var, rate),
+            burst: parse_env_f64(burst_var, burst),
+        }
+    };
+    let anonymous_ip_limit = env_limit(
+        "LAKKO_DISCOVERY_RATE_LIMIT_PER_MINUTE",
+        "LAKKO_DISCOVERY_RATE_LIMIT_BURST",
+        rate_limit::DEFAULT_RATE_PER_MINUTE,
+        rate_limit::DEFAULT_BURST,
+    );
+    let account_limit = env_limit(
+        "LAKKO_DISCOVERY_ACCOUNT_RATE_LIMIT_PER_MINUTE",
+        "LAKKO_DISCOVERY_ACCOUNT_RATE_LIMIT_BURST",
+        rate_limit::DEFAULT_ACCOUNT_RATE_PER_MINUTE,
+        rate_limit::DEFAULT_ACCOUNT_BURST,
+    );
+    let authenticated_ip_limit = env_limit(
+        "LAKKO_DISCOVERY_AUTHENTICATED_IP_RATE_LIMIT_PER_MINUTE",
+        "LAKKO_DISCOVERY_AUTHENTICATED_IP_RATE_LIMIT_BURST",
+        rate_limit::DEFAULT_AUTHENTICATED_IP_RATE_PER_MINUTE,
+        rate_limit::DEFAULT_AUTHENTICATED_IP_BURST,
+    );
+    tracing::info!(
+        ?anonymous_ip_limit,
+        ?account_limit,
+        ?authenticated_ip_limit,
+        "discovery rate limits armed"
+    );
+    rate_limit::DiscoveryLimits::new(
+        anonymous_ip_limit,
+        account_limit,
+        authenticated_ip_limit,
+        session_token_secret,
+    )
 }
 
 #[tokio::main]
@@ -213,20 +261,6 @@ async fn main() -> Result<()> {
     let session_token_secret = TokenSecret::from_base64(&session_token_secret_raw)
         .context("parse LAKKO_SESSION_TOKEN_SECRET as base64")?;
 
-    // G-discovery-ratelimit: per-IP token bucket on the
-    // anonymous OPRF / lookup endpoints. Defaults match
-    // `rate_limit::DEFAULT_*`; overridable via env.
-    let rate_per_min: f64 = parse_env_f64(
-        "LAKKO_DISCOVERY_RATE_LIMIT_PER_MINUTE",
-        rate_limit::DEFAULT_RATE_PER_MINUTE,
-    );
-    let rate_burst: f64 = parse_env_f64(
-        "LAKKO_DISCOVERY_RATE_LIMIT_BURST",
-        rate_limit::DEFAULT_BURST,
-    );
-    let rate_limiter = Arc::new(rate_limit::RateLimiter::new(rate_per_min, rate_burst));
-    tracing::info!(rate_per_min, rate_burst, "discovery rate limiter armed",);
-
     // ADR-0017 (ii) — fresh-identity-publish cool-down (seconds). Default
     // 1 h; 0 disables. A negative value is clamped to 0 (disabled).
     let fresh_identity_cooldown_secs: i64 =
@@ -255,11 +289,14 @@ async fn main() -> Result<()> {
         );
     }
 
+    let session_token_secret = Arc::new(session_token_secret);
+    let rate_limits = Arc::new(rate_limits_from_env(Arc::clone(&session_token_secret)));
+
     let state = AppState {
         db: pool.clone(),
         oprf: Arc::new(oprf_server),
-        session_token_secret: Arc::new(session_token_secret),
-        rate_limiter: Arc::clone(&rate_limiter),
+        session_token_secret,
+        rate_limits: Arc::clone(&rate_limits),
         fresh_identity_cooldown_secs,
         transparency,
     };
@@ -278,9 +315,9 @@ async fn main() -> Result<()> {
     // (GROUP_INVITE_NEVER_EXPIRES) rows are preserved by design, and
     // the FK CASCADE on `group_invite_consumers` reaps the children.
     let _group_invite_pruner = group_invite::spawn_pruner(pool.clone());
-    // G-discovery-ratelimit: drop idle per-IP buckets so
-    // the limiter's memory ceiling stays bounded.
-    let _rate_pruner = rate_limit::spawn_pruner((*rate_limiter).clone());
+    // G-discovery-ratelimit: drop idle buckets so the
+    // limiters' memory ceiling stays bounded.
+    let _rate_pruner = rate_limit::spawn_pruner(Arc::clone(&rate_limits));
 
     // KT-log S2.5 — the transparency-log reconciliation sweep. Spawned
     // ONLY when the transparency integration is armed; best-effort +
@@ -297,8 +334,8 @@ async fn main() -> Result<()> {
     axum::serve(
         listener,
         // ConnectInfo so the rate-limit middleware can
-        // read the source IP when X-Forwarded-For is
-        // absent (dev / direct binding).
+        // read the source IP when nginx's X-Real-IP /
+        // X-Forwarded-For are absent (dev / direct binding).
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(shutdown_signal())
@@ -403,7 +440,7 @@ pub(crate) fn build_app(state: AppState) -> Router {
         .route("/discovery/lookup", post(registry::lookup))
         .route("/discovery/channel/lookup", post(channel_names::lookup))
         .route_layer(axum::middleware::from_fn_with_state(
-            Arc::clone(&state.rate_limiter),
+            Arc::clone(&state.rate_limits),
             rate_limit::middleware,
         ));
 

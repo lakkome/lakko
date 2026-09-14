@@ -175,7 +175,11 @@ public enum HistoryBundleCodec {
 
     /// Encode a local-store message row into the canonical
     /// cross-platform placeholder bytes via the shared Rust core.
-    private static func encodePlaceholder(_ m: PersistedMessage) throws -> Data {
+    static func encodePlaceholder(_ m: PersistedMessage) throws -> Data {
+        // ADR-0047 §5 — placeholder version 2 carries the media metadata, so a
+        // voice message, video note or GIF restores as itself on the new
+        // device. The core applies the envelope's bounds on encode and decode.
+        // The local `played` marker is never transferred.
         let attachments = m.attachments.map { a in
             HistoryAttachment(
                 blobId: Data(base64Encoded: a.blobIdB64) ?? Data(),
@@ -183,7 +187,13 @@ public enum HistoryBundleCodec {
                 nonce: Data(base64Encoded: a.nonceB64) ?? Data(),
                 size: a.size,
                 mime: a.mime,
-                name: a.name
+                name: a.name,
+                kind: a.kind,
+                durationMs: a.durationMs,
+                waveform: a.waveformB64.flatMap { Data(base64Encoded: $0) },
+                width: a.width,
+                height: a.height,
+                thumb: a.thumb.flatMap(Self.historyThumb(from:))
             )
         }
         let placeholder = HistoryPlaceholder(
@@ -199,7 +209,7 @@ public enum HistoryBundleCodec {
     /// Decode canonical placeholder bytes (from any platform)
     /// back into a local-store message row; `nil` on malformed
     /// input.
-    private static func decodePlaceholder(_ bytes: Data) -> PersistedMessage? {
+    static func decodePlaceholder(_ bytes: Data) -> PersistedMessage? {
         guard let placeholder = try? decodeHistoryPlaceholder(bytes: bytes) else {
             return nil
         }
@@ -210,7 +220,23 @@ public enum HistoryBundleCodec {
                 nonceB64: a.nonce.base64EncodedString(),
                 mime: a.mime,
                 size: a.size,
-                name: a.name
+                name: a.name,
+                kind: a.kind,
+                durationMs: a.durationMs,
+                waveformB64: a.waveform.flatMap { $0.isEmpty ? nil : $0.base64EncodedString() },
+                width: a.width,
+                height: a.height,
+                thumb: a.thumb.map { t in
+                    PersistedThumb(
+                        blobIdB64: t.blobId.base64EncodedString(),
+                        keyB64: t.key.base64EncodedString(),
+                        nonceB64: t.nonce.base64EncodedString(),
+                        mime: t.mime,
+                        size: t.size,
+                        width: t.width,
+                        height: t.height
+                    )
+                }
             )
         }
         return PersistedMessage(
@@ -219,6 +245,26 @@ public enum HistoryBundleCodec {
             text: placeholder.text,
             attachments: attachments,
             createdAt: placeholder.createdAt
+        )
+    }
+
+    /// A stored poster frame as the placeholder's thumb; `nil` when a byte
+    /// field no longer decodes (the attachment itself survives).
+    private static func historyThumb(from t: PersistedThumb) -> HistoryThumb? {
+        guard let blobId = Data(base64Encoded: t.blobIdB64),
+              let key = Data(base64Encoded: t.keyB64),
+              let nonce = Data(base64Encoded: t.nonceB64),
+              blobId.count == 32, key.count == 32, nonce.count == 12 else {
+            return nil
+        }
+        return HistoryThumb(
+            blobId: blobId,
+            key: key,
+            nonce: nonce,
+            size: t.size,
+            mime: t.mime,
+            width: t.width,
+            height: t.height
         )
     }
 

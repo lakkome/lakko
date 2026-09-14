@@ -7,6 +7,8 @@ import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.engine.HttpClientEngine
 import io.ktor.client.engine.okhttp.OkHttp
+import me.lakko.app.config.ApiEndpoints
+import me.lakko.app.config.ApiService
 import me.lakko.app.transport.AntiCensorshipEngine
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.get
@@ -286,10 +288,12 @@ public class CallJwtClient(
 
     public companion object {
         /**
-         * `10.0.2.2` is the canonical Android-emulator alias for
-         * the host workstation. Matches the AuthClient default.
+         * The auth service base, same as the AuthClient default:
+         * `<LAKKO_API_BASE_URL>/auth` ([ApiEndpoints]), or the
+         * emulator alias `http://10.0.2.2:8081` without one.
          */
-        public const val DEFAULT_BASE_URL: String = "http://10.0.2.2:8081"
+        public val DEFAULT_BASE_URL: String
+            get() = ApiEndpoints.baseUrlFor(ApiService.AUTH)
 
         /** Default JWKS cache TTL — 24 h per ADR-0008. */
         public const val DEFAULT_JWKS_TTL_MS: Long = 24L * 60L * 60L * 1000L

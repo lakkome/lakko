@@ -20,6 +20,7 @@ Documentation=https://github.com/lakkome/lakko
 Wants=lakko-svc-auth.service \
       lakko-svc-ds.service \
       lakko-svc-storage.service \
+      lakko-svc-gif-proxy.service \
       lakko-svc-discovery.service \
       lakko-svc-push-gw.service \
       lakko-svc-channels.service \

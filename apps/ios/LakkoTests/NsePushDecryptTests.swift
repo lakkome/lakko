@@ -202,6 +202,33 @@ final class NsePushDecryptTests: XCTestCase {
         XCTAssertEqual(b?.body, "Sent 3 attachments")
     }
 
+    /// ADR-0047 — a media-only message is labelled from its already-decoded
+    /// `kind`; an unknown kind, or more than one attachment, keeps the generic
+    /// line (the NSE never fetches media to find out more).
+    func testMediaOnlyChatIsLabelledByKind() async {
+        func body(kind: String?, attachments: Int = 1) async -> String? {
+            let group = FakeThrowawayGroup(decode: { _ in
+                NseProcessedRow(kind: .chat, text: "", attachmentCount: attachments, singleAttachmentKind: kind)
+            })
+            return await decryptPushPreview(
+                NsePushWake(groupHex: groupHex, pointer: 5),
+                FakeDeps(account: okAccount(), group: group, rows: [row(5, 1)])
+            )?.body
+        }
+        let voice = await body(kind: "voice")
+        let video = await body(kind: "video_note")
+        let gif = await body(kind: "gif")
+        let unknown = await body(kind: "sticker")
+        let plain = await body(kind: nil)
+        let many = await body(kind: "voice", attachments: 2)
+        XCTAssertEqual(voice, "Voice message")
+        XCTAssertEqual(video, "Video message")
+        XCTAssertEqual(gif, "GIF")
+        XCTAssertEqual(unknown, "Sent an attachment")
+        XCTAssertEqual(plain, "Sent an attachment")
+        XCTAssertEqual(many, "Sent 2 attachments")
+    }
+
     func testEditSurfacesNewText() async {
         let group = FakeThrowawayGroup(decode: { _ in
             NseProcessedRow(kind: .edit, text: "edited body", attachmentCount: 0)

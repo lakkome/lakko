@@ -10,21 +10,33 @@
  *
  *   1. **Search & send** — type a handle, optional intro,
  *      submit. Drives `ContactsClient.sendContactRequest`.
- *   2. **Pending** — lives in component state only (no
- *      persistence; intro plaintext stays out of localStorage).
- *      Refreshed on mount + on the explicit "Refresh"
- *      button. Each row has Accept / Decline buttons.
+ *   2. **Pending** — in memory only (no persistence; intro
+ *      plaintext stays out of localStorage), held by the
+ *      session-wide `<MailboxProvider>` whose long-poll loop fills
+ *      it automatically. The "Refresh" button asks the same
+ *      provider for an immediate fetch. Each row has Accept /
+ *      Decline buttons.
  *   3. **Accepted** — local address book (public-key shaped),
  *      persisted in `contacts/local-store.ts`.
  *
  * Identity availability: every flow that needs the user's
- * Identity reads `useAuth().identitySecrets()`. When that's
- * `null` the UI shows a "please re-enter your password" panel
- * up front rather than letting the user click into a flow that
- * will fail at the WASM boundary.
+ * Identity reads `useAuth().identitySecrets()`. A reload restores
+ * those secrets with the session, so a `null` here is transient;
+ * the fallback panel offers a real way back to the sign-in form
+ * rather than a link the anonymous-only route would bounce.
  */
-import { createMemo, createSignal, For, onCleanup, onMount, Show, type JSX } from "solid-js";
-import { A } from "@solidjs/router";
+import {
+  createEffect,
+  createMemo,
+  createSignal,
+  For,
+  on,
+  onCleanup,
+  onMount,
+  Show,
+  type JSX,
+} from "solid-js";
+import { A, useNavigate } from "@solidjs/router";
 import { useAuth } from "../auth/AuthContext";
 import {
   base64Decode,
@@ -50,7 +62,8 @@ import {
 } from "../chat/membership-ended";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
 import { groupIdHex as syncGroupIdHex } from "../devices/sync/state";
-import { loadMessageLog } from "../chat/message-log-store";
+import { loadMessageLog, type PersistedGroup } from "../chat/message-log-store";
+import { summarizeGroupSlot, type ChatListSummary } from "../chat/background-log";
 import { subscribeMessageLogChanged } from "../chat/message-log-events";
 import { getDeviceKey } from "../auth/key-store";
 import { loadWasm } from "../wasm";
@@ -66,20 +79,22 @@ import {
 } from "../contacts/invite";
 import { DiscoveryClient, type ActiveInvite } from "../discovery/client";
 import {
-  fingerprintShort,
   loadAccepted,
-  loadCursor,
   peerContactByMemberPubkeys,
   removeAccepted,
-  saveCursor,
   upsertAccepted,
   type AcceptedContact,
 } from "../contacts/local-store";
+import { useMailbox } from "../contacts/MailboxContext";
 import { computeSafetyNumber } from "../contacts/safety";
+import { useProfiles } from "../profile/ProfileContext";
+import { createUsernameCheck } from "../profile/username-field";
+import { mayLookUp, usernameReason, type UsernameCheck } from "../profile/rules";
 
 export default function Contacts(): JSX.Element {
   const auth = useAuth();
   const chats = useChats();
+  const profiles = useProfiles();
   // 1.16e6c2: hand the chat-context wires (canonical Identity +
   // post-mutation snapshot persist) to ContactsClient so every
   // MLS state mutation in `startGroupWith` / `joinGroupFromWelcome`
@@ -93,6 +108,9 @@ export default function Contacts(): JSX.Element {
       if (s.kind !== "session") return;
       await chats.persistSnapshot(s.account.accountId);
     },
+    // ADR-0048 §2 — every outgoing request carries this account's profile.
+    ownProfileEnvelope: () => profiles.ownProfileEnvelope(),
+    onUsernameResolved: (key, username) => profiles.learnUsername(key, username),
   });
 
   // Memoised so consumers re-run when the AuthContext signal
@@ -131,6 +149,7 @@ interface ConnectedContactsProps {
 function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
   const auth = useAuth();
   const chats = useChats();
+  const profiles = useProfiles();
   // The Show wrapper above guarantees identitySecrets() is
   // non-null on every read inside this subtree, but TS doesn't
   // narrow across component boundaries — a tiny accessor that
@@ -151,11 +170,14 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
   const [sendBusy, setSendBusy] = createSignal(false);
   const [sendError, setSendError] = createSignal<string | null>(null);
   const [sendNotice, setSendNotice] = createSignal<string | null>(null);
+  // ADR-0048 §4 — no lookup leaves the device for a name that fails the rule.
+  const searchCheck = createUsernameCheck(searchInput);
 
   async function onSend(e: SubmitEvent): Promise<void> {
     e.preventDefault();
     setSendError(null);
     setSendNotice(null);
+    if (!mayLookUp(searchCheck())) return;
     setSendBusy(true);
     try {
       const introBytes = new TextEncoder().encode(introInput());
@@ -186,16 +208,20 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
   async function onStartGroup(): Promise<void> {
     setSendError(null);
     setSendNotice(null);
+    if (!mayLookUp(searchCheck())) return;
     setSendBusy(true);
     try {
       const result = await props.client.startGroupWithUsername(
         requireIdentity(),
         searchInput(),
       );
-      chats.add({
-        label: `Group with @${result.recipientUsername}`,
+      // ADR-0048 — a 1x1 chat is labelled by the resolver (the peer's name),
+      // never by the handle typed here; this label is only the fallback.
+      const active = chats.add({
+        label: "Direct chat",
         group: result.group,
       });
+      profiles.groupJoined(active.groupIdB64);
       setSendNotice(
         `Group started with @${result.recipientUsername} ` +
           `(Welcome shipped, DS id ${result.welcomeMessageId}).`,
@@ -210,82 +236,14 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
   }
 
   // ---- pending --------------------------------------------------
-  const [pending, setPending] = createSignal<IncomingContactRequest[]>([]);
-  const [cursor, setCursor] = createSignal<number>(loadCursor());
-  const [pollBusy, setPollBusy] = createSignal(false);
-  const [pollError, setPollError] = createSignal<string | null>(null);
-
-  async function refresh(): Promise<void> {
-    setPollError(null);
-    setPollBusy(true);
-    try {
-      const result = await props.client.pollMailbox(
-        requireIdentity(),
-        cursor(),
-      );
-      // Dispatch on event kind. ContactRequests pile up in the
-      // pending list (de-duped by messageId); Welcomes turn
-      // straight into active groups via joinGroupFromWelcome.
-      const seenContactRequests = new Set(
-        pending().map((r) => r.messageId),
-      );
-      const freshRequests: IncomingContactRequest[] = [];
-      for (const ev of result.events) {
-        if (ev.kind === "contact-request") {
-          if (!seenContactRequests.has(ev.request.messageId)) {
-            freshRequests.push(ev.request);
-          }
-        } else if (ev.kind === "welcome") {
-          // welcome — try to join. On success append to active
-          // groups; on failure log and skip.
-          try {
-            const group = await props.client.joinGroupFromWelcome(
-              requireIdentity(),
-              ev.welcome.welcomeBytes,
-            );
-            chats.add({
-              label: `Joined group (Welcome ${ev.welcome.messageId})`,
-              group,
-            });
-          } catch (err) {
-            // eslint-disable-next-line no-console
-            console.warn("joinGroupFromWelcome failed", err);
-          }
-        } else {
-          // 1.9b1: contact-ack — the original recipient of our
-          // ContactRequest pressed Accept. Upsert their pubkeys
-          // into the accepted list so the local address book
-          // flips from "pending" to "accepted" and we have the
-          // accepter's X25519 pubkey handy for future seals.
-          // Cross-platform parity (Apple-Watch-style) note: the
-          // pending-sent table that pairs ack ↔ original request
-          // by `ackToPseudonym` lives on this client; Phase-1
-          // collapses that into a best-effort upsert (the
-          // signature is verified, so even a "stale" ack is a
-          // legitimate accept by the holder of `accepterPubkey`).
-          const accepterContact: AcceptedContact = {
-            signaturePubkeyB64: base64Encode(ev.ack.accepterPubkey),
-            x25519PubkeyB64: base64Encode(ev.ack.accepterX25519Pubkey),
-            displayName: `@${fingerprintShort(ev.ack.accepterPubkey)}`,
-            acceptedAtMs: Date.now(),
-            // ADR-0021 — persist the peer's account_id (hex) so the SFU
-            // group-call roster can resolve to this contact's name.
-            accountIdHex: syncGroupIdHex(ev.ack.accepterAccountId),
-          };
-          setAccepted(upsertAccepted(accepterContact));
-        }
-      }
-      if (freshRequests.length > 0) {
-        setPending([...pending(), ...freshRequests]);
-      }
-      setCursor(result.cursor);
-      saveCursor(result.cursor);
-    } catch (err) {
-      setPollError(formatError(err));
-    } finally {
-      setPollBusy(false);
-    }
-  }
+  // Owned by the session-wide `<MailboxProvider>`: its long-poll loop
+  // dispatches requests into this list, acks into the address book and
+  // Welcomes into joined groups, whether or not this route is mounted.
+  // The Refresh button only asks it for an immediate fetch.
+  const mailbox = useMailbox();
+  // Errors from this route's own Accept path (group creation), shown in the
+  // same slot as a failed manual refresh.
+  const [acceptError, setAcceptError] = createSignal<string | null>(null);
 
   // ---- active MLS groups ---------------------------------------
   // Lifted into the global `<ChatProvider>` (1.16e5) so the
@@ -299,7 +257,11 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
     // the acceptance.
     const contact: AcceptedContact = {
       signaturePubkeyB64: base64Encode(req.fromPubkey),
-      displayName: `@${fingerprintShort(req.fromPubkey)}`,
+      // ADR-0048 — no local rename on accept (keep one the user already set);
+      // the name shown comes from the resolver.
+      displayName:
+        loadAccepted().find((c) => c.signaturePubkeyB64 === base64Encode(req.fromPubkey))
+          ?.displayName ?? "",
       acceptedAtMs: Date.now(),
       // ADR-0021 — persist the peer's account_id (hex) when the request
       // carried it, so the SFU group-call roster can resolve names.
@@ -308,7 +270,8 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
         : {}),
     };
     setAccepted(upsertAccepted(contact));
-    setPending(pending().filter((r) => r.messageId !== req.messageId));
+    mailbox.removePending(req.messageId);
+    setAcceptError(null);
 
     // 1.9b1: ship a ContactAck back to the original sender's
     // mailbox so their UI can flip from "pending" to
@@ -328,7 +291,7 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
     // 1.16e3b: Accept-driven group creation. Requires v2 wire
     // format — surface a clean error for legacy senders.
     if (req.fromAccountId === null) {
-      setPollError(
+      setAcceptError(
         "this is a legacy v1 contact request — group creation " +
           "needs the sender to upgrade to a 1.16e3b+ client",
       );
@@ -341,9 +304,11 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
         req.fromPubkey,
       );
       const active = chats.add({
-        label: `Group with @${fingerprintShort(req.fromPubkey)}`,
+        label: "Direct chat",
         group: result.group,
       });
+      // ADR-0048 §2 — founding a group is joining it.
+      profiles.groupJoined(active.groupIdB64);
       // ADR-0021 follow-up: link the just-created 1×1 chat back to this
       // contact (by its base64 group id) so the in-call roster + chat
       // label resolve to the user-chosen displayName. Re-upsert by the
@@ -355,32 +320,35 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
       // Don't unwind the acceptance; just surface the error. The peer
       // here is identified by their key fingerprint (no @handle on the
       // Accept path) — pass it as the label for any reset-aware copy.
-      setPollError(formatError(err, `@${fingerprintShort(req.fromPubkey)}`));
+      setAcceptError(formatError(err, profiles.resolve(req.fromPubkey).name));
     }
   }
 
   function onDecline(req: IncomingContactRequest): void {
-    setPending(pending().filter((r) => r.messageId !== req.messageId));
+    mailbox.removePending(req.messageId);
   }
 
   // ---- accepted -------------------------------------------------
   const [accepted, setAccepted] = createSignal<AcceptedContact[]>(
     loadAccepted(),
   );
+  // A contact ack the mailbox loop upserted while this route was open.
+  createEffect(
+    on(
+      () => mailbox.acceptedVersion(),
+      () => setAccepted(loadAccepted()),
+      { defer: true },
+    ),
+  );
   function onRemoveAccepted(contact: AcceptedContact): void {
     setAccepted(removeAccepted(contact.signaturePubkeyB64));
   }
-  /** ADR-0021 follow-up: set the contact's user-chosen display name. A
-   *  blank value resets it to the `@<fingerprint>` accept-time default.
-   *  Re-upserts by the same signature pubkey, so the link + account_id
-   *  + group id are preserved. */
+  /** ADR-0048 §5 — set the viewer's LOCAL RENAME of a contact. A blank value
+   *  clears the rename, so the contact's own name shows again. Re-upserts by
+   *  the same signature pubkey, so the link + account_id + group id are
+   *  preserved. */
   function onRenameAccepted(contact: AcceptedContact, newName: string): void {
-    const trimmed = newName.trim();
-    const displayName =
-      trimmed.length > 0
-        ? trimmed
-        : `@${fingerprintShort(base64Decode(contact.signaturePubkeyB64))}`;
-    setAccepted(upsertAccepted({ ...contact, displayName }));
+    setAccepted(upsertAccepted({ ...contact, displayName: newName.trim() }));
   }
 
   return (
@@ -392,6 +360,7 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
       </p>
 
       <SendPanel
+        searchCheck={searchCheck}
         searchInput={searchInput}
         setSearchInput={setSearchInput}
         introInput={introInput}
@@ -410,11 +379,12 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
       <ActiveInvitesPanel />
 
       <PendingPanel
-        pending={pending}
-        busy={pollBusy}
-        error={pollError}
+        pending={mailbox.pending}
+        busy={mailbox.busy}
+        error={() => acceptError() ?? mailbox.error()}
         onRefresh={() => {
-          void refresh();
+          setAcceptError(null);
+          void mailbox.refresh();
         }}
         onAccept={onAccept}
         onDecline={onDecline}
@@ -440,6 +410,7 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
 // ----------------------------------------------------------------------
 
 interface SendPanelProps {
+  readonly searchCheck: () => UsernameCheck;
   readonly searchInput: () => string;
   readonly setSearchInput: (v: string) => void;
   readonly introInput: () => string;
@@ -467,8 +438,16 @@ function SendPanel(props: SendPanelProps): JSX.Element {
             value={props.searchInput()}
             onInput={(e) => props.setSearchInput(e.currentTarget.value)}
             disabled={props.busy()}
+            aria-invalid={props.searchCheck().kind === "invalid"}
           />
         </label>
+        <Show when={usernameReason(props.searchCheck())}>
+          {(reason) => (
+            <div class="form-error" role="status">
+              {reason()}
+            </div>
+          )}
+        </Show>
         <label>
           Intro message (optional)
           <textarea
@@ -488,12 +467,16 @@ function SendPanel(props: SendPanelProps): JSX.Element {
           </div>
         )}
         <div style={{ display: "flex", gap: "0.5rem", "flex-wrap": "wrap" }}>
-          <button class="primary" type="submit" disabled={props.busy()}>
+          <button
+            class="primary"
+            type="submit"
+            disabled={props.busy() || !mayLookUp(props.searchCheck())}
+          >
             {props.busy() ? "Sending…" : "Send contact request"}
           </button>
           <button
             type="button"
-            disabled={props.busy()}
+            disabled={props.busy() || !mayLookUp(props.searchCheck())}
             onClick={props.onStartGroup}
             title="Fetch the recipient's KeyPackage, build a 1×1 MLS group, ship the Welcome over DS."
           >
@@ -1129,17 +1112,13 @@ function ActiveGroupsPanel(props: {
   accepted: () => AcceptedContact[];
 }): JSX.Element {
   const chats = useChats();
-  /** Best label for a chat row: the linked contact's user-chosen
-   *  displayName, else the chat's own label. Resolves the contact by the
-   *  stored groupIdB64 fast-path (accept-created chats) and, universally,
-   *  by the group's non-self member pubkey (outbound + Welcome-joined
-   *  chats that carry no stored link) — ADR-0021. */
+  const profiles = useProfiles();
+  /** Best label for a chat row (ADR-0048 §5). A 1x1 chat is the other person,
+   *  through the one resolver (rename, profile name, verified username,
+   *  fingerprint), read live from the MLS roster so it works however the
+   *  chat was created. A group keeps its own label. */
   const chatLabel = (g: ActiveGroup): string => {
-    const accepted = props.accepted();
-    const byId = accepted.find((c) => c.groupIdB64 === g.groupIdB64);
-    if (byId !== undefined && byId.displayName.length > 0) {
-      return byId.displayName;
-    }
+    props.accepted();
     const own = chats.identity();
     const ownB64 = own === null ? null : base64Encode(own.signaturePublicKey);
     let memberB64s: string[] = [];
@@ -1150,8 +1129,15 @@ function ActiveGroupsPanel(props: {
     } catch {
       // members() can throw on a torn group; fall through to the label.
     }
-    const byMember = peerContactByMemberPubkeys(memberB64s, ownB64, accepted);
-    if (byMember !== undefined && byMember.displayName.length > 0) {
+    const peers = memberB64s.filter((k) => k !== ownB64);
+    if (memberB64s.length === 2 && peers.length === 1 && peers[0] !== undefined) {
+      return profiles.resolve(peers[0]).listLabel;
+    }
+    // A group: a linked contact (accept-created) still names it when renamed.
+    const byId = props.accepted().find((c) => c.groupIdB64 === g.groupIdB64);
+    if (byId !== undefined && byId.displayName.length > 0) return byId.displayName;
+    const byMember = peerContactByMemberPubkeys(memberB64s, ownB64, props.accepted());
+    if (byMember !== undefined && byMember.displayName.length > 0 && memberB64s.length <= 2) {
       return byMember.displayName;
     }
     return g.label;
@@ -1162,21 +1148,15 @@ function ActiveGroupsPanel(props: {
   // ordering (pinned top, archived bottom).
   const sync = useDeviceGroupSync();
   const auth = useAuth();
-  // Phase 2a3e2c-followup-web — per-thread highest message-id
-  // map, sourced from the persistent message log. Unread
-  // count = highestMessageId - readCursor for the same
-  // group. We load the log once on mount and refresh
-  // whenever the auth account_id changes; live changes
-  // happen on Chat.tsx mutations which run in another tab /
-  // route, so the next visit picks them up on its own mount.
-  // Per-group sorted list of incoming/system messageIds —
-  // unread count is `idsAboveCursor.length`, so we keep the
-  // full vector instead of just the max. Web's message-log
-  // store carries the full timeline so this is cheap; the
-  // sort lets `unreadFor` early-exit at the first id ≤ cursor.
-  const [incomingIds, setIncomingIds] = createSignal<
-    { readonly [groupIdHex: string]: readonly bigint[] }
-  >({});
+  // Phase 2a3e2c-followup-web — the chat list's unread badge and last-message
+  // preview, both read from the persisted message log. The log is written by
+  // the open chat view AND by the background receive for every chat that is
+  // not open (`chat/BackgroundReceiveContext.tsx`), and every write publishes
+  // `message-log-changed`, so a message to a chat the user never opened now
+  // shows up here while they are looking at this list.
+  const [logSlots, setLogSlots] = createSignal<{ readonly [groupIdHex: string]: PersistedGroup }>(
+    {},
+  );
 
   async function reloadIncomingIds(): Promise<void> {
     const s = auth.state();
@@ -1186,31 +1166,16 @@ function ActiveGroupsPanel(props: {
     if (deviceKey === null) return;
     const log = await loadMessageLog(accountIdB64, deviceKey);
     if (log === null) return;
-    const map: { [hex: string]: bigint[] } = {};
-    for (const [hex, slot] of Object.entries(log.groups)) {
-      const ids: bigint[] = [];
-      for (const m of slot.messages) {
-        if (m.direction === "outgoing") continue;
-        try {
-          ids.push(BigInt(m.messageId));
-        } catch {
-          // Non-numeric message id — skip.
-        }
-      }
-      if (ids.length > 0) {
-        ids.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-        map[hex] = ids;
-      }
-    }
-    setIncomingIds(map);
+    setLogSlots(log.groups);
   }
 
   onMount(() => {
     void reloadIncomingIds();
     // G-8: the badge used to refresh only on its next mount. Subscribe to
     // message-log changes (a message written from another tab / the Chat
-    // route) so it reloads live. Same-account filter so an unrelated
-    // account's write (multi-account on one browser) is ignored.
+    // route / the background receive) so it reloads live. Same-account filter
+    // so an unrelated account's write (multi-account on one browser) is
+    // ignored.
     const unsubscribe = subscribeMessageLogChanged((account) => {
       const s = auth.state();
       if (s.kind === "session" && s.account.accountId === account) {
@@ -1220,35 +1185,25 @@ function ActiveGroupsPanel(props: {
     onCleanup(unsubscribe);
   });
 
-  function unreadFor(groupIdBytes: Uint8Array): number {
+  /** Unread count + preview for one row — the rule lives in
+   *  `summarizeGroupSlot`: rows above the later of the cross-device read cursor
+   *  and the newest row this device's chat view has shown. */
+  function summaryFor(groupIdBytes: Uint8Array): ChatListSummary {
     const hex = syncGroupIdHex(groupIdBytes);
-    const ids = incomingIds()[hex];
-    if (ids === undefined || ids.length === 0) return 0;
     const cursor = sync.readCursors()[hex];
-    if (cursor === undefined || cursor.upToMessageId.length < 8) {
-      // No cursor yet — treat as "all read" so we don't blast
-      // the badge during cold start; the chat-screen mount
-      // broadcasts a cursor within 1.5 s.
-      return 0;
-    }
-    let cursorId: bigint = 0n;
-    const bytes = cursor.upToMessageId;
-    for (let i = 0; i < 8; i += 1) {
-      cursorId = (cursorId << 8n) | BigInt(bytes[i] as number);
-    }
-    // Count from the high end. Sorted ascending, so the
-    // first id ≤ cursor short-circuits.
-    let unread = 0;
-    for (let i = ids.length - 1; i >= 0; i -= 1) {
-      const id = ids[i] as bigint;
-      if (id > cursorId) {
-        unread += 1;
-        if (unread > 99) return 100;
-      } else {
-        break;
+    let syncedReadUpTo: bigint | null = null;
+    if (cursor !== undefined && cursor.upToMessageId.length >= 8) {
+      let id = 0n;
+      for (let i = 0; i < 8; i += 1) {
+        id = (id << 8n) | BigInt(cursor.upToMessageId[i] as number);
       }
+      syncedReadUpTo = id;
     }
-    return unread;
+    return summarizeGroupSlot(logSlots()[hex], syncedReadUpTo);
+  }
+
+  function unreadFor(groupIdBytes: Uint8Array): number {
+    return summaryFor(groupIdBytes).unread;
   }
 
   /** Pinned → top, archived → bottom, otherwise stable on
@@ -1338,9 +1293,8 @@ function ActiveGroupsPanel(props: {
         when={props.groups().length > 0}
         fallback={
           <p style={{ color: "var(--surface-muted)" }}>
-            No active groups. Start one above with "Start MLS group", or
-            click Refresh in <em>Pending</em> — incoming Welcomes turn
-            into active groups automatically.
+            No active groups. Start one above with "Start MLS group" —
+            groups other people add you to appear here automatically.
           </p>
         }
       >
@@ -1431,6 +1385,28 @@ function ActiveGroupsPanel(props: {
                         The row also goes QUIET — see the unread badge below,
                         which is suppressed for the same reason: a badge
                         asserts a conversation that can still move. */}
+                    {/* The newest message, one line — for a chat the user
+                        has not opened too, since the background receive files
+                        its rows into the log. Replaced by the ended line below
+                        once the membership is over. */}
+                    <Show when={endedLine(g) === null && summaryFor(g.group.groupId).preview}>
+                      {(preview) => (
+                        <div
+                          data-testid="chat-preview"
+                          style={{
+                            color: "var(--surface-muted)",
+                            "font-size": "0.85rem",
+                            overflow: "hidden",
+                            "text-overflow": "ellipsis",
+                            "white-space": "nowrap",
+                            "max-width": "28rem",
+                          }}
+                        >
+                          {summaryFor(g.group.groupId).previewIsOwn ? "You: " : ""}
+                          {preview()}
+                        </div>
+                      )}
+                    </Show>
                     <Show when={endedLine(g)}>
                       {(line) => (
                         <div
@@ -1559,7 +1535,7 @@ function iconBtnStyle(active: boolean): JSX.CSSProperties {
 }
 
 interface PendingPanelProps {
-  readonly pending: () => IncomingContactRequest[];
+  readonly pending: () => readonly IncomingContactRequest[];
   readonly busy: () => boolean;
   readonly error: () => string | null;
   readonly onRefresh: () => void;
@@ -1568,6 +1544,7 @@ interface PendingPanelProps {
 }
 
 function PendingPanel(props: PendingPanelProps): JSX.Element {
+  const profiles = useProfiles();
   return (
     <section style={panelStyle()}>
       <header
@@ -1617,8 +1594,12 @@ function PendingPanel(props: PendingPanelProps): JSX.Element {
             {(req) => (
               <li style={rowStyle()}>
                 <div style={{ flex: 1, "min-width": 0 }}>
-                  <div style={{ "font-family": "ui-monospace, monospace" }}>
-                    From <strong>@{fingerprintShort(req.fromPubkey)}</strong>
+                  <div>
+                    {/* ADR-0048 UX §5 — `Alice Petrova · @alice wants to
+                        connect`, or the verified username / fingerprint when
+                        that is all there is. */}
+                    <strong>{profiles.resolve(req.fromPubkey).listLabel}</strong>{" "}
+                    wants to connect
                   </div>
                   <Show when={req.intro !== null && req.intro !== ""}>
                     <div
@@ -1738,6 +1719,9 @@ interface AcceptedRowProps {
 }
 
 function AcceptedRow(props: AcceptedRowProps): JSX.Element {
+  const profiles = useProfiles();
+  const resolved = (): ReturnType<typeof profiles.resolve> =>
+    profiles.resolve(props.contact.signaturePubkeyB64);
   const [open, setOpen] = createSignal(false);
   const [number, setNumber] = createSignal<string | null>(null);
   const [busy, setBusy] = createSignal(false);
@@ -1786,12 +1770,13 @@ function AcceptedRow(props: AcceptedRowProps): JSX.Element {
   return (
     <li style={rowStyle()}>
       <div style={{ flex: 1 }}>
-        <Show when={editing()} fallback={<strong>{props.contact.displayName}</strong>}>
+        <Show when={editing()} fallback={<strong>{resolved().listLabel}</strong>}>
           <div style={{ display: "flex", gap: "0.25rem", "align-items": "center" }}>
             <input
               type="text"
               value={draft()}
-              placeholder="Display name"
+              placeholder="Your name for this contact (blank = their own)"
+              aria-label="Your name for this contact"
               onInput={(e) => setDraft(e.currentTarget.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter") saveEdit();
@@ -1814,8 +1799,23 @@ function AcceptedRow(props: AcceptedRowProps): JSX.Element {
             "font-family": "ui-monospace, monospace",
           }}
         >
-          {props.contact.signaturePubkeyB64.slice(0, 16)}…
+          Fingerprint {resolved().fingerprint}
         </div>
+        {/* ADR-0048 UX §6 — a rename wins everywhere, so the detail says what
+            the person calls themselves; a failed username claim is noted here
+            and nowhere else. */}
+        <Show when={resolved().theirName}>
+          {(their) => (
+            <div style={{ color: "var(--surface-muted)", "font-size": "0.85rem" }}>
+              Their name: {their()}
+            </div>
+          )}
+        </Show>
+        <Show when={resolved().usernameNotVerified}>
+          <div style={{ color: "var(--surface-muted)", "font-size": "0.85rem" }}>
+            Username not verified
+          </div>
+        </Show>
         <Show when={open()}>
           <div
             style={{
@@ -1875,16 +1875,25 @@ function AcceptedRow(props: AcceptedRowProps): JSX.Element {
 }
 
 function NeedsReauth(): JSX.Element {
+  const auth = useAuth();
+  const navigate = useNavigate();
+  // `/login` is an anonymous-only route: linking to it while signed in
+  // bounces straight back home. Sign out first, then go there — the same
+  // sequence the sidebar's Log out uses.
+  function signInAgain(): void {
+    auth.logout();
+    navigate(paths.login, { replace: true });
+  }
   return (
     <section style={panelStyle()}>
       <p style={{ "margin-top": 0 }}>
-        This page reload restored your session from the local
-        device key, but the secrets needed to sign and decrypt
-        contact requests aren't in memory yet. Please re-enter
-        your password to use Contacts.
+        The keys needed to sign and decrypt contact requests are not
+        available in this session. Sign in again to use Contacts.
       </p>
       <p>
-        <a href="/login">Re-enter password</a>
+        <button class="primary" type="button" onClick={signInAgain}>
+          Sign in again
+        </button>
       </p>
     </section>
   );

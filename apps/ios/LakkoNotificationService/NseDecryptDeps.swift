@@ -177,7 +177,8 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
         // SERVICE-ENVELOPE FILTER — the background half of the gate the
         // foreground `ChatClient.toEvent` has always run, in the same order.
         // Call-signaling proto bytes, ADR-0042/0044 push-routing-secret
-        // envelopes and ADR-0045 committer-liveness beacons all ride the SAME
+        // envelopes, ADR-0045 committer-liveness beacons and ADR-0048 profile
+        // envelopes all ride the SAME
         // group journal as chat; without this, `parseBodyEnvelope`'s deliberate
         // legacy UTF-8 fallback degrades them to a `.chat` body and the NSE
         // renders a notification full of a domain string plus raw binary.
@@ -187,7 +188,9 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
             data,
             decodesAsPushRoutingSecret: Self.decodesAsPushRoutingSecret,
             decodesAsCommitterBeacon: Self.decodesAsCommitterBeacon,
-            committerBeaconEnvelopeLen: Self.committerBeaconEnvelopeLength
+            committerBeaconEnvelopeLen: Self.committerBeaconEnvelopeLength,
+            decodesAsProfile: Self.decodesAsProfile,
+            profileEnvelopeLens: Self.profileEnvelopeLengths
         ) {
             return nil
         }
@@ -204,7 +207,8 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
         return NseProcessedRow(
             kind: kind,
             text: body.text,
-            attachmentCount: body.attachments.count
+            attachmentCount: body.attachments.count,
+            singleAttachmentKind: body.attachments.count == 1 ? body.attachments[0].kind : nil
         )
     }
 
@@ -255,6 +259,26 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
     /// read-only-throwaway discipline (C-59).
     private static var committerBeaconEnvelopeLength: Int {
         Int(committerBeaconEnvelopeLen())
+    }
+
+    /// The AUTHORITATIVE half of the ADR-0048 profile filter: the slim FFI's
+    /// `decodeProfileEnvelope`, which returns nothing on success — the slim
+    /// surface deliberately does not hand the profile's fields to this process.
+    ///
+    /// READ-ONLY: a pure decode. The NSE never stores a profile (C-59) and never
+    /// verifies a username; it only needs the yes/no that keeps a profile out
+    /// of a notification body.
+    private static func decodesAsProfile(_ bytes: Data) -> Bool {
+        (try? decodeProfileEnvelope(plaintext: bytes)) != nil
+    }
+
+    /// The well-formed profile envelope length range, read from the slim FFI's
+    /// `profileEnvelopeMinLen()` / `profileEnvelopeMaxLen()` so no wire number
+    /// is hand-copied into the NSE.
+    private static var profileEnvelopeLengths: ClosedRange<Int> {
+        let minLen = Int(profileEnvelopeMinLen())
+        let maxLen = Int(profileEnvelopeMaxLen())
+        return minLen...max(minLen, maxLen)
     }
 
     /// LOAD-BEARING: this does NOT persist — no `snapshotStorage()` /
@@ -348,17 +372,17 @@ enum NseDsFetch {
     }
 }
 
-/// NSE-side configuration. The DS base URL mirrors the app's ``DsClient``
-/// default (`http://localhost:8082`) — the whole iOS app is dev-configured
-/// today — and is overridable per build via the NSE bundle's `LakkoDsUrl`
-/// Info.plist key so a deployment can point it at the real DS without a code
-/// change.
+/// NSE-side configuration. The DS base URL follows the app's ``DsClient``
+/// default: the NSE bundle carries the same `LakkoApiBaseUrl` Info.plist key
+/// (filled from the same `LAKKO_API_BASE_URL` build setting), so it resolves
+/// to `<base>/ds`, or `http://localhost:8082` with no base URL. The NSE
+/// bundle's `LakkoDsUrl` key, when non-empty, overrides both.
 enum NseConfig {
     static var dsBaseURL: String {
         if let raw = Bundle.main.object(forInfoDictionaryKey: "LakkoDsUrl") as? String {
             let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty { return trimmed }
         }
-        return "http://localhost:8082"
+        return ApiEndpoints.baseURL(for: .ds)
     }
 }

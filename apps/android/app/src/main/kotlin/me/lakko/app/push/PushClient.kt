@@ -7,6 +7,8 @@ import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.engine.HttpClientEngine
 import io.ktor.client.engine.okhttp.OkHttp
+import me.lakko.app.config.ApiEndpoints
+import me.lakko.app.config.ApiService
 import me.lakko.app.transport.AntiCensorshipEngine
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.post
@@ -326,9 +328,11 @@ public class PushClient(
     }
 
     public companion object {
-        /** Default URL — Android emulator loopback alias, port
-         *  `8085` matching the dev `lakko-svc-push-gw` bind. */
-        public const val DEFAULT_BASE_URL: String = "http://10.0.2.2:8085"
+        /** Default URL — `<LAKKO_API_BASE_URL>/push-gw` ([ApiEndpoints]),
+         *  or the Android emulator loopback alias + the dev
+         *  `lakko-svc-push-gw` bind (`http://10.0.2.2:8085`) without one. */
+        public val DEFAULT_BASE_URL: String
+            get() = ApiEndpoints.baseUrlFor(ApiService.PUSH_GW)
 
         /** Raw device pseudonym length — must match
          *  `DEVICE_LEN` in

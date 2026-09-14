@@ -38,17 +38,17 @@ import LakkoCore
 ///
 /// ## Default base URL
 ///
-/// `http://localhost:8084` — the iOS simulator shares the host's
+/// `<LakkoApiBaseUrl>/discovery` (``ApiEndpoints``); with no API base
+/// URL, `http://localhost:8084` — the iOS simulator shares the host's
 /// loopback (unlike Android emulator which needs `10.0.2.2`), port
 /// `8084` matching the `LAKKO_BIND` dev setup for
-/// `lakko-svc-discovery`. Override via the constructor for physical
-/// devices (LAN IP) and production (Cloudflare tunnel URL).
+/// `lakko-svc-discovery`.
 public final class DiscoveryClient {
 
     // MARK: - Configuration
 
     /// Default base URL. See class-level docs.
-    public static let defaultBaseURL: String = "http://localhost:8084"
+    public static var defaultBaseURL: String { ApiEndpoints.baseURL(for: .discovery) }
 
     public let baseURL: String
 
@@ -76,16 +76,26 @@ public final class DiscoveryClient {
     /// `URLSession` is thread-safe).
     public private(set) var sessionToken: String?
 
+    /// The signed-in session's token for the three rate-limited reads
+    /// (`/discovery/oprf`, `/discovery/lookup`, `/discovery/channel/lookup`)
+    /// when this client carries no ``sessionToken`` of its own. Discovery
+    /// only uses it to charge those reads to the account instead of the
+    /// shared per-IP bucket; it is never attached to any other request.
+    /// Defaults to ``AmbientSessionToken/shared``.
+    private let rateLimitToken: () -> String?
+
     public init(
         baseURL: String = DiscoveryClient.defaultBaseURL,
         session: URLSession = .shared,
         sessionToken: String? = nil,
-        antiCensorship: AntiCensorshipConfig = .current
+        antiCensorship: AntiCensorshipConfig = .current,
+        rateLimitToken: @escaping () -> String? = { AmbientSessionToken.shared.current }
     ) {
         self.baseURL = baseURL
         self.session = session
         self.sessionToken = sessionToken
         self.antiCensorship = antiCensorship
+        self.rateLimitToken = rateLimitToken
         self.encoder = JSONEncoder()
         self.decoder = JSONDecoder()
     }
@@ -107,7 +117,7 @@ public final class DiscoveryClient {
 
     /// `POST /discovery/oprf`.
     public func oprfEvaluate(_ request: OprfRequest) async throws -> OprfResponse {
-        try await post(endpoint: "/discovery/oprf", body: request)
+        try await post(endpoint: "/discovery/oprf", body: request, rateLimited: true)
     }
 
     /// `POST /discovery/register`.
@@ -119,7 +129,7 @@ public final class DiscoveryClient {
     /// `nil` on 404 (the typed not-found path), throws on any
     /// other non-2xx.
     public func lookupRaw(_ request: LookupRequest) async throws -> LookupResponse? {
-        try await postNullableOn404(endpoint: "/discovery/lookup", body: request)
+        try await postNullableOn404(endpoint: "/discovery/lookup", body: request, rateLimited: true)
     }
 
     /// `POST /discovery/channel/register` (G4-5, ADR-0010) — bind an
@@ -127,7 +137,7 @@ public final class DiscoveryClient {
     /// write (a DoS rate-limit role — the token's account is NOT compared
     /// against the channel; ownership lives at the PublisherGroup layer).
     /// The low-level POST threads the bearer token via
-    /// ``post(endpoint:body:)``.
+    /// ``post(endpoint:body:rateLimited:)``.
     public func channelRegister(
         _ request: ChannelRegisterRequest
     ) async throws -> ChannelRegisterResponse {
@@ -137,11 +147,13 @@ public final class DiscoveryClient {
     /// `POST /discovery/channel/lookup` (G4-5, ADR-0010). Returns the
     /// typed response on 200, `nil` on 404 (the typed not-found path),
     /// throws on any other non-2xx. Mirror of ``lookupRaw(_:)`` for the
-    /// channel namespace — unauthenticated, so no bearer header.
+    /// channel namespace — unauthenticated; the bearer header only keys the
+    /// rate limiter (see ``attachAuthorizationHeader(to:rateLimited:)``).
     public func channelLookupRaw(
         _ request: ChannelLookupRequest
     ) async throws -> ChannelLookupResponse? {
-        try await postNullableOn404(endpoint: "/discovery/channel/lookup", body: request)
+        try await postNullableOn404(
+            endpoint: "/discovery/channel/lookup", body: request, rateLimited: true)
     }
 
     /// `POST /discovery/identity` — upsert the identity bundle.
@@ -216,6 +228,11 @@ public final class DiscoveryClient {
                 "accountId must be \(Self.accountIdLength) bytes"
             )
         }
+        // ADR-0048 §4 — the blinder refuses a name outside the username rule;
+        // checking first turns that refusal into the reason copy the form
+        // shows (``UsernameRuleViolation``) instead of a raw FFI error.
+        _ = try requireValidUsername(
+            username, emptyError: DiscoveryClientError.argument("username must be non-empty"))
         let blinder = try OprfBlinder.blind(username: username)
         // Read the normalised form **before** finalize — after it
         // the UniFFI sentinel kicks in (1.15e1's
@@ -264,6 +281,9 @@ public final class DiscoveryClient {
     /// the second endpoint: PoW₁ → OPRF blind → `POST /discovery/oprf`
     /// → finalize → PoW₂ → `POST /discovery/lookup`.
     public func lookup(username: String) async throws -> LookupResult {
+        // ADR-0048 §4 — never send a lookup for a name that fails the rule.
+        _ = try requireValidUsername(
+            username, emptyError: DiscoveryClientError.argument("username must be non-empty"))
         let blinder = try OprfBlinder.blind(username: username)
         let normalisedUsername = try blinder.normalizedUsername()
 
@@ -1628,13 +1648,14 @@ public final class DiscoveryClient {
     /// expects a non-nullable typed response.
     fileprivate func post<Req: Encodable, Res: Decodable>(
         endpoint: String,
-        body: Req
+        body: Req,
+        rateLimited: Bool = false
     ) async throws -> Res {
         let url = try buildURL(endpoint: endpoint)
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        attachAuthorizationHeader(to: &request)
+        attachAuthorizationHeader(to: &request, rateLimited: rateLimited)
         do {
             request.httpBody = try encoder.encode(body)
         } catch {
@@ -1658,26 +1679,38 @@ public final class DiscoveryClient {
 
     /// Attach the `Authorization: Bearer <token>` header when a
     /// session token is set. Unauthenticated POSTs (`/pow/challenge`,
-    /// `/discovery/oprf`, `/discovery/lookup`,
     /// `invite/{}/consume`) silently ignore the header server-side
     /// — adding it unconditionally simplifies the call sites at
     /// the cost of a few bytes per request.
-    fileprivate func attachAuthorizationHeader(to request: inout URLRequest) {
-        if let token = sessionToken {
+    ///
+    /// `rateLimited` marks the three reads discovery rate-limits
+    /// (`/discovery/oprf`, `/discovery/lookup`, `/discovery/channel/lookup`):
+    /// with a token the server charges the account, without one the source
+    /// IP, which everyone behind a NAT shares. For those, a client that
+    /// carries no token of its own falls back to the signed-in session's
+    /// (``rateLimitToken``). Protected writes never take that fallback.
+    fileprivate func attachAuthorizationHeader(
+        to request: inout URLRequest,
+        rateLimited: Bool = false
+    ) {
+        let token = sessionToken ?? (rateLimited ? rateLimitToken() : nil)
+        if let token {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
     }
 
-    /// Variant of ``post(endpoint:body:)`` that folds a documented
+    /// Variant of ``post(endpoint:body:rateLimited:)`` that folds a documented
     /// 404 into a `nil` return. Used by `/discovery/lookup`.
     private func postNullableOn404<Req: Encodable, Res: Decodable>(
         endpoint: String,
-        body: Req
+        body: Req,
+        rateLimited: Bool = false
     ) async throws -> Res? {
         let url = try buildURL(endpoint: endpoint)
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        attachAuthorizationHeader(to: &request, rateLimited: rateLimited)
         do {
             request.httpBody = try encoder.encode(body)
         } catch {
@@ -1688,7 +1721,7 @@ public final class DiscoveryClient {
         return try await executeNullableOn404(endpoint: endpoint, request: request)
     }
 
-    /// `GET` variant of ``postNullableOn404(endpoint:body:)``. Same
+    /// `GET` variant of ``postNullableOn404(endpoint:body:rateLimited:)``. Same
     /// 404→nil fold, no request body — used by the
     /// `/discovery/identity/{slug}` and `/discovery/keypackage/{slug}`
     /// fetch paths.

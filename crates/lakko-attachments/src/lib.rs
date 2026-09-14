@@ -50,6 +50,26 @@
 //! MUST fall back to treating the raw bytes as bare UTF-8 text on
 //! JSON parse failure (legacy / test-harness compat — pre-1.19
 //! chat messages are bare UTF-8 with no envelope).
+//!
+//! # Media metadata (ADR-0047)
+//!
+//! Voice messages, video notes and GIFs are ordinary attachments with
+//! optional, bounded metadata on the [`AttachmentRef`]: `kind`,
+//! `duration_ms`, `waveform`, `width`, `height`, `thumb`. Every one of
+//! them is sender-chosen and therefore attacker-controlled, so:
+//!
+//! - **A field that fails its bound is dropped; the attachment and the
+//!   envelope survive.** That includes a field of the wrong JSON type
+//!   (`"duration_ms": "abc"`): an envelope that fails to parse falls
+//!   back to rendering its raw bytes as text, which would show a voice
+//!   message to the user as JSON. The same sanitizer runs in
+//!   [`compose`], so what goes on the wire is what every receiver keeps.
+//! - `kind` is an open string, never a closed enum on the wire — an
+//!   unknown future kind still decodes (see [`MediaKind::Other`]).
+//! - **Inline playback is decided by MIME type alone**
+//!   ([`inline_media_type`]), never by `kind`. `kind: voice` with
+//!   `mime: text/html` is a file.
+//! - [`WIRE_VERSION`] stays 1.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -58,7 +78,8 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use rand::rngs::OsRng;
 use rand::RngCore;
-use serde::{Deserialize, Serialize};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
@@ -92,6 +113,41 @@ pub const WIRE_VERSION: u8 = 1;
 /// sequences run ~25-30 bytes) while bounding the attacker-touchable
 /// parser — anything longer degrades to a plain chat message.
 pub const MAX_EMOJI_BYTES: usize = 64;
+
+/// ADR-0047 — the wire value of [`AttachmentRef::kind`] for a voice
+/// message.
+pub const MEDIA_KIND_VOICE: &str = "voice";
+
+/// ADR-0047 — the wire value of [`AttachmentRef::kind`] for a round
+/// video note.
+pub const MEDIA_KIND_VIDEO_NOTE: &str = "video_note";
+
+/// ADR-0047 — the wire value of [`AttachmentRef::kind`] for a GIF
+/// picked from the GIF proxy and re-uploaded as an attachment.
+pub const MEDIA_KIND_GIF: &str = "gif";
+
+/// ADR-0047 — the longest `duration_ms` a `voice` attachment may carry
+/// (15 minutes). A longer value is dropped at parse and at compose.
+pub const MAX_VOICE_DURATION_MS: u32 = 15 * 60 * 1000;
+
+/// ADR-0047 — the longest `duration_ms` a `video_note` attachment may
+/// carry (60 seconds). A longer value is dropped at parse and at compose.
+pub const MAX_VIDEO_NOTE_DURATION_MS: u32 = 60 * 1000;
+
+/// ADR-0047 — the largest decoded `waveform` (one amplitude byte per bar).
+pub const MAX_WAVEFORM_BYTES: usize = 128;
+
+/// Base64 (standard alphabet, padded) length of [`MAX_WAVEFORM_BYTES`].
+/// Checked before decoding so an oversize string is refused without
+/// allocating its decode.
+const MAX_WAVEFORM_B64_LEN: usize = MAX_WAVEFORM_BYTES.div_ceil(3) * 4;
+
+/// ADR-0047 — the largest `width` / `height` an attachment or its thumb
+/// may carry, in pixels.
+pub const MAX_MEDIA_DIMENSION: u32 = 4096;
+
+/// ADR-0047 — the largest plaintext `size` of a [`ThumbRef`] (256 KiB).
+pub const MAX_THUMB_BYTES: u64 = 256 * 1024;
 
 // ============================================================================
 // Encrypted attachment
@@ -207,7 +263,13 @@ pub fn sha256(bytes: &[u8]) -> [u8; BLOB_ID_LEN] {
 /// nothing here ever crosses the storage-service wire (the
 /// storage server only sees the `ciphertext` bytes and the URL
 /// path's hex blob_id).
+///
+/// The ADR-0047 media fields (`kind` … `thumb`) are optional and
+/// bounded. Deserialization goes through a lenient wire shape: a
+/// field of the wrong type or out of its bound is dropped, never
+/// failing the ref or the envelope (see the crate docs).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "AttachmentRefWire")]
 pub struct AttachmentRef {
     /// Base64 of [`EncryptedAttachment::blob_id`] (32 bytes raw,
     /// 44 chars base64 with padding). The hex form rides in the
@@ -231,6 +293,217 @@ pub struct AttachmentRef {
     /// the first 8 hex chars of the blob_id when missing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// ADR-0047 — what the attachment is: [`MEDIA_KIND_VOICE`],
+    /// [`MEDIA_KIND_VIDEO_NOTE`], [`MEDIA_KIND_GIF`], or absent for a
+    /// plain file. An unknown value is kept verbatim and classifies as
+    /// [`MediaKind::Other`], which renders as a file. Chooses the bubble
+    /// only — whether anything plays inline is decided by `mime`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// ADR-0047 — playback length in milliseconds. Kept only for a
+    /// `voice` (1..=[`MAX_VOICE_DURATION_MS`]) or `video_note`
+    /// (1..=[`MAX_VIDEO_NOTE_DURATION_MS`]) attachment; any other kind,
+    /// zero, or an out-of-range value is dropped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u32>,
+    /// ADR-0047 — base64 (standard alphabet, padded) of 1..=
+    /// [`MAX_WAVEFORM_BYTES`] amplitude bytes, one per bar of the voice
+    /// bubble. Undecodable, empty or oversize is dropped. Read the bytes
+    /// via [`Self::decode_waveform`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub waveform: Option<String>,
+    /// ADR-0047 — pixel width, 1..=[`MAX_MEDIA_DIMENSION`]; otherwise
+    /// dropped. Independent of `height`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    /// ADR-0047 — pixel height, 1..=[`MAX_MEDIA_DIMENSION`]; otherwise
+    /// dropped. Independent of `width`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    /// ADR-0047 — a second encrypted blob holding a poster frame (the
+    /// video note's still). Dropped whole if its own ref is malformed or
+    /// its size is outside 1..=[`MAX_THUMB_BYTES`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thumb: Option<ThumbRef>,
+}
+
+/// The receiver-side classification of [`AttachmentRef::kind`]
+/// (ADR-0047). Never fails: an unrecognised kind is [`Self::Other`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MediaKind {
+    /// [`MEDIA_KIND_VOICE`] — a recorded voice message.
+    Voice,
+    /// [`MEDIA_KIND_VIDEO_NOTE`] — a round video note.
+    VideoNote,
+    /// [`MEDIA_KIND_GIF`] — a GIF re-uploaded from the GIF proxy.
+    Gif,
+    /// Any other value — a kind this build does not know. Renders as a
+    /// plain file.
+    Other,
+}
+
+impl MediaKind {
+    /// Classify a wire `kind` string. Exact, case-sensitive match.
+    #[must_use]
+    pub fn from_wire(kind: &str) -> Self {
+        match kind {
+            MEDIA_KIND_VOICE => Self::Voice,
+            MEDIA_KIND_VIDEO_NOTE => Self::VideoNote,
+            MEDIA_KIND_GIF => Self::Gif,
+            _ => Self::Other,
+        }
+    }
+
+    /// The wire string for a known kind, `None` for [`Self::Other`].
+    #[must_use]
+    pub const fn as_wire(self) -> Option<&'static str> {
+        match self {
+            Self::Voice => Some(MEDIA_KIND_VOICE),
+            Self::VideoNote => Some(MEDIA_KIND_VIDEO_NOTE),
+            Self::Gif => Some(MEDIA_KIND_GIF),
+            Self::Other => None,
+        }
+    }
+}
+
+/// How a client may render an attachment inline (ADR-0047). Returned by
+/// [`inline_media_type`]; `None` there means "file chip with Save".
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum InlineMediaType {
+    /// Render as an image (`image/jpeg`, `image/png`, `image/gif`,
+    /// `image/webp`).
+    Image,
+    /// Play as audio (`audio/mp4`).
+    Audio,
+    /// Play as video (`video/mp4`).
+    Video,
+}
+
+/// The inline-playback allowlist (ADR-0047), MIME essence → class.
+/// `image/svg+xml` is deliberately absent — it can carry script.
+const INLINE_MEDIA_ALLOWLIST: [(&str, InlineMediaType); 6] = [
+    ("image/jpeg", InlineMediaType::Image),
+    ("image/png", InlineMediaType::Image),
+    ("image/gif", InlineMediaType::Image),
+    ("image/webp", InlineMediaType::Image),
+    ("audio/mp4", InlineMediaType::Audio),
+    ("video/mp4", InlineMediaType::Video),
+];
+
+/// The inline-playback allowlist (ADR-0047): the only MIME types a
+/// client may render or play inline. Decided by MIME alone — never by
+/// [`AttachmentRef::kind`], which is sender-chosen like the file name.
+///
+/// Matching is on the MIME essence: parameters after `;` are ignored,
+/// surrounding whitespace is trimmed and the comparison is
+/// ASCII-case-insensitive (so `audio/mp4;codecs=mp4a.40.2`, which a
+/// browser `MediaRecorder` reports, still plays). `image/svg+xml` is
+/// deliberately absent — it can carry script.
+#[must_use]
+pub fn inline_media_type(mime: &str) -> Option<InlineMediaType> {
+    let essence = mime.split_once(';').map_or(mime, |(e, _)| e).trim();
+    INLINE_MEDIA_ALLOWLIST
+        .iter()
+        .find(|(allowed, _)| essence.eq_ignore_ascii_case(allowed))
+        .map(|(_, class)| *class)
+}
+
+/// ADR-0047 — a poster-frame blob carried on an [`AttachmentRef`]. Same
+/// encryption and the same base64 encodings as the ref itself: the thumb
+/// is its own blob on `services/storage` under its own CEK.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "ThumbRefWire")]
+pub struct ThumbRef {
+    /// Base64 of the thumb blob's 32-byte SHA-256 id.
+    pub blob_id: String,
+    /// Base64 of the thumb's 32-byte CEK.
+    pub key: String,
+    /// Base64 of the thumb's 12-byte AEAD nonce.
+    pub nonce: String,
+    /// MIME type of the thumb (normally an image type; check it with
+    /// [`inline_media_type`] before rendering).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mime: Option<String>,
+    /// Plaintext size in bytes, 1..=[`MAX_THUMB_BYTES`].
+    pub size: u64,
+    /// Pixel width, 1..=[`MAX_MEDIA_DIMENSION`]; otherwise dropped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    /// Pixel height, 1..=[`MAX_MEDIA_DIMENSION`]; otherwise dropped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+}
+
+impl ThumbRef {
+    /// Build a thumb ref from an [`EncryptedAttachment`] of the poster
+    /// image. `plaintext_size` is the unencrypted image size.
+    ///
+    /// Bounds are not checked here; an out-of-bound thumb is dropped by
+    /// [`compose`] and by every receiver.
+    #[must_use]
+    pub fn from_encrypted(
+        enc: &EncryptedAttachment,
+        plaintext_size: u64,
+        mime: Option<String>,
+        width: Option<u32>,
+        height: Option<u32>,
+    ) -> Self {
+        Self {
+            blob_id: B64.encode(enc.blob_id),
+            key: B64.encode(enc.key.as_bytes()),
+            nonce: B64.encode(enc.nonce),
+            mime,
+            size: plaintext_size,
+            width,
+            height,
+        }
+    }
+
+    /// Decode the thumb's `blob_id`.
+    ///
+    /// # Errors
+    ///
+    /// [`AttachmentError::WireFormat`] on bad base64 / wrong length.
+    pub fn decode_blob_id(&self) -> Result<[u8; BLOB_ID_LEN], AttachmentError> {
+        decode_blob_id_b64(&self.blob_id)
+    }
+
+    /// Decode the thumb's CEK.
+    ///
+    /// # Errors
+    ///
+    /// [`AttachmentError::WireFormat`] on bad base64 / wrong length.
+    pub fn decode_key(&self) -> Result<AeadKey, AttachmentError> {
+        decode_key_b64(&self.key)
+    }
+
+    /// Decode the thumb's nonce.
+    ///
+    /// # Errors
+    ///
+    /// [`AttachmentError::WireFormat`] on bad base64 / wrong length.
+    pub fn decode_nonce(&self) -> Result<[u8; NONCE_LEN], AttachmentError> {
+        decode_nonce_b64(&self.nonce)
+    }
+
+    /// Apply the ADR-0047 bounds: `None` when the thumb itself is
+    /// unusable (a byte field that does not decode to its length, or a
+    /// size outside 1..=[`MAX_THUMB_BYTES`]); otherwise the thumb with
+    /// any out-of-range dimension dropped.
+    fn sanitized(mut self) -> Option<Self> {
+        if !thumb_size_in_bounds(self.size) {
+            return None;
+        }
+        if self.decode_blob_id().is_err()
+            || self.decode_key().is_err()
+            || self.decode_nonce().is_err()
+        {
+            return None;
+        }
+        self.width = self.width.filter(|&w| dimension_in_bounds(w));
+        self.height = self.height.filter(|&h| dimension_in_bounds(h));
+        Some(self)
+    }
 }
 
 impl AttachmentRef {
@@ -241,6 +514,9 @@ impl AttachmentRef {
     /// UI surfaces to the user; ciphertext is plaintext + 16-byte
     /// tag (negligible delta but conceptually the wire-friendly
     /// choice is plaintext).
+    ///
+    /// The ADR-0047 media fields start unset; add them with the
+    /// `with_*` builders.
     #[must_use]
     pub fn from_encrypted(
         enc: &EncryptedAttachment,
@@ -255,7 +531,93 @@ impl AttachmentRef {
             mime,
             size: plaintext_size,
             name,
+            kind: None,
+            duration_ms: None,
+            waveform: None,
+            width: None,
+            height: None,
+            thumb: None,
         }
+    }
+
+    /// ADR-0047 — set the media `kind` (e.g. [`MEDIA_KIND_VOICE`]).
+    #[must_use]
+    pub fn with_kind(mut self, kind: impl Into<String>) -> Self {
+        self.kind = Some(kind.into());
+        self
+    }
+
+    /// ADR-0047 — set `duration_ms`. Kept on the wire only for a
+    /// `voice` / `video_note` kind within its bound.
+    #[must_use]
+    pub const fn with_duration_ms(mut self, duration_ms: u32) -> Self {
+        self.duration_ms = Some(duration_ms);
+        self
+    }
+
+    /// ADR-0047 — set the waveform from raw amplitude bytes (base64-
+    /// encoded here). More than [`MAX_WAVEFORM_BYTES`], or none, is
+    /// dropped at compose.
+    #[must_use]
+    pub fn with_waveform(mut self, amplitudes: &[u8]) -> Self {
+        self.waveform = Some(B64.encode(amplitudes));
+        self
+    }
+
+    /// ADR-0047 — set the pixel dimensions. Each is bounded separately.
+    #[must_use]
+    pub const fn with_dimensions(mut self, width: u32, height: u32) -> Self {
+        self.width = Some(width);
+        self.height = Some(height);
+        self
+    }
+
+    /// ADR-0047 — attach a poster-frame thumb.
+    #[must_use]
+    pub fn with_thumb(mut self, thumb: ThumbRef) -> Self {
+        self.thumb = Some(thumb);
+        self
+    }
+
+    /// ADR-0047 — the typed media kind, `None` when `kind` is absent (a
+    /// plain file).
+    #[must_use]
+    pub fn media_kind(&self) -> Option<MediaKind> {
+        self.kind.as_deref().map(MediaKind::from_wire)
+    }
+
+    /// ADR-0047 — the decoded waveform amplitudes, `None` when absent or
+    /// out of bounds.
+    #[must_use]
+    pub fn decode_waveform(&self) -> Option<Vec<u8>> {
+        self.waveform.as_deref().and_then(decode_waveform_b64)
+    }
+
+    /// ADR-0047 — how this attachment may be rendered inline, decided by
+    /// its MIME type through [`inline_media_type`]; `None` means a file
+    /// chip. Never consults `kind`.
+    #[must_use]
+    pub fn inline_media_type(&self) -> Option<InlineMediaType> {
+        self.mime.as_deref().and_then(inline_media_type)
+    }
+
+    /// ADR-0047 — `true` when [`Self::inline_media_type`] allows inline
+    /// rendering or playback.
+    #[must_use]
+    pub fn is_inline_playable(&self) -> bool {
+        self.inline_media_type().is_some()
+    }
+
+    /// Apply the ADR-0047 bounds to the media fields, dropping each one
+    /// that fails. The ref's own fields are untouched. Runs on every
+    /// deserialized ref and in [`compose`].
+    fn sanitized(mut self) -> Self {
+        self.duration_ms = bound_duration(self.kind.as_deref(), self.duration_ms);
+        self.waveform = self.waveform.filter(|w| decode_waveform_b64(w).is_some());
+        self.width = self.width.filter(|&w| dimension_in_bounds(w));
+        self.height = self.height.filter(|&h| dimension_in_bounds(h));
+        self.thumb = self.thumb.and_then(ThumbRef::sanitized);
+        self
     }
 
     /// Decode the base64-encoded `blob_id` into 32 raw bytes.
@@ -265,12 +627,7 @@ impl AttachmentRef {
     /// [`AttachmentError::WireFormat`] if the base64 doesn't decode
     /// or the decoded length is not [`BLOB_ID_LEN`].
     pub fn decode_blob_id(&self) -> Result<[u8; BLOB_ID_LEN], AttachmentError> {
-        let bytes = B64
-            .decode(&self.blob_id)
-            .map_err(|e| AttachmentError::WireFormat(format!("blob_id base64: {e}")))?;
-        bytes.try_into().map_err(|v: Vec<u8>| {
-            AttachmentError::WireFormat(format!("blob_id length {} != {BLOB_ID_LEN}", v.len()))
-        })
+        decode_blob_id_b64(&self.blob_id)
     }
 
     /// Decode the base64-encoded CEK into a zeroize-on-drop wrapper.
@@ -279,20 +636,7 @@ impl AttachmentRef {
     ///
     /// [`AttachmentError::WireFormat`] on bad base64 / wrong length.
     pub fn decode_key(&self) -> Result<AeadKey, AttachmentError> {
-        let bytes = B64
-            .decode(&self.key)
-            .map_err(|e| AttachmentError::WireFormat(format!("key base64: {e}")))?;
-        if bytes.len() != KEY_LEN {
-            return Err(AttachmentError::WireFormat(format!(
-                "key length {} != {KEY_LEN}",
-                bytes.len()
-            )));
-        }
-        let mut arr = [0u8; KEY_LEN];
-        arr.copy_from_slice(&bytes);
-        let key = AeadKey::new(arr);
-        arr.zeroize();
-        Ok(key)
+        decode_key_b64(&self.key)
     }
 
     /// Decode the base64-encoded nonce.
@@ -301,13 +645,228 @@ impl AttachmentRef {
     ///
     /// [`AttachmentError::WireFormat`] on bad base64 / wrong length.
     pub fn decode_nonce(&self) -> Result<[u8; NONCE_LEN], AttachmentError> {
-        let bytes = B64
-            .decode(&self.nonce)
-            .map_err(|e| AttachmentError::WireFormat(format!("nonce base64: {e}")))?;
-        bytes.try_into().map_err(|v: Vec<u8>| {
-            AttachmentError::WireFormat(format!("nonce length {} != {NONCE_LEN}", v.len()))
-        })
+        decode_nonce_b64(&self.nonce)
     }
+}
+
+// ---- ADR-0047 lenient wire shapes ----
+
+/// Deserialize an optional field without ever failing the enclosing
+/// object: the value is read as untyped JSON, then converted; a value of
+/// the wrong type (or `null`) becomes `None`. Only a structurally broken
+/// JSON document can fail here, and that already fails the envelope.
+fn lenient<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: DeserializeOwned,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).ok())
+}
+
+/// The wire shape [`AttachmentRef`] deserializes through. The pre-
+/// ADR-0047 fields keep their strict types; the media fields are
+/// lenient, and [`AttachmentRef::sanitized`] applies their bounds.
+#[derive(Deserialize)]
+struct AttachmentRefWire {
+    blob_id: String,
+    key: String,
+    nonce: String,
+    #[serde(default)]
+    mime: Option<String>,
+    size: u64,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default, deserialize_with = "lenient")]
+    kind: Option<String>,
+    #[serde(default, deserialize_with = "lenient")]
+    duration_ms: Option<u32>,
+    #[serde(default, deserialize_with = "lenient")]
+    waveform: Option<String>,
+    #[serde(default, deserialize_with = "lenient")]
+    width: Option<u32>,
+    #[serde(default, deserialize_with = "lenient")]
+    height: Option<u32>,
+    #[serde(default, deserialize_with = "lenient")]
+    thumb: Option<ThumbRef>,
+}
+
+impl From<AttachmentRefWire> for AttachmentRef {
+    fn from(w: AttachmentRefWire) -> Self {
+        Self {
+            blob_id: w.blob_id,
+            key: w.key,
+            nonce: w.nonce,
+            mime: w.mime,
+            size: w.size,
+            name: w.name,
+            kind: w.kind,
+            duration_ms: w.duration_ms,
+            waveform: w.waveform,
+            width: w.width,
+            height: w.height,
+            thumb: w.thumb,
+        }
+        .sanitized()
+    }
+}
+
+/// The wire shape [`ThumbRef`] deserializes through. Dimensions are
+/// lenient (dropped alone); a malformed ref or an out-of-bound size
+/// rejects the whole thumb, which the enclosing lenient `thumb` field
+/// then turns into `None`.
+#[derive(Deserialize)]
+struct ThumbRefWire {
+    blob_id: String,
+    key: String,
+    nonce: String,
+    #[serde(default, deserialize_with = "lenient")]
+    mime: Option<String>,
+    size: u64,
+    #[serde(default, deserialize_with = "lenient")]
+    width: Option<u32>,
+    #[serde(default, deserialize_with = "lenient")]
+    height: Option<u32>,
+}
+
+impl TryFrom<ThumbRefWire> for ThumbRef {
+    type Error = AttachmentError;
+
+    fn try_from(w: ThumbRefWire) -> Result<Self, Self::Error> {
+        Self {
+            blob_id: w.blob_id,
+            key: w.key,
+            nonce: w.nonce,
+            mime: w.mime,
+            size: w.size,
+            width: w.width,
+            height: w.height,
+        }
+        .sanitized()
+        .ok_or_else(|| AttachmentError::WireFormat("thumb out of bounds".to_string()))
+    }
+}
+
+const fn dimension_in_bounds(px: u32) -> bool {
+    px > 0 && px <= MAX_MEDIA_DIMENSION
+}
+
+/// A duration is kept only for a voice or video-note kind, non-zero and
+/// within that kind's limit.
+fn bound_duration(kind: Option<&str>, duration_ms: Option<u32>) -> Option<u32> {
+    let max = match kind.map(MediaKind::from_wire) {
+        Some(MediaKind::Voice) => MAX_VOICE_DURATION_MS,
+        Some(MediaKind::VideoNote) => MAX_VIDEO_NOTE_DURATION_MS,
+        Some(MediaKind::Gif | MediaKind::Other) | None => return None,
+    };
+    duration_ms.filter(|&d| d > 0 && d <= max)
+}
+
+const fn thumb_size_in_bounds(size: u64) -> bool {
+    size > 0 && size <= MAX_THUMB_BYTES
+}
+
+/// ADR-0047 media metadata in decoded form, as a history bundle carries it
+/// (raw waveform bytes; the blob references stay with the caller, whose
+/// fixed-size arrays are valid by construction).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RawMediaMetadata {
+    /// Media kind string.
+    pub kind: Option<String>,
+    /// Playback length in milliseconds.
+    pub duration_ms: Option<u32>,
+    /// Waveform amplitude bytes.
+    pub waveform: Option<Vec<u8>>,
+    /// Pixel width.
+    pub width: Option<u32>,
+    /// Pixel height.
+    pub height: Option<u32>,
+    /// Poster-frame metadata.
+    pub thumb: Option<RawThumbMetadata>,
+}
+
+/// The poster-frame part of [`RawMediaMetadata`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RawThumbMetadata {
+    /// Plaintext size in bytes.
+    pub size: u64,
+    /// MIME type.
+    pub mime: Option<String>,
+    /// Pixel width.
+    pub width: Option<u32>,
+    /// Pixel height.
+    pub height: Option<u32>,
+}
+
+impl RawMediaMetadata {
+    /// Apply exactly the bounds a received envelope gets: each field that
+    /// fails is dropped, a thumb outside its size limit is dropped whole.
+    /// Used where metadata reaches a client by another route than the chat
+    /// envelope — the multi-device history bundle — so both routes restore
+    /// the same thing.
+    #[must_use]
+    pub fn bounded(self) -> Self {
+        Self {
+            duration_ms: bound_duration(self.kind.as_deref(), self.duration_ms),
+            waveform: self
+                .waveform
+                .filter(|w| !w.is_empty() && w.len() <= MAX_WAVEFORM_BYTES),
+            width: self.width.filter(|&w| dimension_in_bounds(w)),
+            height: self.height.filter(|&h| dimension_in_bounds(h)),
+            thumb: self.thumb.and_then(|t| {
+                thumb_size_in_bounds(t.size).then(|| RawThumbMetadata {
+                    width: t.width.filter(|&w| dimension_in_bounds(w)),
+                    height: t.height.filter(|&h| dimension_in_bounds(h)),
+                    ..t
+                })
+            }),
+            kind: self.kind,
+        }
+    }
+}
+
+fn decode_waveform_b64(encoded: &str) -> Option<Vec<u8>> {
+    if encoded.is_empty() || encoded.len() > MAX_WAVEFORM_B64_LEN {
+        return None;
+    }
+    B64.decode(encoded)
+        .ok()
+        .filter(|bytes| !bytes.is_empty() && bytes.len() <= MAX_WAVEFORM_BYTES)
+}
+
+fn decode_blob_id_b64(encoded: &str) -> Result<[u8; BLOB_ID_LEN], AttachmentError> {
+    let bytes = B64
+        .decode(encoded)
+        .map_err(|e| AttachmentError::WireFormat(format!("blob_id base64: {e}")))?;
+    bytes.try_into().map_err(|v: Vec<u8>| {
+        AttachmentError::WireFormat(format!("blob_id length {} != {BLOB_ID_LEN}", v.len()))
+    })
+}
+
+fn decode_key_b64(encoded: &str) -> Result<AeadKey, AttachmentError> {
+    let bytes = B64
+        .decode(encoded)
+        .map_err(|e| AttachmentError::WireFormat(format!("key base64: {e}")))?;
+    if bytes.len() != KEY_LEN {
+        return Err(AttachmentError::WireFormat(format!(
+            "key length {} != {KEY_LEN}",
+            bytes.len()
+        )));
+    }
+    let mut arr = [0u8; KEY_LEN];
+    arr.copy_from_slice(&bytes);
+    let key = AeadKey::new(arr);
+    arr.zeroize();
+    Ok(key)
+}
+
+fn decode_nonce_b64(encoded: &str) -> Result<[u8; NONCE_LEN], AttachmentError> {
+    let bytes = B64
+        .decode(encoded)
+        .map_err(|e| AttachmentError::WireFormat(format!("nonce base64: {e}")))?;
+    bytes.try_into().map_err(|v: Vec<u8>| {
+        AttachmentError::WireFormat(format!("nonce length {} != {NONCE_LEN}", v.len()))
+    })
 }
 
 /// The JSON envelope an MLS Application message carries. v1 fields
@@ -486,6 +1045,11 @@ impl Envelope {
 /// serialisation logic in three platform-side languages — the
 /// readability win matters more in Phase 1 alpha.
 ///
+/// ADR-0047 media metadata on each ref passes through the same bounds a
+/// receiver applies: a field that fails its bound is dropped here, so the
+/// wire never carries a value every receiver would discard and the
+/// sender's `compose → parse` view matches everyone else's.
+///
 /// # Errors
 ///
 /// [`AttachmentError::WireFormat`] if `serde_json::to_vec` fails
@@ -493,7 +1057,10 @@ impl Envelope {
 pub fn compose(text: &str, attachments: Vec<AttachmentRef>) -> Result<Vec<u8>, AttachmentError> {
     let envelope = Envelope {
         text: text.to_string(),
-        attachments,
+        attachments: attachments
+            .into_iter()
+            .map(AttachmentRef::sanitized)
+            .collect(),
         ..Envelope::base()
     };
     serde_json::to_vec(&envelope).map_err(|e| AttachmentError::WireFormat(format!("compose: {e}")))
@@ -679,7 +1246,57 @@ pub enum AttachmentError {
 /// supported public API.
 #[doc(hidden)]
 pub mod fuzz_api {
-    use super::{parse, parse_body, MessageBody};
+    use super::{
+        compose, parse, parse_body, AttachmentRef, MediaKind, MessageBody, MAX_MEDIA_DIMENSION,
+        MAX_THUMB_BYTES, MAX_VIDEO_NOTE_DURATION_MS, MAX_VOICE_DURATION_MS, MAX_WAVEFORM_BYTES,
+    };
+
+    /// ADR-0047 property oracle over attacker-controlled bytes.
+    ///
+    /// Every media field that survives [`parse`] is within its bound,
+    /// and sanitization is idempotent (re-composing the parsed refs and
+    /// parsing again yields the same refs). The harness asserts the
+    /// return, so a bound that stops being enforced — or a sanitizer
+    /// that changes its answer on its own output — becomes a crash.
+    #[must_use]
+    pub fn media_metadata_within_bounds(bytes: &[u8]) -> bool {
+        let (text, refs) = parse(bytes);
+        if !refs.iter().all(ref_within_bounds) {
+            return false;
+        }
+        let Ok(recomposed) = compose(&text, refs.clone()) else {
+            return false;
+        };
+        parse(&recomposed).1 == refs
+    }
+
+    fn ref_within_bounds(r: &AttachmentRef) -> bool {
+        const fn dim_ok(px: Option<u32>) -> bool {
+            match px {
+                None => true,
+                Some(p) => p > 0 && p <= MAX_MEDIA_DIMENSION,
+            }
+        }
+        let duration_ok = match (r.duration_ms, r.media_kind()) {
+            (None, _) => true,
+            (Some(d), Some(MediaKind::Voice)) => d > 0 && d <= MAX_VOICE_DURATION_MS,
+            (Some(d), Some(MediaKind::VideoNote)) => d > 0 && d <= MAX_VIDEO_NOTE_DURATION_MS,
+            (Some(_), _) => false,
+        };
+        let waveform_ok = r.waveform.is_none()
+            || r.decode_waveform()
+                .is_some_and(|w| !w.is_empty() && w.len() <= MAX_WAVEFORM_BYTES);
+        let thumb_ok = r.thumb.as_ref().map_or(true, |t| {
+            t.size > 0
+                && t.size <= MAX_THUMB_BYTES
+                && t.decode_blob_id().is_ok()
+                && t.decode_key().is_ok()
+                && t.decode_nonce().is_ok()
+                && dim_ok(t.width)
+                && dim_ok(t.height)
+        });
+        duration_ok && waveform_ok && dim_ok(r.width) && dim_ok(r.height) && thumb_ok
+    }
 
     /// Drive the receiver-side message-body decode chain on
     /// attacker-controlled bytes.
@@ -700,6 +1317,13 @@ pub mod fuzz_api {
             let _ = r.decode_blob_id();
             let _ = r.decode_key();
             let _ = r.decode_nonce();
+            // ADR-0047: the media-metadata readers a client calls on
+            // every ref, including the nested thumb's own decoders.
+            let _ = (r.media_kind(), r.decode_waveform(), r.inline_media_type());
+            if let Some(t) = &r.thumb {
+                let _ = (t.decode_blob_id(), t.decode_key(), t.decode_nonce());
+                let _ = t.mime.as_deref().map(super::inline_media_type);
+            }
         }
         // ADR-0023: also drive the richer classifier on the same
         // attacker-controlled bytes — the edit/delete/reaction op
@@ -992,5 +1616,516 @@ mod tests {
         // either op — fail-safe to chat.
         let json = br#"{"v":1,"text":"x","typing":true,"edit_of":1}"#;
         assert!(matches!(parse_body(json), MessageBody::Chat { .. }));
+    }
+
+    // ---- ADR-0047: media metadata ----
+
+    fn plain_ref(mime: &str, name: &str) -> AttachmentRef {
+        let enc = encrypt_attachment(b"media bytes").unwrap();
+        AttachmentRef::from_encrypted(&enc, 11, Some(mime.to_string()), Some(name.to_string()))
+    }
+
+    fn valid_thumb() -> ThumbRef {
+        let enc = encrypt_attachment(b"poster").unwrap();
+        ThumbRef::from_encrypted(
+            &enc,
+            6,
+            Some("image/jpeg".to_string()),
+            Some(240),
+            Some(240),
+        )
+    }
+
+    /// Build a one-attachment envelope from `r` as JSON, then overwrite
+    /// (or add) the given attachment fields with raw JSON values — the
+    /// way a hostile or buggy sender would.
+    fn envelope_with_ref_fields(
+        r: &AttachmentRef,
+        fields: &[(&str, serde_json::Value)],
+    ) -> Vec<u8> {
+        let mut value = serde_json::to_value(r).unwrap();
+        let obj = value.as_object_mut().unwrap();
+        for (k, v) in fields {
+            obj.insert((*k).to_string(), v.clone());
+        }
+        serde_json::to_vec(&serde_json::json!({"v": 1, "text": "caption", "attachments": [value]}))
+            .unwrap()
+    }
+
+    fn parse_one(bytes: &[u8]) -> AttachmentRef {
+        let (text, refs) = parse(bytes);
+        assert_eq!(text, "caption", "envelope must not fall back to raw text");
+        assert_eq!(refs.len(), 1, "the attachment must survive");
+        refs.into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn media_fields_round_trip_through_compose_parse() {
+        let voice = plain_ref("audio/mp4", "voice-1.m4a")
+            .with_kind(MEDIA_KIND_VOICE)
+            .with_duration_ms(12_345)
+            .with_waveform(&[0, 10, 200, 255])
+            .with_dimensions(320, 240)
+            .with_thumb(valid_thumb());
+        let bytes = compose("caption", vec![voice.clone()]).unwrap();
+        let got = parse_one(&bytes);
+        assert_eq!(got, voice);
+        assert_eq!(got.media_kind(), Some(MediaKind::Voice));
+        assert_eq!(got.decode_waveform(), Some(vec![0, 10, 200, 255]));
+        assert_eq!(got.thumb.as_ref().unwrap().size, 6);
+        // The same survives the classifier path every client uses.
+        match parse_body(&bytes) {
+            MessageBody::Chat { attachments, .. } => assert_eq!(attachments, vec![voice]),
+            other => panic!("expected Chat, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn old_style_ref_without_media_fields_parses() {
+        let enc = encrypt_attachment(b"x").unwrap();
+        let json = format!(
+            r#"{{"v":1,"text":"caption","attachments":[{{"blob_id":"{}","key":"{}","nonce":"{}","mime":"image/png","size":1,"name":"a.png"}}]}}"#,
+            B64.encode(enc.blob_id),
+            B64.encode(enc.key.as_bytes()),
+            B64.encode(enc.nonce),
+        );
+        let got = parse_one(json.as_bytes());
+        assert_eq!(got.mime.as_deref(), Some("image/png"));
+        assert_eq!(got.media_kind(), None);
+        assert!(got.duration_ms.is_none() && got.waveform.is_none());
+        assert!(got.width.is_none() && got.height.is_none() && got.thumb.is_none());
+        // And a ref with no media fields serialises without any of them.
+        let s = String::from_utf8(compose("c", vec![got]).unwrap()).unwrap();
+        for field in [
+            "kind",
+            "duration_ms",
+            "waveform",
+            "width",
+            "height",
+            "thumb",
+        ] {
+            assert!(!s.contains(field), "{field} leaked into {s}");
+        }
+    }
+
+    #[test]
+    fn voice_duration_over_bound_drops_only_duration() {
+        let r = plain_ref("audio/mp4", "v.m4a")
+            .with_kind(MEDIA_KIND_VOICE)
+            .with_waveform(&[1, 2, 3]);
+        let at_max = parse_one(&envelope_with_ref_fields(
+            &r,
+            &[("duration_ms", MAX_VOICE_DURATION_MS.into())],
+        ));
+        assert_eq!(at_max.duration_ms, Some(MAX_VOICE_DURATION_MS));
+        let over = parse_one(&envelope_with_ref_fields(
+            &r,
+            &[("duration_ms", (MAX_VOICE_DURATION_MS + 1).into())],
+        ));
+        assert_eq!(over.duration_ms, None);
+        assert_eq!(over.kind.as_deref(), Some(MEDIA_KIND_VOICE));
+        assert_eq!(over.decode_waveform(), Some(vec![1, 2, 3]));
+    }
+
+    #[test]
+    fn video_note_duration_over_bound_drops_only_duration() {
+        let r = plain_ref("video/mp4", "n.mp4")
+            .with_kind(MEDIA_KIND_VIDEO_NOTE)
+            .with_dimensions(480, 480);
+        let at_max = parse_one(&envelope_with_ref_fields(
+            &r,
+            &[("duration_ms", MAX_VIDEO_NOTE_DURATION_MS.into())],
+        ));
+        assert_eq!(at_max.duration_ms, Some(MAX_VIDEO_NOTE_DURATION_MS));
+        // A voice-legal duration is still too long for a video note.
+        let over = parse_one(&envelope_with_ref_fields(
+            &r,
+            &[("duration_ms", (MAX_VIDEO_NOTE_DURATION_MS + 1).into())],
+        ));
+        assert_eq!(over.duration_ms, None);
+        assert_eq!((over.width, over.height), (Some(480), Some(480)));
+    }
+
+    #[test]
+    fn duration_is_dropped_for_other_kinds_and_zero() {
+        for kind in [Some(MEDIA_KIND_GIF), Some("sticker"), None] {
+            let mut r = plain_ref("image/gif", "g.gif");
+            r.kind = kind.map(str::to_string);
+            let got = parse_one(&envelope_with_ref_fields(
+                &r,
+                &[("duration_ms", 1000.into())],
+            ));
+            assert_eq!(got.duration_ms, None, "kind {kind:?}");
+            assert_eq!(got.kind.as_deref(), kind);
+        }
+        let voice = plain_ref("audio/mp4", "v.m4a").with_kind(MEDIA_KIND_VOICE);
+        let zero = parse_one(&envelope_with_ref_fields(
+            &voice,
+            &[("duration_ms", 0.into())],
+        ));
+        assert_eq!(zero.duration_ms, None);
+    }
+
+    #[test]
+    fn waveform_out_of_bound_drops_only_waveform() {
+        let r = plain_ref("audio/mp4", "v.m4a")
+            .with_kind(MEDIA_KIND_VOICE)
+            .with_duration_ms(5000);
+        let max = vec![7u8; MAX_WAVEFORM_BYTES];
+        let kept = parse_one(&envelope_with_ref_fields(
+            &r,
+            &[("waveform", B64.encode(&max).into())],
+        ));
+        assert_eq!(kept.decode_waveform(), Some(max));
+        for bad in [
+            B64.encode(vec![7u8; MAX_WAVEFORM_BYTES + 1]),
+            String::new(),
+            "not base64!".to_string(),
+        ] {
+            let got = parse_one(&envelope_with_ref_fields(
+                &r,
+                &[("waveform", bad.clone().into())],
+            ));
+            assert_eq!(got.waveform, None, "waveform {bad:?}");
+            assert_eq!(got.duration_ms, Some(5000));
+        }
+    }
+
+    #[test]
+    fn dimensions_out_of_bound_drop_individually() {
+        let r = plain_ref("image/gif", "g.gif").with_kind(MEDIA_KIND_GIF);
+        let got = parse_one(&envelope_with_ref_fields(
+            &r,
+            &[
+                ("width", (MAX_MEDIA_DIMENSION + 1).into()),
+                ("height", MAX_MEDIA_DIMENSION.into()),
+            ],
+        ));
+        assert_eq!((got.width, got.height), (None, Some(MAX_MEDIA_DIMENSION)));
+        let zero = parse_one(&envelope_with_ref_fields(
+            &r,
+            &[("width", 5.into()), ("height", 0.into())],
+        ));
+        assert_eq!((zero.width, zero.height), (Some(5), None));
+        assert_eq!(zero.kind.as_deref(), Some(MEDIA_KIND_GIF));
+    }
+
+    #[test]
+    fn thumb_out_of_bound_or_malformed_drops_only_thumb() {
+        let r = plain_ref("video/mp4", "n.mp4")
+            .with_kind(MEDIA_KIND_VIDEO_NOTE)
+            .with_duration_ms(3000);
+        let mut at_max = valid_thumb();
+        at_max.size = MAX_THUMB_BYTES;
+        let kept = parse_one(&envelope_with_ref_fields(
+            &r,
+            &[("thumb", serde_json::to_value(&at_max).unwrap())],
+        ));
+        assert_eq!(kept.thumb, Some(at_max));
+
+        let mut oversize = valid_thumb();
+        oversize.size = MAX_THUMB_BYTES + 1;
+        let mut zero = valid_thumb();
+        zero.size = 0;
+        let mut bad_key = valid_thumb();
+        bad_key.key = B64.encode([0u8; 5]);
+        let mut bad_blob = valid_thumb();
+        bad_blob.blob_id = "%%%".to_string();
+        for bad in [oversize, zero, bad_key, bad_blob] {
+            let got = parse_one(&envelope_with_ref_fields(
+                &r,
+                &[("thumb", serde_json::to_value(&bad).unwrap())],
+            ));
+            assert_eq!(got.thumb, None, "thumb {bad:?}");
+            assert_eq!(got.duration_ms, Some(3000));
+        }
+
+        // An out-of-range thumb dimension drops that dimension, not the thumb.
+        let mut wide = serde_json::to_value(valid_thumb()).unwrap();
+        wide["width"] = (MAX_MEDIA_DIMENSION + 1).into();
+        let got = parse_one(&envelope_with_ref_fields(&r, &[("thumb", wide)]));
+        let thumb = got.thumb.unwrap();
+        assert_eq!((thumb.width, thumb.height), (None, Some(240)));
+    }
+
+    #[test]
+    fn wrongly_typed_media_fields_never_fail_the_envelope() {
+        let r = plain_ref("audio/mp4", "v.m4a")
+            .with_kind(MEDIA_KIND_VOICE)
+            .with_duration_ms(4000);
+        let cases: Vec<(&str, serde_json::Value)> = vec![
+            ("duration_ms", "abc".into()),
+            ("duration_ms", (-1).into()),
+            ("duration_ms", 1.5.into()),
+            ("duration_ms", u64::MAX.into()),
+            ("duration_ms", serde_json::Value::Null),
+            ("thumb", 5.into()),
+            ("thumb", serde_json::json!({"blob_id": 5})),
+            ("thumb", serde_json::json!([])),
+            ("waveform", 7.into()),
+            ("waveform", serde_json::json!({"a": [1, 2]})),
+            ("width", "wide".into()),
+            ("height", true.into()),
+            ("kind", serde_json::json!({"voice": true})),
+        ];
+        for (field, value) in cases {
+            let bytes = envelope_with_ref_fields(&r, &[(field, value.clone())]);
+            let got = parse_one(&bytes);
+            match field {
+                "duration_ms" => assert_eq!(got.duration_ms, None, "{value}"),
+                "thumb" => assert_eq!(got.thumb, None, "{value}"),
+                "waveform" => assert_eq!(got.waveform, None, "{value}"),
+                "width" => assert_eq!(got.width, None, "{value}"),
+                "height" => assert_eq!(got.height, None, "{value}"),
+                // The kind itself was the broken field; its loss also
+                // drops the (voice-only) duration.
+                "kind" => assert_eq!((got.kind, got.duration_ms), (None, None), "{value}"),
+                _ => unreachable!(),
+            }
+            assert!(
+                matches!(parse_body(&bytes), MessageBody::Chat { ref text, ref attachments }
+                    if text == "caption" && attachments.len() == 1),
+                "parse_body fell back on {field}={value}"
+            );
+        }
+        // A wrongly typed thumb dimension drops only that dimension.
+        let mut thumb = serde_json::to_value(valid_thumb()).unwrap();
+        thumb["height"] = "tall".into();
+        let got = parse_one(&envelope_with_ref_fields(&r, &[("thumb", thumb)]));
+        assert_eq!(
+            got.thumb.map(|t| (t.width, t.height)),
+            Some((Some(240), None))
+        );
+    }
+
+    #[test]
+    fn unknown_kind_survives_as_other() {
+        let r = plain_ref("application/octet-stream", "s.bin").with_kind("sticker");
+        let got = parse_one(&compose("caption", vec![r]).unwrap());
+        assert_eq!(got.kind.as_deref(), Some("sticker"));
+        assert_eq!(got.media_kind(), Some(MediaKind::Other));
+        assert_eq!(MediaKind::from_wire("Voice"), MediaKind::Other);
+        assert_eq!(MediaKind::Other.as_wire(), None);
+        for k in [MediaKind::Voice, MediaKind::VideoNote, MediaKind::Gif] {
+            assert_eq!(MediaKind::from_wire(k.as_wire().unwrap()), k);
+        }
+    }
+
+    #[test]
+    fn inline_playback_is_gated_on_the_mime_allowlist_only() {
+        use InlineMediaType::{Audio, Image, Video};
+        let table: [(&str, Option<InlineMediaType>); 14] = [
+            ("audio/mp4", Some(Audio)),
+            ("audio/mp4;codecs=mp4a.40.2", Some(Audio)),
+            ("AUDIO/MP4", Some(Audio)),
+            ("video/mp4; codecs=\"avc1.42E01E, mp4a.40.2\"", Some(Video)),
+            ("image/gif", Some(Image)),
+            ("image/webp", Some(Image)),
+            ("image/jpeg", Some(Image)),
+            ("image/png", Some(Image)),
+            ("image/svg+xml", None),
+            ("text/html", None),
+            ("audio/webm", None),
+            ("video/mp4x", None),
+            ("", None),
+            ("audio/mp4x;codecs=mp4a", None),
+        ];
+        for (mime, want) in table {
+            assert_eq!(inline_media_type(mime), want, "{mime:?}");
+        }
+        // kind never grants playback: a `voice` served as HTML is a file.
+        let spoofed = plain_ref("text/html", "v.m4a").with_kind(MEDIA_KIND_VOICE);
+        assert!(!spoofed.is_inline_playable());
+        let mut no_mime = plain_ref("audio/mp4", "v.m4a").with_kind(MEDIA_KIND_VOICE);
+        no_mime.mime = None;
+        assert!(!no_mime.is_inline_playable());
+        // …and a plain file with an allowlisted MIME still plays.
+        assert_eq!(
+            plain_ref("video/mp4", "clip.mp4").inline_media_type(),
+            Some(Video)
+        );
+    }
+
+    #[test]
+    fn compose_drops_out_of_bound_metadata_before_the_wire() {
+        let mut thumb = valid_thumb();
+        thumb.size = MAX_THUMB_BYTES + 1;
+        let r = plain_ref("audio/mp4", "v.m4a")
+            .with_kind(MEDIA_KIND_VOICE)
+            .with_duration_ms(MAX_VOICE_DURATION_MS + 1)
+            .with_waveform(&[1u8; MAX_WAVEFORM_BYTES + 1])
+            .with_dimensions(0, MAX_MEDIA_DIMENSION + 1)
+            .with_thumb(thumb);
+        let s = String::from_utf8(compose("c", vec![r]).unwrap()).unwrap();
+        for field in ["duration_ms", "waveform", "width", "height", "thumb"] {
+            assert!(!s.contains(field), "{field} went on the wire: {s}");
+        }
+        assert!(s.contains(r#""kind":"voice""#));
+    }
+
+    #[test]
+    fn a_decoder_without_the_media_fields_still_reads_the_ref() {
+        // The pre-ADR-0047 shapes, verbatim: no media fields, no
+        // `deny_unknown_fields`. An old client must keep the attachment.
+        #[derive(Deserialize)]
+        struct LegacyRef {
+            blob_id: String,
+            key: String,
+            nonce: String,
+            #[serde(default)]
+            mime: Option<String>,
+            size: u64,
+            #[serde(default)]
+            name: Option<String>,
+        }
+        #[derive(Deserialize)]
+        struct LegacyEnvelope {
+            v: u8,
+            #[serde(default)]
+            text: String,
+            #[serde(default)]
+            attachments: Vec<LegacyRef>,
+        }
+        let r = plain_ref("video/mp4", "note-1.mp4")
+            .with_kind(MEDIA_KIND_VIDEO_NOTE)
+            .with_duration_ms(9000)
+            .with_dimensions(480, 480)
+            .with_thumb(valid_thumb());
+        let bytes = compose("caption", vec![r.clone()]).unwrap();
+        let legacy: LegacyEnvelope = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!((legacy.v, legacy.text.as_str()), (WIRE_VERSION, "caption"));
+        let got = &legacy.attachments[0];
+        assert_eq!(
+            (
+                &got.blob_id,
+                &got.key,
+                &got.nonce,
+                &got.mime,
+                got.size,
+                &got.name
+            ),
+            (&r.blob_id, &r.key, &r.nonce, &r.mime, r.size, &r.name)
+        );
+    }
+
+    #[test]
+    fn fuzz_oracle_holds_on_hostile_media_envelopes() {
+        let r = plain_ref("audio/mp4", "v.m4a").with_kind(MEDIA_KIND_VOICE);
+        let hostile = [
+            envelope_with_ref_fields(&r, &[("duration_ms", u32::MAX.into())]),
+            envelope_with_ref_fields(&r, &[("thumb", 5.into()), ("width", 99_999.into())]),
+            envelope_with_ref_fields(&r, &[("waveform", B64.encode([0u8; 400]).into())]),
+            b"not json".to_vec(),
+            Vec::new(),
+        ];
+        for bytes in hostile {
+            assert!(fuzz_api::media_metadata_within_bounds(&bytes));
+        }
+    }
+
+    /// The history-bundle route (`RawMediaMetadata::bounded`) keeps exactly
+    /// what the envelope route (`AttachmentRef` deserialization) keeps.
+    #[test]
+    fn raw_media_bounds_match_the_envelope_bounds() {
+        let blob = B64.encode([1u8; 32]);
+        let key = B64.encode([2u8; 32]);
+        let nonce = B64.encode([3u8; 12]);
+        let cases: Vec<RawMediaMetadata> = vec![
+            RawMediaMetadata {
+                kind: Some("voice".into()),
+                duration_ms: Some(MAX_VOICE_DURATION_MS + 1),
+                waveform: Some(vec![9; MAX_WAVEFORM_BYTES + 1]),
+                width: Some(0),
+                height: Some(MAX_MEDIA_DIMENSION),
+                thumb: None,
+            },
+            RawMediaMetadata {
+                kind: Some("video_note".into()),
+                duration_ms: Some(MAX_VIDEO_NOTE_DURATION_MS),
+                waveform: Some(vec![]),
+                width: Some(480),
+                height: Some(MAX_MEDIA_DIMENSION + 1),
+                thumb: Some(RawThumbMetadata {
+                    size: MAX_THUMB_BYTES + 1,
+                    mime: Some("image/jpeg".into()),
+                    width: Some(1),
+                    height: Some(1),
+                }),
+            },
+            RawMediaMetadata {
+                kind: Some("gif".into()),
+                duration_ms: Some(1000),
+                waveform: Some(vec![5; 3]),
+                width: Some(320),
+                height: Some(240),
+                thumb: Some(RawThumbMetadata {
+                    size: 10,
+                    mime: None,
+                    width: Some(MAX_MEDIA_DIMENSION + 1),
+                    height: Some(20),
+                }),
+            },
+            RawMediaMetadata::default(),
+        ];
+        for raw in cases {
+            let mut json = serde_json::json!({
+                "blob_id": blob, "key": key, "nonce": nonce, "size": 1,
+            });
+            let obj = json.as_object_mut().expect("object");
+            if let Some(k) = &raw.kind {
+                obj.insert("kind".into(), k.clone().into());
+            }
+            if let Some(d) = raw.duration_ms {
+                obj.insert("duration_ms".into(), d.into());
+            }
+            if let Some(w) = &raw.waveform {
+                obj.insert("waveform".into(), B64.encode(w).into());
+            }
+            if let Some(w) = raw.width {
+                obj.insert("width".into(), w.into());
+            }
+            if let Some(h) = raw.height {
+                obj.insert("height".into(), h.into());
+            }
+            if let Some(t) = &raw.thumb {
+                let mut thumb = serde_json::json!({
+                    "blob_id": blob, "key": key, "nonce": nonce, "size": t.size,
+                });
+                let tobj = thumb.as_object_mut().expect("object");
+                if let Some(m) = &t.mime {
+                    tobj.insert("mime".into(), m.clone().into());
+                }
+                if let Some(w) = t.width {
+                    tobj.insert("width".into(), w.into());
+                }
+                if let Some(h) = t.height {
+                    tobj.insert("height".into(), h.into());
+                }
+                obj.insert("thumb".into(), thumb);
+            }
+            let via_envelope: AttachmentRef = serde_json::from_value(json).expect("ref parses");
+            let via_history = raw.clone().bounded();
+
+            assert_eq!(via_history.kind, via_envelope.kind, "{raw:?}");
+            assert_eq!(via_history.duration_ms, via_envelope.duration_ms, "{raw:?}");
+            assert_eq!(
+                via_history.waveform,
+                via_envelope.decode_waveform(),
+                "{raw:?}"
+            );
+            assert_eq!(via_history.width, via_envelope.width, "{raw:?}");
+            assert_eq!(via_history.height, via_envelope.height, "{raw:?}");
+            assert_eq!(
+                via_history
+                    .thumb
+                    .as_ref()
+                    .map(|t| (t.size, t.mime.clone(), t.width, t.height)),
+                via_envelope
+                    .thumb
+                    .as_ref()
+                    .map(|t| (t.size, t.mime.clone(), t.width, t.height)),
+                "{raw:?}"
+            );
+        }
     }
 }

@@ -14,9 +14,8 @@ import Foundation
 ///
 /// ## Default base URL
 ///
-/// `http://localhost:8081` — same loopback as
-/// ``AuthClient.defaultBaseURL``. Override for physical devices
-/// (LAN IP) and production (Cloudflare tunnel URL).
+/// Same as ``AuthClient/defaultBaseURL``: `<LakkoApiBaseUrl>/auth`,
+/// or `http://localhost:8081` with no API base URL (``ApiEndpoints``).
 ///
 /// ## Surface
 ///
@@ -35,7 +34,7 @@ import Foundation
 ///     (2a2c2, landed).
 public final class WebauthnClient {
 
-    public static let defaultBaseURL: String = "http://localhost:8081"
+    public static var defaultBaseURL: String { ApiEndpoints.baseURL(for: .auth) }
 
     public let baseURL: String
     private let session: URLSession

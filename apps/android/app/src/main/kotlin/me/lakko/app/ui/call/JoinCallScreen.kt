@@ -123,7 +123,15 @@ data class JoinCallUiState(
     val decoded: DecodedCall? = null,
     val phase: JoinCallPhase = JoinCallPhase.Idle,
     val error: String? = null,
+    /** ADR-0048 UX §4 — a guest's "Your name", prefilled `Guest`. */
+    val guestName: String = GUEST_NAME_DEFAULT,
+    /** The reason the typed guest name fails the rule, or `null`. */
+    val guestNameError: String? = null,
 )
+
+/** ADR-0048 UX §4 — the guest name field's prefill. */
+internal const val GUEST_NAME_DEFAULT: String = "Guest"
+
 
 class JoinCallViewModel(
     private val authRepository: AuthRepository,
@@ -223,11 +231,29 @@ class JoinCallViewModel(
         }
     }
 
+    /** `true` while there is no signed-in session, i.e. Join would mint a guest
+     *  account — the screen then asks for the guest's name. */
+    fun needsGuestName(): Boolean = authRepository.identitySecrets.value == null
+
+    /** ADR-0048 UX §4 — the guest name field, checked against the core's rule. */
+    fun onGuestNameChange(value: String) {
+        val check = me.lakko.app.profile.checkDisplayName(value)
+        _uiState.value = _uiState.value.copy(
+            guestName = value,
+            guestNameError = (check as? me.lakko.app.profile.DisplayNameCheck.Invalid)?.problem?.copy,
+        )
+    }
+
     /** Tap Join: use the live session if there is one, else create a guest
      *  account first (username-less full account) and resume after the phrase
-     *  is saved. */
-    fun onStart() {
-        val d = _uiState.value.decoded ?: return
+     *  is saved. The screen has already obtained the microphone (and, for a
+     *  video link, camera) permission; [videoAllowed] is `false` when the
+     *  camera was refused and the user chose audio only. */
+    fun onStart(videoAllowed: Boolean = true) {
+        val decoded = _uiState.value.decoded ?: return
+        // A video link joined after the camera was refused joins audio only
+        // (the user chose that in the permission dialog).
+        val d = if (videoAllowed) decoded else decoded.copy(mediaVideo = false)
         val secrets = authRepository.identitySecrets.value
         if (secrets != null) {
             viewModelScope.launch { beginJoin(d, secrets) }
@@ -261,6 +287,25 @@ class JoinCallViewModel(
         val d = pendingJoin ?: return
         val secrets = authRepository.identitySecrets.value ?: return
         pendingJoin = null
+        // ADR-0048 UX §4 — the guest account now exists: record the name it
+        // asked for as its own profile (no username). A name the rule refuses
+        // is not stored; the guest can set one later in Settings -> Profile.
+        val nameCheck = me.lakko.app.profile.checkDisplayName(_uiState.value.guestName)
+        if (nameCheck is me.lakko.app.profile.DisplayNameCheck.Valid) {
+            try {
+                val updated = me.lakko.app.profile.applyOwnNameChange(
+                    current = me.lakko.app.profile.OwnProfileStore.load(applicationContext, secrets.accountId),
+                    newName = nameCheck.normalized,
+                    username = null,
+                    nowMs = System.currentTimeMillis(),
+                )
+                if (updated != null) {
+                    me.lakko.app.profile.OwnProfileStore.save(applicationContext, secrets.accountId, updated)
+                }
+            } catch (err: Throwable) {
+                Log.w("JoinCall", "guest profile not saved", err)
+            }
+        }
         viewModelScope.launch { beginJoin(d, secrets) }
     }
 
@@ -431,6 +476,10 @@ fun JoinCallScreen(
     onExit: () -> Unit,
 ) {
     val ui by viewModel.uiState.collectAsState()
+    // Hosting or joining a call link needs the microphone, and the camera for
+    // a video link — asked here, before any account is minted or any SFU
+    // connection opened.
+    val callPermissions = rememberCallPermissionGate()
 
     // Once live, the shared in-call UI takes the whole screen.
     if (ui.phase == JoinCallPhase.Live) {
@@ -462,14 +511,42 @@ fun JoinCallScreen(
             }
             else -> {
                 val decoded = ui.decoded!!
+                // ADR-0048 — the host through the one resolver: a name when this
+                // device knows one, else the fingerprint without `@`.
+                val appContext = androidx.compose.ui.platform.LocalContext.current.applicationContext
+                val host = androidx.compose.runtime.remember(decoded.ownerSignatureKey) {
+                    me.lakko.app.profile.ProfileDirectory.get(appContext).resolve(decoded.ownerSignatureKey)
+                }
                 Text(
-                    text = "Host: ${decoded.ownerFingerprint}",
+                    text = "Host: ${host.listLabel}",
                     style = MaterialTheme.typography.bodyMedium,
-                    fontFamily = FontFamily.Monospace,
+                    fontFamily = if (host.isFingerprint) FontFamily.Monospace else FontFamily.Default,
                 )
                 when (ui.phase) {
-                    JoinCallPhase.Idle -> Button(onClick = { viewModel.onStart() }) {
-                        Text(if (decoded.isOwner) "Start call" else "Join call")
+                    JoinCallPhase.Idle -> {
+                        // ADR-0048 UX §4 — a guest (no session) is asked for a
+                        // name before Join mints the guest account.
+                        val asksName = viewModel.needsGuestName()
+                        if (asksName) {
+                            androidx.compose.material3.OutlinedTextField(
+                                value = ui.guestName,
+                                onValueChange = viewModel::onGuestNameChange,
+                                label = { Text("Your name") },
+                                singleLine = true,
+                                isError = ui.guestNameError != null,
+                                supportingText = ui.guestNameError?.let { reason -> { Text(reason) } },
+                            )
+                        }
+                        Button(
+                            enabled = !asksName || ui.guestNameError == null,
+                            onClick = {
+                                callPermissions.request(video = decoded.mediaVideo) { v ->
+                                    viewModel.onStart(videoAllowed = v)
+                                }
+                            },
+                        ) {
+                            Text(if (decoded.isOwner) "Start call" else "Join call")
+                        }
                     }
                     JoinCallPhase.Starting -> Text("Connecting…")
                     JoinCallPhase.Waiting -> Text("Waiting for the owner to admit you…")

@@ -135,6 +135,16 @@ export interface ChatApi {
    *  caller can decide whether to retry (transient) or surface
    *  the error (persistent — disk full, etc.). */
   persistSnapshot(accountIdB64: string): Promise<void>;
+  /** The FAIL-CLOSED sibling of `persistSnapshot`: identical write, but it
+   *  THROWS where `persistSnapshot` silently no-ops — no canonical Identity,
+   *  a canonical Identity other than `expectedIdentity` (the session changed
+   *  under the caller), or no device key. Used by the KeyPackage republish
+   *  (`chat/keypackage-publisher.ts`), which must not upload a KeyPackage
+   *  whose private key did not reach disk. */
+  persistSnapshotDurable(
+    accountIdB64: string,
+    expectedIdentity?: WasmIdentity,
+  ): Promise<void>;
   /** ADR-0040 (G-35) — persist the canonical Identity's provider snapshot AND a
    *  durable pending-commit outbox entry in ONE atomic IndexedDB transaction,
    *  awaited, FAIL-CLOSED (throws). A group-membership commit path calls this
@@ -258,6 +268,31 @@ export function ChatProvider(props: { children: JSX.Element }): JSX.Element {
         snapshotBytes,
         knownGroupIds,
       );
+    },
+    async persistSnapshotDurable(accountIdB64, expectedIdentity) {
+      const id = identity();
+      if (id === null) {
+        throw new Error("persistSnapshotDurable: no canonical Identity");
+      }
+      if (expectedIdentity !== undefined && id !== expectedIdentity) {
+        throw new Error(
+          "persistSnapshotDurable: the canonical Identity changed (session switched)",
+        );
+      }
+      const deviceKey = await getDeviceKey(accountIdB64);
+      if (deviceKey === null) {
+        throw new Error("persistSnapshotDurable: no device key");
+      }
+      // Re-checked after the await: a logout / forgetDevice in that window
+      // freed the identity this snapshot would be taken from.
+      if (identity() !== id) {
+        throw new Error(
+          "persistSnapshotDurable: the canonical Identity changed (session switched)",
+        );
+      }
+      const snapshotBytes = id.snapshotStorage();
+      const knownGroupIds = groups().map((g) => g.groupIdB64);
+      await saveMlsSnapshot(accountIdB64, deviceKey, snapshotBytes, knownGroupIds);
     },
     async persistSnapshotWithCommit(accountIdB64, entry) {
       // FAIL-CLOSED (unlike persistSnapshot's no-op returns): a commit path is

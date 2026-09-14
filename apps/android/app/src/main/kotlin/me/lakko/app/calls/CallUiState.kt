@@ -598,7 +598,12 @@ public class CallUiState(
      * follow-ups — `CallScreen` calls this when a session is
      * injected and falls back to [seedMockState] otherwise.
      */
-    public fun driveFrom(session: CallSession) {
+    public fun driveFrom(
+        session: CallSession,
+        /** ADR-0048 — the remote person's resolved name ("" when unknown). */
+        remoteName: String = "",
+    ) {
+        this.remoteName = remoteName
         bindJob?.cancel()
         bindJob = scope.launch {
             // Collect all three sources; recompute the whole UI
@@ -616,6 +621,9 @@ public class CallUiState(
             launch { session.videoPublishState.collect { rebuildFromSession(session) } }
         }
     }
+
+    /** ADR-0048 — the name [driveFrom] gave the 1x1 remote participant. */
+    private var remoteName: String = ""
 
     /** Recompute phase + roster + video from the session's
      *  current state. Called from each [driveFrom] collector. */
@@ -642,7 +650,7 @@ public class CallUiState(
             roster.add(
                 Participant(
                     id = "remote",
-                    displayName = "",
+                    displayName = remoteName,
                     isLocal = false,
                     micOn = true,
                     camOn = remoteTrack != null,

@@ -39,7 +39,7 @@
 //! ambiguity, no floating-point, no map iteration order):
 //!
 //! ```text
-//! version:           u8  == HISTORY_PLACEHOLDER_VERSION (1)
+//! version:           u8  == HISTORY_PLACEHOLDER_VERSION (2)
 //! message_id:        u64 (big-endian)
 //! direction:         u8  (0 = outgoing, 1 = incoming, 2 = system)
 //! created_at_len:    u16 (big-endian)   + created_at UTF-8 bytes
@@ -52,7 +52,33 @@
 //!     size:          u64 (big-endian)
 //!     mime_present:  u8 (0 | 1)  [ + mime_len: u16 + mime UTF-8 ]
 //!     name_present:  u8 (0 | 1)  [ + name_len: u16 + name UTF-8 ]
+//!     kind_present:  u8 (0 | 1)  [ + kind_len: u16 + kind UTF-8 ]
+//!     duration_present: u8 (0 | 1)  [ + duration_ms: u32 ]
+//!     waveform_present: u8 (0 | 1)  [ + waveform_len: u16 + bytes ]
+//!     width_present:  u8 (0 | 1)  [ + width: u32 ]
+//!     height_present: u8 (0 | 1)  [ + height: u32 ]
+//!     thumb_present:  u8 (0 | 1)  [ + thumb ]
+//!   thumb:
+//!     blob_id: 32 bytes, key: 32 bytes, nonce: 12 bytes, size: u64
+//!     mime_present:  u8 (0 | 1)  [ + mime_len: u16 + mime UTF-8 ]
+//!     width_present:  u8 (0 | 1)  [ + width: u32 ]
+//!     height_present: u8 (0 | 1)  [ + height: u32 ]
 //! ```
+//!
+//! ## Version 2: media metadata (ADR-0047)
+//!
+//! Version 1 carried no media fields, so a voice message, video note or
+//! GIF restored from a history bundle came back as a plain file. Version 2
+//! adds the ADR-0047 attachment fields (`kind`, `duration_ms`, `waveform`,
+//! `width`, `height`, `thumb`). Nothing is deployed, so there is no
+//! version-1 reader: the decoder refuses it.
+//!
+//! This codec enforces **structure** only (lengths, caps, presence bytes).
+//! The **semantic** ADR-0047 bounds (a duration only for a voice or video
+//! note and within its limit, a dimension within 1..=4096, a thumb within
+//! its size limit) live in `lakko-attachments`, which `lakko-mls` does not
+//! depend on; the FFI crates apply them on both encode and decode so every
+//! platform restores exactly what a live message would have shown.
 //!
 //! [`HistoryMessagePlaceholder::decode`] is a bounded parser:
 //! every length is checked against the remaining slice and
@@ -74,7 +100,7 @@ use crate::error::{Error, Result};
 /// Wire-format version byte. Bump on any layout change; the
 /// decoder refuses any other value so an older binary fails
 /// loudly rather than mis-parsing a newer placeholder.
-pub const HISTORY_PLACEHOLDER_VERSION: u8 = 1;
+pub const HISTORY_PLACEHOLDER_VERSION: u8 = 2;
 
 /// Hard cap on the message text, in UTF-8 bytes (1 MiB). Larger
 /// inputs are refused at encode time and rejected at decode.
@@ -92,6 +118,15 @@ pub const MAX_MIME_BYTES: usize = 256;
 
 /// Hard cap on an attachment `name` string, in UTF-8 bytes.
 pub const MAX_NAME_BYTES: usize = 1024;
+
+/// Hard cap on an attachment media `kind` string, in UTF-8 bytes. The
+/// known kinds (`voice`, `video_note`, `gif`) are far shorter; an unknown
+/// kind is carried verbatim within this cap.
+pub const MAX_KIND_BYTES: usize = 32;
+
+/// Hard cap on the waveform, in bytes (one amplitude per bar), matching
+/// ADR-0047's `MAX_WAVEFORM_BYTES`.
+pub const MAX_WAVEFORM_BYTES: usize = 128;
 
 /// SHA-256 blob id length.
 const BLOB_ID_LEN: usize = 32;
@@ -150,6 +185,38 @@ pub struct HistoryAttachmentPlaceholder {
     pub mime: Option<String>,
     /// Optional file name.
     pub name: Option<String>,
+    /// ADR-0047 media kind (`voice`, `video_note`, `gif`, or unknown).
+    pub kind: Option<String>,
+    /// ADR-0047 playback length in milliseconds.
+    pub duration_ms: Option<u32>,
+    /// ADR-0047 waveform amplitudes, at most [`MAX_WAVEFORM_BYTES`].
+    pub waveform: Option<Vec<u8>>,
+    /// ADR-0047 pixel width.
+    pub width: Option<u32>,
+    /// ADR-0047 pixel height.
+    pub height: Option<u32>,
+    /// ADR-0047 poster-frame blob.
+    pub thumb: Option<HistoryThumbPlaceholder>,
+}
+
+/// A poster-frame blob attached to a [`HistoryAttachmentPlaceholder`]
+/// (ADR-0047).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryThumbPlaceholder {
+    /// 32-byte SHA-256 blob id.
+    pub blob_id: [u8; BLOB_ID_LEN],
+    /// 32-byte content-encryption key.
+    pub key: [u8; KEY_LEN],
+    /// 12-byte AEAD nonce.
+    pub nonce: [u8; NONCE_LEN],
+    /// Plaintext size in bytes.
+    pub size: u64,
+    /// Optional MIME type.
+    pub mime: Option<String>,
+    /// Pixel width.
+    pub width: Option<u32>,
+    /// Pixel height.
+    pub height: Option<u32>,
 }
 
 /// The decoded display projection of one history-bundle message.
@@ -230,6 +297,34 @@ impl HistoryMessagePlaceholder {
             out.extend_from_slice(&att.size.to_be_bytes());
             encode_opt_string(&mut out, att.mime.as_deref(), MAX_MIME_BYTES, "mime")?;
             encode_opt_string(&mut out, att.name.as_deref(), MAX_NAME_BYTES, "name")?;
+            encode_opt_string(&mut out, att.kind.as_deref(), MAX_KIND_BYTES, "kind")?;
+            encode_opt_u32(&mut out, att.duration_ms);
+            encode_opt_bytes(
+                &mut out,
+                att.waveform.as_deref(),
+                MAX_WAVEFORM_BYTES,
+                "waveform",
+            )?;
+            encode_opt_u32(&mut out, att.width);
+            encode_opt_u32(&mut out, att.height);
+            match &att.thumb {
+                None => out.push(0),
+                Some(thumb) => {
+                    out.push(1);
+                    out.extend_from_slice(&thumb.blob_id);
+                    out.extend_from_slice(&thumb.key);
+                    out.extend_from_slice(&thumb.nonce);
+                    out.extend_from_slice(&thumb.size.to_be_bytes());
+                    encode_opt_string(
+                        &mut out,
+                        thumb.mime.as_deref(),
+                        MAX_MIME_BYTES,
+                        "thumb mime",
+                    )?;
+                    encode_opt_u32(&mut out, thumb.width);
+                    encode_opt_u32(&mut out, thumb.height);
+                },
+            }
         }
         Ok(out)
     }
@@ -271,6 +366,24 @@ impl HistoryMessagePlaceholder {
             let size = r.u64()?;
             let mime = r.opt_string(MAX_MIME_BYTES, "mime")?;
             let name = r.opt_string(MAX_NAME_BYTES, "name")?;
+            let kind = r.opt_string(MAX_KIND_BYTES, "kind")?;
+            let duration_ms = r.opt_u32("duration_ms")?;
+            let waveform = r.opt_bytes(MAX_WAVEFORM_BYTES, "waveform")?;
+            let width = r.opt_u32("width")?;
+            let height = r.opt_u32("height")?;
+            let thumb = if r.presence("thumb")? {
+                Some(HistoryThumbPlaceholder {
+                    blob_id: r.array::<BLOB_ID_LEN>("thumb blob_id")?,
+                    key: r.array::<KEY_LEN>("thumb key")?,
+                    nonce: r.array::<NONCE_LEN>("thumb nonce")?,
+                    size: r.u64()?,
+                    mime: r.opt_string(MAX_MIME_BYTES, "thumb mime")?,
+                    width: r.opt_u32("thumb width")?,
+                    height: r.opt_u32("thumb height")?,
+                })
+            } else {
+                None
+            };
             attachments.push(HistoryAttachmentPlaceholder {
                 blob_id,
                 key,
@@ -278,6 +391,12 @@ impl HistoryMessagePlaceholder {
                 size,
                 mime,
                 name,
+                kind,
+                duration_ms,
+                waveform,
+                width,
+                height,
+                thumb,
             });
         }
 
@@ -304,6 +423,39 @@ fn encode_opt_string(out: &mut Vec<u8>, s: Option<&str>, cap: usize, field: &str
         None => out.push(0),
         Some(value) => {
             let bytes = value.as_bytes();
+            if bytes.len() > cap {
+                return Err(Error::Codec(format!(
+                    "history placeholder: {field} {} bytes exceeds cap {cap}",
+                    bytes.len()
+                )));
+            }
+            let len = u16::try_from(bytes.len()).map_err(|_| {
+                Error::Codec(format!("history placeholder: {field} length overflow"))
+            })?;
+            out.push(1);
+            out.extend_from_slice(&len.to_be_bytes());
+            out.extend_from_slice(bytes);
+        },
+    }
+    Ok(())
+}
+
+/// Encode an optional `u32` as `present:u8 [+ u32 BE]`.
+fn encode_opt_u32(out: &mut Vec<u8>, v: Option<u32>) {
+    match v {
+        None => out.push(0),
+        Some(value) => {
+            out.push(1);
+            out.extend_from_slice(&value.to_be_bytes());
+        },
+    }
+}
+
+/// Encode optional bytes as `present:u8 [+ len:u16 + bytes]`.
+fn encode_opt_bytes(out: &mut Vec<u8>, b: Option<&[u8]>, cap: usize, field: &str) -> Result<()> {
+    match b {
+        None => out.push(0),
+        Some(bytes) => {
             if bytes.len() > cap {
                 return Err(Error::Codec(format!(
                     "history placeholder: {field} {} bytes exceeds cap {cap}",
@@ -399,15 +551,52 @@ impl<'a> Reader<'a> {
             .map_err(|_| Error::Codec(format!("history placeholder: {field} is not valid UTF-8")))
     }
 
-    /// Read an optional string encoded as `present:u8 [+ u16 len + utf8]`.
-    fn opt_string(&mut self, cap: usize, field: &str) -> Result<Option<String>> {
+    /// Read a presence byte: `0` absent, `1` present, anything else refused.
+    fn presence(&mut self, field: &str) -> Result<bool> {
         match self.u8()? {
-            0 => Ok(None),
-            1 => Ok(Some(self.string_u16(cap, field)?)),
+            0 => Ok(false),
+            1 => Ok(true),
             other => Err(Error::Codec(format!(
                 "history placeholder: {field} presence byte must be 0 or 1, got {other}"
             ))),
         }
+    }
+
+    /// Read an optional string encoded as `present:u8 [+ u16 len + utf8]`.
+    fn opt_string(&mut self, cap: usize, field: &str) -> Result<Option<String>> {
+        if self.presence(field)? {
+            Ok(Some(self.string_u16(cap, field)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn u32(&mut self, field: &str) -> Result<u32> {
+        let b = self.take(4, field)?;
+        Ok(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    }
+
+    /// Read an optional `u32` encoded as `present:u8 [+ u32 BE]`.
+    fn opt_u32(&mut self, field: &str) -> Result<Option<u32>> {
+        if self.presence(field)? {
+            Ok(Some(self.u32(field)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Read optional bytes encoded as `present:u8 [+ u16 len + bytes]`.
+    fn opt_bytes(&mut self, cap: usize, field: &str) -> Result<Option<Vec<u8>>> {
+        if !self.presence(field)? {
+            return Ok(None);
+        }
+        let len = self.u16()? as usize;
+        if len > cap {
+            return Err(Error::Codec(format!(
+                "history placeholder: {field} length {len} exceeds cap {cap}"
+            )));
+        }
+        Ok(Some(self.take(len, field)?.to_vec()))
     }
 }
 
@@ -423,6 +612,54 @@ mod tests {
             size: 4096,
             mime: Some("image/png".into()),
             name: Some("photo.png".into()),
+            kind: None,
+            duration_ms: None,
+            waveform: None,
+            width: Some(640),
+            height: Some(480),
+            thumb: None,
+        }
+    }
+
+    fn voice_note_attachment() -> HistoryAttachmentPlaceholder {
+        HistoryAttachmentPlaceholder {
+            blob_id: [0x44; 32],
+            key: [0x55; 32],
+            nonce: [0x66; 12],
+            size: 12_345,
+            mime: Some("audio/mp4".into()),
+            name: Some("voice-1.m4a".into()),
+            kind: Some("voice".into()),
+            duration_ms: Some(7_250),
+            waveform: Some((0u8..=127).collect()),
+            width: None,
+            height: None,
+            thumb: None,
+        }
+    }
+
+    fn video_note_attachment() -> HistoryAttachmentPlaceholder {
+        HistoryAttachmentPlaceholder {
+            blob_id: [0x77; 32],
+            key: [0x88; 32],
+            nonce: [0x99; 12],
+            size: 800_000,
+            mime: Some("video/mp4".into()),
+            name: Some("video-note.mp4".into()),
+            kind: Some("video_note".into()),
+            duration_ms: Some(42_000),
+            waveform: None,
+            width: Some(480),
+            height: Some(480),
+            thumb: Some(HistoryThumbPlaceholder {
+                blob_id: [0xAA; 32],
+                key: [0xBB; 32],
+                nonce: [0xCC; 12],
+                size: 20_000,
+                mime: Some("image/jpeg".into()),
+                width: Some(240),
+                height: None,
+            }),
         }
     }
 
@@ -470,12 +707,199 @@ mod tests {
             size: u64::MAX,
             mime: None,
             name: None,
+            kind: None,
+            duration_ms: None,
+            waveform: None,
+            width: None,
+            height: None,
+            thumb: None,
         }];
         let bytes = msg.encode().expect("encode");
         assert_eq!(
             HistoryMessagePlaceholder::decode(&bytes).expect("decode"),
             msg
         );
+    }
+
+    #[test]
+    fn media_attachments_round_trip() {
+        let mut msg = sample();
+        msg.attachments = vec![
+            voice_note_attachment(),
+            video_note_attachment(),
+            sample_attachment(),
+        ];
+        let bytes = msg.encode().expect("encode");
+        let back = HistoryMessagePlaceholder::decode(&bytes).expect("decode");
+        assert_eq!(back, msg);
+        assert_eq!(back.attachments[0].kind.as_deref(), Some("voice"));
+        assert_eq!(
+            back.attachments[1].thumb.as_ref().map(|t| t.size),
+            Some(20_000)
+        );
+    }
+
+    #[test]
+    fn version_1_is_refused() {
+        let mut bytes = sample().encode().expect("encode");
+        bytes[0] = 1;
+        let err = HistoryMessagePlaceholder::decode(&bytes).expect_err("v1 must be refused");
+        assert!(matches!(err, Error::Codec(m) if m.contains("version")));
+    }
+
+    #[test]
+    fn oversized_waveform_and_kind_are_refused_both_ways() {
+        let mut msg = sample();
+        let mut att = voice_note_attachment();
+        att.waveform = Some(vec![7; MAX_WAVEFORM_BYTES + 1]);
+        msg.attachments = vec![att];
+        assert!(msg.encode().is_err());
+
+        let mut msg = sample();
+        let mut att = voice_note_attachment();
+        att.kind = Some("k".repeat(MAX_KIND_BYTES + 1));
+        msg.attachments = vec![att];
+        assert!(msg.encode().is_err());
+
+        // A hand-edited waveform length over the cap is refused on decode.
+        let mut msg = sample();
+        let mut att = sample_attachment();
+        att.waveform = Some(vec![1; 3]);
+        att.width = None;
+        att.height = None;
+        msg.attachments = vec![att];
+        let mut bytes = msg.encode().expect("encode");
+        let waveform_len_at = bytes.len() - (1 + 1 + 1 + 3 + 2);
+        bytes[waveform_len_at..waveform_len_at + 2].copy_from_slice(
+            &u16::try_from(MAX_WAVEFORM_BYTES + 1)
+                .expect("fits")
+                .to_be_bytes(),
+        );
+        assert!(HistoryMessagePlaceholder::decode(&bytes).is_err());
+    }
+
+    #[test]
+    fn media_presence_byte_other_than_0_or_1_is_refused() {
+        let mut msg = sample();
+        msg.attachments = vec![voice_note_attachment()];
+        let bytes = msg.encode().expect("encode");
+        // The last byte of a voice attachment without a thumb is the thumb
+        // presence byte.
+        let mut bad = bytes;
+        let last = bad.len() - 1;
+        assert_eq!(bad[last], 0);
+        bad[last] = 2;
+        let err = HistoryMessagePlaceholder::decode(&bad).expect_err("must reject");
+        assert!(matches!(err, Error::Codec(m) if m.contains("thumb") && m.contains("presence")));
+    }
+
+    mod prop {
+        use super::super::*;
+        use proptest::prelude::*;
+
+        fn opt_string(max: usize) -> impl Strategy<Value = Option<String>> {
+            proptest::option::of(
+                proptest::string::string_regex(&format!(".{{0,{max}}}"))
+                    .expect("regex")
+                    .prop_filter("within byte cap", move |s| s.len() <= max),
+            )
+        }
+
+        fn thumb() -> impl Strategy<Value = HistoryThumbPlaceholder> {
+            (
+                any::<[u8; 32]>(),
+                any::<[u8; 32]>(),
+                any::<[u8; 12]>(),
+                any::<u64>(),
+                opt_string(40),
+                any::<Option<u32>>(),
+                any::<Option<u32>>(),
+            )
+                .prop_map(|(blob_id, key, nonce, size, mime, width, height)| {
+                    HistoryThumbPlaceholder {
+                        blob_id,
+                        key,
+                        nonce,
+                        size,
+                        mime,
+                        width,
+                        height,
+                    }
+                })
+        }
+
+        fn attachment() -> impl Strategy<Value = HistoryAttachmentPlaceholder> {
+            (
+                (
+                    any::<[u8; 32]>(),
+                    any::<[u8; 32]>(),
+                    any::<[u8; 12]>(),
+                    any::<u64>(),
+                ),
+                (opt_string(40), opt_string(40), opt_string(MAX_KIND_BYTES)),
+                (
+                    any::<Option<u32>>(),
+                    proptest::option::of(proptest::collection::vec(
+                        any::<u8>(),
+                        0..=MAX_WAVEFORM_BYTES,
+                    )),
+                    any::<Option<u32>>(),
+                    any::<Option<u32>>(),
+                    proptest::option::of(thumb()),
+                ),
+            )
+                .prop_map(
+                    |(
+                        (blob_id, key, nonce, size),
+                        (mime, name, kind),
+                        (duration_ms, waveform, width, height, thumb),
+                    )| {
+                        HistoryAttachmentPlaceholder {
+                            blob_id,
+                            key,
+                            nonce,
+                            size,
+                            mime,
+                            name,
+                            kind,
+                            duration_ms,
+                            waveform,
+                            width,
+                            height,
+                            thumb,
+                        }
+                    },
+                )
+        }
+
+        proptest! {
+            /// Any placeholder within the caps encodes, decodes to an equal
+            /// value, and re-encodes to identical bytes.
+            #[test]
+            fn any_placeholder_round_trips_byte_stably(
+                message_id in any::<u64>(),
+                direction in prop_oneof![
+                    Just(HistoryDirection::Outgoing),
+                    Just(HistoryDirection::Incoming),
+                    Just(HistoryDirection::System),
+                ],
+                created_at in opt_string(40),
+                text in opt_string(200),
+                attachments in proptest::collection::vec(attachment(), 0..4),
+            ) {
+                let msg = HistoryMessagePlaceholder {
+                    message_id,
+                    direction,
+                    created_at: created_at.unwrap_or_default(),
+                    text: text.unwrap_or_default(),
+                    attachments,
+                };
+                let bytes = msg.encode().expect("within caps");
+                let back = HistoryMessagePlaceholder::decode(&bytes).expect("decodes");
+                prop_assert_eq!(&back, &msg);
+                prop_assert_eq!(back.encode().expect("re-encodes"), bytes);
+            }
+        }
     }
 
     #[test]

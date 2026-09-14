@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.update
 import me.lakko.app.auth.AuthRepository
 import me.lakko.app.auth.IdentitySecrets
 import me.lakko.app.auth.base64Encode
+import me.lakko.app.profile.toFfi
 import me.lakko.app.auth.base64UrlDecodeNoPad
 import me.lakko.app.auth.base64UrlEncodeNoPad
 import me.lakko.app.chat.ChatRepository
@@ -40,12 +41,13 @@ import uniffi.lakko_ffi_uniffi.composeInviteCapability
  * ## Identity-secrets gate
  *
  * Every operation that signs / decrypts requires
- * [AuthRepository.identitySecrets] to be non-null. On a
- * session-restore path (rehydrate-from-disk), it is `null` until
- * the user re-enters their password. The repository surfaces
- * this state via [ContactsState.requiresReauth] so the screen
- * can render a "please re-enter password" panel instead of the
- * normal contacts list.
+ * [AuthRepository.identitySecrets] to be non-null. A cold-start
+ * restore now either populates them or lands signed out, so a
+ * live session normally has them; if a poll still finds them
+ * `null` (e.g. racing a logout) the repository surfaces
+ * [ContactsState.requiresReauth] so the screen can render a
+ * "please re-enter password" panel instead of the normal
+ * contacts list. The flag clears on the next poll that has them.
  */
 public class ContactsRepository(
     private val authRepo: AuthRepository,
@@ -131,6 +133,68 @@ public class ContactsRepository(
      *  where no Context was supplied). Called after every accept. */
     private fun persistAccepted() {
         appCtx?.let { AcceptedContactsStore.save(it, mutableState.value.accepted) }
+        pushRenamesToDirectory()
+    }
+
+    // -----------------------------------------------------------------
+    // ADR-0048 — profile names
+    // -----------------------------------------------------------------
+
+    /** The process-wide name directory; `null` in tests (no Context). */
+    private val profileDirectory: me.lakko.app.profile.ProfileDirectory? =
+        appContext?.let { me.lakko.app.profile.ProfileDirectory.get(it) }
+
+    init {
+        // ADR-0048 §3 — username verification resolves a claim through the
+        // plain discovery path (lookup -> bundle -> key), NOT the G-4 gate a
+        // contact request runs: see [me.lakko.app.profile.resolveUsernameForVerification].
+        // Attaching it also verifies every stored claim not yet verified.
+        profileDirectory?.attachUsernameResolver { username -> resolveForVerification(username) }
+    }
+
+    /** Hand the local renames (keyed by signature key) to the directory. */
+    private fun pushRenamesToDirectory() {
+        val directory = profileDirectory ?: return
+        directory.setRenames(
+            mutableState.value.accepted.mapNotNull { c ->
+                val name = c.displayName?.trim()?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
+                java.util.Base64.getEncoder().encodeToString(c.request.fromPubkey) to name
+            }.toMap(),
+        )
+    }
+
+    /**
+     * ADR-0048 §3 — resolve a claimed username to the signature key discovery
+     * serves for it, for the verifier.
+     *
+     * The plain path (lookup -> identity bundle -> key). It never reads or
+     * writes a peer pin: verifying a displayed username is a comparison
+     * against the sender's authenticated key, not a trust decision, and the
+     * G-4 gate would TOFU-pin the key as a side effect. The client's pin
+     * store is simply not consulted on this path.
+     */
+    private suspend fun resolveForVerification(
+        username: String,
+    ): me.lakko.app.profile.UsernameResolution =
+        try {
+            clientFactory().use { client ->
+                me.lakko.app.profile.resolveUsernameForVerification(
+                    username = username,
+                    lookupAccountId = { name -> client.lookupAccountId(name) },
+                    fetchSignatureKey = { accountId -> client.fetchPublishedSignatureKey(accountId) },
+                )
+            }
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (err: Throwable) {
+            // Constructing the client failed; no conclusion about the person.
+            me.lakko.app.profile.UsernameResolution.Unavailable(err)
+        }
+
+    /** This account's own profile in wire form, or `null` when none is stored. */
+    private fun ownProfileForWire(accountId: ByteArray): uniffi.lakko_ffi_uniffi.FfiProfile? {
+        val ctx = appCtx ?: return null
+        return me.lakko.app.profile.OwnProfileStore.load(ctx, accountId)?.toFfi()
     }
 
     /**
@@ -162,6 +226,8 @@ public class ContactsRepository(
                 senderSignaturePubkey = sender.signaturePubkey,
                 recipientUsername = recipientUsername,
                 introMessage = introMessage.toByteArray(Charsets.UTF_8),
+                // ADR-0048 §2 — who is asking, sealed to the recipient.
+                senderProfile = ownProfileForWire(secrets.accountId),
             )
             mutableState.update { state ->
                 state.copy(
@@ -239,17 +305,40 @@ public class ContactsRepository(
                 // Best-effort: a single bad Welcome doesn't
                 // block the inbox poll from advancing the
                 // cursor for the rest of the events.
+                // `joinGroupFromWelcome` republishes this device's
+                // KeyPackage after every attempt, success or failure.
+                var joinFailure: String? = null
                 for (welcome in welcomes) {
                     if (chatRepo != null) {
                         try {
                             chatRepo.joinGroupFromWelcome(welcome.welcomeBytes)
-                        } catch (_: Throwable) {
-                            // No logger plumbed yet — same
-                            // posture as ContactsClient's
-                            // pollStrangerInbox malformed-payload
-                            // drop. 1.15d7 will wire a tracing-
-                            // equivalent sink.
+                        } catch (e: kotlinx.coroutines.CancellationException) {
+                            throw e
+                        } catch (e: Throwable) {
+                            // A dropped Welcome is a chat someone started
+                            // with this user that will never appear, so it
+                            // must not vanish silently. The detail goes to
+                            // the log; the inline error tells the user.
+                            android.util.Log.w(
+                                "ContactsRepository",
+                                "joining a group from a Welcome failed",
+                                e,
+                            )
+                            joinFailure = WELCOME_JOIN_FAILED_MESSAGE
                         }
+                    }
+                }
+                // ADR-0048 §3 — a request's profile is bound to its
+                // signature-verified `from_pubkey`; store it (strictly newer
+                // only) so the request card can say who is asking.
+                profileDirectory?.let { directory ->
+                    for (req in newIncoming) {
+                        val profile = req.profile ?: continue
+                        directory.onProfileReceived(
+                            signatureKeyB64 = java.util.Base64.getEncoder()
+                                .encodeToString(req.fromPubkey),
+                            profile = profile,
+                        )
                     }
                 }
                 mutableState.update { state ->
@@ -260,7 +349,16 @@ public class ContactsRepository(
                         // even if this was a long-poll that
                         // didn't raise it, clearing is a no-op.
                         refreshing = false,
-                        lastError = null,
+                        // Secrets were present for this poll, so any earlier
+                        // re-auth prompt no longer applies.
+                        requiresReauth = false,
+                        // A failed join stays visible across the silent
+                        // background long polls (which would otherwise clear
+                        // it within seconds) until the user refreshes by hand.
+                        lastError = joinFailure
+                            ?: state.lastError.takeIf {
+                                !isManualRefresh && it == WELCOME_JOIN_FAILED_MESSAGE
+                            },
                     )
                 }
             }
@@ -512,6 +610,8 @@ public class ContactsRepository(
                         recipientSignaturePubkey = inviterSigPubkey,
                         recipientX25519Pubkey = inviterX25519Pubkey,
                         introMessage = ByteArray(0),
+                        // ADR-0048 §2 — who is asking, sealed to the inviter.
+                        senderProfile = ownProfileForWire(secrets.accountId),
                     )
                 }
             } catch (e: Throwable) {
@@ -645,6 +745,49 @@ public class ContactsRepository(
                 state.copy(outstandingInvites = state.outstandingInvites + invite)
             }
             invite
+        }
+    }
+
+    /**
+     * ADR-0032 — mint a `/c/<slug>` call link owned by this account.
+     *
+     * Signs a `CallInviteCapability` under the account identity, uploads it to
+     * the discovery ledger (a PoW solve, so this can take seconds) and returns
+     * the pointer link. A call link is independent of any chat: whoever opens it
+     * lands on the JoinCall screen, where this account is recognised as the
+     * owner and founds + hosts the call.
+     *
+     * @throws ContactsError on missing identity secrets, a compose failure, or
+     *   a discovery upload failure.
+     */
+    public suspend fun createCallLink(
+        media: me.lakko.app.calls.CallMediaPreset,
+        expiry: me.lakko.app.calls.CallInviteExpiryPreset,
+        maxUses: me.lakko.app.calls.CallInviteMaxUsesPreset,
+        label: String,
+    ): me.lakko.app.calls.CallInviteComposer.Composed {
+        val secrets = authRepo.identitySecrets.value
+            ?: throw ContactsError.wrap(
+                IllegalStateException(
+                    "no identity secrets — please re-enter your password",
+                ),
+            )
+        return try {
+            Identity.fromSeed(secrets.accountIdentitySeed).use { identity ->
+                authenticatedDiscoveryClient().use { discovery ->
+                    me.lakko.app.calls.CallInviteComposer(discovery).composeAndUpload(
+                        ownerSigningSeed = identity.ed25519Seed(),
+                        ownerAccountId = secrets.accountId,
+                        identity = identity,
+                        media = media,
+                        expiryPreset = expiry,
+                        maxUsesPreset = maxUses,
+                        label = label,
+                    )
+                }
+            }
+        } catch (e: Throwable) {
+            throw ContactsError.wrap(e)
         }
     }
 
@@ -795,6 +938,11 @@ public class ContactsRepository(
 // =============================================================================
 // State shape
 // =============================================================================
+
+/** Inline inbox error shown when a Welcome from a peer could not be joined. */
+internal const val WELCOME_JOIN_FAILED_MESSAGE: String =
+    "Someone started a chat with you, but it could not be opened on this " +
+        "device. Ask them to add you again."
 
 /** Snapshot of every field the [me.lakko.app.ui.contacts.ContactsScreen]
  *  renders. */
@@ -976,31 +1124,15 @@ private const val INVITE_URL_PREFIX: String = "https://lakko.me/i/"
 public data class AcceptedContact(
     val request: IncomingContactRequest,
     val groupIdHex: String? = null,
-    /** User-chosen display name (ADR-0021 follow-up). `null` until the
-     *  user renames the contact; the UI + the group-call roster then fall
-     *  back to [shortFingerprintLabel]. Persisted optionally, so a contact
-     *  stored before this field existed loads with `displayName == null`. */
+    /** The viewer's own name for this contact (a local rename, ADR-0021
+     *  follow-up; never sent anywhere). `null` until the user renames the
+     *  contact. Every surface resolves the label through
+     *  `me.lakko.app.profile.ProfileDirectory` (ADR-0048), which ranks this
+     *  rename above the person's own profile name, their verified username and
+     *  the fingerprint. Persisted optionally, so a contact stored before this
+     *  field existed loads with `displayName == null`. */
     val displayName: String? = null,
-) {
-    /** Short pubkey-fingerprint label this peer is shown by elsewhere in
-     *  the app (first 8 bytes of the Ed25519 pubkey, colon-grouped hex) —
-     *  the fallback the ADR-0021 group-call roster resolver surfaces for a
-     *  recognised contact that has no user-chosen [displayName] yet. */
-    public val shortFingerprintLabel: String
-        get() =
-            request.fromPubkey
-                .take(8)
-                .joinToString("") { "%02x".format(it.toInt() and 0xff) }
-                .chunked(4)
-                .joinToString(":")
-
-    /** The label to show for this contact: the user-chosen [displayName]
-     *  when set (and non-blank), else the short pubkey fingerprint. The
-     *  single source the contacts UI + the group-call roster resolver both
-     *  read, so a rename surfaces everywhere consistently. */
-    public val displayLabel: String
-        get() = displayName?.takeIf { it.isNotBlank() } ?: shortFingerprintLabel
-}
+)
 
 /** Outgoing contact request, surfaced on the UI as an "I asked
  *  @<name> to connect" row. */

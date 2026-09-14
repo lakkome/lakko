@@ -77,6 +77,7 @@ before clients can build TURN credentials.
 #    infra/etc-lakko/lakko.env.example to /etc/lakko/lakko.env:
 #      LAKKO_SFU_JWKS_URL=https://auth.lakko.me/.well-known/jwks.json
 #      LAKKO_SFU_MEDIA_BIND=0.0.0.0:43210
+#      LAKKO_SFU_MEDIA_ADVERTISE_IP=<the VPS public IP>   # required with an unspecified bind
 #    (LAKKO_SFU_BIND / _METRICS_BIND default to loopback 7880 / 9641).
 
 # 3. coturn VPS bootstrap (idempotent). `just deploy-coturn`

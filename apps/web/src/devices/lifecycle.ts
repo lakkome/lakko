@@ -152,3 +152,20 @@ export async function persistDeviceGroupSnapshot(
     console.warn("DeviceGroup snapshot persist failed", err);
   }
 }
+
+/**
+ * The receive loop's persist: the snapshot AND the journal position it has
+ * consumed up to, in one write, and FAIL-CLOSED — unlike
+ * {@link persistDeviceGroupSnapshot} this rejects on failure, because the loop
+ * must hold its cursor when the write did not land (see
+ * `sync/journal-batch.ts`).
+ */
+export async function persistDeviceGroupSnapshotWithCursor(
+  identity: WasmIdentity,
+  accountIdB64: string,
+  deviceKey: CryptoKey,
+  journalCursor: number,
+): Promise<void> {
+  const snapshot = identity.snapshotStorage();
+  await putDeviceGroupSnapshot(accountIdB64, snapshot, deviceKey, journalCursor);
+}

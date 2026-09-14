@@ -105,9 +105,11 @@ mod wasm_tests;
 // keep the rustdoc surface tidy).
 pub use auth::{OpaqueLogin, OpaqueLoginOutput, OpaqueRegister, OpaqueRegisterOutput};
 pub use contacts::{
-    ContactRequest, Direction, IdentityPseudonym, InviteCapability, PerRelationship, StrangerInbox,
+    compose_profile_envelope, decode_profile_envelope, normalize_display_name, profile_is_newer,
+    ContactRequest, Direction, IdentityPseudonym, InviteCapability, OpenedContactRequest,
+    PerRelationship, StrangerInbox, WasmProfile,
 };
-pub use discovery::{normalize_username, OprfBlinder};
+pub use discovery::{normalize_username, validate_username, OprfBlinder};
 pub use mls::{AddMember, Group, Identity, ProcessedMessage, ProcessedMessageKind};
 pub use mnemonic::RecoveryMnemonic;
 pub use pow_solver::{PowProof, PowSolver};

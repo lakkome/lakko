@@ -40,12 +40,12 @@ import Foundation
 ///
 /// ## Default base URL
 ///
-/// `http://localhost:8083` — iOS simulator loopback + port `8083`
-/// matching `lakko-svc-storage`'s dev bind. Override for physical
-/// devices (LAN IP) and production (Cloudflare tunnel URL).
+/// `<LakkoApiBaseUrl>/storage` (``ApiEndpoints``); with no API base
+/// URL, `http://localhost:8083` — iOS simulator loopback + port `8083`
+/// matching `lakko-svc-storage`'s dev bind.
 public final class StorageClient {
 
-    public static let defaultBaseURL: String = "http://localhost:8083"
+    public static var defaultBaseURL: String { ApiEndpoints.baseURL(for: .storage) }
 
     /// Raw SHA-256 blob id length.
     public static let blobIdLength: Int = 32
@@ -99,7 +99,14 @@ public final class StorageClient {
     ///   - blobId: 32-byte SHA-256 of the ciphertext (the
     ///     `blob_id` returned by `EncryptedAttachment.blobId`).
     ///   - ciphertext: The bytes to store. Must hash to `blobId`.
-    public func putBlob(blobId: Data, ciphertext: Data) async throws {
+    ///   - progress: ADR-0047 — optional fraction-sent callback (0...1) for
+    ///     the timeline's determinate upload ring. Called from the session's
+    ///     delegate queue; callers hop to the main actor themselves.
+    public func putBlob(
+        blobId: Data,
+        ciphertext: Data,
+        progress: (@Sendable (Double) -> Void)? = nil
+    ) async throws {
         guard blobId.count == Self.blobIdLength else {
             throw StorageClientError.argument(
                 "blobId must be \(Self.blobIdLength) bytes (got \(blobId.count))"
@@ -125,7 +132,15 @@ public final class StorageClient {
 
         let raw: (Data, URLResponse)
         do {
-            raw = try await session.upload(for: request, from: ciphertext)
+            if let progress {
+                raw = try await session.upload(
+                    for: request,
+                    from: ciphertext,
+                    delegate: UploadProgressDelegate(onProgress: progress)
+                )
+            } else {
+                raw = try await session.upload(for: request, from: ciphertext)
+            }
         } catch {
             throw StorageClientError.network(
                 endpoint: endpoint,
@@ -425,5 +440,27 @@ extension StorageClientError: LocalizedError {
         case .http(let s, let e, let b): return "storage \(e) → \(s): \(b)"
         case .network(let e, let u): return "storage \(e) network error: \(u)"
         }
+    }
+}
+
+/// ADR-0047 — forwards `didSendBodyData` to a fraction-sent callback so a
+/// media upload can drive a determinate ring. Per-task, so concurrent uploads
+/// never share a counter.
+private final class UploadProgressDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    private let onProgress: @Sendable (Double) -> Void
+
+    init(onProgress: @escaping @Sendable (Double) -> Void) {
+        self.onProgress = onProgress
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didSendBodyData bytesSent: Int64,
+        totalBytesSent: Int64,
+        totalBytesExpectedToSend: Int64
+    ) {
+        guard totalBytesExpectedToSend > 0 else { return }
+        onProgress(min(1, max(0, Double(totalBytesSent) / Double(totalBytesExpectedToSend))))
     }
 }

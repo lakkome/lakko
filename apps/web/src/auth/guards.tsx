@@ -15,26 +15,37 @@
  * Both guards are declarative wrappers — pass children through and
  * the consumer never has to think about navigation imperatively.
  *
+ * What either guard renders is decided by `phrase-gate.ts`, which also holds
+ * the rule that an unacknowledged signup recovery phrase is shown before ANY
+ * route — the anonymous guard used to navigate home on the very transition
+ * that produced the phrase, so it was never seen.
+ *
  * The guards read the real auth state behind `useAuth()` —
  * `AuthContext` runs OPAQUE-PAKE round-trips (1.16c) and rehydrates
  * persisted sessions on mount, so the guards see a genuine
  * `loading` / `anon` / `session` value.
  */
-import { Show, type JSX } from "solid-js";
-import { Navigate } from "@solidjs/router";
+import { Match, Show, Switch, type JSX } from "solid-js";
+import { Navigate, useLocation } from "@solidjs/router";
 import { useAuth } from "./AuthContext";
 import { paths } from "../routes/paths";
 import RestoreIdentityPrompt from "./RestoreIdentityPrompt";
 import SaveFreshPhrasePrompt from "./SaveFreshPhrasePrompt";
+import SignupPhrasePrompt from "./SignupPhrasePrompt";
+import { readReturnUrl } from "./return-url";
+import {
+  anonymousGuardView,
+  sessionGuardView,
+  type GuardView,
+} from "./phrase-gate";
 
 /** Gate every route inside the AppShell behind a real session. */
 export function RequireSession(props: { children: JSX.Element }): JSX.Element {
   const auth = useAuth();
+  const view = (): GuardView =>
+    sessionGuardView(auth.state().kind, auth.signupPhrase() !== null);
   return (
-    <Show
-      when={auth.state().kind === "session"}
-      fallback={<UnauthenticatedFallback />}
-    >
+    <Show when={view() === "children"} fallback={<GuardFallback view={view()} />}>
       <IdentitySecurityBanner />
       {props.children}
     </Show>
@@ -86,85 +97,54 @@ export function RequireAnonymous(props: {
   children: JSX.Element;
 }): JSX.Element {
   const auth = useAuth();
+  const view = (): GuardView =>
+    anonymousGuardView(auth.state().kind, auth.signupPhrase() !== null);
   return (
-    <Show
-      when={auth.state().kind === "anon"}
-      fallback={<AlreadyAuthenticatedFallback />}
-    >
+    <Show when={view() === "children"} fallback={<GuardFallback view={view()} />}>
       {props.children}
     </Show>
   );
 }
 
-function UnauthenticatedFallback(): JSX.Element {
-  const auth = useAuth();
-  // ADR-0017: an authenticated-but-identity-pending user (fresh
-  // device, no cached phrase seed) must NOT be bounced to /login —
-  // that would loop (login thinks they're already authenticated).
-  // Render the recovery-phrase prompt in place instead. The
-  // lost-everything fallback (`save-fresh-phrase`) lands here too —
-  // render the phrase-save screen rather than redirect.
+/**
+ * Everything a guard renders instead of its route.
+ *
+ * - `loading`: a placeholder rather than an instant redirect — bouncing the
+ *   user to /login during a half-second rehydration is jarring.
+ * - `restore-identity` / `save-fresh-phrase`: ADR-0017 — an authenticated
+ *   user whose identity is not yet on this device, or who just minted a new
+ *   one, must not be bounced (that would loop).
+ * - `save-signup-phrase`: the signup recovery phrase, until acknowledged.
+ *   Clearing it re-runs the decision: on a public auth page that is
+ *   `redirect-home`, which honours `?return=`; inside the app the route
+ *   underneath simply renders.
+ */
+function GuardFallback(props: { view: GuardView }): JSX.Element {
+  const location = useLocation();
   return (
-    <Show
-      when={
-        auth.state().kind !== "needs-recovery-phrase" &&
-        auth.state().kind !== "save-fresh-phrase"
-      }
-      fallback={
-        <Show
-          when={auth.state().kind === "save-fresh-phrase"}
-          fallback={<RestoreIdentityPrompt />}
-        >
-          <SaveFreshPhrasePrompt />
-        </Show>
-      }
-    >
-      {/* While the context is still resolving (it starts in the
-          "loading" state on mount while it reads localStorage + IDB)
-          we render a placeholder instead of an instant redirect —
-          bouncing the user to /login during a half-second
-          rehydration is jarring. */}
-      <Show
-        when={auth.state().kind !== "loading"}
-        fallback={<p style={{ padding: "1.5rem" }}>Restoring session…</p>}
-      >
+    <Switch>
+      <Match when={props.view === "loading"}>
+        <p style={{ padding: "1.5rem" }}>Restoring session…</p>
+      </Match>
+      <Match when={props.view === "restore-identity"}>
+        <RestoreIdentityPrompt />
+      </Match>
+      <Match when={props.view === "save-fresh-phrase"}>
+        <SaveFreshPhrasePrompt />
+      </Match>
+      <Match when={props.view === "save-signup-phrase"}>
+        <SignupPhrasePrompt />
+      </Match>
+      <Match when={props.view === "redirect-login"}>
         <Navigate href={paths.login} />
-      </Show>
-    </Show>
-  );
-}
-
-function AlreadyAuthenticatedFallback(): JSX.Element {
-  const auth = useAuth();
-  // ADR-0017: the identity-pending state lands here too (the user
-  // just submitted the login form, which is wrapped in
-  // RequireAnonymous). Render the recovery-phrase prompt rather than
-  // an indefinite "Restoring session…". The lost-everything fallback
-  // (`save-fresh-phrase`) lands here too (the user clicked
-  // "Create a new identity" from within RestoreIdentityPrompt) —
-  // render the phrase-save screen.
-  return (
-    <Show
-      when={
-        auth.state().kind !== "needs-recovery-phrase" &&
-        auth.state().kind !== "save-fresh-phrase"
-      }
-      fallback={
-        <Show
-          when={auth.state().kind === "save-fresh-phrase"}
-          fallback={<RestoreIdentityPrompt />}
-        >
-          <SaveFreshPhrasePrompt />
-        </Show>
-      }
-    >
-      {/* If the user is "loading", let it resolve before bouncing. */}
-      <Show
-        when={auth.state().kind === "session"}
-        fallback={<p style={{ padding: "1.5rem" }}>Restoring session…</p>}
-      >
-        <Navigate href={paths.home} />
-      </Show>
-    </Show>
+      </Match>
+      <Match when={props.view === "redirect-home"}>
+        {/* A public auth page reached with `?return=<path>` (1.18e — an invite
+            landing's "Log in" / "Sign up") continues there once signed in —
+            including after the signup phrase is acknowledged. Validated
+            path-only by `readReturnUrl`; `/` when absent or unsafe. */}
+        <Navigate href={readReturnUrl(location)} />
+      </Match>
+    </Switch>
   );
 }

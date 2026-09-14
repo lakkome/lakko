@@ -96,6 +96,31 @@ private struct SignupForm: View {
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled(true)
                     .disabled(viewModel.busy)
+                // ADR-0048 §4 — the reason, as the user types.
+                if let hint = viewModel.usernameHint {
+                    Text(hint)
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                } else {
+                    Text("Latin letters, digits and _, 3 to 32 characters.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
+                // ADR-0048 — optional; others see the username without it.
+                TextField(
+                    "Your name",
+                    text: $viewModel.displayName,
+                    prompt: Text(viewModel.username.isEmpty ? "Your name (optional)" : viewModel.username)
+                )
+                .textFieldStyle(.roundedBorder)
+                .textInputAutocapitalization(.words)
+                .disabled(viewModel.busy)
+                if let nameError = viewModel.displayNameError {
+                    Text(nameError)
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                }
 
                 SecureField("Password", text: $viewModel.password)
                     .textFieldStyle(.roundedBorder)

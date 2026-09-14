@@ -6,7 +6,10 @@ package me.lakko.app.storage
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.HttpClientEngine
 import io.ktor.client.engine.okhttp.OkHttp
+import me.lakko.app.config.ApiEndpoints
+import me.lakko.app.config.ApiService
 import me.lakko.app.transport.AntiCensorshipEngine
+import io.ktor.client.plugins.onUpload
 import io.ktor.client.request.delete
 import io.ktor.client.request.get
 import io.ktor.client.request.head
@@ -113,7 +116,14 @@ public class StorageClient(
      * @param ciphertext  The bytes to store. Must hash to
      *                    `blobId`.
      */
-    public suspend fun putBlob(blobId: ByteArray, ciphertext: ByteArray) {
+    public suspend fun putBlob(
+        blobId: ByteArray,
+        ciphertext: ByteArray,
+        /** ADR-0047 — bytes sent so far and the body length, for the media
+         *  bubble's determinate upload ring. Optional; `null` changes nothing
+         *  about the request. */
+        onProgress: ((sent: Long, total: Long) -> Unit)? = null,
+    ) {
         if (blobId.size != BLOB_ID_LEN) {
             throw StorageClientArgError(
                 "blobId must be $BLOB_ID_LEN bytes (got ${blobId.size})",
@@ -136,6 +146,11 @@ public class StorageClient(
             client.put(url) {
                 contentType(ContentType.Application.OctetStream)
                 setBody(ciphertext)
+                if (onProgress != null) {
+                    onUpload { sent, length ->
+                        onProgress(sent, length ?: ciphertext.size.toLong())
+                    }
+                }
             }
         } catch (cause: Throwable) {
             throw StorageNetworkError(endpoint, cause)
@@ -307,10 +322,12 @@ public class StorageClient(
     }
 
     public companion object {
-        /** Storage service URL — Android emulator loopback
-         *  alias, port `8083` matching the dev
-         *  `lakko-svc-storage` bind. */
-        public const val DEFAULT_BASE_URL: String = "http://10.0.2.2:8083"
+        /** Storage service URL — `<LAKKO_API_BASE_URL>/storage`
+         *  ([ApiEndpoints]), or the Android emulator loopback alias +
+         *  the dev `lakko-svc-storage` bind (`http://10.0.2.2:8083`)
+         *  without one. */
+        public val DEFAULT_BASE_URL: String
+            get() = ApiEndpoints.baseUrlFor(ApiService.STORAGE)
 
         /** Raw SHA-256 blob id length. */
         public const val BLOB_ID_LEN: Int = 32

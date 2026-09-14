@@ -27,6 +27,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
+import kotlinx.coroutines.flow.collectLatest
 import androidx.lifecycle.viewmodel.compose.viewModel
 import me.lakko.app.auth.AuthRepository
 import me.lakko.app.auth.AuthState
@@ -37,6 +39,7 @@ import me.lakko.app.contacts.InviteIntake
 import me.lakko.app.push.LakkoMessagingService
 import me.lakko.app.push.PushIntake
 import me.lakko.app.ui.auth.LoginScreen
+import me.lakko.app.ui.call.OneToOneCallOverlay
 import me.lakko.app.ui.auth.LoginViewModel
 import me.lakko.app.ui.auth.RecoverScreen
 import me.lakko.app.ui.auth.RecoverViewModel
@@ -132,6 +135,14 @@ class MainActivity : ComponentActivity() {
         // joinGroupFromWelcome, and the order of construction
         // makes the dependency obvious in the call site.
         val chatRepository = ChatRepository(applicationContext)
+        // The 1x1 call lives in a process-wide host, not in a chat screen: it
+        // must ring whichever screen is showing and survive leaving the chat.
+        // Every poll of every group hands one-to-one call signaling to it. An
+        // activity recreate builds a new repository, so the port and the hook
+        // are re-attached here each time.
+        val callHost = me.lakko.app.calls.AppCallHost.instance
+        callHost.attach(me.lakko.app.calls.ChatRepositoryCallPort(applicationContext, chatRepository))
+        chatRepository.oneToOneCallInbound = callHost::deliver
         val contactsRepository = ContactsRepository(
             authRepo = authRepository,
             // G-4 (ADR-0016) — the app context backs the persistent
@@ -186,6 +197,7 @@ class MainActivity : ComponentActivity() {
                         authRepository = authRepository,
                         contactsRepository = contactsRepository,
                         chatRepository = chatRepository,
+                        callHost = callHost,
                         deviceGroupSync = deviceGroupSync,
                         inviteIntake = inviteIntake,
                         pushIntake = pushIntake,
@@ -318,6 +330,7 @@ private fun AppRoot(
     authRepository: AuthRepository,
     contactsRepository: ContactsRepository,
     chatRepository: ChatRepository,
+    callHost: me.lakko.app.calls.OneToOneCallHost<me.lakko.app.calls.CallSession>,
     deviceGroupSync: me.lakko.app.devices.sync.DeviceGroupSyncRepository,
     inviteIntake: InviteIntake,
     pushIntake: PushIntake,
@@ -402,6 +415,7 @@ private fun AppRoot(
                     authRepository = authRepository,
                     contactsRepository = contactsRepository,
                     chatRepository = chatRepository,
+                    callHost = callHost,
                     deviceGroupSync = deviceGroupSync,
                     inviteIntake = inviteIntake,
                     pushIntake = pushIntake,
@@ -484,6 +498,7 @@ private fun SessionRoot(
     authRepository: AuthRepository,
     contactsRepository: ContactsRepository,
     chatRepository: ChatRepository,
+    callHost: me.lakko.app.calls.OneToOneCallHost<me.lakko.app.calls.CallSession>,
     deviceGroupSync: me.lakko.app.devices.sync.DeviceGroupSyncRepository,
     inviteIntake: InviteIntake,
     pushIntake: PushIntake,
@@ -492,14 +507,31 @@ private fun SessionRoot(
 ) {
     // Drive ChatRepository.bootstrap whenever a fresh
     // identity-secrets value lands. The first non-null emission
-    // happens immediately after signup / login / recover; the
-    // bootstrap call is idempotent for the same account id, so
-    // repeated emissions (state restoration across config
-    // changes) cost nothing.
+    // happens immediately after signup / login / recover — or, on a
+    // cold start, straight from AuthRepository's silent session
+    // restore; the bootstrap call is idempotent for the same account
+    // id, so repeated emissions cost nothing. A non-idempotent
+    // bootstrap ends by republishing this device's KeyPackage from the
+    // long-lived identity (ChatRepository.requestKeyPackageRepublish).
     val identitySecrets by authRepository.identitySecrets.collectAsStateWithLifecycle()
     LaunchedEffect(identitySecrets) {
         val secrets = identitySecrets ?: return@LaunchedEffect
         chatRepository.bootstrap(secrets)
+        // ADR-0048 — make sure this account's own profile exists and states
+        // its current username (normalised; `null` for a guest). Republished
+        // into every group only when that actually changed.
+        val canonicalUsername = account.username
+            .takeIf { it.isNotBlank() }
+            ?.let { typed ->
+                (me.lakko.app.profile.checkUsername(typed) as? me.lakko.app.profile.UsernameCheck.Valid)
+                    ?.normalized
+            }
+        val (_, profileChanged) = me.lakko.app.profile.OwnProfileStore.ensureUsername(
+            context = chatRepository.context,
+            accountId = secrets.accountId,
+            username = canonicalUsername,
+        )
+        if (profileChanged) chatRepository.publishOwnProfileToAllGroups()
         // Phase 2a3e2b — bootstrap the cross-device sync
         // runtime alongside the chat bootstrap so the poll
         // loop starts at the same moment chat surfaces become
@@ -519,6 +551,48 @@ private fun SessionRoot(
 
     var destination: SessionDestination by remember {
         mutableStateOf(SessionDestination.Home)
+    }
+
+    // The app-level receive loop: every group long-polled while the app is in
+    // the foreground, WHATEVER screen is showing. Call signaling (the 1x1 call
+    // host), group-call records and the chat list's unread counts all come from
+    // what a poll applies, so polling only on the chat list meant an incoming
+    // call rang nowhere else. `STARTED` is the foreground gate: stopped, the
+    // loop ends and the host holds an offer instead of ringing it; started
+    // again, the loop fetches at once and a still-fresh offer rings.
+    //
+    // Groups an open chat screen is long-polling itself are left to that
+    // screen, and the loop restarts when that set changes, so no group is
+    // polled twice (the loser of the per-group race would return at once and
+    // spin) and none is left unpolled.
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    LaunchedEffect(lifecycleOwner, chatRepository, callHost) {
+        lifecycleOwner.lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
+            callHost.setForeground(true)
+            try {
+                chatRepository.screenPolledGroups.collectLatest { excluded ->
+                    while (true) {
+                        val startedAt = android.os.SystemClock.elapsedRealtime()
+                        try {
+                            chatRepository.pollAllGroups(waitSecs = APP_LONG_POLL_SECS, exclude = excluded)
+                        } catch (cancel: kotlinx.coroutines.CancellationException) {
+                            throw cancel
+                        } catch (_: Throwable) {
+                            kotlinx.coroutines.delay(APP_POLL_RETRY_BACKOFF_MS)
+                        }
+                        // A poll that returns at once (not bootstrapped yet, or a
+                        // group momentarily in flight elsewhere) must not become
+                        // a busy loop.
+                        val elapsed = android.os.SystemClock.elapsedRealtime() - startedAt
+                        if (elapsed < APP_POLL_MIN_ITERATION_MS) {
+                            kotlinx.coroutines.delay(APP_POLL_MIN_ITERATION_MS - elapsed)
+                        }
+                    }
+                }
+            } finally {
+                callHost.setForeground(false)
+            }
+        }
     }
 
     // Observe pending invite slugs (1.15e11). When a deep
@@ -583,6 +657,13 @@ private fun SessionRoot(
         pushIntake.consume()
     }
 
+    // ADR-0048 UX §5 — the caller's resolved name for the call overlay.
+    val profileDirectory = remember(chatRepository) {
+        me.lakko.app.profile.ProfileDirectory.get(chatRepository.context)
+    }
+    val nameVersion by profileDirectory.version.collectAsStateWithLifecycle()
+
+    androidx.compose.foundation.layout.Box(modifier = Modifier.fillMaxSize()) {
     when (val current = destination) {
         SessionDestination.Home -> HomeScreen(
             account = account,
@@ -592,12 +673,15 @@ private fun SessionRoot(
             onOpenPasskeys = { destination = SessionDestination.Passkeys },
             onOpenDevices = { destination = SessionDestination.Devices },
             onOpenAntiCensorship = { destination = SessionDestination.AntiCensorship },
+            onOpenProfile = { destination = SessionDestination.Profile },
             onLogout = {
+                callHost.reset()
                 contactsRepository.clear()
                 chatRepository.clear()
                 authRepository.logout()
             },
             onForgetDevice = {
+                callHost.reset()
                 contactsRepository.clear()
                 // Note: chat.forgetDevice() BEFORE
                 // auth.forgetDevice() — see the file-level
@@ -622,6 +706,10 @@ private fun SessionRoot(
                 onOpenChat = { groupIdHex ->
                     destination = SessionDestination.Chat(groupIdHex)
                 },
+                // ADR-0032 — "Start call" on a created call link opens the same
+                // `/c/` landing a tapped link does; AppRoot presents it over the
+                // session, and this account is recognised as the owner there.
+                onStartCallLink = { slug -> inviteIntake.publishCallJoin(slug) },
             )
         }
 
@@ -661,6 +749,7 @@ private fun SessionRoot(
                         resolveRecipient = { username ->
                             contactsRepository.resolveVerifiedRecipient(username)
                         },
+                        callHost = callHost,
                     )
                 },
             )
@@ -721,6 +810,30 @@ private fun SessionRoot(
             onBack = { destination = SessionDestination.Home },
         )
 
+        SessionDestination.Profile -> {
+            // ADR-0048 UX §4 — Settings -> Profile. Keyed on the raw account id
+            // from the live session secrets; a save persists the own profile and
+            // republishes it into every group.
+            val secrets = identitySecrets
+            if (secrets != null) {
+                val ctx = chatRepository.context
+                val accountId = secrets.accountId
+                me.lakko.app.ui.profile.ProfileSettingsScreen(
+                    current = remember(accountId) {
+                        me.lakko.app.profile.OwnProfileStore.load(ctx, accountId)
+                    },
+                    username = account.username.takeIf { it.isNotBlank() },
+                    onSaved = { updated ->
+                        me.lakko.app.profile.OwnProfileStore.save(ctx, accountId, updated)
+                        chatRepository.publishOwnProfileToAllGroups()
+                    },
+                    onBack = { destination = SessionDestination.Home },
+                )
+            } else {
+                LoadingScreen()
+            }
+        }
+
         is SessionDestination.InviteLanding -> {
             val inviteSlug = current.slug
             // Key the VM by slug so re-tapping a different
@@ -760,7 +873,31 @@ private fun SessionRoot(
             )
         }
     }
+
+    // The 1x1 call's ringing banner and in-call screen, above every screen
+    // above. Rendered from the process-wide host, so leaving a chat or
+    // switching screens never hides or ends a call.
+    OneToOneCallOverlay(
+        host = callHost,
+        nameForGroup = { groupIdHex ->
+            nameVersion.let {
+                chatRepository.oneToOnePeerKey(groupIdHex)?.let { key ->
+                    profileDirectory.resolve(key).primary
+                }
+            }
+        },
+    )
+    }
 }
+
+/** App-level receive loop: DS long-poll budget per pass. */
+private const val APP_LONG_POLL_SECS: Int = 30
+
+/** App-level receive loop: pause after a failed pass. */
+private const val APP_POLL_RETRY_BACKOFF_MS: Long = 5_000L
+
+/** App-level receive loop: a pass that returned sooner than this waits out the rest. */
+private const val APP_POLL_MIN_ITERATION_MS: Long = 1_000L
 
 /**
  * Five Session-state destinations. Compose Navigation lands in
@@ -788,6 +925,9 @@ private sealed interface SessionDestination {
 
     /** ADR-0026 — anti-censorship arming surface. */
     data object AntiCensorship : SessionDestination
+
+    /** ADR-0048 — Settings -> Profile (own profile name). */
+    data object Profile : SessionDestination
 }
 
 /**
@@ -800,6 +940,7 @@ private fun AnonRoot(
     repository: AuthRepository,
     cachedUsername: String?,
 ) {
+    val appContext = LocalContext.current.applicationContext
     var destination by remember(cachedUsername) {
         mutableStateOf(
             if (cachedUsername != null) AnonDestination.Login
@@ -823,7 +964,16 @@ private fun AnonRoot(
         }
         AnonDestination.Signup -> {
             val signupVm: SignupViewModel = viewModel(
-                factory = singletonViewModelFactory { SignupViewModel(repository) },
+                factory = singletonViewModelFactory {
+                    SignupViewModel(
+                        repo = repository,
+                        // ADR-0048 — the optional "Your name" lands in the
+                        // own-profile store once the account exists.
+                        saveOwnProfile = { accountId, profile ->
+                            me.lakko.app.profile.OwnProfileStore.save(appContext, accountId, profile)
+                        },
+                    )
+                },
             )
             SignupScreen(
                 viewModel = signupVm,

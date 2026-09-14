@@ -363,11 +363,22 @@ dev-push-gw:
 dev-channels:
     cargo run -p lakko-svc-channels
 
+# Run the GIF proxy locally (ADR-0047 §4) on 127.0.0.1:8091. Needs
+# LAKKO_SESSION_TOKEN_SECRET in .env (the same value dev-auth uses). Without
+# LAKKO_GIF_GIPHY_API_KEY every /gifs route answers 503, which the clients
+# map to a hidden GIF tab; set a GIPHY key in .env to search for real.
+dev-gif-proxy:
+    cargo run -p lakko-svc-gif-proxy
+
 # Run the Rust SFU locally (ADR-0011). Requires LAKKO_SFU_JWKS_URL
 # in .env (point it at a running dev auth service's JWKS, or the
 # fixture JWKS from ci/sfu-e2e/). Set LAKKO_SFU_MEDIA_BIND to a
-# local UDP port (e.g. 0.0.0.0:43210) to exercise media; leave it
-# unset for a signaling-only smoke.
+# local UDP socket to exercise media — either a concrete interface
+# address (e.g. 192.168.1.20:43210, advertised as-is) or
+# 0.0.0.0:43210 together with LAKKO_SFU_MEDIA_ADVERTISE_IP (the IP
+# clients dial, e.g. 127.0.0.1 or your LAN IP; without it an
+# unspecified bind refuses to start). Leave the bind unset for a
+# signaling-only smoke.
 dev-sfu:
     cargo run -p lakko-svc-sfu
 
@@ -754,6 +765,13 @@ turn_host := env_var_or_default("LAKKO_TURN_HOST", "turn.lakko.me")
 # /usr/local/bin + `systemctl restart lakko.target`.
 deploy:
     ssh {{vps_user}}@{{vps_host}} '~/lakko/infra/scripts/deploy.sh'
+
+# Test stack (test.lakko.me): build the working tree locally (Docker for the
+# Linux binaries, npm for the web client), upload, restart lakko-test.target,
+# health-check. The server never builds or pulls git. See infra/test-stack/README.md.
+# Env: LAKKO_TEST_DOMAIN, LAKKO_TEST_SSH, LAKKO_TEST_SSH_KEY, SKIP_WEB=1, SKIP_BACKEND=1.
+deploy-test:
+    infra/test-stack/deploy.sh
 
 # Phase 1.17c — apps/web deploy fallback for the dev box.
 #

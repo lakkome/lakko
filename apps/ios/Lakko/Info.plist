@@ -24,6 +24,8 @@
 	<string>1.0</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
+	<key>LakkoApiBaseUrl</key>
+	<string>$(LAKKO_API_BASE_URL)</string>
 	<key>LakkoAppStoreUrl</key>
 	<string></string>
 	<key>LakkoBackupHeadStalenessSecs</key>
@@ -36,12 +38,16 @@
 	<string></string>
 	<key>LakkoCurrentRelease</key>
 	<string>1</string>
+	<key>LakkoGifProxyUrl</key>
+	<string></string>
 	<key>LakkoReleaseCheckDevOverride</key>
 	<string>false</string>
 	<key>LakkoReleaseKey</key>
 	<string></string>
 	<key>LakkoReleaseManifestUrl</key>
 	<string>https://lakko.me/.well-known/lakko-release</string>
+	<key>LakkoSfuUrl</key>
+	<string>$(LAKKO_SFU_URL)</string>
 	<key>LakkoTransparencyOperatorKey</key>
 	<string></string>
 	<key>LakkoTransparencyUrl</key>
@@ -53,9 +59,9 @@
 	<key>LakkoTransparencyWitnessThreshold</key>
 	<string></string>
 	<key>NSCameraUsageDescription</key>
-	<string>Lakko uses the camera to scan a QR codes from devices you want to link to your account and to capture video for in-call streams. The camera is never recorded server-side — every call frame is end-to-end encrypted under SFrame keys derived from the call's MLS group.</string>
+	<string>Lakko uses the camera to scan QR codes from devices you want to link to your account, to capture video for in-call streams, and to record video messages you choose to send. Everything the camera captures is end-to-end encrypted on your device before it is sent.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Lakko uses the microphone to capture your voice for end-to-end-encrypted calls. The mic is only on while you are in a call and the captured audio is never recorded server-side — every call frame is encrypted under SFrame keys derived from the call's MLS group before it leaves your device.</string>
+	<string>Lakko uses the microphone for end-to-end-encrypted calls and to record voice messages and video messages you choose to send. The mic is only on while you are in a call or recording a message, and everything it captures is encrypted on your device before it is sent.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>fetch</string>

@@ -62,6 +62,9 @@ public final class JoinCallLandingViewModel: ObservableObject {
     @Published public private(set) var phase: Phase = .idle
     @Published public private(set) var decoded: Decoded?
     @Published public private(set) var loading = true
+    /// ADR-0048 / UX spec §4 — a guest (no session) is asked for a name here,
+    /// prefilled `Guest`. It becomes the new account's own profile.
+    @Published public var guestName: String = "Guest"
 
     /// The shared in-call state the orchestrator populates + `CallScreen` reads.
     let ui = CallUiState()
@@ -120,12 +123,28 @@ public final class JoinCallLandingViewModel: ObservableObject {
         // continues the join once the session lands. The synchronous latch makes
         // a rapid double-tap idempotent — never two guest accounts.
         if mintingGuest { return }
+        if let nameError = guestNameError {
+            phase = .error(nameError)
+            return
+        }
+        let nameSnapshot = guestName
         mintingGuest = true
         phase = .starting
         // Arm auto-resume BEFORE the await so the re-mounted landing continues.
         intake.armCallJoinAutoResume()
         do {
             _ = try await authRepository.signupGuest()
+            // The guest account exists from here (its session lands once the
+            // phrase is acknowledged), so its id is known: keep the name as its
+            // own profile, published into every group it later joins.
+            if case .saveFreshPhrase(let account) = authRepository.state {
+                do {
+                    try ProfileDirectory.shared.setOwnDisplayName(
+                        nameSnapshot, accountIdB64: account.accountIdB64)
+                } catch {
+                    NSLog("ADR-0048 guest name not saved: \(error)")
+                }
+            }
         } catch {
             mintingGuest = false // allow a retry after a failed mint
             intake.clearCallJoin() // clears the auto-resume flag too
@@ -133,6 +152,19 @@ public final class JoinCallLandingViewModel: ObservableObject {
             phase = .error(error.localizedDescription)
         }
     }
+
+    /// The inline reason under the guest name field, or `nil`.
+    public var guestNameError: String? {
+        do {
+            _ = try checkDisplayName(guestName)
+            return nil
+        } catch {
+            return (error as? LocalizedError)?.errorDescription ?? "That name cannot be used."
+        }
+    }
+
+    /// `true` when this device has no session, so joining creates a guest.
+    public var joinsAsGuest: Bool { authRepository.identitySecrets == nil }
 
     /// Dismiss / exit the landing — tear down the call + drop the parked slug so
     /// AppRoot returns to the prior destination.
@@ -213,6 +245,18 @@ public final class JoinCallLandingViewModel: ObservableObject {
             return
         }
         phase = .starting
+        // Settle the microphone permission before the SFU session exists, so a
+        // denial is an explained refusal instead of a call nobody can hear.
+        guard await MicrophonePermission.ensureGranted() else {
+            beginning = false
+            phase = .error(MicrophonePermission.deniedMessage)
+            return
+        }
+        // A video call link starts the camera at connect. The link's media is
+        // the creator's choice, not this user's, so a denied camera joins with
+        // audio only — no capture is started — and the call log says why.
+        let cameraAllowed = await CameraPermission.ensureGranted(forVideo: decoded.mediaVideo)
+        let joinWithVideo = decoded.mediaVideo && cameraAllowed
 
         let options = MultiJoinerCall.Options(
             identity: identity,
@@ -222,7 +266,7 @@ public final class JoinCallLandingViewModel: ObservableObject {
             sfuBaseUrl: base,
             sessionToken: secrets.sessionToken,
             audio: true,
-            video: decoded.mediaVideo,
+            video: joinWithVideo,
             resolveDisplayName: nil,
             authBaseUrl: nil
         )
@@ -248,6 +292,9 @@ public final class JoinCallLandingViewModel: ObservableObject {
                 // "waiting" until the Welcome arrives (onJoined → "live").
                 call = try await MultiJoinerCall.join(options: options, ui: ui, callbacks: callbacks)
                 if phase == .starting { phase = .waiting }
+            }
+            if decoded.mediaVideo && !cameraAllowed {
+                ui.addSystemEvent(CameraPermission.deniedMessage)
             }
             // Piece B — bridge the mid-call camera toggle onto the call now that
             // it exists (a no-op for a joiner until it has joined + published).
@@ -280,6 +327,14 @@ public final class JoinCallLandingViewModel: ObservableObject {
         guard let call else { return }
         if camOn {
             Task { @MainActor [weak self] in
+                // The in-call control already settled the permission; this is
+                // the layered half (see `ChatViewModel.applySfuCameraToggle`).
+                guard await CameraPermission.ensureGranted() else {
+                    guard let self else { return }
+                    self.ui.setCamera(false)
+                    self.ui.addSystemEvent(CameraPermission.deniedMessage)
+                    return
+                }
                 do {
                     try await call.publishVideo()
                 } catch {
@@ -356,10 +411,24 @@ public struct JoinCallLandingScreen: View {
     private func content(_ decoded: JoinCallLandingViewModel.Decoded) -> some View {
         switch viewModel.phase {
         case .idle:
+            if viewModel.joinsAsGuest {
+                // ADR-0048 — the name the people in this call's chats see.
+                VStack(alignment: .leading, spacing: 4) {
+                    TextField("Your name", text: $viewModel.guestName)
+                        .textFieldStyle(.roundedBorder)
+                        .textInputAutocapitalization(.words)
+                    if let error = viewModel.guestNameError {
+                        Text(error)
+                            .font(.footnote)
+                            .foregroundStyle(.red)
+                    }
+                }
+            }
             Button(decoded.isOwner ? "Start call" : "Join call") {
                 Task { await viewModel.onStart(decoded) }
             }
             .buttonStyle(.borderedProminent)
+            .disabled(viewModel.joinsAsGuest && viewModel.guestNameError != nil)
             // No login required: a joiner with no session gets a full,
             // username-less guest account (signupGuest) on tap.
         case .starting:

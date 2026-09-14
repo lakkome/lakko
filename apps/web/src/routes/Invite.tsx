@@ -61,6 +61,7 @@ import {
 } from "../contacts/invite";
 import { DiscoveryClient } from "../discovery/client";
 import { useChats } from "../chat/ChatContext";
+import { useProfiles } from "../profile/ProfileContext";
 import { loadWasm } from "../wasm";
 import { paths } from "./paths";
 
@@ -86,6 +87,7 @@ export default function Invite(): JSX.Element {
   const params = useParams<{ slug: string }>();
   const auth = useAuth();
   const chats = useChats();
+  const profiles = useProfiles();
   const navigate = useNavigate();
 
   // Decode the slug + verify the capability signature in a
@@ -148,6 +150,8 @@ export default function Invite(): JSX.Element {
   // there's nothing to snapshot).
   const client = new ContactsClient(undefined, undefined, {
     identityProvider: () => chats.identity(),
+    // ADR-0048 §2 — the request carries this account's profile.
+    ownProfileEnvelope: () => profiles.ownProfileEnvelope(),
   });
 
   return (
@@ -257,7 +261,8 @@ function ConnectPanel(props: {
 
   const nowMs = Date.now();
   const expired = !cap.isValidNow(BigInt(nowMs));
-  const labelOrFingerprint = cap.label.length > 0 ? cap.label : `@${props.invite.fingerprintShort}`;
+  // ADR-0048 — a fingerprint is never shown with `@`: it is not a username.
+  const labelOrFingerprint = cap.label.length > 0 ? cap.label : props.invite.fingerprintShort;
   // 1.9b4: bootstrap-referral auto-accept. When the inviter
   // flagged the capability as a referral signup-deep-link
   // (ADR-0005 §13.4), the joiner does not need to press Accept

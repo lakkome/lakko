@@ -31,12 +31,12 @@ public struct RotateBatchEntry: Encodable {
 ///
 /// ## Default base URL
 ///
-/// `http://localhost:8090` — iOS simulator loopback + the
-/// `services/channels` dev bind. Override on physical
-/// devices (LAN IP) and in production (Cloudflare tunnel).
+/// `<LakkoApiBaseUrl>/channels` (``ApiEndpoints``); with no API
+/// base URL, `http://localhost:8090` — iOS simulator loopback +
+/// the `services/channels` dev bind.
 public final class ChannelsClient {
 
-    public static let defaultBaseURL: String = "http://localhost:8090"
+    public static var defaultBaseURL: String { ApiEndpoints.baseURL(for: .channels) }
 
     /// ADR-0030 — maximum entries a single `POST /rotate/stage`
     /// chunk may carry, mirroring the server-side

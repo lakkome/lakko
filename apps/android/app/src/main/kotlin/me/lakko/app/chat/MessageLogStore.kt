@@ -6,7 +6,6 @@ package me.lakko.app.chat
 import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
-import android.util.Base64
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.io.File
@@ -358,9 +357,39 @@ public data class PersistedAttachment(
     val mime: String?,
     val size: ULong,
     val name: String?,
+    /**
+     * ADR-0047 — the media metadata. Every field defaults to `null`, so a row
+     * written before these existed decodes as a plain file (the posture an old
+     * client already renders), and a row written now round-trips the bubble
+     * shape across a restart. The bounds are the core's; what is stored is
+     * what the core handed over, so nothing out of bound is ever written.
+     *
+     * Device-history transfer is a different path: the `lakko-mls` history
+     * placeholder codec does not carry these fields yet, so a media message
+     * moved to a new device arrives as a plain file. Known and deferred; no
+     * workaround here.
+     */
+    val kind: String? = null,
+    val durationMs: UInt? = null,
+    val waveformB64: String? = null,
+    val width: UInt? = null,
+    val height: UInt? = null,
+    val thumb: PersistedThumb? = null,
 ) {
     public companion object
 }
+
+/** ADR-0047 — a video-note poster blob reference, persisted beside its note. */
+@Serializable
+public data class PersistedThumb(
+    val blobIdB64: String,
+    val keyB64: String,
+    val nonceB64: String,
+    val mime: String?,
+    val size: ULong,
+    val width: UInt? = null,
+    val height: UInt? = null,
+)
 
 // =============================================================================
 // ChatMessage ↔ PersistedMessage helpers
@@ -419,26 +448,75 @@ public fun PersistedMessage.toChatMessage(): ChatMessage? {
     )
 }
 
+// `java.util.Base64` rather than `android.util.Base64`: the same standard
+// alphabet with padding and no line wrapping as the `NO_WRAP` flag this used to
+// pass (so every stored row still decodes), available from API 26 (this app's
+// minimum), and it runs on the host JVM, which is what lets the round trip be
+// unit-tested.
+private val b64Encoder = java.util.Base64.getEncoder()
+private val b64Decoder = java.util.Base64.getDecoder()
+
 public fun PersistedAttachment.Companion.from(
     ref: uniffi.lakko_ffi_uniffi.AttachmentRef,
 ): PersistedAttachment = PersistedAttachment(
-    blobIdB64 = Base64.encodeToString(ref.blobId, Base64.NO_WRAP),
-    keyB64 = Base64.encodeToString(ref.key, Base64.NO_WRAP),
-    nonceB64 = Base64.encodeToString(ref.nonce, Base64.NO_WRAP),
+    blobIdB64 = b64Encoder.encodeToString(ref.blobId),
+    keyB64 = b64Encoder.encodeToString(ref.key),
+    nonceB64 = b64Encoder.encodeToString(ref.nonce),
     mime = ref.mime,
     size = ref.size,
     name = ref.name,
+    kind = ref.kind,
+    durationMs = ref.durationMs,
+    waveformB64 = ref.waveform?.let(b64Encoder::encodeToString),
+    width = ref.width,
+    height = ref.height,
+    thumb = ref.thumb?.let { t ->
+        PersistedThumb(
+            blobIdB64 = b64Encoder.encodeToString(t.blobId),
+            keyB64 = b64Encoder.encodeToString(t.key),
+            nonceB64 = b64Encoder.encodeToString(t.nonce),
+            mime = t.mime,
+            size = t.size,
+            width = t.width,
+            height = t.height,
+        )
+    },
 )
 
+/**
+ * Inverse of [PersistedAttachment.Companion.from]. `null` when a REQUIRED
+ * field (blob id, key, nonce) does not decode — the attachment cannot be
+ * fetched without them. A malformed OPTIONAL field (a waveform or poster that
+ * does not decode) is dropped and the attachment survives, the same rule the
+ * core applies to the wire (ADR-0047 §1).
+ */
 public fun PersistedAttachment.toAttachmentRef(): uniffi.lakko_ffi_uniffi.AttachmentRef? {
     return try {
         uniffi.lakko_ffi_uniffi.AttachmentRef(
-            blobId = Base64.decode(blobIdB64, Base64.NO_WRAP),
-            key = Base64.decode(keyB64, Base64.NO_WRAP),
-            nonce = Base64.decode(nonceB64, Base64.NO_WRAP),
+            blobId = b64Decoder.decode(blobIdB64),
+            key = b64Decoder.decode(keyB64),
+            nonce = b64Decoder.decode(nonceB64),
             mime = mime,
             size = size,
             name = name,
+            kind = kind,
+            durationMs = durationMs,
+            waveform = waveformB64?.let { runCatching { b64Decoder.decode(it) }.getOrNull() },
+            width = width,
+            height = height,
+            thumb = thumb?.let { t ->
+                runCatching {
+                    uniffi.lakko_ffi_uniffi.ThumbRef(
+                        blobId = b64Decoder.decode(t.blobIdB64),
+                        key = b64Decoder.decode(t.keyB64),
+                        nonce = b64Decoder.decode(t.nonceB64),
+                        mime = t.mime,
+                        size = t.size,
+                        width = t.width,
+                        height = t.height,
+                    )
+                }.getOrNull()
+            },
         )
     } catch (_: IllegalArgumentException) {
         null

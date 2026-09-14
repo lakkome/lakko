@@ -4,6 +4,7 @@
 package me.lakko.app.push
 
 import me.lakko.app.chat.looksLikeCallSignaling
+import me.lakko.app.chat.looksLikeProfileEnvelope
 
 /**
  * SERVICE-ENVELOPE classifier for the background push-preview path.
@@ -20,7 +21,14 @@ import me.lakko.app.chat.looksLikeCallSignaling
  *      which would make git treat this file as binary),
  *   2. the **call-signaling** `CallSignalingPayload` proto, and
  *   3. the ADR-0045 **committer-liveness beacon** (27 bytes, domain
- *      `lakko/committer-beacon/v1` plus a trailing NUL).
+ *      `lakko/committer-beacon/v1` plus a trailing NUL), and
+ *   4. the ADR-0048 **profile** envelope (variable length, domain
+ *      `lakko/profile/v1` plus a trailing NUL). Its 17-byte prefix ending
+ *      in a NUL is a complete classification on its own, so no codec is
+ *      injected for it: a malformed profile envelope is still a profile
+ *      envelope and is suppressed, never rendered. The background path only
+ *      suppresses it — storing a profile is a WRITE, and this path is
+ *      read-only (C-59).
  *
  * Kind 3 is the MOST reachable of the three, not the least. A routing
  * secret is broadcast only on a membership change; a beacon is emitted
@@ -105,8 +113,11 @@ internal fun isServiceEnvelope(
     committerBeaconEnvelopeLen: Int,
 ): Boolean {
     // Cheap unambiguous discriminator: the CallSignalingPayload oneof
-    // body tags (0x52/0x5A/0x62/0x6A). Disjoint from both the chat `{`
-    // (0x7B) and the `l` (0x6C) both in-group envelope domains open with.
+    // body tags, fields 10..16 (0x52/0x5A/0x62/0x6A, the group-control
+    // 0x72/0x7A, and the two-byte 0x82 0x01 for field 16 — see
+    // `looksLikeCallSignaling` for why the group tags also check the
+    // `call_id` header). Disjoint from both the chat `{` (0x7B) and the
+    // `l` (0x6C) both in-group envelope domains open with.
     if (looksLikeCallSignaling(payload)) return true
 
     // Kind 1 — cheap pre-filter (exact 70-byte length + leading `l`)
@@ -127,6 +138,10 @@ internal fun isServiceEnvelope(
     ) {
         return true
     }
+
+    // Kind 4 — ADR-0048 profile. The same prefix test the foreground
+    // `ChatClient` classifier uses, so the two paths cannot drift.
+    if (looksLikeProfileEnvelope(payload)) return true
 
     return false
 }

@@ -58,6 +58,8 @@
  * the state flip (home on `session`; the restore prompt in place on
  * `needs-recovery-phrase`).
  */
+import { UsernameHint } from "../profile/UsernameHint";
+import { requireValidUsername } from "../profile/username-field";
 import { createSignal, Match, Show, Switch, type JSX } from "solid-js";
 import { A, useNavigate } from "@solidjs/router";
 import { paths } from "./paths";
@@ -121,6 +123,14 @@ export default function Recover(): JSX.Element {
       setError("Enter the username of the account to recover.");
       return;
     }
+    // ADR-0048 §4 — no lookup for a name that fails the username rule.
+    let canonicalUsername: string;
+    try {
+      canonicalUsername = await requireValidUsername(username());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      return;
+    }
     setBusy(true);
     try {
       // Resolve the phrase. Phrase mode passes it through
@@ -149,7 +159,7 @@ export default function Recover(): JSX.Element {
       } else {
         resolved = phrase();
       }
-      await auth.recover(resolved, password(), username().trim());
+      await auth.recover(resolved, password(), canonicalUsername);
       // Drop the phrase / shares + password fields immediately
       // — the mnemonic is a long-term secret the user has to
       // keep on paper; we don't need it any more after the
@@ -251,7 +261,8 @@ function DeviceRestoreSection(props: {
     if (trimmed.length === 0) {
       throw new Error("Enter the username of the account to restore.");
     }
-    const lookup = await discovery.lookup(trimmed);
+    // ADR-0048 §4 — throws the reason copy; no lookup is sent.
+    const lookup = await discovery.lookup(await requireValidUsername(trimmed));
     if (lookup.account === null) {
       throw new Error("Unknown username — check the spelling.");
     }
@@ -341,6 +352,7 @@ function DeviceRestoreSection(props: {
           placeholder="alice"
         />
       </label>
+      <UsernameHint value={props.username} />
       <RestoreViaDevicePanel prepare={prepare} onRestored={onRestored} />
     </div>
   );
@@ -378,9 +390,16 @@ function TotpRecoverSection(props: {
   async function onSubmit(e: SubmitEvent): Promise<void> {
     e.preventDefault();
     setError(null);
-    const trimmedUser = props.username().trim();
+    let trimmedUser = props.username().trim();
     if (trimmedUser.length === 0) {
       setError("Enter the username of the account to recover.");
+      return;
+    }
+    // ADR-0048 §4 — no lookup for a name that fails the username rule.
+    try {
+      trimmedUser = await requireValidUsername(trimmedUser);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
       return;
     }
     const normalized = normalizeTotpCode(code());
@@ -425,6 +444,7 @@ function TotpRecoverSection(props: {
             placeholder="alice"
           />
         </label>
+        <UsernameHint value={props.username} />
         <label>
           Authenticator code
           <input
@@ -498,9 +518,16 @@ function ContactRecoverSection(props: {
   async function onSendCode(e: SubmitEvent): Promise<void> {
     e.preventDefault();
     setError(null);
-    const trimmedUser = props.username().trim();
+    let trimmedUser = props.username().trim();
     if (trimmedUser.length === 0) {
       setError("Enter the username of the account to recover.");
+      return;
+    }
+    // ADR-0048 §4 — no lookup for a name that fails the username rule.
+    try {
+      trimmedUser = await requireValidUsername(trimmedUser);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
       return;
     }
     // Light client-side shape check — saves a PoW solve on an
@@ -573,6 +600,7 @@ function ContactRecoverSection(props: {
                 placeholder="alice"
               />
             </label>
+            <UsernameHint value={props.username} />
             <KindToggle kind={kind} setKind={setKind} busy={busy} />
             <label>
               {kind() === ContactKind.Email ? "Email" : "Phone number"}
@@ -719,6 +747,7 @@ function RecoverForm(props: RecoverFormProps): JSX.Element {
             placeholder="alice"
           />
         </label>
+        <UsernameHint value={props.username} />
         <Show
           when={props.mode() === "phrase"}
           fallback={

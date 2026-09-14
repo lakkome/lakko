@@ -48,6 +48,9 @@ import { A, useNavigate, useParams } from "@solidjs/router";
 
 import { useAuth } from "../auth/AuthContext";
 import { useChats } from "../chat/ChatContext";
+import { useProfiles } from "../profile/ProfileContext";
+import { createDisplayNameCheck } from "../profile/username-field";
+import { maySaveDisplayName, savedDisplayName } from "../profile/rules";
 import SaveFreshPhrasePrompt from "../auth/SaveFreshPhrasePrompt";
 import { loadWasm } from "../wasm";
 import { DiscoveryClient, DiscoveryHttpError } from "../discovery/client";
@@ -87,7 +90,18 @@ export default function JoinCall() {
   const params = useParams<{ slug: string }>();
   const auth = useAuth();
   const chats = useChats();
+  const profiles = useProfiles();
   const navigate = useNavigate();
+
+  // ADR-0048 UX §4 — a guest (no account yet) is asked their name here,
+  // prefilled `Guest`, and it becomes the new account's profile name.
+  const [guestName, setGuestName] = createSignal("Guest");
+  const guestNameCheck = createDisplayNameCheck(guestName);
+  /** The name to save once the guest session lands; `undefined` = nothing to
+   *  save (the visitor already had a session). */
+  let pendingGuestName: string | null | undefined;
+  const isAnonymousVisitor = (): boolean =>
+    chats.identity() === null || auth.identitySecrets() === null;
 
   const discovery = new DiscoveryClient();
 
@@ -160,6 +174,15 @@ export default function JoinCall() {
     ) {
       const d = pendingJoin();
       setPendingJoin(null);
+      if (pendingGuestName !== undefined) {
+        const name = pendingGuestName;
+        pendingGuestName = undefined;
+        // Saving the name never blocks the join.
+        void profiles.saveOwnDisplayName(name).catch((err: unknown) => {
+          // eslint-disable-next-line no-console
+          console.warn("saving the guest profile name failed", err);
+        });
+      }
       if (d !== null) void beginJoin(d);
     }
   });
@@ -177,6 +200,8 @@ export default function JoinCall() {
     // the join once the session lands. The synchronous latch (set BEFORE the
     // await) makes a rapid double-tap idempotent — never two guest accounts.
     if (mintingGuest) return;
+    if (!maySaveDisplayName(guestNameCheck())) return;
+    pendingGuestName = savedDisplayName(guestNameCheck());
     mintingGuest = true;
     setError(null);
     setPhase("starting");
@@ -185,6 +210,7 @@ export default function JoinCall() {
       await auth.signupGuest();
     } catch (err) {
       mintingGuest = false; // allow a retry after a failed mint
+      pendingGuestName = undefined;
       setPendingJoin(null);
       setError(err instanceof Error ? err.message : String(err));
       setPhase("error");
@@ -295,7 +321,35 @@ export default function JoinCall() {
               Host: <code>{decoded()?.ownerFingerprint}</code>
             </p>
             <Show when={phase() === "idle"}>
-              <button type="button" onClick={() => void onStart(decoded()!)}>
+              <Show when={isAnonymousVisitor() && !decoded()?.isOwner}>
+                <label>
+                  Your name
+                  <input
+                    type="text"
+                    autocomplete="name"
+                    value={guestName()}
+                    onInput={(e) => setGuestName(e.currentTarget.value)}
+                    aria-invalid={guestNameCheck().kind === "invalid"}
+                  />
+                </label>
+                <Show
+                  when={(() => {
+                    const c = guestNameCheck();
+                    return c.kind === "invalid" ? c.reason : null;
+                  })()}
+                >
+                  {(reason) => (
+                    <div class="form-error" role="status" style={{ "font-size": "0.85rem" }}>
+                      {reason()}
+                    </div>
+                  )}
+                </Show>
+              </Show>
+              <button
+                type="button"
+                disabled={isAnonymousVisitor() && !maySaveDisplayName(guestNameCheck())}
+                onClick={() => void onStart(decoded()!)}
+              >
                 {decoded()?.isOwner ? "Start call" : "Join call"}
               </button>
               {/* No login required: a joiner with no session gets a full,

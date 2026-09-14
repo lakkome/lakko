@@ -350,6 +350,33 @@ class ChatServiceEnvelopeTest {
     }
 
     @Test
+    fun `group call control bodies are lifted out of the timeline`() {
+        // Fields 14..16. Before the sniff knew these tags they fell through to
+        // the chat parser, whose lossy-UTF-8 fallback rendered them as a
+        // garbage bubble.
+        for (payload in listOf(
+            me.lakko.app.calls.GroupCallWireFixtures.groupStart(),
+            me.lakko.app.calls.GroupCallWireFixtures.groupJoin(),
+            me.lakko.app.calls.GroupCallWireFixtures.groupLeave(),
+        )) {
+            val event = classify(payload)
+            assertTrue(
+                "expected CallSignaling for tag 0x${(payload[0].toInt() and 0xFF).toString(16)}, got $event",
+                event is IncomingChatEvent.CallSignaling,
+            )
+        }
+    }
+
+    @Test
+    fun `a legacy plain text opening with r or z is still a chat message`() {
+        // 0x72 and 0x7A are `r` and `z`; the group tags must not swallow text.
+        for (text in listOf("rabbit", "zebra", "r", "z")) {
+            val event = classify(text.toByteArray(Charsets.UTF_8))
+            assertTrue("expected Application for '$text', got $event", event is IncomingChatEvent.Application)
+        }
+    }
+
+    @Test
     fun `each envelope kind classifies independently`() {
         // The arms run per row; a beacon must not shadow the chat message next
         // to it in a poll batch, nor be shadowed by it.

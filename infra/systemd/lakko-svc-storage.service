@@ -16,7 +16,7 @@ Group=lakkome
 EnvironmentFile=/etc/lakko/lakko.env
 Environment=RUST_LOG=info
 Environment=LAKKO_BIND=127.0.0.1:8083
-Environment=LAKKO_STORAGE_PATH=/var/lib/lakko/blobs
+Environment=LAKKO_BLOB_DIR=/var/lib/lakko/blobs
 
 ExecStart=/usr/local/bin/lakko-svc-storage
 Restart=on-failure

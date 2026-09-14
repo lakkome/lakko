@@ -103,6 +103,54 @@ final class NseServiceEnvelopeTests: XCTestCase {
     /// keeps this fixture honest against the beacon this file builds.
     private static let beaconEnvelopeLen = 27
 
+    /// The frozen 17-byte ADR-0048 domain separator `lakko/profile/v1\0`,
+    /// built from ASCII + an explicit NUL (no raw NUL in this source).
+    private static let profileDomain: Data = {
+        var d = Data("lakko/profile/v1".utf8)
+        d.append(0x00)
+        return d
+    }()
+
+    /// Stand-in for the slim FFI's `profileEnvelopeMinLen()...profileEnvelopeMaxLen()`
+    /// (28...315 — domain 17 + version 1 + stamp 8 + two length bytes, plus a
+    /// 255-byte name and a 32-byte username at most). Restated for the same
+    /// reason as ``beaconEnvelopeLen``; the Rust side pins the exported values.
+    /// ``testProfileFixtureBoundsMatchTheAdvertisedRange`` keeps it honest
+    /// against the envelopes this file builds.
+    private static let profileEnvelopeLens: ClosedRange<Int> = 28...315
+
+    /// A well-formed profile envelope:
+    /// `domain(17) || version(1) || updated_at_ms(8 BE) || name_len || name || username_len || username`.
+    private func profileEnvelope(name: String = "", username: String = "", updatedAtMs: UInt64 = 7) -> Data {
+        var out = Self.profileDomain
+        out.append(0x01)
+        for shift in stride(from: 56, through: 0, by: -8) {
+            out.append(UInt8((updatedAtMs >> UInt64(shift)) & 0xFF))
+        }
+        let nameBytes = Data(name.utf8)
+        out.append(UInt8(nameBytes.count))
+        out.append(nameBytes)
+        let usernameBytes = Data(username.utf8)
+        out.append(UInt8(usernameBytes.count))
+        out.append(usernameBytes)
+        return out
+    }
+
+    /// Test double for the slim FFI's `decodeProfileEnvelope`: domain, version,
+    /// then the exact length structure (the field-content rules are the Rust
+    /// codec's and are covered there).
+    private func decodesAsProfile(_ bytes: Data) -> Bool {
+        let domain = Self.profileDomain
+        guard bytes.count > domain.count, bytes.prefix(domain.count) == domain else { return false }
+        let payload = Array(bytes.dropFirst(domain.count))
+        guard payload.count >= 1 + 8 + 2, payload[0] == 0x01 else { return false }
+        let nameLen = Int(payload[9])
+        let usernameLenIndex = 10 + nameLen
+        guard payload.count > usernameLenIndex else { return false }
+        let usernameLen = Int(payload[usernameLenIndex])
+        return payload.count == usernameLenIndex + 1 + usernameLen
+    }
+
     /// A well-formed committer beacon: `domain(26) || version(1)=0x01`, 27
     /// bytes. FIELD-LESS, so every beacon on the wire is byte-identical — the
     /// property that lets the codec be a total test.
@@ -134,7 +182,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 routingEnvelope(),
                 decodesAsPushRoutingSecret: decodesAsPushRoutingSecret,
                 decodesAsCommitterBeacon: decodesAsCommitterBeacon,
-                committerBeaconEnvelopeLen: Self.beaconEnvelopeLen
+                committerBeaconEnvelopeLen: Self.beaconEnvelopeLen,
+                decodesAsProfile: decodesAsProfile,
+                profileEnvelopeLens: Self.profileEnvelopeLens
             ),
             "a v2 push-routing-secret envelope must never be rendered"
         )
@@ -172,7 +222,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decoy,
                 decodesAsPushRoutingSecret: decodesAsPushRoutingSecret,
                 decodesAsCommitterBeacon: decodesAsCommitterBeacon,
-                committerBeaconEnvelopeLen: Self.beaconEnvelopeLen
+                committerBeaconEnvelopeLen: Self.beaconEnvelopeLen,
+                decodesAsProfile: decodesAsProfile,
+                profileEnvelopeLens: Self.profileEnvelopeLens
             ),
             "the codec, not the peek, is the authority"
         )
@@ -191,7 +243,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 v1,
                 decodesAsPushRoutingSecret: decodesAsPushRoutingSecret,
                 decodesAsCommitterBeacon: decodesAsCommitterBeacon,
-                committerBeaconEnvelopeLen: Self.beaconEnvelopeLen
+                committerBeaconEnvelopeLen: Self.beaconEnvelopeLen,
+                decodesAsProfile: decodesAsProfile,
+                profileEnvelopeLens: Self.profileEnvelopeLens
             )
         )
     }
@@ -213,7 +267,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                     payload,
                     decodesAsPushRoutingSecret: decodesAsPushRoutingSecret,
                     decodesAsCommitterBeacon: decodesAsCommitterBeacon,
-                    committerBeaconEnvelopeLen: Self.beaconEnvelopeLen
+                    committerBeaconEnvelopeLen: Self.beaconEnvelopeLen,
+                decodesAsProfile: decodesAsProfile,
+                profileEnvelopeLens: Self.profileEnvelopeLens
                 ),
                 "call signaling must never be rendered"
             )
@@ -236,7 +292,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 committerBeacon(),
                 decodesAsPushRoutingSecret: decodesAsPushRoutingSecret,
                 decodesAsCommitterBeacon: decodesAsCommitterBeacon,
-                committerBeaconEnvelopeLen: Self.beaconEnvelopeLen
+                committerBeaconEnvelopeLen: Self.beaconEnvelopeLen,
+                decodesAsProfile: decodesAsProfile,
+                profileEnvelopeLens: Self.profileEnvelopeLens
             ),
             "a committer beacon must never be rendered"
         )
@@ -331,7 +389,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 realMessage,
                 decodesAsPushRoutingSecret: decodesAsPushRoutingSecret,
                 decodesAsCommitterBeacon: decodesAsCommitterBeacon,
-                committerBeaconEnvelopeLen: Self.beaconEnvelopeLen
+                committerBeaconEnvelopeLen: Self.beaconEnvelopeLen,
+                decodesAsProfile: decodesAsProfile,
+                profileEnvelopeLens: Self.profileEnvelopeLens
             ),
             "the codec, not the peek, is the authority"
         )
@@ -345,7 +405,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 committerBeacon(version: 0xFF),
                 decodesAsPushRoutingSecret: decodesAsPushRoutingSecret,
                 decodesAsCommitterBeacon: decodesAsCommitterBeacon,
-                committerBeaconEnvelopeLen: Self.beaconEnvelopeLen
+                committerBeaconEnvelopeLen: Self.beaconEnvelopeLen,
+                decodesAsProfile: decodesAsProfile,
+                profileEnvelopeLens: Self.profileEnvelopeLens
             )
         )
     }
@@ -357,6 +419,95 @@ final class NseServiceEnvelopeTests: XCTestCase {
         XCTAssertFalse(decodesAsPushRoutingSecret(committerBeacon()))
     }
 
+    // MARK: - Kind 4: the ADR-0048 profile envelope
+
+    /// WITHOUT THE ARM this returns false and the profile reaches
+    /// `parseBodyEnvelope`, whose lossy-UTF-8 fallback renders
+    /// `lakko/profile/v1`, a timestamp and the person's name as a notification.
+    func testProfileEnvelopeIsAServiceEnvelope() {
+        for envelope in [
+            profileEnvelope(),
+            profileEnvelope(name: "Alice Petrova", username: "alice"),
+            profileEnvelope(name: String(repeating: "a", count: 255), username: String(repeating: "b", count: 32)),
+        ] {
+            XCTAssertTrue(
+                nseIsServiceEnvelope(
+                    envelope,
+                    decodesAsPushRoutingSecret: decodesAsPushRoutingSecret,
+                    decodesAsCommitterBeacon: decodesAsCommitterBeacon,
+                    committerBeaconEnvelopeLen: Self.beaconEnvelopeLen,
+                    decodesAsProfile: decodesAsProfile,
+                    profileEnvelopeLens: Self.profileEnvelopeLens
+                ),
+                "a \(envelope.count)-byte profile must never be rendered"
+            )
+        }
+    }
+
+    /// The fixtures at the extremes are exactly the advertised range's ends,
+    /// so the range test below is about the real bounds, not invented ones.
+    func testProfileFixtureBoundsMatchTheAdvertisedRange() {
+        XCTAssertEqual(profileEnvelope().count, Self.profileEnvelopeLens.lowerBound)
+        XCTAssertEqual(
+            profileEnvelope(name: String(repeating: "a", count: 255), username: String(repeating: "b", count: 32)).count,
+            Self.profileEnvelopeLens.upperBound
+        )
+    }
+
+    /// The range peek accepts both ends and nothing outside them. An upper
+    /// bound that is too low fails dangerously (long profiles stop being
+    /// suppressed) — which is why it is injected from the FFI.
+    func testProfilePreFilterIsARangeAndTheFirstByte() {
+        let lens = Self.profileEnvelopeLens
+        XCTAssertTrue(nseLooksLikeProfile(profileEnvelope(), envelopeLens: lens))
+        XCTAssertTrue(nseLooksLikeProfile(
+            profileEnvelope(name: String(repeating: "a", count: 255), username: String(repeating: "b", count: 32)),
+            envelopeLens: lens))
+        XCTAssertFalse(nseLooksLikeProfile(profileEnvelope().dropLast(), envelopeLens: lens), "one byte short")
+        XCTAssertFalse(
+            nseLooksLikeProfile(Data([0x6C]) + Data(repeating: 0x61, count: lens.upperBound), envelopeLens: lens),
+            "one byte past the longest well-formed profile")
+        XCTAssertFalse(nseLooksLikeProfile(chatEnvelope, envelopeLens: lens), "a JSON body starts with `{`")
+    }
+
+    /// The peek alone must not suppress: a real message of profile length that
+    /// starts with `l` clears it, and the codec refuses it.
+    func testProfilePeekAloneDoesNotSuppress() {
+        let realMessage = Data("let us meet at the station at nine tonight".utf8)
+        XCTAssertTrue(nseLooksLikeProfile(realMessage, envelopeLens: Self.profileEnvelopeLens))
+        XCTAssertFalse(
+            nseIsServiceEnvelope(
+                realMessage,
+                decodesAsPushRoutingSecret: decodesAsPushRoutingSecret,
+                decodesAsCommitterBeacon: decodesAsCommitterBeacon,
+                committerBeaconEnvelopeLen: Self.beaconEnvelopeLen,
+                decodesAsProfile: decodesAsProfile,
+                profileEnvelopeLens: Self.profileEnvelopeLens
+            ),
+            "the codec, not the peek, is the authority"
+        )
+    }
+
+    /// No two codecs accept each other's bytes.
+    func testProfileCodecDoesNotCrossAcceptTheOtherKinds() {
+        XCTAssertFalse(decodesAsProfile(routingEnvelope()))
+        XCTAssertFalse(decodesAsProfile(committerBeacon()))
+        XCTAssertFalse(decodesAsPushRoutingSecret(profileEnvelope(name: "x")))
+        XCTAssertFalse(decodesAsCommitterBeacon(profileEnvelope()))
+    }
+
+    /// A profile as the NEWEST row must fall back to the real chat before it —
+    /// on growth every member republishes, so this is an ordinary shape.
+    func testProfileAfterChatFallsBackToTheChat() async {
+        let (result, suppressed) = await preview(rows: [
+            NseFetchedRow(id: 10, payload: Data("real message".utf8)),
+            NseFetchedRow(id: 11, payload: profileEnvelope(name: "Alice", username: "alice")),
+            NseFetchedRow(id: 12, payload: profileEnvelope(name: "Bob")),
+        ])
+        XCTAssertEqual(result?.body, "real message")
+        XCTAssertEqual(suppressed, 2)
+    }
+
     // MARK: - A real chat message is never suppressed
 
     func testChatEnvelopeIsNotAServiceEnvelope() {
@@ -366,7 +517,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 chatEnvelope,
                 decodesAsPushRoutingSecret: decodesAsPushRoutingSecret,
                 decodesAsCommitterBeacon: decodesAsCommitterBeacon,
-                committerBeaconEnvelopeLen: Self.beaconEnvelopeLen
+                committerBeaconEnvelopeLen: Self.beaconEnvelopeLen,
+                decodesAsProfile: decodesAsProfile,
+                profileEnvelopeLens: Self.profileEnvelopeLens
             ),
             "a chat envelope must still render"
         )
@@ -375,7 +528,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 Data(),
                 decodesAsPushRoutingSecret: decodesAsPushRoutingSecret,
                 decodesAsCommitterBeacon: decodesAsCommitterBeacon,
-                committerBeaconEnvelopeLen: Self.beaconEnvelopeLen
+                committerBeaconEnvelopeLen: Self.beaconEnvelopeLen,
+                decodesAsProfile: decodesAsProfile,
+                profileEnvelopeLens: Self.profileEnvelopeLens
             ),
             "empty bytes are not a service envelope"
         )
@@ -389,6 +544,7 @@ final class NseServiceEnvelopeTests: XCTestCase {
     private final class FilteringFakeGroup: NseThrowawayGroup {
         private let decodesAsPushRoutingSecret: (Data) -> Bool
         private let decodesAsCommitterBeacon: (Data) -> Bool
+        private let decodesAsProfile: (Data) -> Bool
         private let text: (Data) -> String
         private(set) var suppressed = 0
         var closed = false
@@ -396,10 +552,12 @@ final class NseServiceEnvelopeTests: XCTestCase {
         init(
             decodesAsPushRoutingSecret: @escaping (Data) -> Bool,
             decodesAsCommitterBeacon: @escaping (Data) -> Bool,
+            decodesAsProfile: @escaping (Data) -> Bool,
             text: @escaping (Data) -> String
         ) {
             self.decodesAsPushRoutingSecret = decodesAsPushRoutingSecret
             self.decodesAsCommitterBeacon = decodesAsCommitterBeacon
+            self.decodesAsProfile = decodesAsProfile
             self.text = text
         }
 
@@ -408,7 +566,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 payload,
                 decodesAsPushRoutingSecret: decodesAsPushRoutingSecret,
                 decodesAsCommitterBeacon: decodesAsCommitterBeacon,
-                committerBeaconEnvelopeLen: NseServiceEnvelopeTests.beaconEnvelopeLen
+                committerBeaconEnvelopeLen: NseServiceEnvelopeTests.beaconEnvelopeLen,
+                decodesAsProfile: decodesAsProfile,
+                profileEnvelopeLens: NseServiceEnvelopeTests.profileEnvelopeLens
             ) {
                 suppressed += 1
                 return nil
@@ -446,6 +606,7 @@ final class NseServiceEnvelopeTests: XCTestCase {
         let group = FilteringFakeGroup(
             decodesAsPushRoutingSecret: decodesAsPushRoutingSecret,
             decodesAsCommitterBeacon: decodesAsCommitterBeacon,
+            decodesAsProfile: decodesAsProfile,
             text: { String(decoding: $0, as: UTF8.self) }
         )
         let result = await decryptPushPreview(

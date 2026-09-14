@@ -61,10 +61,15 @@
  *         }
  * ```
  *
- * The plaintext is the raw 32 bytes of the export key — no JSON
- * wrapper. Length is fixed by the OPAQUE ciphersuite, so a
- * length-prefix is wasteful.
+ * The plaintext is the raw 64 bytes of the export key — no JSON
+ * wrapper. Length is fixed by the OPAQUE ciphersuite
+ * (`export-key-length.ts`), so a length-prefix is wasteful.
  */
+
+import {
+  assertExportKeyLength,
+  EXPORT_KEY_ENVELOPE_LEN,
+} from "./export-key-length";
 
 const DB_NAME = "lakko-export-keys";
 const DB_VERSION = 1;
@@ -73,7 +78,7 @@ const STORE = "keys";
 interface ExportKeyRecord {
   accountId: string;
   /** `[12-byte IV | AES-GCM ciphertext+tag]`. The plaintext is
-   *  the raw 32-byte export-key bytes. */
+   *  the raw 64-byte export-key bytes. */
   ciphertext: Uint8Array;
 }
 
@@ -97,28 +102,26 @@ function openDb(): Promise<IDBDatabase> {
 }
 
 /**
- * Encrypt `exportKey` (32 bytes) under `deviceKey` and write the
+ * Encrypt `exportKey` (64 bytes) under `deviceKey` and write the
  * resulting envelope to IDB keyed by `accountIdB64`. Overwrites
  * any prior row.
  *
- * Caller passes the raw 32 bytes; the function does not retain a
- * reference past the encrypt call.
+ * Caller passes the raw 64 bytes; the function does not retain a
+ * reference past the encrypt call. A key of any other length is
+ * refused before anything is written (see `export-key-length.ts`
+ * for why this check used to refuse every real key).
  */
 export async function putExportKey(
   accountIdB64: string,
   exportKey: Uint8Array,
   deviceKey: CryptoKey,
 ): Promise<void> {
-  if (exportKey.length !== 32) {
-    throw new Error(
-      `export key length ${exportKey.length} != 32 (OPAQUE export-key contract)`,
-    );
-  }
+  assertExportKeyLength(exportKey, "export key");
   const iv = crypto.getRandomValues(new Uint8Array(12));
   // `.slice()` narrows the buffer-type from `ArrayBufferLike` to
   // `ArrayBuffer` so `crypto.subtle.encrypt`'s `BufferSource`
   // parameter accepts it — TS 5.7+ rejects the wider type. Cheap
-  // 32-byte copy.
+  // 64-byte copy.
   const ct = new Uint8Array(
     await crypto.subtle.encrypt(
       { name: "AES-GCM", iv },
@@ -153,7 +156,7 @@ export async function putExportKey(
  * Returns:
  *   - `null` when no row exists (fresh device, post-`forgetDevice`,
  *     never-logged-in account, etc.).
- *   - the raw 32-byte export key otherwise.
+ *   - the raw 64-byte export key otherwise.
  *
  * Throws on decrypt failure (device-key rotated, ciphertext
  * tampered, ciphertext truncated). Caller folds this into a
@@ -178,8 +181,9 @@ export async function getExportKey(
     );
     if (row === undefined) return null;
     // Envelope: 12-byte IV || ciphertext+tag (16-byte tag for
-    // AES-GCM). Minimum sensible size = 12 + 16 + 32 = 60.
-    if (row.ciphertext.length < 12 + 16 + 32) {
+    // AES-GCM). AES-GCM adds no padding, so a well-formed envelope
+    // is exactly 12 + 64 + 16 bytes; anything shorter cannot hold a key.
+    if (row.ciphertext.length < EXPORT_KEY_ENVELOPE_LEN) {
       throw new Error(
         `export-key envelope too short (${row.ciphertext.length} bytes)`,
       );
@@ -192,11 +196,7 @@ export async function getExportKey(
     const plain = new Uint8Array(
       await crypto.subtle.decrypt({ name: "AES-GCM", iv }, deviceKey, ct),
     );
-    if (plain.length !== 32) {
-      throw new Error(
-        `decrypted export key length ${plain.length} != 32`,
-      );
-    }
+    assertExportKeyLength(plain, "decrypted export key");
     return plain;
   } finally {
     db.close();

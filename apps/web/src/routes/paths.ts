@@ -37,6 +37,8 @@ export const paths = {
   home: "/",
   /** Contact list and add-contact entry point. */
   contacts: "/contacts",
+  /** The viewer's own profile name (ADR-0048). */
+  profile: "/profile",
   /**
    * Developer probe — runs the "Hello core" round-trip from 1.16a.
    * Kept off the main shell intentionally; users should never land

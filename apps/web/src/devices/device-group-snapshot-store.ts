@@ -35,8 +35,26 @@
  *         row {
  *           accountId:  <b64-uuidv7>,
  *           ciphertext: Uint8Array,   // [12-byte IV | AES-GCM ciphertext+tag]
+ *           journalCursor?: number,   // DS id of the last journal row the
+ *                                     // snapshot has consumed
  *         }
  * ```
+ *
+ * ## The journal cursor lives in the same row
+ *
+ * The sync receive loop used to start at cursor 0 on every page load and
+ * re-feed the whole journal to OpenMLS (see `sync/journal-batch.ts`). Its
+ * position is stored HERE, in the snapshot row and the same `put`, rather than
+ * in a store of its own, for the reason `chat/durable-cursor.ts` gives for the
+ * chat journals: a cursor may lag the durable MLS state but must never lead
+ * it. One write cannot record a position the snapshot beside it has not
+ * reached. A write that carries no cursor (every mutation path other than the
+ * receive loop) keeps the stored one, in the same transaction, so a snapshot
+ * taken after a local publish never discards the loop's position. Deleting the
+ * row (`forgetDevice`) deletes the cursor with it.
+ *
+ * The cursor is stored in the clear: it is a DS journal position, a value the
+ * DS itself assigned and already knows.
  */
 
 const DB_NAME = "lakko-device-group-snapshots";
@@ -48,6 +66,9 @@ interface SnapshotRecord {
   /** `[12-byte IV | AES-GCM ciphertext+tag]`. Plaintext is
    *  the `Identity.snapshotStorage()` blob. */
   ciphertext: Uint8Array;
+  /** DS id of the last DeviceGroup journal row this snapshot has consumed.
+   *  Absent until the receive loop first persists a batch. */
+  journalCursor?: number;
 }
 
 function openDb(): Promise<IDBDatabase> {
@@ -70,11 +91,17 @@ function openDb(): Promise<IDBDatabase> {
 }
 
 /** Encrypt + persist the DeviceGroup MLS snapshot for
- *  `accountIdB64`. Overwrites any prior row. */
+ *  `accountIdB64`. Overwrites any prior row.
+ *
+ *  `journalCursor`, when given, is stored with the snapshot in the same write
+ *  (the receive loop passes the position the snapshot has consumed up to).
+ *  When omitted, the cursor already stored is carried over inside the same
+ *  transaction — see the module header. */
 export async function putDeviceGroupSnapshot(
   accountIdB64: string,
   snapshot: Uint8Array,
   deviceKey: CryptoKey,
+  journalCursor?: number,
 ): Promise<void> {
   if (snapshot.length === 0) {
     throw new Error("device-group snapshot must be non-empty");
@@ -98,10 +125,20 @@ export async function putDeviceGroupSnapshot(
       tx.oncomplete = (): void => resolve();
       tx.onerror = (): void =>
         reject(tx.error ?? new Error("IDB put tx error"));
-      tx.objectStore(STORE).put({
-        accountId: accountIdB64,
-        ciphertext: envelope,
-      } satisfies SnapshotRecord);
+      const store = tx.objectStore(STORE);
+      const read = store.get(accountIdB64);
+      read.onerror = (): void =>
+        reject(read.error ?? new Error("IDB get (cursor carry-over) error"));
+      read.onsuccess = (): void => {
+        const prior = read.result as SnapshotRecord | undefined;
+        const cursor = journalCursor ?? prior?.journalCursor;
+        const row: SnapshotRecord = {
+          accountId: accountIdB64,
+          ciphertext: envelope,
+          ...(cursor === undefined ? {} : { journalCursor: cursor }),
+        };
+        store.put(row);
+      };
     });
   } finally {
     db.close();
@@ -138,6 +175,30 @@ export async function getDeviceGroupSnapshot(
     return new Uint8Array(
       await crypto.subtle.decrypt({ name: "AES-GCM", iv }, deviceKey, ct),
     );
+  } finally {
+    db.close();
+  }
+}
+
+/** Read the DeviceGroup journal cursor stored with the snapshot, or `null`
+ *  when there is no row or no cursor in it. Needs no device key: the cursor is
+ *  not encrypted (see the module header). */
+export async function getDeviceGroupJournalCursor(
+  accountIdB64: string,
+): Promise<number | null> {
+  const db = await openDb();
+  try {
+    const row: SnapshotRecord | undefined = await new Promise(
+      (resolve, reject) => {
+        const tx = db.transaction(STORE, "readonly");
+        const req = tx.objectStore(STORE).get(accountIdB64);
+        req.onsuccess = (): void =>
+          resolve(req.result as SnapshotRecord | undefined);
+        req.onerror = (): void =>
+          reject(req.error ?? new Error("IDB get error"));
+      },
+    );
+    return row?.journalCursor ?? null;
   } finally {
     db.close();
   }

@@ -42,6 +42,7 @@ import type {
   OpenedHistoryPlaceholder,
 } from "../../wasm/lakko_ffi_wasm";
 import { base64Decode, base64Encode } from "../auth/account-id";
+import { historyMediaFromPersisted, persistedMediaFromOpened } from "./history-media";
 import {
   loadMessageLog,
   saveMessageLog,
@@ -249,12 +250,14 @@ function tagToDirection(tag: number): PersistedMessage["direction"] {
 }
 
 /** Encode the local-store message row into the canonical
- *  cross-platform placeholder bytes. */
+ *  cross-platform placeholder bytes (version 2, which carries the ADR-0047
+ *  media metadata, so a voice message, video note or GIF restores as itself
+ *  on the new device). The local-only `played` marker is never transferred. */
 function encodeMessagePlaceholder(wasm: Wasm, m: PersistedMessage): Uint8Array {
   const messageId = safeBigInt(m.messageId) ?? 0n;
   const attachments: HistoryAttachmentInput[] = m.attachments.map((a) => {
     const size = safeBigInt(a.sizeStr) ?? 0n;
-    return new wasm.HistoryAttachmentInput(
+    const input = new wasm.HistoryAttachmentInput(
       base64Decode(a.blobIdB64),
       base64Decode(a.keyB64),
       base64Decode(a.nonceB64),
@@ -262,6 +265,22 @@ function encodeMessagePlaceholder(wasm: Wasm, m: PersistedMessage): Uint8Array {
       a.mime ?? undefined,
       a.name ?? undefined,
     );
+    const { media, thumb } = historyMediaFromPersisted(a);
+    if (media !== null) {
+      input.setMedia(media.kind, media.durationMs, media.waveform, media.width, media.height);
+    }
+    if (thumb !== null) {
+      input.setThumb(
+        thumb.blobId,
+        thumb.key,
+        thumb.nonce,
+        thumb.size,
+        thumb.mime,
+        thumb.width,
+        thumb.height,
+      );
+    }
+    return input;
   });
   return wasm.encodeHistoryPlaceholder(
     messageId,
@@ -293,6 +312,7 @@ function decodeMessagePlaceholder(
     mime: a.mime ?? null,
     sizeStr: a.size.toString(),
     name: a.name ?? null,
+    ...persistedMediaFromOpened(a),
   }));
   return {
     messageId: opened.messageId.toString(),

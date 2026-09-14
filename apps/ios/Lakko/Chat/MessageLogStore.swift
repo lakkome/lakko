@@ -424,6 +424,17 @@ public struct PersistedAttachment: Codable, Equatable {
     public let mime: String?
     public let size: UInt64
     public let name: String?
+    /// ADR-0047 — `voice` / `video_note` / `gif` / another (unknown) kind, or
+    /// `nil` for a plain file. Absent on a row written before the field
+    /// existed, which restores as a plain file chip.
+    public let kind: String?
+    public let durationMs: UInt32?
+    /// Base64 of at most 128 amplitude bytes.
+    public let waveformB64: String?
+    public let width: UInt32?
+    public let height: UInt32?
+    /// The video-note poster blob.
+    public let thumb: PersistedThumb?
 
     public init(
         blobIdB64: String,
@@ -431,7 +442,13 @@ public struct PersistedAttachment: Codable, Equatable {
         nonceB64: String,
         mime: String?,
         size: UInt64,
-        name: String?
+        name: String?,
+        kind: String? = nil,
+        durationMs: UInt32? = nil,
+        waveformB64: String? = nil,
+        width: UInt32? = nil,
+        height: UInt32? = nil,
+        thumb: PersistedThumb? = nil
     ) {
         self.blobIdB64 = blobIdB64
         self.keyB64 = keyB64
@@ -439,6 +456,66 @@ public struct PersistedAttachment: Codable, Equatable {
         self.mime = mime
         self.size = size
         self.name = name
+        self.kind = kind
+        self.durationMs = durationMs
+        self.waveformB64 = waveformB64
+        self.width = width
+        self.height = height
+        self.thumb = thumb
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case blobIdB64, keyB64, nonceB64, mime, size, name
+        case kind, durationMs, waveformB64, width, height, thumb
+    }
+
+    // ADR-0047 — every media field is optional and read with `try?`: a row
+    // written before the fields existed, or one whose optional metadata no
+    // longer decodes, keeps the attachment itself (the envelope rule: bad
+    // metadata is dropped, the attachment survives).
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.blobIdB64 = try c.decode(String.self, forKey: .blobIdB64)
+        self.keyB64 = try c.decode(String.self, forKey: .keyB64)
+        self.nonceB64 = try c.decode(String.self, forKey: .nonceB64)
+        self.mime = try c.decodeIfPresent(String.self, forKey: .mime)
+        self.size = try c.decode(UInt64.self, forKey: .size)
+        self.name = try c.decodeIfPresent(String.self, forKey: .name)
+        self.kind = (try? c.decodeIfPresent(String.self, forKey: .kind)) ?? nil
+        self.durationMs = (try? c.decodeIfPresent(UInt32.self, forKey: .durationMs)) ?? nil
+        self.waveformB64 = (try? c.decodeIfPresent(String.self, forKey: .waveformB64)) ?? nil
+        self.width = (try? c.decodeIfPresent(UInt32.self, forKey: .width)) ?? nil
+        self.height = (try? c.decodeIfPresent(UInt32.self, forKey: .height)) ?? nil
+        self.thumb = (try? c.decodeIfPresent(PersistedThumb.self, forKey: .thumb)) ?? nil
+    }
+}
+
+/// ADR-0047 — JSON projection of a ``ThumbRef`` (the video-note poster blob).
+public struct PersistedThumb: Codable, Equatable {
+    public let blobIdB64: String
+    public let keyB64: String
+    public let nonceB64: String
+    public let mime: String?
+    public let size: UInt64
+    public let width: UInt32?
+    public let height: UInt32?
+
+    public init(
+        blobIdB64: String,
+        keyB64: String,
+        nonceB64: String,
+        mime: String?,
+        size: UInt64,
+        width: UInt32?,
+        height: UInt32?
+    ) {
+        self.blobIdB64 = blobIdB64
+        self.keyB64 = keyB64
+        self.nonceB64 = nonceB64
+        self.mime = mime
+        self.size = size
+        self.width = width
+        self.height = height
     }
 }
 

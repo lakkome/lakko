@@ -93,6 +93,16 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: (p) => p.replace(/^\/api\/channels/, ""),
       },
+      // ADR-0047 §4: lakko-svc-gif-proxy defaults to 127.0.0.1:8091.
+      // Same prefix strip as production nginx `location /api/gifs/`:
+      // the service's own paths start with `/gifs/`, so a search is
+      // `/api/gifs/gifs/search?q=...` and a preview is `/api/gifs` +
+      // the item's `preview_url`. Keeps previews same-origin.
+      "/api/gifs": {
+        target: "http://127.0.0.1:8091",
+        changeOrigin: true,
+        rewrite: (p) => p.replace(/^\/api\/gifs/, ""),
+      },
     },
   },
 

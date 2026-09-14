@@ -51,6 +51,50 @@ pub struct AttachmentRef {
     pub size: u64,
     /// Optional human-visible filename.
     pub name: Option<String>,
+    /// ADR-0047 — `"voice"`, `"video_note"`, `"gif"`, another (unknown)
+    /// value, or `None` for a plain file. Lets a preview say "Voice
+    /// message" instead of a file name.
+    #[uniffi(default = None)]
+    pub kind: Option<String>,
+    /// ADR-0047 — playback length in ms (voice / video note only, bounded
+    /// by the core parser).
+    #[uniffi(default = None)]
+    pub duration_ms: Option<u32>,
+    /// ADR-0047 — raw waveform amplitude bytes, 1..=128.
+    #[uniffi(default = None)]
+    pub waveform: Option<Vec<u8>>,
+    /// ADR-0047 — pixel width, 1..=4096.
+    #[uniffi(default = None)]
+    pub width: Option<u32>,
+    /// ADR-0047 — pixel height, 1..=4096.
+    #[uniffi(default = None)]
+    pub height: Option<u32>,
+    /// ADR-0047 — the poster-frame blob reference (decoded, never fetched
+    /// here).
+    #[uniffi(default = None)]
+    pub thumb: Option<ThumbRef>,
+}
+
+/// ADR-0047 — a decoded poster-frame blob reference, the parse-side mirror
+/// of the full surface's `ThumbRef`.
+#[derive(uniffi::Record, Clone)]
+pub struct ThumbRef {
+    /// Raw 32-byte SHA-256 blob id.
+    pub blob_id: Vec<u8>,
+    /// Raw 32-byte CEK.
+    pub key: Vec<u8>,
+    /// Raw 12-byte AEAD nonce.
+    pub nonce: Vec<u8>,
+    /// Optional MIME type of the poster.
+    pub mime: Option<String>,
+    /// Plaintext size in bytes, 1..=256 KiB.
+    pub size: u64,
+    /// Pixel width, 1..=4096.
+    #[uniffi(default = None)]
+    pub width: Option<u32>,
+    /// Pixel height, 1..=4096.
+    #[uniffi(default = None)]
+    pub height: Option<u32>,
 }
 
 /// Output of [`parse_body_envelope`]: the classified message body
@@ -139,6 +183,18 @@ fn refs_to_ffi(refs: Vec<inner::AttachmentRef>) -> Vec<AttachmentRef> {
             let blob_id = r.decode_blob_id().ok()?;
             let key = r.decode_key().ok()?;
             let nonce = r.decode_nonce().ok()?;
+            let waveform = r.decode_waveform();
+            let thumb = r.thumb.as_ref().and_then(|t| {
+                Some(ThumbRef {
+                    blob_id: t.decode_blob_id().ok()?.to_vec(),
+                    key: t.decode_key().ok()?.as_bytes().to_vec(),
+                    nonce: t.decode_nonce().ok()?.to_vec(),
+                    mime: t.mime.clone(),
+                    size: t.size,
+                    width: t.width,
+                    height: t.height,
+                })
+            });
             Some(AttachmentRef {
                 blob_id: blob_id.to_vec(),
                 key: key.as_bytes().to_vec(),
@@ -146,7 +202,39 @@ fn refs_to_ffi(refs: Vec<inner::AttachmentRef>) -> Vec<AttachmentRef> {
                 mime: r.mime,
                 size: r.size,
                 name: r.name,
+                kind: r.kind,
+                duration_ms: r.duration_ms,
+                waveform,
+                width: r.width,
+                height: r.height,
+                thumb,
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn media_metadata_reaches_the_extension_parse_shape() {
+        let enc = inner::encrypt_attachment(b"voice").unwrap();
+        let r = inner::AttachmentRef::from_encrypted(
+            &enc,
+            5,
+            Some("audio/mp4".to_string()),
+            Some("voice-1.m4a".to_string()),
+        )
+        .with_kind(inner::MEDIA_KIND_VOICE)
+        .with_duration_ms(4200)
+        .with_waveform(&[9, 8, 7]);
+        let body = parse_body_envelope(inner::compose("", vec![r]).unwrap());
+        assert_eq!(body.kind, MessageBodyKind::Chat);
+        let got = &body.attachments[0];
+        assert_eq!(got.kind.as_deref(), Some("voice"));
+        assert_eq!(got.duration_ms, Some(4200));
+        assert_eq!(got.waveform, Some(vec![9, 8, 7]));
+        assert!(got.thumb.is_none());
+    }
 }

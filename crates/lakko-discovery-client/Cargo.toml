@@ -18,6 +18,15 @@ workspace = true
 [dependencies]
 thiserror.workspace = true
 
+# The canonical username character-set rule (ADR-0048 §4) lives in
+# `lakko-contacts::username`, which has no Unicode-table dependency, so the
+# profile decoder there and the blinder here share ONE definition. The
+# reverse direction would have pulled voprf / unicode-normalization into the
+# size-budgeted iOS NSE (`lakko-ffi-extension` links `lakko-contacts`). Adds
+# no third-party crate to any shipped artefact: both FFI crates that link this
+# one already link `lakko-contacts`.
+lakko-contacts.workspace = true
+
 # VOPRF — must use the SAME version + ciphersuite as the server in
 # services/discovery (Ristretto255-SHA512). The server pins voprf 0.5
 # already; we mirror.

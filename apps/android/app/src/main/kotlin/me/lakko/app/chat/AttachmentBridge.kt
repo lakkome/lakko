@@ -7,6 +7,7 @@ import me.lakko.app.storage.StorageClient
 import uniffi.lakko_ffi_uniffi.AttachmentRef
 import uniffi.lakko_ffi_uniffi.EncryptedAttachment
 import uniffi.lakko_ffi_uniffi.FfiException
+import uniffi.lakko_ffi_uniffi.ThumbRef
 import uniffi.lakko_ffi_uniffi.composeEnvelope as ffiComposeEnvelope
 import uniffi.lakko_ffi_uniffi.decryptAttachment as ffiDecryptAttachment
 import uniffi.lakko_ffi_uniffi.encryptAttachment as ffiEncryptAttachment
@@ -96,6 +97,14 @@ public object AttachmentBridge {
          *  this callback should hand off to the right
          *  dispatcher (e.g. `Dispatchers.Main`). */
         onStage: ((UploadStage) -> Unit)? = null,
+        /** ADR-0047 — the optional media metadata (`kind`, duration,
+         *  waveform, dimensions, poster thumb) carried on the ref. `null` is a
+         *  plain file, byte-identical to the pre-ADR-0047 ref. The core drops
+         *  any field outside its bound on the receiving side; this side does
+         *  not rely on that and never sets an out-of-bound value. */
+        media: AttachmentMediaMeta? = null,
+        /** ADR-0047 — upload progress, 0..1, for the determinate ring. */
+        onProgress: ((Float) -> Unit)? = null,
     ): AttachmentRef {
         if (bytes.size > MAX_ATTACHMENT_BYTES) {
             throw AttachmentBridgeException.TooLarge(
@@ -117,7 +126,15 @@ public object AttachmentBridge {
         // blob_id.
         onStage?.invoke(UploadStage.Uploading)
         try {
-            storage.putBlob(blobId = enc.blobId, ciphertext = enc.ciphertext)
+            storage.putBlob(
+                blobId = enc.blobId,
+                ciphertext = enc.ciphertext,
+                onProgress = onProgress?.let { report ->
+                    { sent: Long, total: Long ->
+                        report(if (total <= 0L) 0f else (sent.toFloat() / total).coerceIn(0f, 1f))
+                    }
+                },
+            )
         } catch (e: Throwable) {
             throw AttachmentBridgeException.Upload(e)
         }
@@ -133,8 +150,75 @@ public object AttachmentBridge {
             mime = mime.takeUnless { it.isNullOrEmpty() },
             size = bytes.size.toULong(),
             name = name.takeUnless { it.isNullOrEmpty() },
+            kind = media?.kind,
+            durationMs = media?.durationMs,
+            waveform = media?.waveform?.takeIf { it.isNotEmpty() && it.size <= MAX_WAVEFORM_BYTES },
+            width = media?.width?.takeIf { it in 1u..MAX_MEDIA_DIMENSION },
+            height = media?.height?.takeIf { it in 1u..MAX_MEDIA_DIMENSION },
+            thumb = media?.thumb,
         )
     }
+
+    /**
+     * ADR-0047 — encrypt and upload a video-note poster frame, returning the
+     * [ThumbRef] the note's ref carries. Refuses a poster over
+     * [MAX_THUMB_BYTES] (the core would drop it on receipt anyway).
+     */
+    public suspend fun encryptAndUploadThumb(
+        bytes: ByteArray,
+        mime: String,
+        width: UInt?,
+        height: UInt?,
+        storage: StorageClient = StorageClient(),
+    ): ThumbRef {
+        if (bytes.isEmpty() || bytes.size > MAX_THUMB_BYTES) {
+            throw AttachmentBridgeException.TooLarge(got = bytes.size, max = MAX_THUMB_BYTES)
+        }
+        val enc: EncryptedAttachment = try {
+            ffiEncryptAttachment(plaintext = bytes)
+        } catch (e: FfiException) {
+            throw AttachmentBridgeException.Encryption(e)
+        }
+        try {
+            storage.putBlob(blobId = enc.blobId, ciphertext = enc.ciphertext)
+        } catch (e: Throwable) {
+            throw AttachmentBridgeException.Upload(e)
+        }
+        return ThumbRef(
+            blobId = enc.blobId,
+            key = enc.key,
+            nonce = enc.nonce,
+            mime = mime,
+            size = bytes.size.toULong(),
+            width = width?.takeIf { it in 1u..MAX_MEDIA_DIMENSION },
+            height = height?.takeIf { it in 1u..MAX_MEDIA_DIMENSION },
+        )
+    }
+
+    /** ADR-0047 — download and AEAD-open a video-note poster. */
+    public suspend fun downloadAndDecryptThumb(
+        thumb: ThumbRef,
+        storage: StorageClient = StorageClient(),
+    ): ByteArray = downloadAndDecrypt(
+        ref = AttachmentRef(
+            blobId = thumb.blobId,
+            key = thumb.key,
+            nonce = thumb.nonce,
+            mime = thumb.mime,
+            size = thumb.size,
+            name = null,
+        ),
+        storage = storage,
+    )
+
+    /** ADR-0047 §1 — mirror of the core's waveform bound. */
+    public const val MAX_WAVEFORM_BYTES: Int = 128
+
+    /** ADR-0047 §1 — mirror of the core's per-side dimension bound. */
+    public const val MAX_MEDIA_DIMENSION: UInt = 4096u
+
+    /** ADR-0047 §1 — mirror of the core's poster size bound (256 KiB). */
+    public const val MAX_THUMB_BYTES: Int = 256 * 1024
 
     /**
      * GET the ciphertext for [ref] from storage, hand to
@@ -231,16 +315,56 @@ public object AttachmentBridge {
 
     /**
      * `true` when the ref's MIME type is one the chat UI knows
-     * how to inline-preview. Currently: the four core web
-     * image formats. SVG is deliberately excluded — an
-     * attacker-supplied SVG can carry XML scripting in some
-     * renderers; denying preview consistently is the safe path.
+     * how to inline-preview as an image, per the core's allowlist
+     * (`inlineMediaType`). SVG is never on it — an attacker-supplied
+     * SVG can carry XML scripting in some renderers.
      */
-    public fun isInlinePreviewable(ref: AttachmentRef): Boolean {
-        val m = ref.mime ?: return false
-        return m == "image/jpeg" || m == "image/png" ||
-            m == "image/webp" || m == "image/gif"
+    public fun isInlinePreviewable(
+        ref: AttachmentRef,
+        allowlist: me.lakko.app.media.MediaAllowlist = me.lakko.app.media.coreAllowlist,
+    ): Boolean =
+        // ADR-0047 §1 — the core's MIME allowlist decides, never a list kept
+        // here (the core refuses SVG, and ignores MIME parameters).
+        me.lakko.app.media.inlineKindOf(ref.mime, allowlist) == me.lakko.app.media.InlineKind.IMAGE
+
+    /**
+     * A filename that is safe to join onto a local directory, derived from
+     * the ref's `name`.
+     *
+     * `name` is chosen by the SENDER and arrives inside an MLS application
+     * message, so every member of a group controls it. Passed to
+     * `File(dir, name)` verbatim, `../../files/x` walks out of the share
+     * cache and overwrites app-private files when the recipient taps Save.
+     * This keeps only the last path component (splitting on both `/` and
+     * `\\`), drops control and format characters (the latter include the
+     * right-to-left override that disguises an extension), trims, caps the
+     * length, and falls back when nothing usable is left — including `.`
+     * and `..`, which are path components rather than names.
+     */
+    public fun safeFileName(raw: String?, fallback: String): String {
+        if (raw == null) return fallback
+        val lastComponent = raw.split('/', '\\').last()
+        val cleaned = buildString {
+            var i = 0
+            while (i < lastComponent.length) {
+                val cp = lastComponent.codePointAt(i)
+                val type = Character.getType(cp)
+                if (type != Character.CONTROL.toInt() && type != Character.FORMAT.toInt()) {
+                    appendCodePoint(cp)
+                }
+                i += Character.charCount(cp)
+            }
+        }.trim()
+        val capped = if (cleaned.codePointCount(0, cleaned.length) > MAX_SAFE_FILE_NAME_LENGTH) {
+            cleaned.substring(0, cleaned.offsetByCodePoints(0, MAX_SAFE_FILE_NAME_LENGTH))
+        } else {
+            cleaned
+        }
+        return if (capped.isEmpty() || capped == "." || capped == "..") fallback else capped
     }
+
+    /** Upper bound on [safeFileName]'s output, in code points. */
+    public const val MAX_SAFE_FILE_NAME_LENGTH: Int = 128
 
     /** Lowercase hex of an arbitrary byte buffer — used by the
      *  UI for the short-fallback filename when an attachment
@@ -257,6 +381,34 @@ public object AttachmentBridge {
     }
 
     private const val HEX: String = "0123456789abcdef"
+}
+
+/**
+ * ADR-0047 — the optional media metadata an [AttachmentRef] carries. Every
+ * field is optional on the wire; `kind` picks the bubble on the receiving side
+ * and nothing else (inline playback is decided by the MIME allowlist).
+ */
+public data class AttachmentMediaMeta(
+    val kind: String? = null,
+    val durationMs: UInt? = null,
+    val waveform: ByteArray? = null,
+    val width: UInt? = null,
+    val height: UInt? = null,
+    val thumb: ThumbRef? = null,
+) {
+    override fun equals(other: Any?): Boolean =
+        other is AttachmentMediaMeta && kind == other.kind && durationMs == other.durationMs &&
+            (waveform?.contentEquals(other.waveform) ?: (other.waveform == null)) &&
+            width == other.width && height == other.height && thumb == other.thumb
+
+    override fun hashCode(): Int {
+        var h = kind.hashCode()
+        h = 31 * h + durationMs.hashCode()
+        h = 31 * h + (waveform?.contentHashCode() ?: 0)
+        h = 31 * h + width.hashCode()
+        h = 31 * h + height.hashCode()
+        return 31 * h + thumb.hashCode()
+    }
 }
 
 /**

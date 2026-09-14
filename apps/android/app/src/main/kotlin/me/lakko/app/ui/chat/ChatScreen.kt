@@ -76,6 +76,10 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -153,6 +157,15 @@ public fun ChatScreen(
     val otherMembers = remember(state.groupIdHex, state.readUpToByMember) {
         viewModel.otherChatIdentities()
     }
+    // ADR-0048 — resolved names update in place when a profile arrives or a
+    // username verifies. The header of a two-member chat names the other
+    // person; a group keeps its label, and its incoming bubbles carry author
+    // names instead.
+    val nameVersion by viewModel.nameVersion.collectAsStateWithLifecycle()
+    val peerName = remember(state.groupIdHex, state.messages.size, nameVersion, otherMembers) {
+        viewModel.oneToOnePeerName()
+    }
+    val isGroupChat = otherMembers.size > 1
 
     // 1.19c4 — system-picker launchers. `ACTION_OPEN_DOCUMENT`
     // surfaces both files and photos through the same code path
@@ -184,32 +197,42 @@ public fun ChatScreen(
     }
 
     LaunchedEffect(Unit) {
-        // ADR-0040 (G-35) — re-publish any pending commit that crashed
-        // mid-window on a previous run BEFORE the first poll, re-arming the
-        // own-echo filter for the re-published commit so the refresh below
-        // drops it instead of hitting CannotDecryptOwnMessage. Best-effort —
-        // a re-publish failure leaves the entry un-acked for the next open.
-        viewModel.sweepPendingCommitsOnOpen()
-        // First tick: manual-style refresh so the spinner
-        // blips briefly while the immediate fetch resolves.
-        viewModel.onRefreshClicked()
-        // Subsequent ticks: continuous long-poll. Cancels when
-        // the composable leaves composition (back navigation,
-        // logout). Errors back off via [POLL_RETRY_BACKOFF_MS]
-        // so we don't tight-loop against a 503.
-        while (isActive) {
-            // ADR-0045 UX §6.2.8 item 1 — the poll STOPS for a group this
-            // device is no longer in. The repository gates `pollGroup` too,
-            // which is the authority; this loop must break as well because that
-            // gate makes the call return IMMEDIATELY, and a `while (isActive)`
-            // around an instant return is a spin, not a poll. Checked at the
-            // top so a membership that ends mid-window exits on the next pass.
-            if (viewModel.membershipEnded.value) break
-            try {
-                viewModel.pollOnceLongPoll()
-            } catch (_: Throwable) {
-                delay(POLL_RETRY_BACKOFF_MS)
+        // Claimed for this effect's lifetime, FIRST, so the app-level
+        // all-groups poll hands this group to this screen (and stops holding
+        // its in-flight slot) before the refresh below runs.
+        viewModel.claimScreenPoll()
+        try {
+            // ADR-0040 (G-35) — re-publish any pending commit that crashed
+            // mid-window on a previous run BEFORE the first poll, re-arming the
+            // own-echo filter for the re-published commit so the refresh below
+            // drops it instead of hitting CannotDecryptOwnMessage. Best-effort —
+            // a re-publish failure leaves the entry un-acked for the next open.
+            viewModel.sweepPendingCommitsOnOpen()
+            // First tick: manual-style refresh so the spinner
+            // blips briefly while the immediate fetch resolves.
+            viewModel.onRefreshClicked()
+            // Subsequent ticks: continuous long-poll. Cancels when
+            // the composable leaves composition (back navigation,
+            // logout). Errors back off via [POLL_RETRY_BACKOFF_MS]
+            // so we don't tight-loop against a 503.
+            while (isActive) {
+                // ADR-0045 UX §6.2.8 item 1 — the poll STOPS for a group this
+                // device is no longer in. The repository gates `pollGroup` too,
+                // which is the authority; this loop must break as well because that
+                // gate makes the call return IMMEDIATELY, and a `while (isActive)`
+                // around an instant return is a spin, not a poll. Checked at the
+                // top so a membership that ends mid-window exits on the next pass.
+                if (viewModel.membershipEnded.value) break
+                try {
+                    viewModel.pollOnceLongPoll()
+                } catch (cancel: kotlinx.coroutines.CancellationException) {
+                    throw cancel
+                } catch (_: Throwable) {
+                    delay(POLL_RETRY_BACKOFF_MS)
+                }
             }
+        } finally {
+            viewModel.releaseScreenPoll()
         }
     }
     // ADR-0045 S4b — the committer-liveness beacon emitter.
@@ -227,6 +250,22 @@ public fun ChatScreen(
     // the core's `shouldEmitBeacon` and is never hand-copied here: the tick only
     // bounds how long after a resume the first beacon waits.
     val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    // The chat list's unread badge: a chat that is resumed on screen is being
+    // read, so its incoming messages do not count and showing it clears them.
+    DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            when (event) {
+                androidx.lifecycle.Lifecycle.Event.ON_RESUME -> viewModel.setOnScreen(true)
+                androidx.lifecycle.Lifecycle.Event.ON_PAUSE -> viewModel.setOnScreen(false)
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            viewModel.setOnScreen(false)
+        }
+    }
     LaunchedEffect(lifecycleOwner) {
         lifecycleOwner.lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.RESUMED) {
             while (isActive) {
@@ -246,41 +285,77 @@ public fun ChatScreen(
         }
     }
 
-    LaunchedEffect(state.messages.size) {
+
+
+    // Phase 3a10 — call surface. The 1x1 call (any chat's) is app-level: its
+    // ringing banner and in-call screen are drawn by `OneToOneCallOverlay` in
+    // `MainActivity`, above every screen, so they survive leaving this chat.
+    // This screen only reads the slot to hide its call buttons.
+    val activeCall by viewModel.oneToOneCall.collectAsStateWithLifecycle()
+    // SFU multi-party group call (>2 members). Mutually exclusive with
+    // the 1x1 call — the call button routes to exactly one.
+    val activeSfuCall by viewModel.activeSfuCall.collectAsStateWithLifecycle()
+
+    // Every way into a call asks for the microphone (and, for video, the
+    // camera) first; the denial dialogs are mounted by the gate itself.
+    val callPermissions = me.lakko.app.ui.call.rememberCallPermissionGate()
+    val joinableGroupCall by viewModel.joinableGroupCall.collectAsStateWithLifecycle()
+    val callNotice by viewModel.callNotice.collectAsStateWithLifecycle()
+
+    // ADR-0047 — the media runtime for this chat: decrypted files, the one
+    // voice player, the played marks. Scoped to this screen, so every
+    // decrypted file is deleted when the chat closes.
+    val mediaHub = remember { me.lakko.app.media.ChatMediaHub(context, scope) }
+    DisposableEffect(mediaHub) {
+        onDispose { mediaHub.dispose() }
+    }
+    mediaHub.voiceQueue = {
+        state.messages.map { m ->
+            val voiceRef = m.attachments.singleOrNull()?.takeIf {
+                me.lakko.app.media.renderDecision(it, mediaHub.allowlist).bubble ==
+                    me.lakko.app.media.MediaBubble.VOICE
+            }
+            me.lakko.app.media.VoiceQueueItem(
+                key = voiceRef?.let { me.lakko.app.media.ChatMediaHub.mediaKey(it.blobId) } ?: "msg-${m.messageId}",
+                isVoice = voiceRef != null,
+                senderKey = m.authorKey,
+                played = m.direction != Direction.Incoming,
+            )
+        }
+    }
+    val pendingMedia by viewModel.pendingMedia.collectAsStateWithLifecycle()
+    val recorder = rememberRecordController(mediaHub) { take -> viewModel.sendRecordedTake(take) }
+    val callOwnsMedia = activeCall != null || activeSfuCall != null
+    SideEffect { recorder.inCall = callOwnsMedia }
+    // UX spec §4 — the picker: composer mode (insert, stays open) or reaction
+    // mode for one message (react, closes). `null` when closed.
+    var picker by remember { mutableStateOf<PickerRequest?>(null) }
+    var emojiDataset by remember { mutableStateOf<me.lakko.app.media.EmojiDataset?>(null) }
+    LaunchedEffect(picker != null) {
+        if (picker != null && emojiDataset == null) {
+            emojiDataset = withContext(Dispatchers.IO) { me.lakko.app.media.EmojiAssets.load(context) }
+        }
+    }
+    // A sequence number rides with each insert so two quick taps on the same
+    // emoji are two inserts, not one value written twice.
+    var pendingEmojiInsert by remember { mutableStateOf<Pair<Long, String>?>(null) }
+    var emojiInsertSeq by remember { mutableStateOf(0L) }
+
+    LaunchedEffect(state.messages.size, pendingMedia.size) {
         // Auto-scroll to the latest row on every new message
-        // (Outgoing send + Incoming poll both bump the count).
-        if (state.messages.isNotEmpty()) {
-            listState.animateScrollToItem(state.messages.size - 1)
+        // (Outgoing send + Incoming poll both bump the count, and so does an
+        // outgoing media bubble entering the timeline).
+        val total = state.messages.size + pendingMedia.size
+        if (total > 0) {
+            listState.animateScrollToItem(total - 1)
         }
     }
 
-    // Phase 3a10 — call surface.
-    val activeCall by viewModel.activeCall.collectAsStateWithLifecycle()
-    // SFU multi-party group call (>2 members). Mutually exclusive with
-    // `activeCall` — the call button routes to exactly one.
-    val activeSfuCall by viewModel.activeSfuCall.collectAsStateWithLifecycle()
-    val callStateSnapshot = activeCall?.state?.collectAsStateWithLifecycle()?.value
-    // G3-2-call-present — a "live" call (placed or accepted)
-    // owns the full screen; `ringing` (incoming, pre-accept)
-    // stays a lightweight inline banner.
-    // G3-2-prejoin-join — `Idle` is included so a prepped-but-
-    // undialed outgoing call presents the prejoin (mic / camera
-    // preview) before the user taps Join. There's no `activeCall`
-    // in `Idle` outside that prejoin window.
-    val callIsLive = when (callStateSnapshot) {
-        me.lakko.app.calls.CallSession.WebCallState.Idle,
-        me.lakko.app.calls.CallSession.WebCallState.Outgoing,
-        me.lakko.app.calls.CallSession.WebCallState.Connecting,
-        me.lakko.app.calls.CallSession.WebCallState.Connected,
-        me.lakko.app.calls.CallSession.WebCallState.Ending,
-        me.lakko.app.calls.CallSession.WebCallState.Done,
-        -> true
-        else -> false
-    }
-
-    Column(modifier = modifier.fillMaxSize()) {
+    Box(modifier = modifier.fillMaxSize()) {
+    Column(modifier = Modifier.fillMaxSize()) {
         Header(
-            groupIdHex = state.groupIdHex,
+            title = peerName ?: "Group ${shortHex(state.groupIdHex)}",
+            titleIsKey = peerName == null,
             refreshing = state.refreshing,
             // ADR-0045 UX §6.2.8 item 4 / §6.2.11 — the call buttons are GONE
             // once this device's membership has ended, not merely failing. The
@@ -292,30 +367,53 @@ public fun ChatScreen(
             callActive = activeCall != null || activeSfuCall != null || membershipEnded,
             onNavigateBack = onNavigateBack,
             onRefresh = viewModel::onRefreshClicked,
-            // A group chat (>2 MLS members) routes through the
-            // multi-party SFU path; a 1x1 chat stays on the P2P
-            // CallSession. The button is disabled (callActive) while
-            // either kind of call is already up.
+            // A live group call on this chat is JOINED rather than
+            // duplicated; otherwise a group chat (>2 MLS members) starts a
+            // multi-party SFU call and a 1x1 chat the P2P CallSession. The
+            // buttons are hidden (callActive) while either kind of call is up.
             onStartCall = {
-                if (viewModel.isGroupChat) {
-                    viewModel.startGroupCall(video = false)
-                } else {
-                    viewModel.startCall(audio = true, video = false)
-                }
+                callPermissions.request(video = false) { v -> viewModel.onCallButton(video = v) }
             },
             // Video call — publishes the local camera. Group chats
             // SFrame-seal the video through the SFU; 1x1 chats open a
             // P2P video call (the prejoin still lets the user toggle
             // the camera before joining).
             onStartVideoCall = {
-                if (viewModel.isGroupChat) {
-                    viewModel.startGroupCall(video = true)
-                } else {
-                    viewModel.startCall(audio = true, video = true)
-                }
+                callPermissions.request(video = true) { v -> viewModel.onCallButton(video = v) }
             },
             onShowMembers = viewModel::toggleMembersPanel,
         )
+
+        // The ongoing-group-call banner: a live call on this chat that this
+        // device is not in. Hidden once this device's membership has ended —
+        // the call key can no longer be derived, so Join could only fail.
+        val joinable = joinableGroupCall
+        if (joinable != null && !membershipEnded) {
+            GroupCallBanner(
+                call = joinable,
+                onJoin = {
+                    callPermissions.request(video = false) { v ->
+                        viewModel.joinGroupCall(video = v)
+                    }
+                },
+                onJoinWithVideo = {
+                    callPermissions.request(video = true) { v ->
+                        viewModel.joinGroupCall(video = v)
+                    }
+                },
+            )
+        }
+
+        callNotice?.let { notice ->
+            AlertDialog(
+                onDismissRequest = viewModel::dismissCallNotice,
+                title = { Text("Call") },
+                text = { Text(notice) },
+                confirmButton = {
+                    TextButton(onClick = viewModel::dismissCallNotice) { Text("OK") }
+                },
+            )
+        }
 
         // A4 — the group-membership sheet (roster + add / remove),
         // presented as a Dialog while `membersPanelOpen` is true.
@@ -324,55 +422,8 @@ public fun ChatScreen(
             MembersSheet(viewModel = viewModel, onChatDeleted = onNavigateBack)
         }
 
-        // G3-2-call-present — the inline banner now only
-        // handles the `ringing` incoming-call prompt
-        // (Accept / Decline). Once the call is live it is
-        // presented full-screen via the `Dialog` below.
-        if (activeCall != null &&
-            callStateSnapshot == me.lakko.app.calls.CallSession.WebCallState.Ringing
-        ) {
-            CallOverlay(
-                state = me.lakko.app.calls.CallSession.WebCallState.Ringing,
-                onAccept = { viewModel.acceptIncomingCall() },
-                onDecline = { viewModel.declineIncomingCall() },
-                onHangUp = { viewModel.hangUpCall() },
-                onDismiss = { viewModel.clearFinishedCall() },
-            )
-        }
-
-        // G3-2-call-present — present the full in-call UI over
-        // the chat as a full-screen Dialog while the call is
-        // live. `CallScreen` drives itself from the injected
-        // `session` (CallUiState.driveFrom). The dialog is torn
-        // down when the call clears (`clearFinishedCall` sets
-        // `activeCall = null`); back-press / outside-tap
-        // dismissal are disabled so the only exit is the
-        // in-screen End button (→ hangUp → done → onExit).
-        val liveCall = activeCall
-        if (liveCall != null && callIsLive) {
-            Dialog(
-                onDismissRequest = { /* exit only via End button */ },
-                properties = DialogProperties(
-                    usePlatformDefaultWidth = false,
-                    dismissOnBackPress = false,
-                    dismissOnClickOutside = false,
-                ),
-            ) {
-                Box(modifier = Modifier.fillMaxSize()) {
-                    CallScreen(
-                        onExit = { viewModel.clearFinishedCall() },
-                        session = liveCall,
-                        // G3-2-prejoin-join — Join dials the prepped
-                        // session with the chosen mic / camera; Cancel
-                        // abandons it.
-                        onPrejoinJoin = { mic, cam ->
-                            viewModel.dialActiveCall(audio = mic, video = cam)
-                        },
-                        onPrejoinCancel = { viewModel.cancelActiveCall() },
-                    )
-                }
-            }
-        }
+        // The 1x1 call's ringing banner and in-call screen are NOT drawn
+        // here: see `OneToOneCallOverlay`, mounted app-wide by `MainActivity`.
 
         // SFU multi-party group call — presented full-screen over the
         // chat while live. Unlike the 1x1 path there is no prejoin: the
@@ -419,7 +470,7 @@ public fun ChatScreen(
                 .fillMaxWidth()
                 .padding(horizontal = 12.dp),
         ) {
-            if (state.messages.isEmpty()) {
+            if (state.messages.isEmpty() && pendingMedia.isEmpty()) {
                 // ADR-0045 UX §6.2 — the empty-timeline copy invites a send,
                 // and once the membership has ended that is an invitation the
                 // bar below can no longer accept. The terminal row carries the
@@ -437,7 +488,19 @@ public fun ChatScreen(
                     items(items = state.messages, key = { it.messageId }) { msg ->
                         MessageRow(
                             msg = msg,
+                            mediaHub = mediaHub,
+                            onOpenReactionPicker = {
+                                picker = PickerRequest(PickerMode.REACTION, msg.messageId)
+                            },
                             ownIdentity = ownIdentity,
+                            // ADR-0048 UX §5 — author labels in groups only;
+                            // a 1x1 bubble needs no name. `nameVersion` is
+                            // read so the label updates in place.
+                            authorName = if (isGroupChat && msg.direction == Direction.Incoming) {
+                                nameVersion.let { msg.authorKey?.let(viewModel::nameOf) }
+                            } else {
+                                null
+                            },
                             // ADR-0045 UX §6.2.5 — the same predicate the
                             // composer is gated on, two `when`s below.
                             actionsAvailable = me.lakko.app.chat.messageActionsState(
@@ -480,6 +543,19 @@ public fun ChatScreen(
                             },
                         )
                     }
+                    // ADR-0047 — outgoing media still uploading or not sent.
+                    items(items = pendingMedia, key = { "pending-${it.tempId}" }) { row ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.End,
+                        ) {
+                            PendingMediaBubble(
+                                row = row,
+                                onRetry = { viewModel.retryMediaSend(row.tempId) },
+                                onDiscard = { viewModel.discardMediaSend(row.tempId) },
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -513,6 +589,10 @@ public fun ChatScreen(
 
         when (val slot = me.lakko.app.chat.composerState(membership, state.draft)) {
             me.lakko.app.chat.ComposerSlot.Composer -> Composer(
+                recorder = recorder,
+                emojiInsert = pendingEmojiInsert,
+                onEmojiInserted = { pendingEmojiInsert = null },
+                onOpenPicker = { picker = PickerRequest(PickerMode.COMPOSER, null) },
                 draft = state.draft,
                 sending = state.sending,
                 sendError = state.sendError,
@@ -534,6 +614,35 @@ public fun ChatScreen(
 
             is me.lakko.app.chat.ComposerSlot.Withdrawn -> WithdrawnComposer(slot)
         }
+    }
+    // ADR-0047 §3 — the round live preview over the chat while a video note
+    // records. Draws no pointer handlers of its own outside the circle, so the
+    // held record button keeps its gesture.
+    VideoNoteOverlay(recorder)
+    }
+
+    picker?.let { request ->
+        EmojiPickerSheet(
+            mode = request.mode,
+            dataset = emojiDataset,
+            prefs = mediaHub.prefs,
+            gifModel = if (request.mode == PickerMode.COMPOSER) viewModel.gifPicker else null,
+            loadGifPreview = viewModel::gifPreview,
+            onEmoji = { emoji ->
+                val target = request.messageId
+                if (request.mode == PickerMode.REACTION && target != null) {
+                    viewModel.onReactToMessage(target, emoji)
+                } else {
+                    emojiInsertSeq += 1
+                    pendingEmojiInsert = emojiInsertSeq to emoji
+                }
+            },
+            onGif = viewModel::sendGif,
+            onDismiss = {
+                viewModel.gifPicker.close()
+                picker = null
+            },
+        )
     }
 
     // Inline image preview — surfaced as a full-screen
@@ -576,7 +685,11 @@ public fun ChatScreen(
 
 @Composable
 private fun Header(
-    groupIdHex: String,
+    /** ADR-0048 UX §5 — the other person's resolved name in a 1x1 chat, the
+     *  group label otherwise. */
+    title: String,
+    /** `true` when [title] is an id rather than a name (render monospaced). */
+    titleIsKey: Boolean,
     refreshing: Boolean,
     callActive: Boolean,
     onNavigateBack: () -> Unit,
@@ -595,9 +708,10 @@ private fun Header(
             TextButton(onClick = onNavigateBack) { Text("← Back") }
             Spacer(Modifier.width(4.dp))
             Text(
-                text = "Group ${shortHex(groupIdHex)}",
+                text = title,
                 style = MaterialTheme.typography.titleMedium,
-                fontFamily = FontFamily.Monospace,
+                fontFamily = if (titleIsKey) FontFamily.Monospace else FontFamily.Default,
+                maxLines = 1,
                 modifier = Modifier.weight(1f),
             )
             // Phase 3a10 — call buttons. Hidden when a call
@@ -626,80 +740,44 @@ private fun Header(
 }
 
 // =============================================================================
-// Phase 3a10 — Call overlay
+// Ongoing group call banner
 // =============================================================================
 
 @Composable
-private fun CallOverlay(
-    state: me.lakko.app.calls.CallSession.WebCallState,
-    onAccept: () -> Unit,
-    onDecline: () -> Unit,
-    onHangUp: () -> Unit,
-    onDismiss: () -> Unit,
+private fun GroupCallBanner(
+    call: JoinableGroupCall,
+    onJoin: () -> Unit,
+    onJoinWithVideo: () -> Unit,
 ) {
-    val bg = when (state) {
-        me.lakko.app.calls.CallSession.WebCallState.Ringing ->
-            androidx.compose.ui.graphics.Color(0xFFFFA000)
-        me.lakko.app.calls.CallSession.WebCallState.Connected ->
-            androidx.compose.ui.graphics.Color(0xFF2E7D32)
-        me.lakko.app.calls.CallSession.WebCallState.Done ->
-            androidx.compose.ui.graphics.Color(0xFF616161)
-        else -> androidx.compose.ui.graphics.Color(0xFF1565C0)
+    val joinedLine = when (call.joinedCount) {
+        0 -> "Starting now"
+        1 -> "1 person in the call"
+        else -> "${call.joinedCount} people in the call"
     }
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
+    Surface(
+        color = MaterialTheme.colorScheme.secondaryContainer,
         modifier = Modifier
             .fillMaxWidth()
-            .background(bg)
-            .padding(horizontal = 16.dp, vertical = 10.dp),
+            .semantics { liveRegion = LiveRegionMode.Polite },
     ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = when (state) {
-                    me.lakko.app.calls.CallSession.WebCallState.Idle -> "📞"
-                    me.lakko.app.calls.CallSession.WebCallState.Outgoing ->
-                        "📞 Calling…"
-                    me.lakko.app.calls.CallSession.WebCallState.Ringing ->
-                        "📞 Incoming call"
-                    me.lakko.app.calls.CallSession.WebCallState.Connecting ->
-                        "📞 Connecting…"
-                    me.lakko.app.calls.CallSession.WebCallState.Connected ->
-                        "📞 In call"
-                    me.lakko.app.calls.CallSession.WebCallState.Ending ->
-                        "📞 Ending…"
-                    me.lakko.app.calls.CallSession.WebCallState.Done ->
-                        "📞 Call ended"
-                },
-                style = MaterialTheme.typography.titleMedium,
-                color = androidx.compose.ui.graphics.Color.White,
-            )
-            Text(
-                text = "Audio · signaling-only scaffold. WebRTC pod " +
-                    "integration is the 3a10-followup.",
-                style = MaterialTheme.typography.bodySmall,
-                color = androidx.compose.ui.graphics.Color.White.copy(alpha = 0.85f),
-            )
-        }
-        when (state) {
-            me.lakko.app.calls.CallSession.WebCallState.Ringing -> {
-                TextButton(onClick = onAccept) {
-                    Text("Accept", color = androidx.compose.ui.graphics.Color.White)
-                }
-                TextButton(onClick = onDecline) {
-                    Text("Decline", color = androidx.compose.ui.graphics.Color.White)
-                }
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Group call in progress",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                )
+                Text(
+                    text = joinedLine,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                )
             }
-            me.lakko.app.calls.CallSession.WebCallState.Done -> {
-                TextButton(onClick = onDismiss) {
-                    Text("Dismiss", color = androidx.compose.ui.graphics.Color.White)
-                }
-            }
-            me.lakko.app.calls.CallSession.WebCallState.Idle -> {}
-            else -> {
-                TextButton(onClick = onHangUp) {
-                    Text("Hang up", color = androidx.compose.ui.graphics.Color.White)
-                }
-            }
+            TextButton(onClick = onJoin) { Text("Join") }
+            TextButton(onClick = onJoinWithVideo) { Text("Join with video") }
         }
     }
     HorizontalDivider()
@@ -712,7 +790,14 @@ private fun CallOverlay(
 @Composable
 private fun MessageRow(
     msg: ChatMessage,
+    /** ADR-0047 — the chat's media runtime, for voice / video-note / GIF bubbles. */
+    mediaHub: me.lakko.app.media.ChatMediaHub,
+    /** ADR-0047 — the reaction bar's `+`: the picker in reaction mode. */
+    onOpenReactionPicker: () -> Unit,
     ownIdentity: me.lakko.app.chat.MemberIdentity?,
+    /** ADR-0048 — the resolved author name for an incoming group bubble, else
+     *  `null` (no label). */
+    authorName: String?,
     /** ADR-0045 UX §6.2.5 — whether Edit / Delete / React are offered at all.
      *  `false` once this device's membership has ended: all three compose an
      *  application message, so all three are refused by the same core gate
@@ -737,6 +822,8 @@ private fun MessageRow(
         ) {
             Bubble(
                 msg = msg,
+                mediaHub = mediaHub,
+                onOpenReactionPicker = onOpenReactionPicker,
                 ownIdentity = ownIdentity,
                 actionsAvailable = actionsAvailable,
                 isOwn = true,
@@ -757,12 +844,23 @@ private fun MessageRow(
             )
         }
 
-        Direction.Incoming -> Row(
+        Direction.Incoming -> Column(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.Start,
+            horizontalAlignment = Alignment.Start,
         ) {
+            if (authorName != null) {
+                Text(
+                    text = authorName,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    modifier = Modifier.padding(start = 4.dp, bottom = 2.dp),
+                )
+            }
             Bubble(
                 msg = msg,
+                mediaHub = mediaHub,
+                onOpenReactionPicker = onOpenReactionPicker,
                 ownIdentity = ownIdentity,
                 actionsAvailable = actionsAvailable,
                 isOwn = false,
@@ -793,6 +891,9 @@ private fun MessageRow(
     }
 }
 
+/** ADR-0047 — what the emoji picker was opened for. */
+private data class PickerRequest(val mode: PickerMode, val messageId: Long?)
+
 /** ADR-0023 — the per-message action menu's emoji picker set. */
 private val REACTION_EMOJIS: List<String> =
     listOf("👍", "❤️", "😂", "😮", "😢", "🙏")
@@ -819,6 +920,8 @@ private fun TypingIndicator(text: String?) {
 @Composable
 private fun Bubble(
     msg: ChatMessage,
+    mediaHub: me.lakko.app.media.ChatMediaHub,
+    onOpenReactionPicker: () -> Unit,
     /** ADR-0023 — our own signature key, for the own-reaction highlight. */
     ownIdentity: me.lakko.app.chat.MemberIdentity?,
     isOwn: Boolean,
@@ -853,10 +956,16 @@ private fun Bubble(
         horizontalAlignment = if (isOwn) Alignment.End else Alignment.Start,
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
+        // ADR-0047 §3 — a video note is a circle with no bubble chrome.
+        val chromeless = !msg.deleted && msg.text.isEmpty() && msg.attachments.size == 1 &&
+            remember(msg.messageId) {
+                me.lakko.app.media.renderDecision(msg.attachments[0], mediaHub.allowlist).bubble ==
+                    me.lakko.app.media.MediaBubble.VIDEO_NOTE
+            }
         Box {
             Surface(
                 shape = RoundedCornerShape(12.dp),
-                color = background,
+                color = if (chromeless) Color.Transparent else background,
                 contentColor = contentColor,
                 modifier = Modifier
                     .widthIn(max = 280.dp)
@@ -899,11 +1008,18 @@ private fun Bubble(
                         if (msg.attachments.isNotEmpty()) {
                             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                 for (ref in msg.attachments) {
-                                    AttachmentChipRow(
+                                    AttachmentView(
                                         ref = ref,
-                                        onPreview = { onPreview(ref) },
-                                        onSave = { onSave(ref) },
-                                    )
+                                        hub = mediaHub,
+                                        isOwn = isOwn,
+                                        contentColor = contentColor,
+                                    ) {
+                                        AttachmentChipRow(
+                                            ref = ref,
+                                            onPreview = { onPreview(ref) },
+                                            onSave = { onSave(ref) },
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -941,6 +1057,16 @@ private fun Bubble(
                                 pickingReaction = false
                             }) { Text(emoji) }
                         }
+                        // ADR-0047 / UX spec §4 — any emoji, through the picker
+                        // in reaction mode (Emoji tab only; a tap reacts).
+                        TextButton(
+                            onClick = {
+                                menuOpen = false
+                                pickingReaction = false
+                                onOpenReactionPicker()
+                            },
+                            modifier = Modifier.semantics { contentDescription = "More reactions" },
+                        ) { Text("+") }
                     }
                 } else {
                     DropdownMenuItem(
@@ -1214,6 +1340,12 @@ private fun ThreadMissingHint() {
 
 @Composable
 private fun Composer(
+    /** ADR-0047 — the hold-to-record controller for this chat. */
+    recorder: RecordController,
+    /** ADR-0047 — an emoji the picker asked to insert at the caret. */
+    emojiInsert: Pair<Long, String>?,
+    onEmojiInserted: () -> Unit,
+    onOpenPicker: () -> Unit,
     draft: String,
     sending: Boolean,
     sendError: String?,
@@ -1228,6 +1360,36 @@ private fun Composer(
     onAttachClicked: () -> Unit,
     onRemoveAttachment: (Int) -> Unit,
 ) {
+    // The caret has to be known to insert an emoji AT it (UX spec §4), which a
+    // bare `String` value cannot carry. The view model still owns the text;
+    // this mirrors it and follows an external change (a cleared draft after
+    // Send) without losing the caret on the user's own edits.
+    //
+    // Only a CHANGE of `draft` resets the field — the same rule the `String`
+    // overload of the text field applies internally. Comparing against the
+    // field's own text instead would reset it to a stale draft whenever the
+    // view model's state lags one keystroke behind, dropping what was typed.
+    var field by remember { mutableStateOf(TextFieldValue(draft, TextRange(draft.length))) }
+    var lastDraft by remember { mutableStateOf(draft) }
+    if (draft != lastDraft) {
+        lastDraft = draft
+        if (field.text != draft) field = TextFieldValue(draft, TextRange(draft.length))
+    }
+    LaunchedEffect(emojiInsert) {
+        val emoji = emojiInsert?.second ?: return@LaunchedEffect
+        val sel = field.selection
+        val text = field.text.replaceRange(sel.min, sel.max, emoji)
+        val caret = sel.min + emoji.length
+        field = TextFieldValue(text, TextRange(caret))
+        onDraftChange(text)
+        onEmojiInserted()
+    }
+
+    val recState = recorder.state
+    val recording = recState !is me.lakko.app.media.RecState.Idle &&
+        recState !is me.lakko.app.media.RecState.Requesting
+    val showSend = draft.isNotBlank() || pendingAttachments.isNotEmpty() || uploading
+
     Column {
         HorizontalDivider()
         if (sendError != null) {
@@ -1238,12 +1400,26 @@ private fun Composer(
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
             )
         }
+        // ADR-0047 §6 — microphone / camera refused: the card with Open Settings.
+        recorder.denied?.let { kind ->
+            MediaDeniedCard(kind = kind, onDismiss = recorder::dismissDenied)
+        }
+        (recorder.notice ?: recorder.disabledReason?.takeIf { !showSend })?.let { note ->
+            Text(
+                text = note,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier
+                    .padding(horizontal = 16.dp, vertical = 2.dp)
+                    .semantics { liveRegion = LiveRegionMode.Polite },
+            )
+        }
         // 1.19c4 — pending-attachments tray. Horizontal scroll
         // of chips above the text field; each chip shows
         // `name · size` with a × to drop it. Plus an
         // "Encrypting…" placeholder chip while [uploading] is
         // true.
-        if (pendingAttachments.isNotEmpty() || uploading) {
+        if ((pendingAttachments.isNotEmpty() || uploading) && !recording) {
             PendingAttachmentsTray(
                 attachments = pendingAttachments,
                 uploading = uploading,
@@ -1257,48 +1433,72 @@ private fun Composer(
                 .fillMaxWidth()
                 .padding(12.dp),
         ) {
-            // 1.19c4 — Attach button. Drives the OS-level
-            // ACTION_OPEN_DOCUMENT picker via the launcher
-            // wired in [ChatScreen]; the contract surfaces both
-            // photos and arbitrary files behind a single tap.
-            TextButton(
-                onClick = onAttachClicked,
-                enabled = !sending && !uploading,
-            ) {
-                Text("📎")
-            }
-            OutlinedTextField(
-                value = draft,
-                onValueChange = onDraftChange,
-                placeholder = { Text("Type a message…") },
-                singleLine = false,
-                enabled = !sending,
-                keyboardOptions = KeyboardOptions(
-                    capitalization = KeyboardCapitalization.Sentences,
-                ),
-                modifier = Modifier
-                    .weight(1f)
-                    // ADR-0024 — surface focus to the ViewModel so a
-                    // blur clears any outstanding typing signal.
-                    .onFocusChanged { onFocusChanged(it.isFocused) },
-            )
-            Spacer(Modifier.width(8.dp))
-            Button(
-                onClick = onSendClicked,
-                enabled = !sending && !uploading
-                    && (draft.isNotBlank() || pendingAttachments.isNotEmpty()),
-            ) {
-                if (sending) {
-                    CircularProgressIndicator(
-                        modifier = Modifier
-                            .height(20.dp)
-                            .width(20.dp),
-                        strokeWidth = 2.dp,
-                        color = MaterialTheme.colorScheme.onPrimary,
-                    )
-                } else {
-                    Text("Send")
+            if (recording) {
+                // §2 flow 2 — the recording bar replaces the text field. The
+                // record button stays composed at the same spot so the held
+                // pointer keeps its gesture.
+                RecordingBar(recorder, Modifier.weight(1f).heightIn(min = 48.dp))
+            } else {
+                // UX spec §4 — the smiley opens the picker on the Emoji tab.
+                IconButton(
+                    onClick = onOpenPicker,
+                    enabled = !sending,
+                    modifier = Modifier.semantics { contentDescription = "Emoji and GIFs" },
+                ) {
+                    Text("\uD83D\uDE42")
                 }
+                // 1.19c4 — Attach button. Drives the OS-level
+                // ACTION_OPEN_DOCUMENT picker via the launcher
+                // wired in [ChatScreen]; the contract surfaces both
+                // photos and arbitrary files behind a single tap.
+                TextButton(
+                    onClick = onAttachClicked,
+                    enabled = !sending && !uploading,
+                ) {
+                    Text("\uD83D\uDCCE")
+                }
+                OutlinedTextField(
+                    value = field,
+                    onValueChange = { next ->
+                        field = next
+                        if (next.text != draft) onDraftChange(next.text)
+                    },
+                    placeholder = { Text("Type a message\u2026") },
+                    singleLine = false,
+                    enabled = !sending,
+                    keyboardOptions = KeyboardOptions(
+                        capitalization = KeyboardCapitalization.Sentences,
+                    ),
+                    modifier = Modifier
+                        .weight(1f)
+                        // ADR-0024 — surface focus to the ViewModel so a
+                        // blur clears any outstanding typing signal.
+                        .onFocusChanged { onFocusChanged(it.isFocused) },
+                )
+            }
+            Spacer(Modifier.width(8.dp))
+            if (showSend && !recording) {
+                Button(
+                    onClick = onSendClicked,
+                    enabled = !sending && !uploading
+                        && (draft.isNotBlank() || pendingAttachments.isNotEmpty()),
+                ) {
+                    if (sending) {
+                        CircularProgressIndicator(
+                            modifier = Modifier
+                                .height(20.dp)
+                                .width(20.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.onPrimary,
+                        )
+                    } else {
+                        Text("Send")
+                    }
+                }
+            } else if (recState !is me.lakko.app.media.RecState.Preview) {
+                // UX spec §1 — with nothing to send the right-hand button is
+                // the mic (or camera, after a tap toggles the mode).
+                RecordButton(recorder)
             }
         }
     }
@@ -1536,15 +1736,23 @@ private fun shareDecryptedBytes(
     ref: AttachmentRef,
     bytes: ByteArray,
 ) {
-    val baseName = ref.name
-        ?: "attachment-${AttachmentBridge.hex(ref.blobId).take(8)}"
+    // `ref.name` is sender-controlled: sanitize it, write into a fresh
+    // per-share directory so no existing file can be overwritten, and refuse
+    // anything that still resolves outside that directory.
+    val baseName = AttachmentBridge.safeFileName(
+        ref.name,
+        fallback = "attachment-${AttachmentBridge.hex(ref.blobId).take(8)}",
+    )
     runCatching {
-        val cacheDir = java.io.File(context.cacheDir, "shared-attachments").apply {
-            mkdirs()
+        val shareDir = java.io.File(
+            java.io.File(context.cacheDir, "shared-attachments"),
+            java.util.UUID.randomUUID().toString(),
+        ).apply { mkdirs() }
+        val outFile = java.io.File(shareDir, baseName)
+        check(outFile.canonicalFile.parentFile == shareDir.canonicalFile) {
+            "attachment name resolved outside the share directory"
         }
-        val outFile = java.io.File(cacheDir, baseName).apply {
-            writeBytes(bytes)
-        }
+        outFile.writeBytes(bytes)
         val authority = "${context.packageName}.fileprovider"
         val uri = androidx.core.content.FileProvider
             .getUriForFile(context, authority, outFile)
@@ -2140,7 +2348,7 @@ private fun MembersSheet(
                         // read a display name from), plus the secondary line.
                         waitingAdds.forEach { request ->
                             Text(
-                                text = viewModel.fingerprintOfKeyB64(request.addSignatureKeyB64),
+                                text = viewModel.nameOfKeyB64(request.addSignatureKeyB64),
                                 style = MaterialTheme.typography.bodySmall,
                             )
                             Text(
@@ -2187,7 +2395,7 @@ private fun MembersSheet(
                         ) {
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    text = viewModel.fingerprintOfKeyB64(
+                                    text = viewModel.nameOfKeyB64(
                                         item.addSignatureKeyB64,
                                     ),
                                     style = MaterialTheme.typography.bodySmall,
@@ -2250,9 +2458,12 @@ private fun MembersSheet(
                                 .padding(vertical = 2.dp),
                         ) {
                             Column(modifier = Modifier.weight(1f)) {
+                                // ADR-0048 — a join request names the joiner
+                                // through the one resolver (usually the
+                                // fingerprint: a stranger's profile has not
+                                // reached this device).
                                 Text(
-                                    text = ref.take(8)
-                                        .joinToString("") { "%02x".format(it.toInt() and 0xff) },
+                                    text = viewModel.nameOfKeyB64(me.lakko.app.chat.outboxB64(ref)),
                                     style = MaterialTheme.typography.bodySmall,
                                 )
                                 // ADR-0028 OQ2 — which member's `/g/` link this
@@ -2263,7 +2474,9 @@ private fun MembersSheet(
                                 ]
                                 if (attr != null) {
                                     Text(
-                                        text = "via ${attr.issuerFingerprint.take(11)}" +
+                                        text = "via " +
+                                            (attr.issuerKeyB64?.let(viewModel::nameOf)
+                                                ?: attr.issuerFingerprint.take(11)) +
                                             if (attr.issuerInRoster) {
                                                 " · member"
                                             } else {

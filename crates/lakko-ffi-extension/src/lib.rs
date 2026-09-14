@@ -38,6 +38,10 @@
 //!   constant that filter's cheap pre-peek needs, so the length is not
 //!   hand-copied into Swift where nothing pins it. A pure value on the READ
 //!   side of the classification question; it opens no write path.
+//! - [`profile::decode_profile_envelope`] +
+//!   [`profile::profile_envelope_min_len`] / [`profile::profile_envelope_max_len`]
+//!   — the same filter question for the ADR-0048 profile envelope. Decode
+//!   returns no fields: the NSE must not learn or store profiles (C-59).
 //!
 //! There is deliberately **no compose / send / call / channel / transport
 //! surface**: the NSE only reads and decrypts, then discards. It NEVER writes
@@ -56,6 +60,7 @@ use lakko_mls::{Group as MlsGroup, Identity as MlsIdentity, Incoming as MlsIncom
 
 pub mod attachments;
 pub mod committer_beacon;
+pub mod profile;
 pub mod push_routing;
 
 uniffi::setup_scaffolding!();

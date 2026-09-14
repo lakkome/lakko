@@ -31,7 +31,7 @@ import WebRTC
 /// mismatch the caller should know about. Surfaced as
 /// [`TurnCredentialClientError`].
 public final class TurnCredentialClient: @unchecked Sendable {
-    public static let defaultBaseURL = "http://127.0.0.1:8081"
+    public static var defaultBaseURL: String { ApiEndpoints.baseURL(for: .auth) }
 
     public let baseURL: String
     private let session: URLSession

@@ -146,10 +146,10 @@ export function parseCallInviteSlug(slug: string): ParsedCallInvite {
 }
 
 /** Discrete UI choices the "Create call link" form exposes
- *  for the `expiry_ms` field. Same recipes as the contact-
- *  invite form — keeps the UX consistent across the two
- *  invite kinds. */
-export type ExpiryPreset = "1d" | "7d" | "30d" | "never";
+ *  for the `expiry_ms` field. The contact-invite recipes plus
+ *  `"1h"`: a call link is usually for a call happening now, so
+ *  the shortest useful window is hours, not days. */
+export type ExpiryPreset = "1h" | "1d" | "7d" | "30d" | "never";
 
 /** Translate an [`ExpiryPreset`] into the wire-level UNIX-
  *  millis argument `composeCallInviteCapability` expects.
@@ -158,6 +158,8 @@ export type ExpiryPreset = "1d" | "7d" | "30d" | "never";
  *  allowing it (parallel to contact-invite ADR-0005 §13.3). */
 export function expiryPresetToMs(preset: ExpiryPreset, nowMs: number): bigint {
   switch (preset) {
+    case "1h":
+      return BigInt(nowMs + 3_600_000);
     case "1d":
       return BigInt(nowMs + 1 * 86_400_000);
     case "7d":

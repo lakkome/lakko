@@ -86,12 +86,24 @@ extension PersistedMessage {
 
 extension PersistedAttachment {
     public init(from ref: AttachmentRef) {
-        self.blobIdB64 = ref.blobId.base64EncodedString()
-        self.keyB64 = ref.key.base64EncodedString()
-        self.nonceB64 = ref.nonce.base64EncodedString()
-        self.mime = ref.mime
-        self.size = ref.size
-        self.name = ref.name
+        self.init(
+            blobIdB64: ref.blobId.base64EncodedString(),
+            keyB64: ref.key.base64EncodedString(),
+            nonceB64: ref.nonce.base64EncodedString(),
+            mime: ref.mime,
+            size: ref.size,
+            name: ref.name,
+            // ADR-0047 — the media metadata rides along verbatim. It already
+            // passed the core's bounds on the way in (received refs) or was
+            // produced by this client (sent refs), so nothing is re-validated
+            // here; the render decision re-reads the MIME allowlist anyway.
+            kind: ref.kind,
+            durationMs: ref.durationMs,
+            waveformB64: ref.waveform?.base64EncodedString(),
+            width: ref.width,
+            height: ref.height,
+            thumb: ref.thumb.map(PersistedThumb.init(from:))
+        )
     }
 
     public func toAttachmentRef() -> AttachmentRef? {
@@ -100,13 +112,57 @@ extension PersistedAttachment {
               let nonce = Data(base64Encoded: nonceB64) else {
             return nil
         }
+        // A waveform that no longer decodes, or exceeds the envelope bound,
+        // is dropped; the attachment survives (the ADR-0047 envelope rule).
+        let waveform = waveformB64
+            .flatMap { Data(base64Encoded: $0) }
+            .flatMap { (1...Waveform.maxBytes).contains($0.count) ? $0 : nil }
         return AttachmentRef(
             blobId: blobId,
             key: key,
             nonce: nonce,
             mime: mime,
             size: size,
-            name: name
+            name: name,
+            kind: kind,
+            durationMs: durationMs,
+            waveform: waveform,
+            width: width,
+            height: height,
+            thumb: thumb?.toThumbRef()
+        )
+    }
+}
+
+extension PersistedThumb {
+    public init(from thumb: ThumbRef) {
+        self.init(
+            blobIdB64: thumb.blobId.base64EncodedString(),
+            keyB64: thumb.key.base64EncodedString(),
+            nonceB64: thumb.nonce.base64EncodedString(),
+            mime: thumb.mime,
+            size: thumb.size,
+            width: thumb.width,
+            height: thumb.height
+        )
+    }
+
+    /// `nil` when a byte field no longer decodes — the poster is dropped and
+    /// the bubble shows a neutral circle.
+    public func toThumbRef() -> ThumbRef? {
+        guard let blobId = Data(base64Encoded: blobIdB64),
+              let key = Data(base64Encoded: keyB64),
+              let nonce = Data(base64Encoded: nonceB64) else {
+            return nil
+        }
+        return ThumbRef(
+            blobId: blobId,
+            key: key,
+            nonce: nonce,
+            mime: mime,
+            size: size,
+            width: width,
+            height: height
         )
     }
 }

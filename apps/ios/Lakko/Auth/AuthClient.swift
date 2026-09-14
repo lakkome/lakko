@@ -40,13 +40,12 @@ import LakkoCore
 ///
 /// ## Default base URL
 ///
+/// Derived from the build's API base URL (``ApiEndpoints``, Info.plist
+/// `LakkoApiBaseUrl`): `<base>/auth`. With no base URL configured it is
 /// `http://localhost:8081` — the canonical "host machine from inside
 /// the iOS simulator" address (the simulator shares the host's
 /// network namespace, unlike the Android emulator which needs
-/// `10.0.2.2`). On a physical device pointed at a dev workstation,
-/// override via the constructor with the workstation's LAN IP.
-/// Production switches to `https://api-dev.lakko.me` via the
-/// Cloudflare tunnel.
+/// `10.0.2.2`).
 ///
 /// ## Errors
 ///
@@ -64,10 +63,10 @@ public final class AuthClient {
 
     // MARK: - Configuration
 
-    /// Default base URL — the iOS simulator shares the host's
-    /// loopback, so `localhost:8081` reaches the `lakko-svc-auth` dev
-    /// server. Port matches `LAKKO_BIND` in `CLAUDE.md`.
-    public static let defaultBaseURL: String = "http://localhost:8081"
+    /// Default base URL — `<LakkoApiBaseUrl>/auth`, or the
+    /// `lakko-svc-auth` dev bind `http://localhost:8081` when the build
+    /// carries no API base URL. See ``ApiEndpoints``.
+    public static var defaultBaseURL: String { ApiEndpoints.baseURL(for: .auth) }
 
     /// Base URL. No trailing slash.
     public let baseURL: String

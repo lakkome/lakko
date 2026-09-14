@@ -119,7 +119,22 @@ impl EncryptedAttachment {
 /// envelope. Constructed via [`AttachmentRef::new`] on the send
 /// path; obtained via [`ParsedEnvelope::attachments`] on the
 /// receive path.
+///
+/// ADR-0047 media metadata (`kind`, `durationMs`, `waveform`, `width`,
+/// `height`, `thumb`) is optional and set after construction, so the
+/// constructor's signature is unchanged:
+///
+/// ```ts
+/// const r = new AttachmentRef(blobId, key, nonce, "audio/mp4", size, "voice-1.m4a");
+/// r.kind = "voice";
+/// r.durationMs = 4200;
+/// r.waveform = amplitudes; // Uint8Array, 1..=128 bytes
+/// ```
+///
+/// Out-of-bound values are not errors: `EnvelopeBuilder.build` drops them,
+/// as every receiver would.
 #[wasm_bindgen]
+#[derive(Clone)]
 pub struct AttachmentRef {
     blob_id: Vec<u8>,
     key: Vec<u8>,
@@ -127,6 +142,131 @@ pub struct AttachmentRef {
     mime: Option<String>,
     size: u64,
     name: Option<String>,
+    kind: Option<String>,
+    duration_ms: Option<u32>,
+    waveform: Option<Vec<u8>>,
+    width: Option<u32>,
+    height: Option<u32>,
+    thumb: Option<ThumbRef>,
+}
+
+/// ADR-0047 — a poster-frame blob attached to an [`AttachmentRef`]: its
+/// own encrypted blob under its own CEK. Attach with
+/// `AttachmentRef.setThumb`; read with the `thumb` getter.
+#[wasm_bindgen]
+#[derive(Clone)]
+pub struct ThumbRef {
+    blob_id: Vec<u8>,
+    key: Vec<u8>,
+    nonce: Vec<u8>,
+    mime: Option<String>,
+    size: u64,
+    width: Option<u32>,
+    height: Option<u32>,
+}
+
+#[wasm_bindgen]
+impl ThumbRef {
+    /// Construct from raw byte fields + metadata. Field lengths are
+    /// validated when the owning ref is added to an `EnvelopeBuilder`;
+    /// `size` (1..=256 KiB) and the dimensions (1..=4096) are bounded at
+    /// build time, where an out-of-bound thumb is dropped.
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        blob_id: Vec<u8>,
+        key: Vec<u8>,
+        nonce: Vec<u8>,
+        mime: Option<String>,
+        size: u64,
+        width: Option<u32>,
+        height: Option<u32>,
+    ) -> Self {
+        Self {
+            blob_id,
+            key,
+            nonce,
+            mime,
+            size,
+            width,
+            height,
+        }
+    }
+
+    /// Raw 32-byte SHA-256 blob id of the poster blob.
+    #[wasm_bindgen(getter, js_name = blobId)]
+    pub fn blob_id(&self) -> Vec<u8> {
+        self.blob_id.clone()
+    }
+
+    /// Raw 32-byte CEK of the poster blob.
+    #[wasm_bindgen(getter)]
+    pub fn key(&self) -> Vec<u8> {
+        self.key.clone()
+    }
+
+    /// Raw 12-byte AEAD nonce of the poster blob.
+    #[wasm_bindgen(getter)]
+    pub fn nonce(&self) -> Vec<u8> {
+        self.nonce.clone()
+    }
+
+    /// Poster MIME type, `undefined` when not set. Check it with
+    /// `inlineMediaType` before rendering.
+    #[wasm_bindgen(getter)]
+    pub fn mime(&self) -> Option<String> {
+        self.mime.clone()
+    }
+
+    /// Poster plaintext size in bytes (`BigInt`).
+    #[wasm_bindgen(getter)]
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+
+    /// Poster pixel width, `undefined` when absent.
+    #[wasm_bindgen(getter)]
+    pub fn width(&self) -> Option<u32> {
+        self.width
+    }
+
+    /// Poster pixel height, `undefined` when absent.
+    #[wasm_bindgen(getter)]
+    pub fn height(&self) -> Option<u32> {
+        self.height
+    }
+}
+
+/// ADR-0047 — how an attachment may be rendered inline. Returned by
+/// [`inline_media_type`]; `undefined` there means a file chip.
+#[wasm_bindgen]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InlineMediaType {
+    /// Render as an image.
+    Image = 0,
+    /// Play as audio.
+    Audio = 1,
+    /// Play as video.
+    Video = 2,
+}
+
+impl From<inner::InlineMediaType> for InlineMediaType {
+    fn from(t: inner::InlineMediaType) -> Self {
+        match t {
+            inner::InlineMediaType::Image => Self::Image,
+            inner::InlineMediaType::Audio => Self::Audio,
+            inner::InlineMediaType::Video => Self::Video,
+        }
+    }
+}
+
+/// ADR-0047 — the inline-playback allowlist: how an attachment with this
+/// MIME type may be rendered inline, or `undefined` for a file chip.
+/// Decided by MIME alone (parameters after `;` ignored, case-insensitive);
+/// never pass `kind` here.
+#[wasm_bindgen(js_name = inlineMediaType)]
+#[must_use]
+pub fn inline_media_type(mime: &str) -> Option<InlineMediaType> {
+    inner::inline_media_type(mime).map(Into::into)
 }
 
 #[wasm_bindgen]
@@ -152,7 +292,97 @@ impl AttachmentRef {
             mime,
             size,
             name,
+            kind: None,
+            duration_ms: None,
+            waveform: None,
+            width: None,
+            height: None,
+            thumb: None,
         }
+    }
+
+    /// ADR-0047 — `"voice"`, `"video_note"`, `"gif"`, another (unknown)
+    /// value that renders as a file, or `undefined` for a plain file.
+    /// Chooses the bubble only; inline playback is `inlineMediaType(mime)`.
+    #[wasm_bindgen(getter)]
+    pub fn kind(&self) -> Option<String> {
+        self.kind.clone()
+    }
+
+    /// Set (or clear with `undefined`) the media kind.
+    #[wasm_bindgen(setter)]
+    pub fn set_kind(&mut self, kind: Option<String>) {
+        self.kind = kind;
+    }
+
+    /// ADR-0047 — playback length in ms. Survives only on a `voice`
+    /// (<= 15 min) or `video_note` (<= 60 s) ref.
+    #[wasm_bindgen(getter, js_name = durationMs)]
+    pub fn duration_ms(&self) -> Option<u32> {
+        self.duration_ms
+    }
+
+    /// Set (or clear with `undefined`) `durationMs`.
+    #[wasm_bindgen(setter, js_name = durationMs)]
+    pub fn set_duration_ms(&mut self, duration_ms: Option<u32>) {
+        self.duration_ms = duration_ms;
+    }
+
+    /// ADR-0047 — raw waveform amplitude bytes (1..=128), `undefined` when
+    /// absent.
+    #[wasm_bindgen(getter)]
+    pub fn waveform(&self) -> Option<Vec<u8>> {
+        self.waveform.clone()
+    }
+
+    /// Set (or clear with `undefined`) the waveform bytes.
+    #[wasm_bindgen(setter)]
+    pub fn set_waveform(&mut self, waveform: Option<Vec<u8>>) {
+        self.waveform = waveform;
+    }
+
+    /// ADR-0047 — pixel width (1..=4096), `undefined` when absent.
+    #[wasm_bindgen(getter)]
+    pub fn width(&self) -> Option<u32> {
+        self.width
+    }
+
+    /// Set (or clear with `undefined`) the pixel width.
+    #[wasm_bindgen(setter)]
+    pub fn set_width(&mut self, width: Option<u32>) {
+        self.width = width;
+    }
+
+    /// ADR-0047 — pixel height (1..=4096), `undefined` when absent.
+    #[wasm_bindgen(getter)]
+    pub fn height(&self) -> Option<u32> {
+        self.height
+    }
+
+    /// Set (or clear with `undefined`) the pixel height.
+    #[wasm_bindgen(setter)]
+    pub fn set_height(&mut self, height: Option<u32>) {
+        self.height = height;
+    }
+
+    /// ADR-0047 — the poster-frame thumb (a copy), `undefined` when absent.
+    #[wasm_bindgen(getter)]
+    pub fn thumb(&self) -> Option<ThumbRef> {
+        self.thumb.clone()
+    }
+
+    /// Attach a copy of `thumb`. A method rather than a setter so the
+    /// caller's `ThumbRef` handle stays valid (a by-value setter would
+    /// consume it).
+    #[wasm_bindgen(js_name = setThumb)]
+    pub fn set_thumb(&mut self, thumb: &ThumbRef) {
+        self.thumb = Some(thumb.clone());
+    }
+
+    /// Remove the thumb.
+    #[wasm_bindgen(js_name = clearThumb)]
+    pub fn clear_thumb(&mut self) {
+        self.thumb = None;
     }
 
     /// Raw 32-byte SHA-256 blob id.
@@ -235,14 +465,7 @@ impl ParsedEnvelope {
         let idx = usize::try_from(i).map_err(|_| boundary_err(format!("bad index {i}")))?;
         self.attachments
             .get(idx)
-            .map(|a| AttachmentRef {
-                blob_id: a.blob_id.clone(),
-                key: a.key.clone(),
-                nonce: a.nonce.clone(),
-                mime: a.mime.clone(),
-                size: a.size,
-                name: a.name.clone(),
-            })
+            .cloned()
             .ok_or_else(|| boundary_err(format!("attachment index {i} out of bounds")))
     }
 }
@@ -313,35 +536,7 @@ impl EnvelopeBuilder {
     /// immediately, not at build-time.
     #[wasm_bindgen]
     pub fn add(&mut self, r: &AttachmentRef) -> Result<(), JsError> {
-        if r.blob_id.len() != inner::BLOB_ID_LEN {
-            return Err(boundary_err(format!(
-                "blob_id length {} != {}",
-                r.blob_id.len(),
-                inner::BLOB_ID_LEN
-            )));
-        }
-        if r.key.len() != inner::ATTACHMENT_KEY_LEN {
-            return Err(boundary_err(format!(
-                "key length {} != {}",
-                r.key.len(),
-                inner::ATTACHMENT_KEY_LEN
-            )));
-        }
-        if r.nonce.len() != inner::ATTACHMENT_NONCE_LEN {
-            return Err(boundary_err(format!(
-                "nonce length {} != {}",
-                r.nonce.len(),
-                inner::ATTACHMENT_NONCE_LEN
-            )));
-        }
-        self.refs.push(inner::AttachmentRef {
-            blob_id: B64.encode(&r.blob_id),
-            key: B64.encode(&r.key),
-            nonce: B64.encode(&r.nonce),
-            mime: r.mime.clone(),
-            size: r.size,
-            name: r.name.clone(),
-        });
+        self.refs.push(ref_to_inner(r)?);
         Ok(())
     }
 
@@ -368,27 +563,13 @@ pub fn compose_envelope_text(text: &str) -> Result<Vec<u8>, JsError> {
 #[must_use]
 pub fn parse_envelope(bytes: &[u8]) -> ParsedEnvelope {
     let (text, refs) = inner::parse(bytes);
-    let attachments = refs
-        .into_iter()
-        .filter_map(|r| {
-            // Same skip-malformed-silently posture as the UniFFI
-            // side. Receivers see the rest of the attachments;
-            // the application path decides whether a count
-            // mismatch is worth surfacing to the user.
-            let blob_id = r.decode_blob_id().ok()?;
-            let key = r.decode_key().ok()?;
-            let nonce = r.decode_nonce().ok()?;
-            Some(AttachmentRef {
-                blob_id: blob_id.to_vec(),
-                key: key.as_bytes().to_vec(),
-                nonce: nonce.to_vec(),
-                mime: r.mime,
-                size: r.size,
-                name: r.name,
-            })
-        })
-        .collect();
-    ParsedEnvelope { text, attachments }
+    // Same skip-malformed-silently posture as the UniFFI side. Receivers
+    // see the rest of the attachments; the application path decides
+    // whether a count mismatch is worth surfacing to the user.
+    ParsedEnvelope {
+        text,
+        attachments: refs_to_wasm(refs),
+    }
 }
 
 // ============================================================================
@@ -458,14 +639,7 @@ impl ParsedBody {
         let idx = usize::try_from(i).map_err(|_| boundary_err(format!("bad index {i}")))?;
         self.attachments
             .get(idx)
-            .map(|a| AttachmentRef {
-                blob_id: a.blob_id.clone(),
-                key: a.key.clone(),
-                nonce: a.nonce.clone(),
-                mime: a.mime.clone(),
-                size: a.size,
-                name: a.name.clone(),
-            })
+            .cloned()
             .ok_or_else(|| boundary_err(format!("attachment index {i} out of bounds")))
     }
 }
@@ -592,6 +766,10 @@ fn refs_to_wasm(refs: Vec<inner::AttachmentRef>) -> Vec<AttachmentRef> {
             let blob_id = r.decode_blob_id().ok()?;
             let key = r.decode_key().ok()?;
             let nonce = r.decode_nonce().ok()?;
+            // ADR-0047 media fields arrive already bounded by the core
+            // parser; a thumb that still fails to decode is dropped alone.
+            let waveform = r.decode_waveform();
+            let thumb = r.thumb.as_ref().and_then(thumb_to_wasm);
             Some(AttachmentRef {
                 blob_id: blob_id.to_vec(),
                 key: key.as_bytes().to_vec(),
@@ -599,9 +777,83 @@ fn refs_to_wasm(refs: Vec<inner::AttachmentRef>) -> Vec<AttachmentRef> {
                 mime: r.mime,
                 size: r.size,
                 name: r.name,
+                kind: r.kind,
+                duration_ms: r.duration_ms,
+                waveform,
+                width: r.width,
+                height: r.height,
+                thumb,
             })
         })
         .collect()
+}
+
+fn thumb_to_wasm(t: &inner::ThumbRef) -> Option<ThumbRef> {
+    Some(ThumbRef {
+        blob_id: t.decode_blob_id().ok()?.to_vec(),
+        key: t.decode_key().ok()?.as_bytes().to_vec(),
+        nonce: t.decode_nonce().ok()?.to_vec(),
+        mime: t.mime.clone(),
+        size: t.size,
+        width: t.width,
+        height: t.height,
+    })
+}
+
+/// Convert a wasm ref to the core wire ref, refusing wrong-length raw
+/// byte fields (a caller bug). The ADR-0047 bounds on media fields are
+/// applied later by `inner::compose`, which drops rather than refuses.
+fn ref_to_inner(r: &AttachmentRef) -> Result<inner::AttachmentRef, JsError> {
+    check_byte_fields("", &r.blob_id, &r.key, &r.nonce)?;
+    let thumb = match &r.thumb {
+        None => None,
+        Some(t) => {
+            check_byte_fields("thumb ", &t.blob_id, &t.key, &t.nonce)?;
+            Some(inner::ThumbRef {
+                blob_id: B64.encode(&t.blob_id),
+                key: B64.encode(&t.key),
+                nonce: B64.encode(&t.nonce),
+                mime: t.mime.clone(),
+                size: t.size,
+                width: t.width,
+                height: t.height,
+            })
+        },
+    };
+    Ok(inner::AttachmentRef {
+        blob_id: B64.encode(&r.blob_id),
+        key: B64.encode(&r.key),
+        nonce: B64.encode(&r.nonce),
+        mime: r.mime.clone(),
+        size: r.size,
+        name: r.name.clone(),
+        kind: r.kind.clone(),
+        duration_ms: r.duration_ms,
+        waveform: r.waveform.as_ref().map(|w| B64.encode(w)),
+        width: r.width,
+        height: r.height,
+        thumb,
+    })
+}
+
+fn check_byte_fields(
+    prefix: &str,
+    blob_id: &[u8],
+    key: &[u8],
+    nonce: &[u8],
+) -> Result<(), JsError> {
+    for (field, got, want) in [
+        ("blob_id", blob_id.len(), inner::BLOB_ID_LEN),
+        ("key", key.len(), inner::ATTACHMENT_KEY_LEN),
+        ("nonce", nonce.len(), inner::ATTACHMENT_NONCE_LEN),
+    ] {
+        if got != want {
+            return Err(boundary_err(format!(
+                "{prefix}{field} length {got} != {want}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn bytes_to_aead_key(bytes: &[u8]) -> Result<AeadKey, JsError> {
@@ -703,5 +955,92 @@ mod tests {
         let parsed = parse_envelope(evil);
         assert_eq!(parsed.text(), "[unsupported v99 message]");
         assert_eq!(parsed.attachment_count(), 0);
+    }
+
+    // ---- ADR-0047 ----
+
+    #[test]
+    fn builder_round_trips_media_metadata_through_both_parsers() {
+        let enc = encrypt_attachment(b"note bytes").unwrap();
+        let poster = encrypt_attachment(b"poster").unwrap();
+        let thumb = ThumbRef::new(
+            poster.blob_id(),
+            poster.key(),
+            poster.nonce(),
+            Some("image/jpeg".to_string()),
+            6,
+            Some(240),
+            Some(240),
+        );
+        let mut r = AttachmentRef::new(
+            enc.blob_id(),
+            enc.key(),
+            enc.nonce(),
+            Some("video/mp4".to_string()),
+            10,
+            Some("note-1.mp4".to_string()),
+        );
+        r.set_kind(Some("video_note".to_string()));
+        r.set_duration_ms(Some(9000));
+        r.set_waveform(Some(vec![4, 5, 6]));
+        r.set_width(Some(480));
+        r.set_height(Some(480));
+        r.set_thumb(&thumb);
+        // The caller's thumb handle is still usable after attaching it.
+        assert_eq!(thumb.size(), 6);
+
+        let mut builder = EnvelopeBuilder::new("c".to_string());
+        builder.add(&r).unwrap();
+        let bytes = builder.build().unwrap();
+        for got in [
+            parse_envelope(&bytes).attachment(0).unwrap(),
+            parse_body_envelope(&bytes).attachment(0).unwrap(),
+        ] {
+            assert_eq!(got.kind(), Some("video_note".to_string()));
+            assert_eq!(got.duration_ms(), Some(9000));
+            assert_eq!(got.waveform(), Some(vec![4, 5, 6]));
+            assert_eq!((got.width(), got.height()), (Some(480), Some(480)));
+            let t = got.thumb().unwrap();
+            assert_eq!(
+                (t.blob_id(), t.key(), t.nonce()),
+                (thumb.blob_id(), thumb.key(), thumb.nonce())
+            );
+            assert_eq!((t.size(), t.width(), t.height()), (6, Some(240), Some(240)));
+            assert_eq!(t.mime(), Some("image/jpeg".to_string()));
+        }
+    }
+
+    #[test]
+    fn out_of_bound_media_metadata_is_dropped_at_build() {
+        let enc = encrypt_attachment(b"voice").unwrap();
+        let mut r = AttachmentRef::new(enc.blob_id(), enc.key(), enc.nonce(), None, 5, None);
+        r.set_kind(Some("voice".to_string()));
+        r.set_duration_ms(Some(15 * 60 * 1000 + 1));
+        r.set_waveform(Some(vec![0u8; 129]));
+        r.set_width(Some(0));
+        r.set_height(Some(4096));
+        let mut builder = EnvelopeBuilder::new("c".to_string());
+        builder.add(&r).unwrap();
+        let got = parse_envelope(&builder.build().unwrap())
+            .attachment(0)
+            .unwrap();
+        assert_eq!(got.kind(), Some("voice".to_string()));
+        assert_eq!((got.duration_ms(), got.waveform()), (None, None));
+        assert_eq!((got.width(), got.height()), (None, Some(4096)));
+        assert!(got.thumb().is_none());
+    }
+
+    #[test]
+    fn inline_media_type_follows_the_core_allowlist() {
+        assert_eq!(
+            inline_media_type("audio/mp4;codecs=mp4a.40.2"),
+            Some(InlineMediaType::Audio)
+        );
+        assert_eq!(inline_media_type("video/mp4"), Some(InlineMediaType::Video));
+        assert_eq!(
+            inline_media_type("image/webp"),
+            Some(InlineMediaType::Image)
+        );
+        assert_eq!(inline_media_type("image/svg+xml"), None);
     }
 }

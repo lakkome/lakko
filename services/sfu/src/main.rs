@@ -38,6 +38,7 @@ async fn main() -> anyhow::Result<()> {
         metrics_bind = %cfg.metrics_bind,
         jwks_url = %cfg.jwks_url,
         media_bind = ?cfg.media_bind,
+        media_advertise_ip = ?cfg.media_advertise_ip,
         "lakko-svc-sfu starting (v{})",
         VERSION
     );
@@ -64,11 +65,27 @@ async fn main() -> anyhow::Result<()> {
     // only relay — admitted peers can exchange welcome /
     // signal-relay frames but SDP / ICE frames surface as
     // `RouterError::MediaNotWired`.
+    //
+    // `Config::from_env` has already refused a media bind
+    // with no advertisable host-candidate address, and the
+    // media task re-applies the same rules before binding.
     let media_handle = if let Some(bind) = cfg.media_bind {
-        let (handle, local_addr) = media::spawn_media_task(bind, peers.clone()).await?;
-        info!(media_bind = %bind, media_local_addr = %local_addr, "media: UDP socket bound; routing task spawned");
+        let (handle, advertised) =
+            media::spawn_media_task_advertising(bind, cfg.media_advertise_ip, peers.clone())
+                .await?;
+        info!(
+            media_bind = %bind,
+            media_advertised_addr = %advertised,
+            "media: UDP socket bound; routing task spawned; ICE host candidate advertised"
+        );
         Some(handle)
     } else {
+        if cfg.media_advertise_ip.is_some() {
+            warn!(
+                "media: LAKKO_SFU_MEDIA_ADVERTISE_IP is set but LAKKO_SFU_MEDIA_BIND is unset; \
+                 the advertise IP is ignored"
+            );
+        }
         info!("media: LAKKO_SFU_MEDIA_BIND unset; running signaling-only");
         None
     };

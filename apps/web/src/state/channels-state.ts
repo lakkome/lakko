@@ -86,6 +86,17 @@ interface ChannelsStateInternal {
   >;
 }
 
+// Declared ABOVE the signals on purpose. `subscriberKeysByChannel` below is
+// initialised at module evaluation by calling `loadSubscriberKeysFromStorage()`,
+// and while that function declaration is hoisted, this `const` is not: declared
+// further down (where it used to live, beside the storage helpers) it is still
+// in its temporal dead zone when the initialiser reads it, so importing this
+// module threw `ReferenceError: Cannot access 'STORAGE_KEY' before
+// initialization` -- and `routes/routes.tsx` imports it eagerly, so the whole
+// web app rendered a blank page. vitest never saw it: its `node` environment
+// has no `localStorage`, and the function returns before reading the key.
+const STORAGE_KEY = "lakko.channels.subscriber-keys.v1";
+
 const [channels, setChannels] = createSignal<ReadonlyArray<ChannelHandle>>([]);
 const [postsByChannel, setPostsByChannel] = createSignal<
   ReadonlyMap<string, ReadonlyArray<ChannelPostView>>
@@ -338,8 +349,6 @@ export const channelsActions = {
 // channel; the device-group cache rule still applies and
 // the production rewrite will migrate this localStorage
 // key into the same store.
-
-const STORAGE_KEY = "lakko.channels.subscriber-keys.v1";
 
 interface PersistedSubscriberKey {
   readonly channelId: string;

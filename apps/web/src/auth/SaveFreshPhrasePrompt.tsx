@@ -61,26 +61,45 @@ export default function SaveFreshPhrasePrompt(): JSX.Element {
   return (
     <div class="auth-shell">
       <section class="auth-card">
-        <h1>Save your new recovery phrase</h1>
-        <p style={{ color: "var(--surface-muted)", "margin-top": 0 }}>
-          You created a brand-new secure identity for{" "}
-          <strong>@{username()}</strong>. These 24 words are the{" "}
-          <strong>only way</strong> to recover this new identity if you
-          lose access again. Write them down on paper, in order. Do not
-          screenshot them. Do not store them in plain text. We cannot
-          show them to you again.
-        </p>
-        <p
-          style={{
-            color: "var(--surface-muted)",
-            "font-size": "0.9rem",
-            "margin-top": 0,
-          }}
+        {/* ADR-0032 guest signup lands here too (no username, and nothing was
+            replaced) — the "new identity / contacts re-verify" copy below is
+            only true for the ADR-0017 lost-everything path. */}
+        <Show
+          when={username() !== ""}
+          fallback={
+            <>
+              <h1>Save your recovery phrase</h1>
+              <p style={{ color: "var(--surface-muted)", "margin-top": 0 }}>
+                Your account was created without a password. These 24 words are
+                the <strong>only way</strong> to get back into it on another
+                device or after clearing this browser. Write them down on paper,
+                in order. Do not screenshot them. Do not store them in plain
+                text. We cannot show them to you again.
+              </p>
+            </>
+          }
         >
-          Your existing contacts will see a changed identity key with no
-          proof and will need to verify you again before you can message
-          securely.
-        </p>
+          <h1>Save your new recovery phrase</h1>
+          <p style={{ color: "var(--surface-muted)", "margin-top": 0 }}>
+            You created a brand-new secure identity for{" "}
+            <strong>@{username()}</strong>. These 24 words are the{" "}
+            <strong>only way</strong> to recover this new identity if you
+            lose access again. Write them down on paper, in order. Do not
+            screenshot them. Do not store them in plain text. We cannot
+            show them to you again.
+          </p>
+          <p
+            style={{
+              color: "var(--surface-muted)",
+              "font-size": "0.9rem",
+              "margin-top": 0,
+            }}
+          >
+            Your existing contacts will see a changed identity key with no
+            proof and will need to verify you again before you can message
+            securely.
+          </p>
+        </Show>
 
         <ol
           style={{

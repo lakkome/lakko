@@ -88,6 +88,31 @@ export interface AttachmentRefBytes {
   /** Optional human-visible filename. Set to the source
    *  `File.name` on upload. */
   readonly name: string | undefined;
+  /** ADR-0047 — `"voice"`, `"video_note"`, `"gif"`, an unknown future
+   *  value, or absent for a plain file. Sender-chosen: it picks the bubble
+   *  shape only. Whether bytes render inline is `inlineMediaType(mime)`. */
+  readonly kind?: string | undefined;
+  /** ADR-0047 — playback length, bounded by the core per kind. */
+  readonly durationMs?: number | undefined;
+  /** ADR-0047 — at most 128 amplitude bytes for the voice bubble. */
+  readonly waveform?: Uint8Array | undefined;
+  /** ADR-0047 — pixel size (1..=4096) for layout without a jump. */
+  readonly width?: number | undefined;
+  readonly height?: number | undefined;
+  /** ADR-0047 — a video note's poster frame, its own encrypted blob. */
+  readonly thumb?: ThumbRefBytes | undefined;
+}
+
+/** ADR-0047 — the poster-frame reference inside an [`AttachmentRefBytes`]. */
+export interface ThumbRefBytes {
+  readonly blobId: Uint8Array;
+  readonly key: Uint8Array;
+  readonly nonce: Uint8Array;
+  readonly mime: string | undefined;
+  /** Plaintext size, at most 256 KiB on the wire. */
+  readonly size: number;
+  readonly width: number | undefined;
+  readonly height: number | undefined;
 }
 
 /**
@@ -185,6 +210,63 @@ export async function encryptAndUploadFile(
   };
 }
 
+/** ADR-0047 — media metadata carried on a ref built from raw bytes. */
+export interface AttachmentMediaMeta {
+  readonly kind?: string | undefined;
+  readonly durationMs?: number | undefined;
+  readonly waveform?: Uint8Array | undefined;
+  readonly width?: number | undefined;
+  readonly height?: number | undefined;
+  readonly thumb?: ThumbRefBytes | undefined;
+}
+
+/**
+ * ADR-0047 — encrypt plaintext `bytes` (a recording, a poster frame, a GIF
+ * downloaded through the proxy) under a fresh CEK + nonce, PUT the ciphertext
+ * to storage, and return the ref. The bytes-based sibling of
+ * [`encryptAndUploadFile`]: same size gate, same wasm seal, same handle
+ * hygiene.
+ *
+ * `onProgress` receives the upload's completed fraction (0..1) when the
+ * transport can report it, so the timeline can draw a determinate ring.
+ */
+export async function encryptAndUploadBytes(
+  bytes: Uint8Array,
+  file: { readonly mime: string | undefined; readonly name: string | undefined },
+  meta: AttachmentMediaMeta = {},
+  storage: StorageClient = new StorageClient(),
+  onProgress?: (fraction: number) => void,
+): Promise<AttachmentRefBytes> {
+  if (bytes.length === 0) {
+    throw new AttachmentSizeError(0, MAX_ATTACHMENT_BYTES);
+  }
+  if (bytes.length > MAX_ATTACHMENT_BYTES) {
+    throw new AttachmentSizeError(bytes.length, MAX_ATTACHMENT_BYTES);
+  }
+  const wasm = await loadWasm();
+  const enc = wasm.encryptAttachment(bytes);
+  let blobId: Uint8Array;
+  let key: Uint8Array;
+  let nonce: Uint8Array;
+  try {
+    blobId = enc.blobId;
+    key = enc.key;
+    nonce = enc.nonce;
+    await storage.putBlobWithProgress(blobId, enc.ciphertext, onProgress);
+  } finally {
+    enc.free();
+  }
+  return {
+    blobId,
+    key,
+    nonce,
+    mime: file.mime,
+    size: bytes.length,
+    name: file.name,
+    ...meta,
+  };
+}
+
 /**
  * GET the ciphertext for an [`AttachmentRefBytes`] from
  * storage, hand to `decryptAttachment`, return plaintext bytes.
@@ -239,9 +321,30 @@ export async function composeEnvelope(
         BigInt(r.size),
         r.name,
       );
+      let wasmThumb: InstanceType<typeof wasm.ThumbRef> | null = null;
       try {
+        // ADR-0047 — optional media metadata. Out-of-bound values are not
+        // errors here: `build` drops them exactly as every receiver would.
+        if (r.kind !== undefined) wasmRef.kind = r.kind;
+        if (r.durationMs !== undefined) wasmRef.durationMs = r.durationMs;
+        if (r.waveform !== undefined) wasmRef.waveform = r.waveform;
+        if (r.width !== undefined) wasmRef.width = r.width;
+        if (r.height !== undefined) wasmRef.height = r.height;
+        if (r.thumb !== undefined) {
+          wasmThumb = new wasm.ThumbRef(
+            r.thumb.blobId,
+            r.thumb.key,
+            r.thumb.nonce,
+            r.thumb.mime,
+            BigInt(r.thumb.size),
+            r.thumb.width,
+            r.thumb.height,
+          );
+          wasmRef.setThumb(wasmThumb);
+        }
         builder.add(wasmRef);
       } finally {
+        wasmThumb?.free();
         wasmRef.free();
       }
     }
@@ -250,6 +353,45 @@ export async function composeEnvelope(
     builder.free();
     throw err;
   }
+}
+
+/**
+ * Copy a wasm `AttachmentRef` handle into plain data, ADR-0047 media fields
+ * included. The caller still owns (and frees) `wasmRef`; the `thumb` getter
+ * returns a fresh handle, which is freed here.
+ */
+function fromWasmRef(wasmRef: WasmAttachmentRef): AttachmentRefBytes {
+  const thumbHandle = wasmRef.thumb;
+  let thumb: ThumbRefBytes | undefined;
+  if (thumbHandle !== undefined) {
+    try {
+      thumb = {
+        blobId: thumbHandle.blobId,
+        key: thumbHandle.key,
+        nonce: thumbHandle.nonce,
+        mime: thumbHandle.mime,
+        size: Number(thumbHandle.size),
+        width: thumbHandle.width,
+        height: thumbHandle.height,
+      };
+    } finally {
+      thumbHandle.free();
+    }
+  }
+  return {
+    blobId: wasmRef.blobId,
+    key: wasmRef.key,
+    nonce: wasmRef.nonce,
+    mime: wasmRef.mime,
+    size: Number(wasmRef.size),
+    name: wasmRef.name,
+    kind: wasmRef.kind,
+    durationMs: wasmRef.durationMs,
+    waveform: wasmRef.waveform,
+    width: wasmRef.width,
+    height: wasmRef.height,
+    thumb,
+  };
 }
 
 /**
@@ -275,14 +417,7 @@ export async function parseEnvelope(
     for (let i = 0; i < count; i++) {
       const wasmRef: WasmAttachmentRef = parsed.attachment(i);
       try {
-        attachments.push({
-          blobId: wasmRef.blobId,
-          key: wasmRef.key,
-          nonce: wasmRef.nonce,
-          mime: wasmRef.mime,
-          size: Number(wasmRef.size),
-          name: wasmRef.name,
-        });
+        attachments.push(fromWasmRef(wasmRef));
       } finally {
         wasmRef.free();
       }
@@ -373,14 +508,7 @@ export async function parseBodyEnvelope(
     for (let i = 0; i < count; i++) {
       const wasmRef: WasmAttachmentRef = parsed.attachment(i);
       try {
-        attachments.push({
-          blobId: wasmRef.blobId,
-          key: wasmRef.key,
-          nonce: wasmRef.nonce,
-          mime: wasmRef.mime,
-          size: Number(wasmRef.size),
-          name: wasmRef.name,
-        });
+        attachments.push(fromWasmRef(wasmRef));
       } finally {
         wasmRef.free();
       }
@@ -510,18 +638,4 @@ export function saveDecryptedBytes(
   // Revoke after a tick so Safari has time to start the
   // download — immediate revoke races with the click.
   setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
-
-/**
- * `true` when the ref's MIME type is one the chat UI knows how
- * to inline-preview. Currently: the four core web image
- * formats. SVG is deliberately excluded — an attacker-supplied
- * SVG can carry JS, and inlining it as an `<img>` source is
- * the safe path but disabling preview keeps the UX consistent
- * across formats that can / cannot tile.
- */
-export function isInlinePreviewable(ref: AttachmentRefBytes): boolean {
-  const m = ref.mime;
-  if (m === undefined) return false;
-  return m === "image/jpeg" || m === "image/png" || m === "image/webp" || m === "image/gif";
 }

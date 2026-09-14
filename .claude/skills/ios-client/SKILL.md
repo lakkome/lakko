@@ -79,4 +79,5 @@ xcodebuild -project apps/ios/Lakko.xcodeproj -scheme Lakko -destination 'platfor
 | Key | Purpose |
 |---|---|
 | `LakkoDeviceAttestKey` | Build-time pinned Ed25519 verifying key for device attestation |
-| `LakkoSfuUrl` | SFU base URL for group calls |
+| `LakkoApiBaseUrl` | Native API base (`$(LAKKO_API_BASE_URL)`, per configuration in `project.yml`: Debug `https://test.lakko.me/native`, Release empty). `ApiEndpoints` derives every REST client's base (`<base>/auth`, `/ds`, `/storage`, `/discovery`, `/push-gw`, `/channels`, `/gifs`); empty -> `localhost` dev binds. Also in the NSE Info.plist |
+| `LakkoSfuUrl` | SFU base URL for group calls (`$(LAKKO_SFU_URL)`: Debug `wss://test.lakko.me/sfu`, Release empty) |

@@ -42,6 +42,9 @@ public class ContactsViewModel(
      *  (tests / future contacts-only configs), Accept stays a
      *  pure local marker. */
     private val chatRepo: ChatRepository? = null,
+    /** ADR-0048 §4 — the core's username rule (`validateUsername`). */
+    private val validateUsername: (String) -> String =
+        { uniffi.lakko_ffi_uniffi.validateUsername(it) },
 ) : ViewModel() {
 
     private val mutableUi: MutableStateFlow<UiSlice> = MutableStateFlow(UiSlice())
@@ -78,6 +81,7 @@ public class ContactsViewModel(
     private fun buildUi(repoState: ContactsState, ui: UiSlice): ContactsUiState =
         ContactsUiState(
             usernameInput = ui.usernameInput,
+            usernameError = ui.usernameError,
             introInput = ui.introInput,
             sending = ui.sending,
             sendError = ui.sendError,
@@ -97,8 +101,16 @@ public class ContactsViewModel(
             requiresReauth = repoState.requiresReauth,
         )
 
+    /** ADR-0048 §4 — the search field applies the username rule as the user
+     *  types and shows the reason. */
     public fun onUsernameChange(value: String) {
-        mutableUi.update { it.copy(usernameInput = value) }
+        val check = me.lakko.app.profile.checkUsername(value, validateUsername)
+        mutableUi.update {
+            it.copy(
+                usernameInput = value,
+                usernameError = me.lakko.app.profile.usernameFieldError(check, value),
+            )
+        }
     }
 
     public fun onIntroChange(value: String) {
@@ -110,10 +122,19 @@ public class ContactsViewModel(
     public fun onSendClicked() {
         val snapshot = mutableUi.value
         if (snapshot.sending) return
-        val username = snapshot.usernameInput.trim()
-        if (username.isEmpty()) {
+        if (snapshot.usernameInput.isBlank()) {
             mutableUi.update { it.copy(sendError = "Type a username first.") }
             return
+        }
+        // ADR-0048 §4 — never send a lookup for a name that fails the rule.
+        val username = when (
+            val decision = me.lakko.app.profile.searchDecision(snapshot.usernameInput, validateUsername)
+        ) {
+            is me.lakko.app.profile.SearchDecision.Refuse -> {
+                mutableUi.update { it.copy(sendError = decision.message) }
+                return
+            }
+            is me.lakko.app.profile.SearchDecision.Lookup -> decision.normalized
         }
 
         mutableUi.update { it.copy(sending = true, sendError = null) }
@@ -424,6 +445,94 @@ public class ContactsViewModel(
         repo.renameContact(messageId, name)
     }
 
+    // -----------------------------------------------------------------
+    // Call links (ADR-0032 `/c/<slug>`)
+    // -----------------------------------------------------------------
+
+    private val mutableCallLinks: MutableStateFlow<CallLinkUiState> =
+        MutableStateFlow(CallLinkUiState())
+
+    /** The "Create call link" form and the links created this session. */
+    public val callLinks: StateFlow<CallLinkUiState> = mutableCallLinks.asStateFlow()
+
+    public fun onOpenCallLinkForm() {
+        mutableCallLinks.update { it.copy(formOpen = true, error = null) }
+    }
+
+    /** Close the form. Ignored while a link is being created — the PoW solve is
+     *  already running and its result would otherwise land nowhere visible. */
+    public fun onDismissCallLinkForm() {
+        mutableCallLinks.update { if (it.creating) it else it.copy(formOpen = false, error = null) }
+    }
+
+    public fun onCallLinkMediaChange(media: me.lakko.app.calls.CallMediaPreset) {
+        mutableCallLinks.update { it.copy(media = media) }
+    }
+
+    public fun onCallLinkExpiryChange(expiry: me.lakko.app.calls.CallInviteExpiryPreset) {
+        mutableCallLinks.update { it.copy(expiry = expiry) }
+    }
+
+    public fun onCallLinkMaxUsesChange(maxUses: me.lakko.app.calls.CallInviteMaxUsesPreset) {
+        mutableCallLinks.update { it.copy(maxUses = maxUses) }
+    }
+
+    public fun onCallLinkLabelChange(label: String) {
+        mutableCallLinks.update { it.copy(label = label) }
+    }
+
+    /** Sign + upload the capability, then show the link. */
+    public fun onCreateCallLink() {
+        val form = mutableCallLinks.value
+        if (form.creating) return
+        val labelBytes = form.label.trim().toByteArray(Charsets.UTF_8).size
+        if (labelBytes > me.lakko.app.calls.CALL_INVITE_LABEL_MAX_LEN) {
+            mutableCallLinks.update { it.copy(error = "The label is too long.") }
+            return
+        }
+        mutableCallLinks.update { it.copy(creating = true, error = null) }
+        viewModelScope.launch {
+            try {
+                val composed = repo.createCallLink(
+                    media = form.media,
+                    expiry = form.expiry,
+                    maxUses = form.maxUses,
+                    label = form.label.trim(),
+                )
+                val link = CreatedCallLink(
+                    url = composed.url,
+                    slug = me.lakko.app.auth.base64UrlEncodeNoPad(composed.blobId),
+                    video = form.media == me.lakko.app.calls.CallMediaPreset.AudioVideo,
+                    label = form.label.trim(),
+                    expiry = form.expiry,
+                )
+                mutableCallLinks.update {
+                    it.copy(
+                        creating = false,
+                        formOpen = false,
+                        label = "",
+                        created = listOf(link) + it.created,
+                    )
+                }
+            } catch (err: ContactsError) {
+                mutableCallLinks.update {
+                    it.copy(creating = false, error = callLinkError(err))
+                }
+            } catch (err: Throwable) {
+                mutableCallLinks.update {
+                    it.copy(creating = false, error = err.message ?: "Could not create the call link.")
+                }
+            }
+        }
+    }
+
+    private fun callLinkError(err: ContactsError): String =
+        when (val v = err.variant) {
+            is ContactsError.Variant.Wrapped ->
+                v.cause.message ?: "Could not create the call link."
+            else -> "Could not create the call link."
+        }
+
     /** Map a [ContactsError] to a user-facing message. */
     private fun userFacingError(err: ContactsError): String =
         when (val v = err.variant) {
@@ -440,6 +549,7 @@ public class ContactsViewModel(
      *  in the repository. */
     private data class UiSlice(
         val usernameInput: String = "",
+        val usernameError: String? = null,
         val introInput: String = "",
         val sending: Boolean = false,
         val sendError: String? = null,
@@ -464,6 +574,8 @@ public class ContactsViewModel(
 /** Combined snapshot the [ContactsScreen] renders. */
 public data class ContactsUiState(
     val usernameInput: String,
+    /** ADR-0048 §4 — the reason the typed username fails, or `null`. */
+    val usernameError: String? = null,
     val introInput: String,
     val sending: Boolean,
     val sendError: String?,
@@ -545,3 +657,29 @@ internal fun supersessionRefusedMessage(
                 "against the transparency log. Verify out of band before trusting."
     }
 }
+
+/** A call link created on this device this session. */
+public data class CreatedCallLink(
+    val url: String,
+    /** The `/c/` slug, handed to the JoinCall landing by "Start call". */
+    val slug: String,
+    val video: Boolean,
+    val label: String,
+    val expiry: me.lakko.app.calls.CallInviteExpiryPreset,
+)
+
+/** The "Create call link" form plus the links created so far. */
+public data class CallLinkUiState(
+    val formOpen: Boolean = false,
+    val media: me.lakko.app.calls.CallMediaPreset = me.lakko.app.calls.CallMediaPreset.Audio,
+    val expiry: me.lakko.app.calls.CallInviteExpiryPreset =
+        me.lakko.app.calls.CallInviteExpiryPreset.OneDay,
+    val maxUses: me.lakko.app.calls.CallInviteMaxUsesPreset =
+        me.lakko.app.calls.CallInviteMaxUsesPreset.Ten,
+    val label: String = "",
+    /** `true` while the capability is being signed and uploaded (the upload
+     *  solves a proof-of-work challenge, which can take a few seconds). */
+    val creating: Boolean = false,
+    val error: String? = null,
+    val created: List<CreatedCallLink> = emptyList(),
+)

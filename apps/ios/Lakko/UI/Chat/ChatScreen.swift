@@ -43,23 +43,95 @@ public struct ChatScreen: View {
     // dismisses on `nil`.
     @State private var previewImageData: Data?
 
+    /// ADR-0047 — the per-chat media runtime (recording, the media send queue,
+    /// playback, decrypted-media temp files). A `@StateObject`, so it survives
+    /// the re-renders that hand this screen a fresh view model and goes away —
+    /// taking its temp files with it — when the chat closes.
+    @StateObject private var media: ChatMediaController
+    /// ADR-0047 §4 — the caret the emoji picker inserts at.
+    @StateObject private var caret = ComposerCaret()
+    /// ADR-0047 §4 — the open picker, if any.
+    @State private var picker: PickerRequest?
+
+    /// Which picker is open: the composer's (Emoji + GIF), or the reaction
+    /// bar's `+` for one message (Emoji only).
+    private struct PickerRequest: Identifiable {
+        let id = UUID()
+        let mode: MediaPickerSheet.Mode
+        let message: ChatMessage?
+    }
+
     public init(
         viewModel: ChatViewModel,
         onBack: @escaping () -> Void
     ) {
         self.viewModel = viewModel
         self.onBack = onBack
+        _media = StateObject(wrappedValue: ChatMediaController(port: viewModel.mediaPort()))
+    }
+
+    /// ADR-0047 §6 — the call owns the audio session and the camera.
+    private var callLive: Bool {
+        viewModel.activeCall != nil || viewModel.activeSfuCall != nil
     }
 
     public var body: some View {
+        chatBody
+            .overlay { VideoNoteOverlay(media: media) }
+            .environmentObject(media)
+            .environmentObject(media.live)
+            .onAppear {
+                media.updateTimeline(viewModel.messages)
+                media.callActive = callLive
+            }
+            .onChange(of: viewModel.messages) { _, messages in
+                media.updateTimeline(messages)
+            }
+            .onChange(of: callLive) { _, live in
+                media.callActive = live
+            }
+            .onDisappear { media.chatHidden() }
+            .sheet(item: $picker) { request in
+                MediaPickerSheet(
+                    mode: request.mode,
+                    media: media,
+                    onEmoji: { emoji in
+                        if let message = request.message {
+                            viewModel.reactFromPicker(to: message, emoji: emoji)
+                            picker = nil
+                        } else {
+                            let end = ComposerCaret.insert(emoji, into: &viewModel.draft, at: caret.utf16Range)
+                            caret.utf16Range = end..<end
+                        }
+                    },
+                    onClose: { picker = nil }
+                )
+                .presentationDetents([.medium, .large])
+            }
+    }
+
+    @ViewBuilder
+    private var chatBody: some View {
         VStack(spacing: 0) {
-            // G3-1-call-present — the call host observes the
-            // live `CallSession` (so state transitions update
-            // the UI), renders the ringing banner inline, and
-            // presents the full `CallScreen` over the chat as a
-            // `fullScreenCover` once the call goes live.
-            if let call = viewModel.activeCall {
-                CallHostView(session: call, viewModel: viewModel)
+            // The 1x1 call's ringing banner and full-screen call are no longer
+            // here: they are presented app-wide from the root view
+            // (`CallHostOverlay`), so a call rings on any screen and survives
+            // leaving this chat.
+            // A live group call on this chat that this device is not in.
+            // Liveness is time-based (a call nobody joined stops being
+            // joinable after a minute, any call after four hours), so the
+            // banner re-evaluates on a timer rather than only on a new
+            // journal row.
+            if !viewModel.membershipHasEnded {
+                TimelineView(.periodic(from: .now, by: 10)) { context in
+                    GroupCallBanner(
+                        affordance: viewModel.groupCallAffordance(
+                            nowMs: Int64(context.date.timeIntervalSince1970 * 1000)
+                        ),
+                        busy: viewModel.callStarting,
+                        onJoin: { video in viewModel.joinOngoingGroupCall(video: video) }
+                    )
+                }
             }
             messagesList
             // ADR-0024 — typing indicator, just above the input bar.
@@ -160,17 +232,18 @@ public struct ChatScreen: View {
             if !viewModel.membershipHasEnded {
             ToolbarItem(placement: .navigationBarTrailing) {
                 Button {
-                    // A group chat (>2 members) routes through the SFU
-                    // (multi-party + SFrame); a 1×1 chat stays P2P.
-                    if viewModel.isGroupChat {
-                        viewModel.startGroupCall(video: false)
-                    } else {
-                        viewModel.startCall(audio: true, video: false)
-                    }
+                    // A live group call this device is not in is JOINED; else
+                    // a group chat (>2 members) starts an SFU call (multi-party
+                    // + SFrame) and a 1×1 chat stays P2P.
+                    viewModel.onCallButton(video: false)
                 } label: {
                     Image(systemName: "phone.fill")
                 }
-                .disabled(viewModel.activeCall != nil || viewModel.activeSfuCall != nil)
+                .accessibilityLabel(callButtonLabel(video: false))
+                .disabled(
+                    viewModel.oneToOneCallBusy || viewModel.activeSfuCall != nil
+                        || viewModel.callStarting
+                )
             }
             // Video-call button — starts the call with the local
             // camera published (`config.video`). Group chats publish
@@ -179,17 +252,31 @@ public struct ChatScreen: View {
             // membership has ended (§6.2.8 item 4).
             ToolbarItem(placement: .navigationBarTrailing) {
                 Button {
-                    if viewModel.isGroupChat {
-                        viewModel.startGroupCall(video: true)
-                    } else {
-                        viewModel.startCall(audio: true, video: true)
-                    }
+                    viewModel.onCallButton(video: true)
                 } label: {
                     Image(systemName: "video.fill")
                 }
-                .disabled(viewModel.activeCall != nil || viewModel.activeSfuCall != nil)
+                .accessibilityLabel(callButtonLabel(video: true))
+                .disabled(
+                    viewModel.oneToOneCallBusy || viewModel.activeSfuCall != nil
+                        || viewModel.callStarting
+                )
             }
             }
+        }
+        .alert(
+            "Call",
+            isPresented: Binding(
+                get: { viewModel.callError != nil },
+                set: { presented in
+                    if !presented { viewModel.dismissCallError() }
+                }
+            ),
+            presenting: viewModel.callError
+        ) { _ in
+            Button("OK", role: .cancel) { viewModel.dismissCallError() }
+        } message: { message in
+            Text(message)
         }
         .sheet(isPresented: $viewModel.membersPanelOpen) {
             // ADR-0045 UX §6.2.4 — a deleted chat's row is gone from the
@@ -209,10 +296,19 @@ public struct ChatScreen: View {
             // its ~30 s long poll, and this loop would spin. The condition is
             // checked before each iteration rather than only once, because the
             // eviction can land on a poll this loop itself drove.
+            //
+            // While this loop runs the chat is "open": the app-wide foreground
+            // receive skips it (it polls itself) and its messages do not count
+            // as unread. Registered on the task, not the view model, because
+            // SwiftUI hands this screen a fresh view model on unrelated
+            // re-renders while the task lives on.
+            let openedModel = viewModel
+            openedModel.chatScreenOpened()
             while !Task.isCancelled, viewModel.pollLoopShouldContinue {
                 await viewModel.pollOnceLongPoll()
                 await Task.yield()
             }
+            openedModel.chatScreenClosed()
         }
         // 1.19c3 — Attach action sheet → Photo / Document.
         // Compactly hosts the two picker entry points without
@@ -333,12 +429,10 @@ public struct ChatScreen: View {
     @State private var photoPickerOpenRequested: Bool = false
 
     private var headline: String {
-        // For 1.14f3 we surface the first 16 chars of the hex
-        // group id as the screen title. 1.14f4 will populate
-        // the per-thread peer username (from
-        // `AcceptedContact.request.fromPubkey`) — needs a
-        // reverse-lookup keyed by pubkey, which lands when the
-        // discovery side gains the inverse-of-OPRF endpoint.
+        // ADR-0048 — a 1x1 chat is titled with the other person's resolved
+        // name (rename, profile name, verified username, fingerprint). A group
+        // keeps its group label, unchanged.
+        if let peer = viewModel.oneToOnePeerName { return peer }
         let prefix = viewModel.groupIdHex.prefix(16)
         return "Chat • \(prefix)"
     }
@@ -355,6 +449,17 @@ public struct ChatScreen: View {
                             MessageRow(
                                 message: message,
                                 ownIdentity: viewModel.ownIdentity,
+                                // ADR-0048 — who wrote an incoming group
+                                // message, resolved from the identity stored
+                                // at receipt (C-68). A 1x1 needs no label.
+                                authorName: viewModel.isGroupChat && message.direction == .incoming
+                                    ? message.authorKeyB64.flatMap { viewModel.personName(signatureKeyB64: $0) }
+                                    : nil,
+                                reactorNames: { emoji in
+                                    message.reactions
+                                        .filter { $0.emoji == emoji }
+                                        .compactMap { viewModel.personName(signatureKeyB64: $0.reactor) }
+                                },
                                 // ADR-0045 UX §6.2.5 — the same predicate the
                                 // composer is gated on, a few lines below.
                                 actionsAvailable: viewModel.messageActionsAvailable,
@@ -367,10 +472,24 @@ public struct ChatScreen: View {
                                 onDelete: { viewModel.deleteMessage(message) },
                                 onReact: { emoji in
                                     viewModel.react(to: message, emoji: emoji)
+                                },
+                                // ADR-0047 §4 — the reaction bar's `+`.
+                                onMoreReactions: {
+                                    picker = PickerRequest(mode: .reaction, message: message)
                                 }
                             )
                             .id(message.messageId)
                         }
+                    }
+                    // ADR-0047 — outgoing media still uploading (or failed):
+                    // shown in the timeline immediately with a determinate
+                    // ring, or `Not sent · Retry`. Nothing has reached the
+                    // other side until the row is replaced by the sent message.
+                    ForEach(media.pendingSends) { pending in
+                        PendingMediaRow(pending: pending) {
+                            media.retry(sendId: pending.id)
+                        }
+                        .id("pending-\(pending.id)")
                     }
                     // ADR-0045 UX §6.2.5 — the terminal row.
                     //
@@ -419,6 +538,12 @@ public struct ChatScreen: View {
                     }
                 }
             }
+            .onChange(of: media.pendingSends.count) { old, new in
+                guard new > old, let last = media.pendingSends.last else { return }
+                withAnimation {
+                    scrollProxy.scrollTo("pending-\(last.id)", anchor: .bottom)
+                }
+            }
         }
     }
 
@@ -452,78 +577,67 @@ public struct ChatScreen: View {
         }
     }
 
-    /// G3-1-call-present — host for the active call. Observes
-    /// the live `CallSession` (so state transitions drive the
-    /// UI — the previous `callOverlay` read `call.state` without
-    /// observing the session, so it could go stale). While the
-    /// call is `ringing` (incoming, pre-accept) it shows a
-    /// lightweight inline banner with Accept / Decline; once the
-    /// call goes live (outgoing / connecting / connected /
-    /// ending / done) it presents the full `CallScreen` over the
-    /// chat as a `fullScreenCover`, driven from the session via
-    /// `CallUiState.driveFrom`. The cover is torn down when the
-    /// call clears (`clearFinishedCall` sets `activeCall = nil`,
-    /// which removes this view from the chat body).
-    private struct CallHostView: View {
-        @ObservedObject var session: CallSession
-        @ObservedObject var viewModel: ChatViewModel
+    /// VoiceOver label for a toolbar call button — says "Join" when the tap
+    /// joins the live group call rather than starting a new one.
+    private func callButtonLabel(video: Bool) -> String {
+        if case .joinable = viewModel.groupCallAffordance() {
+            return video ? "Join group call with video" : "Join group call"
+        }
+        return video ? "Video call" : "Call"
+    }
+
+    /// "Group call in progress" — shown while this chat has a live group call
+    /// this device is not in. Join connects to that call id; nothing here can
+    /// start a second call.
+    private struct GroupCallBanner: View {
+        let affordance: GroupCallAffordance
+        let busy: Bool
+        let onJoin: (Bool) -> Void
 
         var body: some View {
-            ringingBanner
-                .fullScreenCover(
-                    isPresented: Binding(
-                        get: { Self.isLive(session.state) },
-                        set: { _ in }
-                    )
-                ) {
-                    CallScreen(session: session) {
-                        viewModel.clearFinishedCall()
-                    }
-                }
-        }
-
-        @ViewBuilder
-        private var ringingBanner: some View {
-            if session.state == .ringing {
-                HStack {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Incoming call")
-                            .font(.headline)
+            if case .joinable(_, let joinedCount, _) = affordance {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 10) {
+                        Image(systemName: "phone.connection.fill")
                             .foregroundStyle(.white)
-                        Text("End-to-end encrypted")
-                            .font(.caption2)
-                            .foregroundStyle(.white.opacity(0.85))
+                            .accessibilityHidden(true)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Group call in progress")
+                                .font(.headline)
+                                .foregroundStyle(.white)
+                            Text(Self.joinedText(joinedCount))
+                                .font(.caption2)
+                                .foregroundStyle(.white.opacity(0.85))
+                        }
+                        Spacer()
+                        if busy {
+                            ProgressView().tint(.white)
+                        }
                     }
-                    Spacer()
                     HStack(spacing: 8) {
-                        Button("Accept") { viewModel.acceptIncomingCall() }
+                        Button("Join") { onJoin(false) }
                             .buttonStyle(.borderedProminent)
                             .tint(.white)
                             .foregroundStyle(.green)
-                        Button("Decline", role: .destructive) {
-                            viewModel.declineIncomingCall()
-                        }
-                        .buttonStyle(.bordered)
-                        .tint(.white)
+                        Button("Join with video") { onJoin(true) }
+                            .buttonStyle(.bordered)
+                            .tint(.white)
                     }
+                    .disabled(busy)
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 10)
-                .background(Color.orange)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.green)
+                .accessibilityElement(children: .contain)
             }
         }
 
-        /// `true` for any non-idle, non-ringing state — the
-        /// full call screen owns the experience from the moment
-        /// an outgoing call is placed or an incoming one is
-        /// accepted, through the terminal `done` (which shows
-        /// the "Call ended" overlay until it auto-dismisses).
-        private static func isLive(_ s: CallSession.WebCallState) -> Bool {
-            switch s {
-            case .outgoing, .connecting, .connected, .ending, .done:
-                return true
-            case .idle, .ringing:
-                return false
+        static func joinedText(_ count: Int) -> String {
+            switch count {
+            case 0: return "Starting — nobody has joined yet"
+            case 1: return "1 person in the call"
+            default: return "\(count) people in the call"
             }
         }
     }
@@ -609,25 +723,94 @@ public struct ChatScreen: View {
             if !viewModel.pendingAttachments.isEmpty || viewModel.uploading {
                 pendingAttachmentsTray
             }
+            // ADR-0047 §6 — the permission-denied card, above the composer.
+            if let denied = media.denied {
+                MediaDeniedCard(resource: denied) { media.dismissDenied() }
+            }
+            if let hint = media.hint {
+                Text(hint)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .transition(.opacity)
+            }
             HStack(spacing: 8) {
-                // Attach button — opens the Photo / File
-                // confirmationDialog wired at the body level.
-                Button {
-                    attachActionSheetPresented = true
-                } label: {
-                    if viewModel.uploading {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Image(systemName: "paperclip")
+                if showsRecordingBar {
+                    // ADR-0047 §2 — the recording bar stands in for the text
+                    // field (and its buttons) while a take is live.
+                    RecordingBar(media: media)
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                } else {
+                    // ADR-0047 §4 — the smiley opens the picker on Emoji.
+                    Button {
+                        picker = PickerRequest(mode: .compose, message: nil)
+                    } label: {
+                        Image(systemName: "face.smiling")
                     }
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.large)
-                .disabled(viewModel.uploading || viewModel.sending)
-                TextField("Message", text: $viewModel.draft, axis: .vertical)
-                    .textFieldStyle(.roundedBorder)
-                    .lineLimit(1...4)
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
                     .disabled(viewModel.sending)
+                    .accessibilityLabel("Emoji and GIFs")
+                    // Attach button — opens the Photo / File
+                    // confirmationDialog wired at the body level.
+                    Button {
+                        attachActionSheetPresented = true
+                    } label: {
+                        if viewModel.uploading {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Image(systemName: "paperclip")
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
+                    .disabled(viewModel.uploading || viewModel.sending)
+                    .accessibilityLabel("Attach")
+                    ComposerTextField(text: $viewModel.draft, caret: caret, disabled: viewModel.sending)
+                }
+                composerTrailingButton
+            }
+        }
+        .animation(.easeInOut(duration: 0.15), value: media.hint)
+        .padding(12)
+        .background(Color(.systemBackground))
+    }
+
+    /// ADR-0047 — the recording bar replaces the text field once a take is
+    /// running, locked, finishing or in preview.
+    private var showsRecordingBar: Bool {
+        switch media.recState {
+        case .idle, .requesting: return false
+        case .recording, .locked, .finalizing, .preview: return true
+        }
+    }
+
+    /// ADR-0047 §1 — Send while the field or the tray has content, otherwise
+    /// the hold-to-record button (mic or camera). While a take is locked the
+    /// slot is Stop; in preview it is Send.
+    @ViewBuilder
+    private var composerTrailingButton: some View {
+        switch media.recState {
+        case .locked:
+            Button { media.stopLocked() } label: {
+                Image(systemName: "stop.fill")
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.red)
+            .controlSize(.large)
+            .accessibilityLabel("Stop recording")
+        case .finalizing:
+            ProgressView()
+                .frame(width: 44, height: 44)
+        case .preview:
+            Button { media.sendPreview() } label: {
+                Image(systemName: "paperplane.fill")
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .accessibilityLabel("Send recording")
+        case .idle, .requesting, .recording:
+            if composerHasContent, !media.recState.isCapturing {
                 Button(action: viewModel.onSendClicked) {
                     if viewModel.sending {
                         ProgressView().controlSize(.small)
@@ -637,19 +820,18 @@ public struct ChatScreen: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
-                .disabled(
-                    viewModel.sending || viewModel.uploading
-                    || (
-                        viewModel.draft.trimmingCharacters(
-                            in: .whitespacesAndNewlines
-                        ).isEmpty
-                        && viewModel.pendingAttachments.isEmpty
-                    )
-                )
+                .disabled(viewModel.sending || viewModel.uploading)
+                .accessibilityLabel("Send")
+            } else {
+                RecordButton(media: media)
             }
         }
-        .padding(12)
-        .background(Color(.systemBackground))
+    }
+
+    private var composerHasContent: Bool {
+        !viewModel.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !viewModel.pendingAttachments.isEmpty
+            || viewModel.uploading
     }
 
     @ViewBuilder
@@ -844,6 +1026,12 @@ private struct MessageRow: View {
     /// used to highlight the reaction chips this user contributed. Never
     /// their MLS leaf: a leaf is reassigned to the next member added.
     let ownIdentity: MemberIdentity?
+    /// ADR-0048 — the resolved name of an incoming message's author in a group,
+    /// shown above the bubble. `nil` for a 1x1, an outgoing row, or an author
+    /// the receive path could not attribute.
+    var authorName: String? = nil
+    /// ADR-0048 — the resolved names of who reacted with an emoji.
+    var reactorNames: (String) -> [String] = { _ in [] }
     /// ADR-0045 UX §6.2.5 — whether Edit / Delete / React are offered at all.
     /// `false` once this device's membership has ended: all three compose an
     /// application message, so all three are refused by the same core gate that
@@ -863,9 +1051,19 @@ private struct MessageRow: View {
     let onEdit: () -> Void
     let onDelete: () -> Void
     let onReact: (String) -> Void
+    /// ADR-0047 §4 — the reaction bar's trailing `+`: any single emoji.
+    var onMoreReactions: () -> Void = {}
 
     /// ADR-0023 — emoji palette for the quick reaction picker.
     private static let reactionPalette = ["👍", "❤️", "😂", "😮", "😢", "🙏"]
+
+    /// ADR-0047 §3 — a message that is exactly one video note renders as the
+    /// circle itself, with no bubble chrome.
+    private var isBareVideoNote: Bool {
+        guard !message.deleted, message.text.isEmpty, message.attachments.count == 1,
+              let ref = message.attachments.first else { return false }
+        return InlineMedia.decision(for: ref).bubble == .videoNote
+    }
 
     /// Edit / Delete are offered only on our own outgoing
     /// messages that carry a server-assigned id and are not
@@ -892,11 +1090,16 @@ private struct MessageRow: View {
             HStack {
                 Spacer(minLength: 48)
                 bubbleColumn(alignment: .trailing) {
-                    bubble
-                        .background(Color.accentColor.opacity(0.9))
-                        .foregroundStyle(.white)
-                        .clipShape(RoundedRectangle(cornerRadius: 16))
-                        .contextMenu { menuItems }
+                    if isBareVideoNote {
+                        bareVideoNote
+                            .contextMenu { menuItems }
+                    } else {
+                        bubble
+                            .background(Color.accentColor.opacity(0.9))
+                            .foregroundStyle(.white)
+                            .clipShape(RoundedRectangle(cornerRadius: 16))
+                            .contextMenu { menuItems }
+                    }
                     // ADR-0024 — "Sent" / "Read" receipt under our own
                     // bubble. Hidden on a deleted tombstone.
                     if !message.deleted { readReceiptCheck }
@@ -905,10 +1108,21 @@ private struct MessageRow: View {
         case .incoming:
             HStack {
                 bubbleColumn(alignment: .leading) {
-                    bubble
-                        .background(Color(.secondarySystemBackground))
-                        .clipShape(RoundedRectangle(cornerRadius: 16))
-                        .contextMenu { menuItems }
+                    if let authorName {
+                        Text(authorName)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    if isBareVideoNote {
+                        bareVideoNote
+                            .contextMenu { menuItems }
+                    } else {
+                        bubble
+                            .background(Color(.secondarySystemBackground))
+                            .clipShape(RoundedRectangle(cornerRadius: 16))
+                            .contextMenu { menuItems }
+                    }
                 }
                 Spacer(minLength: 48)
             }
@@ -947,6 +1161,9 @@ private struct MessageRow: View {
             Menu {
                 ForEach(Self.reactionPalette, id: \.self) { emoji in
                     Button(emoji) { onReact(emoji) }
+                }
+                Button { onMoreReactions() } label: {
+                    Label("More reactions", systemImage: "plus")
                 }
             } label: {
                 Label("React", systemImage: "face.smiling")
@@ -997,12 +1214,38 @@ private struct MessageRow: View {
                 Array(message.attachments.enumerated()),
                 id: \.offset
             ) { _, ref in
-                AttachmentChip(
-                    ref: ref,
-                    direction: message.direction,
-                    onPreview: { onPreview(ref) }
-                )
+                // ADR-0047 — the bubble shape comes from `kind`, but only when
+                // the core's MIME allowlist agrees on the media class; every
+                // other ref (no kind, unknown kind, mismatched or refused MIME)
+                // stays a file chip.
+                let decision = InlineMedia.decision(for: ref)
+                if decision.bubble == .file {
+                    AttachmentChip(
+                        ref: ref,
+                        direction: message.direction,
+                        onPreview: { onPreview(ref) }
+                    )
+                } else {
+                    MediaAttachmentView(
+                        ref: ref,
+                        bubble: decision.bubble,
+                        mediaKey: ChatMediaController.key(for: ref),
+                        incoming: message.direction == .incoming
+                    )
+                }
             }
+        }
+    }
+
+    @ViewBuilder
+    private var bareVideoNote: some View {
+        if let ref = message.attachments.first {
+            MediaAttachmentView(
+                ref: ref,
+                bubble: .videoNote,
+                mediaKey: ChatMediaController.key(for: ref),
+                incoming: message.direction == .incoming
+            )
         }
     }
 
@@ -1023,8 +1266,31 @@ private struct MessageRow: View {
                 if actionsAvailable {
                     Button { onReact(tally.emoji) } label: { chipLabel(tally) }
                         .buttonStyle(.plain)
+                        .contextMenu { reactedBy(tally.emoji) }
+                        .accessibilityHint(reactedByLine(tally.emoji))
                 } else {
                     chipLabel(tally)
+                        .contextMenu { reactedBy(tally.emoji) }
+                        .accessibilityHint(reactedByLine(tally.emoji))
+                }
+            }
+        }
+    }
+
+    /// ADR-0048 — "Reacted by Alice, Bob" for a chip, by resolved name.
+    private func reactedByLine(_ emoji: String) -> String {
+        let names = reactorNames(emoji)
+        return names.isEmpty ? "" : "Reacted by " + names.joined(separator: ", ")
+    }
+
+    /// ADR-0048 — the long-press list of who reacted with `emoji`.
+    @ViewBuilder
+    private func reactedBy(_ emoji: String) -> some View {
+        let names = reactorNames(emoji)
+        if !names.isEmpty {
+            Section("Reacted by") {
+                ForEach(Array(names.enumerated()), id: \.offset) { _, name in
+                    Text(name)
                 }
             }
         }
@@ -1083,6 +1349,48 @@ private struct MessageRow: View {
             }
             .font(.caption2)
             .foregroundStyle(Color.accentColor)
+        }
+    }
+}
+
+/// ADR-0047 — an outgoing media message still in the send queue: the bubble
+/// renders from the local take (voice / video note play before upload), with a
+/// determinate upload ring, or `Not sent · Retry` after a failure.
+private struct PendingMediaRow: View {
+    let pending: ChatMediaController.PendingSend
+    let onRetry: () -> Void
+
+    var body: some View {
+        let bubble = InlineMedia.decision(for: pending.ref).bubble
+        let upload: MediaUploadState = pending.failed ? .failed : .uploading(pending.progress)
+        HStack {
+            Spacer(minLength: 48)
+            if bubble == .videoNote {
+                MediaAttachmentView(
+                    ref: pending.ref,
+                    bubble: bubble,
+                    mediaKey: pending.localKey,
+                    incoming: false,
+                    upload: upload,
+                    localReady: pending.localReady,
+                    onRetry: onRetry
+                )
+            } else {
+                MediaAttachmentView(
+                    ref: pending.ref,
+                    bubble: bubble,
+                    mediaKey: pending.localKey,
+                    incoming: false,
+                    upload: upload,
+                    localReady: pending.localReady,
+                    onRetry: onRetry
+                )
+                .padding(.vertical, 8)
+                .padding(.horizontal, 12)
+                .background(Color.accentColor.opacity(pending.failed ? 0.55 : 0.9))
+                .foregroundStyle(.white)
+                .clipShape(RoundedRectangle(cornerRadius: 16))
+            }
         }
     }
 }
@@ -1220,9 +1528,18 @@ private struct AttachmentChip: View {
     /// surfaces a "Save to Files" / share-sheet flow with a
     /// meaningful filename.
     private func writeTempCopy(bytes: Data, ref: AttachmentRef) -> URL? {
-        let baseName: String = ref.name ?? "attachment-\(AttachmentBridge.hex(ref.blobId).prefix(8))"
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent(baseName)
+        // `ref.name` is sender-controlled: sanitize it, and write into a fresh
+        // per-share directory so no existing file can be overwritten.
+        let baseName = AttachmentBridge.safeFileName(
+            ref.name,
+            fallback: "attachment-\(AttachmentBridge.hex(ref.blobId).prefix(8))"
+        )
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("shared-attachments", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let url = dir.appendingPathComponent(baseName, isDirectory: false)
         do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             try bytes.write(to: url, options: .atomic)
             return url
         } catch {
@@ -1259,10 +1576,6 @@ private struct MembersSheet: View {
     /// no longer exists, so staying on it would leave the user looking at a
     /// thread the registry has forgotten. Supplied by the presenting screen.
     var onDeleted: () -> Void = {}
-
-    private var trimmedInput: String {
-        viewModel.addMemberInput.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
 
     var body: some View {
         NavigationStack {
@@ -1311,8 +1624,12 @@ private struct MembersSheet: View {
                                 .autocorrectionDisabled(true)
                                 .disabled(viewModel.membershipBusy)
                             Button("Add") { viewModel.onAddMember() }
-                                .disabled(viewModel.membershipBusy || trimmedInput.isEmpty)
+                                .disabled(
+                                    viewModel.membershipBusy
+                                        || !checkUsername(viewModel.addMemberInput).allowsLookup)
                         }
+                        // ADR-0048 §4 — the reason, before any lookup.
+                        UsernameRuleHint(input: viewModel.addMemberInput)
                     }
                 }
                 // ADR-0045 (UX §14) — the membership error/notice slot is
@@ -1388,8 +1705,12 @@ private struct MembersSheet: View {
                         ForEach(viewModel.pendingJoins, id: \.self) { ref in
                             HStack {
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Text(Self.shortFingerprint(ref))
-                                        .font(.system(.footnote, design: .monospaced))
+                                    // ADR-0048 — the one resolver: a contact's
+                                    // rename or profile name when known, else the
+                                    // fingerprint without `@`.
+                                    Text(viewModel.personName(signatureKeyB64: base64Encode(ref))
+                                        ?? Self.shortFingerprint(ref))
+                                        .font(.footnote)
                                     // ADR-0028 OQ2 — which member's link this
                                     // request arrived on + whether they are still
                                     // in the roster (advisory).
@@ -1763,21 +2084,24 @@ private struct MembersSheet: View {
         }
     }
 
-    /// A prospective member has no roster row and no contact entry to resolve
-    /// against yet, so the only honest label is a fingerprint of the signature
-    /// key the request carries.
+    /// A prospective member has no roster row yet, so the label comes from the
+    /// one resolver over the signature key the request carries (ADR-0048): a
+    /// rename or a profile already known for that key, else the fingerprint
+    /// without `@`.
+    @MainActor
     private static func pendingAddLabel(_ request: PendingRequest) -> String {
         guard let b64 = request.addSignatureKeyB64,
               let bytes = base64Decode(b64) else { return "Pending member" }
-        return "Member " + bytes.prefix(4).map { String(format: "%02x", $0) }.joined()
+        return ProfileDirectory.shared.resolve(signatureKey: bytes).listLabel
     }
 
     /// The same identity treatment as ``pendingAddLabel(_:)``, reachable from a
     /// bare signature key — a `Not applied` row has left the pending set, so it
     /// no longer has a `PendingRequest` to carry it.
+    @MainActor
     private static func unappliedLabel(_ item: UnappliedAdd) -> String {
         guard let bytes = base64Decode(item.addSignatureKeyB64) else { return "Pending member" }
-        return "Member " + bytes.prefix(4).map { String(format: "%02x", $0) }.joined()
+        return ProfileDirectory.shared.resolve(signatureKey: bytes).listLabel
     }
 
     private var memberCountLabel: String {

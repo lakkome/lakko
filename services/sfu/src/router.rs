@@ -109,9 +109,9 @@ impl RouterError {
             // out.
             Self::MediaNotWired | Self::MediaTaskGone => ErrorCode::BadSdp,
             Self::Media(inner) => match inner {
-                crate::media::MediaError::BadSdp(_) | crate::media::MediaError::Str0m(_) => {
-                    ErrorCode::BadSdp
-                },
+                crate::media::MediaError::BadSdp(_)
+                | crate::media::MediaError::Str0m(_)
+                | crate::media::MediaError::AdvertiseAddress(_) => ErrorCode::BadSdp,
                 crate::media::MediaError::BadIceCandidate(_) => ErrorCode::BadIceCandidate,
             },
         }

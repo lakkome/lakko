@@ -32,6 +32,16 @@ pub enum DiscoveryClientError {
     /// to make form-validation messages clean.
     #[error("username is empty after normalisation")]
     EmptyUsername,
+
+    /// The typed username fails the ADR-0048 §4 character-set rule
+    /// (after normalisation: `[a-z0-9_]`, 3 to 32 characters). Raised by
+    /// [`crate::OprfBlinder::blind`] before any network round-trip, so a
+    /// non-conforming name is neither registered nor looked up.
+    ///
+    /// Carries a reason code only — never the offending character, since
+    /// the input is a lookup target.
+    #[error("invalid username: {0}")]
+    InvalidUsername(#[from] crate::UsernameError),
 }
 
 impl DiscoveryClientError {

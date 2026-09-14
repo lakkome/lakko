@@ -48,6 +48,12 @@ use lakko_contacts::invite::{
 use lakko_contacts::media_state::{
     compose_media_state as rust_compose_media_state, decode_media_state as rust_decode_media_state,
 };
+use lakko_contacts::profile::{
+    compose_profile as rust_compose_profile, decode_profile as rust_decode_profile,
+    normalize_display_name as rust_normalize_display_name,
+    profile_is_newer as rust_profile_is_newer, DisplayNameError, Profile as RustProfile,
+    ProfileError,
+};
 use lakko_contacts::push_routing::{
     compose_push_routing_secret as rust_compose_push_routing_secret,
     decode_push_routing_secret as rust_decode_push_routing_secret,
@@ -73,6 +79,54 @@ fn contact_err(e: ContactError) -> JsError {
 
 fn crypto_err(e: lakko_crypto::error::Error) -> JsError {
     JsError::new(&format!("{e}"))
+}
+
+/// A real `Error` carrying one stable reason code as an own property —
+/// the `mls.rs` `refusalReason` pattern. The message keeps the core's
+/// sentence (never the rejected input); a client branches on the property.
+fn coded_error(message: &str, property: &str, code: &str) -> JsValue {
+    let err = js_sys::Error::new(message);
+    // Best-effort: a failed property write must not replace the error.
+    let _ = js_sys::Reflect::set(
+        err.as_ref(),
+        &JsValue::from_str(property),
+        &JsValue::from_str(code),
+    );
+    err.into()
+}
+
+/// Thrown for a profile refused by its bounds or its wire shape: an `Error`
+/// with a `profileError` code — `"displayName.tooLong"`,
+/// `"username.invalidCharacters"`, `"truncated"`, …
+fn profile_error_value(e: ProfileError) -> JsValue {
+    coded_error(&e.to_string(), "profileError", &e.code())
+}
+
+/// Turn caller-supplied fields into the canonical core profile: trim the
+/// display name (blank = no name), normalise + check a non-empty username
+/// (`None` or empty = no username).
+fn prepare_profile(
+    display_name: Option<String>,
+    username: Option<String>,
+    updated_at_ms: u64,
+) -> Result<RustProfile, JsValue> {
+    let display_name = match display_name {
+        Some(name) => rust_normalize_display_name(&name)
+            .map_err(|e| profile_error_value(ProfileError::DisplayName(e)))?,
+        None => None,
+    };
+    let username = match username {
+        Some(u) if !u.is_empty() => Some(
+            lakko_discovery_client::validate_username(&u)
+                .map_err(|e| profile_error_value(ProfileError::Username(e)))?,
+        ),
+        _ => None,
+    };
+    Ok(RustProfile {
+        display_name,
+        username,
+        updated_at_ms,
+    })
 }
 
 // ============================================================================
@@ -230,9 +284,15 @@ impl ContactRequest {
     /// to the device key); `recipientX25519Pub` is the recipient's
     /// X25519 public key bytes.
     ///
+    /// `profileEnvelope` is the sender's profile (ADR-0048) as produced by
+    /// `composeProfileEnvelope`, or an EMPTY array for no profile. It is
+    /// decoded and bounds-checked before sealing, so a recipient never
+    /// receives a profile it would drop.
+    ///
     /// # Errors
     ///
-    /// `JsError` on any input-shape or AEAD failure.
+    /// Throws on any input-shape or AEAD failure; throws an `Error` with a
+    /// `profileError` code when `profileEnvelope` is non-empty and invalid.
     #[wasm_bindgen]
     pub fn compose(
         sender_signing_seed: &[u8],
@@ -241,10 +301,16 @@ impl ContactRequest {
         from_pseudonym: &[u8],
         valid_after_ms: u64,
         privacy_pass_token: &[u8],
+        profile_envelope: &[u8],
         intro_message: &[u8],
-    ) -> Result<Vec<u8>, JsError> {
+    ) -> Result<Vec<u8>, JsValue> {
+        let profile = if profile_envelope.is_empty() {
+            None
+        } else {
+            Some(rust_decode_profile(profile_envelope).map_err(profile_error_value)?)
+        };
         if sender_signing_seed.len() != 32 {
-            return Err(JsError::new("senderSigningSeed must be 32 bytes"));
+            return Err(JsError::new("senderSigningSeed must be 32 bytes").into());
         }
         let mut seed = [0u8; 32];
         seed.copy_from_slice(sender_signing_seed);
@@ -254,7 +320,8 @@ impl ContactRequest {
             return Err(JsError::new(&format!(
                 "senderAccountId must be {} bytes",
                 lakko_contacts::ACCOUNT_ID_LEN,
-            )));
+            ))
+            .into());
         }
         let mut acct = [0u8; lakko_contacts::ACCOUNT_ID_LEN];
         acct.copy_from_slice(sender_account_id);
@@ -262,7 +329,8 @@ impl ContactRequest {
         if recipient_x25519_pub.len() != PUBLIC_KEY_LEN {
             return Err(JsError::new(&format!(
                 "recipientX25519Pub must be {PUBLIC_KEY_LEN} bytes",
-            )));
+            ))
+            .into());
         }
         let mut x25519_pub_arr = [0u8; PUBLIC_KEY_LEN];
         x25519_pub_arr.copy_from_slice(recipient_x25519_pub);
@@ -270,16 +338,17 @@ impl ContactRequest {
 
         let pseudonym = decode_pseudonym_bytes(from_pseudonym)?;
 
-        rust_compose(
+        Ok(rust_compose(
             &signing,
             &acct,
             &recipient_pub,
             pseudonym,
             valid_after_ms,
             privacy_pass_token,
+            profile.as_ref(),
             intro_message,
         )
-        .map_err(contact_err)
+        .map_err(contact_err)?)
     }
 
     /// Recipient-side: decode wire bytes, verify the Ed25519
@@ -331,18 +400,165 @@ impl ContactRequest {
         self.inner.privacy_pass_token.clone()
     }
 
-    /// Decrypt the intro envelope using the recipient's 32-byte
-    /// X25519 private key. Returns the plaintext bytes.
+    /// Decrypt the sealed envelope using the recipient's 32-byte X25519
+    /// private key. Returns an `OpenedContactRequest` carrying the
+    /// sender's profile (or `undefined`) and the intro message.
+    ///
+    /// The profile is the sender's **claim**, bound to `fromPubkey` (which
+    /// the request signature authenticates): store it under that key and
+    /// show its username only after verifying it through discovery
+    /// (ADR-0048 §3). A profile that fails its bounds arrives as
+    /// `undefined` with the intro intact.
     #[wasm_bindgen(js_name = openEnvelope)]
-    pub fn open_envelope(&self, recipient_x25519_priv: &[u8]) -> Result<Vec<u8>, JsError> {
+    pub fn open_envelope(
+        &self,
+        recipient_x25519_priv: &[u8],
+    ) -> Result<OpenedContactRequest, JsError> {
         if recipient_x25519_priv.len() != 32 {
             return Err(JsError::new("recipientX25519Priv must be 32 bytes"));
         }
         let mut sk = [0u8; 32];
         sk.copy_from_slice(recipient_x25519_priv);
         let priv_key = X25519SecretKey::from_bytes(sk);
-        rust_open(&self.inner, &priv_key).map_err(contact_err)
+        let (profile, intro_message) = rust_open(&self.inner, &priv_key).map_err(contact_err)?;
+        Ok(OpenedContactRequest {
+            profile: profile.map(WasmProfile::from),
+            intro_message,
+        })
     }
+}
+
+/// Result of `ContactRequest.openEnvelope` (ADR-0048 §2).
+#[wasm_bindgen]
+pub struct OpenedContactRequest {
+    profile: Option<WasmProfile>,
+    intro_message: Vec<u8>,
+}
+
+#[wasm_bindgen]
+impl OpenedContactRequest {
+    /// The sender's profile, or `undefined` when the request carried none
+    /// or carried one that failed its bounds.
+    #[wasm_bindgen(getter)]
+    pub fn profile(&self) -> Option<WasmProfile> {
+        self.profile.clone()
+    }
+
+    /// The intro message bytes, possibly empty. May itself be a call
+    /// envelope — classify with `dispatchIncomingEnvelope` as before.
+    #[wasm_bindgen(getter, js_name = introMessage)]
+    pub fn intro_message(&self) -> Vec<u8> {
+        self.intro_message.clone()
+    }
+}
+
+// ============================================================================
+// Profile envelope (ADR-0048)
+// ============================================================================
+
+/// A person's self-stated profile. Mirror of
+/// [`lakko_contacts::profile::Profile`].
+///
+/// **Every field received from someone else is that person's claim.** Store
+/// it under the sender's signature key resolved at receipt (C-68), keep it
+/// only when `profileIsNewer`, and show `username` only once discovery
+/// resolves it to that same key.
+#[wasm_bindgen(js_name = Profile)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WasmProfile {
+    display_name: Option<String>,
+    username: Option<String>,
+    updated_at_ms: u64,
+}
+
+impl From<RustProfile> for WasmProfile {
+    fn from(p: RustProfile) -> Self {
+        Self {
+            display_name: p.display_name,
+            username: p.username,
+            updated_at_ms: p.updated_at_ms,
+        }
+    }
+}
+
+#[wasm_bindgen(js_class = Profile)]
+impl WasmProfile {
+    /// Display name, or `undefined` for no name.
+    #[wasm_bindgen(getter, js_name = displayName)]
+    pub fn display_name(&self) -> Option<String> {
+        self.display_name.clone()
+    }
+
+    /// Claimed username in canonical form, or `undefined` for none.
+    #[wasm_bindgen(getter)]
+    pub fn username(&self) -> Option<String> {
+        self.username.clone()
+    }
+
+    /// Sender-clock UNIX milliseconds, as a `bigint`.
+    #[wasm_bindgen(getter, js_name = updatedAtMs)]
+    pub fn updated_at_ms(&self) -> u64 {
+        self.updated_at_ms
+    }
+}
+
+/// Compose a profile envelope (ADR-0048) — the inner plaintext to publish as
+/// an MLS application message, or to pass to `ContactRequest.compose`.
+///
+/// The display name is trimmed (blank = no name); a non-empty username is
+/// normalised (`@Alice` -> `alice`) and must pass the ADR-0048 §4 rule. The
+/// envelope produced is always one a receiver accepts.
+///
+/// # Errors
+///
+/// Throws an `Error` with a `profileError` code such as
+/// `"displayName.controlOrFormatCharacter"` or `"username.tooShort"`.
+#[wasm_bindgen(js_name = composeProfileEnvelope)]
+pub fn compose_profile_envelope(
+    display_name: Option<String>,
+    username: Option<String>,
+    updated_at_ms: u64,
+) -> Result<Vec<u8>, JsValue> {
+    let profile = prepare_profile(display_name, username, updated_at_ms)?;
+    rust_compose_profile(&profile).map_err(profile_error_value)
+}
+
+/// Strictly decode a profile envelope (ADR-0048). Fail-closed: anything
+/// malformed or out of bounds is refused as a whole.
+///
+/// Use `dispatchIncomingEnvelope` when the plaintext might be any kind.
+///
+/// # Errors
+///
+/// Throws an `Error` with a `profileError` code (`"wrongDomain"`,
+/// `"truncated"`, `"displayName.tooLong"`, …).
+#[wasm_bindgen(js_name = decodeProfileEnvelope)]
+pub fn decode_profile_envelope(plaintext: &[u8]) -> Result<WasmProfile, JsValue> {
+    rust_decode_profile(plaintext)
+        .map(WasmProfile::from)
+        .map_err(profile_error_value)
+}
+
+/// `true` when a profile stamped `incomingUpdatedAtMs` must replace the stored
+/// one **from the same signature key**. Strictly greater wins; equal is not
+/// newer.
+#[wasm_bindgen(js_name = profileIsNewer)]
+#[must_use]
+pub fn profile_is_newer(incoming_updated_at_ms: u64, stored_updated_at_ms: u64) -> bool {
+    rust_profile_is_newer(incoming_updated_at_ms, stored_updated_at_ms)
+}
+
+/// Prepare what a person typed as their display name: trim, `undefined` for
+/// blank ("no name"), and throw the reason for anything out of bounds.
+///
+/// # Errors
+///
+/// Throws an `Error` with a `displayNameError` code: `"lineBreak"`,
+/// `"controlOrFormatCharacter"`, `"tooLong"` or `"tooManyBytes"`.
+#[wasm_bindgen(js_name = normalizeDisplayName)]
+pub fn normalize_display_name(input: &str) -> Result<Option<String>, JsValue> {
+    rust_normalize_display_name(input)
+        .map_err(|e: DisplayNameError| coded_error(&e.to_string(), "displayNameError", e.code()))
 }
 
 // ============================================================================
@@ -1178,6 +1394,14 @@ pub enum WasmIncomingEnvelopeKind {
     /// a beacon can never fall through to `IntroMessage` and be
     /// rendered as a chat bubble.
     CommitterBeacon = 5,
+    /// A member's profile (ADR-0048). The decoded, bounds-checked profile
+    /// rides the `profile` getter of [`WasmIncomingEnvelope`]; `payload` is
+    /// empty, `cameraOn` and `mintEpoch` are `undefined`. Appended as `6` so
+    /// the pre-existing tags stay fixed. Never render it as a chat bubble;
+    /// store it under the sender's signature key resolved at receipt
+    /// (C-68), keep it only when `profileIsNewer`, and verify the username
+    /// through discovery before showing it.
+    Profile = 6,
 }
 
 /// FFI-portable result of [`dispatchIncomingEnvelope`]. The
@@ -1190,6 +1414,7 @@ pub struct WasmIncomingEnvelope {
     payload: Vec<u8>,
     camera_on: Option<bool>,
     mint_epoch: Option<u64>,
+    profile: Option<WasmProfile>,
 }
 
 #[wasm_bindgen(js_class = IncomingEnvelope)]
@@ -1233,6 +1458,13 @@ impl WasmIncomingEnvelope {
     pub fn mint_epoch(&self) -> Option<u64> {
         self.mint_epoch
     }
+
+    /// Set only for `Profile` (ADR-0048): the decoded profile. `undefined`
+    /// for every other kind.
+    #[wasm_bindgen(getter)]
+    pub fn profile(&self) -> Option<WasmProfile> {
+        self.profile.clone()
+    }
 }
 
 /// Single-call dispatcher for opaque relay-payload plaintexts
@@ -1259,36 +1491,49 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<WasmIncomingEnvelo
             payload: p.to_vec(),
             camera_on: None,
             mint_epoch: None,
+            profile: None,
         },
         IncomingEnvelope::CallKeyPackage(p) => WasmIncomingEnvelope {
             kind: WasmIncomingEnvelopeKind::CallKeyPackage,
             payload: p.to_vec(),
             camera_on: None,
             mint_epoch: None,
+            profile: None,
         },
         IncomingEnvelope::MediaState { camera_on } => WasmIncomingEnvelope {
             kind: WasmIncomingEnvelopeKind::MediaState,
             payload: Vec::new(),
             camera_on: Some(camera_on),
             mint_epoch: None,
+            profile: None,
         },
         IncomingEnvelope::PushRoutingSecret { mint_epoch, secret } => WasmIncomingEnvelope {
             kind: WasmIncomingEnvelopeKind::PushRoutingSecret,
             payload: secret.to_vec(),
             camera_on: None,
             mint_epoch: Some(mint_epoch),
+            profile: None,
         },
         IncomingEnvelope::CommitterBeacon => WasmIncomingEnvelope {
             kind: WasmIncomingEnvelopeKind::CommitterBeacon,
             payload: Vec::new(),
             camera_on: None,
             mint_epoch: None,
+            profile: None,
+        },
+        IncomingEnvelope::Profile(p) => WasmIncomingEnvelope {
+            kind: WasmIncomingEnvelopeKind::Profile,
+            payload: Vec::new(),
+            camera_on: None,
+            mint_epoch: None,
+            profile: Some(p.into()),
         },
         IncomingEnvelope::IntroMessage(p) => WasmIncomingEnvelope {
             kind: WasmIncomingEnvelopeKind::IntroMessage,
             payload: p.to_vec(),
             camera_on: None,
             mint_epoch: None,
+            profile: None,
         },
     })
 }
@@ -2085,6 +2330,7 @@ mod tests {
             &pseudonym,
             1_000_000,
             b"",
+            b"",
             b"hi bob",
         )
         .unwrap();
@@ -2096,8 +2342,55 @@ mod tests {
         assert!(req.privacy_pass_token().is_empty());
 
         let priv_bytes = recipient_x25519.to_bytes();
-        let plaintext = req.open_envelope(&priv_bytes).unwrap();
-        assert_eq!(plaintext, b"hi bob");
+        let opened = req.open_envelope(&priv_bytes).unwrap();
+        assert_eq!(opened.profile(), None);
+        assert_eq!(opened.intro_message(), b"hi bob");
+    }
+
+    /// ADR-0048: the profile envelope composed here rides a contact request
+    /// and comes back out of `openEnvelope`, prepared (trimmed, normalised).
+    /// Success paths only — a throw builds a `js_sys::Error`, which panics
+    /// off wasm32.
+    #[test]
+    fn profile_envelope_rides_a_contact_request() {
+        let envelope = compose_profile_envelope(
+            Some("  Alice Petrova ".to_string()),
+            Some("@Alice".to_string()),
+            42,
+        )
+        .unwrap();
+        let decoded = decode_profile_envelope(&envelope).unwrap();
+        assert_eq!(decoded.display_name(), Some("Alice Petrova".to_string()));
+        assert_eq!(decoded.username(), Some("alice".to_string()));
+        assert_eq!(decoded.updated_at_ms(), 42);
+        assert!(profile_is_newer(43, 42) && !profile_is_newer(42, 42));
+        assert_eq!(
+            normalize_display_name("  Bo ").unwrap(),
+            Some("Bo".to_string())
+        );
+
+        let dispatched = dispatch_incoming_envelope(&envelope).unwrap();
+        assert_eq!(dispatched.kind(), WasmIncomingEnvelopeKind::Profile);
+        assert_eq!(dispatched.profile(), Some(decoded.clone()));
+
+        let recipient = X25519SecretKey::from_bytes([0xCD; 32]);
+        let wire = ContactRequest::compose(
+            &[7u8; 32],
+            &[0x77u8; 16],
+            &recipient.public_key().to_bytes(),
+            &[0xAA; 32],
+            0,
+            b"",
+            &envelope,
+            b"hi bob",
+        )
+        .unwrap();
+        let opened = ContactRequest::decode_and_verify(&wire)
+            .unwrap()
+            .open_envelope(&recipient.to_bytes())
+            .unwrap();
+        assert_eq!(opened.profile(), Some(decoded));
+        assert_eq!(opened.intro_message(), b"hi bob");
     }
 
     #[test]

@@ -25,9 +25,9 @@ import LakkoCore
 ///   * ``state`` — discriminated ``AuthState`` (loading / anon /
 ///     session). The router observes this to decide which screen to
 ///     show.
-///   * ``identitySecrets`` — in-memory `(accountId, exportKey)`
-///     after a fresh authenticate; `nil` after a session-restore
-///     from disk or after logout.
+///   * ``identitySecrets`` — the live session's secrets, after a
+///     fresh authenticate or a relaunch restore from the Keychain;
+///     `nil` whenever there is no session (logout, logged out).
 ///
 /// `@MainActor` because every mutation lands on
 /// SwiftUI's main runloop; the async flows hop out to
@@ -36,13 +36,14 @@ import LakkoCore
 ///
 /// ## Division of labor
 ///
-/// Username registration / KeyPackage upload live on
-/// ``DiscoveryClient`` + ``ContactsRepository``, and MLS state
-/// + chat fan-out on ``ChatRepository`` — both surfaces exist
-/// on iOS (discovery 1.14e, MLS chat 1.14f). This repository
-/// owns the authenticate flows (signup / login / passkey /
-/// recover) and coordinates the post-auth bootstrap: it uploads
-/// the identity bundle via ``DiscoveryClient`` and drives the
+/// The discovery wire lives on ``DiscoveryClient``, KeyPackage
+/// publishing on ``ChatRepository``, and MLS state + chat fan-out
+/// on ``ChatRepository``. This repository owns the authenticate
+/// flows (signup / login / passkey / recover) and coordinates the
+/// post-auth bootstrap: it claims the username at signup and
+/// resolves it at login through ``AccountDirectory``, uploads the
+/// identity bundle via ``DiscoveryClient`` (signup, sign-in,
+/// recover), and drives the
 /// backup restore + ``ChatRepository/bootstrap(secrets:)``
 /// hand-off, but does not itself own the discovery or MLS state.
 @MainActor
@@ -87,22 +88,30 @@ public final class AuthRepository: ObservableObject {
     /// in scope and can stash it for the duration of the current
     /// process lifetime. **Cleared on logout / forgetDevice**.
     ///
-    /// **NOT populated on a session restore from disk**: the
-    /// export key is not persisted (only the device root key,
-    /// which is a one-way HKDF derivation — the export key cannot
-    /// be recovered from the device key bytes). A returning user
-    /// whose session rehydrates from ``SessionStore`` lands in a
-    /// state where ``state`` is `.session` but ``identitySecrets``
-    /// is `nil`. Operations that need to sign on behalf of the
-    /// user (contact-request send, MLS commits, …) MUST check this
-    /// and surface a "please re-enter your password" prompt when
-    /// it's `nil`.
-    @Published public private(set) var identitySecrets: IdentitySecrets?
+    /// **Also populated on a relaunch** (``rehydrate(nowMs:)``): the
+    /// AccountIdentity seed and the session token are read back from
+    /// the Keychain (``SessionRestore/decide(marker:persistence:nowMs:)``).
+    /// The relaunch lands either a FULL session — ``state`` is
+    /// `.session` AND this is non-nil, set together — or the
+    /// logged-out state; it never lands `.session` with `nil` secrets.
+    /// Operations that need to sign on behalf of the user still
+    /// guard on `nil` defensively.
+    ///
+    /// Every change is mirrored into ``AmbientSessionToken``, which
+    /// ``DiscoveryClient`` uses to charge its rate-limited reads to this
+    /// account rather than to the shared per-IP bucket.
+    @Published public private(set) var identitySecrets: IdentitySecrets? {
+        didSet { AmbientSessionToken.shared.set(identitySecrets?.sessionToken) }
+    }
 
     // MARK: - Wiring
 
     private let sessionStore: SessionStore
     private let authClientFactory: () -> AuthClient
+    /// Keychain seam for the relaunch restore + the session-token
+    /// persistence that feeds it. Injectable so the restore can be driven
+    /// by a fake in tests.
+    private let persistence: SessionPersistence
 
     /// ADR-0017 fresh-device fail-safe. When a password / passkey
     /// auth succeeds but no AccountIdentity (phrase) seed is cached on
@@ -124,50 +133,95 @@ public final class AuthRepository: ObservableObject {
     /// code is single-use server-side; a retry must re-send).
     private var pendingContactRecover: PendingContactRecover?
 
-    public init(
+    /// The username directory the signup claim and the login resolution go
+    /// through. Injectable so both can be driven by a fake in tests.
+    private let accountDirectory: AccountDirectory
+
+    public convenience init(
         sessionStore: SessionStore = SessionStore(),
-        authClientFactory: @escaping () -> AuthClient = { AuthClient() }
+        authClientFactory: @escaping () -> AuthClient = { AuthClient() },
+        persistence: SessionPersistence = KeychainSessionPersistence(),
+        nowMs: () -> Int64 = SessionRestore.nowMs
+    ) {
+        self.init(
+            sessionStore: sessionStore,
+            authClientFactory: authClientFactory,
+            persistence: persistence,
+            nowMs: nowMs,
+            accountDirectory: DiscoveryAccountDirectory()
+        )
+    }
+
+    init(
+        sessionStore: SessionStore,
+        authClientFactory: @escaping () -> AuthClient,
+        persistence: SessionPersistence,
+        nowMs: () -> Int64,
+        accountDirectory: AccountDirectory
     ) {
         self.sessionStore = sessionStore
         self.authClientFactory = authClientFactory
-        self.state = rehydrate()
+        self.persistence = persistence
+        self.accountDirectory = accountDirectory
+        rehydrate(nowMs: nowMs())
     }
 
     // MARK: - Lifecycle
 
-    /// Inspect persisted state and resolve the initial ``AuthState``:
+    /// Inspect persisted state and resolve the launch state. The decision
+    /// itself is ``SessionRestore/decide(marker:persistence:nowMs:)``; this
+    /// applies it.
     ///
-    ///   * No ``SessionStore`` record → fresh device, ``AuthState/anon(cachedUsername:)``.
-    ///   * Record present but device key absent (Keychain entry
-    ///     deleted, device reset, etc.) → ``AuthState/anon(cachedUsername:)``
-    ///     with the cached username so the Login form can pre-fill.
-    ///   * Record + device key both present → ``AuthState/session(_:)``.
-    private func rehydrate() -> AuthState {
-        guard let cached = sessionStore.load() else {
-            return .anon(cachedUsername: nil)
+    ///   * A marker + device key + AccountIdentity seed + unexpired session
+    ///     token → ``AuthState/session(_:)`` with ``identitySecrets``
+    ///     restored in the same step, so the chat bootstrap (keyed on the
+    ///     secrets) runs exactly as it does after a login.
+    ///   * Anything missing, undecodable or expired → logged out
+    ///     (``AuthState/anon(cachedUsername:)``), never a `.session` with no
+    ///     secrets behind it. An expired token is also deleted.
+    ///
+    /// Trade-off: the relaunch barrier is the device key + the Keychain item
+    /// class, the same one the NSE already relies on to read the seed
+    /// (ADR-0041). See ``SessionRestore/decide(marker:persistence:nowMs:)``.
+    private func rehydrate(nowMs: Int64) {
+        let marker = sessionStore.load()
+        switch SessionRestore.decide(marker: marker, persistence: persistence, nowMs: nowMs) {
+        case .anon(let cachedUsername):
+            identitySecrets = nil
+            state = .anon(cachedUsername: cachedUsername)
+        case .anonDiscardingToken(let cachedUsername):
+            if let marker {
+                persistence.deleteSessionToken(accountIdB64: marker.accountIdB64)
+            }
+            identitySecrets = nil
+            state = .anon(cachedUsername: cachedUsername)
+        case .session(let account, let secrets):
+            identitySecrets = secrets
+            state = .session(account)
         }
-        // We don't *use* the device key bytes here; we just check
-        // they exist. Keychain reads are cheap (no decryption until
-        // the data is touched).
-        let keyBytes: Data?
+    }
+
+    /// Install the live session's secrets AND persist the session token so
+    /// the next launch can restore the session (``rehydrate(nowMs:)``).
+    ///
+    /// Every site that lands a session goes through here, so there is one
+    /// place where "the session is live" and "the next launch can find it"
+    /// are kept together. The persist is best-effort: a Keychain failure
+    /// costs the relaunch restore (the next launch lands logged out), never
+    /// the current session.
+    private func adoptIdentitySecrets(_ secrets: IdentitySecrets, context: String) {
+        identitySecrets = secrets
         do {
-            keyBytes = try DeviceKeyStore.getDeviceKey(accountIdB64: cached.accountIdB64)
-        } catch {
-            // Keychain failure (revoked entry, device-reset
-            // post-restore, etc.) — treat as "no key on this device"
-            // so the user re-enters their password rather than
-            // seeing the app crash.
-            return .anon(cachedUsername: cached.username)
-        }
-        guard keyBytes != nil else {
-            return .anon(cachedUsername: cached.username)
-        }
-        return .session(
-            SessionAccount(
-                accountIdB64: cached.accountIdB64,
-                username: cached.username
+            try persistence.putSessionToken(
+                PersistedSessionToken(
+                    sessionToken: secrets.sessionToken,
+                    sessionExpiresAtMs: secrets.sessionExpiresAtMs
+                ),
+                accountIdB64: base64Encode(secrets.accountId)
             )
-        )
+        } catch {
+            NSLog("session-token persist (\(context)) failed: \(error)")
+        }
     }
 
     // MARK: - Flows
@@ -175,39 +229,95 @@ public final class AuthRepository: ObservableObject {
     /// Drive the full OPAQUE-PAKE signup flow.
     ///
     /// Steps:
-    ///   1. Validate the username (non-empty after trim).
+    ///   1. Validate the username (non-empty after the discovery
+    ///      normalisation — `@` alone is empty).
     ///   2. Call ``AuthClient/signup(password:enrolRecovery:)`` with
     ///      `enrolRecovery = true`.
-    ///   3. Save the `(accountId, username)` marker to ``SessionStore``.
-    ///   4. Derive the device root key via
-    ///      ``deriveDeviceRootKey(exportKey:accountIdB64:)``.
-    ///   5. Stash via ``DeviceKeyStore/putDeviceKey(accountIdB64:rootKey:)``.
-    ///   6. Flip state to ``AuthState/session(_:)``.
-    ///   7. Return the 24-word recovery phrase for the UI to display
+    ///   3. ``completeSignup(result:username:)`` — claim the username in
+    ///      discovery, persist the on-device material, publish the identity
+    ///      bundle, land the session.
+    ///   4. Return the 24-word recovery phrase for the UI to display
     ///      **once**.
-    ///
-    /// The order matters. We persist the marker BEFORE deriving the
-    /// device key so a crash between (3) and (5) leaves the user
-    /// with a recoverable state on next launch (the rehydrate gate
-    /// detects "marker but no device key" and asks for the password
-    /// again). The reverse ordering would leave a working device key
-    /// in Keychain with no record of who it belongs to.
     public func signup(
         username: String,
         password: Data
     ) async throws -> SignupOutcome {
-        let trimmed = username.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            throw AuthClientError.argument("username must be non-empty")
-        }
+        // ADR-0048 §4 — refuse a name that fails the username rule BEFORE the
+        // OPAQUE registration, so a refused name never leaves an unreachable
+        // account behind. The claim sends the canonical form.
+        let canonical = try requireValidUsername(
+            username,
+            emptyError: AuthClientError.argument("username must be non-empty")
+        )
         let client = authClientFactory()
         let result = try await client.signup(password: password, enrolRecovery: true)
+        return try await completeSignup(result: result, username: canonical)
+    }
+
+    /// Everything signup does once the OPAQUE registration committed.
+    ///
+    /// Mirror of the post-registration half of the web `signup`
+    /// (`apps/web/src/auth/AuthContext.tsx`). Split out so the ordering below
+    /// can be driven by a test without an OPAQUE server.
+    ///
+    /// Order, and why:
+    ///
+    ///   1. Derive the AccountIdentity seed from the recovery phrase. Pure; a
+    ///      missing phrase fails here, before any server-visible side effect
+    ///      beyond the registration itself.
+    ///   2. Claim the username in discovery (``claimSignupUsername(accountId:username:sessionToken:directory:)``).
+    ///      BEFORE anything touches the device: a taken name (409) or any other
+    ///      claim failure is thrown to the form with the device untouched, so
+    ///      the user is never signed in to an account nobody can find by name.
+    ///      The server-side account the registration created is left behind,
+    ///      unreachable — the web client accepts the same cost, since the claim
+    ///      needs that account's id and session token to exist.
+    ///   3. Persist the `(accountId, username)` marker with the CANONICAL name
+    ///      the server bound, then the device key. The marker goes first so a
+    ///      crash between the two leaves a recoverable "marker but no key"
+    ///      state rather than a key with no record of whose it is.
+    ///   4. Publish the identity bundle (signature + X25519 public keys, the
+    ///      genesis `leaf_auth`, the ADR-0036 attestation when mintable). A
+    ///      contact request and a fresh-device phrase check both need it.
+    ///      Fail-loud, BEFORE the session lands — the web decision: an account
+    ///      that is signed in but cannot be contacted is the half-broken state
+    ///      this step exists to prevent. The marker and seed are already on the
+    ///      device, so a later password sign-in re-publishes
+    ///      (``finishCanonicalSession(accountIdentitySeed:accountIdBytes:exportKey:sessionToken:sessionExpiresAtMs:username:)``).
+    ///      The KeyPackage is NOT published here — it must come from the
+    ///      long-lived identity (``ChatRepository/republishKeyPackage()``).
+    ///   5. Land the session.
+    func completeSignup(
+        result: SignupResult,
+        username: String
+    ) async throws -> SignupOutcome {
+        // ADR-0017: the canonical AccountIdentity is derived from the stable
+        // BIP39 recovery-phrase seed, NOT the password export key — so a
+        // future recover / password change preserves the identity.
+        // `enrolRecovery = true` always enrols recovery; a missing phrase is
+        // a code-path bypass we must not navigate the user past.
+        guard let phrase = result.recoveryPhrase else {
+            throw AuthClientError.argument(
+                "internal: signup completed without a recovery phrase"
+            )
+        }
+        let accountIdentitySeed = try RecoveryMnemonic
+            .fromPhrase(phrase: phrase)
+            .toSeed()
+
+        // Claim the username before any on-device state exists.
+        let boundUsername = try await claimSignupUsername(
+            accountId: result.accountId,
+            username: username,
+            sessionToken: result.sessionToken,
+            directory: accountDirectory
+        )
 
         let accountIdB64 = base64Encode(result.accountId)
         sessionStore.save(
             PersistedSession(
                 accountIdB64: accountIdB64,
-                username: trimmed
+                username: boundUsername
             )
         )
         let deviceRootKey = deriveDeviceRootKey(
@@ -235,7 +345,7 @@ public final class AuthRepository: ObservableObject {
         // Phase 2a3b0 (ADR-0007) — ensure a random per-device
         // DeviceIdentity seed exists on this device. Distinct
         // from the deterministic AccountIdentity (the
-        // phrase-seeded identity below); used as the MLS leaf in
+        // phrase-seeded identity); used as the MLS leaf in
         // the user's DeviceGroup (2a3a) once the add-device flow
         // lands. Best-effort.
         do {
@@ -245,24 +355,6 @@ public final class AuthRepository: ObservableObject {
         } catch {
             NSLog("device-identity ensure (signup) failed: \(error)")
         }
-
-        // ADR-0017: the canonical AccountIdentity is now derived from
-        // the stable BIP39 recovery-phrase seed, NOT the password
-        // export key — so a future recover / password change preserves
-        // the identity. We need the phrase here, so fail loud BEFORE
-        // building IdentitySecrets if it is absent (`enrolRecovery =
-        // true` always enrols recovery; a missing phrase is a
-        // code-path bypass we must not navigate the user past).
-        guard let phrase = result.recoveryPhrase else {
-            // Should be unreachable — we asked for `enrolRecovery =
-            // true` so the AuthClient always returns a phrase.
-            throw AuthClientError.argument(
-                "internal: signup completed without a recovery phrase"
-            )
-        }
-        let accountIdentitySeed = try RecoveryMnemonic
-            .fromPhrase(phrase: phrase)
-            .toSeed()
         // ADR-0017: cache the AccountIdentity (phrase) seed in the
         // Keychain — same hardware-backed posture as the export-key
         // cache — so a same-device login / passkey-resume can rebuild
@@ -279,23 +371,34 @@ public final class AuthRepository: ObservableObject {
             NSLog("account-identity-seed persist (signup) failed: \(error)")
         }
 
+        // The FIRST-EVER bundle publish, with the genesis leaf self-signature
+        // (G-30 #2, ADR-0019) so the transparency append accepts the new
+        // binding. Fail-loud — see the ordering note above.
+        try await publishFreshIdentityBundle(
+            accountId: result.accountId,
+            sessionToken: result.sessionToken,
+            seed: accountIdentitySeed
+        )
+
         // Stash the export key + phrase seed + session token for
         // ContactsClient / ChatRepository / DiscoveryClient. The bytes
-        // survive until logout / forgetDevice clears the publisher;
-        // signup is a one-shot ceremony so we don't expect any
-        // surprises here. ADR-0017: the canonical identity downstream
-        // callers rebuild reads `accountIdentitySeed`.
-        identitySecrets = IdentitySecrets(
-            accountId: result.accountId,
-            exportKey: result.exportKey,
-            accountIdentitySeed: accountIdentitySeed,
-            sessionToken: result.sessionToken,
-            sessionExpiresAtMs: result.sessionExpiresAtMs
+        // survive until logout / forgetDevice clears the publisher.
+        // ADR-0017: the canonical identity downstream callers rebuild
+        // reads `accountIdentitySeed`.
+        adoptIdentitySecrets(
+            IdentitySecrets(
+                accountId: result.accountId,
+                exportKey: result.exportKey,
+                accountIdentitySeed: accountIdentitySeed,
+                sessionToken: result.sessionToken,
+                sessionExpiresAtMs: result.sessionExpiresAtMs
+            ),
+            context: "signup"
         )
         state = .session(
             SessionAccount(
                 accountIdB64: accountIdB64,
-                username: trimmed
+                username: boundUsername
             )
         )
         // Phase 2a1c — post-signup backup bootstrap. Caches the
@@ -434,27 +537,28 @@ public final class AuthRepository: ObservableObject {
 
     /// Drive the full OPAQUE-PAKE login flow.
     ///
-    /// Mirror of `apps/android`'s `AuthRepository.login`. Steps:
+    /// Mirror of `apps/web/src/auth/AuthContext.tsx` `login`. Steps:
     ///
-    ///   1. Resolve the typed username to an `accountId`. In 1.14d4
-    ///      the only resolver is the on-device ``SessionStore``
-    ///      cache — if the typed username matches the cached entry,
-    ///      we use the cached `accountId` and skip a round-trip; if
-    ///      it doesn't, we throw `invalid credentials` (the same
-    ///      error as a wrong password — indistinguishable failure
-    ///      preserves OPAQUE's no-probing property).
-    ///      Cross-device login via the discovery service is 1.14e's
-    ///      job; until then a fresh device requires running signup
-    ///      first.
+    ///   1. Resolve the typed username to an `accountId`
+    ///      (``resolveLoginAccount(cached:typedUsername:normalize:lookup:encodeAccountId:)``):
+    ///      the on-device ``SessionStore`` marker answers when it names the
+    ///      same account (no round-trip); otherwise — a fresh device, or a
+    ///      different account than the one cached — a discovery lookup
+    ///      resolves it. An unregistered name fails as `invalid credentials`,
+    ///      like a wrong password, and nothing is contacted beyond the lookup.
     ///   2. Call ``AuthClient/login(accountId:password:)``.
     ///   3. Re-derive the device root key from the OPAQUE export
     ///      key. The derivation is deterministic for the same
     ///      password, so re-running it on every login produces the
     ///      same bytes the original signup wrote — the
     ///      ``DeviceKeyStore`` upsert is harmless.
-    ///   4. Re-save the ``SessionStore`` marker (idempotent — same
-    ///      `accountId`, same `username`).
-    ///   5. Flip state to ``AuthState/session(_:)``.
+    ///   4. Save the ``SessionStore`` marker for the resolved account
+    ///      (idempotent on the cached path; on a lookup it is the first
+    ///      record of this account on the device).
+    ///   5. Land the session from the cached AccountIdentity seed, or — with
+    ///      no seed on this device — park in ``AuthState/needsRecoveryPhrase(_:)``
+    ///      (ADR-0017; the lookup changes which account is targeted, never
+    ///      where the identity comes from).
     public func login(
         username: String,
         password: Data
@@ -466,24 +570,22 @@ public final class AuthRepository: ObservableObject {
         guard !password.isEmpty else {
             throw AuthClientError.argument("password must be non-empty")
         }
-        guard let cached = sessionStore.load() else {
-            throw AuthClientError.http(
-                status: 401,
-                endpoint: "/login/start",
-                body: "no account on this device — sign up first"
-            )
-        }
-        guard cached.username == trimmed else {
-            throw AuthClientError.http(
-                status: 401,
-                endpoint: "/login/start",
-                body: "invalid credentials"
-            )
-        }
-        guard let accountIdBytes = base64Decode(cached.accountIdB64) else {
-            // Corrupted session row — fail safe by wiping it +
-            // surfacing as anon.
-            sessionStore.clear()
+        let directory = accountDirectory
+        let resolved = try await resolveLoginAccount(
+            cached: sessionStore.load().map {
+                CachedAccount(accountIdB64: $0.accountIdB64, username: $0.username)
+            },
+            typedUsername: trimmed,
+            lookup: { try await directory.lookup(username: $0) },
+            encodeAccountId: base64Encode
+        )
+        let accountIdB64 = resolved.accountIdB64
+        guard let accountIdBytes = base64Decode(accountIdB64) else {
+            // Only reachable from a corrupted cached marker (a looked-up id
+            // was encoded here) — fail safe by wiping it.
+            if resolved.fromCache {
+                sessionStore.clear()
+            }
             throw AuthClientError.argument(
                 "stored account id is malformed; please sign up again"
             )
@@ -497,17 +599,17 @@ public final class AuthRepository: ObservableObject {
 
         let deviceRootKey = deriveDeviceRootKey(
             exportKey: result.exportKey,
-            accountIdB64: cached.accountIdB64
+            accountIdB64: accountIdB64
         )
         try DeviceKeyStore.putDeviceKey(
-            accountIdB64: cached.accountIdB64,
+            accountIdB64: accountIdB64,
             rootKey: deviceRootKey
         )
         // Phase 2a2c2 — refresh the cached export key under the
         // Keychain. Best-effort.
         do {
             try ExportKeyStore.putExportKey(
-                accountIdB64: cached.accountIdB64,
+                accountIdB64: accountIdB64,
                 exportKey: result.exportKey
             )
         } catch {
@@ -519,12 +621,16 @@ public final class AuthRepository: ObservableObject {
         // fresh bytes.
         do {
             _ = try DeviceIdentityStore.ensureDeviceIdentitySeed(
-                accountIdB64: cached.accountIdB64
+                accountIdB64: accountIdB64
             )
         } catch {
             NSLog("device-identity ensure (login) failed: \(error)")
         }
-        sessionStore.save(cached) // idempotent upsert — schema-versioned
+        // Idempotent upsert on the cached path; the first record of this
+        // account on the device after a lookup.
+        sessionStore.save(
+            PersistedSession(accountIdB64: accountIdB64, username: resolved.username)
+        )
 
         // ADR-0017: the canonical AccountIdentity is seeded from the
         // BIP39 phrase seed, NOT the export key. Read the cached seed
@@ -536,17 +642,17 @@ public final class AuthRepository: ObservableObject {
         // Instead we flip to the `needsRecoveryPhrase` fail-safe state
         // and let the user supply their phrase.
         let accountIdentitySeed = Self.readCachedAccountIdentitySeed(
-            accountIdB64: cached.accountIdB64,
+            accountIdB64: accountIdB64,
             context: "login"
         )
         finishOrPromptForRecovery(
             accountIdentitySeed: accountIdentitySeed,
             accountIdBytes: accountIdBytes,
-            accountIdB64: cached.accountIdB64,
+            accountIdB64: accountIdB64,
             exportKey: result.exportKey,
             sessionToken: result.sessionToken,
             sessionExpiresAtMs: result.sessionExpiresAtMs,
-            username: cached.username
+            username: resolved.username
         )
         // 1.20c — best-effort push subscribe.
         Task { await Self.subscribePushBestEffort(context: "login") }
@@ -834,8 +940,9 @@ public final class AuthRepository: ObservableObject {
         // (the only case on a routine recover) — SKIP the supersession
         // proof mint + upload entirely (emitting a proof for a key
         // nobody's pin changed would be spurious). The bundle is still
-        // re-published WITHOUT a proof so the directory's KeyPackage
-        // upserts current + any stale server-side proof column clears.
+        // re-published WITHOUT a proof so any stale server-side proof
+        // column clears (the KeyPackage is published separately, from the
+        // long-lived identity, by `ChatRepository.republishKeyPackage`).
         // A mismatch can NEVER happen on a phrase-seeded recover (same
         // seed ⇒ same key); if it ever does we fail loud rather than
         // publish a changed key with no proof (which would break every
@@ -926,12 +1033,15 @@ public final class AuthRepository: ObservableObject {
 
         // ADR-0017: also carry the phrase seed (the canonical identity
         // seed downstream callers rebuild from). Cleared on logout.
-        identitySecrets = IdentitySecrets(
-            accountId: accountIdBytes,
-            exportKey: result.exportKey,
-            accountIdentitySeed: accountIdentitySeed,
-            sessionToken: result.sessionToken,
-            sessionExpiresAtMs: result.sessionExpiresAtMs
+        adoptIdentitySecrets(
+            IdentitySecrets(
+                accountId: accountIdBytes,
+                exportKey: result.exportKey,
+                accountIdentitySeed: accountIdentitySeed,
+                sessionToken: result.sessionToken,
+                sessionExpiresAtMs: result.sessionExpiresAtMs
+            ),
+            context: "recover"
         )
         // Clear any pending fresh-device fail-safe — recover just
         // restored the identity directly.
@@ -980,6 +1090,13 @@ public final class AuthRepository: ObservableObject {
     /// Login form pre-fills it.
     public func logout() {
         let cached = sessionStore.load()
+        // Drop the persisted session token so a relaunch after logout lands
+        // logged out instead of silently restoring the session this call
+        // just ended (``rehydrate(nowMs:)`` requires the token). The seed and
+        // device key stay, which is what keeps the next login cheap.
+        if let cached {
+            persistence.deleteSessionToken(accountIdB64: cached.accountIdB64)
+        }
         identitySecrets = nil
         pendingRecovery = nil
         pendingFreshPhrase = nil
@@ -1015,6 +1132,9 @@ public final class AuthRepository: ObservableObject {
             // Phase 2a2c2 — drop the cached export key too. Same
             // clean-wipe rationale.
             ExportKeyStore.deleteExportKey(accountIdB64: cached.accountIdB64)
+            // The persisted session token (relaunch restore input). Same
+            // clean-wipe rationale.
+            persistence.deleteSessionToken(accountIdB64: cached.accountIdB64)
             // ADR-0017 — drop the cached AccountIdentity (phrase) seed.
             // It is the highest-sensitivity on-device secret. After this
             // wipe the only way back into the account is the recovery
@@ -1037,6 +1157,10 @@ public final class AuthRepository: ObservableObject {
             DeviceGroupSnapshotStore().deleteSnapshot(
                 accountIdB64: cached.accountIdB64
             )
+            // ADR-0048 — the account's own profile, the profiles received from
+            // the people it talked to, and the username verdicts. Same
+            // clean-wipe rationale.
+            ProfileDirectory.shared.forget(accountIdB64: cached.accountIdB64)
         }
         sessionStore.clear()
         identitySecrets = nil
@@ -1143,9 +1267,12 @@ public final class AuthRepository: ObservableObject {
     /// ADR-0017 — finish a warm session once the canonical
     /// AccountIdentity (phrase) seed is in hand: set the in-memory
     /// secrets (carrying the seed downstream callers rebuild the
-    /// canonical identity from) and flip to `.session`. Shared by the
-    /// warm same-device login / passkey paths and the fresh-device
-    /// `provideRecoveryPhrase` completion.
+    /// canonical identity from) and flip to `.session`, then refresh the
+    /// published identity bundle in the background
+    /// (``refreshPublishedIdentity(accountIdBytes:accountIdentitySeed:sessionToken:)``).
+    /// Shared by the warm same-device login / passkey paths, the
+    /// fresh-device `provideRecoveryPhrase` completion, the ACCESS-factor
+    /// warm landing and the fresh-phrase confirmation.
     private func finishCanonicalSession(
         accountIdentitySeed: Data,
         accountIdBytes: Data,
@@ -1155,24 +1282,27 @@ public final class AuthRepository: ObservableObject {
         username: String
     ) {
         let accountIdB64 = base64Encode(accountIdBytes)
-        identitySecrets = IdentitySecrets(
-            accountId: accountIdBytes,
-            exportKey: exportKey,
-            accountIdentitySeed: accountIdentitySeed,
-            sessionToken: sessionToken,
-            sessionExpiresAtMs: sessionExpiresAtMs
+        adoptIdentitySecrets(
+            IdentitySecrets(
+                accountId: accountIdBytes,
+                exportKey: exportKey,
+                accountIdentitySeed: accountIdentitySeed,
+                sessionToken: sessionToken,
+                sessionExpiresAtMs: sessionExpiresAtMs
+            ),
+            context: "finishCanonicalSession"
         )
         pendingRecovery = nil
         state = .session(
             SessionAccount(accountIdB64: accountIdB64, username: username)
         )
         // ADR-0017 defence-in-depth (lakko-security Phase-3A follow-up (i))
-        // — fire-and-forget self-check: is the account's published identity
-        // still OURS? A mismatch means someone replaced it (the ACCESS-hijack
-        // signature). iOS does not re-publish on a warm login, so this is
-        // race-free; best-effort (a 404 / fetch error never alerts).
+        // + the re-publish that keeps the account reachable — fire-and-forget.
+        // Observe first (a replaced bundle raises the alert), then re-publish
+        // this device's bundle. Both run in this one task, in that order, so
+        // the observation never sees this device's own upload.
         Task { [weak self] in
-            await self?.checkPublishedIdentityConsistency(
+            await self?.refreshPublishedIdentity(
                 accountIdBytes: accountIdBytes,
                 accountIdentitySeed: accountIdentitySeed,
                 sessionToken: sessionToken
@@ -1180,32 +1310,99 @@ public final class AuthRepository: ObservableObject {
         }
     }
 
-    /// ADR-0017 defence-in-depth — set ``identityAlert`` when the account's
-    /// published AccountIdentity differs from this device's. Best-effort:
-    /// a 404 (fresh signup) or a fetch error never alerts. Resets the alert
-    /// each call so a clean login clears a stale one.
-    private func checkPublishedIdentityConsistency(
+    /// Self-check the account's published identity bundle, then re-publish
+    /// this device's. Mirror of the web `refreshPublishedIdentity` on an
+    /// explicit sign-in; the decision is ``planPublishedIdentityRefresh(observed:derivedSignaturePubkey:)``.
+    ///
+    /// Before this ran on sign-in, iOS never re-published after signup — and
+    /// signup did not publish either — so an iOS account could be missing
+    /// from the directory for good: nobody could send it a contact request,
+    /// and a fresh-device sign-in hard-blocked on the absent bundle.
+    ///
+    ///   * Resets ``identityAlert`` first, so a clean sign-in clears a stale
+    ///     one; a 404 or a fetch error never alerts.
+    ///   * The upload carries the genesis `leaf_auth` self-signature (G-30 #2)
+    ///     so that, when this is the account's first publish, the
+    ///     transparency append accepts the binding; on a re-publish of a
+    ///     logged key it is ignored. The ADR-0036 attestation is minted only
+    ///     when the bundle is not known to be published.
+    ///   * Best-effort: a failure is logged and the session stands.
+    ///   * A logout or another sign-in while the fetch is out stops it: the
+    ///     identity is no longer this session's, so it neither alerts nor
+    ///     publishes.
+    private func refreshPublishedIdentity(
         accountIdBytes: Data,
         accountIdentitySeed: Data,
         sessionToken: String
     ) async {
         identityAlert = nil
+        let identity: Identity
         do {
-            let derivedPubkey = try Identity
-                .fromSeed(seed: accountIdentitySeed)
-                .signaturePublicKey()
-            let discovery = DiscoveryClient(sessionToken: sessionToken)
-            guard let bundle = try await discovery.identityFetch(
-                accountId: accountIdBytes
-            ) else {
-                return // 404 — nothing published yet; do not alert.
-            }
-            if base64Decode(bundle.signaturePubkey) != derivedPubkey {
-                identityAlert = .publishedIdentityChanged
+            identity = try Identity.fromSeed(seed: accountIdentitySeed)
+        } catch {
+            NSLog("identity bundle refresh: identity derive failed: \(error)")
+            return
+        }
+        let derivedPubkey = identity.signaturePublicKey()
+        let discovery = DiscoveryClient(sessionToken: sessionToken)
+
+        let observed: PublishedIdentityObservation
+        do {
+            if let bundle = try await discovery.identityFetch(accountId: accountIdBytes) {
+                observed = .present(signaturePubkey: base64Decode(bundle.signaturePubkey))
+            } else {
+                observed = .absent
             }
         } catch {
             NSLog("self-identity consistency check failed: \(error)")
+            observed = .unreachable
         }
+        guard isLiveSession(accountIdBytes: accountIdBytes, accountIdentitySeed: accountIdentitySeed) else {
+            return
+        }
+        let plan = planPublishedIdentityRefresh(
+            observed: observed,
+            derivedSignaturePubkey: derivedPubkey
+        )
+        if plan.raiseAlert {
+            identityAlert = .publishedIdentityChanged
+        }
+
+        do {
+            let leafAuth = try signLeafGenesis(
+                ed25519Seed: identity.ed25519Seed(),
+                usernameHash: transparencyAccountKey(accountId: accountIdBytes)
+            )
+            var genesisAttest: Data?
+            if plan.mintGenesisAttestation {
+                genesisAttest = await Self.mintGenesisAttestation(
+                    accountId: accountIdBytes,
+                    identityPubkey: derivedPubkey,
+                    sessionToken: sessionToken,
+                    client: authClientFactory()
+                )
+            }
+            guard isLiveSession(accountIdBytes: accountIdBytes, accountIdentitySeed: accountIdentitySeed) else {
+                return
+            }
+            try await accountDirectory.publishIdentityBundle(
+                accountId: accountIdBytes,
+                signaturePubkey: derivedPubkey,
+                x25519Pubkey: identity.x25519PublicKey(),
+                leafAuth: leafAuth,
+                genesisAttest: genesisAttest,
+                sessionToken: sessionToken
+            )
+        } catch {
+            NSLog("identity bundle refresh (sign-in) failed: \(error)")
+        }
+    }
+
+    /// `true` while the live session is still the one holding this account
+    /// and identity seed.
+    private func isLiveSession(accountIdBytes: Data, accountIdentitySeed: Data) -> Bool {
+        identitySecrets?.accountId == accountIdBytes
+            && identitySecrets?.accountIdentitySeed == accountIdentitySeed
     }
 
     /// Dismiss the identity-changed security banner.
@@ -1427,13 +1624,16 @@ public final class AuthRepository: ObservableObject {
                 "failed: \(error)"
             )
         }
-        identitySecrets = IdentitySecrets(
-            accountId: pending.accountIdBytes,
-            exportKey: pending.exportKey,
-            accountIdentitySeed: seed,
-            sessionToken: sessionToken ?? pending.sessionToken,
-            sessionExpiresAtMs: sessionExpiresAtMs
-                ?? pending.sessionExpiresAtMs
+        adoptIdentitySecrets(
+            IdentitySecrets(
+                accountId: pending.accountIdBytes,
+                exportKey: pending.exportKey,
+                accountIdentitySeed: seed,
+                sessionToken: sessionToken ?? pending.sessionToken,
+                sessionExpiresAtMs: sessionExpiresAtMs
+                    ?? pending.sessionExpiresAtMs
+            ),
+            context: "completeFromPairing"
         )
         pendingRecovery = nil
         state = .session(
@@ -1453,7 +1653,7 @@ public final class AuthRepository: ObservableObject {
     /// identity BEFORE any persistence; a mismatched / unverifiable
     /// seed leaves this device untouched.
     ///
-    /// The device root key (the ``rehydrate()`` existence-gate) is
+    /// The device root key (the ``rehydrate(nowMs:)`` existence-gate) is
     /// derived from the identity seed via
     /// `deriveDeviceRootKeyFromIdentitySeed` — distinct HKDF domain
     /// from the exportKey-derived variant. The iOS per-account stores
@@ -1527,12 +1727,15 @@ public final class AuthRepository: ObservableObject {
                 username: username
             )
         )
-        identitySecrets = IdentitySecrets(
-            accountId: accountIdBytes,
-            exportKey: Data(),
-            accountIdentitySeed: seed,
-            sessionToken: sessionToken,
-            sessionExpiresAtMs: sessionExpiresAtMs
+        adoptIdentitySecrets(
+            IdentitySecrets(
+                accountId: accountIdBytes,
+                exportKey: Data(),
+                accountIdentitySeed: seed,
+                sessionToken: sessionToken,
+                sessionExpiresAtMs: sessionExpiresAtMs
+            ),
+            context: "completeFromDeviceRestore"
         )
         pendingRecovery = nil
         state = .session(
@@ -1557,7 +1760,7 @@ public final class AuthRepository: ObservableObject {
     ///     this device rebuilds the canonical identity directly. If
     ///     the device root key is missing (e.g. post-Keychain-reset),
     ///     it is bootstrapped from the cached (already-verified) seed
-    ///     so the ``rehydrate()`` existence-gate passes on the next
+    ///     so the ``rehydrate(nowMs:)`` existence-gate passes on the next
     ///     launch.
     ///   * **Cold case** — park a ``PendingRecovery`` (empty
     ///     exportKey) and flip to `.needsRecoveryPhrase`; the
@@ -1625,7 +1828,7 @@ public final class AuthRepository: ObservableObject {
     ///   * **Warm case** — a cached AccountIdentity (phrase) seed on
     ///     this device rebuilds the canonical identity directly. The
     ///     device root key is bootstrapped from the cached (already-
-    ///     verified) seed when absent so the ``rehydrate()``
+    ///     verified) seed when absent so the ``rehydrate(nowMs:)``
     ///     existence-gate passes on the next launch, then
     ///     ``finishCanonicalSession`` flips to `.session`.
     ///   * **Cold case** — park a ``PendingRecovery`` (empty exportKey)
@@ -1827,10 +2030,11 @@ public final class AuthRepository: ObservableObject {
     private static func mintGenesisAttestation(
         accountId: Data,
         identityPubkey: Data,
-        sessionToken: String
+        sessionToken: String,
+        client: AuthClient = AuthClient()
     ) async -> Data? {
         do {
-            return try await AuthClient().mintGenesisAttestation(
+            return try await client.mintGenesisAttestation(
                 sessionToken: sessionToken,
                 identityPubkey: identityPubkey
             )
@@ -1843,16 +2047,26 @@ public final class AuthRepository: ObservableObject {
         }
     }
 
-    /// Publish the fresh-identity bundle (+ KeyPackage) for `accountId`
-    /// WITHOUT a supersession proof (ADR-0017 lost-everything). THROWS on
-    /// failure — the caller publishes before any local mutation, so a throw
-    /// leaves the device untouched and the user can retry.
+    /// Publish the fresh-identity bundle for `accountId` WITHOUT a
+    /// supersession proof (ADR-0017 lost-everything). THROWS on failure — the
+    /// caller publishes before any local mutation, so a throw leaves the
+    /// device untouched and the user can retry.
+    ///
+    /// **No KeyPackage here, deliberately.** This used to also upload
+    /// `identity.createKeyPackage()` minted on the throwaway `Identity` built
+    /// just below. A KeyPackage's private init / leaf keys live in the
+    /// provider of the `Identity` that minted it, and this one is dropped at
+    /// the end of the call — so every Welcome sent to that KeyPackage failed
+    /// on this device, and since discovery keeps one KeyPackage per account
+    /// the user could not be added to any group at all. The KeyPackage is now
+    /// published only from the long-lived identity
+    /// (``ChatRepository/republishKeyPackage()``), once the session lands and
+    /// the chat bootstrap has run.
     private func publishFreshIdentityBundle(
         accountId: Data,
         sessionToken: String,
         seed: Data
     ) async throws {
-        let discovery = DiscoveryClient(sessionToken: sessionToken)
         let identity = try Identity.fromSeed(seed: seed)
         // G-30 #2 (ADR-0019): a fresh-start mint publishes a NEW key with no
         // supersession proof, so authorise the log entry with a genesis
@@ -1866,18 +2080,16 @@ public final class AuthRepository: ObservableObject {
         let genesisAttest = await Self.mintGenesisAttestation(
             accountId: accountId,
             identityPubkey: identity.signaturePublicKey(),
-            sessionToken: sessionToken
+            sessionToken: sessionToken,
+            client: authClientFactory()
         )
-        try await discovery.uploadIdentityBundle(
+        try await accountDirectory.publishIdentityBundle(
             accountId: accountId,
             signaturePubkey: identity.signaturePublicKey(),
             x25519Pubkey: identity.x25519PublicKey(),
             leafAuth: leafAuth,
-            genesisAttest: genesisAttest
-        )
-        try await discovery.uploadKeyPackage(
-            accountId: accountId,
-            keyPackageBytes: identity.createKeyPackage()
+            genesisAttest: genesisAttest,
+            sessionToken: sessionToken
         )
     }
 
@@ -1992,7 +2204,7 @@ public final class AuthRepository: ObservableObject {
 
     /// ADR-0018 factor (c) — bootstrap the device root key from a
     /// VERIFIED AccountIdentity seed when the Keychain has none (the
-    /// ``rehydrate()`` existence-gate would otherwise bounce the next
+    /// ``rehydrate(nowMs:)`` existence-gate would otherwise bounce the next
     /// launch to the login form). Mirror of the web's nullable-
     /// deviceKey bootstrap in `provideRecoveryPhrase` /
     /// `completeFromPairing`.
@@ -2004,7 +2216,7 @@ public final class AuthRepository: ObservableObject {
     ///
     /// Best-effort: a Keychain failure leaves the in-memory session
     /// working; a later password login re-derives + persists. A probe
-    /// failure is treated as "no key" (same as ``rehydrate()``) — the
+    /// failure is treated as "no key" (same as ``rehydrate(nowMs:)``) — the
     /// iOS per-account stores are direct Keychain rows, NOT wrapped
     /// under the device root key, so an overwrite is harmless.
     private func bootstrapDeviceKeyFromVerifiedSeedIfAbsent(
@@ -2021,7 +2233,7 @@ public final class AuthRepository: ObservableObject {
         } catch {
             NSLog("device-key probe failed (\(context)): \(error)")
             // Fall through — same "treat as no key" posture as
-            // rehydrate().
+            // rehydrate(nowMs:).
         }
         var deviceRootKey = deriveDeviceRootKeyFromIdentitySeed(
             accountIdentitySeed: accountIdentitySeed,
@@ -2056,10 +2268,10 @@ public final class AuthRepository: ObservableObject {
     /// from the (unchanged) phrase seed and assert the equality:
     ///
     ///   * equal (the only case on a routine recover) → re-publish the
-    ///     bundle WITHOUT a proof. The public keys are identical but the
-    ///     fresh KeyPackage's init key is new, so the upsert keeps the
-    ///     directory current + a proof-less upload clears any stale
-    ///     server-side proof column.
+    ///     bundle WITHOUT a proof. The public keys are identical, so the
+    ///     upsert keeps the directory current + a proof-less upload clears
+    ///     any stale server-side proof column. (No KeyPackage: that is
+    ///     ``ChatRepository/republishKeyPackage()``'s job.)
     ///   * NOT equal → this can NEVER happen on a phrase-seeded recover
     ///     (same seed ⇒ same key). If it ever does, the phrase that
     ///     authenticated the OPAQUE recover differs from the one seeding
@@ -2104,10 +2316,10 @@ public final class AuthRepository: ObservableObject {
             // G-30 #2 (ADR-0019): carry a genesis self-signature over the
             // (account_key, pubkey) binding. On a TRUE re-publish (the key is
             // already logged) discovery Skips the transparency append, so this
-            // is ignored; but on this platform `signup` does not itself publish
-            // the bundle, so a recover can be the FIRST time discovery sees the
-            // account — then this self-sig authorises the genesis log entry.
-            // The key is unchanged, so the self-sig is valid.
+            // is ignored; but an account whose signup publish never landed (or
+            // one created before signup published at all) can reach its FIRST
+            // publish here — then this self-sig authorises the genesis log
+            // entry. The key is unchanged, so the self-sig is valid.
             let leafAuth = try signLeafGenesis(
                 ed25519Seed: identity.ed25519Seed(),
                 usernameHash: transparencyAccountKey(accountId: accountId)
@@ -2122,8 +2334,11 @@ public final class AuthRepository: ObservableObject {
                 identityPubkey: identity.signaturePublicKey(),
                 sessionToken: sessionToken
             )
-            // Proof-less re-publish (account key unchanged). Refreshes
-            // the KeyPackage + clears any stale server proof column.
+            // Proof-less re-publish (account key unchanged). Clears any
+            // stale server proof column. The KeyPackage is NOT refreshed
+            // here: it must come from the long-lived identity, and
+            // ``ChatRepository/republishKeyPackage()`` does that once the
+            // session lands.
             try await discovery.uploadIdentityBundle(
                 accountId: accountId,
                 signaturePubkey: identity.signaturePublicKey(),

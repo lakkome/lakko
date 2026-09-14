@@ -159,6 +159,12 @@ class CallInviteUrlTest {
     }
 
     @Test
+    fun `expiry preset 1h resolves to now plus one hour`() {
+        val now = 1_700_000_000_000L
+        assertEquals(now + 3_600_000L, CallInviteExpiryPreset.OneHour.toMs(now))
+    }
+
+    @Test
     fun `expiry preset 7d resolves to now plus seven days`() {
         val now = 1_700_000_000_000L
         val expected = now + 7L * 86_400_000

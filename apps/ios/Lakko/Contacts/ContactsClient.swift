@@ -557,6 +557,7 @@ public final class ContactsClient {
         senderAccountId: Data,
         senderSignaturePubkey: Data,
         recipientUsername: String,
+        profile: FfiProfile? = nil,
         introMessage: Data
     ) async throws -> SendResult {
         let lookup: LookupResult
@@ -602,6 +603,7 @@ public final class ContactsClient {
             senderSignaturePubkey: senderSignaturePubkey,
             recipientSignaturePubkey: recipientSignaturePub,
             recipientX25519Pubkey: recipientX25519Pub,
+            profile: profile,
             introMessage: introMessage
         )
 
@@ -629,6 +631,7 @@ public final class ContactsClient {
         recipientAccountId: Data,
         recipientSignaturePubkey: Data,
         recipientX25519Pubkey: Data,
+        profile: FfiProfile? = nil,
         introMessage: Data
     ) async throws -> SendResult {
         let published = try await composeAndPublishContactRequest(
@@ -637,6 +640,7 @@ public final class ContactsClient {
             senderSignaturePubkey: senderSignaturePubkey,
             recipientSignaturePubkey: recipientSignaturePubkey,
             recipientX25519Pubkey: recipientX25519Pubkey,
+            profile: profile,
             introMessage: introMessage
         )
         return SendResult(
@@ -657,6 +661,7 @@ public final class ContactsClient {
         senderSignaturePubkey: Data,
         recipientSignaturePubkey: Data,
         recipientX25519Pubkey: Data,
+        profile: FfiProfile?,
         introMessage: Data
     ) async throws -> PublishedRequest {
         let recipientPseudonym: Data
@@ -680,17 +685,31 @@ public final class ContactsClient {
         // request in the DS ingest layer's "no attestation tier"
         // rate-limit bucket (lowest ceiling).
         let privacyPassToken = Data()
-        let wireBytes: Data
-        do {
-            wireBytes = try composeContactRequest(
+        // ADR-0048 §2 — the sender's own profile rides inside the sealed
+        // envelope, so the recipient can see who is asking before accepting.
+        // The profile is optional to the request: one the core refuses to
+        // compose (a stored name that no longer passes the bounds) is left out
+        // rather than blocking the request itself.
+        let compose: (FfiProfile?) throws -> Data = { profile in
+            try composeContactRequest(
                 senderSigningSeed: senderSigningSeed,
                 senderAccountId: senderAccountId,
                 recipientX25519Pub: recipientX25519Pubkey,
                 fromPseudonym: senderPseudonym,
                 validAfterMs: validAfterMs,
                 privacyPassToken: privacyPassToken,
+                profile: profile,
                 introMessage: introMessage
             )
+        }
+        let wireBytes: Data
+        do {
+            do {
+                wireBytes = try compose(profile)
+            } catch let refused as FfiError where profile != nil && refused.isProfileFieldRefusal {
+                NSLog("ADR-0048 contact request sent without a profile: the profile was refused")
+                wireBytes = try compose(nil)
+            }
         } catch {
             throw ContactsError.wrap(error)
         }
@@ -851,13 +870,26 @@ public final class ContactsClient {
                 }
 
                 let intro: String?
+                let profile: ProfileClaim?
                 do {
-                    let plaintext = try parsed.openEnvelope(
+                    let opened = try parsed.openEnvelope(
                         recipientX25519Priv: myX25519Secret
                     )
-                    intro = String(data: plaintext, encoding: .utf8) ?? ""
+                    intro = String(data: opened.introMessage, encoding: .utf8) ?? ""
+                    // ADR-0048 — `nil` when the request carried no profile, or
+                    // one that failed its bounds (the request itself stays
+                    // valid). Bound by the caller to `fromPubkey`, which the
+                    // request signature authenticates.
+                    profile = opened.profile.map {
+                        ProfileClaim(
+                            displayName: $0.displayName,
+                            username: $0.username,
+                            updatedAtMs: $0.updatedAtMs
+                        )
+                    }
                 } catch {
                     intro = nil
+                    profile = nil
                 }
 
                 let req = IncomingContactRequest(
@@ -867,6 +899,7 @@ public final class ContactsClient {
                     fromPseudonym: parsed.fromPseudonym(),
                     validAfterMs: parsed.validAfterMs(),
                     intro: intro,
+                    profile: profile,
                     createdAt: message.createdAt
                 )
                 events.append(.contactRequest(req))
@@ -927,6 +960,10 @@ public struct IncomingContactRequest: Equatable, Codable {
     /// UTF-8-decoded intro message, or `nil` when there was no
     /// intro / it didn't decrypt. Empty string is a valid payload.
     public let intro: String?
+    /// ADR-0048 — the sender's profile as they state it, or `nil` when the
+    /// request carried none (or one that failed its bounds). A claim bound to
+    /// ``fromPubkey``; its username is shown only once verified.
+    public let profile: ProfileClaim?
     public let createdAt: String
 
     public init(
@@ -936,6 +973,7 @@ public struct IncomingContactRequest: Equatable, Codable {
         fromPseudonym: Data,
         validAfterMs: UInt64,
         intro: String?,
+        profile: ProfileClaim? = nil,
         createdAt: String
     ) {
         self.messageId = messageId
@@ -944,6 +982,7 @@ public struct IncomingContactRequest: Equatable, Codable {
         self.fromPseudonym = fromPseudonym
         self.validAfterMs = validAfterMs
         self.intro = intro
+        self.profile = profile
         self.createdAt = createdAt
     }
 }
@@ -1187,5 +1226,20 @@ public struct LogRollbackDetected: Error, LocalizedError, Equatable {
         "the transparency log appears to have shrunk (a smaller log_size " +
         "than previously observed) — an append-only log cannot do this, " +
         "so this is an unambiguous rollback attack. Refusing to proceed."
+    }
+}
+
+extension FfiError {
+    /// `true` for the ADR-0048 profile-field refusals — a display name or a
+    /// username out of bounds — as opposed to anything about the request.
+    var isProfileFieldRefusal: Bool {
+        switch self {
+        case .UsernameEmpty, .UsernameTooShort, .UsernameTooLong, .UsernameInvalidCharacters,
+            .DisplayNameLineBreak, .DisplayNameControlOrFormatCharacter,
+            .DisplayNameTooLong, .DisplayNameTooManyBytes:
+            return true
+        default:
+            return false
+        }
     }
 }

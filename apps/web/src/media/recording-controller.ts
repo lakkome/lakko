@@ -1,0 +1,431 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+/**
+ * ADR-0047 — the browser glue around `recording-machine.ts`.
+ *
+ * Translates pointer, keyboard, timer and capture callbacks into machine
+ * events, and performs the effects the machine returns. It decides nothing on
+ * its own: every "does this send / lock / cancel / discard" answer comes from
+ * the reducer, which is where the tests are.
+ *
+ * Owns at most one capture at a time and releases every stream and object URL
+ * it created on `dispose` (called from the owning component's `onCleanup`).
+ */
+
+import { createSignal, type Accessor } from "solid-js";
+
+import { RECORDING_UNSUPPORTED } from "./capture-format";
+import {
+  AcquireError,
+  MediaTake,
+  acquireStream,
+  hasCamera,
+  queryPermission,
+  recordingSupported,
+  stopStream,
+  type CaptureResult,
+  type PermissionState,
+} from "./media-capture";
+import { recordMode, setRecordMode } from "./media-prefs";
+import {
+  IDLE,
+  isCapturing,
+  reduce,
+  type CaptureKind,
+  type PointerKind,
+  type RecEffect,
+  type RecEvent,
+  type RecHint,
+  type RecState,
+} from "./recording-machine";
+
+const TICK_MS = 100;
+const HINT_MS = 2500;
+
+export type RecorderNotice = RecHint | "no-camera" | "start-failed";
+
+export const NOTICE_COPY: Readonly<Record<RecorderNotice, string>> = {
+  "hold-to-record": "Hold to record",
+  cancelled: "Cancelled",
+  "no-camera": "No camera found",
+  "start-failed": "Couldn't start recording",
+};
+
+/** UX spec §6 — the denied card, web wording. */
+export const DENIED_COPY: Readonly<Record<CaptureKind, string>> = {
+  voice: "Lakko needs microphone access to record voice messages. Allow microphone access in your browser's site settings.",
+  video_note: "Lakko needs camera access to record video messages. Allow camera access in your browser's site settings.",
+};
+
+export const IN_CALL_COPY = "Unavailable during a call";
+
+export interface PreviewTake {
+  readonly result: CaptureResult;
+  readonly url: string;
+}
+
+export interface Recorder {
+  readonly state: Accessor<RecState>;
+  readonly elapsedMs: Accessor<number>;
+  readonly level: Accessor<number>;
+  readonly notice: Accessor<RecorderNotice | null>;
+  readonly denied: Accessor<CaptureKind | null>;
+  readonly preview: Accessor<PreviewTake | null>;
+  /** The live stream a video note's round preview shows. */
+  readonly liveStream: Accessor<MediaStream | null>;
+  readonly facing: Accessor<"user" | "environment">;
+  /** Why the record button is disabled, or `null` when it is usable. */
+  readonly disabledReason: Accessor<string | null>;
+  readonly mode: Accessor<CaptureKind>;
+
+  onPointerDown(e: PointerEvent): void;
+  onPointerMove(e: PointerEvent): void;
+  onPointerUp(e: PointerEvent): void;
+  onPointerCancel(): void;
+  /** A click with `detail === 0`: keyboard or assistive-technology activation. */
+  onKeyboardActivate(): void;
+  toggleMode(): void;
+  stop(): void;
+  remove(): void;
+  cancel(): void;
+  sendPreview(): void;
+  flipCamera(): void;
+  dismissDenied(): void;
+  dispose(): void;
+}
+
+export interface RecorderOptions {
+  /** A finished take the user chose to send. */
+  onSend(result: CaptureResult): void;
+  /** `true` while a call owns the microphone and camera. */
+  inCall: Accessor<boolean>;
+  /** Registers object URLs this controller creates, so they are revoked. */
+  createUrl(blob: Blob): string | null;
+  revokeUrl(url: string): void;
+}
+
+export function createRecorder(opts: RecorderOptions): Recorder {
+  const [state, setState] = createSignal<RecState>(IDLE);
+  const [elapsedMs, setElapsed] = createSignal(0);
+  const [level, setLevel] = createSignal(0);
+  const [notice, setNotice] = createSignal<RecorderNotice | null>(null);
+  const [denied, setDenied] = createSignal<CaptureKind | null>(null);
+  const [preview, setPreview] = createSignal<PreviewTake | null>(null);
+  const [liveStream, setLiveStream] = createSignal<MediaStream | null>(null);
+  const [facing, setFacing] = createSignal<"user" | "environment">("user");
+  const [cameraPresent, setCameraPresent] = createSignal<boolean | null>(null);
+
+  const supported: Record<CaptureKind, boolean> = {
+    voice: recordingSupported("voice"),
+    video_note: recordingSupported("video_note"),
+  };
+  const permission: Record<CaptureKind, PermissionState> = { voice: "unknown", video_note: "unknown" };
+
+  let take: MediaTake | null = null;
+  /** A stream a permission request produced, not yet handed to a take. */
+  let pendingStream: MediaStream | null = null;
+  /** Bumped whenever a capture is abandoned, so a late async acquire can tell
+   *  it arrived for a take that no longer exists. */
+  let generation = 0;
+  let ticker: ReturnType<typeof setInterval> | null = null;
+  let noticeTimer: ReturnType<typeof setTimeout> | null = null;
+  let disposed = false;
+
+  const refreshPermissions = (): void => {
+    for (const kind of ["voice", "video_note"] as const) {
+      void queryPermission(kind).then((p) => {
+        permission[kind] = p;
+      });
+    }
+  };
+  refreshPermissions();
+  void hasCamera().then(setCameraPresent);
+
+  const onKey = (e: KeyboardEvent): void => {
+    if (e.key === "Escape" && state().phase !== "idle") {
+      e.preventDefault();
+      dispatch({ type: "cancel" });
+    }
+  };
+  globalThis.document?.addEventListener("keydown", onKey);
+
+  const mode = (): CaptureKind => (cameraPresent() === false ? "voice" : recordMode());
+
+  const disabledReason = (): string | null => {
+    if (opts.inCall()) return IN_CALL_COPY;
+    if (!supported[mode()]) return RECORDING_UNSUPPORTED[mode()];
+    return null;
+  };
+
+  function showNotice(n: RecorderNotice): void {
+    setNotice(n);
+    if (noticeTimer !== null) clearTimeout(noticeTimer);
+    noticeTimer = setTimeout(() => setNotice(null), HINT_MS);
+  }
+
+  function startTicker(): void {
+    if (ticker !== null) return;
+    ticker = setInterval(() => {
+      const s = state();
+      if (s.phase === "recording" || s.phase === "locked") {
+        setElapsed(Math.max(0, Date.now() - s.startedAt));
+        setLevel(take?.level() ?? 0);
+        dispatch({ type: "tick", at: Date.now() });
+      } else {
+        stopTicker();
+      }
+    }, TICK_MS);
+  }
+
+  function stopTicker(): void {
+    if (ticker !== null) clearInterval(ticker);
+    ticker = null;
+    setLevel(0);
+  }
+
+  function dispatch(event: RecEvent): void {
+    if (disposed) return;
+    const next = reduce(state(), event);
+    setState(next.state);
+    for (const effect of next.effects) perform(effect);
+    if (isCapturing(next.state)) startTicker();
+    // Whatever the machine did with it, a stream nobody claimed is released.
+    if (pendingStream !== null && !isCapturing(next.state) && next.state.phase !== "requesting") {
+      stopStream(pendingStream);
+      pendingStream = null;
+    }
+  }
+
+  function beginTake(kind: CaptureKind, stream: MediaStream): void {
+    const t = new MediaTake(kind, stream);
+    t.onTrackEnded(() => dispatch({ type: "revoked" }));
+    try {
+      t.start();
+    } catch {
+      t.discard();
+      showNotice("start-failed");
+      dispatch({ type: "capture-failed" });
+      return;
+    }
+    take = t;
+    setFacing(t.facingMode);
+    setLiveStream(kind === "video_note" ? t.previewStream : null);
+  }
+
+  function perform(effect: RecEffect): void {
+    switch (effect.type) {
+      case "request-permission": {
+        const gen = generation;
+        acquireStream(effect.kind).then(
+          (stream) => {
+            if (disposed || gen !== generation || state().phase !== "requesting") {
+              stopStream(stream);
+              return;
+            }
+            pendingStream = stream;
+            permission[effect.kind] = "granted";
+            dispatch({ type: "permission-result", granted: true, at: Date.now() });
+          },
+          (err: unknown) => {
+            if (gen !== generation || state().phase !== "requesting") return;
+            const reason = err instanceof AcquireError ? err.reason : "failed";
+            if (reason === "denied") {
+              permission[effect.kind] = "denied";
+              dispatch({ type: "permission-result", granted: false, at: Date.now() });
+            } else {
+              dispatch({ type: "cancel" });
+              showNotice(reason === "no-device" && effect.kind === "video_note" ? "no-camera" : "start-failed");
+            }
+          },
+        );
+        return;
+      }
+      case "start-capture": {
+        setDenied(null);
+        setElapsed(0);
+        if (pendingStream !== null) {
+          const stream = pendingStream;
+          pendingStream = null;
+          beginTake(effect.kind, stream);
+          return;
+        }
+        const gen = generation;
+        acquireStream(effect.kind).then(
+          (stream) => {
+            if (disposed || gen !== generation || !isCapturing(state())) {
+              stopStream(stream);
+              return;
+            }
+            beginTake(effect.kind, stream);
+          },
+          (err: unknown) => {
+            if (gen !== generation) return;
+            const reason = err instanceof AcquireError ? err.reason : "failed";
+            if (reason === "denied") {
+              permission[effect.kind] = "denied";
+              dispatch({ type: "revoked" });
+            } else {
+              showNotice(reason === "no-device" && effect.kind === "video_note" ? "no-camera" : "start-failed");
+              dispatch({ type: "capture-failed" });
+            }
+          },
+        );
+        return;
+      }
+      case "release-stream":
+        stopStream(pendingStream);
+        pendingStream = null;
+        return;
+      case "finish": {
+        generation += 1;
+        stopTicker();
+        const t = take;
+        take = null;
+        setLiveStream(null);
+        if (t === null) {
+          // The capture never got going (a release before the stream arrived).
+          if (effect.disposition === "preview") dispatch({ type: "preview-failed" });
+          return;
+        }
+        if (effect.disposition === "discard") {
+          t.discard();
+          return;
+        }
+        void t.stop().then(
+          (result) => {
+            if (disposed) return;
+            if (effect.disposition === "send") {
+              opts.onSend(result);
+              return;
+            }
+            const url = opts.createUrl(result.blob);
+            if (url === null) return;
+            setPreview({ result, url });
+            dispatch({ type: "preview-ready", durationMs: result.durationMs });
+          },
+          () => {
+            showNotice("start-failed");
+            if (effect.disposition === "preview") dispatch({ type: "preview-failed" });
+          },
+        );
+        return;
+      }
+      case "hint":
+        showNotice(effect.hint);
+        return;
+      case "show-denied":
+        setDenied(effect.kind);
+        return;
+      case "toggle-mode":
+        toggleMode();
+        return;
+      case "send-preview": {
+        const p = preview();
+        setPreview(null);
+        if (p !== null) {
+          opts.revokeUrl(p.url);
+          opts.onSend(p.result);
+        }
+        return;
+      }
+      case "discard-preview": {
+        const p = preview();
+        setPreview(null);
+        if (p !== null) opts.revokeUrl(p.url);
+        return;
+      }
+    }
+  }
+
+  function pointerKind(e: PointerEvent): PointerKind {
+    return e.pointerType === "touch" || e.pointerType === "pen" ? e.pointerType : "mouse";
+  }
+
+  function toggleMode(): void {
+    if (cameraPresent() === false) {
+      showNotice("no-camera");
+      return;
+    }
+    setRecordMode(recordMode() === "voice" ? "video_note" : "voice");
+  }
+
+  return {
+    state,
+    elapsedMs,
+    level,
+    notice,
+    denied,
+    preview,
+    liveStream,
+    facing,
+    disabledReason,
+    mode,
+    onPointerDown(e) {
+      if (e.button !== 0 || disabledReason() !== null) return;
+      e.preventDefault();
+      try {
+        (e.currentTarget as Element | null)?.setPointerCapture(e.pointerId);
+      } catch {
+        // Capture is an improvement, not a requirement.
+      }
+      dispatch({
+        type: "press",
+        kind: mode(),
+        pointer: pointerKind(e),
+        x: e.clientX,
+        y: e.clientY,
+        at: Date.now(),
+        permission: permission[mode()],
+      });
+    },
+    onPointerMove(e) {
+      if (state().phase === "recording") dispatch({ type: "move", x: e.clientX, y: e.clientY });
+    },
+    onPointerUp() {
+      dispatch({ type: "release", at: Date.now() });
+    },
+    onPointerCancel() {
+      if (state().phase === "recording" || state().phase === "requesting") dispatch({ type: "cancel" });
+    },
+    onKeyboardActivate() {
+      if (disabledReason() !== null || state().phase !== "idle") return;
+      dispatch({ type: "activate", kind: mode(), at: Date.now(), permission: permission[mode()] });
+    },
+    toggleMode,
+    stop: () => dispatch({ type: "stop", at: Date.now() }),
+    remove: () => dispatch({ type: "delete" }),
+    cancel: () => dispatch({ type: "cancel" }),
+    sendPreview: () => dispatch({ type: "send" }),
+    flipCamera() {
+      const t = take;
+      if (t === null) return;
+      void t.flipCamera().then((ok) => {
+        if (ok) {
+          setFacing(t.facingMode);
+          setLiveStream(null);
+          setLiveStream(t.previewStream);
+        }
+      });
+    },
+    dismissDenied: () => {
+      setDenied(null);
+      refreshPermissions();
+    },
+    dispose() {
+      if (disposed) return;
+      dispatch({ type: "cancel" });
+      const p = preview();
+      if (p !== null) opts.revokeUrl(p.url);
+      disposed = true;
+      generation += 1;
+      stopTicker();
+      take?.discard();
+      take = null;
+      stopStream(pendingStream);
+      pendingStream = null;
+      if (noticeTimer !== null) clearTimeout(noticeTimer);
+      globalThis.document?.removeEventListener("keydown", onKey);
+    },
+  };
+}

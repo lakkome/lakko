@@ -83,6 +83,7 @@ public fun SignupScreen(
         Stage.Form -> SignupForm(
             state = state,
             onUsernameChange = viewModel::onUsernameChange,
+            onDisplayNameChange = viewModel::onDisplayNameChange,
             onPasswordChange = viewModel::onPasswordChange,
             onConfirmChange = viewModel::onConfirmChange,
             onSubmit = viewModel::onSubmit,
@@ -111,6 +112,7 @@ public fun SignupScreen(
 private fun SignupForm(
     state: SignupUiState,
     onUsernameChange: (String) -> Unit,
+    onDisplayNameChange: (String) -> Unit,
     onPasswordChange: (String) -> Unit,
     onConfirmChange: (String) -> Unit,
     onSubmit: () -> Unit,
@@ -145,7 +147,36 @@ private fun SignupForm(
             label = { Text("Username") },
             singleLine = true,
             enabled = !state.busy,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
+            isError = state.usernameError != null,
+            // ADR-0048 §4 — the rule's reason as the user types, or the
+            // canonical form when typed with uppercase.
+            supportingText = {
+                val line = state.usernameError ?: state.usernameHint
+                    ?: "Latin letters, digits and _, 3-32 characters"
+                Text(line)
+            },
+            keyboardOptions = KeyboardOptions(
+                keyboardType = KeyboardType.Text,
+                autoCorrect = false,
+            ),
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Spacer(Modifier.height(12.dp))
+
+        // ADR-0048 §4 — optional profile name; placeholder is the username.
+        OutlinedTextField(
+            value = state.displayName,
+            onValueChange = onDisplayNameChange,
+            label = { Text("Your name") },
+            placeholder = {
+                Text(state.username.trim().removePrefix("@").ifEmpty { "Optional" })
+            },
+            singleLine = true,
+            enabled = !state.busy,
+            isError = state.displayNameError != null,
+            supportingText = {
+                Text(state.displayNameError ?: "Optional. Shown to people you talk to.")
+            },
             modifier = Modifier.fillMaxWidth(),
         )
         Spacer(Modifier.height(12.dp))

@@ -223,6 +223,9 @@ public sealed class CallInviteUrlException(message: String) : Exception(message)
  * form — keeps the UX consistent across the two invite kinds.
  */
 public enum class CallInviteExpiryPreset {
+    /** A call a user is about to hold now — the "Create call link" form's
+     *  shortest choice. */
+    OneHour,
     OneDay,
     SevenDays,
     ThirtyDays,
@@ -235,6 +238,7 @@ public enum class CallInviteExpiryPreset {
      * MUST surface a warning before allowing it.
      */
     public fun toMs(nowMs: Long): Long = when (this) {
+        OneHour -> nowMs + 3_600_000L
         OneDay -> nowMs + 1L * 86_400_000
         SevenDays -> nowMs + 7L * 86_400_000
         ThirtyDays -> nowMs + 30L * 86_400_000

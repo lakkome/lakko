@@ -22,6 +22,13 @@
 //!   [`compose`] / [`decode_and_verify`] / [`open_envelope`].
 //!   Manual length-prefixed binary codec, frozen at v1.
 //!   Ed25519-signed by the sender's identity key.
+//!   The sealed plaintext is `profile_len ‖ profile ‖ intro`
+//!   (ADR-0048 §2).
+//! - [`profile`] — the ADR-0048 profile envelope (display name,
+//!   claimed username, `updated_at_ms`): bounded, fail-closed,
+//!   classified by [`incoming_envelope`].
+//! - [`username`] — the ADR-0048 §4 canonical-username rule
+//!   (`[a-z0-9_]`, 3 to 32), shared with `lakko-discovery-client`.
 //!
 //! ## What's NOT here (1.9b and later)
 //!
@@ -63,10 +70,12 @@ pub mod group_join_attribution;
 pub mod incoming_envelope;
 pub mod invite;
 pub mod media_state;
+pub mod profile;
 pub mod pseudonym;
 pub mod push_routing;
 pub mod request;
 pub mod safety;
+pub mod username;
 
 pub use ack::{compose_ack, decode_and_verify_ack, ContactAck};
 pub use call_invite::{
@@ -112,6 +121,12 @@ pub use media_state::{
     compose_media_state, decode_media_state, try_unwrap_media_state, MediaState, MediaStateError,
     MEDIA_STATE_ENVELOPE_DOMAIN_V1, MEDIA_STATE_PAYLOAD_LEN, MEDIA_STATE_VERSION_V1,
 };
+pub use profile::{
+    check_display_name, compose_profile, decode_profile, is_format_char, normalize_display_name,
+    profile_is_newer, try_unwrap_profile, DisplayNameError, Profile, ProfileError,
+    DISPLAY_NAME_MAX_BYTES, DISPLAY_NAME_MAX_CHARS, FORMAT_CHAR_RANGES, PROFILE_ENVELOPE_DOMAIN_V1,
+    PROFILE_ENVELOPE_MAX_LEN, PROFILE_ENVELOPE_MIN_LEN, PROFILE_VERSION_V1,
+};
 pub use pseudonym::{Direction, IdentityPseudonym, PerRelationship, StrangerInbox, PSEUDONYM_LEN};
 pub use push_routing::{
     compose_push_routing_secret, decode_push_routing_secret, derive_push_gid,
@@ -126,3 +141,4 @@ pub use safety::{
     safety_number, safety_number_bytes, SAFETY_NUMBER_DIGITS, SAFETY_NUMBER_DIGITS_PER_GROUP,
     SAFETY_NUMBER_GROUPS,
 };
+pub use username::{check_canonical_username, UsernameError, USERNAME_MAX_LEN, USERNAME_MIN_LEN};

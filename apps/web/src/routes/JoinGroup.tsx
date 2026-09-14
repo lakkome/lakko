@@ -44,6 +44,7 @@ import { Show, createMemo, createResource, createSignal, onCleanup } from "solid
 import { A, useNavigate, useParams } from "@solidjs/router";
 import { useAuth } from "../auth/AuthContext";
 import { useChats } from "../chat/ChatContext";
+import { useProfiles } from "../profile/ProfileContext";
 import { ContactsClient } from "../contacts/client";
 import { loadWasm } from "../wasm";
 import { base64UrlEncodeNoPad } from "../auth/account-id";
@@ -55,6 +56,7 @@ import {
   JOIN_WAIT_SECONDARY,
 } from "../chat/unapplied-requests";
 import { paths } from "./paths";
+import { joinGroupAuthLinks } from "./join-group-auth";
 
 type JoinPhase = "idle" | "requesting" | "waiting" | "joined" | "error";
 
@@ -73,6 +75,7 @@ export default function JoinGroup() {
   const params = useParams<{ slug: string }>();
   const auth = useAuth();
   const chats = useChats();
+  const profiles = useProfiles();
   const navigate = useNavigate();
 
   // Canonical identity provider — the same wasm Identity every Group on this
@@ -149,6 +152,12 @@ export default function JoinGroup() {
             );
             if (group !== null) {
               if (pollTimer !== undefined) clearInterval(pollTimer);
+              // Register the joined group so the chat route can find it, and
+              // ADR-0048 §2 — publish this device's profile into it: the
+              // members already there cannot learn the newcomer's name any
+              // other way.
+              const active = chats.add({ label: "Group", group });
+              profiles.groupJoined(active.groupIdB64);
               setPhase("joined");
               navigate(paths.chat(base64UrlEncodeNoPad(group.groupId)));
             }
@@ -182,8 +191,17 @@ export default function JoinGroup() {
           when={auth.state().kind === "session" && auth.identitySecrets() !== null}
           fallback={
             <>
-              <p>Log in to request to join this group.</p>
-              <A href={paths.login}>Log in</A>
+              <p>Sign up or log in to request to join this group.</p>
+              <div style={{ display: "flex", gap: "0.75rem" }}>
+                <A href={joinGroupAuthLinks(params.slug).signup}>
+                  <button class="primary" type="button">
+                    Sign up
+                  </button>
+                </A>
+                <A href={joinGroupAuthLinks(params.slug).login}>
+                  <button type="button">Log in</button>
+                </A>
+              </div>
             </>
           }
         >

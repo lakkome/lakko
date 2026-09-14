@@ -27,6 +27,9 @@ public final class SignupViewModel: ObservableObject {
     // MARK: - Form fields
 
     @Published public var username: String = ""
+    /// ADR-0048 — the optional "Your name" field. Blank means others see the
+    /// username.
+    @Published public var displayName: String = ""
     @Published public var password: String = ""
     @Published public var confirm: String = ""
     @Published public var acknowledged: Bool = false
@@ -63,6 +66,22 @@ public final class SignupViewModel: ObservableObject {
     public func onSubmit() {
         guard !busy else { return } // ignore double-tap
 
+        // ADR-0048 §4 — the username rule, checked as the user typed and again
+        // here, before anything reaches the auth service.
+        switch checkUsername(username) {
+        case .empty:
+            error = "Type a username first."
+            return
+        case .invalid(let reason):
+            error = reason.message
+            return
+        case .valid:
+            break
+        }
+        if let nameError = displayNameError {
+            error = nameError
+            return
+        }
         if password != confirm {
             error = "Passwords do not match."
             return
@@ -76,6 +95,7 @@ public final class SignupViewModel: ObservableObject {
         error = nil
 
         let usernameSnapshot = username
+        let displayNameSnapshot = displayName
         let passwordBytes = Data(password.utf8)
 
         Task {
@@ -95,10 +115,14 @@ public final class SignupViewModel: ObservableObject {
                 error = nil
                 password = ""
                 confirm = ""
+                saveDisplayName(displayNameSnapshot)
                 stage = .phrase(outcome.recoveryPhrase)
             } catch let err as AuthClientError {
                 busy = false
                 error = userFacing(err)
+            } catch let err as DiscoveryClientError {
+                busy = false
+                error = err.authFormMessage
             } catch {
                 busy = false
                 self.error = (error as? LocalizedError)?.errorDescription
@@ -117,6 +141,39 @@ public final class SignupViewModel: ObservableObject {
     public func onAcknowledge() {
         stage = .form
         acknowledged = false
+    }
+
+    // MARK: - ADR-0048 profile name
+
+    /// The inline reason under the username field, or `nil`.
+    public var usernameHint: String? {
+        checkUsername(username).inlineMessage
+    }
+
+    /// The inline reason under the name field, or `nil` when the name is fine
+    /// (blank included — the field is optional).
+    public var displayNameError: String? {
+        do {
+            _ = try checkDisplayName(displayName)
+            return nil
+        } catch {
+            return (error as? LocalizedError)?.errorDescription ?? "That name cannot be used."
+        }
+    }
+
+    /// Store the name typed at signup as the new account's own profile. The
+    /// session has just landed, so the account id is known. Best-effort: a
+    /// name is optional, and Settings -> Profile can set it later.
+    private func saveDisplayName(_ input: String) {
+        guard let accountId = repository.identitySecrets?.accountId else { return }
+        let normalized: String?
+        do { normalized = try checkDisplayName(input) } catch { return }
+        guard normalized != nil else { return }
+        do {
+            try ProfileDirectory.shared.setOwnDisplayName(input, accountIdB64: base64Encode(accountId))
+        } catch {
+            NSLog("ADR-0048 signup name not saved: \(error)")
+        }
     }
 
     // MARK: - Error mapping

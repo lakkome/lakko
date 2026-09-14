@@ -9,6 +9,8 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import me.lakko.app.config.ApiEndpoints
+import me.lakko.app.config.ApiService
 import org.webrtc.PeerConnection
 import java.net.HttpURLConnection
 import java.net.URL
@@ -39,7 +41,10 @@ public class TurnCredentialClient(
     public val baseUrl: String = DEFAULT_BASE_URL,
 ) {
     public companion object {
-        public const val DEFAULT_BASE_URL: String = "http://127.0.0.1:8081"
+        /** The auth service base: `<LAKKO_API_BASE_URL>/auth`
+         *  ([ApiEndpoints]), or `http://10.0.2.2:8081` without one. */
+        public val DEFAULT_BASE_URL: String
+            get() = ApiEndpoints.baseUrlFor(ApiService.AUTH)
         private const val TAG = "lakko.turn"
 
         private val json: Json = Json {

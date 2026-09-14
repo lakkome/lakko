@@ -760,8 +760,12 @@ export class SfuCallSession {
       const remoteStream = stream0 ?? new MediaStream([ev.track]);
       // Decrypt incoming media; the worker reads the per-frame KID to
       // pick the right per-sender key, so one seed serves every sender.
+      // Arm at the CURRENT seed, not the one this connection published
+      // with: a track that arrives after a mid-call rekey (a link-call
+      // admission advancing the epoch) is sealed under the new epoch, and
+      // a receiver armed with the publish seed drops every frame.
       this.transformIds.add(
-        attachReceiverSFrame(ev.receiver, { seed }),
+        attachReceiverSFrame(ev.receiver, { seed: this.activeSeed ?? seed }),
       );
       this.callbacks.onRemoteTrack?.({
         streamId: remoteStream.id,

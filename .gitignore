@@ -27,6 +27,7 @@ infra/etc-lakko/lakko.env
 # Production uses systemd EnvironmentFile=/etc/lakko/lakko.env.
 .env
 **/.env
+.env.cred
 
 # Generated proptest regressions (deterministic, but local artifacts).
 **/proptest-regressions/

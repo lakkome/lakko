@@ -2945,12 +2945,15 @@ a pointer rather than re-argued, because each is written up where it belongs:
 - **The election is real, not a design.** All three clients emit a throttled beacon
   from a foregrounded chat screen, store the observations and fold them at sweep
   time, so an admin-only group is served by whichever admin is running the app
-  rather than waiting on an absent owner. **With one honest platform asymmetry:**
-  the freshness window is derived against a worst-case *poll* interval, and the web
-  client has no periodic poll at all (its poll is event-driven — mount, a user
-  action, the Refresh button), so a takeover there can lag well past the window.
-  Both natives long-poll and do meet the constraint. The mechanism is built
-  everywhere and **underperforms its own design on web**.
+  rather than waiting on an absent owner. ~~**With one honest platform asymmetry:**
+  the web client has no periodic poll at all~~ — **closed.** The freshness window is
+  derived against a worst-case *poll* interval, and the web client's poll used to be
+  event-driven only (mount, a user action, the Refresh button), so a takeover there
+  could lag well past the window. The web chat route now runs an automatic receive
+  loop: a DS long poll with a 25 s `wait` (`apps/web/src/ds/long-poll-loop.ts`),
+  running while the chat is open and the tab visible, or during a call — the same
+  foreground condition the web beacon emitter already required. All three clients
+  now meet the constraint.
 
 **Negative / new risks (Option B, as built).**
 
@@ -3016,10 +3019,10 @@ a pointer rather than re-argued, because each is written up where it belongs:
   not fire** … `composeCommitterBeacon` has zero production call sites~~ —
   **corrected again, and this time the bullet closes.** The emitter, the observation
   store and the fold landed on all three clients (`02f0037`, `1f230ab`), so a
-  `waiting` request ends when any candidate next has the group open. **What survives
-  of this bullet is the platform asymmetry above, not the mechanism:** the beacon's
-  freshness window is derived against a worst-case poll and web has no periodic poll,
-  so a web-only group's takeover can lag past it.
+  `waiting` request ends when any candidate next has the group open. The platform
+  asymmetry this bullet used to keep — web had no periodic poll, so a web-only
+  group's takeover could lag past the freshness window — is closed too, by the web
+  chat route's long-poll receive loop (see the bullet above).
 
 **Neutral (Option B, as built).**
 
@@ -3224,15 +3227,18 @@ blocker.
   observation store fed by the DS row's `created_at`, and the fold evaluated at
   verdict time with ranks re-derived through `Group::committerRank` against the
   current role table — `02f0037` on web, `1f230ab` on both natives, and all three
-  are pinned as **C-64**. **What is left of this item is a platform gap, not a
-  missing part:** the beacon's freshness window is `2 × interval + worst-case poll`,
-  and the web client has **no periodic poll at all** — mount, a user action and the
-  Refresh button drive it — so on web a beacon can be observed well after the window
-  it was sized for and a takeover lags. Both natives long-poll and meet the
-  constraint. Fixing it means either giving the web chat a periodic poll or deriving
-  its window from what it actually does; neither is designed here, and the honest
-  statement in the meantime is that the mechanism **underperforms its own design on
-  one of three platforms**.
+  are pinned as **C-64**. ~~**What is left of this item is a platform gap**~~ —
+  **closed.** The beacon's freshness window is `2 × interval + worst-case poll`, and
+  the web client used to have **no periodic poll at all** (mount, a user action and
+  the Refresh button drove it), so on web a beacon could be observed well after the
+  window it was sized for. Of the two fixes this item named — give the web chat a
+  periodic poll, or derive its window from what it actually does — the first was
+  built: the chat route long-polls its journal with a 25 s `wait`
+  (`apps/web/src/ds/long-poll-loop.ts`, below the 30 s worst-case poll the window is
+  sized against) while the chat is open and the tab is visible, or during a call.
+  That is the beacon emitter's own foreground condition, so a web candidate that is
+  beaconing is also observing, and the mechanism meets its design on all three
+  platforms.
 - ~~**`approve_external_join` is the last live direct-commit path, and it is now
   user-visible.**~~ **ANSWERED — S7 landed (`576ea14`).** The question this bullet
   said needed deciding — *what `Approve` means once it stops meaning "added"* — was

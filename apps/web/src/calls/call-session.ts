@@ -185,6 +185,35 @@ export function trackConstraint(
   return true;
 }
 
+/**
+ * Timers that bound how long a 1×1 call may sit in a non-terminal state.
+ *
+ * Without them a call that nobody answers never ends: the caller shows
+ * "Calling…" forever and the callee's banner rings until the tab closes. Each
+ * expiry publishes `End{timedOut}` so the other side stops too.
+ */
+export interface CallSessionTiming {
+  /** An incoming call rings for this long before it ends as `timedOut`. */
+  readonly ringTimeoutMs: number;
+  /** From `dial()` (or `accept()`) until ICE connects. A caller whose offer
+   *  is never answered, or a call whose transport never comes up, ends as
+   *  `timedOut` after this. */
+  readonly establishTimeoutMs: number;
+  /** ICE `disconnected` is often transient (a Wi-Fi roam, a brief loss); the
+   *  call ends only if it has not recovered after this grace. `failed` still
+   *  ends the call at once. */
+  readonly iceDisconnectedGraceMs: number;
+}
+
+/** Default {@link CallSessionTiming}. Chosen, not measured: 45 s is the
+ *  order of a phone's ring before voicemail; 10 s is long enough to ride out
+ *  a roam and short enough that a dead call does not look alive. */
+export const DEFAULT_CALL_SESSION_TIMING: CallSessionTiming = {
+  ringTimeoutMs: 45_000,
+  establishTimeoutMs: 45_000,
+  iceDisconnectedGraceMs: 10_000,
+};
+
 /** Public STUN fallback. Replaced by self-hosted in Phase
  *  3a2. */
 const PUBLIC_ICE_SERVERS: RTCIceServer[] = [
@@ -249,11 +278,27 @@ export class CallSession {
     atMs: number;
   } | null = null;
 
+  /** The inbound offer this callee is ringing for. Held, not applied: the
+   *  answerer captures media and builds its `RTCPeerConnection` only when the
+   *  user accepts (see {@link accept}). `null` for the caller and once
+   *  accepted. */
+  private pendingOffer: { sdp: string; mediaAudio: boolean } | null = null;
+  /** In-flight guard for {@link accept} (a double tap must not answer twice). */
+  private accepting = false;
+  /** Ring timeout (callee) or establish timeout (both sides). One slot: a
+   *  call is only ever in one of those phases. */
+  private phaseTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Grace timer armed on ICE `disconnected`. */
+  private iceGraceTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly timing: CallSessionTiming;
+
   constructor(
     callId: Uint8Array,
     private readonly callbacks: CallSessionCallbacks,
+    timing: Partial<CallSessionTiming> = {},
   ) {
     this.callId = callId;
+    this.timing = { ...DEFAULT_CALL_SESSION_TIMING, ...timing };
   }
 
   /** Current state — UI re-reads after every callback. */
@@ -281,9 +326,20 @@ export class CallSession {
    * failure — the caller surfaces the error in the UI.
    */
   async dial(media: CallMedia): Promise<void> {
+    if (this.state !== "idle") return;
     this.isOfferer = true;
     this.setState("outgoing");
+    // Nobody answering is a normal outcome, not a hang: end as `timedOut`
+    // (published, so the callee's banner stops too) unless ICE connects first.
+    this.armPhaseTimer(this.timing.establishTimeoutMs, () => {
+      if (this.state === "outgoing" || this.state === "connecting") {
+        void this.endLocal("timedOut");
+      }
+    });
     await this.openPeerConnection(media);
+    // The call may have ended while the capture permission prompt was open
+    // (read through the getter: the narrowing above predates the await).
+    if (this.getState() !== "outgoing") return;
     if (this.pc === null) throw new Error("peer connection not initialised");
     const offer = await this.pc.createOffer();
     await this.pc.setLocalDescription(offer);
@@ -305,45 +361,43 @@ export class CallSession {
    * Inbound side: route a parsed signaling payload into
    * the state machine. Caller's chat-message dispatcher
    * filters by call_id (only payloads with this session's
-   * call_id reach this method) and feeds them in order.
+   * call_id reach this method), delivers each journal row
+   * exactly once, and feeds them in order — one at a time.
+   *
+   * Group-control bodies (`groupStart` / `groupJoin` /
+   * `groupLeave`) are dropped here as well as at the
+   * dispatcher (C-11): they never advance a 1×1 state machine.
    */
   async applyIncomingSignaling(parsed: ParsedCallSignaling): Promise<void> {
     switch (parsed.kind) {
       case "offer":
-        if (this.state !== "idle") {
+        if (this.state === "connecting" || this.state === "connected") {
           // Mid-call renegotiation offer (piece B2b: the peer added a video
           // track). NOT a fresh call — apply it with the perfect-negotiation
           // glare guard and answer, keeping the call up.
           await this.applyRenegotiationOffer(parsed.sdp);
           return;
         }
-        // Fresh inbound call — we're the answerer.
+        // Anything but `idle` here is a repeat, never a renegotiation: a
+        // second copy of the offer we are already ringing for, an offer that
+        // arrives while we are dialing, or one that lands while the call is
+        // ending. Treating a ringing callee's repeat as a renegotiation is
+        // what used to publish an Answer the user never gave and then leave
+        // `accept()` running `createAnswer` in `stable`.
+        if (this.state !== "idle") return;
+        // Fresh inbound call — we're the answerer. Nothing is captured and no
+        // peer connection exists until the user accepts: ringing must not
+        // open the microphone or raise a permission prompt with no banner to
+        // explain it, and an Accept tap must not race a capture still in
+        // flight. The offer is held and applied in `accept()`.
         this.isOfferer = false;
+        this.pendingOffer = { sdp: parsed.sdp, mediaAudio: parsed.mediaAudio };
         this.setState("ringing");
-        // Answerer capture is audio-only, regardless of the offerer's video
-        // flag. The answerer's camera must NOT turn on just because the OFFERER
-        // advertised video — capturing it here acquired-then-muted the track
-        // (the camera-sync effect promptly disabled the freshly acquired
-        // camera, so the peer saw no answerer video). The answerer opts into
-        // SENDING video explicitly via "Accept with video" (accept → camOn=true
-        // → the shipped `addLocalVideo` mid-call camera-on path). It still
-        // RECEIVES the offerer's video either way (see `ontrack`).
-        await this.openPeerConnection({
-          audio: parsed.mediaAudio,
-          video: false,
+        this.armPhaseTimer(this.timing.ringTimeoutMs, () => {
+          if (this.state === "ringing" && !this.accepting) {
+            void this.endLocal("timedOut");
+          }
         });
-        if (this.pc === null) return;
-        try {
-          await this.pc.setRemoteDescription({
-            type: "offer",
-            sdp: parsed.sdp,
-          });
-          await this.applyQueuedCandidates();
-        } catch (err) {
-          // eslint-disable-next-line no-console
-          console.warn("setRemoteDescription(offer) failed", err);
-          this.endLocal("error");
-        }
         break;
 
       case "answer":
@@ -364,7 +418,7 @@ export class CallSession {
             console.warn("setRemoteDescription(answer) failed", err);
             this.endLocal("error");
           }
-        } else {
+        } else if (this.state === "connecting" || this.state === "connected") {
           // Mid-call renegotiation answer (to a reneg offer we sent).
           try {
             this.isSettingRemoteAnswerPending = true;
@@ -418,29 +472,70 @@ export class CallSession {
    * signaling event.
    */
   async accept(): Promise<void> {
-    if (this.state !== "ringing" || this.isOfferer) return;
-    if (this.pc === null) {
-      this.endLocal("error");
+    if (this.state !== "ringing" || this.isOfferer || this.accepting) return;
+    const offer = this.pendingOffer;
+    if (offer === null) {
+      void this.endLocal("error");
       return;
     }
+    this.accepting = true;
+    // The ring timeout no longer applies; the establish timeout does (a
+    // capture prompt left open, or a transport that never comes up).
+    this.armPhaseTimer(this.timing.establishTimeoutMs, () => {
+      if (this.state === "ringing" || this.state === "connecting") {
+        void this.endLocal("timedOut");
+      }
+    });
     try {
-      const answer = await this.pc.createAnswer();
-      await this.pc.setLocalDescription(answer);
+      // Answerer capture is audio-only, regardless of the offerer's video
+      // flag. The answerer's camera must NOT turn on just because the OFFERER
+      // advertised video — capturing it here acquired-then-muted the track
+      // (the camera-sync effect promptly disabled the freshly acquired
+      // camera, so the peer saw no answerer video). The answerer opts into
+      // SENDING video explicitly via "Accept with video" (accept → camOn=true
+      // → the shipped `addLocalVideo` mid-call camera-on path). It still
+      // RECEIVES the offerer's video either way (see `ontrack`).
+      await this.openPeerConnection({ audio: offer.mediaAudio, video: false });
+      // The caller hung up, or the establish timer fired, while the capture
+      // was in flight: `openPeerConnection` already released it.
+      if (this.state !== "ringing") return;
+      const pc = this.pc;
+      if (pc === null) return;
+      await pc.setRemoteDescription({ type: "offer", sdp: offer.sdp });
+      this.pendingOffer = null;
+      await this.applyQueuedCandidates();
+      if (this.state !== "ringing" || this.pc !== pc) return;
+      // An answer is only meaningful against an applied remote offer. Checked
+      // rather than assumed: `createAnswer` in any other state throws, and
+      // the old path that reached it in `stable` turned an Accept tap into
+      // `End{error}`.
+      if (pc.signalingState !== "have-remote-offer") {
+        throw new Error(
+          `cannot answer in signaling state ${pc.signalingState}`,
+        );
+      }
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
       if (answer.sdp === undefined) {
         throw new Error("createAnswer produced no SDP body");
       }
-      const wasm = await loadWasm();
-      const bytes = wasm.composeCallAnswerSignaling(this.callId, answer.sdp);
-      this.callbacks.onOutboundSignaling(bytes);
+      // Set before the next await, so an ICE `connected` that fires right
+      // after the local description applies advances connecting → connected
+      // rather than being overwritten back to connecting.
       this.setState("connecting");
       // Arm onnegotiationneeded for future local track changes (B2b): the
       // answer is sent + our local description is set, so the initial
       // negotiation is applied on our side.
       this.negotiationReady = true;
+      const wasm = await loadWasm();
+      const bytes = wasm.composeCallAnswerSignaling(this.callId, answer.sdp);
+      this.callbacks.onOutboundSignaling(bytes);
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn("accept failed", err);
-      this.endLocal("error");
+      void this.endLocal("error");
+    } finally {
+      this.accepting = false;
     }
   }
 
@@ -629,6 +724,10 @@ export class CallSession {
 
   /** Idempotent tear-down — safe to call multiple times. */
   dispose(): void {
+    this.clearPhaseTimer();
+    this.clearIceGraceTimer();
+    this.pendingOffer = null;
+    this.pendingCandidates = [];
     // G3-3-conn-quality — stop the stats poll loop before
     // dropping the peer connection.
     if (this.statsTimer !== null) {
@@ -682,8 +781,15 @@ export class CallSession {
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn("getUserMedia denied / failed", err);
-      this.endLocal("error");
+      void this.endLocal("error");
       throw err;
+    }
+    // The call ended while the capture (and its permission prompt) was in
+    // flight. Release the microphone / camera at once rather than attaching
+    // it to a peer connection nobody will ever close.
+    if (this.state === "ending" || this.state === "done") {
+      for (const track of stream.getTracks()) track.stop();
+      return;
     }
     this.localStream = stream;
     // Surface the local capture so the UI can render a self-preview
@@ -739,13 +845,33 @@ export class CallSession {
     };
 
     pc.oniceconnectionstatechange = (): void => {
+      // A late event from a peer connection this session already closed.
+      if (this.pc !== pc) return;
       const s = pc.iceConnectionState;
       if (s === "connected" || s === "completed") {
-        if (this.state === "connecting" || this.state === "ringing") {
+        this.clearIceGraceTimer();
+        if (this.state === "connecting") {
+          this.clearPhaseTimer();
           this.setState("connected");
         }
+      } else if (s === "disconnected") {
+        // Often transient. End only if it has not recovered after the grace;
+        // a recovery (`connected` / `completed`) clears the timer above.
+        if (
+          this.iceGraceTimer === null &&
+          (this.state === "connecting" || this.state === "connected")
+        ) {
+          this.iceGraceTimer = setTimeout(() => {
+            this.iceGraceTimer = null;
+            if (this.pc !== pc) return;
+            const now = pc.iceConnectionState;
+            if (now === "disconnected" || now === "failed") {
+              void this.endLocal("error");
+            }
+          }, this.timing.iceDisconnectedGraceMs);
+        }
       } else if (s === "failed") {
-        this.endLocal("error");
+        void this.endLocal("error");
       }
     };
   }
@@ -828,8 +954,34 @@ export class CallSession {
     }
   }
 
+  private armPhaseTimer(ms: number, onExpire: () => void): void {
+    this.clearPhaseTimer();
+    this.phaseTimer = setTimeout(() => {
+      this.phaseTimer = null;
+      onExpire();
+    }, ms);
+  }
+
+  private clearPhaseTimer(): void {
+    if (this.phaseTimer !== null) {
+      clearTimeout(this.phaseTimer);
+      this.phaseTimer = null;
+    }
+  }
+
+  private clearIceGraceTimer(): void {
+    if (this.iceGraceTimer !== null) {
+      clearTimeout(this.iceGraceTimer);
+      this.iceGraceTimer = null;
+    }
+  }
+
   private async endLocal(reason: WebCallEndReason): Promise<void> {
-    if (this.state === "done") return;
+    // `ending` too: a timer firing while a hang-up is already publishing its
+    // End must not publish a second one.
+    if (this.state === "ending" || this.state === "done") return;
+    this.clearPhaseTimer();
+    this.clearIceGraceTimer();
     this.setState("ending", reason);
     try {
       const wasm = await loadWasm();
@@ -844,7 +996,7 @@ export class CallSession {
   }
 
   private endRemote(reason: WebCallEndReason): void {
-    if (this.state === "done") return;
+    if (this.state === "idle" || this.state === "done") return;
     this.dispose();
     this.setState("done", reason);
   }

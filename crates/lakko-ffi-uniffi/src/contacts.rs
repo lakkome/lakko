@@ -25,9 +25,11 @@
 //!     `ContactRequest.decodeAndVerify(wire)`.
 //!
 //!   * [`ContactRequest::open_envelope`] — recipient side step 2:
-//!     open the sealed-box intro message with the recipient's
-//!     X25519 private key. Method (not constructor) because it
-//!     returns plaintext bytes, not another `ContactRequest`.
+//!     open the sealed box with the recipient's X25519 private key,
+//!     returning the sender's profile (ADR-0048) and the intro
+//!     message as an [`OpenedContactRequest`]. Method (not
+//!     constructor) because it returns plaintext, not another
+//!     `ContactRequest`.
 
 use lakko_contacts::call_invite::{
     call_sign_revocation as rust_call_sign_revocation, compose as rust_call_invite_compose,
@@ -70,6 +72,11 @@ use lakko_contacts::invite::{
 };
 use lakko_contacts::media_state::{
     compose_media_state as rust_compose_media_state, decode_media_state as rust_decode_media_state,
+};
+use lakko_contacts::profile::{
+    compose_profile as rust_compose_profile, decode_profile as rust_decode_profile,
+    normalize_display_name as rust_normalize_display_name,
+    profile_is_newer as rust_profile_is_newer, Profile as RustProfile,
 };
 use lakko_contacts::push_routing::{
     compose_push_routing_secret as rust_compose_push_routing_secret,
@@ -270,6 +277,12 @@ impl PerRelationship {
 /// at [`lakko_contacts::request::MAX_PRIVACY_PASS_TOKEN_LEN`] —
 /// over-cap returns [`FfiError::Contacts`].
 ///
+/// `profile` is the sender's own profile (ADR-0048), or `None` to send
+/// none. It is sealed alongside the intro, so the recipient can show who
+/// is asking before accepting; the DS still sees only ciphertext. It is
+/// prepared exactly as [`compose_profile_envelope`] prepares it (display
+/// name trimmed, blank = no name; username normalised and checked).
+///
 /// `intro_message` is the optional plaintext payload (sealed in
 /// an HPKE-equivalent envelope to `recipient_x25519_pub`).
 ///
@@ -278,6 +291,8 @@ impl PerRelationship {
 /// * [`FfiError::Contacts`] on wrong-length seed / account-id /
 ///   pseudonym, over-cap `privacy_pass_token`, or any AEAD
 ///   failure inside the sealed envelope.
+/// * A `Username*` / `DisplayName*` variant when `profile` violates a
+///   bound — nothing is composed, so no recipient ever drops it.
 /// * [`FfiError::Crypto`] when `recipient_x25519_pub` is not a
 ///   valid X25519 public key (canonical encoding).
 #[uniffi::export]
@@ -288,8 +303,10 @@ pub fn compose_contact_request(
     from_pseudonym: Vec<u8>,
     valid_after_ms: u64,
     privacy_pass_token: Vec<u8>,
+    profile: Option<FfiProfile>,
     intro_message: Vec<u8>,
 ) -> Result<Vec<u8>, FfiError> {
+    let profile = profile.map(prepare_profile).transpose()?;
     if sender_signing_seed.len() != 32 {
         return Err(FfiError::Contacts(
             "senderSigningSeed must be 32 bytes".to_string(),
@@ -325,6 +342,7 @@ pub fn compose_contact_request(
         pseudonym,
         valid_after_ms,
         &privacy_pass_token,
+        profile.as_ref(),
         &intro_message,
     )?;
     Ok(wire)
@@ -399,14 +417,26 @@ impl ContactRequest {
         self.inner.privacy_pass_token.clone()
     }
 
-    /// Decrypt the intro envelope using the recipient's 32-byte
-    /// X25519 private key. Returns the plaintext bytes.
+    /// Decrypt the sealed envelope using the recipient's 32-byte
+    /// X25519 private key. Returns the sender's profile (if any) and
+    /// the intro message.
+    ///
+    /// The profile is the sender's **claim**, bound to
+    /// [`Self::from_pubkey`] (which the request signature
+    /// authenticates): store it under that key, and show its username
+    /// only after verifying it through discovery (ADR-0048 §3). A profile
+    /// that fails its bounds arrives as `None` with the intro intact —
+    /// the request is still authentic and still worth showing.
     ///
     /// # Errors
     ///
     /// * [`FfiError::Contacts`] when the AEAD open fails
-    ///   (wrong key or tampered ciphertext).
-    pub fn open_envelope(&self, recipient_x25519_priv: Vec<u8>) -> Result<Vec<u8>, FfiError> {
+    ///   (wrong key or tampered ciphertext), or the sealed plaintext's
+    ///   profile framing is broken.
+    pub fn open_envelope(
+        &self,
+        recipient_x25519_priv: Vec<u8>,
+    ) -> Result<OpenedContactRequest, FfiError> {
         if recipient_x25519_priv.len() != 32 {
             return Err(FfiError::Contacts(
                 "recipientX25519Priv must be 32 bytes".to_string(),
@@ -415,9 +445,139 @@ impl ContactRequest {
         let mut sk = [0u8; 32];
         sk.copy_from_slice(&recipient_x25519_priv);
         let priv_key = X25519SecretKey::from_bytes(sk);
-        let plaintext = rust_open(&self.inner, &priv_key)?;
-        Ok(plaintext)
+        let (profile, intro_message) = rust_open(&self.inner, &priv_key)?;
+        Ok(OpenedContactRequest {
+            profile: profile.map(Into::into),
+            intro_message,
+        })
     }
+}
+
+/// Result of [`ContactRequest::open_envelope`] (ADR-0048 §2).
+#[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
+pub struct OpenedContactRequest {
+    /// The sender's profile, or `None` when the request carried none or
+    /// carried one that failed its bounds. A claim bound to the request's
+    /// `from_pubkey` — see [`ContactRequest::open_envelope`].
+    pub profile: Option<FfiProfile>,
+    /// The intro message, possibly empty. May itself be a call envelope —
+    /// classify it with [`dispatch_incoming_envelope`] as before.
+    pub intro_message: Vec<u8>,
+}
+
+// ============================================================================
+// Profile envelope — ADR-0048
+// ============================================================================
+
+/// A person's self-stated profile (ADR-0048). Mirror of
+/// [`lakko_contacts::profile::Profile`].
+///
+/// **Every field received from someone else is that person's claim.** Store
+/// it under the sender's signature key resolved at receipt (C-68), keep it
+/// only when [`profile_is_newer`] than the stored one, and show `username`
+/// only once discovery resolves it to that same key.
+#[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
+pub struct FfiProfile {
+    /// Display name, or `None` for no name.
+    pub display_name: Option<String>,
+    /// Claimed username in canonical form, or `None` for no username.
+    pub username: Option<String>,
+    /// Sender-clock UNIX milliseconds at which the profile was set.
+    pub updated_at_ms: u64,
+}
+
+impl From<RustProfile> for FfiProfile {
+    fn from(p: RustProfile) -> Self {
+        Self {
+            display_name: p.display_name,
+            username: p.username,
+            updated_at_ms: p.updated_at_ms,
+        }
+    }
+}
+
+/// Turn a caller-supplied profile into the canonical core value: trim the
+/// display name (blank = no name) and normalise + check the username
+/// (`None` or empty = no username). Anything else out of bounds is refused
+/// here with a typed variant, before any bytes exist.
+fn prepare_profile(p: FfiProfile) -> Result<RustProfile, FfiError> {
+    let display_name = match p.display_name {
+        Some(name) => rust_normalize_display_name(&name)?,
+        None => None,
+    };
+    let username = match p.username {
+        Some(u) if !u.is_empty() => Some(lakko_discovery_client::validate_username(&u)?),
+        _ => None,
+    };
+    Ok(RustProfile {
+        display_name,
+        username,
+        updated_at_ms: p.updated_at_ms,
+    })
+}
+
+/// Compose a profile envelope (ADR-0048) — the inner plaintext to publish
+/// as an MLS application message in a group.
+///
+/// Prepares the profile first (see [`FfiProfile`]): the display name is
+/// trimmed and a blank one becomes "no name"; a non-empty username is
+/// normalised (`@Alice` -> `alice`) and must pass the ADR-0048 §4 rule. The
+/// envelope produced is always one a receiver accepts.
+///
+/// # Errors
+///
+/// * `DisplayNameLineBreak` / `DisplayNameControlOrFormatCharacter` /
+///   `DisplayNameTooLong` / `DisplayNameTooManyBytes` — the name.
+/// * `UsernameEmpty` / `UsernameTooShort` / `UsernameTooLong` /
+///   `UsernameInvalidCharacters` — the username.
+#[uniffi::export]
+pub fn compose_profile_envelope(profile: FfiProfile) -> Result<Vec<u8>, FfiError> {
+    let prepared = prepare_profile(profile)?;
+    rust_compose_profile(&prepared).map_err(Into::into)
+}
+
+/// Strictly decode a profile envelope (ADR-0048). Fail-closed: a plaintext
+/// without the profile domain separator, malformed, or with any field out of
+/// bounds is refused as a whole.
+///
+/// Use [`dispatch_incoming_envelope`] when the plaintext might be any
+/// in-group envelope kind.
+///
+/// # Errors
+///
+/// * [`FfiError::Contacts`] for a wrong domain / truncation / trailing bytes
+///   / unknown version / non-UTF-8 name.
+/// * A `DisplayName*` or `Username*` variant for an out-of-bounds field.
+#[uniffi::export]
+pub fn decode_profile_envelope(plaintext: Vec<u8>) -> Result<FfiProfile, FfiError> {
+    rust_decode_profile(&plaintext)
+        .map(Into::into)
+        .map_err(Into::into)
+}
+
+/// `true` when a profile stamped `incoming_updated_at_ms` must replace the
+/// stored one **from the same signature key**. Strictly greater wins; equal
+/// is not newer, so a re-broadcast is not an update.
+#[uniffi::export]
+#[must_use]
+pub fn profile_is_newer(incoming_updated_at_ms: u64, stored_updated_at_ms: u64) -> bool {
+    rust_profile_is_newer(incoming_updated_at_ms, stored_updated_at_ms)
+}
+
+/// Prepare what a person typed as their display name: trim, map blank to
+/// `None` ("no name"), and refuse anything out of bounds with the reason.
+///
+/// For the Settings -> Profile and signup fields, so the same rule the
+/// envelope enforces is shown as the user types — no client re-implements
+/// the control / format-character table.
+///
+/// # Errors
+///
+/// `DisplayNameLineBreak` / `DisplayNameControlOrFormatCharacter` /
+/// `DisplayNameTooLong` / `DisplayNameTooManyBytes`.
+#[uniffi::export]
+pub fn normalize_display_name(input: String) -> Result<Option<String>, FfiError> {
+    rust_normalize_display_name(&input).map_err(Into::into)
 }
 
 // ============================================================================
@@ -1343,6 +1503,16 @@ pub enum FfiIncomingEnvelopeKind {
     /// never fall through to `IntroMessage` and be rendered as a
     /// chat bubble.
     CommitterBeacon,
+    /// A member's profile (ADR-0048). The decoded, bounds-checked profile
+    /// rides the `profile` field of [`FfiIncomingEnvelope`]; `payload` is
+    /// empty. Never render it as a chat bubble. Appended last so every
+    /// earlier variant keeps its ordinal.
+    ///
+    /// Every field is the sender's claim: store it under the sender's
+    /// signature key resolved from the MLS sender leaf at receipt (C-68),
+    /// keep it only when [`profile_is_newer`], and verify the username
+    /// through discovery before showing it.
+    Profile,
 }
 
 /// FFI-portable result of [`dispatch_incoming_envelope`].
@@ -1374,6 +1544,9 @@ pub struct FfiIncomingEnvelope {
     /// secret from an authorised sender and is refused only by
     /// the order.
     pub mint_epoch: Option<u64>,
+    /// Set only for `Profile` (ADR-0048): the decoded profile. `None` for
+    /// every other kind.
+    pub profile: Option<FfiProfile>,
 }
 
 /// Single-call dispatcher for opaque relay-payload plaintexts.
@@ -1394,6 +1567,7 @@ pub struct FfiIncomingEnvelope {
 pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvelope, FfiError> {
     let parsed = rust_dispatch_incoming_envelope(&plaintext)
         .map_err(|err| FfiError::Contacts(err.to_string()))?;
+    let mut profile = None;
     let (kind, payload, camera_on, mint_epoch) = match parsed {
         IncomingEnvelope::CallWelcome(p) => {
             (FfiIncomingEnvelopeKind::CallWelcome, p.to_vec(), None, None)
@@ -1422,6 +1596,10 @@ pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvel
             None,
             None,
         ),
+        IncomingEnvelope::Profile(p) => {
+            profile = Some(p.into());
+            (FfiIncomingEnvelopeKind::Profile, Vec::new(), None, None)
+        },
         IncomingEnvelope::IntroMessage(p) => (
             FfiIncomingEnvelopeKind::IntroMessage,
             p.to_vec(),
@@ -1434,6 +1612,7 @@ pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvel
         payload,
         camera_on,
         mint_epoch,
+        profile,
     })
 }
 
@@ -2181,6 +2360,7 @@ mod tests {
             from_pseudonym.clone(),
             1_700_000_000_000,
             vec![], // privacy_pass_token — empty for unit test
+            None,   // profile (ADR-0048)
             intro.clone(),
         )
         .expect("compose");
@@ -2197,10 +2377,11 @@ mod tests {
         assert!(req.privacy_pass_token().is_empty());
 
         // Open the sealed envelope with Bob's private key.
-        let plaintext = req
+        let opened = req
             .open_envelope(bob_priv.to_bytes().to_vec())
             .expect("open");
-        assert_eq!(plaintext, intro);
+        assert_eq!(opened.profile, None);
+        assert_eq!(opened.intro_message, intro);
     }
 
     #[test]
@@ -2214,6 +2395,7 @@ mod tests {
             vec![0u8; PSEUDONYM_LEN],
             0,
             vec![], // privacy_pass_token
+            None,   // profile (ADR-0048)
             vec![],
         )
         .expect_err("expected wrong-length rejection");
@@ -2232,6 +2414,7 @@ mod tests {
             vec![0u8; PSEUDONYM_LEN],
             0,
             vec![], // privacy_pass_token
+            None,   // profile (ADR-0048)
             vec![],
         )
         .expect_err("expected wrong-length rejection");
@@ -2486,6 +2669,7 @@ mod tests {
             vec![0u8; PSEUDONYM_LEN],
             0,
             vec![], // privacy_pass_token
+            None,   // profile (ADR-0048)
             b"secret".to_vec(),
         )
         .expect("compose");
@@ -2520,6 +2704,7 @@ mod tests {
             vec![0xC9u8; PSEUDONYM_LEN],
             0,
             token.clone(),
+            None, // profile (ADR-0048)
             b"".to_vec(),
         )
         .expect("compose");
@@ -3174,5 +3359,120 @@ mod tests {
             committer_beacon_freshness_window_ms(),
             2 * committer_beacon_interval_ms() + committer_beacon_worst_case_poll_ms(),
         );
+    }
+
+    // ========================================================
+    // ADR-0048 — profile envelope + contact-request carrier
+    // ========================================================
+
+    fn typed_profile() -> FfiProfile {
+        FfiProfile {
+            display_name: Some("  Alice Petrova ".to_string()),
+            username: Some("@Alice".to_string()),
+            updated_at_ms: 1_700_000_000_000,
+        }
+    }
+
+    fn canonical_profile() -> FfiProfile {
+        FfiProfile {
+            display_name: Some("Alice Petrova".to_string()),
+            username: Some("alice".to_string()),
+            updated_at_ms: 1_700_000_000_000,
+        }
+    }
+
+    #[test]
+    fn profile_envelope_prepares_then_round_trips() {
+        let wire = compose_profile_envelope(typed_profile()).expect("compose");
+        assert_eq!(
+            decode_profile_envelope(wire.clone()).expect("decode"),
+            canonical_profile()
+        );
+        let dispatched = dispatch_incoming_envelope(wire).expect("dispatch");
+        assert_eq!(dispatched.kind, FfiIncomingEnvelopeKind::Profile);
+        assert!(dispatched.payload.is_empty());
+        assert_eq!(dispatched.profile, Some(canonical_profile()));
+        // Blank fields mean "none".
+        let blank = compose_profile_envelope(FfiProfile {
+            display_name: Some("   ".to_string()),
+            username: Some(String::new()),
+            updated_at_ms: 1,
+        })
+        .expect("compose blank");
+        let decoded = decode_profile_envelope(blank).expect("decode blank");
+        assert_eq!(decoded.display_name, None);
+        assert_eq!(decoded.username, None);
+    }
+
+    #[test]
+    fn profile_envelope_refusals_are_typed() {
+        let mut p = canonical_profile();
+        p.username = Some("p\u{430}vel".to_string());
+        assert!(matches!(
+            compose_profile_envelope(p),
+            Err(FfiError::UsernameInvalidCharacters(_))
+        ));
+        let mut p = canonical_profile();
+        p.display_name = Some("Alice\u{202E}".to_string());
+        assert!(matches!(
+            compose_profile_envelope(p),
+            Err(FfiError::DisplayNameControlOrFormatCharacter(_))
+        ));
+        assert!(matches!(
+            normalize_display_name("a".repeat(65)),
+            Err(FfiError::DisplayNameTooLong(_))
+        ));
+        assert!(matches!(
+            normalize_display_name("Al\nice".to_string()),
+            Err(FfiError::DisplayNameLineBreak(_))
+        ));
+        assert_eq!(
+            normalize_display_name(" Bo ".to_string()).unwrap(),
+            Some("Bo".to_string())
+        );
+        assert!(matches!(
+            decode_profile_envelope(b"hi".to_vec()),
+            Err(FfiError::Contacts(_))
+        ));
+        assert!(profile_is_newer(2, 1));
+        assert!(!profile_is_newer(1, 1));
+    }
+
+    #[test]
+    fn contact_request_carries_the_profile() {
+        let alice_signing = SigningKey::from_seed(&[0xAAu8; 32]);
+        let bob_priv = InnerX25519SecretKey::from_bytes([0xBBu8; 32]);
+        let wire = compose_contact_request(
+            alice_signing.to_seed().to_vec(),
+            vec![0xA1u8; ACCOUNT_ID_LEN],
+            bob_priv.public_key().to_bytes().to_vec(),
+            vec![0x55u8; PSEUDONYM_LEN],
+            0,
+            vec![],
+            Some(typed_profile()),
+            b"hi bob".to_vec(),
+        )
+        .expect("compose");
+        let req = ContactRequest::decode_and_verify(wire).expect("decode");
+        let opened = req
+            .open_envelope(bob_priv.to_bytes().to_vec())
+            .expect("open");
+        assert_eq!(opened.profile, Some(canonical_profile()));
+        assert_eq!(opened.intro_message, b"hi bob".to_vec());
+
+        let mut bad = canonical_profile();
+        bad.username = Some("ab".to_string());
+        let err = compose_contact_request(
+            alice_signing.to_seed().to_vec(),
+            vec![0xA1u8; ACCOUNT_ID_LEN],
+            bob_priv.public_key().to_bytes().to_vec(),
+            vec![0x55u8; PSEUDONYM_LEN],
+            0,
+            vec![],
+            Some(bad),
+            b"hi bob".to_vec(),
+        )
+        .expect_err("an out-of-bounds profile must refuse the compose");
+        assert!(matches!(err, FfiError::UsernameTooShort(_)));
     }
 }

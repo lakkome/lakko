@@ -71,9 +71,9 @@ import uniffi.lakko_ffi_uniffi.parseCallSignaling
  */
 public class CallSession(
     private val applicationContext: Context,
-    public val callId: ByteArray,
+    override val callId: ByteArray,
     private val onOutboundSignaling: (ByteArray) -> Unit,
-) {
+) : OneToOneCallSession {
 
     /** Lifecycle phases. Mirror of `lakko_calls::CallState`. */
     public enum class WebCallState { Idle, Outgoing, Ringing, Connecting, Connected, Ending, Done }
@@ -99,7 +99,7 @@ public class CallSession(
     public enum class VideoPublishState { Off, Starting, Live, Failed }
 
     private val mutableState: MutableStateFlow<WebCallState> = MutableStateFlow(WebCallState.Idle)
-    public val state: StateFlow<WebCallState> = mutableState.asStateFlow()
+    override val state: StateFlow<WebCallState> = mutableState.asStateFlow()
 
     private val mutableEndReason: MutableStateFlow<WebCallEndReason?> = MutableStateFlow(null)
     public val endReason: StateFlow<WebCallEndReason?> = mutableEndReason.asStateFlow()
@@ -144,6 +144,16 @@ public class CallSession(
      * answer.
      */
     private var pendingRemoteOfferSdp: String? = null
+
+    /**
+     * Remote ICE candidates that arrived before the remote description was
+     * set: while ringing (no `PeerConnection` until [acceptCall]) and in the
+     * window between an offer / answer arriving and `setRemoteDescription`
+     * completing. Released in arrival order right after the remote
+     * description lands ([applyBufferedRemoteCandidates]); dropping them
+     * instead can leave ICE with no reachable path.
+     */
+    private val remoteCandidates = RemoteCandidateBuffer()
 
     /**
      * The WebRTC pod. Lazily constructed inside [dial] /
@@ -282,7 +292,7 @@ public class CallSession(
      * ("lakko/call/v1", call_id, 32)`); `localLeaf` is this
      * device's leaf index in the call's MLS group.
      */
-    public fun setCallKey(seed: ByteArray, localLeaf: Int) {
+    override fun setCallKey(seed: ByteArray, localLeaf: Int) {
         this.callKeySeed = seed
         this.localLeaf = localLeaf
         // G3-2-e2ee-active — SFrame seed present → E2EE keying
@@ -353,7 +363,7 @@ public class CallSession(
      * attaches a local audio track, generates a real SDP
      * offer and ships it via the existing signaling pipe.
      */
-    public fun dial(audio: Boolean = true, video: Boolean = false) {
+    override fun dial(audio: Boolean, video: Boolean) {
         if (mutableState.value != WebCallState.Idle) return
         isOfferer = true
         mutableState.value = WebCallState.Outgoing
@@ -578,7 +588,7 @@ public class CallSession(
     }
 
     /** Outbound or active call teardown. */
-    public fun hangUp(reason: WebCallEndReason = WebCallEndReason.HungUp) {
+    override fun hangUp(reason: WebCallEndReason) {
         endLocal(reason)
     }
 
@@ -590,7 +600,7 @@ public class CallSession(
      *  while accepting a video call. Defaults to `false` —
      *  the UI's "accept with camera" toggle threads its value
      *  through to here. */
-    public fun acceptCall(withVideo: Boolean = false) {
+    override fun acceptCall(withVideo: Boolean) {
         if (mutableState.value != WebCallState.Ringing || isOfferer) return
         val offerSdp = pendingRemoteOfferSdp
         if (offerSdp == null) {
@@ -631,6 +641,9 @@ public class CallSession(
 
             try {
                 val answerSdp = rtc.createAnswer(remoteOfferSdp = offerSdp)
+                // The remote offer is now the remote description: the
+                // candidates the caller trickled while this call rang can go in.
+                applyBufferedRemoteCandidates(rtc)
                 val bytes = composeCallSignaling(
                     FfiCallSignalingBody.Answer(
                         callId = callId,
@@ -654,7 +667,7 @@ public class CallSession(
     }
 
     /** Inbound side: decline. */
-    public fun declineCall() {
+    override fun declineCall() {
         endLocal(WebCallEndReason.Declined)
     }
 
@@ -665,7 +678,7 @@ public class CallSession(
     /** Route a parsed signaling payload into the state
      *  machine. Caller has already verified call_id matches
      *  this session. */
-    public fun applyIncomingSignaling(body: FfiCallSignalingBody) {
+    override fun applyIncomingSignaling(body: FfiCallSignalingBody) {
         when (body) {
             is FfiCallSignalingBody.Offer -> {
                 if (mutableState.value == WebCallState.Idle) {
@@ -692,6 +705,7 @@ public class CallSession(
                     scope.launch {
                         try {
                             rtc.applyRemoteAnswer(body.sdp)
+                            applyBufferedRemoteCandidates(rtc)
                             // ADR-0032 piece B2b — arm renegotiation for future
                             // local track changes; drive a camera-on that was
                             // queued before the initial answer landed.
@@ -710,15 +724,24 @@ public class CallSession(
                 }
             }
             is FfiCallSignalingBody.IceCandidate -> {
-                val rtc = this.rtc ?: return
+                if (mutableState.value == WebCallState.Done) return
                 // sdpMLineIndex on the wire is UInt32; libwebrtc
                 // takes Int. The valid range for an SDP m-line
                 // index is 0..255 in practice, so the cast is
                 // loss-free.
-                rtc.addRemoteCandidate(
+                val candidate = RemoteIceCandidate(
                     sdpMid = body.sdpMid,
                     sdpMLineIndex = body.sdpMLineIndex.toInt(),
                     candidateSdp = body.candidate,
+                )
+                // Before the remote description is set (ringing, or the SDP
+                // still being applied) the candidate is kept, not dropped.
+                if (remoteCandidates.offer(candidate)) return
+                val rtc = this.rtc ?: return
+                rtc.addRemoteCandidate(
+                    sdpMid = candidate.sdpMid,
+                    sdpMLineIndex = candidate.sdpMLineIndex,
+                    candidateSdp = candidate.candidateSdp,
                 )
             }
             is FfiCallSignalingBody.End -> {
@@ -728,13 +751,14 @@ public class CallSession(
             is FfiCallSignalingBody.GroupStart,
             is FfiCallSignalingBody.GroupJoin,
             is FfiCallSignalingBody.GroupLeave -> {
-                // Group-call signaling (Phase 3c2) is handled
-                // by the in-chat joinable-call card
-                // dispatcher, not by the 1×1 [CallSession].
-                // The chat-route owner filters these away
-                // from the 1×1 sink before they reach this
-                // method; the exhaustive-when contract just
-                // requires we name them.
+                // Group-call signaling never belongs to the 1×1
+                // [CallSession] (C-11). `ChatRepository`
+                // routes these bodies to the group-call ledger
+                // (`GroupCallLedger.kt`) and never forwards them
+                // to the 1×1 sink, so this arm is unreachable;
+                // the exhaustive-when contract just requires we
+                // name them, and ignoring them is the safe
+                // answer if a future caller gets it wrong.
             }
         }
     }
@@ -742,6 +766,26 @@ public class CallSession(
     // ----------------------------------------------------------------
     // Internal — WebRTC delegate plumbing
     // ----------------------------------------------------------------
+
+    /** Mark the remote description applied and add every candidate that
+     *  arrived before it, oldest first. Runs on [scope] right after
+     *  `setRemoteDescription` completes. */
+    private fun applyBufferedRemoteCandidates(rtc: WebRtcPeerConnection) {
+        for (candidate in remoteCandidates.markRemoteDescriptionApplied()) {
+            rtc.addRemoteCandidate(
+                sdpMid = candidate.sdpMid,
+                sdpMLineIndex = candidate.sdpMLineIndex,
+                candidateSdp = candidate.candidateSdp,
+            )
+        }
+        val dropped = remoteCandidates.dropped
+        if (dropped > 0) {
+            android.util.Log.w(
+                "CallSession",
+                "dropped $dropped remote ICE candidates over the pre-connection buffer capacity",
+            )
+        }
+    }
 
     /** G3-sframe-native N-6 — arm SFrame encryptors on every
      *  sender of [rtc] using the seed + leaf injected via
@@ -1055,6 +1099,8 @@ public class CallSession(
         negotiationReady = false
         pendingRenegotiation = false
         addingVideo = false
+        // Candidates kept for a remote description that will never be set.
+        remoteCandidates.reset()
         // ADR-0032 piece B2a — no camera-on in flight once the media pipeline
         // is torn down.
         mutableVideoPublishState.value = VideoPublishState.Off

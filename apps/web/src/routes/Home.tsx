@@ -12,6 +12,7 @@ import { A } from "@solidjs/router";
 import { paths } from "./paths";
 import { useAuth } from "../auth/AuthContext";
 import PasskeysSection from "../auth/PasskeysSection";
+import CreateCallLinkPanel from "../calls/CreateCallLinkPanel";
 
 export default function Home(): JSX.Element {
   const auth = useAuth();
@@ -40,6 +41,7 @@ export default function Home(): JSX.Element {
           loaded in this browser.
         </li>
       </ul>
+      <CreateCallLinkPanel />
       <hr style={{ margin: "1.5rem 0" }} />
       <PasskeysSection />
     </article>

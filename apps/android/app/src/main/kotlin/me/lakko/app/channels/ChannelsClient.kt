@@ -7,6 +7,8 @@ import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.engine.HttpClientEngine
 import io.ktor.client.engine.okhttp.OkHttp
+import me.lakko.app.config.ApiEndpoints
+import me.lakko.app.config.ApiService
 import me.lakko.app.transport.AntiCensorshipEngine
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.get
@@ -448,7 +450,10 @@ public class ChannelsClient(
     }
 
     public companion object {
-        public const val DEFAULT_BASE_URL: String = "http://10.0.2.2:8090"
+        /** `<LAKKO_API_BASE_URL>/channels` ([ApiEndpoints]), or
+         *  `http://10.0.2.2:8090` without an API base URL. */
+        public val DEFAULT_BASE_URL: String
+            get() = ApiEndpoints.baseUrlFor(ApiService.CHANNELS)
 
         /** ADR-0030 — the max entries a single
          *  `POST /rotate/stage` chunk may carry. Mirrors the

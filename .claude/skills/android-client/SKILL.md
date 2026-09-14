@@ -83,7 +83,8 @@ cd apps/android && ./gradlew :app:assembleDebug
 | Key | Purpose |
 |---|---|
 | `LAKKO_DEVICE_ATTEST_KEY` | Build-time pinned Ed25519 verifying key (gradle property `lakko.device.attest.key`) |
-| `LAKKO_SFU_URL` | SFU base URL for group calls (gradle property `lakko.sfu.url`) |
+| `LAKKO_API_BASE_URL` | Native API base (gradle property `lakko.api.url`; debug default `https://test.lakko.me/native`, release empty). `config/ApiEndpoints` derives every REST client's `DEFAULT_BASE_URL` (`<base>/auth`, `/ds`, ...); empty -> `http://10.0.2.2:<port>` dev binds (cleartext allowed for those hosts by the debug-only network security config) |
+| `LAKKO_SFU_URL` | SFU base URL for group calls (gradle property `lakko.sfu.url`; debug default `wss://test.lakko.me/sfu`, release empty) |
 
 ## Dependencies to watch
 

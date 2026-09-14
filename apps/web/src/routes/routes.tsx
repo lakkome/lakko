@@ -31,6 +31,7 @@ import Recover from "./Recover";
 import Signup from "./Signup";
 import Home from "./Home";
 import Contacts from "./Contacts";
+import Profile from "./Profile";
 import Call from "./Call";
 import {
   ChannelsList,
@@ -117,6 +118,7 @@ export const routes: RouteDefinition[] = [
     children: [
       { path: paths.home, component: Home },
       { path: paths.contacts, component: Contacts },
+      { path: paths.profile, component: Profile },
       { path: chatRoutePattern, component: Chat },
       // Standalone design route — render Call with no props (its
       // embedded/onExit props are only used when Chat.tsx presents

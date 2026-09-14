@@ -12,10 +12,12 @@
 //! `std::env::var` call wrapped in a friendly error.
 
 use std::env;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use thiserror::Error;
+
+use crate::media::{resolve_advertise_ip, AdvertiseError};
 
 /// Default WebSocket signaling bind address.
 const DEFAULT_BIND: &str = "127.0.0.1:7880";
@@ -49,6 +51,16 @@ pub enum ConfigError {
         name: &'static str,
         /// Human-readable parse failure.
         detail: String,
+    },
+
+    /// Env var is optional in general but required by the
+    /// value of another one.
+    #[error("missing env var {name}: {reason}")]
+    RequiredBy {
+        /// Variable name.
+        name: &'static str,
+        /// Which other value makes it required, and why.
+        reason: String,
     },
 }
 
@@ -85,11 +97,31 @@ pub struct Config {
     /// only relay, and `ClientFrame::SdpOffer` /
     /// `IceCandidate` frames surface as
     /// `RouterError::MediaNotWired`. Set this in
-    /// production via `LAKKO_SFU_MEDIA_BIND`
-    /// (e.g. `0.0.0.0:0` to let the OS pick a port, or
-    /// a fixed `0.0.0.0:43210` if the firewall pins
-    /// it).
+    /// production via `LAKKO_SFU_MEDIA_BIND`, e.g. a fixed
+    /// `0.0.0.0:43210` if the firewall pins the port (or
+    /// `:0` to let the OS pick one). Binding an unspecified
+    /// address (`0.0.0.0` / `::`) REQUIRES
+    /// [`Self::media_advertise_ip`]: startup fails without
+    /// it.
     pub media_bind: Option<SocketAddr>,
+    /// IP the SFU advertises as its ICE host candidate in
+    /// every SDP answer (the port is always the one the
+    /// media socket bound). Read from
+    /// `LAKKO_SFU_MEDIA_ADVERTISE_IP` and resolved at load:
+    ///
+    /// - set → that IP, which must be a usable host-candidate
+    ///   address (not unspecified / multicast / broadcast /
+    ///   link-local) of the same family as the bind IP;
+    /// - unset with a concrete bind IP → the bind IP;
+    /// - unset with an unspecified bind IP → load fails
+    ///   ([`ConfigError::RequiredBy`]), because str0m refuses
+    ///   an unspecified host candidate and every answer would
+    ///   ship without one, so no client could connect media.
+    ///
+    /// Always `Some` when [`Self::media_bind`] is `Some`.
+    /// With media off it holds the raw value (or `None`) so
+    /// startup can warn that it is being ignored.
+    pub media_advertise_ip: Option<IpAddr>,
 }
 
 impl Config {
@@ -120,6 +152,11 @@ impl Config {
             DEFAULT_PEER_MSG_RATE_PER_SEC,
         )?;
         let media_bind = parse_optional_socket("LAKKO_SFU_MEDIA_BIND")?;
+        let raw_advertise_ip = parse_optional_ip(MEDIA_ADVERTISE_IP)?;
+        let media_advertise_ip = match media_bind {
+            Some(bind) => Some(resolve_media_advertise_ip(bind, raw_advertise_ip)?),
+            None => raw_advertise_ip,
+        };
 
         Ok(Self {
             signaling_bind,
@@ -129,6 +166,7 @@ impl Config {
             handshake_timeout,
             peer_msg_rate_per_sec,
             media_bind,
+            media_advertise_ip,
         })
     }
 }
@@ -158,6 +196,55 @@ fn parse_optional_socket(name: &'static str) -> Result<Option<SocketAddr>, Confi
             name,
             detail: e.to_string(),
         })
+}
+
+/// Env var carrying the advertised media IP.
+const MEDIA_ADVERTISE_IP: &str = "LAKKO_SFU_MEDIA_ADVERTISE_IP";
+
+/// Parse an optional bare `IpAddr` (no port) from `name`.
+/// Unset or empty → `Ok(None)`; malformed → loud
+/// [`ConfigError::Invalid`].
+fn parse_optional_ip(name: &'static str) -> Result<Option<IpAddr>, ConfigError> {
+    let raw = match env::var(name) {
+        Ok(v) if !v.is_empty() => v,
+        _ => return Ok(None),
+    };
+    raw.parse::<IpAddr>()
+        .map(Some)
+        .map_err(|e| ConfigError::Invalid {
+            name,
+            detail: format!("expected a bare IP address (no port), got {raw:?}: {e}"),
+        })
+}
+
+/// Resolve the advertised media IP with the media layer's
+/// own rules ([`resolve_advertise_ip`]) so config and the
+/// media task can never disagree, mapping each refusal onto
+/// the env var an operator has to fix.
+fn resolve_media_advertise_ip(
+    bind: SocketAddr,
+    advertise: Option<IpAddr>,
+) -> Result<IpAddr, ConfigError> {
+    resolve_advertise_ip(bind.ip(), advertise).map_err(|e| match e {
+        AdvertiseError::UnspecifiedBind { .. } => ConfigError::RequiredBy {
+            name: MEDIA_ADVERTISE_IP,
+            reason: format!(
+                "LAKKO_SFU_MEDIA_BIND={bind} binds an unspecified address, which cannot be \
+                 advertised as an ICE host candidate; set {MEDIA_ADVERTISE_IP} to the IP \
+                 clients reach this socket on"
+            ),
+        },
+        AdvertiseError::BindNotAdvertisable { .. } => ConfigError::Invalid {
+            name: "LAKKO_SFU_MEDIA_BIND",
+            detail: format!("{e}; set {MEDIA_ADVERTISE_IP} to a usable IP"),
+        },
+        AdvertiseError::AdvertiseNotAdvertisable { .. } | AdvertiseError::FamilyMismatch { .. } => {
+            ConfigError::Invalid {
+                name: MEDIA_ADVERTISE_IP,
+                detail: e.to_string(),
+            }
+        },
+    })
 }
 
 fn parse_secs(name: &'static str, fallback: u64) -> Result<Duration, ConfigError> {
@@ -211,6 +298,7 @@ mod tests {
             "LAKKO_SFU_HANDSHAKE_TIMEOUT_SECS",
             "LAKKO_SFU_PEER_MSG_RATE_PER_SEC",
             "LAKKO_SFU_MEDIA_BIND",
+            "LAKKO_SFU_MEDIA_ADVERTISE_IP",
         ] {
             env::remove_var(key);
         }
@@ -301,13 +389,15 @@ mod tests {
     }
 
     /// A valid `host:port` parses through to a `Some(addr)`
-    /// — the production happy path.
+    /// — the production happy path: every interface bound,
+    /// the public IP advertised.
     #[test]
     fn media_bind_valid_socket_addr() {
         with_env(
             &[
                 ("LAKKO_SFU_JWKS_URL", "https://a/x"),
                 ("LAKKO_SFU_MEDIA_BIND", "0.0.0.0:43210"),
+                ("LAKKO_SFU_MEDIA_ADVERTISE_IP", "203.0.113.7"),
             ],
             || {
                 let cfg = Config::from_env().expect("valid env with media");
@@ -315,6 +405,188 @@ mod tests {
                     cfg.media_bind.map(|s| s.to_string()),
                     Some("0.0.0.0:43210".to_owned())
                 );
+                assert_eq!(
+                    cfg.media_advertise_ip,
+                    Some("203.0.113.7".parse::<IpAddr>().unwrap())
+                );
+            },
+        );
+    }
+
+    /// An unspecified media bind without an advertise IP is
+    /// FATAL. This is the configuration production shipped
+    /// with: str0m refuses a `0.0.0.0` host candidate, the
+    /// refusal was swallowed, and every SDP answer went out
+    /// with no SFU candidate — media could never connect.
+    #[test]
+    fn unspecified_media_bind_without_advertise_ip_is_fatal() {
+        for bind in ["0.0.0.0:43210", "[::]:43210"] {
+            with_env(
+                &[
+                    ("LAKKO_SFU_JWKS_URL", "https://a/x"),
+                    ("LAKKO_SFU_MEDIA_BIND", bind),
+                ],
+                || {
+                    let err = Config::from_env().unwrap_err();
+                    assert!(
+                        matches!(
+                            err,
+                            ConfigError::RequiredBy {
+                                name: "LAKKO_SFU_MEDIA_ADVERTISE_IP",
+                                ..
+                            }
+                        ),
+                        "bind {bind}: expected RequiredBy, got {err:?}"
+                    );
+                },
+            );
+        }
+    }
+
+    /// An empty advertise value is "unset", so it does not
+    /// rescue an unspecified bind either.
+    #[test]
+    fn empty_advertise_ip_does_not_rescue_an_unspecified_bind() {
+        with_env(
+            &[
+                ("LAKKO_SFU_JWKS_URL", "https://a/x"),
+                ("LAKKO_SFU_MEDIA_BIND", "0.0.0.0:43210"),
+                ("LAKKO_SFU_MEDIA_ADVERTISE_IP", ""),
+            ],
+            || {
+                let err = Config::from_env().unwrap_err();
+                assert!(matches!(err, ConfigError::RequiredBy { .. }));
+            },
+        );
+    }
+
+    /// A concrete media bind without an advertise IP
+    /// advertises the bind IP — unchanged behaviour for a
+    /// bind such as the local stack's LAN address.
+    #[test]
+    fn concrete_media_bind_without_advertise_ip_advertises_the_bind_ip() {
+        with_env(
+            &[
+                ("LAKKO_SFU_JWKS_URL", "https://a/x"),
+                ("LAKKO_SFU_MEDIA_BIND", "192.168.1.20:43210"),
+            ],
+            || {
+                let cfg = Config::from_env().expect("concrete bind is valid alone");
+                assert_eq!(
+                    cfg.media_advertise_ip,
+                    Some("192.168.1.20".parse::<IpAddr>().unwrap())
+                );
+            },
+        );
+    }
+
+    /// An advertise IP that can never be an ICE host
+    /// candidate is refused at load, naming the variable.
+    #[test]
+    fn unusable_advertise_ip_is_rejected() {
+        for bad in [
+            "0.0.0.0",
+            "224.0.0.1",
+            "255.255.255.255",
+            "169.254.10.20",
+            "::",
+            "ff02::1",
+            "fe80::1",
+        ] {
+            let bind = if bad.contains(':') {
+                "[::]:43210"
+            } else {
+                "0.0.0.0:43210"
+            };
+            with_env(
+                &[
+                    ("LAKKO_SFU_JWKS_URL", "https://a/x"),
+                    ("LAKKO_SFU_MEDIA_BIND", bind),
+                    ("LAKKO_SFU_MEDIA_ADVERTISE_IP", bad),
+                ],
+                || {
+                    let err = Config::from_env().unwrap_err();
+                    assert!(
+                        matches!(
+                            err,
+                            ConfigError::Invalid {
+                                name: "LAKKO_SFU_MEDIA_ADVERTISE_IP",
+                                ..
+                            }
+                        ),
+                        "advertise {bad}: expected Invalid, got {err:?}"
+                    );
+                },
+            );
+        }
+    }
+
+    /// A malformed advertise value (not an IP, or an IP with
+    /// a port) is refused rather than silently ignored.
+    #[test]
+    fn malformed_advertise_ip_is_rejected() {
+        for bad in ["not-an-ip", "203.0.113.7:43210"] {
+            with_env(
+                &[
+                    ("LAKKO_SFU_JWKS_URL", "https://a/x"),
+                    ("LAKKO_SFU_MEDIA_BIND", "0.0.0.0:43210"),
+                    ("LAKKO_SFU_MEDIA_ADVERTISE_IP", bad),
+                ],
+                || {
+                    let err = Config::from_env().unwrap_err();
+                    assert!(matches!(
+                        err,
+                        ConfigError::Invalid {
+                            name: "LAKKO_SFU_MEDIA_ADVERTISE_IP",
+                            ..
+                        }
+                    ));
+                },
+            );
+        }
+    }
+
+    /// An advertise IP of the other address family from the
+    /// bind is refused at load.
+    #[test]
+    fn advertise_ip_family_mismatch_is_rejected() {
+        with_env(
+            &[
+                ("LAKKO_SFU_JWKS_URL", "https://a/x"),
+                ("LAKKO_SFU_MEDIA_BIND", "0.0.0.0:43210"),
+                ("LAKKO_SFU_MEDIA_ADVERTISE_IP", "2001:db8::7"),
+            ],
+            || {
+                let err = Config::from_env().unwrap_err();
+                assert!(matches!(
+                    err,
+                    ConfigError::Invalid {
+                        name: "LAKKO_SFU_MEDIA_ADVERTISE_IP",
+                        ..
+                    }
+                ));
+            },
+        );
+    }
+
+    /// A concrete but unusable media bind (link-local)
+    /// without an advertise IP is refused, naming the bind.
+    #[test]
+    fn unusable_concrete_media_bind_is_rejected() {
+        with_env(
+            &[
+                ("LAKKO_SFU_JWKS_URL", "https://a/x"),
+                ("LAKKO_SFU_MEDIA_BIND", "169.254.1.1:43210"),
+            ],
+            || {
+                let err = Config::from_env().unwrap_err();
+                assert!(matches!(
+                    err,
+                    ConfigError::Invalid {
+                        name: "LAKKO_SFU_MEDIA_BIND",
+                        ..
+                    }
+                ));
             },
         );
     }

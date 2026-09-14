@@ -1,0 +1,987 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+//! Profile envelope — a person's own display name and username, carried
+//! end-to-end encrypted ([ADR-0048](../../../docs/adr/0048-profile-names.md)).
+//!
+//! ## What travels, and where
+//!
+//! A profile is `{display_name, username, updated_at_ms}`. It rides:
+//!
+//! * inside a [`crate::request::ContactRequest`]'s sealed envelope, so a
+//!   recipient can show who is asking before accepting (the framing lives
+//!   in [`crate::request`]);
+//! * as an MLS application message in every group the person is in,
+//!   classified by [`crate::incoming_envelope`] so it is never rendered as
+//!   a chat bubble.
+//!
+//! The server sees neither: the first is sealed to the recipient's X25519
+//! key, the second is sealed under the group's epoch secret
+//! (invariants #1, #2).
+//!
+//! ## What the envelope does NOT establish
+//!
+//! **Everything in it is the sender's own claim.** This module bounds the
+//! shape of that claim; it does not make it true:
+//!
+//! * The profile is bound to a person by the **receiver**, which stores it
+//!   under the sender's signature key resolved at receipt (C-68) — the MLS
+//!   sender leaf for an in-group profile, the request-signature-authenticated
+//!   `from_pubkey` for a contact request. The envelope carries no identity
+//!   of its own, on purpose: a key named in the payload would be a second,
+//!   unauthenticated identity claim beside the authenticated one.
+//! * A `username` here is a **claim to verify**, never a fact to display.
+//!   ADR-0048 §3 has the client resolve it through discovery and show it
+//!   only if the resolved key equals the sender's authenticated key. What
+//!   this codec guarantees is narrower and still load-bearing: a claimed
+//!   username is always canonical ([`crate::username`]), so a look-alike
+//!   (`pаvel` with a Cyrillic `а`) is refused before verification is even
+//!   attempted.
+//! * `display_name` is unverifiable by construction and is shown as the
+//!   person's own statement.
+//!
+//! ## Wire shape
+//!
+//! ```text
+//!   plaintext_payload =
+//!       PROFILE_ENVELOPE_DOMAIN_V1 || version || updated_at_ms || name_len || name || username_len || username
+//!      └──── 17 bytes, ASCII ────┘ └─ 0x01 ─┘ └── 8 B, BE ───┘ └── 1 B ──┘ └ .. ┘ └──── 1 B ────┘ └── .. ──┘
+//!
+//!                     "lakko/profile/v1\x00"
+//! ```
+//!
+//! A length of `0` means "no name" / "no username". Total length is
+//! between [`PROFILE_ENVELOPE_MIN_LEN`] and [`PROFILE_ENVELOPE_MAX_LEN`].
+//!
+//! ## Bounds, and why a violation rejects the whole envelope
+//!
+//! * `display_name`: valid UTF-8, trimmed, 1 to [`DISPLAY_NAME_MAX_CHARS`]
+//!   Unicode scalar values and at most [`DISPLAY_NAME_MAX_BYTES`] bytes, no
+//!   line break, no control character (general category `Cc`) and no format
+//!   character (`Cf`) — see [`DisplayNameError`].
+//! * `username`: canonical per [`crate::username::check_canonical_username`].
+//!
+//! An envelope violating any bound is **rejected as a whole**. Unlike
+//! attachment metadata, a profile has no remainder worth keeping: a valid
+//! username beside a name smuggling a right-to-left override is not a
+//! profile anyone should render half of.
+//!
+//! **`compose` refuses exactly what `decode` refuses.** Both run the same
+//! [`Profile::validate`], so a conforming sender cannot emit an envelope a
+//! conforming receiver drops.
+//!
+//! ### The byte cap is 255, not 256
+//!
+//! ADR-0048 §1 says "at most 64 characters and 256 bytes", but the same
+//! section fixes `name_len` at one byte, whose ceiling is 255. The one-byte
+//! length wins, because it is the wire: [`DISPLAY_NAME_MAX_BYTES`] is 255.
+//! The practical effect is that 64 characters of four-byte scalars (a name
+//! made entirely of emoji or supplementary-plane CJK) is refused by one
+//! byte; 63 such characters fit.
+//!
+//! ### The format-character table
+//!
+//! Rust's standard library answers `Cc` (`char::is_control`) but not `Cf`,
+//! and this crate adds no Unicode-tables dependency for one category. So
+//! [`FORMAT_CHAR_RANGES`] enumerates `Cf` explicitly. It was checked against
+//! Python's `unicodedata` at Unicode 14.0, and widened by one known later
+//! addition (the Egyptian hieroglyph format controls U+13439..U+1343F, added
+//! in Unicode 15.0 — taken from the Unicode 15.0 release, not re-verified
+//! against a table in this repository). A `Cf` code point assigned after
+//! that would be admitted until the table is updated.
+//!
+//! **Three `Cf` exceptions, because refusing them breaks ordinary names and
+//! buys nothing.** ZERO WIDTH NON-JOINER (U+200C) and ZERO WIDTH JOINER
+//! (U+200D) are admitted anywhere: ZWJ builds emoji sequences (family,
+//! profession-with-gender) and ZWNJ is required by Persian and several Indic
+//! spellings. The tag characters U+E0020..U+E007F are admitted only as a
+//! subdivision-flag sequence — directly after WAVING BLACK FLAG U+1F3F4 and
+//! ending in CANCEL TAG U+E007F — so they cannot hide inside ordinary text.
+//! An invisible joiner can make two names render alike, but a display name
+//! is neither unique nor trusted (ADR-0048 §3: the verified username and the
+//! safety number disambiguate), so that costs nothing an attacker could not
+//! already get by typing the same name twice. What stays refused is what can
+//! mislead beyond a collision: the bidi controls, which reorder how
+//! neighbouring text renders — a name ending in U+202E can visually swallow
+//! the `· @username` shown beside it — plus the invisible spacers (ZWSP,
+//! WORD JOINER, BOM, SOFT HYPHEN) that no name needs.
+//!
+//! ## Cross-kind isolation
+//!
+//! The separator must be byte-distinct from, and not a prefix of or prefixed
+//! by, every sibling envelope domain in the crate;
+//! [`tests::separator_distinct_from_sibling_domains`] asserts it, since
+//! [`crate::incoming_envelope`] dispatches on a byte-prefix match.
+//!
+//! ## Order
+//!
+//! [`profile_is_newer`]: a receiver keeps the profile with the greater
+//! `updated_at_ms` **per signature key**; equal is not newer. The stamp is
+//! the sender's own clock, which is acceptable here and nowhere near a
+//! security decision: a sender with a backwards clock only delays its own
+//! update, and a sender that stamps the far future only prevents its own
+//! later updates from landing — it can do nothing to anyone else's profile,
+//! because profiles are keyed by the authenticated sender.
+
+use core::result::Result as CoreResult;
+
+use thiserror::Error;
+
+use crate::username::{check_canonical_username, UsernameError, USERNAME_MAX_LEN};
+
+/// 17-byte domain separator prepended to the profile payload.
+///
+/// The trailing `\x00` makes the prefix impossible for a UTF-8 free-text
+/// payload to start with, mirroring the sibling envelopes. The printable
+/// prefix is `lakko/profile/v1`.
+///
+/// **The `v1` names the envelope FAMILY, not the schema version.** These
+/// bytes are frozen: [`crate::incoming_envelope`] dispatches on this exact
+/// prefix. The in-payload version byte is the knob that moves.
+pub const PROFILE_ENVELOPE_DOMAIN_V1: &[u8] = b"lakko/profile/v1\x00";
+
+/// Schema-version byte carried first after the separator. Today the sole
+/// accepted value.
+pub const PROFILE_VERSION_V1: u8 = 0x01;
+
+/// Longest admissible display name, in Unicode scalar values (not grapheme
+/// clusters — a flag or a skin-toned emoji counts as more than one).
+pub const DISPLAY_NAME_MAX_CHARS: usize = 64;
+
+/// Longest admissible display name, in UTF-8 bytes. The one-byte `name_len`
+/// field's ceiling — see the module docs for why this is 255 and not the
+/// ADR's 256.
+pub const DISPLAY_NAME_MAX_BYTES: usize = u8::MAX as usize;
+
+/// Bytes after the separator that every envelope carries: version,
+/// `updated_at_ms`, `name_len`, `username_len`.
+const FIXED_PAYLOAD_LEN: usize = 1 + 8 + 1 + 1;
+
+/// Shortest well-formed envelope: no name, no username.
+pub const PROFILE_ENVELOPE_MIN_LEN: usize = PROFILE_ENVELOPE_DOMAIN_V1.len() + FIXED_PAYLOAD_LEN;
+
+/// Longest well-formed envelope: a maximal name and a maximal username.
+pub const PROFILE_ENVELOPE_MAX_LEN: usize =
+    PROFILE_ENVELOPE_MIN_LEN + DISPLAY_NAME_MAX_BYTES + USERNAME_MAX_LEN;
+
+/// Unicode general category `Cf` (format), as inclusive code-point ranges.
+///
+/// See the module docs for provenance, and for the characters this refuses
+/// that a reader might not expect (ZWJ, ZWNJ, tag characters).
+pub const FORMAT_CHAR_RANGES: &[(u32, u32)] = &[
+    (0x00AD, 0x00AD),   // SOFT HYPHEN
+    (0x0600, 0x0605),   // ARABIC NUMBER SIGN .. ARABIC NUMBER MARK ABOVE
+    (0x061C, 0x061C),   // ARABIC LETTER MARK (bidi)
+    (0x06DD, 0x06DD),   // ARABIC END OF AYAH
+    (0x070F, 0x070F),   // SYRIAC ABBREVIATION MARK
+    (0x0890, 0x0891),   // ARABIC POUND / PIASTRE MARK ABOVE
+    (0x08E2, 0x08E2),   // ARABIC DISPUTED END OF AYAH
+    (0x180E, 0x180E),   // MONGOLIAN VOWEL SEPARATOR
+    (0x200B, 0x200F),   // ZWSP, ZWNJ, ZWJ, LRM, RLM
+    (0x202A, 0x202E),   // LRE, RLE, PDF, LRO, RLO
+    (0x2060, 0x2064),   // WORD JOINER .. INVISIBLE PLUS
+    (0x2066, 0x206F),   // LRI, RLI, FSI, PDI, deprecated format controls
+    (0xFEFF, 0xFEFF),   // ZERO WIDTH NO-BREAK SPACE (BOM)
+    (0xFFF9, 0xFFFB),   // INTERLINEAR ANNOTATION ANCHOR .. TERMINATOR
+    (0x110BD, 0x110BD), // KAITHI NUMBER SIGN
+    (0x110CD, 0x110CD), // KAITHI NUMBER SIGN ABOVE
+    (0x13430, 0x1343F), // EGYPTIAN HIEROGLYPH format controls (..38 in 14.0, ..3F in 15.0)
+    (0x1BCA0, 0x1BCA3), // SHORTHAND FORMAT LETTER OVERLAP .. UP STEP
+    (0x1D173, 0x1D17A), // MUSICAL SYMBOL BEGIN BEAM .. END PHRASE
+    (0xE0001, 0xE0001), // LANGUAGE TAG
+    (0xE0020, 0xE007F), // TAG SPACE .. CANCEL TAG
+];
+
+/// `true` for a Unicode format character (general category `Cf`), per
+/// [`FORMAT_CHAR_RANGES`].
+#[must_use]
+pub fn is_format_char(c: char) -> bool {
+    let cp = u32::from(c);
+    FORMAT_CHAR_RANGES
+        .iter()
+        .any(|&(lo, hi)| (lo..=hi).contains(&cp))
+}
+
+/// `true` for a character that breaks a line: every `Cc` line terminator
+/// Unicode names (LF, VT, FF, CR, NEL) plus LINE SEPARATOR and PARAGRAPH
+/// SEPARATOR, which are not `Cc` and would otherwise slip past the control
+/// check.
+const fn is_line_break(c: char) -> bool {
+    matches!(
+        c,
+        '\n' | '\u{000B}' | '\u{000C}' | '\r' | '\u{0085}' | '\u{2028}' | '\u{2029}'
+    )
+}
+
+/// A person's self-stated profile.
+///
+/// **Every field is the sender's claim.** See the module docs: the receiver
+/// binds it to the authenticated sender key, and verifies `username`
+/// through discovery before showing it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Profile {
+    /// The display name, or `None` for "no name". When `Some`, it must
+    /// satisfy [`check_display_name`] — in particular it is already trimmed
+    /// and never empty (`Some("")` is refused; "no name" is `None`). Use
+    /// [`normalize_display_name`] on user input.
+    pub display_name: Option<String>,
+    /// The claimed username in canonical form, or `None` for "no
+    /// username". When `Some`, it must satisfy
+    /// [`crate::username::check_canonical_username`].
+    pub username: Option<String>,
+    /// Sender-clock UNIX milliseconds at which this profile was set. Orders
+    /// profiles from the same sender via [`profile_is_newer`].
+    pub updated_at_ms: u64,
+}
+
+impl Profile {
+    /// Check every bound. The single rule both [`compose_profile`] and
+    /// [`decode_profile`] run, so they cannot drift.
+    ///
+    /// # Errors
+    ///
+    /// * [`ProfileError::DisplayName`] — the display name violates a bound.
+    /// * [`ProfileError::Username`] — the username is not canonical.
+    pub fn validate(&self) -> CoreResult<(), ProfileError> {
+        if let Some(name) = &self.display_name {
+            check_display_name(name).map_err(ProfileError::DisplayName)?;
+        }
+        if let Some(username) = &self.username {
+            check_canonical_username(username).map_err(ProfileError::Username)?;
+        }
+        Ok(())
+    }
+}
+
+/// Why a display name was refused.
+///
+/// A reason code: no variant carries the offending character.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum DisplayNameError {
+    /// `Some("")` — "no name" is spelled `None`. Only reachable from a
+    /// struct built by hand; the wire encodes an empty name as `None`.
+    #[error("display name is empty")]
+    Empty,
+    /// Leading or trailing whitespace. [`normalize_display_name`] trims.
+    #[error("display name has leading or trailing whitespace")]
+    NotTrimmed,
+    /// Contains a line break.
+    #[error("display name contains a line break")]
+    LineBreak,
+    /// Contains a control (`Cc`) or format (`Cf`) character — which
+    /// includes the right-to-left override and the zero-width characters.
+    #[error("display name contains a control or format character")]
+    ControlOrFormatCharacter,
+    /// More than [`DISPLAY_NAME_MAX_CHARS`] Unicode scalar values.
+    #[error("display name is longer than {max_chars} characters")]
+    TooLong {
+        /// Mirror of [`DISPLAY_NAME_MAX_CHARS`].
+        max_chars: usize,
+    },
+    /// More than [`DISPLAY_NAME_MAX_BYTES`] UTF-8 bytes.
+    #[error("display name is longer than {max_bytes} bytes")]
+    TooManyBytes {
+        /// Mirror of [`DISPLAY_NAME_MAX_BYTES`].
+        max_bytes: usize,
+    },
+    /// The wire bytes are not valid UTF-8. Decode-only.
+    #[error("display name is not valid UTF-8")]
+    NotUtf8,
+}
+
+impl DisplayNameError {
+    /// Stable, language-neutral reason code for FFI surfaces. Frozen.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Empty => "empty",
+            Self::NotTrimmed => "notTrimmed",
+            Self::LineBreak => "lineBreak",
+            Self::ControlOrFormatCharacter => "controlOrFormatCharacter",
+            Self::TooLong { .. } => "tooLong",
+            Self::TooManyBytes { .. } => "tooManyBytes",
+            Self::NotUtf8 => "notUtf8",
+        }
+    }
+}
+
+/// Check that `name` is an admissible display name **as it stands** (no
+/// trimming is applied).
+///
+/// Reasons are tested in a fixed order: empty, untrimmed, line break,
+/// control / format character, then the two lengths.
+///
+/// # Errors
+///
+/// Returns the first [`DisplayNameError`] that applies.
+pub fn check_display_name(name: &str) -> CoreResult<(), DisplayNameError> {
+    if name.is_empty() {
+        return Err(DisplayNameError::Empty);
+    }
+    if name.trim() != name {
+        return Err(DisplayNameError::NotTrimmed);
+    }
+    if name.chars().any(is_line_break) {
+        return Err(DisplayNameError::LineBreak);
+    }
+    if has_refused_control_or_format(name) {
+        return Err(DisplayNameError::ControlOrFormatCharacter);
+    }
+    if name.chars().count() > DISPLAY_NAME_MAX_CHARS {
+        return Err(DisplayNameError::TooLong {
+            max_chars: DISPLAY_NAME_MAX_CHARS,
+        });
+    }
+    if name.len() > DISPLAY_NAME_MAX_BYTES {
+        return Err(DisplayNameError::TooManyBytes {
+            max_bytes: DISPLAY_NAME_MAX_BYTES,
+        });
+    }
+    Ok(())
+}
+
+/// ZERO WIDTH NON-JOINER and ZERO WIDTH JOINER: `Cf`, admitted anywhere in a
+/// display name (see the module doc).
+const PERMITTED_JOINERS: [char; 2] = ['\u{200C}', '\u{200D}'];
+/// WAVING BLACK FLAG, the base a subdivision-flag tag sequence follows.
+const FLAG_BASE: char = '\u{1F3F4}';
+/// CANCEL TAG, which terminates a subdivision-flag tag sequence.
+const CANCEL_TAG: char = '\u{E007F}';
+
+const fn is_tag_char(c: char) -> bool {
+    matches!(c, '\u{E0020}'..='\u{E007F}')
+}
+
+/// `true` when `name` holds a control character, or a format character that
+/// is neither a permitted joiner nor part of a well-formed subdivision-flag
+/// tag sequence (`U+1F3F4`, one or more tags, ending in `U+E007F`).
+fn has_refused_control_or_format(name: &str) -> bool {
+    let chars: Vec<char> = name.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == FLAG_BASE {
+            // Consume a following tag run; it is admissible only if it ends
+            // in CANCEL TAG and contains at least one tag before it.
+            let mut j = i + 1;
+            while j < chars.len() && is_tag_char(chars[j]) && chars[j] != CANCEL_TAG {
+                j += 1;
+            }
+            if j < chars.len() && chars[j] == CANCEL_TAG && j > i + 1 {
+                i = j + 1;
+                continue;
+            }
+        } else if c.is_control() || (is_format_char(c) && !PERMITTED_JOINERS.contains(&c)) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Turn what a person typed into the display name to store and send.
+///
+/// Trims, maps "nothing left" to `Ok(None)` (ADR-0048: empty = no name),
+/// and otherwise runs [`check_display_name`] on the trimmed text.
+///
+/// # Errors
+///
+/// Returns the [`DisplayNameError`] the trimmed text violates.
+pub fn normalize_display_name(input: &str) -> CoreResult<Option<String>, DisplayNameError> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    check_display_name(trimmed)?;
+    Ok(Some(trimmed.to_string()))
+}
+
+/// `true` when a profile stamped `incoming_updated_at_ms` must replace one
+/// stamped `stored_updated_at_ms` from the **same signature key**.
+///
+/// Strictly greater wins; **equal is not newer**, so a re-broadcast of the
+/// profile a receiver already holds is not an update.
+#[must_use]
+pub const fn profile_is_newer(incoming_updated_at_ms: u64, stored_updated_at_ms: u64) -> bool {
+    incoming_updated_at_ms > stored_updated_at_ms
+}
+
+/// Compose a profile envelope.
+///
+/// The output is the **inner** plaintext handed to the MLS
+/// application-message send path, or placed in a contact request's sealed
+/// envelope by [`crate::request::compose`].
+///
+/// # Errors
+///
+/// Exactly the errors [`Profile::validate`] returns — `compose` refuses what
+/// [`decode_profile`] would refuse.
+pub fn compose_profile(profile: &Profile) -> CoreResult<Vec<u8>, ProfileError> {
+    profile.validate()?;
+    let name = profile.display_name.as_deref().unwrap_or("").as_bytes();
+    let username = profile.username.as_deref().unwrap_or("").as_bytes();
+    // `validate` bounded both lengths below `u8::MAX`; the conversions are
+    // re-checked rather than cast so a future bound change cannot truncate.
+    let name_len = u8::try_from(name.len()).map_err(|_| {
+        ProfileError::DisplayName(DisplayNameError::TooManyBytes {
+            max_bytes: DISPLAY_NAME_MAX_BYTES,
+        })
+    })?;
+    let username_len = u8::try_from(username.len()).map_err(|_| {
+        ProfileError::Username(UsernameError::TooLong {
+            max: USERNAME_MAX_LEN,
+        })
+    })?;
+
+    let mut out = Vec::with_capacity(PROFILE_ENVELOPE_MIN_LEN + name.len() + username.len());
+    out.extend_from_slice(PROFILE_ENVELOPE_DOMAIN_V1);
+    out.push(PROFILE_VERSION_V1);
+    out.extend_from_slice(&profile.updated_at_ms.to_be_bytes());
+    out.push(name_len);
+    out.extend_from_slice(name);
+    out.push(username_len);
+    out.extend_from_slice(username);
+    Ok(out)
+}
+
+/// Discriminated unwrap for the [`crate::incoming_envelope`] dispatcher.
+///
+/// * `Ok(Some(profile))` — the domain separator matched and the envelope
+///   is well-formed and within every bound.
+/// * `Ok(None)` — the prefix does not match; fall through.
+/// * `Err(_)` — the prefix matched but the envelope is malformed or out of
+///   bounds. The caller drops it (fail-closed), never renders it.
+///
+/// # Errors
+///
+/// * [`ProfileError::Truncated`] — the payload ends before a declared field.
+/// * [`ProfileError::UnknownVersion`] — the version byte is not
+///   [`PROFILE_VERSION_V1`].
+/// * [`ProfileError::TrailingBytes`] — bytes remain after the username.
+/// * [`ProfileError::DisplayName`] / [`ProfileError::Username`] — a field is
+///   out of bounds.
+pub fn try_unwrap_profile(plaintext: &[u8]) -> CoreResult<Option<Profile>, ProfileError> {
+    let Some(payload) = plaintext.strip_prefix(PROFILE_ENVELOPE_DOMAIN_V1) else {
+        return Ok(None);
+    };
+    let mut cur = payload;
+
+    let version = take_u8(&mut cur)?;
+    if version != PROFILE_VERSION_V1 {
+        return Err(ProfileError::UnknownVersion(version));
+    }
+    let updated_at_bytes: [u8; 8] = take(&mut cur, 8)?
+        .try_into()
+        .map_err(|_| ProfileError::Truncated)?;
+    let updated_at_ms = u64::from_be_bytes(updated_at_bytes);
+
+    let name_len = usize::from(take_u8(&mut cur)?);
+    let name_bytes = take(&mut cur, name_len)?;
+    let username_len = usize::from(take_u8(&mut cur)?);
+    let username_bytes = take(&mut cur, username_len)?;
+    if !cur.is_empty() {
+        return Err(ProfileError::TrailingBytes { count: cur.len() });
+    }
+
+    let display_name = if name_bytes.is_empty() {
+        None
+    } else {
+        let name = core::str::from_utf8(name_bytes)
+            .map_err(|_| ProfileError::DisplayName(DisplayNameError::NotUtf8))?;
+        Some(name.to_string())
+    };
+    let username = if username_bytes.is_empty() {
+        None
+    } else {
+        // Non-UTF-8 bytes are by definition outside `[a-z0-9_]`.
+        let username = core::str::from_utf8(username_bytes)
+            .map_err(|_| ProfileError::Username(UsernameError::InvalidCharacters))?;
+        Some(username.to_string())
+    };
+
+    let profile = Profile {
+        display_name,
+        username,
+        updated_at_ms,
+    };
+    profile.validate()?;
+    Ok(Some(profile))
+}
+
+/// Strict standalone decoder: a non-profile plaintext is a hard error.
+///
+/// # Errors
+///
+/// * [`ProfileError::WrongDomain`] — `bytes` does not start with
+///   [`PROFILE_ENVELOPE_DOMAIN_V1`].
+/// * Every error [`try_unwrap_profile`] returns.
+pub fn decode_profile(bytes: &[u8]) -> CoreResult<Profile, ProfileError> {
+    try_unwrap_profile(bytes)?.ok_or(ProfileError::WrongDomain)
+}
+
+/// Why a profile envelope was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum ProfileError {
+    /// The plaintext does not carry the profile domain separator. Only from
+    /// [`decode_profile`]; [`try_unwrap_profile`] returns `Ok(None)`.
+    #[error("plaintext does not carry the profile domain separator")]
+    WrongDomain,
+    /// The payload ends before a declared field.
+    #[error("profile envelope is truncated")]
+    Truncated,
+    /// Bytes remain after the username field.
+    #[error("profile envelope has {count} trailing bytes")]
+    TrailingBytes {
+        /// How many bytes followed the username.
+        count: usize,
+    },
+    /// The version byte is not [`PROFILE_VERSION_V1`].
+    #[error("profile envelope carries unknown schema version {0:#04x}")]
+    UnknownVersion(u8),
+    /// The display name violates a bound.
+    #[error("invalid display name: {0}")]
+    DisplayName(DisplayNameError),
+    /// The username is not canonical.
+    #[error("invalid username: {0}")]
+    Username(UsernameError),
+}
+
+impl ProfileError {
+    /// Stable, language-neutral reason code for FFI surfaces. Frozen.
+    ///
+    /// Field errors are namespaced (`displayName.tooLong`,
+    /// `username.invalidCharacters`) so one code set covers both fields.
+    #[must_use]
+    pub fn code(self) -> String {
+        match self {
+            Self::WrongDomain => "wrongDomain".to_string(),
+            Self::Truncated => "truncated".to_string(),
+            Self::TrailingBytes { .. } => "trailingBytes".to_string(),
+            Self::UnknownVersion(_) => "unknownVersion".to_string(),
+            Self::DisplayName(e) => format!("displayName.{}", e.code()),
+            Self::Username(e) => format!("username.{}", e.code()),
+        }
+    }
+}
+
+fn take_u8(cur: &mut &[u8]) -> CoreResult<u8, ProfileError> {
+    let (&first, rest) = cur.split_first().ok_or(ProfileError::Truncated)?;
+    *cur = rest;
+    Ok(first)
+}
+
+fn take<'a>(cur: &mut &'a [u8], n: usize) -> CoreResult<&'a [u8], ProfileError> {
+    if cur.len() < n {
+        return Err(ProfileError::Truncated);
+    }
+    let (head, rest) = cur.split_at(n);
+    *cur = rest;
+    Ok(head)
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn profile(name: Option<&str>, username: Option<&str>, at: u64) -> Profile {
+        Profile {
+            display_name: name.map(str::to_string),
+            username: username.map(str::to_string),
+            updated_at_ms: at,
+        }
+    }
+
+    /// Hand-build an envelope with arbitrary (possibly invalid) fields,
+    /// bypassing `compose`'s validation — so decode's own gates are tested.
+    fn raw(version: u8, at: u64, name: &[u8], username: &[u8]) -> Vec<u8> {
+        let mut out = PROFILE_ENVELOPE_DOMAIN_V1.to_vec();
+        out.push(version);
+        out.extend_from_slice(&at.to_be_bytes());
+        out.push(u8::try_from(name.len()).unwrap());
+        out.extend_from_slice(name);
+        out.push(u8::try_from(username.len()).unwrap());
+        out.extend_from_slice(username);
+        out
+    }
+
+    // --- wire format ---------------------------------------------------------
+
+    #[test]
+    fn compose_then_decode_round_trips() {
+        for p in [
+            profile(Some("Alice Petrova"), Some("alice"), 1_700_000_000_000),
+            profile(None, Some("bob_42"), 0),
+            profile(Some("Guest"), None, u64::MAX),
+            profile(None, None, 7),
+            profile(Some("Анна Иванова"), Some("anna"), 1),
+        ] {
+            let wire = compose_profile(&p).unwrap();
+            assert_eq!(decode_profile(&wire).unwrap(), p);
+        }
+    }
+
+    #[test]
+    fn compose_layout_is_pinned() {
+        let wire =
+            compose_profile(&profile(Some("Al"), Some("abc"), 0x0102_0304_0506_0708)).unwrap();
+        let sep = PROFILE_ENVELOPE_DOMAIN_V1.len();
+        assert_eq!(sep, 17);
+        assert_eq!(&wire[..sep], b"lakko/profile/v1\x00");
+        assert_eq!(wire[sep], PROFILE_VERSION_V1);
+        assert_eq!(&wire[sep + 1..sep + 9], &[1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(wire[sep + 9], 2);
+        assert_eq!(&wire[sep + 10..sep + 12], b"Al");
+        assert_eq!(wire[sep + 12], 3);
+        assert_eq!(&wire[sep + 13..], b"abc");
+    }
+
+    #[test]
+    fn envelope_length_bounds_are_the_documented_construction() {
+        assert_eq!(PROFILE_ENVELOPE_MIN_LEN, 28);
+        assert_eq!(PROFILE_ENVELOPE_MAX_LEN, 28 + 255 + 32);
+        let empty = compose_profile(&profile(None, None, 0)).unwrap();
+        assert_eq!(empty.len(), PROFILE_ENVELOPE_MIN_LEN);
+        // A maximal envelope: 255 bytes of name in exactly 64 chars (63
+        // four-byte scalars + one three-byte scalar) and 32 of username.
+        let name = format!("{}\u{20AC}", "\u{1F600}".repeat(63));
+        assert_eq!(name.len(), 255);
+        assert_eq!(name.chars().count(), DISPLAY_NAME_MAX_CHARS);
+        let max = compose_profile(&profile(Some(&name), Some(&"a".repeat(32)), 0)).unwrap();
+        assert_eq!(max.len(), PROFILE_ENVELOPE_MAX_LEN);
+    }
+
+    // --- fail-closed decode --------------------------------------------------
+
+    #[test]
+    fn non_profile_plaintext_falls_through() {
+        assert_eq!(try_unwrap_profile(b"hi alice"), Ok(None));
+        assert_eq!(try_unwrap_profile(&[]), Ok(None));
+        assert_eq!(decode_profile(b"hi alice"), Err(ProfileError::WrongDomain));
+    }
+
+    #[test]
+    fn bare_separator_is_truncated_not_a_fall_through() {
+        assert_eq!(
+            try_unwrap_profile(PROFILE_ENVELOPE_DOMAIN_V1),
+            Err(ProfileError::Truncated)
+        );
+    }
+
+    #[test]
+    fn every_truncation_point_is_refused() {
+        let wire = compose_profile(&profile(Some("Alice"), Some("alice"), 9)).unwrap();
+        for cut in PROFILE_ENVELOPE_DOMAIN_V1.len()..wire.len() {
+            assert_eq!(
+                try_unwrap_profile(&wire[..cut]),
+                Err(ProfileError::Truncated),
+                "cut at {cut}"
+            );
+        }
+    }
+
+    #[test]
+    fn trailing_bytes_are_refused() {
+        let mut wire = compose_profile(&profile(Some("Alice"), None, 9)).unwrap();
+        wire.push(0);
+        assert_eq!(
+            decode_profile(&wire),
+            Err(ProfileError::TrailingBytes { count: 1 })
+        );
+    }
+
+    #[test]
+    fn unknown_versions_are_refused() {
+        for v in [0x00, 0x02, 0xFF] {
+            assert_eq!(
+                decode_profile(&raw(v, 0, b"", b"")),
+                Err(ProfileError::UnknownVersion(v))
+            );
+        }
+    }
+
+    #[test]
+    fn non_utf8_fields_are_refused() {
+        assert_eq!(
+            decode_profile(&raw(1, 0, &[0xFF, 0xFE], b"")),
+            Err(ProfileError::DisplayName(DisplayNameError::NotUtf8))
+        );
+        assert_eq!(
+            decode_profile(&raw(1, 0, b"", &[0xC3, 0x28, 0x61])),
+            Err(ProfileError::Username(UsernameError::InvalidCharacters))
+        );
+    }
+
+    #[test]
+    fn an_out_of_bounds_field_rejects_the_whole_envelope() {
+        // A perfectly good username does not rescue a bad name, and vice versa.
+        assert_eq!(
+            decode_profile(&raw(1, 0, "Alice\u{202E}".as_bytes(), b"alice")),
+            Err(ProfileError::DisplayName(
+                DisplayNameError::ControlOrFormatCharacter
+            ))
+        );
+        assert_eq!(
+            decode_profile(&raw(1, 0, b"Pavel", "p\u{430}vel".as_bytes())),
+            Err(ProfileError::Username(UsernameError::InvalidCharacters))
+        );
+    }
+
+    #[test]
+    fn decode_refuses_what_compose_refuses() {
+        // Each invalid profile: compose errs, and the same fields on the wire
+        // (hand-built, bypassing compose) produce the same error from decode.
+        let cases: &[(&str, &str)] = &[
+            (" Alice", ""),
+            ("Al\nice", ""),
+            ("A\u{200B}lice", ""),
+            ("x", "Alice"),
+            ("x", "ab"),
+            ("x", "ali-ce"),
+        ];
+        for &(name, username) in cases {
+            let p = profile(
+                Some(name),
+                if username.is_empty() {
+                    None
+                } else {
+                    Some(username)
+                },
+                0,
+            );
+            let compose_err = compose_profile(&p).unwrap_err();
+            let decode_err =
+                decode_profile(&raw(1, 0, name.as_bytes(), username.as_bytes())).unwrap_err();
+            assert_eq!(compose_err, decode_err, "{name:?} / {username:?}");
+        }
+        // 65 chars cannot even be hand-built past the u8 length on some
+        // inputs, so check that one via a sub-255-byte ASCII name.
+        let long = "a".repeat(DISPLAY_NAME_MAX_CHARS + 1);
+        assert_eq!(
+            compose_profile(&profile(Some(&long), None, 0)),
+            decode_profile(&raw(1, 0, long.as_bytes(), b"")).map(|_| Vec::new()),
+        );
+    }
+
+    #[test]
+    fn some_empty_fields_are_refused_by_compose() {
+        assert_eq!(
+            compose_profile(&profile(Some(""), None, 0)),
+            Err(ProfileError::DisplayName(DisplayNameError::Empty))
+        );
+        assert_eq!(
+            compose_profile(&profile(None, Some(""), 0)),
+            Err(ProfileError::Username(UsernameError::Empty))
+        );
+    }
+
+    // --- display-name bounds -------------------------------------------------
+
+    #[test]
+    fn display_name_length_boundaries_discriminate() {
+        let at_chars = "a".repeat(DISPLAY_NAME_MAX_CHARS);
+        assert_eq!(check_display_name(&at_chars), Ok(()));
+        assert_eq!(
+            check_display_name(&"a".repeat(DISPLAY_NAME_MAX_CHARS + 1)),
+            Err(DisplayNameError::TooLong { max_chars: 64 })
+        );
+        // 63 four-byte scalars = 252 bytes: fits. 64 = 256 bytes: one over the
+        // one-byte length, refused even though the char count is admissible.
+        assert_eq!(check_display_name(&"\u{1F600}".repeat(63)), Ok(()));
+        assert_eq!(
+            check_display_name(&"\u{1F600}".repeat(64)),
+            Err(DisplayNameError::TooManyBytes { max_bytes: 255 })
+        );
+    }
+
+    #[test]
+    fn display_name_refuses_controls_formats_and_line_breaks() {
+        for (bad, why) in [
+            ("Al\u{0}ice", DisplayNameError::ControlOrFormatCharacter),
+            ("Al\u{1B}ice", DisplayNameError::ControlOrFormatCharacter),
+            ("Al\u{7F}ice", DisplayNameError::ControlOrFormatCharacter),
+            ("Al\u{202E}ice", DisplayNameError::ControlOrFormatCharacter), // RLO
+            ("Al\u{2066}ice", DisplayNameError::ControlOrFormatCharacter), // LRI
+            ("Al\u{200B}ice", DisplayNameError::ControlOrFormatCharacter), // ZWSP
+            ("Al\u{E0067}ice", DisplayNameError::ControlOrFormatCharacter), // stray tag
+            (
+                "\u{1F3F4}\u{E0067}\u{E0062}",
+                DisplayNameError::ControlOrFormatCharacter,
+            ), // unterminated flag
+            (
+                "\u{1F3F4}\u{E007F}",
+                DisplayNameError::ControlOrFormatCharacter,
+            ), // flag with no tags
+            ("Al\u{FEFF}ice", DisplayNameError::ControlOrFormatCharacter), // BOM
+            ("Al\u{AD}ice", DisplayNameError::ControlOrFormatCharacter),   // soft hyphen
+            ("Al\u{61C}ice", DisplayNameError::ControlOrFormatCharacter),  // ALM
+            ("Al\u{E0001}ice", DisplayNameError::ControlOrFormatCharacter), // LANGUAGE TAG
+            ("Al\nice", DisplayNameError::LineBreak),
+            ("Al\rice", DisplayNameError::LineBreak),
+            ("Al\u{85}ice", DisplayNameError::LineBreak),
+            ("Al\u{2028}ice", DisplayNameError::LineBreak),
+            ("Al\u{2029}ice", DisplayNameError::LineBreak),
+        ] {
+            assert_eq!(check_display_name(bad), Err(why), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn display_name_accepts_ordinary_scripts_and_emoji() {
+        for ok in [
+            "Alice Petrova",
+            "Анна",
+            "李小龙",
+            "محمد",
+            "Zoë",
+            "O'Brien-Smith",
+            "\u{1F600} Party",
+            "a",
+            // ZWJ emoji sequence: man, ZWJ, woman, ZWJ, girl.
+            "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467} Family",
+            // Persian spelling that needs ZWNJ ("mi-khaham").
+            "\u{0645}\u{06CC}\u{200C}\u{062E}\u{0648}\u{0627}\u{0647}\u{0645}",
+            // Flag of Scotland: black flag + tags "gbsct" + cancel tag.
+            "Ian \u{1F3F4}\u{E0067}\u{E0062}\u{E0073}\u{E0063}\u{E0074}\u{E007F}",
+        ] {
+            assert_eq!(check_display_name(ok), Ok(()), "{ok:?}");
+        }
+    }
+
+    #[test]
+    fn display_name_must_already_be_trimmed() {
+        for bad in [" Alice", "Alice ", "\u{3000}Alice", "Alice\t"] {
+            assert_eq!(
+                check_display_name(bad),
+                Err(DisplayNameError::NotTrimmed),
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_trims_and_maps_blank_to_none() {
+        assert_eq!(
+            normalize_display_name("  Alice  "),
+            Ok(Some("Alice".to_string()))
+        );
+        assert_eq!(normalize_display_name(""), Ok(None));
+        assert_eq!(normalize_display_name(" \t\u{3000} "), Ok(None));
+        assert_eq!(
+            normalize_display_name(" A\u{202E}B "),
+            Err(DisplayNameError::ControlOrFormatCharacter)
+        );
+    }
+
+    #[test]
+    fn format_table_is_sorted_disjoint_and_hits_its_edges() {
+        for w in FORMAT_CHAR_RANGES.windows(2) {
+            assert!(w[0].1 < w[1].0, "{w:?}");
+        }
+        for &(lo, hi) in FORMAT_CHAR_RANGES {
+            assert!(lo <= hi);
+            for cp in [lo, hi] {
+                let c = char::from_u32(cp).unwrap();
+                assert!(is_format_char(c), "{cp:#x}");
+            }
+            if let Some(before) = lo.checked_sub(1).and_then(char::from_u32) {
+                // The code point just below each range is outside `Cf` in
+                // every range of the table (no two ranges are adjacent).
+                assert!(!is_format_char(before), "{:#x}", lo - 1);
+            }
+        }
+        assert!(!is_format_char('a'));
+        assert!(!is_format_char(' '));
+    }
+
+    #[test]
+    fn error_messages_never_echo_the_name() {
+        let err = check_display_name("Secret\u{202E}Name").unwrap_err();
+        assert!(!err.to_string().contains("Secret"));
+        let err = decode_profile(&raw(1, 0, "Secret\u{202E}".as_bytes(), b"")).unwrap_err();
+        assert!(!err.to_string().contains("Secret"));
+        assert!(!format!("{err:?}").contains("Secret"));
+    }
+
+    #[test]
+    fn error_codes_are_frozen() {
+        assert_eq!(ProfileError::WrongDomain.code(), "wrongDomain");
+        assert_eq!(ProfileError::Truncated.code(), "truncated");
+        assert_eq!(
+            ProfileError::DisplayName(DisplayNameError::TooLong { max_chars: 64 }).code(),
+            "displayName.tooLong"
+        );
+        assert_eq!(
+            ProfileError::Username(UsernameError::InvalidCharacters).code(),
+            "username.invalidCharacters"
+        );
+    }
+
+    // --- order ---------------------------------------------------------------
+
+    #[test]
+    fn newer_is_strictly_greater() {
+        assert!(profile_is_newer(2, 1));
+        assert!(!profile_is_newer(1, 1), "equal is not newer");
+        assert!(!profile_is_newer(0, 1));
+        assert!(profile_is_newer(u64::MAX, u64::MAX - 1));
+        assert!(!profile_is_newer(u64::MAX, u64::MAX));
+    }
+
+    // --- cross-kind isolation ------------------------------------------------
+
+    #[test]
+    fn separator_distinct_from_sibling_domains() {
+        let other_domains: &[&[u8]] = &[
+            crate::call_welcome::CALL_WELCOME_ENVELOPE_DOMAIN_V1,
+            crate::call_kp_forward::CALL_KP_FORWARD_ENVELOPE_DOMAIN_V1,
+            crate::media_state::MEDIA_STATE_ENVELOPE_DOMAIN_V1,
+            crate::push_routing::PUSH_ROUTING_SECRET_ENVELOPE_DOMAIN_V1,
+            crate::push_routing::PUSH_GID_DERIVE_DOMAIN_V1,
+            crate::committer_beacon::COMMITTER_BEACON_ENVELOPE_DOMAIN_V1,
+            crate::invite::REVOKE_DOMAIN_V1,
+            crate::invite::OWNER_LIST_DOMAIN_V1,
+            crate::invite::JOINER_TAG_SALT_DOMAIN_V1,
+            crate::call_invite::CALL_INVITE_REVOKE_DOMAIN_V1,
+            crate::group_invite::GROUP_INVITE_REVOKE_DOMAIN_V1,
+            b"lakko/group-join-attribution/v1",
+        ];
+        for d in other_domains {
+            assert_ne!(*d, PROFILE_ENVELOPE_DOMAIN_V1, "{d:?}");
+            assert!(
+                !d.starts_with(PROFILE_ENVELOPE_DOMAIN_V1)
+                    && !PROFILE_ENVELOPE_DOMAIN_V1.starts_with(d),
+                "neither separator may prefix the other: {d:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn profile_does_not_cross_dispatch_as_a_sibling() {
+        use crate::call_kp_forward::{try_unwrap_call_kp_forward, wrap_call_kp_forward};
+        use crate::call_welcome::{try_unwrap_call_welcome, wrap_call_welcome};
+        use crate::committer_beacon::{compose_committer_beacon, try_unwrap_committer_beacon};
+        use crate::media_state::{compose_media_state, try_unwrap_media_state};
+        use crate::push_routing::{compose_push_routing_secret, try_unwrap_push_routing_secret};
+
+        let wire = compose_profile(&profile(Some("Alice"), Some("alice"), 1)).unwrap();
+        assert!(try_unwrap_call_welcome(&wire).unwrap().is_none());
+        assert!(try_unwrap_call_kp_forward(&wire).unwrap().is_none());
+        assert!(try_unwrap_media_state(&wire).unwrap().is_none());
+        assert!(try_unwrap_push_routing_secret(&wire).unwrap().is_none());
+        assert!(try_unwrap_committer_beacon(&wire).unwrap().is_none());
+
+        for sibling in [
+            wrap_call_welcome(&[0xAB; 256]),
+            wrap_call_kp_forward(&[0xCD; 512]),
+            compose_media_state(true),
+            compose_push_routing_secret(7, &[0x11; 32]),
+            compose_committer_beacon(),
+        ] {
+            assert_eq!(try_unwrap_profile(&sibling), Ok(None));
+        }
+    }
+}

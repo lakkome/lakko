@@ -57,7 +57,7 @@ if [[ ! -x /usr/local/bin/lakko-svc-sfu ]]; then
 fi
 if [[ ! -f /etc/lakko/lakko.env ]]; then
   warn "/etc/lakko/lakko.env missing — author it from infra/etc-lakko/lakko.env.example"
-  warn "(LAKKO_SFU_JWKS_URL + LAKKO_SFU_MEDIA_BIND=0.0.0.0:${MEDIA_UDP_PORT} at minimum)"
+  warn "(LAKKO_SFU_JWKS_URL + LAKKO_SFU_MEDIA_BIND=0.0.0.0:${MEDIA_UDP_PORT} + LAKKO_SFU_MEDIA_ADVERTISE_IP=<public IP> at minimum)"
 fi
 # The mTLS CA for the /metrics scrape (shared with the other
 # services' monitoring setup).
@@ -101,7 +101,8 @@ else
 fi
 
 note "done."
-note "  - ensure lakko.env has LAKKO_SFU_JWKS_URL + LAKKO_SFU_MEDIA_BIND=0.0.0.0:${MEDIA_UDP_PORT}"
+note "  - ensure lakko.env has LAKKO_SFU_JWKS_URL + LAKKO_SFU_MEDIA_BIND=0.0.0.0:${MEDIA_UDP_PORT} + LAKKO_SFU_MEDIA_ADVERTISE_IP=<public IP>"
+note "    (without the advertise IP the SFU refuses to start: 0.0.0.0 is not a usable ICE candidate)"
 note "  - run 'just deploy' to build + install lakko-svc-sfu + start it via lakko.target"
 note "  - verify:  curl -sI https://${SFU_DOMAIN}/health"
 note "  - logs:    just logs-sfu"

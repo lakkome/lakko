@@ -130,6 +130,49 @@ public final class ChatRepository: ObservableObject {
     /// repository.
     private var currentAccountIdB64: String?
 
+    /// Raw account id + bearer token of the live session, for the
+    /// KeyPackage upload. Refreshed on EVERY ``bootstrap(secrets:)`` call,
+    /// including the same-account early return, because a re-login in the
+    /// same process mints a new token without changing the account.
+    private var currentAccountId: Data?
+    private var currentSessionToken: String?
+
+    /// Publishes this device's KeyPackage from ``canonicalIdentity`` —
+    /// persist-before-upload, single-flight. See ``republishKeyPackage()``.
+    private lazy var keyPackageRepublisher = KeyPackageRepublisher(
+        ports: KeyPackageRepublisher.Ports(
+            mint: { [weak self] in
+                guard let self,
+                      let identity = self.canonicalIdentity,
+                      let accountId = self.currentAccountId,
+                      let token = self.currentSessionToken,
+                      !token.isEmpty else {
+                    return nil
+                }
+                return KeyPackageUpload(
+                    accountId: accountId,
+                    sessionToken: token,
+                    keyPackage: try identity.createKeyPackage()
+                )
+            },
+            persist: { [weak self] in
+                guard let self else {
+                    throw ChatError.argument(
+                        "ChatRepository deallocated — KeyPackage upload aborted"
+                    )
+                }
+                try self.persistSnapshotDurableOrThrow()
+            },
+            upload: { upload in
+                try await DiscoveryClient(sessionToken: upload.sessionToken)
+                    .uploadKeyPackage(
+                        accountId: upload.accountId,
+                        keyPackageBytes: upload.keyPackage
+                    )
+            }
+        )
+    )
+
     /// Map of hex group id → live ``Group`` handle + per-thread
     /// timeline / cursor. Read + mutated only on `@MainActor`, and every
     /// UniFFI `Group` call is synchronous, so an individual access is never
@@ -175,6 +218,36 @@ public final class ChatRepository: ObservableObject {
     /// the first ``pollGroup(groupIdHex:waitSecs:)`` for that group). Reset by
     /// ``wipeInMemoryState()`` on a logout / account switch.
     private var sweptGroupsThisSession: Set<String> = []
+
+    /// ADR-0048 — where a received in-group profile goes: the shared profile
+    /// directory in production. A seam so a test can capture what the receive
+    /// path hands over.
+    var receivedProfileSink: @MainActor (ProfileClaim, MemberIdentity?) -> Void = { claim, senderKey in
+        ProfileDirectory.shared.acceptReceived(claim, signatureKeyB64: senderKey)
+    }
+
+    /// ADR-0048 §2 — publishes this device's own profile into its groups on
+    /// join, on change and on growth, through the same locked application send
+    /// path the other service envelopes take.
+    private lazy var profilePublisher = ProfilePublisher(
+        ports: ProfilePublisher.Ports(
+            send: { [weak self] groupIdHex, bytes in
+                guard let self else { return }
+                try await self.publishApplicationMessage(
+                    groupIdHex: groupIdHex, plaintextBytes: bytes)
+            },
+            envelope: { ProfileDirectory.shared.ownProfileEnvelope() },
+            canSend: { [weak self] groupIdHex in
+                guard let self, self.groups[groupIdHex] != nil else { return false }
+                return !membershipEnded(self.membershipStateNow(groupIdHex: groupIdHex))
+            },
+            nowMs: { Self.nowMs() },
+            jitterMs: { Int64.random(in: 0...ProfilePublisher.maxJitterMs) },
+            sleep: { ms in
+                try? await Task.sleep(nanoseconds: UInt64(max(0, ms)) * 1_000_000)
+            }
+        )
+    )
 
     public init(
         chatClient: ChatClient = ChatClient(),
@@ -237,6 +310,8 @@ public final class ChatRepository: ObservableObject {
     /// KeyPackages.
     public func bootstrap(secrets: IdentitySecrets) {
         let newAccountIdB64 = base64Encode(secrets.accountId)
+        currentAccountId = secrets.accountId
+        currentSessionToken = secrets.sessionToken
         if currentAccountIdB64 == newAccountIdB64 { return }
         if currentAccountIdB64 != nil {
             wipeInMemoryState()
@@ -363,6 +438,9 @@ public final class ChatRepository: ObservableObject {
             // it is deliberately never pruned with the pending sweep, so an
             // account reset has to take it explicitly.
             leaveRequestStore.clearForAccount(accountIdB64: accountIdB64)
+            // ADR-0048 — the names of the people this account talked to, the
+            // username verdicts, and its own profile.
+            ProfileDirectory.shared.forget(accountIdB64: accountIdB64)
             // Phase 2a3f1 — drop the plaintext message log too.
             // The Keychain wrap key is shared across accounts
             // (per-installation, not per-account) so we leave
@@ -374,6 +452,8 @@ public final class ChatRepository: ObservableObject {
 
     private func wipeInMemoryState() {
         groups.removeAll()
+        groupCalls.removeAll()
+        unreadCounts.removeAll()
         canonicalIdentity = nil
         // ADR-0040 (G-35) — a new session must re-sweep the outbox for every
         // group on its first poll.
@@ -382,6 +462,9 @@ public final class ChatRepository: ObservableObject {
         // carried-over stamp would suppress the first beacon of that session,
         // which the core deliberately makes immediate.
         lastBeaconAtMs.removeAll()
+        // ADR-0048 — a scheduled growth republish belongs to the session that
+        // saw the growth.
+        profilePublisher.reset()
         // `commitChain` is deliberately NOT cleared. Dropping a tail does not
         // stop the section behind it — it only makes the next caller start
         // BESIDE that section, which is the race the chain exists to close.
@@ -479,13 +562,27 @@ public final class ChatRepository: ObservableObject {
         // the DS `group_id`). The owner mints the secret on chat-open
         // (`ensurePushRouting`); until then this is a no-op deferral.
         subscribeGroupUnderPushGid(groupIdHex: groupIdHex)
+        // ADR-0048 §2 — a chat this device just founded has never heard its
+        // name; the recipient joins at the epoch this is sealed under.
+        publishOwnProfileSoon(groupIdHex: groupIdHex)
         return groupIdHex
     }
 
     /// Join an MLS group from a `Welcome` blob.
     ///
     /// Returns the joined group's hex id.
+    ///
+    /// Every attempt, success or failure, ends by requesting a KeyPackage
+    /// republish. Processing a Welcome deletes the private keys of the
+    /// KeyPackage it targets (OpenMLS keeps them only for a last-resort
+    /// KeyPackage, which Lakko never mints), and discovery holds one
+    /// KeyPackage per account — so without a fresh upload the directory
+    /// keeps handing out a KeyPackage this device can no longer open, and
+    /// the next person to add this user fails. A failed join republishes
+    /// too: whether the keys were consumed before the failure is not
+    /// observable from here, and a spare upload costs one PoW.
     public func joinGroupFromWelcome(welcomeBytes: Data) async throws -> String {
+        defer { republishKeyPackage() }
         guard let identity = canonicalIdentity else {
             throw ChatError.argument(
                 "ChatRepository not bootstrapped — call bootstrap() first"
@@ -513,7 +610,37 @@ public final class ChatRepository: ObservableObject {
         // receives the group's `push_routing_secret` over the distribution
         // envelope on its next poll; never subscribes under `group_id`).
         subscribeGroupUnderPushGid(groupIdHex: groupIdHex)
+        // ADR-0048 §2 — joining: tell the group who this is.
+        publishOwnProfileSoon(groupIdHex: groupIdHex)
         return groupIdHex
+    }
+
+    /// ADR-0048 §2 — publish the own profile into `groupIdHex` without making
+    /// the caller wait on the network. Fire-and-forget: the send takes the
+    /// per-group commit chain on its own.
+    private func publishOwnProfileSoon(groupIdHex: String) {
+        Task { @MainActor [weak self] in
+            await self?.profilePublisher.publishNow(groupIdHex: groupIdHex)
+        }
+    }
+
+    /// ADR-0048 §2 — the own profile changed: publish it into every group.
+    public func publishOwnProfileToAllGroups() async {
+        await profilePublisher.publishToAll(groupIdHexes: Array(groups.keys).sorted())
+    }
+
+    /// ADR-0048 §2 — republish the own profile (throttled, jittered) when the
+    /// roster gained a key it did not have before.
+    private func noteProfileGrowthIfMembershipGrew(
+        groupIdHex: String,
+        previousMemberKeys: [String]?
+    ) {
+        guard let record = groups[groupIdHex] else { return }
+        let current = PushGroupRouting.memberSignatureKeys(group: record.group)
+        guard membershipGrew(previousMemberKeys: previousMemberKeys, currentMemberKeys: current) else {
+            return
+        }
+        profilePublisher.noteGrowth(groupIdHex: groupIdHex)
     }
 
     /// ADR-0028 (G-3) — joiner step 1: request to join a group from a `/g/`
@@ -807,6 +934,7 @@ public final class ChatRepository: ObservableObject {
         // from, so dropping it after the live handle means a crash between the
         // two leaves the chat present rather than half-gone.
         groups.removeValue(forKey: groupIdHex)
+        unreadCounts.removeValue(forKey: groupIdHex)
         knownGroupsStore.remove(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
         state = state.with(threads: buildThreadList())
         return true
@@ -834,6 +962,17 @@ public final class ChatRepository: ObservableObject {
     public func members(groupIdHex: String) -> [GroupMember]? {
         guard let record = groups[groupIdHex] else { return nil }
         return try? record.group.members()
+    }
+
+    /// ADR-0048 — the other member's signature key in a two-member chat, or
+    /// `nil` for a group, a chat with nobody else yet, or a torn roster read.
+    /// What the chat list and a 1x1 header name the conversation by.
+    public func oneToOnePeerSignatureKey(groupIdHex: String) -> Data? {
+        guard let record = groups[groupIdHex],
+              let roster = try? record.group.members(), roster.count == 2,
+              let own = try? record.group.ownLeafIndex()
+        else { return nil }
+        return roster.first { $0.leafIndex != own }?.signaturePublicKey
     }
 
     /// Our own leaf index in `groupIdHex`, or `nil` when there is no handle.
@@ -1263,6 +1402,10 @@ public final class ChatRepository: ObservableObject {
         // AFTER the add commit so the new member is already in the group.
         // Fire-and-forget; failures retry on the next add / launch sweep.
         redistributePushRoutingSecret(groupIdHex: groupIdHex)
+        // ADR-0048 §2 — the newcomer cannot read the epochs in which anyone's
+        // profile was published. Only SCHEDULES (the send takes this chain
+        // later), so the lock held here is never awaited against itself.
+        profilePublisher.noteGrowth(groupIdHex: groupIdHex)
         return commitPublish.id
     }
 
@@ -2545,10 +2688,13 @@ public final class ChatRepository: ObservableObject {
             raw: raw,
             after: after
         )
+        noteAppliedForUnread(result.events, groupIdHex: groupIdHex)
         record.consumeEvents(
             result.events,
-            callSignalingSink: { [weak self] payload in
-                self?.callSignalingSink?(groupIdHex, payload)
+            callSignalingSink: { [weak self] messageId, payload, createdAt, senderLeaf in
+                self?.routeCallSignaling(
+                    groupIdHex: groupIdHex, messageId: messageId, payload: payload,
+                    createdAt: createdAt, senderLeaf: senderLeaf)
             },
             chatStatusSink: { [weak self] status in
                 self?.chatStatusSink?(groupIdHex, status)
@@ -2575,6 +2721,9 @@ public final class ChatRepository: ObservableObject {
             membershipProposalSink: { [weak self] record, createdAt in
                 self?.recordPendingRequestObservation(
                     groupIdHex: groupIdHex, record: record, createdAt: createdAt)
+            },
+            profileSink: { [weak self] claim, senderKey in
+                self?.receivedProfileSink(claim, senderKey)
             }
         )
         // THE ORDERING RULE — persist first, advance the cursor second, and hold
@@ -2610,14 +2759,101 @@ public final class ChatRepository: ObservableObject {
         // Fire-and-forget, same non-nesting argument as the sink above.
         rotatePushRoutingSecretIfMembershipShrank(
             groupIdHex: groupIdHex, previousMemberKeys: membersBeforePoll)
+        // ADR-0048 §2 — and did someone else's Add land? Same before/after
+        // roster comparison, other direction. Only schedules.
+        noteProfileGrowthIfMembershipGrew(
+            groupIdHex: groupIdHex, previousMemberKeys: membersBeforePoll)
     }
 
-    /// Phase 3a9 — closure the UI attaches to dispatch
-    /// inbound call-signaling bytes into its
-    /// ``CallSession`` state machine. `nil` when no call
-    /// surface is attached; the per-record poll just drops
-    /// the payload.
-    public var callSignalingSink: ((String, Data) -> Void)?
+    /// The app-level ``CallHost``'s inbound 1x1 call-signaling feed. Claimed
+    /// once, by the composition root (``CallHost/attach(to:)``) — never by a
+    /// chat view model, which is what used to make an incoming call ring only
+    /// while that chat was on screen. `nil` when no host is attached; the row is
+    /// then dropped.
+    ///
+    /// Only ever handed a body ``CallSignalingRoute`` allows through (C-11):
+    /// offer / answer / candidate, and `CallEnd`, which the host drops unless it
+    /// names the active call on the group that call lives in (C-12). Group-control
+    /// bodies never reach it — they fold into ``groupCalls`` instead.
+    ///
+    /// Called synchronously, in journal order, from inside the non-suspending
+    /// apply region of every receive path; the handler must not suspend.
+    var callSignalingSink: ((InboundCallRow) -> Void)?
+
+    /// Per-chat ongoing group call, keyed by hex group id, as observed on the
+    /// group journal (`GroupCallStart` / `GroupCallJoin` / `GroupCallLeave` /
+    /// `CallEnd`).
+    ///
+    /// Held HERE rather than on a view model so it is fed by every receive
+    /// path — the open chat's long poll and the foreground receive of every
+    /// other group alike. In memory only: a relaunch forgets an in-progress call
+    /// until its next journal activity.
+    @Published private(set) var groupCalls: [String: OngoingGroupCall] = [:]
+
+    /// Classify one decrypted call-signaling payload and deliver it.
+    ///
+    /// Group-control bodies update ``groupCalls``; everything the 1x1 path may
+    /// see goes to ``callSignalingSink``. The split is ``CallSignalingRoute``,
+    /// so the C-11 rule lives in one tested place rather than in each sink.
+    ///
+    /// `senderLeaf` is the MLS sender leaf of the journal row that carried the
+    /// payload. A group-control body naming a different leaf is dropped
+    /// (``GroupCallSignal/speaksFor(senderLeaf:)``); it never reaches the
+    /// record.
+    ///
+    /// This is the ONE funnel every receive path reaches (the poll's apply and
+    /// the ADR-0045 sweep's verdict read both call it, and the foreground
+    /// receive of non-open groups is the same poll), so the leaf check cannot be
+    /// skipped by arriving another way.
+    func routeCallSignaling(
+        groupIdHex: String,
+        messageId: Int64,
+        payload: Data,
+        createdAt: String,
+        senderLeaf: UInt32?
+    ) {
+        let body: FfiCallSignalingBody
+        do {
+            body = try parseCallSignaling(plaintext: payload)
+        } catch {
+            NSLog("parseCallSignaling failed: %@", error.localizedDescription)
+            return
+        }
+        let route = CallSignalingRoute.of(body)
+        if let signal = route.groupSignal, !signal.speaksFor(senderLeaf: senderLeaf) {
+            NSLog("group-call signal dropped: claimed leaf does not match the MLS sender")
+        } else if let signal = route.groupSignal {
+            let rowMs = Self.parseDsTimestampMs(createdAt)
+            if case .start = signal, rowMs == nil {
+                // The start time is bounded by the server's row stamp; with no
+                // readable stamp there is nothing to bound it by, so the
+                // announce is dropped rather than trusted on the sender's word
+                // or on a local clock.
+                NSLog("group-call start dropped: unparseable DS created_at")
+            } else {
+                applyGroupCallSignal(
+                    groupIdHex: groupIdHex,
+                    signal: signal,
+                    atMs: rowMs ?? Self.nowMs()
+                )
+            }
+        }
+        if route.forwardToOneToOne {
+            callSignalingSink?(
+                InboundCallRow(
+                    groupIdHex: groupIdHex, messageId: messageId, createdAt: createdAt, body: body))
+        }
+    }
+
+    /// Fold one group-call signal into ``groupCalls``. Also the path for this
+    /// device's OWN signals, which MLS never echoes back to their sender.
+    func applyGroupCallSignal(groupIdHex: String, signal: GroupCallSignal, atMs: Int64) {
+        let next = GroupCallReducer.apply(
+            signal, to: groupCalls[groupIdHex], rowCreatedAtMs: atMs)
+        if next != groupCalls[groupIdHex] {
+            groupCalls[groupIdHex] = next
+        }
+    }
 
     /// ADR-0024 — closure the chat view model attaches to receive
     /// inbound typing / read-receipt status events for a group (by
@@ -2626,6 +2862,67 @@ public final class ChatRepository: ObservableObject {
     /// a monotone per-leaf read watermark. `nil` when no chat
     /// surface is attached; the per-record poll just drops them.
     public var chatStatusSink: ((String, ChatStatusEvent) -> Void)?
+
+    // MARK: - Foreground receive support
+
+    /// How many chat screens currently have each group open (a count, not a
+    /// flag: SwiftUI can briefly hold an outgoing and an incoming screen for the
+    /// same chat during a transition).
+    ///
+    /// An open chat long-polls itself, so ``ForegroundReceiveScheduler`` skips
+    /// it, and what it applies is being read, so it does not count as unread.
+    private var openChats: [String: Int] = [:]
+
+    /// See ``ChatThread/unread``.
+    private var unreadCounts: [String: Int] = [:]
+
+    /// A chat screen started showing (and long-polling) `groupIdHex`. Clears
+    /// the group's unread count.
+    func chatScreenOpened(groupIdHex: String) {
+        openChats[groupIdHex, default: 0] += 1
+        if unreadCounts.removeValue(forKey: groupIdHex) != nil {
+            state = state.with(threads: buildThreadList())
+        }
+    }
+
+    /// The matching close for ``chatScreenOpened(groupIdHex:)``.
+    func chatScreenClosed(groupIdHex: String) {
+        guard let count = openChats[groupIdHex] else { return }
+        if count <= 1 {
+            openChats.removeValue(forKey: groupIdHex)
+        } else {
+            openChats[groupIdHex] = count - 1
+        }
+    }
+
+    func isChatOpen(groupIdHex: String) -> Bool {
+        openChats[groupIdHex] != nil
+    }
+
+    /// Every group the foreground receive may poll: loaded, and still a member
+    /// of. Sorted, so the round robin visits them in a stable order.
+    func receivableGroupIds() -> [String] {
+        groups.keys
+            .filter { !membershipEnded(membershipStateNow(groupIdHex: $0)) }
+            .sorted()
+    }
+
+    /// The group's journal cursor, or `nil` for an unknown group. The scheduler
+    /// compares it across a poll to tell whether the poll consumed rows.
+    func journalCursor(groupIdHex: String) -> Int64? {
+        groups[groupIdHex]?.cursor
+    }
+
+    /// Count what a receive path just applied towards the chat list's unread
+    /// badge — unless the chat is open, in which case it is being read.
+    private func noteAppliedForUnread(_ events: [IncomingChatEvent], groupIdHex: String) {
+        unreadCounts[groupIdHex] = UnreadCounting.next(
+            current: unreadCounts[groupIdHex] ?? 0,
+            applied: events,
+            chatOpen: isChatOpen(groupIdHex: groupIdHex)
+        )
+        if unreadCounts[groupIdHex] == 0 { unreadCounts.removeValue(forKey: groupIdHex) }
+    }
 
     /// Pull new messages for every active group. Per-group
     /// failures are swallowed so one bad apple doesn't block the
@@ -2640,6 +2937,27 @@ public final class ChatRepository: ObservableObject {
                 continue
             }
         }
+    }
+
+    // MARK: - KeyPackage publication
+
+    /// Publish a fresh KeyPackage minted on the long-lived
+    /// ``canonicalIdentity``, so a Welcome sent to it can actually be
+    /// opened on this device.
+    ///
+    /// Order is mint → durable snapshot persist → upload, and a failed
+    /// persist aborts the upload (fail closed: never publish a KeyPackage
+    /// whose private keys might not survive a relaunch). Requests coalesce
+    /// into at most one pass per burst — see ``KeyPackageRepublisher``.
+    ///
+    /// Called after every chat bootstrap (each session start, including the
+    /// silent relaunch restore) and after every Welcome join attempt. A
+    /// no-op until the repository is bootstrapped with a session token.
+    /// Returns the driver task so a caller can await completion; production
+    /// callers fire and forget.
+    @discardableResult
+    public func republishKeyPackage() -> Task<Void, Never> {
+        keyPackageRepublisher.request()
     }
 
     // MARK: - Internals
@@ -2922,6 +3240,8 @@ public final class ChatRepository: ObservableObject {
         // the direct add path re-broadcasts it. No-op when this device holds
         // none.
         if addedCount > 0 { redistributePushRoutingSecret(groupIdHex: groupIdHex) }
+        // ADR-0048 §2 — a swept Add is growth too.
+        noteProfileGrowthIfMembershipGrew(groupIdHex: groupIdHex, previousMemberKeys: before)
         return outcome
     }
 
@@ -2990,27 +3310,27 @@ public final class ChatRepository: ObservableObject {
                     // loop does, and a skipped row must surface nothing.
                     let processed = try record.group.processIncomingVerifyingRoles(
                         identity: identity, bytes: row.payload)
+                    let event = ChatClient.toEvent(
+                        messageId: row.id,
+                        createdAt: row.createdAt,
+                        processed: processed,
+                        // ADR-0023 — the SECOND receive path, and it must
+                        // resolve identically to the poll: the roster is read
+                        // here, one line after the apply, in the epoch this row
+                        // decrypted at. These rows are gone from the poll's
+                        // future forever, so an author resolved wrongly here is
+                        // resolved wrongly for good. It passes the GROUP, not a
+                        // resolver of its own — the two paths are then left
+                        // nothing to disagree about.
+                        group: record.group
+                    )
+                    self.noteAppliedForUnread([event], groupIdHex: groupIdHex)
                     record.consumeEvents(
-                        [
-                            ChatClient.toEvent(
-                                messageId: row.id,
-                                createdAt: row.createdAt,
-                                processed: processed,
-                                // ADR-0023 — the SECOND receive path, and it
-                                // must resolve identically to the poll: the
-                                // roster is read here, one line after the
-                                // apply, in the epoch this row decrypted at.
-                                // These rows are gone from the poll's future
-                                // forever, so an author resolved wrongly here
-                                // is resolved wrongly for good. It passes the
-                                // GROUP, not a resolver of its own — the two
-                                // paths are then left nothing to disagree
-                                // about.
-                                group: record.group
-                            )
-                        ],
-                        callSignalingSink: { [weak self] payload in
-                            self?.callSignalingSink?(groupIdHex, payload)
+                        [event],
+                        callSignalingSink: { [weak self] messageId, payload, createdAt, senderLeaf in
+                            self?.routeCallSignaling(
+                                groupIdHex: groupIdHex, messageId: messageId, payload: payload,
+                                createdAt: createdAt, senderLeaf: senderLeaf)
                         },
                         chatStatusSink: { [weak self] status in
                             self?.chatStatusSink?(groupIdHex, status)
@@ -3028,6 +3348,9 @@ public final class ChatRepository: ObservableObject {
                         membershipProposalSink: { [weak self] proposal, createdAt in
                             self?.recordPendingRequestObservation(
                                 groupIdHex: groupIdHex, record: proposal, createdAt: createdAt)
+                        },
+                        profileSink: { [weak self] claim, senderKey in
+                            self?.receivedProfileSink(claim, senderKey)
                         }
                     )
                     // Per row, and deliberately not deferred to the end of the
@@ -3959,7 +4282,7 @@ public final class ChatRepository: ObservableObject {
     }
 
     private func buildThreadList() -> [ChatThread] {
-        groups.values.map { $0.toThread() }
+        groups.map { hex, record in record.toThread(unread: unreadCounts[hex] ?? 0) }
             .sorted { $0.groupIdHex < $1.groupIdHex }
     }
 
@@ -4040,16 +4363,21 @@ public struct ChatThread: Equatable {
     /// and the state is TERMINAL, so a snapshot can never be stale in the
     /// direction that matters.
     public let membershipEnded: Bool
+    /// Incoming messages this device applied while the chat was not open, since
+    /// it was last opened here. In memory only; see ``UnreadCounting``.
+    public let unread: Int
 
     public init(
         groupIdHex: String,
         messages: [ChatMessage],
         cursor: Int64,
+        unread: Int = 0,
         membershipEnded: Bool = false
     ) {
         self.groupIdHex = groupIdHex
         self.messages = messages
         self.cursor = cursor
+        self.unread = unread
         self.membershipEnded = membershipEnded
     }
 }
@@ -4310,11 +4638,12 @@ private final class GroupRecord {
     /// Events must arrive in journal order; the op fold assumes it.
     func consumeEvents(
         _ events: [IncomingChatEvent],
-        callSignalingSink: ((Data) -> Void)? = nil,
+        callSignalingSink: ((Int64, Data, String, UInt32?) -> Void)? = nil,
         chatStatusSink: ((ChatStatusEvent) -> Void)? = nil,
         pushRoutingSecretSink: ((Data, UInt64, UInt32?) -> Void)? = nil,
         committerBeaconSink: ((UInt32?, String) -> Void)? = nil,
-        membershipProposalSink: ((ProposalRecord, String) -> Void)? = nil
+        membershipProposalSink: ((ProposalRecord, String) -> Void)? = nil,
+        profileSink: ((ProfileClaim, MemberIdentity?) -> Void)? = nil
     ) {
         for event in events {
             switch event {
@@ -4372,11 +4701,12 @@ private final class GroupRecord {
                         createdAt: createdAt
                     )
                 )
-            case .callSignaling(_, let payloadBytes, _):
-                // Phase 3a9 — route into the CallSession
-                // state machine. Out-of-band — never
-                // touches the chat timeline.
-                callSignalingSink?(payloadBytes)
+            case .callSignaling(let messageId, let payloadBytes, let createdAt, let senderLeaf):
+                // Phase 3a9 — route into the app-level call host (1x1) or the
+                // group-call record (group bodies). Out-of-band — never touches
+                // the chat timeline. The DS message id rides along: it is half
+                // of the call host's exactly-once key.
+                callSignalingSink?(messageId, payloadBytes, createdAt, senderLeaf)
             case .externalJoinRequest(_, _, let retained, _):
                 // ADR-0027 (G-3) — a non-member's external Add proposal,
                 // retained pending an owner/admin approval. Not a timeline
@@ -4422,6 +4752,11 @@ private final class GroupRecord {
                 // it with the DS row's time; the core's retained pending set
                 // stays the truth about what is pending.
                 membershipProposalSink?(record, createdAt)
+            case .profile(_, let profile, let senderKey, _):
+                // ADR-0048 — a member's profile. Not a timeline row: routed out
+                // with the signature key resolved at receipt (C-68), which is
+                // the only identity it may ever be stored under.
+                profileSink?(profile, senderKey)
             }
         }
     }
@@ -4497,11 +4832,12 @@ private final class GroupRecord {
         }
     }
 
-    func toThread() -> ChatThread {
+    func toThread(unread: Int = 0) -> ChatThread {
         ChatThread(
             groupIdHex: DsClient.pseudonymHex(groupId),
             messages: messages,
             cursor: cursor,
+            unread: unread,
             // ADR-0045 UX §6.2.4 — `nil` (a torn handle) reports `false`: an
             // unreadable group is not evidence of an eviction, and this line
             // is a claim about fact rather than about capability.

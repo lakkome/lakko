@@ -1,0 +1,198 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+/**
+ * The decisions the app-level call host takes for a GROUP (SFU) call, kept pure
+ * so they can be tested — vitest runs in plain node, without jsdom and without
+ * the Solid transform, so nothing reachable only from `CallHostContext.tsx` can
+ * be asserted at all.
+ *
+ * ## Why the group call moved
+ *
+ * The 1x1 call had already moved to the call host; the group call was still
+ * created and owned by `routes/Chat.tsx`. Three defects followed from that:
+ *
+ *   - **Leaving the chat left the call.** The view's cleanup ran
+ *     `leaveGroupCall`, so navigating to Home, Contacts or another chat hung the
+ *     SFU session up and published the Leave (a confirmation prompt only asked
+ *     the user to choose between one screen and the call).
+ *   - **The call key froze outside the chat.** The mid-call SFrame rekey
+ *     (G-18 / ADR-0029) was an effect over the chat view's `membersVersion`, a
+ *     counter only that view bumps. Nothing else noticed an epoch advance.
+ *   - **A call started in a chat that was not open surfaced nowhere.** The
+ *     group-call record already heard the start from the background receive,
+ *     but only the chat view rendered it.
+ *
+ * The host now owns the session, its UI adapter, the in-call overlay and the
+ * hang-up; the rekey is driven by the per-group MLS lock draining
+ * (`mls/group-lock.ts` `onGroupMlsIdle`), which every epoch-moving region on
+ * every receive path runs under; and the call lane of the background receive
+ * long-polls the call's group while the chat is closed.
+ */
+
+/** Why this device is leaving a group call. */
+export type GroupLeaveReason = "hungUp" | "error";
+
+export interface GroupCallLeaveInput {
+  /** What the caller asked for. */
+  readonly reason: GroupLeaveReason;
+  /** The SFU session itself reported `failed` — overrides `reason`. */
+  readonly sessionFailed: boolean;
+  /** This device published its `GroupCallJoin`. */
+  readonly joinPublished: boolean;
+  /** This device published the `GroupCallStart`. */
+  readonly initiator: boolean;
+  /** This device's leaf in the group. */
+  readonly ownLeaf: number;
+  /** Joined leaves of the call's record at leave time, `null` when the record
+   *  is gone (another member already ended it). */
+  readonly recordJoinedLeaves: ReadonlySet<number> | null;
+}
+
+export interface GroupCallLeavePlan {
+  /** The reason carried by the Leave / End bodies. */
+  readonly leaveReason: GroupLeaveReason;
+  /** Publish a `GroupCallLeave`. */
+  readonly publishLeave: boolean;
+  /** Publish the terminating `CallEnd`. */
+  readonly publishEnd: boolean;
+}
+
+/**
+ * What leaving a group call has to tell the group.
+ *
+ * A Leave only if this device announced a Join. A `CallEnd` only when the local
+ * record shows nobody else joined, and only from a device that was actually in
+ * the call (joined) or that started it: a joiner whose connection failed before
+ * it ever joined must not end a call other members may be about to enter.
+ */
+export function planGroupCallLeave(input: GroupCallLeaveInput): GroupCallLeavePlan {
+  const leaveReason: GroupLeaveReason = input.sessionFailed ? "error" : input.reason;
+  const publishLeave = input.joinPublished;
+  let publishEnd = false;
+  if (input.joinPublished || input.initiator) {
+    const othersJoined =
+      input.recordJoinedLeaves !== null &&
+      [...input.recordJoinedLeaves].some((leaf) => leaf !== input.ownLeaf);
+    publishEnd = !othersJoined;
+  }
+  return { leaveReason, publishLeave, publishEnd };
+}
+
+/** What the host does when a group's MLS lock queue drains. */
+export type GroupCallEpochAction =
+  /** Not the call's group, nothing changed, or the epoch cannot be read. */
+  | "none"
+  /** Re-derive the call seed at the current epoch and rekey the session. */
+  | "rekey"
+  /** The device is no longer in the group: tear the call down locally. */
+  | "end-locally";
+
+export interface GroupCallEpochInput {
+  /** The group of the live group call (one with a session), or `null`. */
+  readonly callGroupIdB64: string | null;
+  /** The group whose lock queue drained. */
+  readonly settledGroupIdB64: string;
+  /** The chat is still in the registry. */
+  readonly groupJoined: boolean;
+  /** `Group.isActive`, `undefined` when it cannot be read. */
+  readonly isActive: boolean | undefined;
+  /** The epoch the session's current seed was derived at. */
+  readonly keyedEpoch: bigint | null;
+  /** The group's epoch now, `undefined` when it cannot be read. */
+  readonly currentEpoch: bigint | undefined;
+}
+
+/**
+ * Decide whether a drained lock queue means the live group call must rekey.
+ *
+ * Fail-closed in both directions (invariant #4): an unreadable epoch keeps the
+ * current key rather than guessing, and a group this device has left ends the
+ * call rather than keeping media flowing under a key no member will rotate
+ * again. `Group.isActive` going false is permanent (ADR-0045 UX §6.2), and every
+ * exporter call on such a group raises, so there would be nothing to rekey to.
+ */
+export function decideGroupCallEpochChange(input: GroupCallEpochInput): GroupCallEpochAction {
+  if (input.callGroupIdB64 === null || input.callGroupIdB64 !== input.settledGroupIdB64) {
+    return "none";
+  }
+  if (!input.groupJoined || input.isActive === false) return "end-locally";
+  if (input.currentEpoch === undefined) return "none";
+  if (input.keyedEpoch !== null && input.keyedEpoch === input.currentEpoch) return "none";
+  return "rekey";
+}
+
+/** A live group call some chat has recorded. */
+export interface LiveGroupCallRef {
+  readonly groupIdB64: string;
+  readonly callIdHex: string;
+}
+
+export interface GroupCallBannerInput {
+  /** Every chat with a live group call, in registry order. */
+  readonly live: readonly LiveGroupCallRef[];
+  /** The chat view for this group is mounted (it shows its own banner). */
+  readonly isChatOpen: (groupIdB64: string) => boolean;
+  /** Whether this device is still a member (`Group.isActive !== false`). */
+  readonly isMember: (groupIdB64: string) => boolean;
+  /** Any call — 1x1 or group — is ringing, starting or live on this device. */
+  readonly inAnyCall: boolean;
+  /** Calls the user dismissed, or left, this session. */
+  readonly dismissedCallIds: ReadonlySet<string>;
+}
+
+/**
+ * The group call to announce on screens other than its chat, or `null`.
+ *
+ * Nothing while this device is in a call (one call at a time), nothing for a
+ * chat that is open (its own banner already offers Join), nothing for a group
+ * this device has left (a call control asserts a live E2EE session — UX
+ * §6.2.11), and nothing for a call the user dismissed or has just left.
+ */
+export function selectGroupCallBanner(input: GroupCallBannerInput): LiveGroupCallRef | null {
+  if (input.inAnyCall) return null;
+  for (const ref of input.live) {
+    if (input.dismissedCallIds.has(ref.callIdHex)) continue;
+    if (input.isChatOpen(ref.groupIdB64)) continue;
+    if (!input.isMember(ref.groupIdB64)) continue;
+    return ref;
+  }
+  return null;
+}
+
+/** What a chat's call buttons do. */
+export type ChatCallAffordance =
+  /** No call buttons: membership ended, or a call is already running. */
+  | "hidden"
+  /** Join the group call already in progress in this chat. */
+  | "join-group"
+  /** Start a new group call over the SFU. */
+  | "start-group"
+  /** Place a 1x1 P2P call. */
+  | "start-one-to-one";
+
+export interface ChatCallAffordanceInput {
+  readonly membershipEnded: boolean;
+  /** A 1x1 call is ringing / dialing / live anywhere. */
+  readonly oneToOneInCall: boolean;
+  /** A group call is starting or live anywhere. */
+  readonly groupCallActive: boolean;
+  /** This chat has a live group-call record. */
+  readonly liveCallInThisChat: boolean;
+  readonly memberCount: number;
+}
+
+/**
+ * The chat header's call buttons.
+ *
+ * A call already running anywhere hides them: returning to the chat of a live
+ * group call must show that call (the host's overlay), never offer to start a
+ * second one. A group call already in progress in this chat is JOINED, never
+ * shadowed by a new one; otherwise a group chat (more than two members) starts
+ * an SFU call and a two-member chat a 1x1 P2P call.
+ */
+export function chatCallAffordance(input: ChatCallAffordanceInput): ChatCallAffordance {
+  if (input.membershipEnded || input.oneToOneInCall || input.groupCallActive) return "hidden";
+  if (input.liveCallInThisChat) return "join-group";
+  return input.memberCount > 2 ? "start-group" : "start-one-to-one";
+}

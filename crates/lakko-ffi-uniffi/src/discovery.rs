@@ -34,15 +34,39 @@
 use std::sync::Mutex;
 
 use lakko_discovery_client::{
-    normalize_username as inner_normalize, DiscoveryClientError, OprfBlinder as InnerBlinder,
+    normalize_username as inner_normalize, validate_username as inner_validate,
+    DiscoveryClientError, OprfBlinder as InnerBlinder,
 };
 
 use crate::FfiError;
 
 impl From<DiscoveryClientError> for FfiError {
     fn from(e: DiscoveryClientError) -> Self {
-        Self::Discovery(e.to_string())
+        match e {
+            // The typed ADR-0048 §4 reason becomes its own variant, so the
+            // blinder's refusal is branchable exactly like `validate_username`'s.
+            DiscoveryClientError::InvalidUsername(reason) => reason.into(),
+            other => Self::Discovery(other.to_string()),
+        }
     }
+}
+
+/// Normalise `input` and require the ADR-0048 §4 username rule — ASCII
+/// `[a-z0-9_]`, 3 to 32 characters. Returns the normalised form.
+///
+/// What signup and search fields call as the user types, so the reason can
+/// be shown and a lookup is never sent for a name that fails. The blinder
+/// runs the same check, so a caller that skips this still cannot register
+/// or look up a non-conforming name.
+///
+/// # Errors
+///
+/// * [`FfiError::UsernameEmpty`] / [`FfiError::UsernameTooShort`] /
+///   [`FfiError::UsernameTooLong`] / [`FfiError::UsernameInvalidCharacters`]
+///   — the reason is the variant; the message never contains the input.
+#[uniffi::export]
+pub fn validate_username(input: String) -> Result<String, FfiError> {
+    inner_validate(&input).map_err(Into::into)
 }
 
 /// Normalise the typed username and return the canonical form.
@@ -93,9 +117,10 @@ impl OprfBlinder {
     ///
     /// # Errors
     ///
-    /// * [`FfiError::Discovery`] with an "empty username" message
-    ///   when the input reduces to an empty string after
-    ///   normalisation (e.g. caller passed `"@"` or `"   "`).
+    /// * [`FfiError::UsernameEmpty`] / [`FfiError::UsernameTooShort`] /
+    ///   [`FfiError::UsernameTooLong`] /
+    ///   [`FfiError::UsernameInvalidCharacters`] — the name fails the
+    ///   ADR-0048 §4 rule, so it can be neither registered nor looked up.
     /// * [`FfiError::Discovery`] with a "voprf" message on a
     ///   blind failure — extremely unlikely on a sane RNG;
     ///   treat as fatal.
@@ -118,8 +143,9 @@ impl OprfBlinder {
     ///
     /// # Errors
     ///
-    /// Same as [`Self::blind`] — an empty-after-normalisation handle or
-    /// an OPRF blind failure.
+    /// [`FfiError::Discovery`] for an empty-after-normalisation handle or
+    /// an OPRF blind failure. The ADR-0048 §4 username rule is NOT applied
+    /// to channel handles — a separate namespace with its own policy.
     #[uniffi::constructor]
     pub fn blind_channel(handle: String) -> Result<Self, FfiError> {
         let (blinder, blinded_b64) = InnerBlinder::blind_channel(&handle)?;
@@ -201,10 +227,44 @@ mod tests {
     #[test]
     fn blind_rejects_empty_after_normalisation() {
         match OprfBlinder::blind("   @   ".to_string()) {
-            Err(FfiError::Discovery(_)) => {},
-            Err(other) => panic!("expected Discovery, got {other:?}"),
+            Err(FfiError::UsernameEmpty(_)) => {},
+            Err(other) => panic!("expected UsernameEmpty, got {other:?}"),
             Ok(_) => panic!("expected empty-username rejection"),
         }
+    }
+
+    #[test]
+    fn validate_username_surfaces_each_reason_as_its_variant() {
+        assert_eq!(validate_username("@Bob_42".to_string()).unwrap(), "bob_42");
+        assert!(matches!(
+            validate_username("@".to_string()),
+            Err(FfiError::UsernameEmpty(_))
+        ));
+        assert!(matches!(
+            validate_username("al".to_string()),
+            Err(FfiError::UsernameTooShort(_))
+        ));
+        assert!(matches!(
+            validate_username("a".repeat(33)),
+            Err(FfiError::UsernameTooLong(_))
+        ));
+        assert!(matches!(
+            validate_username("p\u{430}vel".to_string()),
+            Err(FfiError::UsernameInvalidCharacters(_))
+        ));
+    }
+
+    #[test]
+    fn blind_surfaces_the_username_rule_refusal() {
+        match OprfBlinder::blind("ali-ce".to_string()) {
+            Err(FfiError::UsernameInvalidCharacters(msg)) => {
+                assert!(!msg.contains("ali"), "the message must not echo the input");
+            },
+            Err(other) => panic!("expected UsernameInvalidCharacters, got {other:?}"),
+            Ok(_) => panic!("expected a refusal"),
+        }
+        // Channel handles keep their own policy.
+        assert!(OprfBlinder::blind_channel("my-channel".to_string()).is_ok());
     }
 
     #[test]

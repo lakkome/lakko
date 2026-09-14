@@ -1317,6 +1317,7 @@ mod tests {
             bob_from_pseudonym,
             1_700_000_000_000, // valid_after_ms
             b"",               // privacy_pass_token (empty for the test)
+            None,              // profile (ADR-0048)
             intro,
         )
         .expect("Bob's ContactRequest compose must succeed");
@@ -1332,7 +1333,8 @@ mod tests {
         assert_eq!(req.from_account_id, Some(bob_account_id));
 
         // ---- 6. Alice opens the HPKE envelope -----------
-        let plaintext = open_envelope(&req, &alice_x25519_priv).expect("Alice's open must succeed");
+        let (_, plaintext) =
+            open_envelope(&req, &alice_x25519_priv).expect("Alice's open must succeed");
         assert_eq!(
             plaintext.as_slice(),
             intro.as_ref(),

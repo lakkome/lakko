@@ -39,6 +39,7 @@ import { callActions, type Participant } from "../state/call-state";
 import {
   SfuCallSession,
   type SfuCallConfig,
+  type SfuCallState,
   type SfuRemoteTrack,
   type VideoPublishState,
 } from "./sfu-call-session";
@@ -62,6 +63,10 @@ export interface SfuCallUiOptions {
    *  participant derives from the shared seed, read aloud out-of-band to
    *  detect a man-in-the-middle. Omitted → the pill shows no fingerprint. */
   readonly safetyNumber?: string | undefined;
+  /** Every session lifecycle transition, after the store has been updated.
+   *  The chat uses it to announce the call on the group journal: a
+   *  `GroupCallJoin` once `connected`, a `GroupCallLeave` on `failed`. */
+  readonly onSessionStateChange?: (state: SfuCallState) => void;
 }
 
 /** Handle returned by {@link createSfuCallUi}. */
@@ -249,6 +254,7 @@ export function createSfuCallUi(
         case "idle":
           break;
       }
+      options.onSessionStateChange?.(state);
     },
     onWelcome: (selfPeerId, roster): void => {
       const remotes = roster

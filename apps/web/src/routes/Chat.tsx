@@ -36,6 +36,7 @@ import {
   createMemo,
   createSignal,
   For,
+  on,
   onMount,
   onCleanup,
   Show,
@@ -45,25 +46,18 @@ import { A, useNavigate, useParams } from "@solidjs/router";
 import { useAuth } from "../auth/AuthContext";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
 import { groupIdHex as hexOf } from "../devices/sync/state";
+import { useCallHost } from "../calls/CallHostContext";
+import { useBackgroundReceive } from "../chat/BackgroundReceiveContext";
+import { eventToPersistedMessage, mergeForegroundSlot } from "../chat/background-log";
+import { memberKeysOf, peerName } from "../chat/peer-name";
+import { groupCallsFor } from "../calls/group-call-store";
+import { chatCallAffordance, type ChatCallAffordance } from "../calls/group-call-host";
 import {
-  CallSession,
-  mintCallId,
-  type WebCallState,
-  type WebCallEndReason,
-  type WebConnectionStats,
-  type VideoPublishState,
-} from "../calls/call-session";
-import {
-  callActions,
-  callState as callUi,
-  qualityColour,
-  type Participant,
-  type QualityTier,
-} from "../state/call-state";
-import { createSfuCallUi, type SfuCallUiHandle } from "../calls/sfu-call-ui";
-import { sfuBaseUrl } from "../calls/sfu-config";
-import { CallJwtClient } from "../calls/call-jwt-client";
-import Call from "./Call";
+  NO_GROUP_CALLS,
+  selectLiveGroupCall,
+  type GroupCallRecord,
+  type GroupCallRecords,
+} from "../calls/group-call-record";
 import { loadWasm as loadWasmForCalls } from "../wasm";
 // ADR-0045 UX §6 — the core's own answer to *will the identical call work
 // later*. Imported as a named export rather than through `loadWasm` because
@@ -74,24 +68,48 @@ import {
   deleteGroupFromMessageLog,
   loadMessageLog,
   MESSAGE_LOG_VERSION,
-  saveMessageLog,
-  type MessageLogPayload,
-  type PersistedAttachment,
-  type PersistedGroup,
+  updateMessageLog,
   type PersistedMessage,
 } from "../chat/message-log-store";
 import { getDeviceKey } from "../auth/key-store";
 import { base64Decode, base64Encode, base64UrlDecodeNoPad } from "../auth/account-id";
-import { ChatClient } from "../chat/client";
-import { makeCallSignalingPublisher } from "../chat/call-signaling-publish";
-import { ContactsClient } from "../contacts/client";
+import { ChatClient, type PollMessagesResult } from "../chat/client";
+import { isDsNetworkFailure } from "../ds/client";
 import {
-  loadAccepted,
-  peerContactByMemberPubkeys,
-} from "../contacts/local-store";
+  createWakeLatch,
+  LONG_POLL_WAIT_SECS,
+  NETWORK_BACKOFF_MS,
+  runLongPollLoop,
+  sleepCancellable,
+} from "../ds/long-poll-loop";
+import { ContactsClient } from "../contacts/client";
+import { loadAccepted } from "../contacts/local-store";
 import type { IncomingChatEvent } from "../chat/client";
 import {
+  attachmentRefFromPersisted,
+  b64UrlDecode,
+  persistedFromAttachmentRef,
+} from "../chat/persisted-attachment";
+// ADR-0047 — voice messages, video notes, the emoji picker and GIFs. Every
+// rule lives in a plain module under `media/` (tested there); this file wires
+// them into the timeline and the composer.
+import { EmojiPicker } from "../media/EmojiPicker";
+import { MediaAttachment, type MediaUpload } from "../media/MediaBubbles";
+import {
+  RecordButton,
+  RecorderNotices,
+  RecordingBar,
+  VideoNoteOverlay,
+  recorderBusy,
+} from "../media/MediaComposer";
+import { createMediaHub, mediaKey, type MediaHub } from "../media/media-hub";
+import { createRecorder } from "../media/recording-controller";
+import type { CaptureResult } from "../media/media-capture";
+import { isSingleEmojiGrapheme } from "../media/emoji/emoji-index";
+import { MAX_GIF_FULL_BYTES, fetchGifMedia, type GifItem } from "../media/gif-client";
+import {
   composeEnvelope,
+  encryptAndUploadBytes,
   composeEditEnvelope,
   composeDeleteEnvelope,
   composeReactionEnvelope,
@@ -100,14 +118,19 @@ import {
   downloadAndDecryptRef,
   encryptAndUploadFile,
   formatAttachmentSize,
-  isInlinePreviewable,
   saveDecryptedBytes,
+  type AttachmentMediaMeta,
   type AttachmentRefBytes,
+  type ThumbRefBytes,
   AttachmentSizeError,
   AttachmentMissingError,
   MAX_ATTACHMENT_BYTES,
 } from "../chat/attachments";
 import { useChats, type ActiveGroup } from "../chat/ChatContext";
+import { useProfiles } from "../profile/ProfileContext";
+import { membersGrew } from "../profile/membership-growth";
+import { createUsernameCheck } from "../profile/username-field";
+import { mayLookUp, usernameReason } from "../profile/rules";
 import {
   ensureGroupPushRouting,
   memberSignatureKeys,
@@ -288,7 +311,13 @@ type TimelineRow =
       tempId: number;
       plaintext: string;
       attachments: AttachmentRefBytes[];
-      ack: "pending" | "sent";
+      /** ADR-0047 — `"failed"` is an outgoing media message whose upload or
+       *  publish failed: it stays in the timeline with `Not sent · Retry`
+       *  and nothing reached the other side. Never persisted. */
+      ack: "pending" | "sent" | "failed";
+      /** ADR-0047 — set on an outgoing media message: the key its local
+       *  bytes are filed under in the media hub until the upload lands. */
+      mediaLocalKey?: string;
       /** Filled when ack flips to "sent". */
       messageId?: number;
       createdAt?: string;
@@ -379,60 +408,28 @@ export default function Chat(): JSX.Element {
         when={auth.identitySecrets() !== null}
         fallback={<NeedsReauth />}
       >
+        {/* Keyed on the group id: navigating from one chat straight to another
+            (the call banner, a notification) re-uses this route component, and
+            an unkeyed view would carry one chat's timeline, cursor and receive
+            loop into the next. The id, not the entry object, is the key — the
+            registry replaces the entry on an ADR-0040 persist-abort reset, which
+            must NOT remount the view. */}
         <Show
-          when={entry() !== undefined}
+          when={entry() !== undefined ? groupIdB64() : null}
+          keyed
           fallback={<GroupNotFound />}
         >
-          <ChatView
-            entry={entry() as ActiveGroup}
-            requireIdentity={requireIdentity}
-            onLeave={() => navigate(paths.contacts)}
-          />
+          {(_id) => (
+            <ChatView
+              entry={entry() as ActiveGroup}
+              requireIdentity={requireIdentity}
+              onLeave={() => navigate(paths.contacts)}
+            />
+          )}
         </Show>
       </Show>
     </article>
   );
-}
-
-// ---------------------------------------------------------------
-// G3-3-conn-quality — in-call connection-quality display helpers
-// ---------------------------------------------------------------
-
-/**
- * Bucket a measured round-trip time into the shared
- * [`QualityTier`]. These are UX display bands (NOT measured
- * SLOs) matching the iOS / Android clients exactly: a `null`
- * RTT (pre-measurement) reads as `good` so a freshly-connected
- * call doesn't flash a red dot before the first stats sample.
- */
-function qualityTierForRtt(rttMs: number | null): QualityTier {
-  if (rttMs === null) return "good";
-  if (rttMs < 100) return "excellent";
-  if (rttMs < 200) return "good";
-  if (rttMs < 350) return "fair";
-  if (rttMs < 600) return "poor";
-  return "bad";
-}
-
-/** Format a bits-per-second rate for the in-call readout.
- *  Mirrors the `formatBps` in the Call.tsx design route. */
-function formatBps(bps: number | null): string {
-  if (bps === null) return "—";
-  if (bps >= 1_000_000) return `${(bps / 1_000_000).toFixed(1)} Mbps`;
-  if (bps >= 1_000) return `${(bps / 1_000).toFixed(0)} kbps`;
-  return `${bps} bps`;
-}
-
-/** Map a [`QualityTier`] to a concrete CSS colour for the dot. */
-function qualityDotColour(tier: QualityTier): string {
-  switch (qualityColour(tier)) {
-    case "green":
-      return "#22c55e";
-    case "yellow":
-      return "#eab308";
-    case "red":
-      return "#ef4444";
-  }
 }
 
 // ---------------------------------------------------------------
@@ -453,6 +450,20 @@ function ChatView(props: {
   // always see the current session.
   const auth = useAuth();
   const chats = useChats();
+  // ADR-0048 — profile names: the one display resolver, the received-profile
+  // store the receive loop feeds, and the publish triggers.
+  const profiles = useProfiles();
+  // The app-level 1x1 call slot and signaling queue (`calls/CallHostContext`):
+  // calls ring and survive on every screen, not just inside this view.
+  const callHost = useCallHost();
+  // The hand-off with the background receive for the chats that are not open
+  // (`chat/receive-coordinator.ts`): one shared journal cursor per group, who
+  // polls it, and the events it applied while this view was not mounted.
+  const receive = useBackgroundReceive();
+  // Claimed synchronously, before the first effect: from here on the
+  // background sweep leaves this group to this view's own long poll.
+  const releaseForeground = receive.coordinator.claimForeground(props.entry.groupIdB64);
+  onCleanup(releaseForeground);
   // Phase 2a3e2b-web — cross-device sync for per-thread state
   // (drafts now; flags / order / read cursors follow). Used
   // below to seed the composer from sibling-device drafts
@@ -493,6 +504,9 @@ function ChatView(props: {
       if (s.kind !== "session") return;
       await chats.persistSnapshot(s.account.accountId);
     },
+    // ADR-0048 §3 — an add-by-username lookup proves the binding a username
+    // verification would check.
+    onUsernameResolved: (key, username) => profiles.learnUsername(key, username),
     // ADR-0040 (G-35) — the FAIL-CLOSED persist the four commit paths run BEFORE
     // publishing: the outbox entry + the N+1 snapshot in one atomic write. A
     // throw here (no session, no device key, IDB failure) aborts the commit so
@@ -520,7 +534,19 @@ function ChatView(props: {
   });
 
   const [rows, setRows] = createSignal<TimelineRow[]>([]);
-  const [cursor, setCursor] = createSignal(0);
+  // The journal cursor. The authority is the coordinator's per-group value,
+  // shared with the background receive: a poll that ran for this group while
+  // the view was not mounted has already moved it, and a view that started from
+  // its own older copy (the debounced log write may not have landed) would
+  // re-fetch consumed rows that can never decrypt again. The local signal only
+  // makes the value reactive for the persist effect.
+  const [cursorSignal, setCursorSignal] = createSignal(0);
+  const cursor = (): number =>
+    Math.max(cursorSignal(), receive.coordinator.cursor(props.entry.groupIdB64) ?? 0);
+  const setCursor = (to: number): void => {
+    const next = receive.coordinator.noteCursor(props.entry.groupIdB64, to);
+    setCursorSignal(Math.max(cursorSignal(), next));
+  };
 
   // ADR-0023 — per-message op overlay (edit / delete / reaction).
   // Keyed on the target's DS `messageId`. In-memory + session-
@@ -583,649 +609,114 @@ function ChatView(props: {
   const [error, setError] = createSignal<string | null>(null);
   const [notice, setNotice] = createSignal<string | null>(null);
 
-  // Phase 3a8 — 1×1 call surface. Only one CallSession can
-  // ride a given chat thread at a time; the field tracks
-  // the active session (if any) + its observable state.
-  // Audio is bound to a hidden `<audio>` element via the
-  // ref below; the call overlay shows the duration / hang
-  // up button.
-  const [callState, setCallState] = createSignal<WebCallState>("idle");
-  const [callEndReason, setCallEndReason] = createSignal<WebCallEndReason | null>(null);
-  // G3-3-conn-quality — live connection-quality sample from the
-  // session's getStats poll loop. null until the first tick lands.
-  const [callConnStats, setCallConnStats] =
-    createSignal<WebConnectionStats | null>(null);
-  let activeCall: CallSession | null = null;
-  const [remoteAudioStream, setRemoteAudioStream] = createSignal<MediaStream | null>(
-    null,
-  );
-  const [audioRef, setAudioRef] = createSignal<HTMLAudioElement | null>(null);
-  // 1×1 video-call state. `videoCall` is set when the call is dialed
-  // with a camera; `localCallStream` is the local capture (mic + camera)
-  // for the self-preview tile; `remoteHasVideo` tracks whether the remote
-  // peer is sending video (set per `ontrack`).
-  const [videoCall, setVideoCall] = createSignal(false);
-  const [localCallStream, setLocalCallStream] = createSignal<MediaStream | null>(
-    null,
-  );
-  const [remoteHasVideo, setRemoteHasVideo] = createSignal(false);
-  // True while a FRESH incoming 1×1 offer advertised video (`parsed.mediaVideo`).
-  // Gates the "Accept with video" affordance on the ringing banner — an
-  // audio-only offer keeps a single "Accept". Set when the answerer session is
-  // spun up for a first-seen offer; cleared when the call ends.
-  const [remoteWantsVideo, setRemoteWantsVideo] = createSignal(false);
-  // B2a — mid-call camera-on lifecycle for the 1×1 path (off / starting /
-  // live / failed), fed by the CallSession's `onVideoPublishState`. The SFU
-  // path exposes the same via `sfuHandle().videoPublishState()`; the effect
-  // below mirrors whichever is active into the shared store.
-  const [oneToOneVideoState, setOneToOneVideoState] =
-    createSignal<VideoPublishState>("off");
-  // SFU multi-party (group) call. Distinct from the 1×1 `activeCall`
-  // above — a group chat (>2 members) routes through the Rust SFU with
-  // SFrame, while a 1×1 chat stays P2P DTLS-SRTP. `sfuHandle` is held in
-  // a signal so the remote-stream accessor reads reactively in JSX;
-  // `sfuActive` gates the in-call overlay (the SFU path leaves the 1×1
-  // `callState()` at `idle`).
-  const [sfuHandle, setSfuHandle] = createSignal<SfuCallUiHandle | null>(null);
-  // G-18 / ADR-0029 — the active SFU call's per-call id, retained so a mid-call
-  // epoch advance can re-derive the call seed at the NEW epoch. Set when a group
-  // call starts; read only while `sfuHandle()` is live (a stale value after the
-  // call ends is harmless — the rekey effect guards on the live handle).
-  let activeCallId: Uint8Array | null = null;
-  const [sfuActive, setSfuActive] = createSignal(false);
-  createEffect(() => {
-    const el = audioRef();
-    const stream = remoteAudioStream();
-    if (el !== null && stream !== null) {
-      el.srcObject = stream;
-      void el.play().catch(() => {
-        // Autoplay might be blocked until user gesture —
-        // the Accept button click on the receiver counts.
-      });
-    }
-  });
+  // Phase 3a8 — the 1x1 call surface moved to the app-level call host
+  // (`calls/CallHostContext.tsx`): it rang only while this view was mounted
+  // and ended when the user left it. The group (SFU) call followed it there.
+  // Owned by this view, it was left on unmount — navigating to Home, Contacts
+  // or another chat hung it up — and its mid-call rekey (ADR-0029) was an
+  // effect over this view's `membersVersion`, so it stopped with the view. This
+  // view now only asks the host for a call and reads the host's slot; a return
+  // to the call's chat finds the host's overlay, never a second call.
 
-  // -----------------------------------------------------------------
-  // G3-3-web-session-bind — drive the full Call.tsx in-call UI (the
-  // shared `callActions` store) from the live `CallSession`. The web
-  // analog of iOS/Android driveFrom + call-present: the rich UI is
-  // presented as a full-screen overlay over the chat for live call
-  // states, while `ringing` keeps the lightweight inline banner
-  // (Accept / Decline).
-  // -----------------------------------------------------------------
-
-  /** True while the full in-call overlay should cover the chat.
-   *  `ringing` is excluded — an incoming call shows the inline
-   *  banner until accepted. */
-  const callOverlayVisible = (): boolean => {
-    if (sfuActive()) return true;
-    const s = callState();
-    return (
-      s === "outgoing" ||
-      s === "connecting" ||
-      s === "connected" ||
-      s === "ending"
-    );
+  // Ongoing group calls this chat has heard announced (see
+  // `calls/group-call-record.ts` for the contract shared with iOS/Android).
+  const groupCalls = (): GroupCallRecords => {
+    const s = auth.state();
+    if (s.kind !== "session") return NO_GROUP_CALLS;
+    // `calls/group-call-store.ts` — fed by the call host from BOTH receive
+    // paths, so a start row consumed in the background is already here.
+    return groupCallsFor(s.account.accountId, props.entry.groupIdB64);
   };
+  // Liveness is time-based (a call with nobody in it stops being live 60 s
+  // after it started), so the selector needs a clock that ticks.
+  const [groupCallClock, setGroupCallClock] = createSignal(Date.now());
+  const groupCallClockTimer = setInterval(() => setGroupCallClock(Date.now()), 10_000);
+  onCleanup(() => clearInterval(groupCallClockTimer));
+  const liveGroupCall = createMemo<GroupCallRecord | null>(() =>
+    selectLiveGroupCall(groupCalls(), groupCallClock()),
+  );
 
-  /** Synthesised local participant. `camOn` seeds from whether this is a
-   *  video call (`videoCall()`); `micOn` seeds true. The live mic + camera
-   *  state is thereafter driven through `callActions.setMic` / `setCamera`
-   *  ↔ `setMicrophoneEnabled` / `setCameraEnabled` (see the effects below).
-   *  Quality dot tracks the live RTT sample. */
-  const localParticipant = (): Participant => ({
-    id: "local",
-    displayName: "You",
-    isLocal: true,
-    micOn: true,
-    // Initial camera state = whether this is a video call. The live
-    // toggle thereafter is the store's `camOn` (driven by the camera
-    // button + mirrored onto the session below) — this seed is read
-    // once at connect, so it does not fight the toggle.
-    camOn: videoCall(),
-    handRaised: false,
-    quality: qualityTierForRtt(callConnStats()?.rttMs ?? null),
-    speaking: false,
-    screenSharing: false,
-  });
-
-  /** Synthesised sole remote participant for the 1×1 call. The web
-   *  P2P path carries no roster, so the single remote IS this chat's
-   *  contact. ADR-0021 follow-up: resolve the linked contact's
-   *  user-chosen displayName (matched by this chat's group id), so a
-   *  rename shows in the in-call roster; fall back to the chat label,
-   *  then "Peer". Read at connect time, so a pre-call rename is
-   *  reflected. */
-  const remoteParticipant = (): Participant => ({
-    id: "peer",
-    displayName: resolvePeerName(),
-    isLocal: false,
-    micOn: true,
-    // Lights up the remote video tile once the peer's video track
-    // arrives (the effect below keeps it in sync after connect).
-    // The remote tile shows video whenever the peer has a live video track —
-    // NOT gated on whether WE started a video call, so a peer that turns their
-    // camera on mid-call (piece B2b) renders even in a call we started
-    // audio-only. In a pure-audio call `remoteHasVideo()` is false anyway.
-    camOn: remoteHasVideo(),
-    handRaised: false,
-    quality: "good",
-    speaking: false,
-    screenSharing: false,
-  });
-
-  /** Best contact name for this 1×1 chat: the linked contact's
-   *  displayName (ADR-0021), else the chat label, else "Peer". */
+  /** Best name for this chat (ADR-0048 §5) — `chat/peer-name.ts`, shared with
+   *  the call host's ringing banner. */
   const resolvePeerName = (): string => {
-    const accepted = loadAccepted();
-    // Fast path: a chat created from an accepted request carries a stored
-    // groupIdB64 link to its contact.
-    const byId = accepted.find((c) => c.groupIdB64 === props.entry.groupIdB64);
-    if (byId !== undefined && byId.displayName.length > 0) {
-      return byId.displayName;
-    }
-    // Universal: match the 1×1 peer by the group's non-self member pubkey, so
-    // an outbound or Welcome-joined chat (no stored link) still resolves.
     const own = chats.identity();
-    const ownB64 = own === null ? null : base64Encode(own.signaturePublicKey);
-    let memberB64s: string[] = [];
-    try {
-      memberB64s = (
-        props.entry.group.members() as Array<{ signaturePublicKey: Uint8Array }>
-      ).map((m) => base64Encode(m.signaturePublicKey));
-    } catch {
-      // members() can throw on a torn group; fall through to the label.
-    }
-    const byMember = peerContactByMemberPubkeys(memberB64s, ownB64, accepted);
-    if (byMember !== undefined && byMember.displayName.length > 0) {
-      return byMember.displayName;
-    }
-    return props.entry.label.length > 0 ? props.entry.label : "Peer";
+    return peerName({
+      ownKeyB64: own === null ? null : base64Encode(own.signaturePublicKey),
+      memberKeysB64: memberKeysOf(props.entry.group),
+      resolveName: (k) => profiles.resolve(k).name,
+      linkedContactName: loadAccepted().find((c) => c.groupIdB64 === props.entry.groupIdB64)
+        ?.displayName,
+      label: props.entry.label,
+    });
   };
 
-  /** Map the session's `WebCallState` onto the shared call-UI
-   *  store (phase + 1×1 roster). Called from `onStateChange`. */
-  const syncCallUiFromState = (s: WebCallState): void => {
-    switch (s) {
-      case "outgoing":
-      case "connecting":
-        callActions.setPhase({ kind: "connecting" });
-        callActions.setParticipants([localParticipant()]);
-        // 1×1 web media is P2P DTLS-SRTP, not SFrame — keep the
-        // E2EE indicator inactive. This is what hides the pill on this
-        // path: it gates on there BEING a safety number, not on which
-        // surface renders it (see calls/safety-pill.ts).
-        callActions.setE2ee({ active: false, shortFingerprint: null });
-        break;
-      case "connected":
-        callActions.setPhase({ kind: "connected" });
-        callActions.setParticipants([localParticipant(), remoteParticipant()]);
-        break;
-      case "ending":
-        // Transient — hold the connected visuals until `done`.
-        break;
-      case "idle":
-      case "ringing":
-      case "done":
-        // `ringing` uses the inline banner (no overlay); `done` /
-        // `idle` tear the overlay down.
-        callActions.reset();
-        break;
-    }
-  };
-
-  // When the user hits "End call" inside the embedded Call.tsx, it
-  // sets the store phase to `ended`; mirror that onto the real
-  // session by hanging up (idempotent — a remote-initiated end
-  // already drove the session to `done`).
-  createEffect(() => {
-    if (callUi.phase().kind !== "ended") return;
-    if (activeCall !== null) {
-      void activeCall.hangUp("hungUp");
-    }
-    const h = sfuHandle();
-    if (h !== null) {
-      h.hangUp();
-      setSfuHandle(null);
-      setSfuActive(false);
-    }
-  });
-
-  // G3-3-web-call-controls — drive the real microphone from the
-  // store's local-participant `micOn` flag. The Call.tsx mic button
-  // toggles `callActions.setMic`; this mirrors it onto the live
-  // session (idempotent — `track.enabled = on` is cheap, so the
-  // redundant calls on each quality patch are harmless). Drives whichever
-  // call kind is live — the 1×1 `activeCall` or the SFU group `sfuHandle`.
-  createEffect(() => {
-    const local = callUi.participants().find((p) => p.isLocal);
-    if (local === undefined) return;
-    if (activeCall !== null) {
-      activeCall.setMicrophoneEnabled(local.micOn);
-    }
-    const h = sfuHandle();
-    if (h !== null) {
-      h.setMicrophoneEnabled(local.micOn);
-    }
-  });
-
-  // Apply an in-call device-picker change to the live session
-  // (`replaceTrack` on the live sender — no renegotiation; on the SFU path the
-  // sender keeps its SFrame transform so media stays encrypted). The outgoing
-  // dial / SFU publish already honour the selection at capture time; this
-  // covers a mid-call switch (and an answerer that captured the OS default
-  // before the user's pick). `lastAudio/VideoInput` debounce so an unrelated
-  // reactive tick doesn't re-capture. Drives whichever call kind is live —
-  // 1×1 `activeCall` or the SFU group `sfuHandle`.
-  let lastAudioInput: string | null = null;
-  let lastVideoInput: string | null = null;
-  createEffect(() => {
-    const audioId = callUi.settings().selectedAudioInput;
-    const videoId = callUi.settings().selectedVideoInput;
-    const sfu = sfuHandle();
-    if (activeCall === null && sfu === null) {
-      lastAudioInput = null;
-      lastVideoInput = null;
-      return;
-    }
-    if (audioId !== null && audioId !== lastAudioInput) {
-      lastAudioInput = audioId;
-      void activeCall?.switchAudioInput(audioId);
-      void sfu?.switchAudioInput(audioId);
-    }
-    if (videoId !== null && videoId !== lastVideoInput) {
-      lastVideoInput = videoId;
-      void activeCall?.switchVideoInput(videoId);
-      void sfu?.switchVideoInput(videoId);
-    }
-  });
-
-  // In-call camera control. The Call.tsx camera button toggles
-  // `callActions.setCamera`; this mirrors the store's local `camOn`
-  // onto the live session (local-only `track.enabled` gate, no
-  // renegotiation). Drives whichever call kind is live — the 1×1
-  // `activeCall` or the SFU group `sfuHandle` (a no-op on the group path
-  // while the call is audio-only; a group video call publishes the camera
-  // at connect, so the toggle gates the live video track).
-  createEffect(() => {
-    const local = callUi.participants().find((p) => p.isLocal);
-    if (local === undefined) return;
-    if (activeCall !== null) {
-      if (local.camOn) {
-        // 1×1 mid-call camera-on (piece B2b): addLocalVideo acquires + adds a
-        // video track + renegotiates the first time (a call started
-        // audio-only), and re-enables an existing sender after. Idempotent +
-        // in-flight-guarded, so a redundant reactive tick is a cheap no-op. On
-        // a capture failure revert the toggle + surface a message — fail-safe,
-        // the call stays up audio-only.
-        void activeCall.addLocalVideo().catch((err: unknown) => {
-          callActions.setCamera(false);
-          setError(
-            `Could not start the camera: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          );
-        });
-      } else {
-        activeCall.setCameraEnabled(false);
-      }
-    }
-    const h = sfuHandle();
-    if (h !== null) {
-      if (local.camOn) {
-        // Group mid-call camera-on (piece B): publishVideo acquires the camera
-        // + renegotiates the first time (a call started audio-only), and
-        // re-enables an existing sender after. Idempotent + in-flight-guarded,
-        // so a redundant reactive tick is a cheap no-op. On a capture failure
-        // (permission denied / no camera) revert the toggle + surface a
-        // message — fail-safe, the call stays up audio-only (invariant #4).
-        void h.publishVideo().catch((err: unknown) => {
-          callActions.setCamera(false);
-          setError(
-            `Could not start the camera: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          );
-        });
-      } else {
-        h.setCameraEnabled(false);
-      }
-    }
-  });
-
-  // B2a — mirror the ACTIVE call's mid-call camera-on lifecycle into the
-  // shared store, so one videoPublishState surface drives the camera-button
-  // spinner + the self-tile "Starting camera…" hint regardless of call kind.
-  // Reads the SFU group handle's state when a group call is live, else the
-  // 1×1 CallSession's; both re-establish reactively when `sfuHandle()` flips.
-  createEffect(() => {
-    const h = sfuHandle();
-    const state: VideoPublishState =
-      h !== null ? h.videoPublishState() : oneToOneVideoState();
-    callActions.setVideoPublishState(state);
-  });
-
-  // Keep the remote tile's camera state in sync after connect: the
-  // 1×1 roster is set on the state transition, but the peer's video
-  // track can arrive a beat later (a separate `ontrack`). When
-  // `remoteHasVideo` flips, patch just the remote participant.
-  createEffect(() => {
-    if (callState() !== "connected") return;
-    callActions.setParticipantCamera("peer", remoteHasVideo());
-  });
-
-  /** Build the outbound-signaling callback that puts raw bytes onto the chat
-   *  group's DS journal as an MLS application message.
-   *
-   *  This used to seal + publish here, and it was the only
-   *  `createApplicationMessage` call site outside `chat/client.ts` — no MLS
-   *  lock, no durable persist. It now routes through `broadcastControl`, the
-   *  same locked, fail-closed-persisting seam every other application message
-   *  takes; see `chat/call-signaling-publish.ts` for the two hazards that
-   *  bypass reopened, and the natives' matching route. */
-  function publishSignalingFor(group: ActiveGroup): (bytes: Uint8Array) => void {
-    return makeCallSignalingPublisher({
-      chat,
-      identity: () => props.requireIdentity(),
-      group: () => group.group,
+  /** What this chat's call buttons (and the in-chat "call in progress"
+   *  banner) offer — `calls/group-call-host.ts`. */
+  const callAffordance = (): ChatCallAffordance =>
+    chatCallAffordance({
+      membershipEnded: membershipEnded(),
+      oneToOneInCall: callHost.inCall(),
+      groupCallActive: callHost.groupCallBusy(),
+      liveCallInThisChat: liveGroupCall() !== null,
+      memberCount: memberCount(),
     });
-  }
 
-  function buildCallSession(callId: Uint8Array): CallSession {
-    return new CallSession(callId, {
-      onRemoteStream: (s) => {
-        setRemoteAudioStream(s);
-        // `ontrack` fires per track (audio, then video); re-check each
-        // time so the remote video tile lights up when its track arrives.
-        setRemoteHasVideo(s.getVideoTracks().length > 0);
-      },
-      onLocalStream: (s) => setLocalCallStream(s),
-      // B2a — mid-call camera-on lifecycle. The effect below mirrors this
-      // into the shared store (camera-button spinner + self-tile hint).
-      onVideoPublishState: (s) => setOneToOneVideoState(s),
-      onOutboundSignaling: publishSignalingFor(props.entry),
-      onStateChange: (s, reason) => {
-        setCallState(s);
-        if (reason !== undefined) setCallEndReason(reason);
-        // G3-3-web-session-bind — drive the full Call.tsx UI store.
-        syncCallUiFromState(s);
-        if (s === "done") {
-          activeCall = null;
-          setRemoteAudioStream(null);
-          setLocalCallStream(null);
-          setVideoCall(false);
-          setRemoteHasVideo(false);
-          setRemoteWantsVideo(false);
-          setOneToOneVideoState("off");
-          // G3-3-conn-quality — drop the stale sample so the
-          // next call doesn't briefly flash the previous one.
-          setCallConnStats(null);
-        }
-      },
-      // G3-3-conn-quality — live RTT / bitrate / relay sample,
-      // pushed every 2 s while the call is connected. Also feeds
-      // the full Call.tsx connection-detail popover + quality dot.
-      onConnectionStats: (stats) => {
-        setCallConnStats(stats);
-        callActions.setConnectionDetail({
-          rttMs: stats.rttMs,
-          downBps: stats.downBps,
-          upBps: stats.upBps,
-          connectionType: stats.relayed
-            ? "relay"
-            : stats.rttMs !== null
-              ? "direct"
-              : "unknown",
-        });
-        callActions.setQuality("local", qualityTierForRtt(stats.rttMs));
-      },
-    });
-  }
-
-  async function onCallClicked(): Promise<void> {
-    await startOneToOneCall(false);
-  }
-
-  async function onVideoCallClicked(): Promise<void> {
-    await startOneToOneCall(true);
-  }
-
+  /** Place a 1x1 call. The session lives in the call host, so it survives
+   *  leaving this chat. */
   async function startOneToOneCall(withVideo: boolean): Promise<void> {
-    if (activeCall !== null) return;
-    setVideoCall(withVideo);
-    const session = buildCallSession(mintCallId());
-    activeCall = session;
+    if (callHost.inCall() || callHost.groupCallBusy()) return;
     try {
-      await session.dial({
-        audio: true,
-        video: withVideo,
-        // Honour the in-call device picker's current selection at capture
-        // time; `null` falls back to the OS default inside CallSession.
-        audioDeviceId: callUi.settings().selectedAudioInput,
-        videoDeviceId: callUi.settings().selectedVideoInput,
-      });
+      await callHost.dial(props.entry.groupIdB64, withVideo);
     } catch (err) {
-      setError(
-        `Could not start call: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      activeCall = null;
-      setVideoCall(false);
+      setError(`Could not start call: ${err instanceof Error ? err.message : String(err)}`);
     }
-  }
-
-  // SFU multi-party (group) call. Routed for group chats (>2 members);
-  // 1×1 stays on `onCallClicked` (P2P DTLS-SRTP). Derives the per-call
-  // SFrame seed + leaf from the MLS group, mints the call-admission JWT
-  // bound to the live session token, and drives the shared call-UI
-  // store through `createSfuCallUi`. Fail-closed throughout: any missing
-  // prerequisite (SFU URL / session / seed) aborts before media.
-  async function startGroupCall(withVideo: boolean): Promise<void> {
-    if (sfuHandle() !== null || activeCall !== null) return;
-    const base = sfuBaseUrl();
-    if (base === null) {
-      setError(
-        "Group calls need an SFU endpoint — set VITE_LAKKO_SFU_URL and rebuild.",
-      );
-      return;
-    }
-    const id = chats.identity();
-    const secrets = auth.identitySecrets();
-    if (id === null || secrets === null) {
-      setError("Re-authenticate to start a group call (no live session token).");
-      return;
-    }
-    try {
-      const wasm = await loadWasmForCalls();
-      const callIdBytes = mintCallId();
-      const callIdHex = hexOf(callIdBytes);
-      // Per-call SFrame seed + this client's leaf. Deterministic per MLS
-      // epoch (audit-pack C-1) so every participant derives identical
-      // bytes. `ownLeafIndex` is the KID this client stamps into frames.
-      const seed = props.entry.group.exportSecret(
-        id,
-        "lakko/call/v1",
-        callIdBytes,
-        32,
-      );
-      const localLeaf = props.entry.group.ownLeafIndex;
-      // Canonical call safety number — the same string every participant
-      // derives from the shared seed, shown in the E2EE pill for an
-      // out-of-band man-in-the-middle check. Display-only + non-critical:
-      // a derivation failure must never abort the call.
-      let safetyNumber: string | undefined;
-      try {
-        safetyNumber = wasm.callSafetyNumber(seed);
-      } catch {
-        safetyNumber = undefined;
-      }
-      // Call-admission JWT (JWS Compact, EdDSA) bound to the session.
-      const jwt = new CallJwtClient(wasm);
-      jwt.setSessionToken(secrets.sessionToken);
-      const minted = await jwt.mint(callIdHex, "participant");
-      // ADR-0021 — precompute the per-call peer_tag -> contact name map
-      // once, so the SFU roster resolves to real contact names instead of
-      // a pseudonym. The tag is derived locally (the SFU never sends a
-      // name); a peer with no matching contact keeps the pseudonym slice.
-      const tagToName = new Map<string, string>();
-      // ADR-0021: on a (vanishingly rare) tag collision between two
-      // contacts, do NOT show one of their names — fall back to the
-      // pseudonym, so a collision never surfaces a wrong contact name.
-      const collidedTags = new Set<string>();
-      for (const c of loadAccepted()) {
-        if (c.accountIdHex !== undefined) {
-          const tag = wasm.sfuPeerTag(callIdHex, c.accountIdHex);
-          if (tagToName.has(tag)) {
-            collidedTags.add(tag);
-          } else {
-            tagToName.set(tag, c.displayName);
-          }
-        }
-      }
-      const resolveDisplayName = (
-        _peerId: string,
-        pseudonym: string,
-        peerTag: string | undefined,
-      ): string => {
-        if (peerTag !== undefined && !collidedTags.has(peerTag)) {
-          const name = tagToName.get(peerTag);
-          if (name !== undefined) return name;
-        }
-        return pseudonym.length > 0 ? pseudonym.slice(0, 8) : "Peer";
-      };
-      const handle = createSfuCallUi(
-        {
-          sfuBaseUrl: base,
-          jwt: minted.jwt,
-          seed,
-          localLeaf,
-          media: {
-            audio: true,
-            // A group video call publishes the camera at connect (the session
-            // SFrame-seals the video sender like the audio one); an audio call
-            // leaves it off. The in-call camera toggle gates the live track.
-            video: withVideo,
-            // Honour the in-call device picker's current selections at publish
-            // time (an `{ exact }` deviceId constraint, else the OS default).
-            audioDeviceId: callUi.settings().selectedAudioInput,
-            videoDeviceId: callUi.settings().selectedVideoInput,
-          },
-        },
-        { localDisplayName: "You", safetyNumber, resolveDisplayName },
-      );
-      activeCallId = callIdBytes;
-      setSfuHandle(handle);
-      setSfuActive(true);
-      await handle.connect();
-    } catch (err) {
-      setError(
-        `Could not start group call: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      sfuHandle()?.hangUp();
-      setSfuHandle(null);
-      setSfuActive(false);
-    }
-  }
-
-  async function onHangUp(): Promise<void> {
-    if (activeCall === null) return;
-    await activeCall.hangUp("hungUp");
-  }
-
-  /** Exit the in-call overlay — tears down whichever session is live
-   *  (SFU group call or 1×1 P2P). Wired to `Call`'s `onExit`. */
-  function onCallExit(): void {
-    const h = sfuHandle();
-    if (h !== null) {
-      h.hangUp();
-      setSfuHandle(null);
-      setSfuActive(false);
-      return;
-    }
-    void onHangUp();
-  }
-
-  async function onAcceptCall(): Promise<void> {
-    if (activeCall === null) return;
-    await activeCall.accept();
   }
 
   /**
-   * Accept an incoming 1×1 call joining with the camera SENDING (the symmetric /
-   * FaceTime-style affordance). The answerer captures audio-only at accept time
-   * (see `applyIncomingSignaling`); opting into video is `accept()` + camOn=true,
-   * which drives the SAME shipped `addLocalVideo` mid-call camera-on path the
-   * caller uses — no duplicated capture / renegotiation logic. `setVideoCall`
-   * BEFORE accept seeds the synthesised local participant's `camOn` so the
-   * connecting-transition roster carries it; `setCamera(true)` after reinforces
-   * once the store has a live local participant. The camera-sync effect then
-   * fires `addLocalVideo` (fail-safe: a capture failure reverts the toggle and
-   * surfaces a message — the call stays up audio-only).
+   * Start (`joinCallIdHex === null`) or join a group call in this chat. The
+   * session belongs to the call host; this view only reports the outcome. A
+   * join polls this chat first (`refresh`), so the seed is derived at the epoch
+   * the call is at and a `CallEnd` already on the journal is seen.
    */
-  async function onAcceptWithVideo(): Promise<void> {
-    if (activeCall === null) return;
-    setVideoCall(true);
-    await activeCall.accept();
-    callActions.setCamera(true);
+  async function requestGroupCall(joinCallIdHex: string | null, withVideo: boolean): Promise<void> {
+    setGroupCallClock(Date.now());
+    const outcome = await callHost.startGroupCall({
+      groupIdB64: props.entry.groupIdB64,
+      withVideo,
+      joinCallIdHex,
+      syncGroup: refresh,
+    });
+    switch (outcome.kind) {
+      case "connected":
+      case "busy":
+        return;
+      case "ended":
+        setNotice("That group call has ended.");
+        return;
+      case "failed":
+        setError(outcome.message);
+        return;
+    }
   }
 
-  async function onDeclineCall(): Promise<void> {
-    if (activeCall === null) return;
-    await activeCall.decline();
+  /** The header's Call / Video buttons. */
+  function onCallButton(withVideo: boolean): void {
+    switch (callAffordance()) {
+      case "join-group": {
+        const live = liveGroupCall();
+        if (live !== null) void requestGroupCall(live.callIdHex, withVideo);
+        return;
+      }
+      case "start-group":
+        void requestGroupCall(null, withVideo);
+        return;
+      case "start-one-to-one":
+        void startOneToOneCall(withVideo);
+        return;
+      case "hidden":
+        return;
+    }
   }
-
-  // Route every inbound callSignaling row to the active
-  // session (or spin a fresh answerer session up for a
-  // first-seen offer).
-  createEffect(() => {
-    const list = rows();
-    for (const row of list) {
-      if (row.kind !== "incoming") continue;
-      const ev = row.event;
-      if (ev.kind !== "callSignaling") continue;
-      const bytes = ev.payloadBytes;
-      void (async (): Promise<void> => {
-        try {
-          const wasm = await loadWasmForCalls();
-          const parsed = wasm.parseCallSignaling(bytes);
-          if (activeCall === null) {
-            // Fresh inbound offer — spin up an answerer
-            // session bound to the offer's call_id.
-            if (parsed.kind !== "offer") return;
-            const session = buildCallSession(parsed.callId);
-            activeCall = session;
-            // Surface whether the offerer advertised video, so the ringing
-            // banner can offer "Accept with video" (else audio-only "Accept").
-            setRemoteWantsVideo(parsed.mediaVideo);
-          }
-          // Ignore stale signaling targeting a different
-          // call_id.
-          if (
-            activeCall.callId.length === parsed.callId.length &&
-            !uint8ArrayEquals(activeCall.callId, parsed.callId)
-          ) {
-            return;
-          }
-          await activeCall.applyIncomingSignaling(parsed);
-        } catch (err) {
-          // eslint-disable-next-line no-console
-          console.warn("inbound call signaling failed", err);
-        }
-      })();
-    }
-  });
-
-  onCleanup(() => {
-    if (activeCall !== null) {
-      activeCall.dispose();
-      activeCall = null;
-    }
-    const h = sfuHandle();
-    if (h !== null) {
-      h.hangUp();
-      setSfuHandle(null);
-      setSfuActive(false);
-    }
-  });
 
   // Phase 2a3e2b-web: cross-device draft synchronisation.
   //
@@ -1307,18 +798,41 @@ function ChatView(props: {
       }
     | null
   >(null);
-  // Cached per-blob_id plaintext blobs for inline preview +
-  // re-download. Keyed by hex(blob_id). Re-decrypt is cheap (no
-  // network round-trip after the first hit) but caching keeps
-  // a clicked image from re-fetching on every render.
-  const [decryptedCache, setDecryptedCache] = createSignal<
-    Map<string, { bytes: Uint8Array; objectUrl: string | null }>
-  >(new Map());
+  // ADR-0047 — the media runtime every bubble shares: decrypted media as
+  // object URLs (revoked when this view unmounts — before this, every
+  // previewed image stayed in memory for the life of the tab), the
+  // one-at-a-time player, auto-continue, and the local-only "played" set.
+  const hub: MediaHub = createMediaHub({
+    voiceQueue: () =>
+      rows().flatMap((row) => {
+        const attachments =
+          row.kind === "outgoing"
+            ? row.attachments
+            : row.event.kind === "application"
+              ? row.event.attachments
+              : [];
+        const voice = attachments.find((a) => hub.decision(a).bubble === "voice");
+        const key = voice !== undefined && voice.blobId.length > 0 ? mediaKey(voice.blobId) : null;
+        return [
+          {
+            key: key ?? `row:${rowMessageId(row) ?? "pending"}`,
+            isVoice: key !== null,
+            senderKey: rowAuthorIdentity(row),
+            // Our own recordings never show as unplayed and are never
+            // auto-continued into.
+            played: row.kind === "outgoing",
+          },
+        ];
+      }),
+  });
+  onCleanup(() => hub.dispose());
   // 1.18g — Add-member panel state. Inline form expands below
   // the chat header when toggled; collapses after a successful
   // add or explicit Cancel.
   const [addMemberOpen, setAddMemberOpen] = createSignal(false);
   const [addMemberInput, setAddMemberInput] = createSignal("");
+  // ADR-0048 §4 — no lookup leaves the device for a name that fails the rule.
+  const addMemberCheck = createUsernameCheck(addMemberInput);
   // ADR-0028 (G-3) — the minted group invite-link (the owner/admin
   // "create invite link" affordance), or `null` before it is generated.
   const [inviteLink, setInviteLink] = createSignal<string | null>(null);
@@ -1358,14 +872,12 @@ function ChatView(props: {
   // sibling tab on `/contacts` surfaces here without a hard
   // reload. The cost is one localStorage read per
   // membersVersion bump — sub-millisecond.
-  const acceptedByPubkey = createMemo<Map<string, string>>(() => {
-    membersVersion();
-    const map = new Map<string, string>();
-    for (const c of loadAccepted()) {
-      map.set(c.signaturePubkeyB64, c.displayName);
-    }
-    return map;
-  });
+  // ADR-0048 §5 — every member label in this view goes through the one
+  // display resolver (local rename → profile name → verified username →
+  // fingerprint without `@`). `name` for one-string surfaces (typing, authors,
+  // reactions), `listLabel` (`Name · @username`) for roster rows.
+  const memberName = (keyB64: string): string => profiles.resolve(keyB64).name;
+  const memberListLabel = (keyB64: string): string => profiles.resolve(keyB64).listLabel;
   const members = createMemo<readonly { leafIndex: number; sigPubkey: Uint8Array }[]>(
     () => {
       // Subscribe to the version signal so the memo re-runs.
@@ -1381,31 +893,25 @@ function ChatView(props: {
     },
   );
 
-  // G-18 / ADR-0029 — mid-call call-key rotation. When the group's MLS epoch
-  // advances during a live SFU call (`membersVersion` bumps after the receive
-  // loop / add / remove / external-join applies a commit), re-derive the
-  // per-call seed at the NEW epoch and rekey every attached SFrame transform.
-  // The worker keeps the previous key for the overlap window so in-flight
-  // frames sealed under the old epoch still open, then drops it (forward
-  // secrecy). Fail-closed: a derivation failure leaves the call on the current
-  // seed — never a downgrade.
+  // ADR-0048 §2 trigger 3 — when this group gains a member, republish this
+  // device's profile (throttled + jittered per group by the scheduler), so the
+  // newcomer — who cannot read any earlier epoch — learns the existing names.
+  // The first roster read is the baseline, not growth. Every path that can add
+  // a member (a polled commit, a sweep, an own direct add) bumps
+  // `membersVersion`, which is what re-runs `members()`.
+  let lastMemberKeys: ReadonlySet<string> | null = null;
   createEffect(() => {
-    membersVersion(); // reactive dep — fires on every epoch advance
-    const handle = sfuHandle();
-    const id = chats.identity();
-    if (handle === null || activeCallId === null || id === null) return;
-    try {
-      const newSeed = props.entry.group.exportSecret(
-        id,
-        "lakko/call/v1",
-        activeCallId,
-        32,
-      );
-      handle.rekey(newSeed);
-    } catch {
-      // Best-effort — keep the current seed on a re-derivation failure.
+    const current = new Set(members().map((m) => base64Encode(m.sigPubkey)));
+    if (membersGrew(lastMemberKeys, current)) {
+      profiles.groupGrew(props.entry.groupIdB64);
     }
+    if (current.size > 0) lastMemberKeys = current;
   });
+
+  // G-18 / ADR-0029 — the mid-call call-key rotation is the call host's: it
+  // runs whenever this group's MLS lock queue drains (`onGroupMlsIdle`), which
+  // every poll and commit of this view does, and so does the background
+  // receive once this view is closed.
 
   // ADR-0022 — the local member's role in this group ("owner" / "admin" /
   // "member"), or `null` for an open / legacy group with no role table. Drives
@@ -1739,9 +1245,10 @@ function ChatView(props: {
    * **The foreground gate is the load-bearing part and it is a caller
    * obligation the core cannot check.** A beacon means *able to sweep*, and on
    * this client a sweep runs only at the tail of a poll driven by this
-   * component while the tab is visible — the ADR-0041 background decrypt is
-   * read-only-throwaway and structurally cannot commit (C-59). A beacon from a
-   * hidden tab would therefore be a lie that costs the group a takeover: every
+   * component — and that poll pauses while the tab is hidden, except during a
+   * call — and the ADR-0041 background decrypt is read-only-throwaway and
+   * structurally cannot commit (C-59). A beacon from a hidden tab would
+   * therefore be a lie that costs the group a takeover: every
    * other candidate would defer to a device that is not going to sweep, and
    * would keep deferring for as long as the hidden tab kept beaconing.
    *
@@ -2595,13 +2102,7 @@ function ChatView(props: {
    *  {@link PendingRequest} to carry it. */
   function labelForSignatureKey(keyB64: string | undefined): string {
     if (keyB64 === undefined) return "(unknown)";
-    const name = acceptedByPubkey().get(keyB64);
-    if (name !== undefined && name.length > 0) return name;
-    try {
-      return shortFingerprint(base64Decode(keyB64));
-    } catch {
-      return "(unknown)";
-    }
+    return memberListLabel(keyB64);
   }
 
   // ADR-0028 OQ2 — resolve which member's `/g/` link each pending request
@@ -2611,7 +2112,7 @@ function ChatView(props: {
   // roster. Advisory metadata for the admin — the role-gated approval gate is the
   // boundary, so a missing / failed lookup never blocks Approve.
   const [joinAttributions, setJoinAttributions] = createSignal<
-    Map<string, { issuerFingerprint: string; issuerInRoster: boolean }>
+    Map<string, { issuerKeyB64: string; issuerInRoster: boolean }>
   >(new Map());
   createEffect(() => {
     membersVersion();
@@ -2621,10 +2122,11 @@ function ChatView(props: {
     void (async () => {
       try {
         const attrs = await contacts.fetchJoinAttributions(gid);
-        const map = new Map<string, { issuerFingerprint: string; issuerInRoster: boolean }>();
+        const map = new Map<string, { issuerKeyB64: string; issuerInRoster: boolean }>();
         for (const a of attrs) {
           map.set(base64Encode(a.joinerSignatureKey), {
-            issuerFingerprint: a.issuerFingerprint,
+            // ADR-0048 — the issuer is named through the resolver.
+            issuerKeyB64: base64Encode(a.issuerSignaturePubkey),
             issuerInRoster: rosterB64.has(base64Encode(a.issuerSignaturePubkey)),
           });
         }
@@ -2667,10 +2169,8 @@ function ChatView(props: {
    *  Keyed on the identity rather than the leaf so a member who left
    *  cannot be relabelled with the name of whoever took their slot. */
   const labelForIdentity = (identity: MemberIdentity): string => {
-    const name = acceptedByPubkey().get(identity);
-    if (name !== undefined && name.length > 0) return name;
-    const m = members().find((mm) => base64Encode(mm.sigPubkey) === identity);
-    return m === undefined ? "A member" : shortFingerprint(m.sigPubkey);
+    if (identity === OWN_REACTION_SENTINEL) return "A member";
+    return memberName(identity);
   };
 
   // -------------------------------------------------------------------------
@@ -2687,14 +2187,10 @@ function ChatView(props: {
   const rosterViews = createMemo(() =>
     members().map((m) => {
       const keyB64 = base64Encode(m.sigPubkey);
-      const name = acceptedByPubkey().get(keyB64);
       return {
         leafIndex: m.leafIndex,
         signatureKeyB64: keyB64,
-        label:
-          name !== undefined && name.length > 0
-            ? name
-            : shortFingerprint(m.sigPubkey),
+        label: memberListLabel(keyB64),
       };
     }),
   );
@@ -3236,6 +2732,28 @@ function ChatView(props: {
         }
         continue;
       }
+      // Call signaling is handed to the call dispatcher — once per journal
+      // row, in order — and never becomes a timeline row. Dispatching it from
+      // the rows is what re-applied every offer on every poll.
+      if (e.kind === "callSignaling") {
+        callHost.ingestSignaling(props.entry.groupIdB64, {
+          messageId: e.messageId,
+          createdAt: e.createdAt,
+          payloadBytes: e.payloadBytes,
+          ...(e.senderLeaf === undefined ? {} : { senderLeaf: e.senderLeaf }),
+        });
+        continue;
+      }
+      // ADR-0048 — a member's profile. Filed in the profile store under the
+      // sender's signature key resolved AT RECEIPT (C-68) and nowhere else;
+      // never a timeline row. A malformed envelope (`profile` undefined) or an
+      // unattributable sender is dropped.
+      if (e.kind === "profile") {
+        if (e.profile !== undefined && e.senderKey !== undefined) {
+          profiles.ingest(e.senderKey, e.profile);
+        }
+        continue;
+      }
       if (incomingIds.has(e.messageId)) continue;
       fresh.push({ kind: "incoming", event: e });
     }
@@ -3257,7 +2775,44 @@ function ChatView(props: {
     if (sawProposal) setPendingVersion(pendingVersion() + 1);
   }
 
+  /**
+   * The user-initiated poll: the Refresh button, mount, and every membership
+   * action. Shows `busy` and surfaces a failure in the error slot. The body is
+   * `pollOnce`, shared with the automatic receive loop below, which runs the
+   * same poll silently.
+   */
   async function refresh(): Promise<void> {
+    if (membershipEnded()) return;
+    setError(null);
+    setBusy(true);
+    try {
+      await pollOnce(0, undefined, false);
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** The group's epoch, or `undefined` when the handle cannot be read. */
+  function readEpoch(): bigint | undefined {
+    try {
+      return props.entry.group.epoch;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * One poll of this group's journal and everything that hangs off it. Throws
+   * on failure; touches neither `busy` nor the error slot — the callers own
+   * that. Returns the outcome so the receive loop can pace itself.
+   */
+  async function pollOnce(
+    waitSecs: number,
+    signal: AbortSignal | undefined,
+    background: boolean,
+  ): Promise<PollMessagesResult["outcome"] | "membership-ended"> {
     // ADR-0045 UX §6.2.8 item 1 — the poll must STOP for a group this device
     // is no longer in, and stopping is not an optimisation. `unprotect_message`
     // refuses on `!is_active()` before it looks at the message at all, and the
@@ -3270,15 +2825,15 @@ function ChatView(props: {
     //
     // A GATE rather than a disposal, because `refresh` is re-entered from a
     // dozen call sites (mount, the Refresh button, every membership action,
-    // the Welcome intake) and there is no single interval to clear.
+    // the Welcome intake). The automatic receive loop has an interval-shaped
+    // lifetime and is also stopped outright (`shouldContinue`), but this gate
+    // stays the authority for every caller.
     //
     // The cursor is deliberately left where the last applied row put it
     // (§6.2.13): it costs nothing, and whether a rejoin wants it reset is the
     // rejoin path's question, not this one's.
-    if (membershipEnded()) return;
-    setError(null);
-    setBusy(true);
-    try {
+    if (membershipEnded()) return "membership-ended";
+    {
       // ADR-0043 — baseline for the membership diff, captured BEFORE the poll
       // applies any commit. A Commit carries no membership delta out of the
       // poll loop, so a removal committed by SOMEONE ELSE is inferred from
@@ -3286,12 +2841,20 @@ function ChatView(props: {
       // never show up here (they were applied locally before this poll, so
       // the baseline is already post-removal); those rotate directly in
       // `onRemoveMember`.
-      const membersBeforePoll = memberSignatureKeys(props.entry.group);
+      //
+      // Re-taken under the MLS lock right before the apply (`beforeApply`):
+      // a long poll parks for up to `LONG_POLL_WAIT_SECS`, and a baseline from
+      // before the park would include whatever another path applied in the
+      // meantime — an own removal, or a manual refresh's batch — and rotate
+      // for it a second time. The pre-fetch values stand only for the
+      // `cursor-moved` path, which returns before reading them.
+      let membersBeforePoll = memberSignatureKeys(props.entry.group);
+      let epochBeforePoll = readEpoch();
       const result = await chat.pollMessages(
         props.requireIdentity(),
         props.entry.group,
         cursor(),
-        0,
+        waitSecs,
         // G-38 — the poll's apply half runs under the same per-group MLS lock
         // the commit paths take, so the cursor read-modify-write has to run in
         // there with it. Handing the accessors in is what lets `ChatClient`
@@ -3300,14 +2863,32 @@ function ChatView(props: {
         // Writing `result.cursor` back out here would land a microtask AFTER
         // the lock released, which is exactly the window a queued poll used to
         // re-read and re-feed already-consumed rows through.
-        { read: () => cursor(), advance: (to) => setCursor(to) },
+        {
+          read: () => cursor(),
+          advance: (to) => setCursor(to),
+          beforeApply: () => {
+            membersBeforePoll = memberSignatureKeys(props.entry.group);
+            epochBeforePoll = readEpoch();
+          },
+        },
+        signal,
       );
       // The batch was stale (another poll consumed past our `after` while we
       // were parked on the fetch). Nothing was applied and the cursor was not
       // touched — drop it. The poll that DID apply owns rendering those rows.
-      if (result.outcome === "cursor-moved") return;
+      // With the receive loop parked on a long poll, this is the COMMON outcome
+      // of a user-initiated refresh racing it, not a corner case.
+      if (result.outcome === "cursor-moved") return result.outcome;
       // ADR-0045 — the shared consumer; see `consumeEvents`.
       consumeEvents(result.events);
+      // The component was torn down while this batch was being applied (a
+      // route change during a long poll). The rows are decrypted and the
+      // cursor has moved, but the debounced timeline persist died with the
+      // component, and MLS forward secrecy means they can never be decrypted
+      // again — so write them now rather than lose them. The rest of this
+      // function still runs: an ADR-0043 rotation owed for a removal in this
+      // batch must not be skipped because the view closed.
+      if (signal?.aborted === true) void persistToLogBestEffort();
       // NB: no `setCursor` here — `pollMessages` advanced it under the lock, or
       // deliberately HELD it (`outcome: "persist-held"`) because the MLS
       // snapshot did not reach disk. The events are still consumed either way:
@@ -3323,7 +2904,23 @@ function ChatView(props: {
       setMemberCount(props.entry.group.memberCount);
       // 1.18h — bump membersVersion so the members panel's
       // createMemo re-reads the post-poll leaf set.
-      setMembersVersion(membersVersion() + 1);
+      //
+      // The automatic receive loop bumps it only when this batch could have
+      // changed what those readers see: the epoch moved, or it carried a
+      // commit / external-join request. Every bump re-runs the members-panel
+      // effects, and one of them (`fetchJoinAttributions`, for owners and
+      // admins) refetches the whole journal — once per incoming chat message,
+      // and once per idle long-poll timeout, is load nothing asked for. A
+      // user-initiated refresh still re-reads everything.
+      if (
+        !background ||
+        readEpoch() !== epochBeforePoll ||
+        result.events.some(
+          (e) => e.kind === "system" || e.kind === "externalJoinRequest",
+        )
+      ) {
+        setMembersVersion(membersVersion() + 1);
+      }
       // ADR-0043 — someone else's Remove commit just landed? Then the
       // evicted member still holds this group's push_routing_secret and
       // push-gw is still waking it. Re-key so nobody ever notifies the id it
@@ -3387,12 +2984,80 @@ function ChatView(props: {
         // eslint-disable-next-line no-console
         console.warn("ADR-0045 tail sweep failed", err);
       });
-    } catch (err) {
-      setError(formatError(err));
-    } finally {
-      setBusy(false);
+      return result.outcome;
     }
   }
+
+  /**
+   * The automatic receive loop — without it nothing arrived until the user
+   * pressed Refresh: messages, membership commits, ADR-0045 proposals and
+   * beacons, and the 1x1 call signaling (an incoming call rang only when
+   * somebody clicked).
+   *
+   * It long-polls this group's journal (`LONG_POLL_WAIT_SECS`) through the same
+   * `pollOnce` as the Refresh button, silently. Overlap with a user-initiated
+   * refresh is already safe: the fetch is outside the per-group MLS lock, the
+   * apply and the cursor move are inside it, and a batch whose cursor moved
+   * while it was on the network is dropped (`cursor-moved`).
+   *
+   * Lifetime: started once the mount sequence (log hydrate -> outbox sweep ->
+   * first refresh) has finished, so the first long poll starts from the cursor
+   * that sequence left behind; aborted on unmount; ended for good when this
+   * device's membership ends.
+   *
+   * Paused while the tab is hidden — push covers a backgrounded tab, as on
+   * the native clients, and the ADR-0045 beacon is foreground-gated for the
+   * same reason — EXCEPT while a call is in progress or ringing: 1x1 call
+   * signaling rides this journal, and a live SFU call's mid-call rekey
+   * (ADR-0029) is driven by the epoch advances this poll applies.
+   */
+  const receiveLoopAbort = new AbortController();
+  const receiveLoopResume = createWakeLatch();
+  const callInProgress = (): boolean =>
+    callHost.callLaneGroupIdB64() === props.entry.groupIdB64;
+  function receiveLoopPaused(): boolean {
+    return globalThis.document?.visibilityState === "hidden" && !callInProgress();
+  }
+  function startReceiveLoop(): void {
+    void runLongPollLoop(receiveLoopAbort.signal, {
+      shouldContinue: () => !membershipEnded(),
+      isPaused: receiveLoopPaused,
+      waitUntilResumed: (signal) => receiveLoopResume.wait(signal),
+      tick: async (signal) => {
+        const outcome = await pollOnce(LONG_POLL_WAIT_SECS, signal, true);
+        // A held persist leaves the cursor where it was, so the next long poll
+        // would hand back the same rows at once. Give storage a moment rather
+        // than re-applying in a tight loop.
+        return outcome === "persist-held" ? NETWORK_BACKOFF_MS : 0;
+      },
+      classifyFailure: (err) => (isDsNetworkFailure(err) ? "network" : "other"),
+      sleep: sleepCancellable,
+      now: () => Date.now(),
+      onFailure: (err, backoffMs) => {
+        // eslint-disable-next-line no-console
+        console.warn(`chat receive loop poll failed; retrying in ${backoffMs} ms`, err);
+      },
+    });
+  }
+  const onReceiveLoopVisibility = (): void => receiveLoopResume.wake();
+  globalThis.document?.addEventListener("visibilitychange", onReceiveLoopVisibility);
+  // A call starting in a hidden tab must un-pause the loop at once.
+  createEffect(
+    on(callInProgress, (inCall) => {
+      if (inCall) receiveLoopResume.wake();
+    }),
+  );
+  onCleanup(() => {
+    globalThis.document?.removeEventListener(
+      "visibilitychange",
+      onReceiveLoopVisibility,
+    );
+    receiveLoopAbort.abort();
+  });
+
+  // No leave guard: a 1x1 call and a group call both belong to the call host
+  // and continue on whatever screen the user moves to, and the host prompts on
+  // a reload or tab close.
 
   async function onSend(e: SubmitEvent): Promise<void> {
     e.preventDefault();
@@ -3525,7 +3190,15 @@ function ChatView(props: {
    *  toggles, so they stay in sync). */
   async function onReact(messageId: number, emoji: string): Promise<void> {
     setReactPickerId(null);
+    setFullReactPickerId(null);
     setError(null);
+    // ADR-0047 §3 — a reaction is exactly one emoji grapheme. The wire accepts
+    // any string up to 64 bytes; this is the check that keeps the six-emoji
+    // bar and the picker one model.
+    if (!isSingleEmojiGrapheme(emoji)) {
+      setError("A reaction must be a single emoji.");
+      return;
+    }
     try {
       const envelopeBytes = await composeReactionEnvelope(messageId, emoji);
       await chat.sendMessage(
@@ -3662,9 +3335,10 @@ function ChatView(props: {
 
   // ADR-0045 S4b — the beacon emitter.
   //
-  // Driven by its own timer rather than by the poll, because the poll on this
-  // client is event-driven (mount, a user action, the Refresh button) while a
-  // beacon's whole meaning is a CADENCE: "still here". The tick is cheap and
+  // Driven by its own timer rather than by the poll, because the poll's pace is
+  // set by traffic (a long poll returns as soon as a row arrives, and pauses
+  // in a hidden tab) while a beacon's whole meaning is a CADENCE: "still
+  // here". The tick is cheap and
   // deliberately much shorter than the beacon interval — `shouldEmitBeacon` is
   // the throttle, so the tick only has to be fine-grained enough not to add
   // meaningful latency to the first beacon after the tab becomes visible.
@@ -3874,6 +3548,272 @@ function ChatView(props: {
     );
   }
 
+  // ----- ADR-0047 media messages ----------------------------------------
+  //
+  // A voice message, video note or GIF is sent as its OWN message the moment
+  // it is finished (recorded and released / sent from preview / tapped in the
+  // GIF grid): the bubble enters the timeline at once with a determinate
+  // upload ring, and a failure leaves it there as `Not sent · Retry` rather
+  // than rolling it back. The job keeps whatever it already achieved (the
+  // bytes, the uploaded thumb, the uploaded ref) so a retry resumes rather
+  // than re-uploading.
+
+  interface MediaSendJob {
+    readonly tempId: number;
+    readonly localKey: string;
+    name: string;
+    readonly meta: AttachmentMediaMeta;
+    /** Placeholder mime shown until the bytes are known (a GIF's type comes
+     *  from the proxy response). */
+    mime: string;
+    loadBytes: () => Promise<{ bytes: Uint8Array; mime: string }>;
+    bytes?: Uint8Array;
+    poster?: { blob: Blob; mime: string; width: number; height: number };
+    thumb?: ThumbRefBytes;
+    posterTried?: boolean;
+    uploaded?: AttachmentRefBytes;
+  }
+  const mediaJobs = new Map<number, MediaSendJob>();
+  const [mediaUploads, setMediaUploads] = createSignal<ReadonlyMap<number, number | "failed">>(new Map());
+  function setMediaUpload(tempId: number, value: number | "failed" | null): void {
+    const next = new Map(mediaUploads());
+    if (value === null) next.delete(tempId);
+    else next.set(tempId, value);
+    setMediaUploads(next);
+  }
+  function mediaUploadFor(row: TimelineRow): MediaUpload {
+    if (row.kind !== "outgoing" || row.ack === "sent") return undefined;
+    const u = mediaUploads().get(row.tempId);
+    return u ?? (row.ack === "failed" ? "failed" : 0);
+  }
+  onCleanup(() => mediaJobs.clear());
+
+  function placeholderRef(job: MediaSendJob): AttachmentRefBytes {
+    return {
+      blobId: new Uint8Array(0),
+      key: new Uint8Array(0),
+      nonce: new Uint8Array(0),
+      mime: job.mime,
+      size: job.bytes?.length ?? 0,
+      name: job.name,
+      ...job.meta,
+    };
+  }
+
+  function startMediaSend(job: MediaSendJob): void {
+    setError(null);
+    mediaJobs.set(job.tempId, job);
+    setRows([
+      ...rows(),
+      {
+        kind: "outgoing",
+        tempId: job.tempId,
+        plaintext: "",
+        attachments: [placeholderRef(job)],
+        ack: "pending",
+        mediaLocalKey: job.localKey,
+        authorKey: ownSignatureKeyB64(),
+      },
+    ]);
+    void runMediaJob(job);
+  }
+
+  function setMediaRowAck(tempId: number, ack: "pending" | "failed"): void {
+    setRows(
+      rows().map((r) =>
+        r.kind === "outgoing" && r.tempId === tempId && r.ack !== ack ? { ...r, ack } : r,
+      ),
+    );
+  }
+
+  async function runMediaJob(job: MediaSendJob): Promise<void> {
+    setMediaUpload(job.tempId, 0);
+    setMediaRowAck(job.tempId, "pending");
+    try {
+      if (job.uploaded === undefined) {
+        if (job.bytes === undefined) {
+          const loaded = await job.loadBytes();
+          job.bytes = loaded.bytes;
+          job.mime = loaded.mime;
+          // A GIF's container is only known once the proxy answered.
+          if (job.meta.kind === "gif" && loaded.mime === "image/webp") {
+            job.name = job.name.replace(/\.gif$/, ".webp");
+          }
+          hub.fileLocal(job.localKey, new Blob([loaded.bytes.slice()]), loaded.mime);
+        }
+        if (job.poster !== undefined && job.thumb === undefined && !job.posterTried) {
+          job.posterTried = true;
+          try {
+            const posterBytes = new Uint8Array(await job.poster.blob.arrayBuffer());
+            const t = await encryptAndUploadBytes(posterBytes, { mime: job.poster.mime, name: undefined });
+            job.thumb = {
+              blobId: t.blobId,
+              key: t.key,
+              nonce: t.nonce,
+              mime: job.poster.mime,
+              size: posterBytes.length,
+              width: job.poster.width,
+              height: job.poster.height,
+            };
+            // The poster is ours already: file it so the sent bubble shows it
+            // without downloading its own upload.
+            hub.fileLocal(`thumb:${mediaKey(t.blobId)}`, job.poster.blob, job.poster.mime);
+          } catch (err) {
+            // ADR-0047 open question, current answer: a failed poster upload
+            // sends the note without one; the bubble shows a neutral circle.
+            console.warn("video note poster upload failed; sending without a poster", err);
+          }
+        }
+        job.uploaded = await encryptAndUploadBytes(
+          job.bytes,
+          { mime: job.mime, name: job.name },
+          { ...job.meta, ...(job.thumb === undefined ? {} : { thumb: job.thumb }) },
+          undefined,
+          (fraction) => setMediaUpload(job.tempId, fraction),
+        );
+      }
+      const uploaded = job.uploaded;
+      const envelopeBytes = await composeEnvelope("", [uploaded]);
+      const result = await chat.sendMessage(props.requireIdentity(), props.entry.group, envelopeBytes);
+      // File the local bytes under the real blob id before the row flips, so
+      // the re-rendered bubble plays them without downloading its own upload.
+      const bytes = job.bytes;
+      if (bytes !== undefined) {
+        hub.fileLocal(mediaKey(uploaded.blobId), new Blob([bytes.slice()]), uploaded.mime);
+      }
+      setRows(
+        rows().map((r) =>
+          r.kind === "outgoing" && r.tempId === job.tempId
+            ? {
+                kind: "outgoing" as const,
+                tempId: r.tempId,
+                plaintext: "",
+                attachments: [uploaded],
+                ack: "sent" as const,
+                messageId: result.messageId,
+                createdAt: result.createdAt,
+                authorKey: r.authorKey,
+              }
+            : r,
+        ),
+      );
+      hub.revoke(job.localKey);
+      mediaJobs.delete(job.tempId);
+      setMediaUpload(job.tempId, null);
+    } catch (err) {
+      setMediaUpload(job.tempId, "failed");
+      setMediaRowAck(job.tempId, "failed");
+      if (err instanceof AttachmentSizeError) {
+        setError(`That message is ${formatAttachmentSize(err.got)} — over the ${formatAttachmentSize(err.max)} limit.`);
+      }
+      console.warn("media message not sent", err);
+    }
+  }
+
+  function retryMediaSend(tempId: number): void {
+    const job = mediaJobs.get(tempId);
+    if (job !== undefined) void runMediaJob(job);
+  }
+
+  /** A finished recording the user chose to send. */
+  function sendCapturedTake(take: CaptureResult): void {
+    const tempId = nextTempId++;
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const isVoice = take.kind === "voice";
+    startMediaSend({
+      tempId,
+      localKey: `local:${tempId}`,
+      name: isVoice ? `voice-${stamp}.m4a` : `video-${stamp}.mp4`,
+      mime: take.mime,
+      meta: {
+        kind: take.kind,
+        durationMs: take.durationMs,
+        ...(take.waveform === undefined ? {} : { waveform: take.waveform }),
+        ...(take.width === undefined ? {} : { width: take.width }),
+        ...(take.height === undefined ? {} : { height: take.height }),
+      },
+      ...(take.poster === undefined ? {} : { poster: take.poster }),
+      loadBytes: async () => ({ bytes: new Uint8Array(await take.blob.arrayBuffer()), mime: take.mime }),
+    });
+  }
+
+  /** UX spec §5 — a tapped GIF is sent immediately: its full rendition is
+   *  fetched through the proxy, encrypted and uploaded like any file, so a
+   *  recipient only ever fetches the encrypted blob from Lakko storage. */
+  function sendGif(item: GifItem): void {
+    const tempId = nextTempId++;
+    startMediaSend({
+      tempId,
+      localKey: `local:${tempId}`,
+      name: `gif-${item.id}.gif`,
+      mime: "image/gif",
+      meta: { kind: "gif", width: item.width, height: item.height },
+      loadBytes: async () => {
+        const token = auth.identitySecrets()?.sessionToken ?? null;
+        if (token === null) throw new Error("no session for the GIF proxy");
+        const r = await fetchGifMedia(item.fullUrl, token, MAX_GIF_FULL_BYTES);
+        if (r.kind !== "ok") throw new Error(`GIF download failed: ${r.kind}`);
+        return { bytes: r.value.bytes, mime: r.value.mime };
+      },
+    });
+  }
+
+  const recorder = createRecorder({
+    onSend: sendCapturedTake,
+    inCall: () => callInProgress(),
+    createUrl: (blob) => hub.registry.set(`take:${Date.now()}:${Math.random()}`, blob),
+    revokeUrl: (url) => {
+      for (const [k, u] of hub.registry.entries()) if (u === url) hub.registry.revoke(k);
+    },
+  });
+  onCleanup(() => recorder.dispose());
+  // UX spec §6 — the call owns the microphone and camera; a take in progress
+  // when a call starts is dropped, as is one when the membership ends.
+  createEffect(
+    on(
+      () => callInProgress() || membershipEnded(),
+      (blocked) => {
+        if (blocked && recorder.state().phase !== "idle") recorder.cancel();
+      },
+    ),
+  );
+
+  // ADR-0047 — the composer's emoji / GIF picker, and the reaction picker.
+  const [composerPickerOpen, setComposerPickerOpen] = createSignal(false);
+  const [fullReactPickerId, setFullReactPickerId] = createSignal<number | null>(null);
+  let composerInput: HTMLInputElement | undefined;
+  let composerCaret: { start: number; end: number } | null = null;
+  function rememberCaret(): void {
+    if (composerInput === undefined) return;
+    composerCaret = {
+      start: composerInput.selectionStart ?? composerInput.value.length,
+      end: composerInput.selectionEnd ?? composerInput.value.length,
+    };
+  }
+  /** UX spec §4 — insert at the caret, keep the picker open, keep focus. */
+  function insertEmoji(emoji: string): void {
+    const current = input();
+    const fromInput =
+      composerInput !== undefined && globalThis.document?.activeElement === composerInput
+        ? { start: composerInput.selectionStart ?? current.length, end: composerInput.selectionEnd ?? current.length }
+        : null;
+    const caret = fromInput ?? composerCaret ?? { start: current.length, end: current.length };
+    const start = Math.min(caret.start, current.length);
+    const end = Math.min(Math.max(caret.end, start), current.length);
+    const next = current.slice(0, start) + emoji + current.slice(end);
+    setInput(next);
+    const pos = start + emoji.length;
+    composerCaret = { start: pos, end: pos };
+    const searchFocused =
+      globalThis.document?.activeElement instanceof HTMLInputElement &&
+      globalThis.document.activeElement !== composerInput;
+    if (composerInput !== undefined && !searchFocused) {
+      composerInput.value = next;
+      composerInput.focus();
+      composerInput.setSelectionRange(pos, pos);
+    }
+  }
+
   /**
    * Download + decrypt a received attachment + offer a Save
    * dialog. Used by the attachment-chip Save button on incoming
@@ -3920,26 +3860,17 @@ function ChatView(props: {
   async function onPreviewAttachment(
     ref: AttachmentRefBytes,
   ): Promise<void> {
-    const key = blobIdHex(ref.blobId);
-    const cached = decryptedCache().get(key);
-    if (cached !== undefined && cached.objectUrl !== null) {
-      // Already cached — the bubble already renders inline.
-      // Nothing to do; the Hide affordance on the chip clears
-      // the URL.
+    // ADR-0047 — inline only for a type the core's allowlist accepts.
+    if (hub.inlineType(ref.mime) !== "image") return;
+    if (hub.urlFor(mediaKey(ref.blobId)) !== null) {
+      // Already filed — the bubble already renders inline.
       return;
     }
     setError(null);
     try {
-      const bytes = await downloadAndDecryptRef(ref);
-      const blob = new Blob([bytes.slice()], {
-        type: ref.mime ?? "application/octet-stream",
-      });
-      const url = URL.createObjectURL(blob);
-      const next = new Map(decryptedCache());
-      next.set(key, { bytes, objectUrl: url });
-      setDecryptedCache(next);
-      // No window.open — the JSX picks up the cached URL via
-      // the `getCachedUrl` getter passed to AttachmentChips.
+      // Filed in the hub's registry, so the URL is revoked on Hide or
+      // when this view unmounts.
+      await hub.load(ref);
     } catch (err) {
       if (err instanceof AttachmentMissingError) {
         setError("The attachment is no longer available on the server.");
@@ -3957,13 +3888,7 @@ function ChatView(props: {
    * re-renders without the inline image.
    */
   function onHideAttachmentPreview(ref: AttachmentRefBytes): void {
-    const key = blobIdHex(ref.blobId);
-    const cached = decryptedCache().get(key);
-    if (cached === undefined || cached.objectUrl === null) return;
-    URL.revokeObjectURL(cached.objectUrl);
-    const next = new Map(decryptedCache());
-    next.set(key, { bytes: cached.bytes, objectUrl: null });
-    setDecryptedCache(next);
+    hub.revoke(mediaKey(ref.blobId));
   }
 
   /** Cache accessor passed to [`AttachmentChips`] — returns the
@@ -3972,7 +3897,7 @@ function ChatView(props: {
    *  every render so the inline image appears reactively once
    *  the cache lands. */
   function getCachedAttachmentUrl(ref: AttachmentRefBytes): string | null {
-    return decryptedCache().get(blobIdHex(ref.blobId))?.objectUrl ?? null;
+    return hub.urlFor(mediaKey(ref.blobId));
   }
 
   // 1.18g — "Add member" submission handler. Resolves the
@@ -3988,6 +3913,7 @@ function ChatView(props: {
   async function onAddMember(): Promise<void> {
     const username = addMemberInput().trim();
     if (username.length === 0) return;
+    if (!mayLookUp(addMemberCheck())) return;
     setError(null);
     setNotice(null);
     setBusy(true);
@@ -4060,8 +3986,8 @@ function ChatView(props: {
       setMembersVersion(membersVersion() + 1);
       setNotice(
         result.outcome.kind === "committed"
-          ? `@${result.recipientUsername} added (commit #${result.outcome.commitMessageId}).`
-          : `@${result.recipientUsername} requested. They join when an owner or an admin applies the change.`,
+          ? `${memberName(base64Encode(result.recipientSignaturePubkey))} added (commit #${result.outcome.commitMessageId}).`
+          : `${memberName(base64Encode(result.recipientSignaturePubkey))} requested. They join when an owner or an admin applies the change.`,
       );
       setAddMemberInput("");
       setAddMemberOpen(false);
@@ -4489,9 +4415,35 @@ function ChatView(props: {
     }
   }
 
+  /** Events the background receive applied for this group — held while the
+   *  view was not mounted, and delivered live after that. Through the same
+   *  consumer as a poll batch, so every kind is folded exactly as if this view
+   *  had polled it. */
+  function onBackgroundEvents(events: readonly IncomingChatEvent[]): void {
+    consumeEvents(events);
+    if (events.some((e) => e.kind === "system" || e.kind === "externalJoinRequest")) {
+      setMemberCount(props.entry.group.memberCount);
+      setMembersVersion(membersVersion() + 1);
+    }
+  }
+  let detachFromBackground: (() => void) | null = null;
+  onCleanup(() => {
+    detachFromBackground?.();
+    detachFromBackground = null;
+  });
+
   onMount(() => {
     void (async (): Promise<void> => {
       await hydrateFromLog();
+      // Attached only once the timeline is seeded from the log: the consumer
+      // de-duplicates against the rows it holds, and events drained into an
+      // empty timeline would stop the seed from running.
+      if (!receiveLoopAbort.signal.aborted) {
+        detachFromBackground = receive.coordinator.attachView(
+          props.entry.groupIdB64,
+          onBackgroundEvents,
+        );
+      }
       // ADR-0040 (G-35) — re-publish any pending commit that crashed mid-window
       // on a previous run BEFORE the first poll, re-arming the own-echo filter
       // for the re-published commit so `refresh()` (below) drops it instead of
@@ -4527,6 +4479,10 @@ function ChatView(props: {
         console.warn("commit-outbox sweep failed", err);
       }
       await refresh();
+      // Automatic receive from here on — see `startReceiveLoop`. Not started
+      // earlier so the first long poll cannot race the outbox sweep for the
+      // cursor it hands to `refresh`.
+      if (!receiveLoopAbort.signal.aborted) startReceiveLoop();
       // ADR-0045 S4b — announce this device immediately rather than waiting a
       // tick. The core's own rule is that the FIRST beacon of a session is
       // immediate, precisely because a candidate that has just opened the app
@@ -4617,6 +4573,8 @@ function ChatView(props: {
     // touch the signals
     void rows();
     void cursor();
+    // ADR-0047 — the local "played" marker is persisted with the row.
+    void hub.playedKeys();
     if (!didHydrateFromLog) return;
     if (pendingPersistTimer !== null) clearTimeout(pendingPersistTimer);
     pendingPersistTimer = setTimeout(() => {
@@ -4629,6 +4587,11 @@ function ChatView(props: {
     if (pendingPersistTimer !== null) {
       clearTimeout(pendingPersistTimer);
       pendingPersistTimer = null;
+      // Flush rather than drop: rows applied in the last debounce window have
+      // already moved the shared cursor, so the background receive that takes
+      // this group over will not fetch them again — this write is the only
+      // place they reach the log. The merge keeps anything it files meanwhile.
+      void persistToLogBestEffort();
     }
   });
 
@@ -4650,6 +4613,15 @@ function ChatView(props: {
       const slot = log.groups[groupIdHexForLog()];
       if (slot === undefined) return;
       const seeded = slot.messages.map(persistedToTimelineRow);
+      // ADR-0047 — restore which voice messages / video notes this device
+      // has already played (local-only, UX spec §8).
+      hub.seedPlayed(
+        slot.messages.flatMap((m) =>
+          m.attachments
+            .filter((a) => a.played === true)
+            .map((a) => mediaKey(b64UrlDecode(a.blobIdB64))),
+        ),
+      );
       // Only seed when the in-memory list is empty — a refresh
       // running concurrently with hydration shouldn't get
       // stomped by the disk load.
@@ -4676,29 +4648,27 @@ function ChatView(props: {
       if (accountIdB64 === null) return;
       const deviceKey = await getDeviceKey(accountIdB64);
       if (deviceKey === null) return;
-      // Read current log (other groups may have rows that
-      // belong to the same account — we don't want to wipe
-      // them when writing back). Per-tab serialisation is the
-      // common case (one Chat route mounted at a time), so a
-      // read-modify-write race against another tab is rare
-      // enough to ignore for MVP.
-      const existing =
-        (await loadMessageLog(accountIdB64, deviceKey)) ??
-        ({ version: MESSAGE_LOG_VERSION, groups: {} } as MessageLogPayload);
-      const next: MessageLogPayload = {
-        // Bumped on write: this device now writes `authorKeyB64`.
-        version: MESSAGE_LOG_VERSION,
-        groups: {
-          ...existing.groups,
-          [groupIdHexForLog()]: {
-            cursor: String(cursor()),
-            messages: rows()
-              .map(timelineRowToPersisted)
-              .filter((m): m is PersistedMessage => m !== null),
-          } satisfies PersistedGroup,
-        },
-      };
-      await saveMessageLog(accountIdB64, deviceKey, next);
+      const messages = rows()
+        .map((r) => timelineRowToPersisted(r, hub.playedKeys()))
+        .filter((m): m is PersistedMessage => m !== null);
+      const hex = groupIdHexForLog();
+      const at = cursor();
+      // Serialized with every other writer of this account's log, and MERGED
+      // rather than replacing this group's slot: the background receive may
+      // have filed newer rows for this chat after this view last looked (the
+      // hand-off at mount, or this final write landing after the view closed).
+      // See `chat/background-log.ts`.
+      await updateMessageLog(accountIdB64, deviceKey, (existing) => {
+        const groups = existing?.groups ?? {};
+        return {
+          // Bumped on write: this device now writes `authorKeyB64`.
+          version: MESSAGE_LOG_VERSION,
+          groups: {
+            ...groups,
+            [hex]: mergeForegroundSlot(groups[hex], { messages, cursor: at }),
+          },
+        };
+      });
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn("persistToLogBestEffort failed", err);
@@ -4833,42 +4803,23 @@ function ChatView(props: {
               shape §6.1.1 rejects, and §6.2.11 forbids any live indicator on a
               dead group for a stronger reason: a call control asserts a live
               E2EE session, and there is not one. */}
-          <Show
-            when={
-              (callState() === "idle" || callState() === "done") &&
-              !sfuActive() &&
-              !membershipEnded()
-            }
-          >
+          <Show when={callAffordance() !== "hidden"}>
+            {/* A group call already in progress is JOINED, never shadowed by a
+                second one. Otherwise: group chat (>2 members) -> SFU + SFrame,
+                camera sealed like the audio track; 1×1 -> P2P DTLS-SRTP. */}
             <button
               type="button"
-              onClick={() => {
-                // Group chat (>2 members) → SFU + SFrame; 1×1 → P2P.
-                if (memberCount() > 2) {
-                  void startGroupCall(false);
-                } else {
-                  void onCallClicked();
-                }
-              }}
+              onClick={() => onCallButton(false)}
               disabled={busy()}
             >
-              📞 Call
+              {callAffordance() === "join-group" ? "📞 Join call" : "📞 Call"}
             </button>
-            {/* Video call. Group (>2) routes through the SFU with the camera
-                SFrame-sealed like the audio track; 1×1 is P2P DTLS-SRTP. Same
-                memberCount branch as the audio button above. */}
             <button
               type="button"
-              onClick={() => {
-                if (memberCount() > 2) {
-                  void startGroupCall(true);
-                } else {
-                  void onVideoCallClicked();
-                }
-              }}
+              onClick={() => onCallButton(true)}
               disabled={busy()}
             >
-              📹 Video
+              {callAffordance() === "join-group" ? "📹 Join with video" : "📹 Video"}
             </button>
           </Show>
           <button type="button" onClick={props.onLeave}>
@@ -4877,79 +4828,15 @@ function ChatView(props: {
         </div>
       </header>
 
-      {/* G3-3-web-session-bind — full in-call UI presented over the
-          chat for live call states (the web analog of iOS/Android
-          call-present). `ringing` keeps the lightweight inline banner
-          below (Accept / Decline) until the call is accepted. */}
-      <Show when={callOverlayVisible()}>
-        <Call
-          embedded={true}
-          onExit={(): void => {
-            onCallExit();
-          }}
-          remoteStreamFor={(participantId): MediaStream | undefined => {
-            // 1×1 P2P: the sole remote tile id is `peer` → the live P2P
-            // remote stream (carries the peer's video track when present).
-            if (participantId === "peer") {
-              return remoteAudioStream() ?? undefined;
-            }
-            // SFU group: roster id is `peer-<peerId>`; the SFU sets the
-            // downstream MSID stream id to that same peer id, so strip the
-            // prefix to look the stream up.
-            const peerId = participantId.replace(/^peer-/, "");
-            return sfuHandle()?.remoteStreams().get(peerId);
-          }}
-          localStream={(): MediaStream | undefined =>
-            // Self-preview: the SFU group capture when a group call is live,
-            // else the 1×1 P2P capture. Only one kind is live at a time.
-            sfuHandle()?.localStream() ?? localCallStream() ?? undefined
-          }
-        />
-      </Show>
+      {/* The in-call UI and the remote audio sinks of both call kinds are the
+          call host's (`calls/CallHostContext.tsx`), rendered on every screen. */}
 
-      {/* Hidden audio sink for the remote stream. Rendered for the
-          whole call lifetime (ringing → ending) in a stable slot so
-          it does not unmount when the inline banner gives way to the
-          full overlay — otherwise remote audio would cut out. */}
-      <Show when={callState() !== "idle" && callState() !== "done"}>
-        <audio
-          ref={(el) => setAudioRef(el)}
-          autoplay
-          style={{ display: "none" }}
-        />
-      </Show>
-
-      {/* SFU group-call remote audio — one hidden sink per remote
-          MediaStream, keyed by the stream object identity (a stable
-          stream keeps its element, so audio does not cut on roster
-          churn). Remote VIDEO renders per-tile from the store roster:
-          the `remoteStreamFor` prop above resolves a tile's stream via
-          the SFU MSID-stream-id-to-peer mapping (`peer-<peerId>`). */}
-      <Show when={sfuActive()}>
-        <For
-          each={[
-            ...(
-              sfuHandle()?.remoteStreams() ?? new Map<string, MediaStream>()
-            ).values(),
-          ]}
-        >
-          {(stream) => (
-            <audio
-              autoplay
-              style={{ display: "none" }}
-              ref={(el) => {
-                el.srcObject = stream;
-              }}
-            />
-          )}
-        </For>
-      </Show>
-
-      {/* Phase 3a8 — inline incoming-call banner. Now shown ONLY
-          while `ringing` (Accept / Decline); live states use the
-          full overlay above. */}
-      <Show when={callState() === "ringing"}>
+      {/* Group call in progress that this device is not in. Announced by
+          the initiator's GroupCallStart and kept current by every
+          participant's Join / Leave (see calls/group-call-record.ts). */}
+      <Show when={callAffordance() === "join-group"}>
         <div
+          role="status"
           style={{
             position: "sticky",
             top: "0",
@@ -4963,153 +4850,72 @@ function ChatView(props: {
             "align-items": "center",
             "justify-content": "space-between",
             gap: "0.75rem",
-            "box-shadow": "0 2px 8px rgba(0, 0, 0, 0.15)",
+            "flex-wrap": "wrap",
           }}
         >
           <div>
-            <strong>
-              {(() => {
-                switch (callState()) {
-                  case "outgoing":
-                    return "📞 Calling…";
-                  case "ringing":
-                    return "📞 Incoming call";
-                  case "connecting":
-                    return "📞 Connecting…";
-                  case "connected":
-                    return "📞 In call";
-                  case "ending":
-                    return "📞 Ending…";
-                  default:
-                    return "📞";
-                }
-              })()}
-            </strong>
+            <strong>Group call in progress</strong>
             <div style={{ "font-size": "0.85rem", "margin-top": "0.2rem" }}>
-              Audio + video · end-to-end encrypted P2P (DTLS-SRTP).
+              {(() => {
+                const n = liveGroupCall()?.joinedLeaves.size ?? 0;
+                if (n === 0) return "Starting…";
+                return n === 1 ? "1 person in the call" : `${n} people in the call`;
+              })()}
+              {" · end-to-end encrypted"}
             </div>
-            {/* G3-3-conn-quality — live RTT / bitrate / path readout
-                from the session's getStats poll. Shown only while
-                connected (the sample is meaningless before ICE
-                settles). */}
-            <Show when={callState() === "connected"}>
-              <div
-                style={{
-                  "font-size": "0.8rem",
-                  "margin-top": "0.3rem",
-                  display: "flex",
-                  "align-items": "center",
-                  gap: "0.4rem",
-                }}
-              >
-                <span
-                  aria-hidden="true"
-                  style={{
-                    width: "0.55rem",
-                    height: "0.55rem",
-                    "border-radius": "50%",
-                    "background-color": qualityDotColour(
-                      qualityTierForRtt(callConnStats()?.rttMs ?? null),
-                    ),
-                    display: "inline-block",
-                    "flex-shrink": 0,
-                  }}
-                />
-                <span>
-                  {(() => {
-                    const s = callConnStats();
-                    const rtt =
-                      s?.rttMs != null ? `${s.rttMs} ms` : "measuring…";
-                    const path =
-                      s?.relayed === true ? "relay" : s != null ? "direct" : "—";
-                    return `${rtt} · ${path} · ↓ ${formatBps(
-                      s?.downBps ?? null,
-                    )} · ↑ ${formatBps(s?.upBps ?? null)}`;
-                  })()}
-                </span>
-              </div>
-            </Show>
           </div>
           <div style={{ display: "flex", gap: "0.4rem" }}>
-            <Show when={callState() === "ringing"}>
-              <button
-                type="button"
-                onClick={() => {
-                  void onAcceptCall();
-                }}
-                style={{
-                  background: "var(--surface)",
-                  color: "var(--surface-fg)",
-                  border: "none",
-                  padding: "0.5rem 0.9rem",
-                  "border-radius": "var(--radius-sm)",
-                  "font-weight": "600",
-                  cursor: "pointer",
-                }}
-              >
-                Accept
-              </button>
-              {/* Symmetric / FaceTime-style: a video offer also offers joining
-                  with the camera sending. Audio-only offers keep just "Accept". */}
-              <Show when={remoteWantsVideo()}>
-                <button
-                  type="button"
-                  onClick={() => {
-                    void onAcceptWithVideo();
-                  }}
-                  style={{
-                    background: "var(--surface)",
-                    color: "var(--surface-fg)",
-                    border: "none",
-                    padding: "0.5rem 0.9rem",
-                    "border-radius": "var(--radius-sm)",
-                    "font-weight": "600",
-                    cursor: "pointer",
-                  }}
-                >
-                  Accept with video
-                </button>
-              </Show>
-              <button
-                type="button"
-                onClick={() => {
-                  void onDeclineCall();
-                }}
-                style={{
-                  background: "transparent",
-                  color: "var(--accent-fg)",
-                  border: "1px solid var(--accent-fg)",
-                  padding: "0.5rem 0.9rem",
-                  "border-radius": "var(--radius-sm)",
-                  cursor: "pointer",
-                }}
-              >
-                Decline
-              </button>
-            </Show>
-            <Show when={callState() !== "ringing"}>
-              <button
-                type="button"
-                onClick={() => {
-                  void onHangUp();
-                }}
-                style={{
-                  background: "transparent",
-                  color: "var(--accent-fg)",
-                  border: "1px solid var(--accent-fg)",
-                  padding: "0.5rem 0.9rem",
-                  "border-radius": "var(--radius-sm)",
-                  cursor: "pointer",
-                }}
-              >
-                Hang up
-              </button>
-            </Show>
+            <button
+              type="button"
+              disabled={busy()}
+              onClick={() => {
+                const live = liveGroupCall();
+                if (live !== null) void requestGroupCall(live.callIdHex, false);
+              }}
+              style={{
+                background: "var(--surface-elevated)",
+                color: "var(--surface-fg)",
+                border: "none",
+                padding: "0.5rem 0.9rem",
+                "border-radius": "var(--radius-sm)",
+                "font-weight": "600",
+                cursor: "pointer",
+              }}
+            >
+              Join
+            </button>
+            <button
+              type="button"
+              disabled={busy()}
+              onClick={() => {
+                const live = liveGroupCall();
+                if (live !== null) void requestGroupCall(live.callIdHex, true);
+              }}
+              style={{
+                background: "var(--surface-elevated)",
+                color: "var(--surface-fg)",
+                border: "none",
+                padding: "0.5rem 0.9rem",
+                "border-radius": "var(--radius-sm)",
+                "font-weight": "600",
+                cursor: "pointer",
+              }}
+            >
+              Join with video
+            </button>
           </div>
         </div>
       </Show>
 
-      <Show when={callState() === "done" && callEndReason() !== null}>
+      {/* The ringing banner and the 1x1 in-call UI are the call host's
+          (`calls/CallHostContext.tsx`), shown on every screen. What stays
+          here is the one line about THIS chat's most recent 1x1 call. */}
+      <Show
+        when={
+          !callHost.inCall() &&
+          callHost.lastEnded()?.groupIdB64 === props.entry.groupIdB64
+        }
+      >
         <div
           style={{
             margin: "0.5rem 0",
@@ -5120,7 +4926,7 @@ function ChatView(props: {
             color: "var(--surface-muted)",
           }}
         >
-          Last call ended ({callEndReason()}).
+          Last call ended ({callHost.lastEnded()?.reason}).
         </div>
       </Show>
 
@@ -5153,14 +4959,22 @@ function ChatView(props: {
             onInput={(e) => setAddMemberInput(e.currentTarget.value)}
             style={{ flex: 1 }}
             disabled={busy()}
+            aria-invalid={addMemberCheck().kind === "invalid"}
           />
           <button
             class="primary"
             type="submit"
-            disabled={busy() || addMemberInput().trim().length === 0}
+            disabled={busy() || !mayLookUp(addMemberCheck())}
           >
             {busy() ? "Adding…" : "Add"}
           </button>
+          <Show when={usernameReason(addMemberCheck())}>
+            {(reason) => (
+              <span class="form-error" role="status" style={{ "align-self": "center" }}>
+                {reason()}
+              </span>
+            )}
+          </Show>
         </form>
       </Show>
 
@@ -5472,7 +5286,7 @@ function ChatView(props: {
                             "white-space": "nowrap",
                           }}
                         >
-                          {hexOf(ref).slice(0, 16)}…
+                          {memberListLabel(base64Encode(ref))}
                         </span>
                         {(() => {
                           const attr = joinAttributions().get(base64Encode(ref));
@@ -5497,7 +5311,7 @@ function ChatView(props: {
                                   : "var(--danger, #c0392b)",
                               }}
                             >
-                              via {attr.issuerFingerprint.slice(0, 11)}
+                              via {memberName(attr.issuerKeyB64)}
                               {attr.issuerInRoster
                                 ? " · member"
                                 : " · not a current member"}
@@ -5759,9 +5573,7 @@ function ChatView(props: {
                 // Lookup key matches `local-store.ts`'s
                 // `signaturePubkeyB64` shape (standard base64
                 // of the 32-byte Ed25519 verifying key).
-                const displayName = acceptedByPubkey().get(
-                  base64Encode(m.sigPubkey),
-                );
+                const memberKeyB64 = base64Encode(m.sigPubkey);
                 // ADR-0045 — NO optimistic update. A member with a pending
                 // removal stays in the roster, annotated, because they are
                 // still cryptographically in the group and still receiving
@@ -5770,10 +5582,7 @@ function ChatView(props: {
                 // unencrypted call.
                 const annotation = (): string | null =>
                   rowAnnotation(pendingRequests(), m.leafIndex, ownLeaf());
-                const label = (): string =>
-                  displayName !== undefined
-                    ? displayName
-                    : shortFingerprint(m.sigPubkey);
+                const label = (): string => memberListLabel(memberKeyB64);
                 return (
                   <li
                     // The annotation is part of the row's ACCESSIBLE LABEL, not
@@ -6314,6 +6123,14 @@ function ChatView(props: {
                 readByOthers={(id) =>
                   isReadByEveryOther(readWatermarks(), id, ownSignatureKeyB64())
                 }
+                readersOf={(id) => {
+                  const own = ownSignatureKeyB64();
+                  const out: MemberIdentity[] = [];
+                  for (const [member, upTo] of readWatermarks()) {
+                    if (member !== own && upTo >= id) out.push(member);
+                  }
+                  return out;
+                }}
                 editingId={editingId()}
                 editText={editText()}
                 setEditText={setEditText}
@@ -6333,6 +6150,17 @@ function ChatView(props: {
                 onCloseReactPicker={() => setReactPickerId(null)}
                 onReact={onReact}
                 actionsAvailable={messageActionsAvailable()}
+                hub={hub}
+                mediaUpload={mediaUploadFor(row)}
+                onRetryMedia={() => {
+                  if (row.kind === "outgoing") retryMediaSend(row.tempId);
+                }}
+                fullReactPickerId={fullReactPickerId()}
+                onOpenFullReactPicker={(id) => {
+                  setReactPickerId(null);
+                  setFullReactPickerId(id);
+                }}
+                onCloseFullReactPicker={() => setFullReactPickerId(null)}
               />
             )}
           </For>
@@ -6560,6 +6388,9 @@ function ChatView(props: {
       </Show>
 
       <Show when={!membershipEnded()}>
+      {/* ADR-0047 UX §6 — the permission-denied card and the short hints. */}
+      <RecorderNotices recorder={recorder} />
+      <VideoNoteOverlay recorder={recorder} />
       <form
         onSubmit={onSend}
         style={{
@@ -6567,8 +6398,22 @@ function ChatView(props: {
           gap: "0.5rem",
           "padding-top": "0.5rem",
           "border-top": "1px solid var(--surface-border)",
+          position: "relative",
         }}
       >
+        <Show when={composerPickerOpen() && !recorderBusy(recorder)}>
+          <EmojiPicker
+            mode="compose"
+            onEmoji={insertEmoji}
+            onGif={sendGif}
+            onClose={() => setComposerPickerOpen(false)}
+            sessionToken={() => auth.identitySecrets()?.sessionToken ?? null}
+          />
+        </Show>
+        <Show
+          when={!recorderBusy(recorder)}
+          fallback={<RecordingBar recorder={recorder} />}
+        >
         {/* 1.19c2 — Attach button. The hidden `<input
             type="file" multiple>` is keyed by uploading() so
             the same file can be re-picked after a failed
@@ -6600,7 +6445,24 @@ function ChatView(props: {
             style={{ display: "none" }}
           />
         </label>
+        {/* ADR-0047 UX §4 — the smiley button left of the text field. */}
+        <button
+          type="button"
+          class="lakko-icon-btn"
+          data-picker-toggle
+          aria-label="Emoji and GIFs"
+          aria-expanded={composerPickerOpen()}
+          title="Emoji and GIFs"
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => {
+            rememberCaret();
+            setComposerPickerOpen(!composerPickerOpen());
+          }}
+        >
+          🙂
+        </button>
         <input
+          ref={composerInput}
           type="text"
           placeholder="Message"
           autocomplete="off"
@@ -6608,9 +6470,24 @@ function ChatView(props: {
           onInput={(e) => setInput(e.currentTarget.value)}
           // ADR-0024 — leaving the composer is a typing-stop
           // transition; emit one `typing:false` (best-effort).
-          onBlur={() => sendTypingStop()}
+          onBlur={() => {
+            rememberCaret();
+            sendTypingStop();
+          }}
           style={{ flex: 1 }}
         />
+        </Show>
+        {/* UX spec §1 — Send while the field or tray has content, otherwise
+            the record button (mic or camera). The record button stays mounted
+            through a held take: it holds the pointer capture the gesture runs
+            on. */}
+        <Show
+          when={
+            (input().length > 0 || pendingAttachments().length > 0 || uploading()) &&
+            !recorderBusy(recorder)
+          }
+          fallback={<RecordButton recorder={recorder} />}
+        >
         <button
           class="primary"
           type="submit"
@@ -6621,6 +6498,7 @@ function ChatView(props: {
         >
           Send
         </button>
+        </Show>
       </form>
       </Show>
     </div>
@@ -6647,6 +6525,9 @@ function TimelineBubble(props: {
    *  been read by EVERY other member? Drives the own-message
    *  Sent → Read indicator. */
   readByOthers: (messageId: number) => boolean;
+  /** ADR-0048 — the members whose read watermark covers this message, for the
+   *  `Read by …` label. */
+  readersOf: (messageId: number) => MemberIdentity[];
   editingId: number | null;
   editText: string;
   setEditText: (v: string) => void;
@@ -6664,7 +6545,17 @@ function TimelineBubble(props: {
    *  refuses Send. Threaded as a prop rather than read here so the two bubble
    *  components stay pure renderers of what `membership-ended.ts` decided. */
   actionsAvailable: boolean;
+  /** ADR-0047 — the media runtime, this row's upload state and its retry. */
+  hub: MediaHub;
+  mediaUpload: MediaUpload;
+  onRetryMedia: () => void;
+  /** ADR-0047 — the reaction bar's "+" opens the full picker for this id. */
+  fullReactPickerId: number | null;
+  onOpenFullReactPicker: (messageId: number) => void;
+  onCloseFullReactPicker: () => void;
 }): JSX.Element {
+  // ADR-0048 — the author label goes through the one display resolver.
+  const profiles = useProfiles();
   // System rows + call signaling never carry an op overlay.
   if (props.row.kind === "incoming") {
     const ev = props.row.event;
@@ -6711,6 +6602,11 @@ function TimelineBubble(props: {
       // `rows()`. Defensive.
       return null;
     }
+    if (ev.kind === "profile") {
+      // ADR-0048 — filed in the profile store by the receive loop, never
+      // pushed into `rows()`. Defensive.
+      return null;
+    }
     if (ev.kind === "membershipProposal") {
       // ADR-0045 UX §10 — a request is not something that HAPPENED to the
       // group; only outcomes belong in the timeline. The receive loop routes
@@ -6727,7 +6623,7 @@ function TimelineBubble(props: {
         ack="sent"
         originalText={ev.text}
         attachments={ev.attachments}
-        meta={`peer · #${ev.messageId} · ${ev.createdAt}`}
+        meta={`${ev.senderKey !== undefined ? profiles.resolve(ev.senderKey).name : "Unknown sender"} · #${ev.messageId} · ${ev.createdAt}`}
         tone="incoming"
         {...props}
       />
@@ -6746,9 +6642,12 @@ function TimelineBubble(props: {
       meta={
         r.ack === "pending"
           ? "you · sending…"
-          : `you · sent · #${r.messageId ?? "?"} · ${r.createdAt ?? ""}`
+          : r.ack === "failed"
+            ? "you · not sent"
+            : `you · sent · #${r.messageId ?? "?"} · ${r.createdAt ?? ""}`
       }
       tone="outgoing"
+      mediaLocalKey={r.mediaLocalKey}
       {...props}
     />
   );
@@ -6768,9 +6667,11 @@ function TimelineBubble(props: {
 function ChatBubbleBody(props: {
   messageId: number | undefined;
   isOwn: boolean;
-  ack: "pending" | "sent";
+  ack: "pending" | "sent" | "failed";
   originalText: string;
   attachments: AttachmentRefBytes[];
+  /** ADR-0047 — an outgoing media message's local key before upload. */
+  mediaLocalKey?: string | undefined;
   meta: string;
   tone: "incoming" | "outgoing";
   onDownload: (ref: AttachmentRefBytes) => void | Promise<void>;
@@ -6780,6 +6681,9 @@ function ChatBubbleBody(props: {
   ownIdentity: MemberIdentity | undefined;
   opState: (messageId: number) => MessageOpState | undefined;
   readByOthers: (messageId: number) => boolean;
+  /** ADR-0048 — the members whose read watermark covers this message, for the
+   *  `Read by …` label. */
+  readersOf: (messageId: number) => MemberIdentity[];
   editingId: number | null;
   editText: string;
   setEditText: (v: string) => void;
@@ -6797,7 +6701,17 @@ function ChatBubbleBody(props: {
    *  refuses Send. Threaded as a prop rather than read here so the two bubble
    *  components stay pure renderers of what `membership-ended.ts` decided. */
   actionsAvailable: boolean;
+  /** ADR-0047 — the media runtime, this row's upload state and its retry. */
+  hub: MediaHub;
+  mediaUpload: MediaUpload;
+  onRetryMedia: () => void;
+  /** ADR-0047 — the reaction bar's "+" opens the full picker for this id. */
+  fullReactPickerId: number | null;
+  onOpenFullReactPicker: (messageId: number) => void;
+  onCloseFullReactPicker: () => void;
 }): JSX.Element {
+  // ADR-0048 — reactors and readers are named through the one display resolver.
+  const profiles = useProfiles();
   const isIncoming = props.tone === "incoming";
   // The live overlay for this message (reactive). `undefined`
   // until an op lands.
@@ -6816,6 +6730,7 @@ function ChatBubbleBody(props: {
     emoji: string;
     count: number;
     mine: boolean;
+    reactedBy: string;
   }> => {
     const m = state()?.reactions;
     if (m === undefined) return [];
@@ -6825,10 +6740,33 @@ function ChatBubbleBody(props: {
         emoji,
         count: reactors.size,
         mine: reactors.has(own),
+        // ADR-0048 UX §5 — "Reacted by …", names through the resolver.
+        reactedBy: [...reactors]
+          .map((r) =>
+            r === own ? "You" : r === OWN_REACTION_SENTINEL ? "A member" : profiles.resolve(r).name,
+          )
+          .join(", "),
       }))
       .filter((e) => e.count > 0)
       .sort((a, b) => a.emoji.localeCompare(b.emoji));
   };
+
+  // ADR-0047 — media attachments render as their own bubbles; anything the
+  // hub does not accept as media stays a file chip.
+  const mediaRefs = (): AttachmentRefBytes[] =>
+    props.attachments.filter((a) => props.hub.decision(a).bubble !== "file");
+  const fileRefs = (): AttachmentRefBytes[] =>
+    props.attachments.filter((a) => props.hub.decision(a).bubble === "file");
+  // UX spec §3 — a video note is a circle with no bubble chrome.
+  const chromeless = (): boolean =>
+    props.originalText.length === 0 &&
+    props.attachments.length === 1 &&
+    props.attachments[0] !== undefined &&
+    props.hub.decision(props.attachments[0]).bubble === "video_note";
+  const keyFor = (ref: AttachmentRefBytes): string =>
+    ref.blobId.length === 0 && props.mediaLocalKey !== undefined
+      ? props.mediaLocalKey
+      : mediaKey(ref.blobId);
 
   const bubbleStyle = isIncoming
     ? {
@@ -6846,12 +6784,22 @@ function ChatBubbleBody(props: {
         "border-radius": "var(--radius-md)",
         "align-self": "flex-end",
         "max-width": "75%",
-        opacity: props.ack === "pending" ? 0.7 : 1,
+        // A pending media message keeps full opacity: its upload ring is the
+        // progress signal, and a dimmed video would read as disabled.
+        opacity: props.ack === "pending" && props.mediaLocalKey === undefined ? 0.7 : 1,
       };
-  const metaColour = isIncoming ? "var(--surface-muted)" : undefined;
+  const metaColour = isIncoming || chromeless() ? "var(--surface-muted)" : undefined;
 
   return (
-    <li style={{ ...bubbleStyle, position: "relative" }}>
+    <li
+      style={{
+        ...bubbleStyle,
+        ...(chromeless()
+          ? { background: "transparent", border: "none", padding: "0.25rem 0", color: "var(--surface-fg)" }
+          : {}),
+        position: "relative",
+      }}
+    >
       <Show
         when={!isDeleted()}
         fallback={
@@ -6886,9 +6834,26 @@ function ChatBubbleBody(props: {
                   </Show>
                 </div>
               </Show>
-              <Show when={props.attachments.length > 0}>
+              <Show when={mediaRefs().length > 0}>
+                <div style={{ display: "flex", "flex-direction": "column", gap: "0.35rem", "margin-top": displayText().length > 0 ? "0.4rem" : 0 }}>
+                  <For each={mediaRefs()}>
+                    {(ref) => (
+                      <MediaAttachment
+                        attachment={ref}
+                        hub={props.hub}
+                        mediaKey={keyFor(ref)}
+                        incoming={isIncoming}
+                        upload={props.mediaUpload}
+                        onRetry={props.onRetryMedia}
+                      />
+                    )}
+                  </For>
+                </div>
+              </Show>
+              <Show when={fileRefs().length > 0}>
                 <AttachmentChips
-                  attachments={props.attachments}
+                  hub={props.hub}
+                  attachments={fileRefs()}
                   onDownload={props.onDownload}
                   onPreview={props.onPreview}
                   onHidePreview={props.onHidePreview}
@@ -6996,11 +6961,15 @@ function ChatBubbleBody(props: {
               return (
                 <Show
                   when={props.actionsAvailable}
-                  fallback={<span style={chipStyle}>{chipBody()}</span>}
+                  fallback={
+                    <span style={chipStyle} title={`Reacted by ${re.reactedBy}`}>
+                      {chipBody()}
+                    </span>
+                  }
                 >
                   <button
                     type="button"
-                    title={re.mine ? "Remove your reaction" : "React"}
+                    title={`${re.mine ? "Remove your reaction" : "React"} · Reacted by ${re.reactedBy}`}
                     onClick={() => {
                       if (props.messageId !== undefined) {
                         void props.onReact(props.messageId, re.emoji);
@@ -7043,9 +7012,17 @@ function ChatBubbleBody(props: {
             const read = (): boolean =>
               props.messageId !== undefined &&
               props.readByOthers(props.messageId);
+            // ADR-0048 UX §5 — read receipts name the readers.
+            const readers = (): string =>
+              props.messageId === undefined
+                ? ""
+                : props
+                    .readersOf(props.messageId)
+                    .map((r) => profiles.resolve(r).name)
+                    .join(", ");
             return (
               <span
-                title={read() ? "Read" : "Sent"}
+                title={read() && readers().length > 0 ? `Read by ${readers()}` : read() ? "Read" : "Sent"}
                 aria-label={read() ? "Read" : "Sent"}
                 style={{
                   "font-size": "0.72rem",
@@ -7171,7 +7148,44 @@ function ChatBubbleBody(props: {
               </button>
             )}
           </For>
+          {/* ADR-0047 — "+" opens the full picker in reaction mode. */}
+          <button
+            type="button"
+            aria-label="More reactions"
+            title="More reactions"
+            onClick={() => {
+              if (props.messageId !== undefined) props.onOpenFullReactPicker(props.messageId);
+            }}
+            style={{
+              border: "none",
+              background: "transparent",
+              "font-size": "1rem",
+              cursor: "pointer",
+              padding: "0.1rem 0.3rem",
+              "line-height": 1,
+              color: "var(--surface-fg)",
+            }}
+          >
+            +
+          </button>
         </div>
+      </Show>
+      <Show
+        when={
+          props.actionsAvailable &&
+          props.messageId !== undefined &&
+          props.fullReactPickerId === props.messageId
+        }
+      >
+        <EmojiPicker
+          mode="reaction"
+          onEmoji={(emoji) => {
+            if (props.messageId !== undefined) void props.onReact(props.messageId, emoji);
+          }}
+          onClose={() => props.onCloseFullReactPicker()}
+          sessionToken={() => null}
+          align={isIncoming ? "left" : "right"}
+        />
       </Show>
     </li>
   );
@@ -7203,8 +7217,8 @@ const bubbleMiniBtnStyle = {
  * Render the attachment-chip strip below a bubble's text body.
  * Each chip shows `name · size` plus action buttons:
  *
- *   * **Open** — inline-preview when the MIME is a known image
- *     format (`isInlinePreviewable`); fetches + decrypts the
+ *   * **Open** — inline-preview when the MIME is an allowlisted
+ *     image type (`inlineMediaType`); fetches + decrypts the
  *     bytes lazily, caches the object URL.
  *   * **Save** — download + decrypt + trigger a save dialog.
  *
@@ -7212,6 +7226,7 @@ const bubbleMiniBtnStyle = {
  * both the incoming-grey and outgoing-accent bubble bodies.
  */
 function AttachmentChips(props: {
+  hub: MediaHub;
   attachments: AttachmentRefBytes[];
   onDownload: (ref: AttachmentRefBytes) => void | Promise<void>;
   onPreview: (ref: AttachmentRefBytes) => void | Promise<void>;
@@ -7236,7 +7251,9 @@ function AttachmentChips(props: {
       <For each={props.attachments}>
         {(ref) => {
           const cachedUrl = (): string | null => props.getCachedUrl(ref);
-          const previewable = isInlinePreviewable(ref);
+          // ADR-0047 — inline only for an image type the core's allowlist
+          // accepts; never decided by the sender-chosen kind or name.
+          const previewable = props.hub.inlineType(ref.mime) === "image";
           return (
             <div style={{ display: "flex", "flex-direction": "column", gap: "0.25rem" }}>
               <Show when={previewable && cachedUrl() !== null}>
@@ -7369,16 +7386,26 @@ function GroupNotFound(): JSX.Element {
 }
 
 function NeedsReauth(): JSX.Element {
+  const auth = useAuth();
+  const navigate = useNavigate();
+  // `/login` is an anonymous-only route: linking to it while signed in
+  // bounces straight back home. Sign out first, then go there — the same
+  // sequence the sidebar's Log out uses.
+  function signInAgain(): void {
+    auth.logout();
+    navigate(paths.login, { replace: true });
+  }
   return (
     <section style={panelStyle()}>
-      <h1 style={{ "margin-top": 0 }}>Re-enter your password</h1>
+      <h1 style={{ "margin-top": 0 }}>Sign in again</h1>
       <p>
-        This page reload restored your session from the local device
-        key, but the secrets needed to decrypt and sign messages
-        aren't in memory. Please re-enter your password.
+        The keys needed to decrypt and sign messages are not available in
+        this session. Sign in again to open this chat.
       </p>
       <p>
-        <A href={paths.login}>Re-enter password</A>
+        <button class="primary" type="button" onClick={signInAgain}>
+          Sign in again
+        </button>
       </p>
     </section>
   );
@@ -7397,19 +7424,6 @@ function panelStyle(): JSX.CSSProperties {
   };
 }
 
-/** 12-hex-char prefix of an Ed25519 verifying key — enough to
- *  visually tell members apart in the leaf list without crowding
- *  the row. Mirror of `Invite.tsx`'s helper; if a third call
- *  site appears, fold both into `contacts/local-store.ts`'s
- *  existing `fingerprintShort` (which works in base64 — JS
- *  string typing wants the hex variant here). */
-function shortFingerprint(pubkey: Uint8Array): string {
-  let hex = "";
-  for (let i = 0; i < pubkey.length && hex.length < 12; i++) {
-    hex += (pubkey[i] ?? 0).toString(16).padStart(2, "0");
-  }
-  return hex.slice(0, 12);
-}
 
 /**
  * ADR-0045 UX §6 — ask the core whether a plain retry may succeed.
@@ -7496,7 +7510,11 @@ function hasFilesType(dt: DataTransfer | null): boolean {
  *  with whatever the DS eventually hands back. The next ack
  *  flips the row to `kind: "outgoing"` with a populated
  *  `messageId` and the next persist sweep includes it. */
-function timelineRowToPersisted(row: TimelineRow): PersistedMessage | null {
+function timelineRowToPersisted(
+  row: TimelineRow,
+  /** ADR-0047 — media keys this device has played; local-only state. */
+  played: ReadonlySet<string> = new Set(),
+): PersistedMessage | null {
   // Phase 3a8 — call signaling events never persist into
   // the chat log; they're an out-of-band side channel that
   // the CallContext consumes.
@@ -7515,7 +7533,9 @@ function timelineRowToPersisted(row: TimelineRow): PersistedMessage | null {
       messageId: String(row.messageId),
       direction: "outgoing",
       text: row.plaintext,
-      attachments: row.attachments.map(persistedFromAttachmentRef),
+      attachments: row.attachments.map((a) =>
+        persistedFromAttachmentRef(a, played.has(mediaKey(a.blobId))),
+      ),
       createdAt: row.createdAt,
       // ADR-0023 — persisted so edit / delete keep working after a
       // reload. The key we stamped at send, read back verbatim: the
@@ -7526,18 +7546,20 @@ function timelineRowToPersisted(row: TimelineRow): PersistedMessage | null {
   }
   // Incoming: split application vs system.
   if (row.event.kind === "application") {
-    return {
-      messageId: String(row.event.messageId),
-      direction: "incoming",
-      text: row.event.text,
-      attachments: row.event.attachments.map(persistedFromAttachmentRef),
-      createdAt: row.event.createdAt,
-      // ADR-0023 — the author's signature key, resolved back at
-      // receipt in the epoch that named it. Storing the leaf here
-      // was never an option: by the time this row is read back the
-      // leaf may belong to whoever was added next.
-      authorKeyB64: authorIdentityToPersisted(row.event.senderKey),
-    };
+    // The same shape the background receive files for a chat that is not
+    // open (`chat/background-log.ts`), so the two read back identically.
+    // ADR-0023 — the author is the signature key resolved at receipt; storing
+    // the leaf was never an option, it may belong to whoever was added next.
+    const anyPlayed = row.event.attachments.some((a) => played.has(mediaKey(a.blobId)));
+    const base = eventToPersistedMessage(row.event);
+    return anyPlayed
+      ? {
+          ...base,
+          attachments: row.event.attachments.map((a) =>
+            persistedFromAttachmentRef(a, played.has(mediaKey(a.blobId))),
+          ),
+        }
+      : base;
   }
   if (row.event.kind === "callSignaling") {
     // Already filtered out at the top of this function.
@@ -7564,6 +7586,12 @@ function timelineRowToPersisted(row: TimelineRow): PersistedMessage | null {
     // timeline row, so this branch is unreachable. Never persist it.
     return null;
   }
+  if (row.event.kind === "profile") {
+    // ADR-0048 — consumed by the receive loop (filed in the profile store),
+    // never a timeline row. Never persist it: a name belongs in the encrypted
+    // profile store, not in the transcript.
+    return null;
+  }
   if (row.event.kind === "membershipProposal") {
     // ADR-0045 UX §10 — a pending request must NEVER reach the persisted
     // message log: it is an intent the system may discard a second later, and
@@ -7581,17 +7609,6 @@ function timelineRowToPersisted(row: TimelineRow): PersistedMessage | null {
   };
 }
 
-function persistedFromAttachmentRef(a: AttachmentRefBytes): PersistedAttachment {
-  return {
-    blobIdB64: b64UrlEncode(a.blobId),
-    keyB64: b64UrlEncode(a.key),
-    nonceB64: b64UrlEncode(a.nonce),
-    mime: a.mime ?? null,
-    sizeStr: String(a.size),
-    name: a.name ?? null,
-  };
-}
-
 /** Inverse — reconstruct a [`TimelineRow`] from the on-disk
  *  shape. Outgoing rows come back as acked
  *  (`ack: "sent"`, no `tempId`); the UI's `<For>` key uses
@@ -7602,7 +7619,7 @@ function persistedFromAttachmentRef(a: AttachmentRefBytes): PersistedAttachment 
  *  text already baked in; the systemKind discriminator isn't
  *  recoverable but the rendered string is the same. */
 function persistedToTimelineRow(m: PersistedMessage): TimelineRow {
-  const attachments = m.attachments.map(attachmentRefFromPersisted);
+  const attachments = m.attachments.map((a) => attachmentRefFromPersisted(a).ref);
   if (m.direction === "outgoing") {
     return {
       kind: "outgoing",
@@ -7657,43 +7674,4 @@ function persistedToTimelineRow(m: PersistedMessage): TimelineRow {
   };
 }
 
-function attachmentRefFromPersisted(a: PersistedAttachment): AttachmentRefBytes {
-  return {
-    blobId: b64UrlDecode(a.blobIdB64),
-    key: b64UrlDecode(a.keyB64),
-    nonce: b64UrlDecode(a.nonceB64),
-    mime: a.mime ?? undefined,
-    size: Number(a.sizeStr),
-    name: a.name ?? undefined,
-  };
-}
 
-function b64UrlEncode(bytes: Uint8Array): string {
-  let binary = "";
-  for (let i = 0; i < bytes.length; i += 1) {
-    binary += String.fromCharCode(bytes[i] as number);
-  }
-  return btoa(binary)
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/, "");
-}
-
-function uint8ArrayEquals(a: Uint8Array, b: Uint8Array): boolean {
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i += 1) {
-    if (a[i] !== b[i]) return false;
-  }
-  return true;
-}
-
-function b64UrlDecode(s: string): Uint8Array {
-  const padded = s + "===".slice((s.length + 3) % 4);
-  const std = padded.replace(/-/g, "+").replace(/_/g, "/");
-  const binary = atob(std);
-  const out = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) {
-    out[i] = binary.charCodeAt(i);
-  }
-  return out;
-}

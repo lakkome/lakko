@@ -495,6 +495,12 @@ final class MultiJoinerCall {
             // Case present to keep the switch exhaustive after the FFI added
             // the variant.
             break
+        case .profile:
+            // ADR-0048 — a profile envelope rides the GROUP JOURNAL as an MLS
+            // application message (handled in `ChatClient.pollMessages`), never
+            // the SFU signal-relay. A relay payload that classifies as one is
+            // out of place here and carries no authenticated sender key — drop.
+            break
         }
     }
 

@@ -131,11 +131,22 @@ public struct NseProcessedRow: Equatable {
     public let text: String
     /// Number of attachment refs (chat only).
     public let attachmentCount: Int
+    /// ADR-0047 — the `kind` of the message's only attachment (`voice`,
+    /// `video_note`, `gif`, or an unknown string), read from the envelope the
+    /// NSE already decoded. `nil` when there is no single attachment. A LABEL
+    /// only: the NSE never fetches or decrypts the media itself.
+    public let singleAttachmentKind: String?
 
-    public init(kind: NseProcessedKind, text: String, attachmentCount: Int) {
+    public init(
+        kind: NseProcessedKind,
+        text: String,
+        attachmentCount: Int,
+        singleAttachmentKind: String? = nil
+    ) {
         self.kind = kind
         self.text = text
         self.attachmentCount = attachmentCount
+        self.singleAttachmentKind = attachmentCount == 1 ? singleAttachmentKind : nil
     }
 }
 
@@ -352,7 +363,9 @@ private func previewBody(of row: NseProcessedRow) -> String? {
     // A normal chat message → its text (or an attachment hint).
     case .chat:
         if !row.text.isEmpty { return truncate(row.text) }
-        if row.attachmentCount == 1 { return "Sent an attachment" }
+        if row.attachmentCount == 1 {
+            return nseMediaLabel(kind: row.singleAttachmentKind) ?? "Sent an attachment"
+        }
         if row.attachmentCount > 1 { return "Sent \(row.attachmentCount) attachments" }
         return nil
     // An edit rewrites a prior message → surface the new text.
@@ -416,8 +429,16 @@ private let committerBeaconEnvelopeFirstByte: UInt8 = 0x6C
 ///
 /// Verbatim mirror of the foreground `ChatClient.looksLikeCallSignaling`: the
 /// proto's first wire tag is one of `0x52` / `0x5A` / `0x62` / `0x6A`
-/// (`CallSignalingPayload.body` oneof fields 10..13), while a chat envelope
-/// starts with `{` (`0x7B`) — no overlap.
+/// (`CallSignalingPayload.body` oneof fields 10..13, the 1x1 bodies),
+/// `0x72` / `0x7A` (`GroupCallStart` 14 / `GroupCallJoin` 15) or the two-byte
+/// `0x82 0x01` (`GroupCallLeave` 16), while a chat envelope starts with `{`
+/// (`0x7B`) — no overlap. Without the group tags a group-call body reached the
+/// chat parser's lossy fallback and became a notification preview of garbage.
+///
+/// The group tags are ASCII `r` / `z`, so they are matched on their full
+/// framing (``nseIsFramedGroupCallBody(_:tagLength:)``) rather than the first
+/// byte — a first-byte rule would suppress every legacy plain-text message
+/// starting with one of those letters.
 ///
 /// This is the FULL authority for the call-signaling kind on both paths (there
 /// is no prost decoder on the NSE's slim surface, and the foreground uses none
@@ -428,7 +449,38 @@ private let committerBeaconEnvelopeFirstByte: UInt8 = 0x6C
 /// mean the notification and the timeline disagree about what arrived.
 public func nseLooksLikeCallSignaling(_ bytes: Data) -> Bool {
     guard let first = bytes.first else { return false }
-    return first == 0x52 || first == 0x5A || first == 0x62 || first == 0x6A
+    switch first {
+    case 0x52, 0x5A, 0x62, 0x6A:
+        return true
+    case 0x72, 0x7A:
+        return nseIsFramedGroupCallBody(bytes, tagLength: 1)
+    case 0x82:
+        return bytes.count >= 2
+            && bytes[bytes.startIndex + 1] == 0x01
+            && nseIsFramedGroupCallBody(bytes, tagLength: 2)
+    default:
+        return false
+    }
+}
+
+/// `tag || varint(len) || body`, where the body is EXACTLY the rest of the
+/// payload and opens with the 16-byte `call_id` field (`0x0A 0x10`) every
+/// group-call message carries first. Verbatim mirror of the foreground
+/// `ChatClient.isFramedGroupCallBody`.
+public func nseIsFramedGroupCallBody(_ bytes: Data, tagLength: Int) -> Bool {
+    var index = bytes.startIndex + tagLength
+    var length = 0
+    var shift = 0
+    while true {
+        guard index < bytes.endIndex, shift <= 14 else { return false }
+        let byte = bytes[index]
+        index += 1
+        length |= Int(byte & 0x7F) << shift
+        if byte & 0x80 == 0 { break }
+        shift += 7
+    }
+    guard length >= 18, bytes.endIndex - index == length else { return false }
+    return bytes[index] == 0x0A && bytes[index + 1] == 0x10
 }
 
 /// Cheap PRE-FILTER for an ADR-0042 / ADR-0044 push-routing-secret envelope:
@@ -478,6 +530,25 @@ public func nseLooksLikeCommitterBeacon(_ bytes: Data, envelopeLen: Int) -> Bool
     bytes.count == envelopeLen && bytes.first == committerBeaconEnvelopeFirstByte
 }
 
+/// First byte of the ADR-0048 profile domain separator `lakko/profile/v1\0` —
+/// the same ASCII `l` as the other in-group envelope domains, kept as its own
+/// constant so retiring one wire format cannot re-point another's peek.
+private let profileEnvelopeFirstByte: UInt8 = 0x6C
+
+/// Cheap PRE-FILTER for an ADR-0048 profile envelope: a length inside the
+/// well-formed range plus the first domain byte.
+///
+/// A profile, unlike a beacon, has variable length (a name and a username of
+/// their own lengths), so the peek is a RANGE. Both bounds arrive from the slim
+/// FFI (`profileEnvelopeMinLen()` / `profileEnvelopeMaxLen()`), which derives
+/// them from `lakko_contacts`' own constants — never copied here. A stale upper
+/// bound would fail in the dangerous direction (long names would stop being
+/// suppressed), which is why it is injected rather than written as a literal.
+/// The peek decides nothing; `decodeProfileEnvelope` is the verdict.
+public func nseLooksLikeProfile(_ bytes: Data, envelopeLens: ClosedRange<Int>) -> Bool {
+    envelopeLens.contains(bytes.count) && bytes.first == profileEnvelopeFirstByte
+}
+
 /// `true` when an already-DECRYPTED MLS application body is an in-group SERVICE
 /// envelope that must NEVER be rendered as a notification.
 ///
@@ -509,16 +580,26 @@ public func nseLooksLikeCommitterBeacon(_ bytes: Data, envelopeLen: Int) -> Bool
 /// Returning `true` makes the caller drop the row, and the extraction loop then
 /// falls back naturally to the newest REAL chat message (or, with none, to the
 /// handler's generic "New message" banner).
+///
+/// ADR-0048 adds a fourth kind, the profile envelope. It is suppressed and
+/// NOTHING else: the NSE never stores the profile (C-59 — this process writes
+/// no durable state) and has no roster to attribute it with anyway. The
+/// foreground app stores it on its own receive path.
 public func nseIsServiceEnvelope(
     _ bytes: Data,
     decodesAsPushRoutingSecret: (Data) -> Bool,
     decodesAsCommitterBeacon: (Data) -> Bool,
-    committerBeaconEnvelopeLen: Int
+    committerBeaconEnvelopeLen: Int,
+    decodesAsProfile: (Data) -> Bool,
+    profileEnvelopeLens: ClosedRange<Int>
 ) -> Bool {
     if nseLooksLikeCallSignaling(bytes) { return true }
     if nseLooksLikePushRoutingSecret(bytes), decodesAsPushRoutingSecret(bytes) { return true }
     if nseLooksLikeCommitterBeacon(bytes, envelopeLen: committerBeaconEnvelopeLen),
        decodesAsCommitterBeacon(bytes) {
+        return true
+    }
+    if nseLooksLikeProfile(bytes, envelopeLens: profileEnvelopeLens), decodesAsProfile(bytes) {
         return true
     }
     return false
@@ -538,6 +619,18 @@ private func hexToData(_ hex: String) -> Data? {
         index = next
     }
     return out
+}
+
+/// ADR-0047 — the notification body for a media message whose kind the
+/// already-decoded envelope names. An unknown kind keeps the generic
+/// attachment line, exactly as the timeline renders it as a file chip.
+func nseMediaLabel(kind: String?) -> String? {
+    switch kind {
+    case "voice": return "Voice message"
+    case "video_note": return "Video message"
+    case "gif": return "GIF"
+    default: return nil
+    }
 }
 
 /// Truncate a preview body to a sane notification length.

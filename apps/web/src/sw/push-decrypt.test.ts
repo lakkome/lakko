@@ -412,6 +412,35 @@ describe("decryptPushPreview — service envelopes are never previewed", () => {
     }
   });
 
+  it("returns null for a lone group-call control body (start / join / leave)", async () => {
+    // Fields 14 / 15 / 16 of `CallSignalingPayload`: 0x72, 0x7A and the
+    // two-byte tag 0x82 0x01. Before the fix these reached the lossy-UTF-8
+    // chat fallback and became a notification of binary garbage.
+    const bodies = [
+      callSignalingPayload(0x72),
+      callSignalingPayload(0x7a),
+      new Uint8Array([0x82, 0x01, 0x08, 0x01, 0x12, 0x02, 0x68, 0x69]),
+    ];
+    for (const body of bodies) {
+      const { deps } = baseDeps({
+        dsFetchGroup: vi.fn(async () => ({
+          messages: [rawMsg(42, body)],
+        })),
+      });
+      expect(await decryptPushPreview(wake(), deps)).toBeNull();
+    }
+  });
+
+  it("does not take a lone 0x82 without the 0x01 continuation for signaling", async () => {
+    // 0x82 alone is not the field-16 tag; the peek must not swallow it.
+    const { deps } = baseDeps({
+      dsFetchGroup: vi.fn(async () => ({
+        messages: [rawMsg(42, new Uint8Array([0x82, 0x02, 0x68, 0x69]))],
+      })),
+    });
+    expect(await decryptPushPreview(wake(), deps)).not.toBeNull();
+  });
+
   it("previews the chat message when a service envelope precedes it", async () => {
     const { deps } = baseDeps({
       dsFetchGroup: vi.fn(async () => ({

@@ -178,7 +178,9 @@ public enum CallInviteUrlError: Error, Equatable, LocalizedError {
 /// for the `expiry_ms` field. Same recipes as the contact-
 /// invite form — keeps the UX consistent across the two
 /// invite kinds.
-public enum CallInviteExpiryPreset {
+public enum CallInviteExpiryPreset: CaseIterable {
+    /// A call starting now — the shortest window the create form offers.
+    case oneHour
     case oneDay
     case sevenDays
     case thirtyDays
@@ -190,6 +192,8 @@ public enum CallInviteExpiryPreset {
     /// and the UI MUST surface a warning before allowing it.
     public func toMs(nowMs: UInt64) -> UInt64 {
         switch self {
+        case .oneHour:
+            return nowMs + 3_600_000
         case .oneDay:
             return nowMs + 1 * 86_400_000
         case .sevenDays:
@@ -203,7 +207,7 @@ public enum CallInviteExpiryPreset {
 }
 
 /// Discrete UI choices for `max_uses`.
-public enum CallInviteMaxUsesPreset {
+public enum CallInviteMaxUsesPreset: CaseIterable {
     case single
     case ten
     case unlimited
@@ -228,7 +232,7 @@ public enum CallInviteMaxUsesPreset {
 /// for the media kind — surfaces the same `audio-only` vs
 /// `audio-video` toggle the `CallInviteMedia` wire flags
 /// carry.
-public enum CallMediaPreset {
+public enum CallMediaPreset: CaseIterable {
     case audio
     case audioVideo
 }

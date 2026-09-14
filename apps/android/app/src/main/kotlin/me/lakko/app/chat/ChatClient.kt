@@ -13,6 +13,7 @@ import me.lakko.app.ds.FetchResult
 import me.lakko.app.push.GroupPushRouting
 import uniffi.lakko_ffi_uniffi.AttachmentRef
 import uniffi.lakko_ffi_uniffi.FfiException
+import uniffi.lakko_ffi_uniffi.FfiProfile
 import uniffi.lakko_ffi_uniffi.FfiPushRoutingSecret
 import uniffi.lakko_ffi_uniffi.Group
 import uniffi.lakko_ffi_uniffi.Identity
@@ -21,6 +22,7 @@ import uniffi.lakko_ffi_uniffi.ParsedBody
 import uniffi.lakko_ffi_uniffi.ProcessedMessage
 import uniffi.lakko_ffi_uniffi.committerBeaconEnvelopeLen
 import uniffi.lakko_ffi_uniffi.decodeCommitterBeacon
+import uniffi.lakko_ffi_uniffi.decodeProfileEnvelope
 import uniffi.lakko_ffi_uniffi.decodePushRoutingSecret
 import uniffi.lakko_ffi_uniffi.parseBodyEnvelope
 
@@ -415,21 +417,60 @@ public class ChatClient(
 
 /** Phase 3a10 — cheap byte-sniff for the
  *  `CallSignalingPayload` proto. Returns `true` when the
- *  first byte matches one of the oneof body tags
- *  (0x52/0x5A/0x62/0x6A for fields 10..13). Chat envelopes
- *  start with `{` (0x7B); sets don't overlap.
+ *  payload opens with one of the oneof body tags:
+ *
+ *   * fields 10..13 (the 1x1 bodies): one tag byte,
+ *     0x52 / 0x5A / 0x62 / 0x6A;
+ *   * fields 14 and 15 (`GroupCallStart` / `GroupCallJoin`): one
+ *     tag byte, 0x72 / 0x7A;
+ *   * field 16 (`GroupCallLeave`): TWO tag bytes, 0x82 0x01 — a
+ *     field number above 15 no longer fits the single-byte varint,
+ *     which is exactly how a first-byte sniff silently misses it.
+ *
+ *  Chat envelopes start with `{` (0x7B), disjoint from every tag.
+ *
+ *  Before the group tags were added here, a group-control body fell
+ *  through to `parseBodyEnvelope`, whose deliberate lossy-UTF-8
+ *  fallback rendered it as a garbage chat bubble (foreground) or a
+ *  garbage notification (background, which reuses this function).
+ *
+ *  The group tags additionally require the body's first field to be
+ *  the 16-byte `call_id` (`len`, then 0x0A 0x10). 0x72 and 0x7A are
+ *  the ASCII letters `r` and `z`, so a legacy plain-UTF-8 message
+ *  opening with either letter would otherwise be swallowed as call
+ *  signaling; 0x10 is a control byte no typed text carries at that
+ *  offset. Every group body is composed by the one Rust encoder
+ *  (prost writes fields in number order, and `call_id` is mandatory
+ *  and exactly 16 bytes), and its whole body is far below 128 bytes,
+ *  so the length is always one varint byte. The 1x1 tags keep their
+ *  first-byte-only test unchanged.
  *
  *  `internal` rather than `private` ONLY so the background
  *  push-preview path can reuse this exact sniff instead of
  *  duplicating the tag set — see
  *  `me.lakko.app.push.isServiceEnvelope`. The proto oneof tags
  *  must have exactly one definition; a second copy would drift
- *  silently the next time a field number moves. Behaviour here is
- *  unchanged. */
+ *  silently the next time a field number moves. */
 internal fun looksLikeCallSignaling(bytes: ByteArray): Boolean {
     if (bytes.isEmpty()) return false
     val first = bytes[0].toInt() and 0xFF
-    return first == 0x52 || first == 0x5A || first == 0x62 || first == 0x6A
+    if (first == 0x52 || first == 0x5A || first == 0x62 || first == 0x6A) return true
+    val lengthAt = when {
+        first == 0x72 || first == 0x7A -> 1
+        first == 0x82 && bytes.size > 1 && (bytes[1].toInt() and 0xFF) == 0x01 -> 2
+        else -> return false
+    }
+    return opensWithCallId(bytes, lengthAt)
+}
+
+/** `bytes[lengthAt]` is a one-byte body length, followed by the `call_id`
+ *  field header: tag 0x0A (field 1, length-delimited), length 0x10 (16). */
+private fun opensWithCallId(bytes: ByteArray, lengthAt: Int): Boolean {
+    if (bytes.size < lengthAt + 3) return false
+    val bodyLength = bytes[lengthAt].toInt() and 0xFF
+    if (bodyLength >= 0x80) return false
+    return (bytes[lengthAt + 1].toInt() and 0xFF) == 0x0A &&
+        (bytes[lengthAt + 2].toInt() and 0xFF) == 0x10
 }
 
 /** First byte of the ADR-0045 committer-beacon domain separator (`'l'` of
@@ -512,6 +553,48 @@ private fun committerBeaconArm(bytes: ByteArray): Boolean =
     looksLikeCommitterBeacon(bytes, committerBeaconEnvelopeLength, ::decodesAsCommitterBeacon)
 
 /**
+ * ADR-0048 — the frozen profile-envelope domain separator,
+ * `lakko/profile/v1` followed by one NUL byte. Built programmatically: a raw
+ * NUL in a source file makes git treat it as binary.
+ */
+private val PROFILE_ENVELOPE_DOMAIN: ByteArray =
+    "lakko/profile/v1".toByteArray(Charsets.US_ASCII) + byteArrayOf(0)
+
+/**
+ * ADR-0048 — does this application plaintext open with the profile-envelope
+ * domain separator?
+ *
+ * Unlike the routing-secret peek this prefix test is a complete CLASSIFICATION
+ * (though not a complete decode): the 17-byte separator ends in a NUL byte, so
+ * no chat envelope (`{`) and no legacy UTF-8 message a person typed can open
+ * with it. A plaintext that does is a profile envelope whether or not it
+ * decodes, and one that does not decode — an out-of-bounds name, a truncated
+ * frame, an unknown version — is DROPPED rather than handed to the chat
+ * parser, whose lossy-UTF-8 fallback would render the domain string and the
+ * raw bytes as a bubble. The core refuses such an envelope "as a whole"
+ * (ADR-0048 §1), and so does this client.
+ *
+ * `internal` so the background push-preview filter reuses this exact test.
+ * Pure — host-testable.
+ */
+internal fun looksLikeProfileEnvelope(bytes: ByteArray): Boolean {
+    if (bytes.size < PROFILE_ENVELOPE_DOMAIN.size) return false
+    for (i in PROFILE_ENVELOPE_DOMAIN.indices) {
+        if (bytes[i] != PROFILE_ENVELOPE_DOMAIN[i]) return false
+    }
+    return true
+}
+
+/** The authoritative, fail-closed profile decode: the profile, or `null` for a
+ *  malformed / out-of-bounds envelope (which is then dropped, never rendered). */
+private fun decodeProfileOrNull(bytes: ByteArray): FfiProfile? =
+    try {
+        decodeProfileEnvelope(bytes)
+    } catch (_: Throwable) {
+        null
+    }
+
+/**
  * Classify one decrypted DS row into an [IncomingChatEvent].
  *
  * `internal`, and with its two FFI touchpoints as DEFAULTED PARAMETERS, so the
@@ -550,6 +633,7 @@ internal fun toEvent(
     resolveSender: (UInt) -> MemberIdentity?,
     isCommitterBeacon: (ByteArray) -> Boolean = ::committerBeaconArm,
     parseBody: (ByteArray) -> ParsedBody = ::parseBodyEnvelope,
+    decodeProfile: (ByteArray) -> FfiProfile? = ::decodeProfileOrNull,
 ): IncomingChatEvent =
     when (processed) {
         is ProcessedMessage.Application -> {
@@ -579,13 +663,19 @@ internal fun toEvent(
             // bytes before running the chat-envelope
             // parser. Cheap unambiguous discriminator:
             // CallSignalingPayload's first proto wire tag
-            // is one of 0x52 / 0x5A / 0x62 / 0x6A
-            // (oneof fields 10..13); chat envelopes start
+            // is one of 0x52 / 0x5A / 0x62 / 0x6A / 0x72 /
+            // 0x7A / 0x82 0x01 (oneof fields 10..16, see
+            // [looksLikeCallSignaling]); chat envelopes start
             // with `{` (0x7B). No overlap.
             if (looksLikeCallSignaling(processed.data)) {
                 IncomingChatEvent.CallSignaling(
                     messageId = messageId,
                     payloadBytes = processed.data,
+                    // The MLS-authenticated sender leaf: a group-control body
+                    // names a leaf of its own, and the ledger refuses one
+                    // that does not match this (a member may only speak for
+                    // itself).
+                    senderLeaf = processed.senderLeaf,
                     createdAt = createdAt,
                 )
             } else if (routingSecret != null) {
@@ -638,6 +728,20 @@ internal fun toEvent(
                 IncomingChatEvent.CommitterBeacon(
                     messageId = messageId,
                     senderLeaf = processed.senderLeaf,
+                    createdAt = createdAt,
+                )
+            } else if (looksLikeProfileEnvelope(processed.data)) {
+                // ADR-0048 — a member's profile. Never a timeline bubble.
+                // The sender is resolved to its signature KEY here, one line
+                // after the apply, because this is the one moment the roster
+                // is the epoch the envelope was sealed at (C-68). The profile
+                // names no identity of its own, so nothing in its bytes can
+                // choose whom it is stored under. A malformed envelope arrives
+                // as `profile = null` and is consumed as a no-op.
+                IncomingChatEvent.Profile(
+                    messageId = messageId,
+                    profile = decodeProfile(processed.data),
+                    senderKey = processed.senderLeaf?.let(resolveSender),
                     createdAt = createdAt,
                 )
             } else {
@@ -928,6 +1032,10 @@ public sealed interface IncomingChatEvent {
         val messageId: Long,
         val payloadBytes: ByteArray,
         val createdAt: String,
+        /** MLS-authenticated sender leaf of the row, `null` for a non-member
+         *  sender. A group-control body is refused unless the leaf it claims
+         *  equals this one. */
+        val senderLeaf: UInt? = null,
     ) : IncomingChatEvent {
         // Override equals / hashCode for the payload
         // ByteArray — default reference equality would
@@ -937,16 +1045,34 @@ public sealed interface IncomingChatEvent {
             if (other !is CallSignaling) return false
             return messageId == other.messageId &&
                 payloadBytes.contentEquals(other.payloadBytes) &&
-                createdAt == other.createdAt
+                createdAt == other.createdAt &&
+                senderLeaf == other.senderLeaf
         }
 
         override fun hashCode(): Int {
             var result = messageId.hashCode()
             result = 31 * result + payloadBytes.contentHashCode()
             result = 31 * result + createdAt.hashCode()
+            result = 31 * result + (senderLeaf?.hashCode() ?: 0)
             return result
         }
     }
+
+    /** ADR-0048 — a member's profile envelope. Never a timeline bubble.
+     *
+     *  [profile] is `null` when the envelope matched the profile domain but was
+     *  malformed or out of bounds; the core refuses such an envelope as a
+     *  whole, so it is consumed as a no-op and never rendered.
+     *
+     *  [senderKey] is the sender's signature key resolved from the MLS sender
+     *  leaf at receipt (C-68), `null` when the sender could not be resolved —
+     *  an unattributable profile is never stored. */
+    public data class Profile(
+        val messageId: Long,
+        val profile: FfiProfile?,
+        val senderKey: MemberIdentity?,
+        val createdAt: String,
+    ) : IncomingChatEvent
 
     /** ADR-0027 (G-3) — an external-join *request*: a non-member posted an
      *  external Add proposal to this group's journal and the MLS core retained

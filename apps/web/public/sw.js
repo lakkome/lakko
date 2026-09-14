@@ -400,7 +400,7 @@ async function backgroundPreview(wake) {
   }
 
   const [core, wasm] = await Promise.all([loadDecryptModule(), loadSwWasm()]);
-  const deps = buildDecryptDeps(wasm);
+  const deps = buildDecryptDeps(wasm, core);
   return core.decryptPushPreview(wake, deps);
 }
 
@@ -438,8 +438,22 @@ function loadSwWasm() {
  * capability here is a read or a pure compute — there is deliberately
  * NO write path (no `saveSnapshot` / `saveMessageLog` / cursor advance).
  */
-function buildDecryptDeps(wasm) {
+function buildDecryptDeps(wasm, core) {
   return {
+    // ADR-0048 — the name this device already knows for a sender, from the
+    // encrypted profile row the app wrote. READ-ONLY: the SW never stores a
+    // profile and never looks a username up (C-59).
+    lookupSenderName: async (accountId, deviceKey, senderKeyB64) => {
+      const row = await idbGet("lakko-profiles", "rows", accountId);
+      if (row === undefined || row.ciphertext === undefined) return null;
+      try {
+        const plain = await aesGcmUnwrap(deviceKey, row.ciphertext);
+        const payload = JSON.parse(new TextDecoder().decode(plain));
+        return core.senderNameFromProfileRow(payload, senderKeyB64);
+      } catch {
+        return null;
+      }
+    },
     // ADR-0042 Sprint 4 — reverse-map an opaque `push_gid` wake `g`
     // back to the owning `(accountId, base64 group_id)`. The `routes`
     // store is PLAINTEXT by design (push_gid is a one-way derivation;

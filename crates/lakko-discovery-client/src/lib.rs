@@ -53,7 +53,17 @@
 //! the same hash. Username uniqueness is enforced at the
 //! oprf-hash level, not the plaintext level — so two visually
 //! confusable strings (e.g. `paypal` vs `paypaI`) are different
-//! accounts. UI-side homograph defences are out of scope here.
+//! accounts — which is exactly why the character-set rule below exists.
+//!
+//! ## Username character set (ADR-0048 §4)
+//!
+//! [`validate_username`] requires the normalised form to be ASCII
+//! `[a-z0-9_]`, 3 to 32 characters, so Latin / Cyrillic look-alikes
+//! and dashes cannot mislead. The server cannot enforce it (it sees a
+//! blinded element), so [`OprfBlinder::blind`] enforces it: a name
+//! that fails is refused before any request is built, for register
+//! and lookup alike. `@channel` handles ([`OprfBlinder::blind_channel`])
+//! are a separate namespace with their own (unchanged) policy.
 //!
 //! ## Security notes
 //!
@@ -76,7 +86,8 @@ mod normalize;
 
 pub use blinder::{OprfBlinder, OPRF_HASH_LEN};
 pub use error::DiscoveryClientError;
-pub use normalize::normalize_username;
+pub use lakko_contacts::username::{UsernameError, USERNAME_MAX_LEN, USERNAME_MIN_LEN};
+pub use normalize::{normalize_username, validate_username};
 
 /// Lakko VOPRF cipher suite — Ristretto255-SHA512.
 ///

@@ -37,7 +37,13 @@
 //!    decision via
 //!    [`crate::committer_beacon::acting_committer_verdict`],
 //!    pairing it with the MLS sender leaf and the DS row age.
-//! 6. **Intro-message fallthrough** — plain free-text
+//! 6. [`crate::profile::try_unwrap_profile`] — a member's
+//!    profile (ADR-0048). Caller stores it under the sender's
+//!    signature key resolved at receipt (C-68), keeps it only if
+//!    [`crate::profile::profile_is_newer`] than what it holds, and
+//!    verifies any claimed username through discovery before
+//!    showing it.
+//! 7. **Intro-message fallthrough** — plain free-text
 //!    `ContactRequest` (ADR-0005 scenario A; "add me as a
 //!    contact"). Caller renders the bytes as a UTF-8 intro
 //!    message.
@@ -73,6 +79,7 @@ use crate::call_kp_forward::try_unwrap_call_kp_forward;
 use crate::call_welcome::{try_unwrap_call_welcome, CallWelcomeError};
 use crate::committer_beacon::{try_unwrap_committer_beacon, CommitterBeaconError};
 use crate::media_state::{try_unwrap_media_state, MediaStateError};
+use crate::profile::{try_unwrap_profile, Profile, ProfileError};
 use crate::push_routing::{try_unwrap_push_routing_secret, PushRoutingSecretError};
 
 /// Discriminated dispatch result. Borrow-flavoured slice so
@@ -80,7 +87,12 @@ use crate::push_routing::{try_unwrap_push_routing_secret, PushRoutingSecretError
 /// whether to clone bytes when it persists / forwards them
 /// (e.g. handing a Welcome to `Group::join_from_welcome`
 /// which takes a slice).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Not `Copy`: the [`IncomingEnvelope::Profile`] variant owns its
+/// decoded strings, because a profile is validated field by field
+/// (UTF-8, bounds) and handing back the raw slices would invite a
+/// caller to re-read unvalidated bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IncomingEnvelope<'a> {
     /// First-joiner Welcome for a link-based call. Caller
     /// drives `Group::join_from_welcome(payload)`.
@@ -142,6 +154,17 @@ pub enum IncomingEnvelope<'a> {
     /// person is online"** — no UI copy may imply the stronger
     /// claim.
     CommitterBeacon,
+    /// A member's profile (ADR-0048): display name, claimed username,
+    /// sender-clock stamp — already validated against every bound.
+    ///
+    /// **Every field is the sender's claim.** The caller stores it
+    /// under the sender's signature key resolved at receipt (C-68,
+    /// never a leaf index, never a key the payload might name), keeps
+    /// it only when [`crate::profile::profile_is_newer`] than the
+    /// stored one, and shows `username` only after verifying it
+    /// through discovery (ADR-0048 §3). Never rendered as a chat
+    /// bubble.
+    Profile(Profile),
     /// Plain free-text intro message (ADR-0005 scenario A).
     /// Caller renders as a UTF-8 ContactRequest.
     IntroMessage(&'a [u8]),
@@ -175,6 +198,11 @@ pub enum DispatchError {
     /// unknown version).
     #[error(transparent)]
     CommitterBeacon(#[from] CommitterBeaconError),
+    /// A profile envelope (ADR-0048) matched its domain separator
+    /// but was malformed or out of bounds. The whole envelope is
+    /// refused — a profile has no remainder worth keeping.
+    #[error(transparent)]
+    Profile(#[from] ProfileError),
 }
 
 /// Single-call dispatcher. Runs the two unwrap helpers in
@@ -221,7 +249,11 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<IncomingEnvelope<'
     if try_unwrap_committer_beacon(plaintext)?.is_some() {
         return Ok(IncomingEnvelope::CommitterBeacon);
     }
-    // 6. Plain intro message — ADR-0005 scenario A.
+    // 6. Profile — ADR-0048.
+    if let Some(profile) = try_unwrap_profile(plaintext)? {
+        return Ok(IncomingEnvelope::Profile(profile));
+    }
+    // 7. Plain intro message — ADR-0005 scenario A.
     Ok(IncomingEnvelope::IntroMessage(plaintext))
 }
 
@@ -276,6 +308,41 @@ mod tests {
             dispatch_incoming_envelope(&wrapped),
             Err(DispatchError::CommitterBeacon(_)),
         ));
+    }
+
+    #[test]
+    fn dispatches_profile_envelope() {
+        use crate::profile::compose_profile;
+        let profile = Profile {
+            display_name: Some("Alice Petrova".to_string()),
+            username: Some("alice".to_string()),
+            updated_at_ms: 42,
+        };
+        let wrapped = compose_profile(&profile).unwrap();
+        assert_eq!(
+            dispatch_incoming_envelope(&wrapped).unwrap(),
+            IncomingEnvelope::Profile(profile),
+        );
+    }
+
+    #[test]
+    fn an_out_of_bounds_profile_is_an_error_not_an_intro_message() {
+        // Fail-closed: a profile carrying a right-to-left override in
+        // its name must be dropped, never rendered as chat text.
+        use crate::profile::{DisplayNameError, PROFILE_ENVELOPE_DOMAIN_V1, PROFILE_VERSION_V1};
+        let name = "Alice\u{202E}".as_bytes();
+        let mut wrapped = PROFILE_ENVELOPE_DOMAIN_V1.to_vec();
+        wrapped.push(PROFILE_VERSION_V1);
+        wrapped.extend_from_slice(&0u64.to_be_bytes());
+        wrapped.push(u8::try_from(name.len()).unwrap());
+        wrapped.extend_from_slice(name);
+        wrapped.push(0);
+        assert_eq!(
+            dispatch_incoming_envelope(&wrapped),
+            Err(DispatchError::Profile(ProfileError::DisplayName(
+                DisplayNameError::ControlOrFormatCharacter
+            ))),
+        );
     }
 
     #[test]

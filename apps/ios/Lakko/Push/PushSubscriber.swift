@@ -37,7 +37,7 @@ import UserNotifications
 ///
 /// ## Default base URL
 ///
-/// `http://localhost:8085` — see ``PushClient/defaultBaseURL``.
+/// ``PushClient/defaultBaseURL`` — derived from the build's API base URL.
 @MainActor
 public final class PushSubscriber {
 

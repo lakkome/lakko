@@ -30,8 +30,14 @@ public struct HomeScreen: View {
     public var onOpenPasskeys: () -> Void
     public var onOpenDevices: () -> Void
     public var onOpenAntiCensorship: () -> Void
+    public var onOpenProfile: () -> Void
     public var onLogout: () -> Void
     public var onForgetDevice: () -> Void
+    /// ADR-0048 — the own name shown under the heading updates when saved.
+    @ObservedObject private var profiles = ProfileDirectory.shared
+    /// ADR-0047 / UX spec §3 — "Autoplay video notes", default OFF: autoplay
+    /// downloads media, so it is the user's choice, per device.
+    @AppStorage(MediaPrefs.autoplayKey) private var autoplayVideoNotes = false
 
     public init(
         account: SessionAccount,
@@ -41,6 +47,7 @@ public struct HomeScreen: View {
         onOpenPasskeys: @escaping () -> Void = {},
         onOpenDevices: @escaping () -> Void = {},
         onOpenAntiCensorship: @escaping () -> Void = {},
+        onOpenProfile: @escaping () -> Void = {},
         onLogout: @escaping () -> Void,
         onForgetDevice: @escaping () -> Void
     ) {
@@ -51,6 +58,7 @@ public struct HomeScreen: View {
         self.onOpenPasskeys = onOpenPasskeys
         self.onOpenDevices = onOpenDevices
         self.onOpenAntiCensorship = onOpenAntiCensorship
+        self.onOpenProfile = onOpenProfile
         self.onLogout = onLogout
         self.onForgetDevice = onForgetDevice
     }
@@ -61,7 +69,7 @@ public struct HomeScreen: View {
                 .font(.largeTitle)
                 .fontWeight(.bold)
 
-            Text("Signed in as @\(account.username)")
+            Text("Signed in as \(ownProfilePreview(displayName: profiles.ownProfile?.displayName, username: account.username) ?? "a guest account")")
                 .font(.title2)
 
             Text("Account id (base64):")
@@ -120,6 +128,15 @@ public struct HomeScreen: View {
             .buttonStyle(.bordered)
             .controlSize(.large)
 
+            // ADR-0048 — Settings -> Profile: the name the people this
+            // account talks to see.
+            Button(action: onOpenProfile) {
+                Text("Profile")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+
             // ADR-0026 — anti-censorship arming surface. Tapping
             // pushes `AntiCensorshipSettingsView` via the SessionRoot
             // destination toggle.
@@ -129,6 +146,9 @@ public struct HomeScreen: View {
             }
             .buttonStyle(.bordered)
             .controlSize(.large)
+
+            Toggle("Autoplay video notes", isOn: $autoplayVideoNotes)
+                .font(.body)
 
             Text(
                 "Accept a contact request from the Contacts screen and the " +

@@ -89,20 +89,8 @@ android {
             "\"${project.findProperty("lakko.fcm.senderId") as String? ?: ""}\"",
         )
 
-        // SFU multi-party group-call endpoint. The Rust SFU is a
-        // WebSocket origin (`ws://` / `wss://`, no trailing path);
-        // `SfuConfig` trims it and `SfuSignalingClient` appends
-        // `/v1/connect`. Sourced from a gradle property (set via
-        // `apps/android/local.properties` or `-P lakko.sfu.url=...`)
-        // so it never lands in version control. Empty when unset —
-        // `SfuConfig.baseUrl` then returns null and the group-call
-        // trigger refuses with a clear log line (1x1 P2P calls are
-        // unaffected). Emulator dev: `ws://10.0.2.2:8085`.
-        buildConfigField(
-            "String",
-            "LAKKO_SFU_URL",
-            "\"${project.findProperty("lakko.sfu.url") as String? ?: ""}\"",
-        )
+        // The deployment endpoints (`LAKKO_API_BASE_URL`, `LAKKO_SFU_URL`)
+        // are per build type — see `buildTypes` below.
 
         // G-13 (ADR-0015) — optional build-time pin of the device-attestation
         // verifying key (base64url of the 32-byte Ed25519 key). When set,
@@ -308,7 +296,49 @@ android {
     }
 
     buildTypes {
+        // Deployment endpoints, per build type. A gradle property overrides
+        // the default for any build (`-P lakko.api.url=...` /
+        // `-P lakko.sfu.url=...`, or `apps/android/local.properties`); set it
+        // to an empty string to get the local-development fallbacks.
+        //
+        // `LAKKO_API_BASE_URL` — the native API base every REST client derives
+        // its service base from (`ApiEndpoints`): `<base>/auth`, `/ds`,
+        // `/storage`, `/discovery`, `/push-gw`, `/channels`, `/gifs`. Empty ->
+        // each client keeps its `http://10.0.2.2:<port>` emulator dev bind (a
+        // release build logs a warning).
+        //   debug:   https://test.lakko.me/native (the test stack)
+        //   release: empty until a production release sets it
+        //
+        // `LAKKO_SFU_URL` — the SFU WebSocket origin (`ws://` / `wss://`, no
+        // trailing path); `SfuConfig` trims it and `SfuSignalingClient`
+        // appends `/v1/connect`. Empty -> `SfuConfig.baseUrl` is null and the
+        // group-call trigger refuses with a clear log line (1x1 P2P calls are
+        // unaffected).
+        //   debug:   wss://test.lakko.me/sfu
+        //   release: empty
+        fun com.android.build.api.dsl.ApplicationBuildType.endpointFields(
+            apiDefault: String,
+            sfuDefault: String,
+        ) {
+            buildConfigField(
+                "String",
+                "LAKKO_API_BASE_URL",
+                "\"${project.findProperty("lakko.api.url") as String? ?: apiDefault}\"",
+            )
+            buildConfigField(
+                "String",
+                "LAKKO_SFU_URL",
+                "\"${project.findProperty("lakko.sfu.url") as String? ?: sfuDefault}\"",
+            )
+        }
+        debug {
+            endpointFields(
+                apiDefault = "https://test.lakko.me/native",
+                sfuDefault = "wss://test.lakko.me/sfu",
+            )
+        }
         release {
+            endpointFields(apiDefault = "", sfuDefault = "")
             // Smoke build only — release shrinking is wired
             // properly in 1.15d when there's enough code to
             // shrink. The lakko-core consumer-rules.pro keeps
@@ -329,6 +359,28 @@ android {
         //     pickFirsts += listOf("**/libc++_shared.so")
         // }
     }
+}
+
+// ADR-0047 §3 — the emoji picker's data. ONE dataset for all three clients:
+// the file the web client bundles, generated offline by
+// `apps/web/scripts/gen-emoji-data.mjs` from pinned Unicode 15.1 + CLDR 45
+// sources (annotated `Unicode-3.0` in the repo's REUSE.toml at its source
+// path). It is copied into this app's assets at build time rather than
+// checked in a second time, so the Android set cannot drift from the web set,
+// and nothing fetches emoji data at runtime.
+val emojiDataSource: File =
+    rootProject.layout.projectDirectory.file("../web/src/media/emoji/emoji-data.json").asFile
+val copyEmojiData = tasks.register<Sync>("copyEmojiData") {
+    from(emojiDataSource)
+    into(layout.buildDirectory.dir("generated/lakko-emoji-assets/emoji"))
+}
+android.sourceSets.getByName("main").assets.srcDir(
+    layout.buildDirectory.dir("generated/lakko-emoji-assets"),
+)
+tasks.named("preBuild") { dependsOn(copyEmojiData) }
+android.testOptions.unitTests.all {
+    // The emoji index tests parse the real dataset, from its source path.
+    it.systemProperty("lakko.emojiDataPath", emojiDataSource.absolutePath)
 }
 
 dependencies {
@@ -436,6 +488,11 @@ dependencies {
     implementation(libs.androidx.camera.camera2)
     implementation(libs.androidx.camera.lifecycle)
     implementation(libs.androidx.camera.view)
+    // ADR-0047 — video notes: CameraX `Recorder` / `VideoCapture` write the
+    // H.264 + AAC MP4 every client plays. CameraX core, camera2, lifecycle
+    // and view were already here for the QR scanner; this is the one module
+    // that records.
+    implementation(libs.androidx.camera.video)
     implementation(libs.mlkit.barcode.scanning)
     implementation(libs.zxing.core)
 

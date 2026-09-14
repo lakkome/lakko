@@ -86,10 +86,17 @@ public final class ContactsViewModel: ObservableObject {
     /// form; failures land in ``sendError``.
     public func onSendClicked() {
         guard !sending else { return }
-        let username = usernameInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !username.isEmpty else {
+        // ADR-0048 §4 — no lookup is sent for a name that fails the rule.
+        let username: String
+        switch checkUsername(usernameInput) {
+        case .empty:
             sendError = "Type a username first."
             return
+        case .invalid(let reason):
+            sendError = reason.message
+            return
+        case .valid(let canonical):
+            username = canonical
         }
 
         sending = true
@@ -134,6 +141,11 @@ public final class ContactsViewModel: ObservableObject {
                     ?? "Send failed."
             }
         }
+    }
+
+    /// ADR-0048 §4 — the inline reason under the add-contact field, or `nil`.
+    public var usernameHint: String? {
+        checkUsername(usernameInput).inlineMessage
     }
 
     public func onRefreshClicked() {

@@ -58,6 +58,7 @@ import type {
   Identity as WasmIdentity,
 } from "../../wasm/lakko_ffi_wasm";
 import type { IdentityFetchResponse } from "../discovery/wire";
+import type { ReceivedProfile } from "../profile/profile-envelope";
 import type { AccountPubkeyPin } from "./local-store";
 import {
   readPin,
@@ -152,6 +153,17 @@ export interface ContactsClientOptions {
    *  group cache) it is a no-op — such callers persist nothing and hold no cached
    *  group, so they cannot desync, mirroring `onPersistWithCommit`. */
   onCommitPersistAbort?: (groupIdB64: string) => Promise<void>;
+  /** ADR-0048 §2 — this account's composed profile envelope, carried inside
+   *  every outgoing contact request's sealed plaintext so the recipient can
+   *  see who is asking before accepting. `null` (or unset) sends none. A throw
+   *  is treated as `null`: a profile is never a reason not to send a
+   *  request. */
+  ownProfileEnvelope?: () => Promise<Uint8Array | null>;
+  /** ADR-0048 §3 — a username lookup this client ran resolved `username` to
+   *  the account publishing `signatureKeyB64`. That is exactly the binding a
+   *  username verification checks, so the caller may record it instead of
+   *  spending another lookup later. It shows nothing by itself. */
+  onUsernameResolved?: (signatureKeyB64: string, username: string) => void;
 }
 
 /** Result of `ContactsClient.sendContactRequest`. */
@@ -198,6 +210,12 @@ export interface IncomingContactRequest {
    *  intro / it didn't decrypt. Empty string is a valid
    *  payload (means "no intro" in `compose`). */
   intro: string | null;
+  /** ADR-0048 — the sender's profile from the sealed plaintext, or `null`
+   *  when the request carried none, carried one out of bounds, or did not
+   *  decrypt. The sender's CLAIM, bound to `fromPubkey` (which the request
+   *  signature authenticates): file it under that key and verify the
+   *  username before showing it. */
+  profile: ReceivedProfile | null;
   /** ISO-8601 timestamp the DS recorded on receive. */
   createdAt: string;
 }
@@ -736,6 +754,10 @@ export class ContactsClient {
   private readonly onCommitPersistAbort:
     | ((groupIdB64: string) => Promise<void>)
     | undefined;
+  private readonly ownProfileEnvelope: (() => Promise<Uint8Array | null>) | undefined;
+  private readonly onUsernameResolved:
+    | ((signatureKeyB64: string, username: string) => void)
+    | undefined;
 
   constructor(
     private readonly discovery: DiscoveryClient = new DiscoveryClient(),
@@ -746,6 +768,31 @@ export class ContactsClient {
     this.onPersist = options.onPersist;
     this.onPersistWithCommit = options.onPersistWithCommit;
     this.onCommitPersistAbort = options.onCommitPersistAbort;
+    this.ownProfileEnvelope = options.ownProfileEnvelope;
+    this.onUsernameResolved = options.onUsernameResolved;
+  }
+
+  /** ADR-0048 §3 — report a lookup's binding to the verification cache.
+   *  Best-effort: a throwing listener never fails the lookup's own flow. */
+  private reportUsernameResolved(signatureKey: Uint8Array, username: string): void {
+    try {
+      this.onUsernameResolved?.(base64Encode(signatureKey), username);
+    } catch {
+      // Diagnostic cache only.
+    }
+  }
+
+  /** ADR-0048 §2 — the profile envelope to seal into a contact request, or an
+   *  empty array for none. */
+  private async profileEnvelopeForRequest(): Promise<Uint8Array> {
+    if (this.ownProfileEnvelope === undefined) return new Uint8Array(0);
+    try {
+      return (await this.ownProfileEnvelope()) ?? new Uint8Array(0);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("ContactsClient: own profile envelope unavailable; sending the request without it", err);
+      return new Uint8Array(0);
+    }
   }
 
   /**
@@ -1541,6 +1588,7 @@ export class ContactsClient {
     await this.verifyBundleAccountKey(recipientAccountId, bundle);
     const recipientSignaturePub = base64Decode(bundle.signature_pubkey);
     const recipientX25519Pub = base64Decode(bundle.x25519_pubkey);
+    this.reportUsernameResolved(recipientSignaturePub, lookup.normalisedUsername);
 
     const publish = await this.composeAndPublishContactRequest(
       identity,
@@ -1663,6 +1711,8 @@ export class ContactsClient {
     // (lowest ceiling). Production mobile builds populate this
     // from the platform attestation API.
     const privacyPassToken = new Uint8Array(0);
+    // ADR-0048 §2 — the sender's profile rides the sealed plaintext.
+    const profileEnvelope = await this.profileEnvelopeForRequest();
     let wireBytes: Uint8Array;
     try {
       // 1.16e3b: pass our own account_id so the receiver can
@@ -1675,6 +1725,7 @@ export class ContactsClient {
         senderPseudonym,
         validAfterMs,
         privacyPassToken,
+        profileEnvelope,
         introMessage,
       );
     } catch (err) {
@@ -1831,6 +1882,13 @@ export class ContactsClient {
    *                   immediate return). The DS clamps to its
    *                   own ceiling.
    *
+   * @param signal     Aborts the fetch (a parked long poll on sign-out).
+   *
+   * No cursor re-read and no serialization here: this is a plain
+   * fetch-and-decode. Any caller that can overlap with another poll of
+   * the same mailbox must go through `contacts/mailbox-poller.ts`, which
+   * drops a batch whose cursor moved and serializes the dispatch.
+   *
    * Malformed entries on the wire are **dropped silently** —
    * the verifier rejects bad signatures, decoding errors are
    * logged via `console.warn` and skipped. We don't surface a
@@ -1841,6 +1899,7 @@ export class ContactsClient {
     identity: IdentitySecrets | null,
     after: number,
     waitSecs = 0,
+    signal?: AbortSignal,
   ): Promise<PollResult> {
     const wasm = await loadWasm();
     const myIdentity = await this.resolveIdentity(identity);
@@ -1851,7 +1910,11 @@ export class ContactsClient {
 
     let raw;
     try {
-      raw = await this.ds.fetchMailbox(myPseudonym, { after, waitSecs });
+      raw = await this.ds.fetchMailbox(myPseudonym, {
+        after,
+        waitSecs,
+        ...(signal !== undefined ? { signal } : {}),
+      });
     } catch (err) {
       throw ContactsError.wrap(err);
     }
@@ -1925,9 +1988,22 @@ export class ContactsClient {
       }
 
       let intro: string | null = null;
+      let profile: ReceivedProfile | null = null;
       try {
-        const introBytes = parsed.openEnvelope(myX25519Secret);
-        intro = new TextDecoder("utf-8", { fatal: false }).decode(introBytes);
+        const opened = parsed.openEnvelope(myX25519Secret);
+        intro = new TextDecoder("utf-8", { fatal: false }).decode(opened.introMessage);
+        // ADR-0048 — a profile out of bounds arrives as `undefined` with the
+        // intro intact; the request itself is still a valid request.
+        const p = opened.profile;
+        if (p !== undefined) {
+          profile = {
+            displayName: p.displayName ?? null,
+            username: p.username ?? null,
+            updatedAtMs: p.updatedAtMs,
+          };
+          p.free();
+        }
+        opened.free();
       } catch (err) {
         // Envelope didn't decrypt for our X25519 secret. Could
         // be a malicious request, could be a bug; either way
@@ -1956,6 +2032,7 @@ export class ContactsClient {
           fromPseudonym: parsed.fromPseudonym,
           validAfterMs: parsed.validAfterMs,
           intro,
+          profile,
           createdAt: message.createdAt,
         },
       });
@@ -2106,6 +2183,7 @@ export class ContactsClient {
     // a key change, fail-closed (`SupersessionRefused`) otherwise.
     await this.verifyBundleAccountKey(lookup.account, bundle);
     const recipientSignaturePubkey = base64Decode(bundle.signature_pubkey);
+    this.reportUsernameResolved(recipientSignaturePubkey, lookup.normalisedUsername);
 
     const out = await this.startGroupWith(
       identity,
@@ -3157,6 +3235,7 @@ export class ContactsClient {
     // (`SupersessionRefused`) on a changed key with no valid proof.
     await this.verifyBundleAccountKey(lookup.account, bundle);
     const recipientSignaturePubkey = base64Decode(bundle.signature_pubkey);
+    this.reportUsernameResolved(recipientSignaturePubkey, lookup.normalisedUsername);
     onResolved?.({
       accountId: lookup.account,
       signaturePubkey: recipientSignaturePubkey,

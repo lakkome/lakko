@@ -85,11 +85,17 @@ vi.mock("./sframe-transform", () => ({
 // `dispatchIncomingEnvelope` classifies that text; `composeMediaState` tags the
 // broadcast bytes so the send tests can read the intended flag back.
 vi.mock("../wasm", () => {
+  // Mirrors the real enum's tags (`WasmIncomingEnvelopeKind`), including the
+  // kinds this suite never dispatches, so a relayed payload the mock classified
+  // as one of them cannot silently collide with a tag it does use.
   const IncomingEnvelopeKind = Object.freeze({
     CallWelcome: 0,
     CallKeyPackage: 1,
     IntroMessage: 2,
     MediaState: 3,
+    PushRoutingSecret: 4,
+    CommitterBeacon: 5,
+    Profile: 6,
   });
   return {
     loadWasm: async () => ({
@@ -108,6 +114,11 @@ vi.mock("../wasm", () => {
         }
         if (s === "media:malformed") {
           throw new Error("matched media-state domain but malformed body");
+        }
+        if (s === "profile") {
+          // ADR-0048 — a profile envelope classifies as its own kind, with no
+          // camera flag.
+          return { kind: IncomingEnvelopeKind.Profile, cameraOn: undefined, free: () => {} };
         }
         // Anything else classifies as a plain intro (fall-through).
         return {
@@ -200,6 +211,23 @@ describe("SfuCallSession — relay classification", () => {
     await flush();
     expect(media).toHaveLength(0);
     expect(opaque).toEqual([["peerY", "call-welcome-bytes"]]);
+  });
+
+  it("never consumes a Profile relay as a media-state signal (ADR-0048)", async () => {
+    // A Profile is not a media-state signal: it must not flip a camera tile,
+    // and the session passes it on untouched for the orchestrator to drop.
+    const media: Array<[string, boolean]> = [];
+    const opaque: Array<[string, string]> = [];
+    const session = new SfuCallSession(baseConfig(), {
+      onRemoteMediaState: (peerId, on) => media.push([peerId, on]),
+      onSignalRelay: (from, payload) => opaque.push([from, decode(payload)]),
+    });
+    await session.connect();
+
+    relay("peerP", "profile");
+    await flush();
+    expect(media).toHaveLength(0);
+    expect(opaque).toEqual([["peerP", "profile"]]);
   });
 
   it("falls through a matched-but-malformed media-state body to onSignalRelay", async () => {

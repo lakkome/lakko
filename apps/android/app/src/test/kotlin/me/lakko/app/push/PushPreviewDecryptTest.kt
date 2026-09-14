@@ -612,6 +612,35 @@ class PushPreviewDecryptTest {
                 ),
             )
         }
+        // 2b. The group-control bodies (fields 14..16, the last with a
+        // two-byte tag) — a notification must never render one.
+        for (payload in listOf(
+            me.lakko.app.calls.GroupCallWireFixtures.groupStart(),
+            me.lakko.app.calls.GroupCallWireFixtures.groupJoin(),
+            me.lakko.app.calls.GroupCallWireFixtures.groupLeave(),
+        )) {
+            assertTrue(
+                "group body 0x${(payload[0].toInt() and 0xFF).toString(16)} must classify as service",
+                isServiceEnvelope(
+                    payload,
+                    ::fakeRoutingSecretDecode,
+                    ::fakeCommitterBeaconDecode,
+                    beaconEnvelopeLen,
+                ),
+            )
+        }
+        // A plain message opening with `r` / `z` is not one.
+        for (text in listOf("rabbit", "zebra")) {
+            assertFalse(
+                "'$text' must not classify as service",
+                isServiceEnvelope(
+                    text.toByteArray(Charsets.UTF_8),
+                    ::fakeRoutingSecretDecode,
+                    ::fakeCommitterBeaconDecode,
+                    beaconEnvelopeLen,
+                ),
+            )
+        }
         // A real chat envelope starts with `{` (0x7B) — never a service
         // envelope, and it must not pay for the throwing codec.
         assertFalse(

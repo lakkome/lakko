@@ -101,6 +101,26 @@ export class DsNetworkError extends Error {
   }
 }
 
+/**
+ * `true` when `err` is, or wraps, a transport-level DS failure. The receive
+ * loops use it to pick the short network backoff. Wrapping differs by caller —
+ * `ChatError` keeps `cause`, `ContactsError` keeps `variant.cause` — so the
+ * walk follows both, bounded so a cyclic chain cannot hang it.
+ */
+export function isDsNetworkFailure(err: unknown): boolean {
+  let current: unknown = err;
+  for (let depth = 0; depth < 8 && current !== undefined && current !== null; depth += 1) {
+    if (current instanceof DsNetworkError) return true;
+    if (typeof current !== "object") return false;
+    const record = current as {
+      cause?: unknown;
+      variant?: { cause?: unknown };
+    };
+    current = record.cause ?? record.variant?.cause;
+  }
+  return false;
+}
+
 export class DsClient {
   constructor(public readonly baseUrl: string = DEFAULT_BASE_URL) {}
 
@@ -204,7 +224,15 @@ export class DsClient {
    */
   async fetchMailbox(
     pseudonym: Uint8Array,
-    options: { after?: number; limit?: number; waitSecs?: number } = {},
+    options: {
+      after?: number;
+      limit?: number;
+      waitSecs?: number;
+      /** Aborts the (possibly long-polling) request. An aborted fetch
+       *  rejects with `DsNetworkError`; callers that abort on purpose
+       *  check their own signal first. */
+      signal?: AbortSignal;
+    } = {},
   ): Promise<FetchResult> {
     if (pseudonym.length !== 32) {
       throw new DsClientArgError("pseudonym must be 32 bytes");
@@ -228,7 +256,10 @@ export class DsClient {
 
     let response: Response;
     try {
-      response = await fetch(url, { method: "GET" });
+      response = await fetch(url, {
+        method: "GET",
+        ...(options.signal !== undefined ? { signal: options.signal } : {}),
+      });
     } catch (err) {
       throw new DsNetworkError(endpoint, err);
     }
@@ -261,7 +292,15 @@ export class DsClient {
    */
   async fetchGroup(
     groupId: Uint8Array,
-    options: { after?: number; limit?: number; waitSecs?: number } = {},
+    options: {
+      after?: number;
+      limit?: number;
+      waitSecs?: number;
+      /** Aborts the (possibly long-polling) request. An aborted fetch
+       *  rejects with `DsNetworkError`; callers that abort on purpose
+       *  check their own signal first. */
+      signal?: AbortSignal;
+    } = {},
   ): Promise<FetchResult> {
     if (groupId.length === 0) {
       throw new DsClientArgError("groupId must be non-empty");
@@ -284,7 +323,10 @@ export class DsClient {
 
     let response: Response;
     try {
-      response = await fetch(url, { method: "GET" });
+      response = await fetch(url, {
+        method: "GET",
+        ...(options.signal !== undefined ? { signal: options.signal } : {}),
+      });
     } catch (err) {
       throw new DsNetworkError(endpoint, err);
     }

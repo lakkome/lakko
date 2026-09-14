@@ -7,50 +7,64 @@
  * `127.0.0.1:8081` via Vite's `/api/auth/*` dev proxy.
  *
  * 1.16c3c1 adds the BIP39 recovery passphrase. After a successful
- * signup the form switches to a "your recovery phrase" panel that
- * displays the 24 words once and requires the user to confirm
- * they have written them down before navigating home. Re-display
- * is impossible — the words live in memory only and drop the
- * moment the user hits "Done".
+ * signup the 24 words are shown once and the user must confirm they
+ * have written them down before going anywhere. That screen is NOT
+ * rendered here: `auth.signup` lands the session, and this page sits
+ * inside `<RequireAnonymous>`, which used to navigate home on that
+ * transition before a stage of this page could show the phrase. The
+ * route guards render `auth/SignupPhrasePrompt.tsx` for as long as
+ * `auth.signupPhrase()` is unacknowledged (`auth/phrase-gate.ts`).
  *
  * Generates a fresh UUIDv7 `account_id` client-side, persists
  * `(accountId, username)` in `localStorage` so subsequent logins
  * on this device work.
  */
-import { createSignal, For, Show, type JSX } from "solid-js";
-import { A, useLocation, useNavigate } from "@solidjs/router";
+import { createSignal, Show, type JSX } from "solid-js";
+import { A } from "@solidjs/router";
 import { paths } from "./paths";
 import { useAuth } from "../auth/AuthContext";
-import { readReturnUrl } from "../auth/return-url";
+import { useProfiles } from "../profile/ProfileContext";
 import {
-  DEFAULT_SHARE_COUNT,
-  DEFAULT_THRESHOLD,
-  splitMnemonic,
-} from "../recovery/shamir";
-
-/**
- * Two-stage form: `"form"` collects username + password, `"phrase"`
- * displays the BIP39 mnemonic post-signup. The local state machine
- * keeps the wiring contained — no need to lift state into a parent.
- */
-type Stage = { kind: "form" } | { kind: "phrase"; phrase: string };
+  createDisplayNameCheck,
+  createUsernameCheck,
+} from "../profile/username-field";
+import {
+  mayLookUp,
+  maySaveDisplayName,
+  savedDisplayName,
+  usernameReason,
+  type DisplayNameCheck,
+  type UsernameCheck,
+} from "../profile/rules";
 
 export default function Signup(): JSX.Element {
   const auth = useAuth();
-  const navigate = useNavigate();
-  const location = useLocation();
+  const profiles = useProfiles();
 
-  const [stage, setStage] = createSignal<Stage>({ kind: "form" });
   const [username, setUsername] = createSignal("");
+  // ADR-0048 — optional profile name, saved once the account exists.
+  const [displayName, setDisplayName] = createSignal("");
+  // ADR-0048 §4 — validated as the user types; nothing is registered for a
+  // name that fails the rule.
+  const usernameCheck = createUsernameCheck(username);
+  const displayNameCheck = createDisplayNameCheck(displayName);
   const [password, setPassword] = createSignal("");
   const [confirm, setConfirm] = createSignal("");
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
-  const [acknowledged, setAcknowledged] = createSignal(false);
 
   async function onSubmit(e: SubmitEvent): Promise<void> {
     e.preventDefault();
     setError(null);
+    const checked = usernameCheck();
+    if (!mayLookUp(checked)) {
+      setError(usernameReason(checked) ?? "Enter a username");
+      return;
+    }
+    if (!maySaveDisplayName(displayNameCheck())) {
+      setError("Fix your name before continuing.");
+      return;
+    }
     if (password() !== confirm()) {
       setError("Passwords do not match.");
       return;
@@ -63,13 +77,26 @@ export default function Signup(): JSX.Element {
     }
     setBusy(true);
     try {
-      const out = await auth.signup(username().trim(), password());
+      // Resolving lands the session with the phrase pending; the guard around
+      // this route switches to the phrase screen on that transition, so there
+      // is nothing to render from the result here.
+      await auth.signup(checked.normalised, password());
+      // ADR-0048 — the name is local until there is something to publish it
+      // into; a failure to save it never fails the signup.
+      const name = savedDisplayName(displayNameCheck());
+      if (name !== null) {
+        try {
+          await profiles.saveOwnDisplayName(name);
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("saving the profile name after signup failed", err);
+        }
+      }
       // Clear the password fields immediately — we don't need them
       // any more, and we don't want them sitting in DOM state
       // longer than necessary.
       setPassword("");
       setConfirm("");
-      setStage({ kind: "phrase", phrase: out.recoveryPhrase });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -77,47 +104,24 @@ export default function Signup(): JSX.Element {
     }
   }
 
-  function onAcknowledge(): void {
-    // Drop the phrase from local state before navigating — the
-    // <RecoveryPhrasePanel> below has already finished rendering;
-    // there is no path back to it. The same words live in
-    // server-side ciphertext (the OPAQUE recovery envelope), but
-    // are NOT recoverable from there without the words themselves.
-    setStage({ kind: "form" });
-    // 1.18e — honour `?return=<path>` from the URL so an anon
-    // visitor who clicked "Sign up" from the invite landing
-    // (`/i/:slug`) lands back there after auth + acknowledge.
-    // Validated path-only by `readReturnUrl`; falls back to `/`
-    // when the param is absent / malformed / open-redirect attempt.
-    navigate(readReturnUrl(location), { replace: true });
-  }
-
   return (
     <div class="auth-shell">
       <section class="auth-card">
-        <Show
-          when={stage().kind === "form"}
-          fallback={
-            <RecoveryPhrasePanel
-              phrase={(stage() as { kind: "phrase"; phrase: string }).phrase}
-              acknowledged={acknowledged}
-              setAcknowledged={setAcknowledged}
-              onAcknowledge={onAcknowledge}
-            />
-          }
-        >
-          <SignupForm
-            username={username}
-            setUsername={setUsername}
-            password={password}
-            setPassword={setPassword}
-            confirm={confirm}
-            setConfirm={setConfirm}
-            busy={busy}
-            error={error}
-            onSubmit={onSubmit}
-          />
-        </Show>
+        <SignupForm
+          username={username}
+          setUsername={setUsername}
+          usernameCheck={usernameCheck}
+          displayName={displayName}
+          setDisplayName={setDisplayName}
+          displayNameCheck={displayNameCheck}
+          password={password}
+          setPassword={setPassword}
+          confirm={confirm}
+          setConfirm={setConfirm}
+          busy={busy}
+          error={error}
+          onSubmit={onSubmit}
+        />
       </section>
     </div>
   );
@@ -130,6 +134,10 @@ export default function Signup(): JSX.Element {
 interface SignupFormProps {
   readonly username: () => string;
   readonly setUsername: (v: string) => void;
+  readonly usernameCheck: () => UsernameCheck;
+  readonly displayName: () => string;
+  readonly setDisplayName: (v: string) => void;
+  readonly displayNameCheck: () => DisplayNameCheck;
   readonly password: () => string;
   readonly setPassword: (v: string) => void;
   readonly confirm: () => string;
@@ -159,8 +167,54 @@ function SignupForm(props: SignupFormProps): JSX.Element {
             value={props.username()}
             onInput={(e) => props.setUsername(e.currentTarget.value)}
             disabled={props.busy()}
+            aria-invalid={props.usernameCheck().kind === "invalid"}
+            aria-describedby="signup-username-hint"
           />
         </label>
+        {/* ADR-0048 UX §4 — the reason as the user types; uppercase is
+            accepted and shown lowercased. */}
+        <div id="signup-username-hint" role="status" style={{ "font-size": "0.85rem" }}>
+          <Show
+            when={usernameReason(props.usernameCheck())}
+            fallback={
+              <Show when={props.usernameCheck().kind === "valid"}>
+                <span style={{ color: "var(--surface-muted)" }}>
+                  @{(props.usernameCheck() as { normalised: string }).normalised}
+                </span>
+              </Show>
+            }
+          >
+            {(reason) => <span class="form-error">{reason()}</span>}
+          </Show>
+        </div>
+        <label>
+          Your name (optional)
+          <input
+            type="text"
+            autocomplete="name"
+            placeholder={
+              props.usernameCheck().kind === "valid"
+                ? (props.usernameCheck() as { normalised: string }).normalised
+                : ""
+            }
+            value={props.displayName()}
+            onInput={(e) => props.setDisplayName(e.currentTarget.value)}
+            disabled={props.busy()}
+            aria-invalid={props.displayNameCheck().kind === "invalid"}
+          />
+        </label>
+        <Show
+          when={(() => {
+            const c = props.displayNameCheck();
+            return c.kind === "invalid" ? c.reason : null;
+          })()}
+        >
+          {(reason) => (
+            <div class="form-error" role="status" style={{ "font-size": "0.85rem" }}>
+              {reason()}
+            </div>
+          )}
+        </Show>
         <label>
           Password
           <input
@@ -184,7 +238,15 @@ function SignupForm(props: SignupFormProps): JSX.Element {
           />
         </label>
         {props.error() !== null && <div class="form-error">{props.error()}</div>}
-        <button class="primary" type="submit" disabled={props.busy()}>
+        <button
+          class="primary"
+          type="submit"
+          disabled={
+            props.busy() ||
+            !mayLookUp(props.usernameCheck()) ||
+            !maySaveDisplayName(props.displayNameCheck())
+          }
+        >
           {props.busy() ? "Creating account…" : "Sign up"}
         </button>
       </form>
@@ -192,262 +254,5 @@ function SignupForm(props: SignupFormProps): JSX.Element {
         Already have an account? <A href={paths.login}>Log in</A>.
       </p>
     </>
-  );
-}
-
-// ----------------------------------------------------------------------
-// Stage 2: recovery phrase display
-// ----------------------------------------------------------------------
-
-interface PhrasePanelProps {
-  readonly phrase: string;
-  readonly acknowledged: () => boolean;
-  readonly setAcknowledged: (v: boolean) => void;
-  readonly onAcknowledge: () => void;
-}
-
-function RecoveryPhrasePanel(props: PhrasePanelProps): JSX.Element {
-  const words = (): string[] => props.phrase.split(/\s+/).filter((w) => w !== "");
-  return (
-    <>
-      <h1>Save your recovery phrase</h1>
-      <p style={{ color: "var(--surface-muted)", "margin-top": 0 }}>
-        These 24 words are the <strong>only way</strong> to recover
-        your account if you forget your password. Write them down
-        on paper, in order. Do not screenshot them. Do not store
-        them in plain text. We cannot show them to you again.
-      </p>
-
-      <ol
-        style={{
-          display: "grid",
-          "grid-template-columns": "repeat(2, minmax(0, 1fr))",
-          gap: "0.25rem 0.75rem",
-          padding: "1rem 1rem 1rem 2.5rem",
-          margin: "1rem 0",
-          background: "var(--surface-bg)",
-          border: "1px solid var(--surface-border)",
-          "border-radius": "var(--radius-sm)",
-          "font-family": "ui-monospace, SFMono-Regular, Menlo, monospace",
-          "font-size": "0.95rem",
-        }}
-      >
-        {words().map((w) => (
-          <li>{w}</li>
-        ))}
-      </ol>
-
-      <label
-        style={{
-          display: "flex",
-          "align-items": "flex-start",
-          gap: "0.5rem",
-          "margin-bottom": "1rem",
-        }}
-      >
-        <input
-          type="checkbox"
-          checked={props.acknowledged()}
-          onChange={(e) => props.setAcknowledged(e.currentTarget.checked)}
-          style={{ "margin-top": "0.25rem", width: "auto" }}
-        />
-        <span>
-          I have written down my 24-word recovery phrase. I
-          understand that losing it means losing access to this
-          account.
-        </span>
-      </label>
-
-      <SocialRecoveryPanel phrase={props.phrase} />
-
-      <button
-        class="primary"
-        type="button"
-        disabled={!props.acknowledged()}
-        onClick={props.onAcknowledge}
-      >
-        Done — take me to Lakko
-      </button>
-    </>
-  );
-}
-
-// ----------------------------------------------------------------------
-// Phase 1.21c — optional Shamir 3-of-5 social-recovery shares
-// ----------------------------------------------------------------------
-
-/**
- * Optional sub-panel inside the post-signup recovery-phrase
- * screen. Lets the user split the 24-word mnemonic into 5
- * shares (any 3 reconstruct) for distribution to guardians.
- *
- * Collapsed by default — the canonical "write 24 words on
- * paper" flow stays the prominent path. Power users who want
- * a social fallback expand the panel, copy each share, and
- * give one to each guardian. The user acknowledgement above
- * (the "I have written down" checkbox) gates the Done button
- * regardless; social shares are a complement to the
- * paper-phrase backup, not a replacement.
- */
-function SocialRecoveryPanel(props: { phrase: string }): JSX.Element {
-  const [open, setOpen] = createSignal(false);
-  const [busy, setBusy] = createSignal(false);
-  const [shares, setShares] = createSignal<string[]>([]);
-  const [error, setError] = createSignal<string | null>(null);
-  const [copiedIndex, setCopiedIndex] = createSignal<number | null>(null);
-
-  async function onGenerate(): Promise<void> {
-    setBusy(true);
-    setError(null);
-    try {
-      const out = await splitMnemonic(
-        props.phrase,
-        DEFAULT_THRESHOLD,
-        DEFAULT_SHARE_COUNT,
-      );
-      setShares(out);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function onCopy(idx: number, value: string): Promise<void> {
-    try {
-      await navigator.clipboard.writeText(value);
-      setCopiedIndex(idx);
-      // Reset the "copied" flag after a short delay so a
-      // subsequent copy on the same chip surfaces a fresh
-      // confirmation.
-      setTimeout(() => setCopiedIndex((cur) => (cur === idx ? null : cur)), 1500);
-    } catch {
-      setError("Clipboard write blocked — copy manually.");
-    }
-  }
-
-  return (
-    <details
-      open={open()}
-      onToggle={(e) => setOpen(e.currentTarget.open)}
-      style={{
-        "margin-bottom": "1rem",
-        padding: "0.5rem 0.75rem",
-        border: "1px solid var(--surface-border)",
-        "border-radius": "var(--radius-sm)",
-        background: "var(--surface-elevated)",
-      }}
-    >
-      <summary
-        style={{
-          cursor: "pointer",
-          "font-size": "0.9rem",
-        }}
-      >
-        Optional: split into 3-of-5 social-recovery shares
-      </summary>
-      <p
-        style={{
-          color: "var(--surface-muted)",
-          "font-size": "0.85rem",
-          margin: "0.5rem 0",
-        }}
-      >
-        Generate 5 share strings; any 3 reconstruct your
-        recovery phrase. Distribute one to each trusted
-        guardian (family, friends, a safe deposit box). No
-        single guardian alone — or any two colluding — can
-        recover your account; you can lose contact with two
-        guardians and still recover.
-      </p>
-      <Show
-        when={shares().length > 0}
-        fallback={
-          <button
-            type="button"
-            onClick={() => {
-              void onGenerate();
-            }}
-            disabled={busy()}
-            style={{ "font-size": "0.85rem" }}
-          >
-            {busy() ? "Generating…" : `Generate ${DEFAULT_SHARE_COUNT} shares`}
-          </button>
-        }
-      >
-        <ol
-          style={{
-            display: "flex",
-            "flex-direction": "column",
-            gap: "0.4rem",
-            padding: 0,
-            margin: "0 0 0.5rem 0",
-            "list-style": "none",
-          }}
-        >
-          <For each={shares()}>
-            {(share, i) => (
-              <li
-                style={{
-                  display: "flex",
-                  "align-items": "center",
-                  gap: "0.5rem",
-                  padding: "0.4rem 0.5rem",
-                  background: "var(--surface-bg)",
-                  "border-radius": "var(--radius-sm)",
-                }}
-              >
-                <strong style={{ "min-width": "1.5rem", "font-family": "ui-monospace" }}>
-                  #{i() + 1}
-                </strong>
-                <code
-                  style={{
-                    flex: 1,
-                    "font-size": "0.75rem",
-                    overflow: "hidden",
-                    "text-overflow": "ellipsis",
-                    "white-space": "nowrap",
-                  }}
-                  title={share}
-                >
-                  {share}
-                </code>
-                <button
-                  type="button"
-                  onClick={() => {
-                    void onCopy(i(), share);
-                  }}
-                  style={{
-                    "font-size": "0.75rem",
-                    padding: "0.2rem 0.5rem",
-                  }}
-                >
-                  {copiedIndex() === i() ? "Copied" : "Copy"}
-                </button>
-              </li>
-            )}
-          </For>
-        </ol>
-        <p
-          style={{
-            color: "var(--surface-muted)",
-            "font-size": "0.8rem",
-            margin: "0.25rem 0 0",
-          }}
-        >
-          Distribute one share to each of {DEFAULT_SHARE_COUNT}{" "}
-          trusted guardians. Recover via /recover → Recovery
-          shares with any {DEFAULT_THRESHOLD}.
-        </p>
-      </Show>
-      <Show when={error() !== null}>
-        <div
-          class="form-error"
-          style={{ "margin-top": "0.5rem", "font-size": "0.85rem" }}
-        >
-          {error()}
-        </div>
-      </Show>
-    </details>
   );
 }

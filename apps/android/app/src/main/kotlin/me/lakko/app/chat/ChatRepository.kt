@@ -18,6 +18,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import me.lakko.app.profile.toFfi
 import me.lakko.app.push.DevicePushId
 import me.lakko.app.push.GroupPushRouting
 import me.lakko.app.push.NativePushRoutingPorts
@@ -132,6 +133,11 @@ public class ChatRepository(
      *  persist; the sensitive secret lives encrypted in
      *  [PushRoutingSecretStore]. */
     private val pushRouteStore: PushRouteStore = PushRouteStore(applicationContext),
+    /** Builds the short-lived, bearer-authenticated discovery client
+     *  [republishKeyPackage] uploads through. Separate from [discovery] so
+     *  the session token is never attached to that shared client's other
+     *  requests. */
+    private val keyPackageDiscoveryFactory: () -> DiscoveryClient = { DiscoveryClient() },
 ) : AutoCloseable {
 
     /**
@@ -182,6 +188,9 @@ public class ChatRepository(
      */
     private val groups: MutableMap<String, GroupRecord> =
         Collections.synchronizedMap(mutableMapOf())
+
+    /** The chat list's local unread counts; see [LocalUnreadCounter]. */
+    private val localUnread = LocalUnreadCounter()
 
     /**
      * G-37 — PER-GROUP coroutine mutexes for serialising operations on ONE
@@ -266,6 +275,76 @@ public class ChatRepository(
      */
     private val providerLock = Mutex()
 
+    /**
+     * The account + bearer token the current session's KeyPackage is
+     * published for. Set by [bootstrap], cleared by [clear]. Kept separately
+     * from [canonicalIdentity] because the token is not MLS state.
+     */
+    private val keyPackageAccount = AtomicReference<KeyPackageAccount?>(null)
+
+    /**
+     * `true` when this session's bootstrap found a snapshot on disk it could
+     * not read or restore (Keystore hiccup, corrupt envelope). That envelope
+     * is still the only copy of every group's state, and the KeyPackage
+     * republish persists the WHOLE provider, so while this is set its persist
+     * refuses rather than overwrite it with a near-empty provider. Cleared
+     * once any other path has persisted successfully (the old envelope is
+     * gone by then anyway) and on [clear].
+     */
+    private val snapshotUnreadable = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** Process-lifetime scope for the fire-and-forget KeyPackage republish.
+     *  Not tied to a screen, so leaving the chat UI never strands an upload
+     *  half way. */
+    private val keyPackageScope: CoroutineScope =
+        CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    private val keyPackageRepublisher: KeyPackageRepublisher<KeyPackageSession> =
+        KeyPackageRepublisher(
+            ports = object : KeyPackageRepublishPorts<KeyPackageSession> {
+                override suspend fun <T> exclusiveProvider(block: suspend () -> T): T =
+                    providerLock.withLock { block() }
+
+                override fun currentSession(): KeyPackageSession? {
+                    val identity = canonicalIdentity.get() ?: return null
+                    val accountIdB64 = currentAccountIdB64.get() ?: return null
+                    val account = keyPackageAccount.get() ?: return null
+                    if (account.accountIdB64 != accountIdB64) return null
+                    return KeyPackageSession(identity, account)
+                }
+
+                override fun createKeyPackage(session: KeyPackageSession): ByteArray =
+                    session.identity.createKeyPackage()
+
+                override fun persistSnapshotDurably(session: KeyPackageSession) {
+                    // The session must still be the live one: persisting a
+                    // replaced identity's provider under this account would
+                    // overwrite the real snapshot.
+                    check(canonicalIdentity.get() === session.identity) {
+                        "session changed before the KeyPackage snapshot persist"
+                    }
+                    check(!snapshotUnreadable.get()) {
+                        "the on-disk MLS snapshot was not restorable this session; " +
+                            "refusing to overwrite it for a KeyPackage"
+                    }
+                    val blob = session.identity.snapshotStorage()
+                    snapshotStore.putSnapshot(
+                        applicationContext,
+                        session.account.accountIdB64,
+                        blob,
+                    )
+                }
+
+                override suspend fun upload(session: KeyPackageSession, keyPackage: ByteArray) {
+                    keyPackageDiscoveryFactory().use { client ->
+                        client.setSessionToken(session.account.sessionToken)
+                        client.uploadKeyPackage(session.account.accountId, keyPackage)
+                    }
+                }
+            },
+            log = { message, cause -> android.util.Log.w("ChatRepository", message, cause) },
+        )
+
     private val mutableState: MutableStateFlow<ChatRepositoryState> =
         MutableStateFlow(ChatRepositoryState())
 
@@ -287,6 +366,15 @@ public class ChatRepository(
      */
     public fun bootstrap(secrets: IdentitySecrets) {
         val newAccountIdB64 = base64UrlSafe(secrets.accountId)
+        // Refresh the publish credentials even on the same-account early
+        // return below: a re-authentication hands us a newer token.
+        keyPackageAccount.set(
+            KeyPackageAccount(
+                accountIdB64 = newAccountIdB64,
+                accountId = secrets.accountId.copyOf(),
+                sessionToken = secrets.sessionToken,
+            ),
+        )
         val existing = currentAccountIdB64.get()
         if (existing == newAccountIdB64) return
         if (existing != null) {
@@ -300,7 +388,7 @@ public class ChatRepository(
         // Restore the snapshot — best-effort. The Identity is
         // valid even if the restore fails (we just lose the
         // prior MLS state, peers re-bootstrap).
-        val restored = runCatching {
+        val restoreResult = runCatching {
             val blob = snapshotStore.getSnapshot(applicationContext, newAccountIdB64)
             if (blob != null) {
                 identity.restoreStorage(blob)
@@ -308,7 +396,16 @@ public class ChatRepository(
             } else {
                 false
             }
-        }.getOrDefault(false)
+        }
+        val restored = restoreResult.getOrDefault(false)
+        if (restoreResult.isFailure) {
+            android.util.Log.w(
+                "ChatRepository",
+                "MLS snapshot present but not restorable",
+                restoreResult.exceptionOrNull(),
+            )
+        }
+        snapshotUnreadable.set(restoreResult.isFailure)
 
         canonicalIdentity.set(identity)
         currentAccountIdB64.set(newAccountIdB64)
@@ -363,6 +460,45 @@ public class ChatRepository(
         }
 
         mutableState.update { it.copy(bootstrapped = true) }
+
+        // Every session start — a password / passkey / recovery landing AND
+        // the silent cold-start restore — publishes a KeyPackage minted from
+        // THIS long-lived identity. Nothing else on Android publishes a usable
+        // one, and the directory row may be dead (consumed by a Welcome, or
+        // minted by a throwaway identity before this fix). Strictly after the
+        // snapshot restore above: `restoreStorage` replaces the whole provider
+        // and would erase private keys minted before it.
+        // When the on-disk snapshot could not be restored, the republish's own
+        // persist refuses (see [snapshotUnreadable]) and nothing is uploaded.
+        requestKeyPackageRepublish()
+    }
+
+    /**
+     * Publish a KeyPackage this device can be added to a group with: mint it
+     * from the canonical [Identity], persist the provider snapshot durably
+     * under [providerLock], and only then upload it with the session token.
+     * No upload when the persist fails (fail closed). Serialized, so a burst of
+     * requests made before a run mints uploads once. See
+     * [KeyPackageRepublisher] for the ordering and coalescing rules.
+     */
+    public suspend fun republishKeyPackage(): KeyPackageRepublishOutcome =
+        keyPackageRepublisher.republish()
+
+    /**
+     * Fire-and-forget [republishKeyPackage]. The request is numbered BEFORE
+     * this returns, so a caller that just finished a Welcome join is
+     * guaranteed a KeyPackage minted after that join.
+     */
+    public fun requestKeyPackageRepublish() {
+        val ticket = keyPackageRepublisher.markRequested()
+        keyPackageScope.launch {
+            val outcome = keyPackageRepublisher.serve(ticket)
+            if (outcome != KeyPackageRepublishOutcome.UPLOADED &&
+                outcome != KeyPackageRepublishOutcome.COVERED
+            ) {
+                android.util.Log.w("ChatRepository", "KeyPackage republish ended: $outcome")
+            }
+        }
     }
 
     /** Decode a lowercase hex string into bytes. Returns `null`
@@ -475,8 +611,27 @@ public class ChatRepository(
             }
             publishThreadList()
         }
+        // ADR-0048 §2 — founding a group is joining it: publish this device's
+        // profile so the invitee learns the founder's name. Launched, never
+        // awaited: the publish takes the per-group lock itself.
+        profileRepublish.publishNow(groupIdHex)
         return groupIdHex
     }
+
+    /** Who the KeyPackage is published for: the snapshot key, the raw
+     *  account id the directory expects, and the bearer token. */
+    private class KeyPackageAccount(
+        val accountIdB64: String,
+        val accountId: ByteArray,
+        val sessionToken: String,
+    )
+
+    /** One KeyPackage republish run's view of the session, captured under
+     *  [providerLock] so mint, persist and upload all name the same account. */
+    private class KeyPackageSession(
+        val identity: Identity,
+        val account: KeyPackageAccount,
+    )
 
     /** G-37 — carries a freshly-created group across the provider-lock release
      *  so the Welcome mailbox publish can run outside it. */
@@ -498,6 +653,21 @@ public class ChatRepository(
      *         been called yet.
      */
     public suspend fun joinGroupFromWelcome(welcomeBytes: ByteArray): String {
+        try {
+            return joinGroupFromWelcomeAttempt(welcomeBytes)
+        } finally {
+            // After EVERY attempt, success or failure. A successful join
+            // consumed the published KeyPackage (OpenMLS deletes its private
+            // key; the directory holds one row per account), so the row is now
+            // dead. A failed join is often the symptom of a dead row — e.g.
+            // one minted before this fix by a throwaway identity — and a fresh
+            // one is the only way the NEXT adder can succeed. Numbered here,
+            // after the join, so it is served by a KeyPackage minted after it.
+            requestKeyPackageRepublish()
+        }
+    }
+
+    private suspend fun joinGroupFromWelcomeAttempt(welcomeBytes: ByteArray): String {
         val identity = canonicalIdentity.get()
             ?: throw IllegalStateException(
                 "ChatRepository not bootstrapped — call bootstrap() first",
@@ -528,6 +698,9 @@ public class ChatRepository(
             groupIdHex
         }
         publishThreadList()
+        // ADR-0048 §2 — publish this device's profile into the group it just
+        // joined: nobody there knows its name yet.
+        profileRepublish.publishNow(groupIdHex)
         return groupIdHex
     }
 
@@ -547,14 +720,124 @@ public class ChatRepository(
      * upstream — the view model and screen layer enforce that.
      */
     /**
-     * Phase 3a10 — closure the UI attaches to dispatch
-     * inbound call-signaling bytes into its
-     * [me.lakko.app.calls.CallSession] state machine. `null`
-     * when no call surface is attached; the per-record poll
-     * just drops the payload.
+     * Where one-to-one call signaling goes: the app-level
+     * [me.lakko.app.calls.OneToOneCallHost.deliver], installed by `MainActivity`.
+     *
+     * One hook for the whole repository, fed by EVERY poll of every group
+     * ([routeParsedCallSignaling]). It used to be a slot each `ChatViewModel`
+     * overwrote with a closure filtered to its own chat, so an offer to a chat
+     * that was not open was dropped while the cursor advanced past it and the
+     * call never rang. `null` (tests, before wiring) drops the body.
+     *
+     * Invoked inside the poll's critical section with the row's DS message id
+     * and `created_at`; the host only checks its high-water mark and enqueues.
      */
     @Volatile
-    public var callSignalingSink: ((String, ByteArray) -> Unit)? = null
+    internal var oneToOneCallInbound:
+        ((groupIdHex: String, messageId: Long, body: uniffi.lakko_ffi_uniffi.FfiCallSignalingBody, createdAt: String) -> Unit)? =
+        null
+
+    private val mutableGroupCalls: MutableStateFlow<Map<String, me.lakko.app.calls.GroupCallRecord>> =
+        MutableStateFlow(emptyMap())
+
+    /**
+     * The ongoing-group-call ledger, one record per chat, keyed by group id hex.
+     *
+     * Held HERE rather than in a `ChatViewModel` because the app polls EVERY
+     * group, not only the open chat: a group-call announce that lands for a chat
+     * that is not open would otherwise be dropped while the cursor advances past
+     * it, and the chat would never learn the call exists. The ledger is fed by
+     * every poll of every group ([routeParsedCallSignaling]), open or not.
+     *
+     * In memory only. A restart loses the records (the cursor is already past the
+     * announce), so a call started before the restart is not offered until
+     * someone publishes a fresh start.
+     */
+    internal val groupCalls: StateFlow<Map<String, me.lakko.app.calls.GroupCallRecord>> =
+        mutableGroupCalls.asStateFlow()
+
+    /**
+     * Fold one group-call signal into [groupIdHex]'s ledger record. Called for
+     * every received body by [routeParsedCallSignaling] (with the DS row's
+     * `created_at`) and by the chat screen for every body THIS device publishes
+     * (with the local clock) — a device never receives its own application
+     * messages back, so without the second caller its own record would never
+     * count itself.
+     */
+    internal fun applyGroupCallSignal(
+        groupIdHex: String,
+        signal: me.lakko.app.calls.GroupCallSignal,
+        observedAtMs: Long,
+        nowMs: Long = System.currentTimeMillis(),
+    ) {
+        mutableGroupCalls.update { calls ->
+            val before = calls[groupIdHex]
+            val after = me.lakko.app.calls.reduceGroupCall(before, signal, observedAtMs, nowMs)
+            when {
+                after == before -> calls
+                after == null -> calls - groupIdHex
+                else -> calls + (groupIdHex to after)
+            }
+        }
+    }
+
+    /**
+     * Route one received call-signaling payload: parse, then
+     * [routeParsedCallSignaling]. A payload that does not parse is dropped.
+     *
+     * Runs inside the poll's critical section, so it does only a parse and an
+     * atomic state update / enqueue.
+     */
+    private fun routeIncomingCallSignaling(
+        groupIdHex: String,
+        messageId: Long,
+        payload: ByteArray,
+        createdAt: String,
+        senderLeaf: UInt?,
+    ) {
+        val body = try {
+            uniffi.lakko_ffi_uniffi.parseCallSignaling(payload)
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "call signaling: parse failed, dropped", cause)
+            return
+        }
+        routeParsedCallSignaling(groupIdHex, messageId, body, createdAt, senderLeaf)
+    }
+
+    /**
+     * Route one parsed call-signaling body.
+     *
+     * Group-control bodies go to the ledger and NEVER to [oneToOneCallInbound] —
+     * that hook feeds the 1x1 call host (C-11). `CallEnd` goes to both; each
+     * side drops it unless it names its own call on its own group (C-12).
+     */
+    internal fun routeParsedCallSignaling(
+        groupIdHex: String,
+        messageId: Long,
+        body: uniffi.lakko_ffi_uniffi.FfiCallSignalingBody,
+        createdAt: String,
+        senderLeaf: UInt?,
+    ) {
+        val route = me.lakko.app.calls.callSignalingRoute(body)
+        if (route != me.lakko.app.calls.CallSignalingRoute.ONE_TO_ONE_ONLY) {
+            // A group-control body may only speak for its own sender: the leaf
+            // it names is an unauthenticated field, the MLS sender leaf of the
+            // row is not. A mismatch is dropped (web parity).
+            me.lakko.app.calls.groupCallSignalForRow(body, senderLeaf)
+                ?.let { signal ->
+                    val now = System.currentTimeMillis()
+                    applyGroupCallSignal(
+                        groupIdHex = groupIdHex,
+                        signal = signal,
+                        observedAtMs = GroupRecord.parseIsoMillis(createdAt) ?: now,
+                        nowMs = now,
+                    )
+                }
+        }
+        if (route != me.lakko.app.calls.CallSignalingRoute.GROUP_LEDGER_ONLY) {
+            oneToOneCallInbound?.invoke(groupIdHex, messageId, body, createdAt)
+        }
+    }
 
     /**
      * Phase 3a10 — publish raw plaintext bytes as an MLS
@@ -666,6 +949,18 @@ public class ChatRepository(
         } catch (cause: Throwable) {
             null
         }
+    }
+
+    /**
+     * ADR-0048 UX §5 — the other member's signature key in a two-member chat,
+     * or `null` for a group, an unknown group or an unreadable roster. The
+     * chat list names a 1x1 chat after this person.
+     */
+    public fun oneToOnePeerKey(groupIdHex: String): ByteArray? {
+        val members = members(groupIdHex) ?: return null
+        if (members.size != 2) return null
+        val own = ownMemberIdentity(groupIdHex) ?: return null
+        return members.firstOrNull { outboxB64(it.signaturePublicKey) != own }?.signaturePublicKey
     }
 
     /**
@@ -1141,7 +1436,13 @@ public class ChatRepository(
         // nobody has been added yet, so there is no new member to teach the
         // secret to; the redistribute is driven by whichever device sweeps the
         // proposal (see [sweepIfCommitter]).
-        if (outcome is MembershipOutcome.Committed) redistributePushRoutingBestEffort(groupIdHex)
+        if (outcome is MembershipOutcome.Committed) {
+            redistributePushRoutingBestEffort(groupIdHex)
+            // ADR-0048 §2 — the add landed, so the newcomer needs this
+            // device's profile. The direct path has no before/after roster
+            // diff of its own; a Committed add IS growth.
+            profileRepublish.onGrowth(groupIdHex)
+        }
         return outcome
     }
 
@@ -1384,6 +1685,8 @@ public class ChatRepository(
         val joinerSignatureKey: ByteArray,
         val issuerFingerprint: String,
         val issuerInRoster: Boolean,
+        /** ADR-0048 — the issuer's signature key, so the UI can show a name. */
+        val issuerSignatureKey: ByteArray = ByteArray(0),
     )
 
     /**
@@ -1425,6 +1728,7 @@ public class ChatRepository(
                     joinerSignatureKey = attr.joinerSignatureKey,
                     issuerFingerprint = attr.issuerFingerprint,
                     issuerInRoster = rosterKeys.any { it.contentEquals(attr.issuerSignaturePubkey) },
+                    issuerSignatureKey = attr.issuerSignaturePubkey,
                 ),
             )
         }
@@ -2280,6 +2584,119 @@ public class ChatRepository(
             },
         )
 
+    // -----------------------------------------------------------------
+    // ADR-0048 — profile names
+    // -----------------------------------------------------------------
+
+    /** The process-wide name directory (profiles, verifications, renames). */
+    private val profileDirectory: me.lakko.app.profile.ProfileDirectory by lazy {
+        me.lakko.app.profile.ProfileDirectory.get(applicationContext)
+    }
+
+    /**
+     * ADR-0048 §2 — the per-group republish scheduler. Join / founding and a
+     * profile change publish at once; a group gaining a member republishes
+     * throttled and jittered, so one add does not produce a synchronised burst
+     * from every member. Runs on its own process-lifetime scope: a publish
+     * takes the per-group lock through [broadcastControlToGroup], so it is
+     * always LAUNCHED, never awaited under a lock.
+     */
+    private val profileRepublish: me.lakko.app.profile.ProfileRepublishScheduler =
+        me.lakko.app.profile.ProfileRepublishScheduler(
+            scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+            publish = { groupIdHex -> publishOwnProfile(groupIdHex) },
+        )
+
+    /** This account's own profile in wire form, or `null` when none is stored
+     *  yet (nothing to publish). */
+    private fun ownProfileForWire(): uniffi.lakko_ffi_uniffi.FfiProfile? {
+        val accountId = keyPackageAccount.get()?.accountId ?: return null
+        return me.lakko.app.profile.OwnProfileStore.load(applicationContext, accountId)?.toFfi()
+    }
+
+    /**
+     * ADR-0048 §2 — publish this device's own profile into [groupIdHex] as an
+     * MLS application message, over the same locked, persist-before-publish
+     * send path the committer beacon and the push-routing secret use.
+     *
+     * Skipped (returns `false`) when no profile is stored, when the group is
+     * unknown, and when this device's membership has ended — an evicted device
+     * cannot seal into the group and must not try.
+     */
+    private suspend fun publishOwnProfile(groupIdHex: String): Boolean {
+        val identity = canonicalIdentity.get() ?: return false
+        val record = groups[groupIdHex] ?: return false
+        if (readIsActive { record.group.isActive() } == false) return false
+        val profile = ownProfileForWire() ?: return false
+        val envelope = try {
+            uniffi.lakko_ffi_uniffi.composeProfileEnvelope(profile)
+        } catch (cause: Throwable) {
+            // A stored profile the core refuses (it was validated when saved,
+            // so this is not expected) is never sent in a weakened form.
+            android.util.Log.w("ChatRepository", "ADR-0048 own profile refused by the composer", cause)
+            return false
+        }
+        return try {
+            broadcastControlToGroup(
+                identity = identity,
+                groupIdHex = groupIdHex,
+                group = record.group,
+                envelope = envelope,
+            )
+            true
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "ADR-0048 profile not published", cause)
+            false
+        }
+    }
+
+    /**
+     * ADR-0048 §2 — the own profile changed: publish it into every group this
+     * device is in. Best-effort and fire-and-forget.
+     */
+    public fun publishOwnProfileToAllGroups() {
+        val targets = synchronized(groups) { groups.keys.toList() }
+        profileRepublish.publishNowToAll(targets)
+    }
+
+    /**
+     * ADR-0048 §3 — a received profile, bound to the sender's signature key the
+     * classifier resolved at receipt (C-68). Stored only when strictly newer;
+     * its username claim is then verified off this path. Called from the
+     * poll's provider critical section, so it only writes the store and
+     * LAUNCHES the verification.
+     */
+    private fun receiveProfileBestEffort(
+        senderKey: MemberIdentity?,
+        profile: uniffi.lakko_ffi_uniffi.FfiProfile,
+    ) {
+        try {
+            profileDirectory.onProfileReceived(
+                signatureKeyB64 = senderKey,
+                profile = me.lakko.app.profile.PeerProfile(
+                    displayName = profile.displayName,
+                    username = profile.username,
+                    updatedAtMs = profile.updatedAtMs,
+                ),
+            )
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "ADR-0048 profile not stored", cause)
+        }
+    }
+
+    /** ADR-0048 §2 — republish on growth when the roster gained a member. */
+    private fun republishProfileIfGrown(
+        groupIdHex: String,
+        previousMemberKeys: List<String>?,
+        currentMemberKeys: List<String>?,
+        selfEvicted: Boolean,
+    ) {
+        if (selfEvicted) return
+        if (me.lakko.app.profile.membershipGrew(previousMemberKeys, currentMemberKeys)) {
+            profileRepublish.onGrowth(groupIdHex)
+        }
+    }
+
     /**
      * ADR-0042 — post a control application message (the push-routing-secret
      * distribution envelope) to [group]'s journal under [providerLock], reusing
@@ -2788,9 +3205,10 @@ public class ChatRepository(
             )
             record.consumeEvents(
                 events = result.events,
-                callSignalingSink = { payload ->
-                    callSignalingSink?.invoke(groupIdHex, payload)
+                callSignalingSink = { messageId, payload, createdAt, senderLeaf ->
+                    routeIncomingCallSignaling(groupIdHex, messageId, payload, createdAt, senderLeaf)
                 },
+                profileSink = { senderKey, profile -> receiveProfileBestEffort(senderKey, profile) },
                 membershipProposalSink = { proposal, createdAt ->
                     // ADR-0045 UX §4 / §10 — stamp a PEER's request with the DS
                     // row's own timestamp. Without this the observation store
@@ -2829,6 +3247,12 @@ public class ChatRepository(
                         senderLeaf,
                     )
                 },
+            )
+            // The chat list's unread badge: incoming chat messages applied
+            // while this chat is not on screen (see [LocalUnreadCounter]).
+            localUnread.onIncomingApplied(
+                groupIdHex,
+                result.events.count { it is IncomingChatEvent.Application },
             )
             // THE ORDERING RULE — persist first, advance the cursor second, and
             // hold the cursor when the write does not land. See [DurableCursorGate]
@@ -2881,13 +3305,25 @@ public class ChatRepository(
             // `GroupContext` — and returns ROTATE, after which the device mints
             // a secret nobody will ever be notified under and the broadcast
             // throws.
+            val membersAfterPoll = memberSignatureKeysOrNull(record.group)
+            val evictedByBatch = readIsActive { record.group.isActive() } == false
             rotatePushRoutingIfShrankBestEffort(
                 groupIdHex = groupIdHex,
                 group = record.group,
                 identity = identity,
                 previousMemberKeys = membersBeforePoll,
-                currentMemberKeys = memberSignatureKeysOrNull(record.group),
-                selfEvicted = readIsActive { record.group.isActive() } == false,
+                currentMemberKeys = membersAfterPoll,
+                selfEvicted = evictedByBatch,
+            )
+            // ADR-0048 §2 — somebody else's commit added a member: the newcomer
+            // cannot read earlier epochs, so republish this device's profile
+            // (throttled + jittered per group). Same key-set diff as the shrink
+            // above, so a remove-and-add in one batch is still growth.
+            republishProfileIfGrown(
+                groupIdHex = groupIdHex,
+                previousMemberKeys = membersBeforePoll,
+                currentMemberKeys = membersAfterPoll,
+                selfEvicted = evictedByBatch,
             )
             publishThreadList()
         }
@@ -2926,15 +3362,19 @@ public class ChatRepository(
      *
      * @param waitSecs same semantics as [pollGroup]; passed through to each
      *   per-group call.
+     * @param exclude groups another loop is already long-polling (an open chat
+     *   screen, [screenPolledGroups]). Polling one of them here would lose the
+     *   per-group in-flight race and return at once, so a loop whose every
+     *   group is excluded would spin instead of waiting.
      */
-    public suspend fun pollAllGroups(waitSecs: Int = 0) {
+    public suspend fun pollAllGroups(waitSecs: Int = 0, exclude: Set<String> = emptySet()) {
         canonicalIdentity.get() ?: return
         // Snapshot the keys under the map's own monitor — `groups` is a
         // `synchronizedMap`, whose iterators are NOT self-synchronising.
-        val groupIds = synchronized(groups) { groups.keys.toList() }
+        val groupIds = synchronized(groups) { groups.keys.toList() }.filter { it !in exclude }
         // ADR-0045 UX §6.2.8 item 1 — filtered HERE as well as gated inside
         // [pollGroup], and the reason is a spin rather than a duplicate check:
-        // the chat-list screen drives this in `while (isActive) { … }` and
+        // the app-level receive loop drives this in `while (true) { … }` and
         // relies on the long poll for its cadence, so a fleet of groups this
         // device has all been removed from would return instantly, forever.
         // Filtering first lets the empty case take one honest long-poll-shaped
@@ -2959,6 +3399,9 @@ public class ChatRepository(
      */
     public fun clear() {
         wipeInMemoryState()
+        localUnread.clear()
+        keyPackageAccount.set(null)
+        snapshotUnreadable.set(false)
         currentAccountIdB64.set(null)
         canonicalIdentity.set(null)
         mutableState.value = ChatRepositoryState()
@@ -2971,7 +3414,18 @@ public class ChatRepository(
      */
     public fun forgetDevice() {
         val accountIdB64 = currentAccountIdB64.get()
+        val rawAccountId = keyPackageAccount.get()?.accountId
         clear()
+        // ADR-0048 — the names learned on this device and this account's own
+        // profile go with the device.
+        try {
+            profileDirectory.clear()
+            if (rawAccountId != null) {
+                me.lakko.app.profile.OwnProfileStore.delete(applicationContext, rawAccountId)
+            }
+        } catch (_: Throwable) {
+            // best-effort
+        }
         if (accountIdB64 != null) {
             try {
                 snapshotStore.deleteSnapshot(applicationContext, accountIdB64)
@@ -3093,6 +3547,11 @@ public class ChatRepository(
         // that somehow still held one would simply hold the last reference to
         // an orphaned Mutex, never a lock a NEW operation could also acquire.
         groupLocks.clear()
+        // ADR-0048 — per-group republish timing belongs to the session.
+        profileRepublish.reset()
+        // A previous session's group-call records name calls in groups this
+        // account may not be in.
+        mutableGroupCalls.value = emptyMap()
         // Close the previous identity handle (releases the
         // Rust-side Arc + provider storage); the next
         // bootstrap builds a fresh one.
@@ -3141,6 +3600,7 @@ public class ChatRepository(
         try {
             val blob = identity.snapshotStorage()
             snapshotStore.putSnapshot(applicationContext, accountIdB64, blob)
+            snapshotUnreadable.set(false)
         } catch (_: Throwable) {
             // Best-effort. 1.15d7 will plumb a `tracing`-
             // equivalent logger so failures here surface to
@@ -3204,6 +3664,7 @@ public class ChatRepository(
             )
         val blob = identity.snapshotStorage()
         snapshotStore.putSnapshot(applicationContext, accountIdB64, blob)
+        snapshotUnreadable.set(false)
     }
 
     // -----------------------------------------------------------------
@@ -4084,13 +4545,23 @@ public class ChatRepository(
         // committer sweeps whatever is pending including a `Remove` naming it.
         // Captured beside the post-sweep roster for the same reason as on the
         // poll path.
+        val membersAfterSweep = providerLock.withLock { memberSignatureKeysOrNull(record.group) }
+        val evictedBySweep = readIsActive { record.group.isActive() } == false
         rotatePushRoutingIfShrankBestEffort(
             groupIdHex = groupIdHex,
             group = record.group,
             identity = identity,
             previousMemberKeys = membersBefore,
-            currentMemberKeys = providerLock.withLock { memberSignatureKeysOrNull(record.group) },
-            selfEvicted = readIsActive { record.group.isActive() } == false,
+            currentMemberKeys = membersAfterSweep,
+            selfEvicted = evictedBySweep,
+        )
+        // ADR-0048 §2 — a swept Add brings in a newcomer who needs this
+        // device's profile too.
+        republishProfileIfGrown(
+            groupIdHex = groupIdHex,
+            previousMemberKeys = membersBefore,
+            currentMemberKeys = membersAfterSweep,
+            selfEvicted = evictedBySweep,
         )
         // ADR-0042 — a swept ADD needs the current routing secret, exactly as
         // the direct add path re-broadcasts it. No-op when this device holds
@@ -4165,26 +4636,30 @@ public class ChatRepository(
                     val processed =
                         record.group.processIncomingVerifyingRoles(identity, row.payload)
                     try {
+                        val sweptEvent = toEvent(
+                            messageId = row.id,
+                            createdAt = row.createdAt,
+                            processed = processed,
+                            // The SECOND receive path, and it must
+                            // resolve identically to the poll: the
+                            // roster is read HERE, one line after the
+                            // apply, because that is the epoch this row
+                            // decrypted at. This path consumes rows the
+                            // poll will never fetch again, so a leaf
+                            // resolved later here is unrecoverable.
+                            resolveSender = { leaf ->
+                                resolveMemberIdentity(rosterOf(record.group), leaf)
+                            },
+                        )
                         record.consumeEvents(
-                            events = listOf(
-                                toEvent(
-                                    messageId = row.id,
-                                    createdAt = row.createdAt,
-                                    processed = processed,
-                                    // The SECOND receive path, and it must
-                                    // resolve identically to the poll: the
-                                    // roster is read HERE, one line after the
-                                    // apply, because that is the epoch this row
-                                    // decrypted at. This path consumes rows the
-                                    // poll will never fetch again, so a leaf
-                                    // resolved later here is unrecoverable.
-                                    resolveSender = { leaf ->
-                                        resolveMemberIdentity(rosterOf(record.group), leaf)
-                                    },
-                                ),
-                            ),
-                            callSignalingSink = { payload ->
-                                callSignalingSink?.invoke(groupIdHex, payload)
+                            events = listOf(sweptEvent),
+                            callSignalingSink = { messageId, payload, createdAt, senderLeaf ->
+                                routeIncomingCallSignaling(
+                                    groupIdHex, messageId, payload, createdAt, senderLeaf,
+                                )
+                            },
+                            profileSink = { senderKey, profile ->
+                                receiveProfileBestEffort(senderKey, profile)
                             },
                             membershipProposalSink = { proposal, createdAt ->
                                 // The sweep's own apply pass consumes rows the
@@ -4212,6 +4687,12 @@ public class ChatRepository(
                                     createdAt = createdAt,
                                 )
                             },
+                        )
+                        // A swept chat message counts toward the chat list's
+                        // unread badge exactly as a polled one does.
+                        localUnread.onIncomingApplied(
+                            groupIdHex,
+                            if (sweptEvent is IncomingChatEvent.Application) 1 else 0,
                         )
                         // Per row, and deliberately not deferred to the end of the
                         // sweep: this is what pushes `record.messages` into the
@@ -4554,8 +5035,51 @@ public class ChatRepository(
         // monitor would stall every unrelated lookup behind whatever MLS call
         // happens to hold the handle.
         val records = synchronized(groups) { groups.values.toList() }
-        val threads = records.map { it.toThread() }
+        val threads = records.map { record ->
+            val thread = record.toThread()
+            val unread = localUnread.snapshot(thread.groupIdHex)
+            thread.copy(localUnread = unread.count, unreadViewedThisSession = unread.viewedThisSession)
+        }
         mutableState.update { it.copy(threads = threads) }
+    }
+
+    /**
+     * The chat for [groupIdHex] is (or stops being) on screen. While it is,
+     * incoming messages do not count toward its unread badge, and showing it
+     * clears the count. Driven by the chat screen's lifecycle.
+     */
+    public fun setThreadOnScreen(groupIdHex: String, onScreen: Boolean) {
+        localUnread.setOnScreen(groupIdHex, onScreen)
+        publishThreadList()
+    }
+
+    private val screenPollLock = Any()
+    private val screenPollCounts = HashMap<String, Int>()
+    private val mutableScreenPolledGroups = MutableStateFlow<Set<String>>(emptySet())
+
+    /**
+     * Groups an open chat screen is long-polling itself. The app-level
+     * all-groups loop leaves them out ([pollAllGroups]'s `exclude`) and
+     * restarts when the set changes, so a group is never long-polled twice and
+     * never left unpolled.
+     */
+    public val screenPolledGroups: StateFlow<Set<String>> = mutableScreenPolledGroups.asStateFlow()
+
+    /** A chat screen started its own poll loop for [groupIdHex]. Pair with [releaseScreenPoll]. */
+    public fun claimScreenPoll(groupIdHex: String) {
+        synchronized(screenPollLock) {
+            screenPollCounts[groupIdHex] = (screenPollCounts[groupIdHex] ?: 0) + 1
+            mutableScreenPolledGroups.value = screenPollCounts.keys.toSet()
+        }
+    }
+
+    /** The chat screen's poll loop for [groupIdHex] ended. */
+    public fun releaseScreenPoll(groupIdHex: String) {
+        synchronized(screenPollLock) {
+            val remaining = (screenPollCounts[groupIdHex] ?: 0) - 1
+            if (remaining > 0) screenPollCounts[groupIdHex] = remaining else screenPollCounts.remove(groupIdHex)
+            mutableScreenPolledGroups.value = screenPollCounts.keys.toSet()
+        }
     }
 
     /** URL-safe-ish base64 of the 16-byte account id, used as
@@ -4613,6 +5137,13 @@ public data class ChatThread(
      * (see [membershipState]).
      */
     val membershipEnded: Boolean = false,
+    /** Incoming chat messages this device applied while the chat was not on
+     *  screen, since it was last shown or since the process started (in
+     *  memory). The chat list folds it with the cross-device read cursor. */
+    val localUnread: Int = 0,
+    /** The chat was on screen at some point in this process, so [localUnread]
+     *  is an exact count rather than a lower bound. */
+    val unreadViewedThisSession: Boolean = false,
 )
 
 /** One message in a [ChatThread].
@@ -4867,10 +5398,11 @@ private class GroupRecord(
      */
     fun consumeEvents(
         events: List<IncomingChatEvent>,
-        callSignalingSink: ((ByteArray) -> Unit)? = null,
+        callSignalingSink: ((Long, ByteArray, String, UInt?) -> Unit)? = null,
         pushRoutingSecretSink: ((ByteArray, ULong, UInt?) -> Unit)? = null,
         committerBeaconSink: ((UInt?, String) -> Unit)? = null,
         membershipProposalSink: ((ProposalRecord, String) -> Unit)? = null,
+        profileSink: ((MemberIdentity?, uniffi.lakko_ffi_uniffi.FfiProfile) -> Unit)? = null,
     ) {
         for (event in events) {
             when (event) {
@@ -4914,10 +5446,26 @@ private class GroupRecord(
                     ),
                 )
                 is IncomingChatEvent.CallSignaling -> {
-                    // Phase 3a10 — route into the
-                    // CallSession state machine. Never
-                    // touches the chat timeline.
-                    callSignalingSink?.invoke(event.payloadBytes)
+                    // Phase 3a10 — route into the call state
+                    // machines (the group-call ledger and the 1x1
+                    // CallSession). Never touches the chat
+                    // timeline. The DS row's `created_at` rides
+                    // along because the ledger bounds a group
+                    // call's announced start time by it.
+                    callSignalingSink?.invoke(
+                        event.messageId,
+                        event.payloadBytes,
+                        event.createdAt,
+                        event.senderLeaf,
+                    )
+                }
+                is IncomingChatEvent.Profile -> {
+                    // ADR-0048 — a member's profile. Not a timeline row. A
+                    // malformed envelope (`profile == null`) is consumed as a
+                    // no-op; the sink stores a well-formed one under the
+                    // sender key the classifier resolved at receipt.
+                    val profile = event.profile
+                    if (profile != null) profileSink?.invoke(event.senderKey, profile)
                 }
                 is IncomingChatEvent.ExternalJoinRequest -> {
                     // ADR-0027 (G-3) — a non-member's external Add proposal,

@@ -76,6 +76,9 @@ public final class LoginViewModel: ObservableObject {
             } catch let err as AuthClientError {
                 busy = false
                 error = userFacing(err)
+            } catch let err as DiscoveryClientError {
+                busy = false
+                error = err.authFormMessage
             } catch {
                 busy = false
                 self.error = (error as? LocalizedError)?.errorDescription

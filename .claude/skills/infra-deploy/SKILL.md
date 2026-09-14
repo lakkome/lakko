@@ -26,7 +26,7 @@ Deployment is a single Hetzner VPS running every backend service under systemd, 
 
 - Production uses systemd `EnvironmentFile=/etc/lakko/lakko.env` — NOT `.env`/dotenvy (dotenvy is `#[cfg(debug_assertions)]` only).
 - Each service reads `LAKKO_<NAME>_DATABASE_URL`, falling back to generic `DATABASE_URL`.
-- The SFU UDP media plane (`LAKKO_SFU_MEDIA_BIND`, default `0.0.0.0:43210`) is a DIRECT public port — not proxied through nginx (nginx only fronts the WS signaling `/v1/connect` + health endpoints).
+- The SFU UDP media plane (`LAKKO_SFU_MEDIA_BIND`, default `0.0.0.0:43210`, with `LAKKO_SFU_MEDIA_ADVERTISE_IP` set to the public IP — required, since an unspecified address cannot be an ICE host candidate and the SFU refuses to start without it) is a DIRECT public port — not proxied through nginx (nginx only fronts the WS signaling `/v1/connect` + health endpoints).
 
 ## Deploy commands (HAVE SIDE EFFECTS — confirm before running)
 

@@ -42,12 +42,12 @@ import Foundation
 ///
 /// ## Default base URL
 ///
+/// `<LakkoApiBaseUrl>/ds` (``ApiEndpoints``); with no API base URL,
 /// `http://localhost:8082` — iOS simulator loopback + port `8082`
-/// matching `lakko-svc-ds`'s dev bind. Override for physical
-/// devices (LAN IP) and production (Cloudflare tunnel URL).
+/// matching `lakko-svc-ds`'s dev bind.
 public final class DsClient {
 
-    public static let defaultBaseURL: String = "http://localhost:8082"
+    public static var defaultBaseURL: String { ApiEndpoints.baseURL(for: .ds) }
 
     public let baseURL: String
     private let session: URLSession

@@ -360,6 +360,94 @@ pub enum FfiError {
     /// The joiner named by an approve is already a member.
     #[error("{0}")]
     MembershipJoinerAlreadyAMember(String),
+
+    // ------------------------------------------------------------------
+    // Typed username / display-name refusals (ADR-0048 §1, §4).
+    //
+    // Same shape and the same reason as the membership block above: a
+    // `flat_error` lowers only the variant ordinal and the `Display`
+    // string, so the reason has to BE the variant for Swift / Kotlin to
+    // branch on it without parsing prose. APPENDED at the end for the same
+    // ordinal-stability reason — keep new variants after these.
+    //
+    // The message is the core's English sentence and never carries the
+    // offending input (a username is a lookup target; a display name is
+    // personal data). Select UI copy from the VARIANT.
+    // ------------------------------------------------------------------
+    /// A username is empty after normalisation (`""`, `"   "`, `"@"`).
+    #[error("{0}")]
+    UsernameEmpty(String),
+
+    /// A username is shorter than 3 characters after normalisation.
+    #[error("{0}")]
+    UsernameTooShort(String),
+
+    /// A username is longer than 32 characters after normalisation.
+    #[error("{0}")]
+    UsernameTooLong(String),
+
+    /// A username contains a character outside `[a-z0-9_]` after
+    /// normalisation — Cyrillic look-alikes, dashes, dots, spaces, emoji.
+    #[error("{0}")]
+    UsernameInvalidCharacters(String),
+
+    /// A display name contains a line break.
+    #[error("{0}")]
+    DisplayNameLineBreak(String),
+
+    /// A display name contains a control or format character (including
+    /// the right-to-left override and the zero-width characters).
+    #[error("{0}")]
+    DisplayNameControlOrFormatCharacter(String),
+
+    /// A display name is longer than 64 characters.
+    #[error("{0}")]
+    DisplayNameTooLong(String),
+
+    /// A display name is longer than 255 UTF-8 bytes.
+    #[error("{0}")]
+    DisplayNameTooManyBytes(String),
+}
+
+impl From<lakko_contacts::username::UsernameError> for FfiError {
+    fn from(e: lakko_contacts::username::UsernameError) -> Self {
+        use lakko_contacts::username::UsernameError as U;
+        let msg = e.to_string();
+        match e {
+            U::Empty => Self::UsernameEmpty(msg),
+            U::TooShort { .. } => Self::UsernameTooShort(msg),
+            U::TooLong { .. } => Self::UsernameTooLong(msg),
+            U::InvalidCharacters => Self::UsernameInvalidCharacters(msg),
+        }
+    }
+}
+
+impl From<lakko_contacts::profile::DisplayNameError> for FfiError {
+    fn from(e: lakko_contacts::profile::DisplayNameError) -> Self {
+        use lakko_contacts::profile::DisplayNameError as D;
+        let msg = e.to_string();
+        match e {
+            D::LineBreak => Self::DisplayNameLineBreak(msg),
+            D::ControlOrFormatCharacter => Self::DisplayNameControlOrFormatCharacter(msg),
+            D::TooLong { .. } => Self::DisplayNameTooLong(msg),
+            D::TooManyBytes { .. } => Self::DisplayNameTooManyBytes(msg),
+            // Unreachable from user input on the FFI paths, which trim and
+            // map blank to "no name" first; a wire decode reports its own
+            // failures through `Contacts`, like every sibling envelope.
+            D::Empty | D::NotTrimmed | D::NotUtf8 => Self::Contacts(format!("display name: {msg}")),
+        }
+    }
+}
+
+impl From<lakko_contacts::profile::ProfileError> for FfiError {
+    fn from(e: lakko_contacts::profile::ProfileError) -> Self {
+        use lakko_contacts::profile::ProfileError as P;
+        match e {
+            P::DisplayName(d) => d.into(),
+            P::Username(u) => u.into(),
+            other => Self::Contacts(other.to_string()),
+        }
+    }
 }
 
 impl From<lakko_mls::Error> for FfiError {
@@ -3025,6 +3113,87 @@ pub struct HistoryAttachment {
     pub mime: Option<String>,
     /// Optional file name.
     pub name: Option<String>,
+    /// ADR-0047 media kind (`voice`, `video_note`, `gif`, or unknown).
+    #[uniffi(default = None)]
+    pub kind: Option<String>,
+    /// ADR-0047 playback length in milliseconds.
+    #[uniffi(default = None)]
+    pub duration_ms: Option<u32>,
+    /// ADR-0047 waveform amplitude bytes (at most 128).
+    #[uniffi(default = None)]
+    pub waveform: Option<Vec<u8>>,
+    /// ADR-0047 pixel width.
+    #[uniffi(default = None)]
+    pub width: Option<u32>,
+    /// ADR-0047 pixel height.
+    #[uniffi(default = None)]
+    pub height: Option<u32>,
+    /// ADR-0047 poster frame.
+    #[uniffi(default = None)]
+    pub thumb: Option<HistoryThumb>,
+}
+
+/// A poster-frame blob on a [`HistoryAttachment`] (ADR-0047).
+/// `blob_id` / `key` MUST be 32 bytes, `nonce` 12 bytes.
+#[derive(uniffi::Record)]
+pub struct HistoryThumb {
+    /// 32-byte SHA-256 blob id.
+    pub blob_id: Vec<u8>,
+    /// 32-byte content-encryption key.
+    pub key: Vec<u8>,
+    /// 12-byte AEAD nonce.
+    pub nonce: Vec<u8>,
+    /// Plaintext size in bytes.
+    pub size: u64,
+    /// Optional MIME type.
+    #[uniffi(default = None)]
+    pub mime: Option<String>,
+    /// Pixel width.
+    #[uniffi(default = None)]
+    pub width: Option<u32>,
+    /// Pixel height.
+    #[uniffi(default = None)]
+    pub height: Option<u32>,
+}
+
+/// Apply the ADR-0047 bounds (`lakko_attachments::RawMediaMetadata`) to a
+/// history attachment, so a restored message keeps exactly what the live
+/// envelope would have kept.
+fn bound_history_media(
+    mut a: lakko_mls::history_placeholder::HistoryAttachmentPlaceholder,
+) -> lakko_mls::history_placeholder::HistoryAttachmentPlaceholder {
+    let raw = lakko_attachments::RawMediaMetadata {
+        kind: a.kind.take(),
+        duration_ms: a.duration_ms,
+        waveform: a.waveform.take(),
+        width: a.width,
+        height: a.height,
+        thumb: a
+            .thumb
+            .as_ref()
+            .map(|t| lakko_attachments::RawThumbMetadata {
+                size: t.size,
+                mime: t.mime.clone(),
+                width: t.width,
+                height: t.height,
+            }),
+    }
+    .bounded();
+    a.kind = raw.kind;
+    a.duration_ms = raw.duration_ms;
+    a.waveform = raw.waveform;
+    a.width = raw.width;
+    a.height = raw.height;
+    a.thumb = match (a.thumb.take(), raw.thumb) {
+        (Some(mut t), Some(bounded)) => {
+            t.mime = bounded.mime;
+            t.width = bounded.width;
+            t.height = bounded.height;
+            Some(t)
+        },
+        _ => None,
+    };
+    a
 }
 
 /// The display projection of one history-bundle message —
@@ -3066,17 +3235,37 @@ fn fixed_bytes<const N: usize>(v: &[u8], field: &str) -> Result<[u8; N], FfiErro
 /// (see `lakko_mls::history_placeholder`).
 #[uniffi::export]
 pub fn encode_history_placeholder(placeholder: HistoryPlaceholder) -> Result<Vec<u8>, FfiError> {
-    use lakko_mls::history_placeholder::{HistoryAttachmentPlaceholder, HistoryMessagePlaceholder};
+    use lakko_mls::history_placeholder::{
+        HistoryAttachmentPlaceholder, HistoryMessagePlaceholder, HistoryThumbPlaceholder,
+    };
     let mut attachments = Vec::with_capacity(placeholder.attachments.len());
     for a in placeholder.attachments {
-        attachments.push(HistoryAttachmentPlaceholder {
+        let thumb = match a.thumb {
+            None => None,
+            Some(t) => Some(HistoryThumbPlaceholder {
+                blob_id: fixed_bytes::<32>(&t.blob_id, "thumb blob_id")?,
+                key: fixed_bytes::<32>(&t.key, "thumb key")?,
+                nonce: fixed_bytes::<12>(&t.nonce, "thumb nonce")?,
+                size: t.size,
+                mime: t.mime,
+                width: t.width,
+                height: t.height,
+            }),
+        };
+        attachments.push(bound_history_media(HistoryAttachmentPlaceholder {
             blob_id: fixed_bytes::<32>(&a.blob_id, "blob_id")?,
             key: fixed_bytes::<32>(&a.key, "key")?,
             nonce: fixed_bytes::<12>(&a.nonce, "nonce")?,
             size: a.size,
             mime: a.mime,
             name: a.name,
-        });
+            kind: a.kind,
+            duration_ms: a.duration_ms,
+            waveform: a.waveform,
+            width: a.width,
+            height: a.height,
+            thumb,
+        }));
     }
     let msg = HistoryMessagePlaceholder {
         message_id: placeholder.message_id,
@@ -3108,6 +3297,7 @@ pub fn decode_history_placeholder(bytes: Vec<u8>) -> Result<HistoryPlaceholder, 
         attachments: msg
             .attachments
             .into_iter()
+            .map(bound_history_media)
             .map(|a| HistoryAttachment {
                 blob_id: a.blob_id.to_vec(),
                 key: a.key.to_vec(),
@@ -3115,9 +3305,93 @@ pub fn decode_history_placeholder(bytes: Vec<u8>) -> Result<HistoryPlaceholder, 
                 size: a.size,
                 mime: a.mime,
                 name: a.name,
+                kind: a.kind,
+                duration_ms: a.duration_ms,
+                waveform: a.waveform,
+                width: a.width,
+                height: a.height,
+                thumb: a.thumb.map(|t| HistoryThumb {
+                    blob_id: t.blob_id.to_vec(),
+                    key: t.key.to_vec(),
+                    nonce: t.nonce.to_vec(),
+                    size: t.size,
+                    mime: t.mime,
+                    width: t.width,
+                    height: t.height,
+                }),
             })
             .collect(),
     })
+}
+
+#[cfg(test)]
+mod history_placeholder_media_tests {
+    use super::*;
+
+    fn attachment(kind: &str, duration_ms: u32) -> HistoryAttachment {
+        HistoryAttachment {
+            blob_id: vec![1; 32],
+            key: vec![2; 32],
+            nonce: vec![3; 12],
+            size: 1000,
+            mime: Some("audio/mp4".into()),
+            name: Some("voice.m4a".into()),
+            kind: Some(kind.into()),
+            duration_ms: Some(duration_ms),
+            waveform: Some(vec![10, 20, 30]),
+            width: Some(0),
+            height: None,
+            thumb: Some(HistoryThumb {
+                blob_id: vec![4; 32],
+                key: vec![5; 32],
+                nonce: vec![6; 12],
+                size: 5000,
+                mime: Some("image/jpeg".into()),
+                width: Some(240),
+                height: Some(99_999),
+            }),
+        }
+    }
+
+    fn round_trip(att: HistoryAttachment) -> HistoryAttachment {
+        let bytes = encode_history_placeholder(HistoryPlaceholder {
+            message_id: 7,
+            direction: HistoryMessageDirection::Incoming,
+            created_at: "2026-09-14T12:00:00Z".into(),
+            text: String::new(),
+            attachments: vec![att],
+        })
+        .expect("encodes");
+        decode_history_placeholder(bytes)
+            .expect("decodes")
+            .attachments
+            .pop()
+            .expect("one attachment")
+    }
+
+    #[test]
+    fn voice_metadata_survives_the_history_bundle() {
+        let back = round_trip(attachment("voice", 7_250));
+        assert_eq!(back.kind.as_deref(), Some("voice"));
+        assert_eq!(back.duration_ms, Some(7_250));
+        assert_eq!(back.waveform, Some(vec![10, 20, 30]));
+        // Out-of-range values get the envelope's treatment: dropped alone.
+        assert_eq!(back.width, None);
+        let thumb = back.thumb.expect("thumb kept");
+        assert_eq!(
+            (thumb.size, thumb.width, thumb.height),
+            (5000, Some(240), None)
+        );
+    }
+
+    #[test]
+    fn a_duration_the_kind_does_not_allow_is_dropped() {
+        assert_eq!(round_trip(attachment("gif", 1_000)).duration_ms, None);
+        assert_eq!(
+            round_trip(attachment("video_note", 61_000)).duration_ms,
+            None
+        );
+    }
 }
 
 /// Compute the deterministic DeviceGroup `group_id` from an

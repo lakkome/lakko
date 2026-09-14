@@ -2946,6 +2946,8 @@ pub struct HistoryAttachmentInput {
     size_val: u64,
     mime_val: Option<String>,
     name_val: Option<String>,
+    media_val: lakko_attachments::RawMediaMetadata,
+    thumb_refs_val: Option<(Vec<u8>, Vec<u8>, Vec<u8>)>,
 }
 
 #[wasm_bindgen]
@@ -2967,8 +2969,91 @@ impl HistoryAttachmentInput {
             size_val: size,
             mime_val: mime,
             name_val: name,
+            media_val: lakko_attachments::RawMediaMetadata::default(),
+            thumb_refs_val: None,
         }
     }
+
+    /// ADR-0047 media metadata. `waveform` is the raw amplitude bytes.
+    /// Out-of-range values are dropped on encode, as for a live envelope.
+    #[wasm_bindgen(js_name = setMedia)]
+    pub fn set_media(
+        &mut self,
+        kind: Option<String>,
+        duration_ms: Option<u32>,
+        waveform: Option<Vec<u8>>,
+        width: Option<u32>,
+        height: Option<u32>,
+    ) {
+        self.media_val.kind = kind;
+        self.media_val.duration_ms = duration_ms;
+        self.media_val.waveform = waveform;
+        self.media_val.width = width;
+        self.media_val.height = height;
+    }
+
+    /// ADR-0047 poster frame. `blobId` / `key` MUST be 32 bytes, `nonce`
+    /// 12 bytes.
+    #[wasm_bindgen(js_name = setThumb)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_thumb(
+        &mut self,
+        blob_id: &[u8],
+        key: &[u8],
+        nonce: &[u8],
+        size: u64,
+        mime: Option<String>,
+        width: Option<u32>,
+        height: Option<u32>,
+    ) {
+        self.thumb_refs_val = Some((blob_id.to_vec(), key.to_vec(), nonce.to_vec()));
+        self.media_val.thumb = Some(lakko_attachments::RawThumbMetadata {
+            size,
+            mime,
+            width,
+            height,
+        });
+    }
+}
+
+/// Apply the ADR-0047 bounds (`lakko_attachments::RawMediaMetadata`) to a
+/// history attachment, so a restored message keeps exactly what the live
+/// envelope would have kept.
+fn bound_history_media(
+    mut a: lakko_mls::history_placeholder::HistoryAttachmentPlaceholder,
+) -> lakko_mls::history_placeholder::HistoryAttachmentPlaceholder {
+    let raw = lakko_attachments::RawMediaMetadata {
+        kind: a.kind.take(),
+        duration_ms: a.duration_ms,
+        waveform: a.waveform.take(),
+        width: a.width,
+        height: a.height,
+        thumb: a
+            .thumb
+            .as_ref()
+            .map(|t| lakko_attachments::RawThumbMetadata {
+                size: t.size,
+                mime: t.mime.clone(),
+                width: t.width,
+                height: t.height,
+            }),
+    }
+    .bounded();
+    a.kind = raw.kind;
+    a.duration_ms = raw.duration_ms;
+    a.waveform = raw.waveform;
+    a.width = raw.width;
+    a.height = raw.height;
+    a.thumb = match (a.thumb.take(), raw.thumb) {
+        (Some(mut t), Some(bounded)) => {
+            t.mime = bounded.mime;
+            t.width = bounded.width;
+            t.height = bounded.height;
+            Some(t)
+        },
+        _ => None,
+    };
+    a
 }
 
 fn fixed_bytes<const N: usize>(v: &[u8], field: &str) -> Result<[u8; N], JsValue> {
@@ -2994,18 +3079,39 @@ pub fn encode_history_placeholder(
     text: &str,
     attachments: Vec<HistoryAttachmentInput>,
 ) -> Result<Vec<u8>, JsValue> {
-    use lakko_mls::history_placeholder::{HistoryAttachmentPlaceholder, HistoryMessagePlaceholder};
+    use lakko_mls::history_placeholder::{
+        HistoryAttachmentPlaceholder, HistoryMessagePlaceholder, HistoryThumbPlaceholder,
+    };
     let dir = direction_from_u8(direction)?;
     let mut atts = Vec::with_capacity(attachments.len());
     for a in attachments {
-        atts.push(HistoryAttachmentPlaceholder {
+        let media = a.media_val;
+        let thumb = match (a.thumb_refs_val, media.thumb) {
+            (Some((blob_id, key, nonce)), Some(t)) => Some(HistoryThumbPlaceholder {
+                blob_id: fixed_bytes::<32>(&blob_id, "thumb blob_id")?,
+                key: fixed_bytes::<32>(&key, "thumb key")?,
+                nonce: fixed_bytes::<12>(&nonce, "thumb nonce")?,
+                size: t.size,
+                mime: t.mime,
+                width: t.width,
+                height: t.height,
+            }),
+            _ => None,
+        };
+        atts.push(bound_history_media(HistoryAttachmentPlaceholder {
             blob_id: fixed_bytes::<32>(&a.blob_id_val, "blob_id")?,
             key: fixed_bytes::<32>(&a.key_val, "key")?,
             nonce: fixed_bytes::<12>(&a.nonce_val, "nonce")?,
             size: a.size_val,
             mime: a.mime_val,
             name: a.name_val,
-        });
+            kind: media.kind,
+            duration_ms: media.duration_ms,
+            waveform: media.waveform,
+            width: media.width,
+            height: media.height,
+            thumb,
+        }));
     }
     let msg = HistoryMessagePlaceholder {
         message_id,
@@ -3020,6 +3126,7 @@ pub fn encode_history_placeholder(
 /// One attachment after the decode path — flat getters.
 #[wasm_bindgen]
 #[allow(clippy::struct_field_names, missing_docs)]
+#[derive(Clone)]
 pub struct OpenedHistoryAttachment {
     blob_id_val: Vec<u8>,
     key_val: Vec<u8>,
@@ -3027,6 +3134,59 @@ pub struct OpenedHistoryAttachment {
     size_val: u64,
     mime_val: Option<String>,
     name_val: Option<String>,
+    kind_val: Option<String>,
+    duration_ms_val: Option<u32>,
+    waveform_val: Option<Vec<u8>>,
+    width_val: Option<u32>,
+    height_val: Option<u32>,
+    thumb_val: Option<OpenedHistoryThumb>,
+}
+
+/// A decoded poster frame (ADR-0047) — flat getters.
+#[wasm_bindgen]
+#[derive(Clone)]
+#[allow(clippy::struct_field_names, missing_docs)]
+pub struct OpenedHistoryThumb {
+    blob_id_val: Vec<u8>,
+    key_val: Vec<u8>,
+    nonce_val: Vec<u8>,
+    size_val: u64,
+    mime_val: Option<String>,
+    width_val: Option<u32>,
+    height_val: Option<u32>,
+}
+
+#[wasm_bindgen]
+#[allow(missing_docs)]
+impl OpenedHistoryThumb {
+    #[wasm_bindgen(getter, js_name = blobId)]
+    pub fn blob_id(&self) -> Vec<u8> {
+        self.blob_id_val.clone()
+    }
+    #[wasm_bindgen(getter)]
+    pub fn key(&self) -> Vec<u8> {
+        self.key_val.clone()
+    }
+    #[wasm_bindgen(getter)]
+    pub fn nonce(&self) -> Vec<u8> {
+        self.nonce_val.clone()
+    }
+    #[wasm_bindgen(getter)]
+    pub fn size(&self) -> u64 {
+        self.size_val
+    }
+    #[wasm_bindgen(getter)]
+    pub fn mime(&self) -> Option<String> {
+        self.mime_val.clone()
+    }
+    #[wasm_bindgen(getter)]
+    pub fn width(&self) -> Option<u32> {
+        self.width_val
+    }
+    #[wasm_bindgen(getter)]
+    pub fn height(&self) -> Option<u32> {
+        self.height_val
+    }
 }
 
 #[wasm_bindgen]
@@ -3055,6 +3215,31 @@ impl OpenedHistoryAttachment {
     #[wasm_bindgen(getter)]
     pub fn name(&self) -> Option<String> {
         self.name_val.clone()
+    }
+    #[wasm_bindgen(getter)]
+    pub fn kind(&self) -> Option<String> {
+        self.kind_val.clone()
+    }
+    #[wasm_bindgen(getter, js_name = durationMs)]
+    pub fn duration_ms(&self) -> Option<u32> {
+        self.duration_ms_val
+    }
+    /// Raw waveform amplitude bytes.
+    #[wasm_bindgen(getter)]
+    pub fn waveform(&self) -> Option<Vec<u8>> {
+        self.waveform_val.clone()
+    }
+    #[wasm_bindgen(getter)]
+    pub fn width(&self) -> Option<u32> {
+        self.width_val
+    }
+    #[wasm_bindgen(getter)]
+    pub fn height(&self) -> Option<u32> {
+        self.height_val
+    }
+    #[wasm_bindgen(getter)]
+    pub fn thumb(&self) -> Option<OpenedHistoryThumb> {
+        self.thumb_val.clone()
     }
 }
 
@@ -3092,17 +3277,7 @@ impl OpenedHistoryPlaceholder {
     /// `Array<OpenedHistoryAttachment>`.
     #[wasm_bindgen(getter)]
     pub fn attachments(&self) -> Vec<OpenedHistoryAttachment> {
-        self.attachments_val
-            .iter()
-            .map(|a| OpenedHistoryAttachment {
-                blob_id_val: a.blob_id_val.clone(),
-                key_val: a.key_val.clone(),
-                nonce_val: a.nonce_val.clone(),
-                size_val: a.size_val,
-                mime_val: a.mime_val.clone(),
-                name_val: a.name_val.clone(),
-            })
-            .collect()
+        self.attachments_val.clone()
     }
 }
 
@@ -3121,6 +3296,7 @@ pub fn decode_history_placeholder(bytes: &[u8]) -> Result<OpenedHistoryPlacehold
         attachments_val: msg
             .attachments
             .into_iter()
+            .map(bound_history_media)
             .map(|a| OpenedHistoryAttachment {
                 blob_id_val: a.blob_id.to_vec(),
                 key_val: a.key.to_vec(),
@@ -3128,6 +3304,20 @@ pub fn decode_history_placeholder(bytes: &[u8]) -> Result<OpenedHistoryPlacehold
                 size_val: a.size,
                 mime_val: a.mime,
                 name_val: a.name,
+                kind_val: a.kind,
+                duration_ms_val: a.duration_ms,
+                waveform_val: a.waveform,
+                width_val: a.width,
+                height_val: a.height,
+                thumb_val: a.thumb.map(|t| OpenedHistoryThumb {
+                    blob_id_val: t.blob_id.to_vec(),
+                    key_val: t.key.to_vec(),
+                    nonce_val: t.nonce.to_vec(),
+                    size_val: t.size,
+                    mime_val: t.mime,
+                    width_val: t.width,
+                    height_val: t.height,
+                }),
             })
             .collect(),
     })

@@ -3,9 +3,12 @@
 
 #![allow(unreachable_pub, dead_code, clippy::float_cmp)]
 
-//! Per-IP token-bucket rate limiter for discovery's
+//! Token-bucket rate limiter for discovery's
 //! anonymous endpoints — OPRF evaluation, username
-//! lookup, channel-name lookup.
+//! lookup, channel-name lookup. Requests with a valid
+//! session token are charged per account plus a
+//! per-IP ceiling; requests without one per IP (see
+//! [`DiscoveryLimits`]).
 //!
 //! ## Threat model
 //!
@@ -32,11 +35,14 @@
 //!
 //! ## IP extraction
 //!
-//! Production runs behind system-nginx which sets
-//! `X-Forwarded-For` with the original client address.
-//! The middleware honours that header first; falls
-//! back to `ConnectInfo<SocketAddr>` for direct dev
-//! `cargo run` use.
+//! Production runs behind system-nginx, which sets
+//! `X-Real-IP` to the peer address and appends it to
+//! `X-Forwarded-For`. The middleware trusts only what
+//! nginx wrote: `X-Real-IP`, else the rightmost
+//! `X-Forwarded-For` entry, else
+//! `ConnectInfo<SocketAddr>` for direct dev `cargo run`
+//! use. The leftmost `X-Forwarded-For` entry is the
+//! client's own claim and is never used.
 //!
 //! ## Cleanup
 //!
@@ -48,16 +54,18 @@
 //! interval.
 
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::net::IpAddr;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::body::Body;
 use axum::extract::{ConnectInfo, State};
-use axum::http::{Request, StatusCode};
+use axum::http::{header, Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use lakko_auth_token::{TokenSecret, ACCOUNT_ID_LEN};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -73,6 +81,22 @@ pub const DEFAULT_RATE_PER_MINUTE: f64 = 60.0;
 /// might fire a short burst; the bucket admits up to
 /// 10 in a row before the per-minute cap kicks in.
 pub const DEFAULT_BURST: f64 = 10.0;
+
+/// Default per-account rate for requests with a valid session token. The same
+/// human cadence as the anonymous per-IP default, but charged to the person
+/// rather than to everyone sharing their address. Chosen, not measured.
+pub const DEFAULT_ACCOUNT_RATE_PER_MINUTE: f64 = 60.0;
+
+/// Default per-account burst. Chosen, not measured.
+pub const DEFAULT_ACCOUNT_BURST: f64 = 10.0;
+
+/// Default per-IP ceiling for authenticated requests: ten accounts' worth, so
+/// a shared address serves a household or an office while one address
+/// cycling through many accounts is still capped. Chosen, not measured.
+pub const DEFAULT_AUTHENTICATED_IP_RATE_PER_MINUTE: f64 = 600.0;
+
+/// Default per-IP ceiling burst for authenticated requests. Chosen, not measured.
+pub const DEFAULT_AUTHENTICATED_IP_BURST: f64 = 100.0;
 
 /// Idle threshold for the background pruner. Buckets
 /// with full tokens AND last-touched older than this
@@ -121,25 +145,24 @@ impl TokenBucket {
     }
 }
 
-/// Shared rate limiter — one instance per service.
-/// Cheap to clone (the inner state is behind an
-/// `Arc<Mutex<...>>`).
+/// A token-bucket limiter keyed by `K` (a source IP or an account id).
+/// Cheap to clone (the inner state is behind an `Arc<Mutex<...>>`).
 #[derive(Debug, Clone)]
-pub struct RateLimiter {
-    inner: Arc<Mutex<RateLimiterInner>>,
+pub struct RateLimiter<K = IpAddr> {
+    inner: Arc<Mutex<RateLimiterInner<K>>>,
 }
 
 #[derive(Debug)]
-struct RateLimiterInner {
+struct RateLimiterInner<K> {
     /// `rate_per_minute / 60.0` precomputed.
     rate_per_sec: f64,
     /// Maximum tokens per bucket.
     burst: f64,
-    /// Per-IP buckets.
-    buckets: HashMap<IpAddr, TokenBucket>,
+    /// One bucket per key.
+    buckets: HashMap<K, TokenBucket>,
 }
 
-impl RateLimiter {
+impl<K: Eq + Hash + Copy> RateLimiter<K> {
     /// Build with the given rate-per-minute + burst.
     ///
     /// # Panics
@@ -161,16 +184,16 @@ impl RateLimiter {
         }
     }
 
-    /// Test a single request from `ip`. Returns `true`
+    /// Test a single request for `key`. Returns `true`
     /// if admitted, `false` if rate-limited.
-    pub fn try_consume(&self, ip: IpAddr) -> bool {
-        self.try_consume_at(ip, Instant::now())
+    pub fn try_consume(&self, key: K) -> bool {
+        self.try_consume_at(key, Instant::now())
     }
 
     /// As [`Self::try_consume`] but with an explicit
     /// `now` — used by tests that need deterministic
     /// time stepping without sleeping.
-    pub fn try_consume_at(&self, ip: IpAddr, now: Instant) -> bool {
+    pub fn try_consume_at(&self, key: K, now: Instant) -> bool {
         let mut inner = match self.inner.lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
@@ -179,7 +202,7 @@ impl RateLimiter {
         let rate = inner.rate_per_sec;
         let bucket = inner
             .buckets
-            .entry(ip)
+            .entry(key)
             .or_insert_with(|| TokenBucket::new(burst, now));
         bucket.try_consume(rate, burst, now)
     }
@@ -214,11 +237,129 @@ impl RateLimiter {
     }
 }
 
+/// One rate and burst pair, per minute.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Limit {
+    /// Sustained requests per minute.
+    pub per_minute: f64,
+    /// Bucket size.
+    pub burst: f64,
+}
+
+/// The three buckets behind the rate-limited discovery endpoints.
+///
+/// * A request carrying a valid session token is charged to its **account**
+///   and to a per-IP **ceiling** for authenticated traffic. People behind one
+///   router (a home, an office, a carrier NAT) therefore do not share a
+///   bucket, while one address holding many accounts still hits the ceiling.
+/// * A request without a valid token (signup, a fresh install) is charged to
+///   the per-IP **anonymous** bucket, as before.
+///
+/// The account is read from the token only to key the bucket; nothing about
+/// the looked-up name is recorded against it (invariant #5).
+#[derive(Debug)]
+pub struct DiscoveryLimits {
+    anonymous_ip: RateLimiter<IpAddr>,
+    account: RateLimiter<[u8; ACCOUNT_ID_LEN]>,
+    authenticated_ip: RateLimiter<IpAddr>,
+    token_secret: Arc<TokenSecret>,
+}
+
+/// Why a request was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    /// Admitted.
+    Admit,
+    /// The account's bucket is empty.
+    AccountExhausted,
+    /// The source address's bucket (anonymous or ceiling) is empty.
+    NetworkExhausted,
+}
+
+impl DiscoveryLimits {
+    /// Build the three limiters.
+    #[must_use]
+    pub fn new(
+        anonymous_ip: Limit,
+        account: Limit,
+        authenticated_ip: Limit,
+        token_secret: Arc<TokenSecret>,
+    ) -> Self {
+        Self {
+            anonymous_ip: RateLimiter::new(anonymous_ip.per_minute, anonymous_ip.burst),
+            account: RateLimiter::new(account.per_minute, account.burst),
+            authenticated_ip: RateLimiter::new(authenticated_ip.per_minute, authenticated_ip.burst),
+            token_secret,
+        }
+    }
+
+    /// Charge one request. `account` is the verified account id, if any.
+    ///
+    /// The authenticated path checks the address ceiling before the account,
+    /// so a request refused by the ceiling does not also drain the account.
+    pub fn admit_at(
+        &self,
+        ip: IpAddr,
+        account: Option<[u8; ACCOUNT_ID_LEN]>,
+        now: Instant,
+    ) -> Verdict {
+        match account {
+            None => {
+                if self.anonymous_ip.try_consume_at(ip, now) {
+                    Verdict::Admit
+                } else {
+                    Verdict::NetworkExhausted
+                }
+            },
+            Some(account) => {
+                if !self.authenticated_ip.try_consume_at(ip, now) {
+                    Verdict::NetworkExhausted
+                } else if self.account.try_consume_at(account, now) {
+                    Verdict::Admit
+                } else {
+                    Verdict::AccountExhausted
+                }
+            },
+        }
+    }
+
+    /// The account a request's `Authorization: Bearer` token verifies to.
+    ///
+    /// A missing, malformed or expired token is not an error on these
+    /// endpoints — they are anonymous by design — so it yields `None` and the
+    /// request is charged to its address.
+    fn bearer_account(&self, req: &Request<Body>, now_ms: i64) -> Option<[u8; ACCOUNT_ID_LEN]> {
+        let token = req
+            .headers()
+            .get(header::AUTHORIZATION)?
+            .to_str()
+            .ok()?
+            .strip_prefix("Bearer ")?;
+        let bytes = self.token_secret.verify(token, now_ms).ok()?;
+        bytes.as_slice().try_into().ok()
+    }
+
+    /// Drop idle buckets from all three limiters; returns how many.
+    pub fn prune_idle(&self, cutoff: Instant) -> usize {
+        self.anonymous_ip.prune_idle(cutoff)
+            + self.account.prune_idle(cutoff)
+            + self.authenticated_ip.prune_idle(cutoff)
+    }
+
+    /// Total bucket count — observability hook.
+    #[must_use]
+    pub fn bucket_count(&self) -> usize {
+        self.anonymous_ip.bucket_count()
+            + self.account.bucket_count()
+            + self.authenticated_ip.bucket_count()
+    }
+}
+
 /// Spawn the periodic prune-idle background task.
 /// Runs until the tokio runtime is dropped. The
-/// caller holds an `Arc<RateLimiter>` clone in
+/// caller holds an `Arc<DiscoveryLimits>` clone in
 /// `AppState`; the spawned task holds its own clone.
-pub fn spawn_pruner(limiter: RateLimiter) -> tokio::task::JoinHandle<()> {
+pub fn spawn_pruner(limits: Arc<DiscoveryLimits>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let interval = DEFAULT_PRUNE_INTERVAL;
         let mut ticker = tokio::time::interval(interval);
@@ -230,12 +371,11 @@ pub fn spawn_pruner(limiter: RateLimiter) -> tokio::task::JoinHandle<()> {
             let cutoff = Instant::now()
                 .checked_sub(DEFAULT_PRUNE_AFTER)
                 .unwrap_or_else(Instant::now);
-            let _ = cutoff; // (`-D clippy::unchecked_duration_subtraction` is satisfied by the checked_sub above)
-            let dropped = limiter.prune_idle(cutoff);
+            let dropped = limits.prune_idle(cutoff);
             if dropped > 0 {
                 tracing::debug!(
                     dropped,
-                    remaining = limiter.bucket_count(),
+                    remaining = limits.bucket_count(),
                     "rate_limit: pruned idle buckets"
                 );
             }
@@ -247,43 +387,44 @@ pub fn spawn_pruner(limiter: RateLimiter) -> tokio::task::JoinHandle<()> {
 // axum middleware
 // =========================================================
 
-/// Extract the source IP from an axum request. Looks
-/// at `X-Forwarded-For` first (production nginx sets
-/// it), then `X-Real-IP`, finally the
-/// `ConnectInfo<SocketAddr>` extension.
+/// Extract the source IP from an axum request.
+///
+/// Only values the fronting nginx wrote can be trusted; anything the client
+/// sent is attacker-controlled and would let it pick its own bucket.
+///
+/// 1. `X-Real-IP` — nginx sets it to `$remote_addr`, replacing whatever the
+///    client sent.
+/// 2. The **rightmost** `X-Forwarded-For` entry — `$proxy_add_x_forwarded_for`
+///    appends `$remote_addr` to the client-supplied list, so only the last
+///    entry is nginx's. The leftmost entry is whatever the client claimed.
+/// 3. The `ConnectInfo<SocketAddr>` extension (direct `cargo run` use).
+///
+/// This relies on the service being reachable only through nginx: it binds
+/// `127.0.0.1` in production, so no client can set these headers directly.
 fn source_ip(req: &Request<Body>) -> Option<IpAddr> {
-    if let Some(xff) = req.headers().get("x-forwarded-for") {
-        if let Ok(s) = xff.to_str() {
-            // XFF is comma-separated; the original
-            // client is the leftmost entry. nginx's
-            // `proxy_set_header X-Forwarded-For
-            // $proxy_add_x_forwarded_for` produces
-            // that order.
-            if let Some(first) = s.split(',').next() {
-                if let Ok(ip) = first.trim().parse::<IpAddr>() {
-                    return Some(ip);
-                }
-            }
-        }
+    let header = |name: &str| req.headers().get(name).and_then(|v| v.to_str().ok());
+
+    if let Some(ip) = header("x-real-ip").and_then(|s| s.trim().parse::<IpAddr>().ok()) {
+        return Some(ip);
     }
-    if let Some(real) = req.headers().get("x-real-ip") {
-        if let Ok(s) = real.to_str() {
-            if let Ok(ip) = s.trim().parse::<IpAddr>() {
-                return Some(ip);
-            }
-        }
+    if let Some(ip) = header("x-forwarded-for")
+        .and_then(|s| s.rsplit(',').next())
+        .and_then(|last| last.trim().parse::<IpAddr>().ok())
+    {
+        return Some(ip);
     }
     req.extensions()
         .get::<ConnectInfo<std::net::SocketAddr>>()
         .map(|c| c.0.ip())
 }
 
-/// Middleware function — extracts the source IP, runs
-/// `RateLimiter::try_consume`, returns 429 on reject.
+/// Middleware function — identifies the source address and, when the request
+/// carries a valid session token, the account; charges the matching buckets
+/// ([`DiscoveryLimits::admit_at`]); returns 429 on reject.
 ///
 /// Wire with `Router::route_layer(middleware::from_fn_with_state(...))`.
 pub async fn middleware(
-    State(limiter): State<Arc<RateLimiter>>,
+    State(limits): State<Arc<DiscoveryLimits>>,
     req: Request<Body>,
     next: Next,
 ) -> Response {
@@ -294,13 +435,20 @@ pub async fn middleware(
         // on, and short-circuits before any OPRF compute.
         return rate_limited_response("rate-limited", "unable to identify source");
     };
-    if limiter.try_consume(ip) {
-        next.run(req).await
-    } else {
-        rate_limited_response(
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+    let account = limits.bearer_account(&req, now_ms);
+    match limits.admit_at(ip, account, Instant::now()) {
+        Verdict::Admit => next.run(req).await,
+        Verdict::AccountExhausted => rate_limited_response(
+            "rate-limited",
+            "too many discovery requests from your account — back off and retry",
+        ),
+        Verdict::NetworkExhausted => rate_limited_response(
             "rate-limited",
             "too many discovery requests from your network — back off and retry",
-        )
+        ),
     }
 }
 
@@ -444,6 +592,196 @@ mod tests {
         let dropped = rl.prune_idle(cutoff);
         assert_eq!(dropped, 0);
         assert_eq!(rl.bucket_count(), 1);
+    }
+
+    fn request_with(headers: &[(&str, &str)], peer: Option<&str>) -> Request<Body> {
+        let mut builder = Request::builder().uri("/discovery/lookup");
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+        let mut req = builder.body(Body::empty()).expect("request builds");
+        if let Some(peer) = peer {
+            let addr: std::net::SocketAddr = peer.parse().expect("socket addr parses");
+            req.extensions_mut().insert(ConnectInfo(addr));
+        }
+        req
+    }
+
+    const SECRET_B64: &str = "ZGV2LXNlc3Npb24tdG9rZW4tc2VjcmV0LWZvci1sb2NhbC10ZXN0aW5nLW9ubHkhIQ==";
+
+    fn limits(anonymous: f64, account: f64, ceiling: f64) -> DiscoveryLimits {
+        let secret = TokenSecret::from_base64(SECRET_B64).expect("fixture secret decodes");
+        DiscoveryLimits::new(
+            Limit {
+                per_minute: 60.0,
+                burst: anonymous,
+            },
+            Limit {
+                per_minute: 60.0,
+                burst: account,
+            },
+            Limit {
+                per_minute: 600.0,
+                burst: ceiling,
+            },
+            Arc::new(secret),
+        )
+    }
+
+    fn drain(
+        limits: &DiscoveryLimits,
+        src: IpAddr,
+        account: Option<[u8; 16]>,
+        now: Instant,
+    ) -> usize {
+        (0..1000)
+            .take_while(|_| limits.admit_at(src, account, now) == Verdict::Admit)
+            .count()
+    }
+
+    #[test]
+    fn accounts_behind_one_address_do_not_share_a_bucket() {
+        let l = limits(3.0, 5.0, 100.0);
+        let router = ip(198, 51, 100, 1);
+        let now = Instant::now();
+        assert_eq!(drain(&l, router, Some([1; 16]), now), 5);
+        // A second person behind the same router still has a full bucket.
+        assert_eq!(drain(&l, router, Some([2; 16]), now), 5);
+        // So does anonymous traffic from that router: it has its own bucket.
+        assert_eq!(drain(&l, router, None, now), 3);
+    }
+
+    #[test]
+    fn an_account_is_limited_across_addresses() {
+        let l = limits(3.0, 5.0, 100.0);
+        let now = Instant::now();
+        for i in 0..5u8 {
+            assert_eq!(
+                l.admit_at(ip(203, 0, 113, i), Some([9; 16]), now),
+                Verdict::Admit
+            );
+        }
+        assert_eq!(
+            l.admit_at(ip(203, 0, 113, 200), Some([9; 16]), now),
+            Verdict::AccountExhausted
+        );
+    }
+
+    #[test]
+    fn one_address_cycling_accounts_hits_the_ceiling() {
+        let l = limits(3.0, 5.0, 12.0);
+        let src = ip(192, 0, 2, 7);
+        let now = Instant::now();
+        let admitted = (0..40u8)
+            .filter(|n| l.admit_at(src, Some([*n; 16]), now) == Verdict::Admit)
+            .count();
+        assert_eq!(admitted, 12);
+        assert_eq!(
+            l.admit_at(src, Some([99; 16]), now),
+            Verdict::NetworkExhausted
+        );
+    }
+
+    #[test]
+    fn a_ceiling_refusal_does_not_drain_the_account() {
+        let l = limits(3.0, 5.0, 1.0);
+        let now = Instant::now();
+        assert_eq!(
+            l.admit_at(ip(192, 0, 2, 1), Some([4; 16]), now),
+            Verdict::Admit
+        );
+        assert_eq!(
+            l.admit_at(ip(192, 0, 2, 1), Some([4; 16]), now),
+            Verdict::NetworkExhausted
+        );
+        // The refused request cost the account nothing: four more addresses
+        // (each with its own one-token ceiling) spend the remaining four tokens,
+        // and only the fifth runs the account dry.
+        for last in 2..=5 {
+            assert_eq!(
+                l.admit_at(ip(192, 0, 2, last), Some([4; 16]), now),
+                Verdict::Admit
+            );
+        }
+        assert_eq!(
+            l.admit_at(ip(192, 0, 2, 6), Some([4; 16]), now),
+            Verdict::AccountExhausted
+        );
+    }
+
+    #[test]
+    fn bearer_account_accepts_only_a_valid_token() {
+        let l = limits(3.0, 5.0, 100.0);
+        let now_ms: i64 = 1_800_000_000_000;
+        let secret = TokenSecret::from_base64(SECRET_B64).expect("fixture secret decodes");
+        let good = secret
+            .issue(&[7; 16], now_ms + 60_000)
+            .expect("token issues");
+        let expired = secret.issue(&[7; 16], now_ms - 1).expect("token issues");
+        let other = TokenSecret::new(vec![0x42; 32])
+            .expect("secret builds")
+            .issue(&[7; 16], now_ms + 60_000)
+            .expect("token issues");
+        let bearer = |t: &str| request_with(&[("authorization", &format!("Bearer {t}"))], None);
+
+        assert_eq!(l.bearer_account(&bearer(&good), now_ms), Some([7; 16]));
+        assert_eq!(l.bearer_account(&bearer(&expired), now_ms), None);
+        assert_eq!(l.bearer_account(&bearer(&other), now_ms), None);
+        assert_eq!(l.bearer_account(&bearer("garbage"), now_ms), None);
+        assert_eq!(
+            l.bearer_account(&request_with(&[("authorization", &good)], None), now_ms),
+            None
+        );
+        assert_eq!(l.bearer_account(&request_with(&[], None), now_ms), None);
+    }
+
+    #[test]
+    fn source_ip_ignores_client_supplied_leftmost_forwarded_for() {
+        // nginx's `$proxy_add_x_forwarded_for` appends the real peer to
+        // whatever the client sent. A client that sends a fresh fake value on
+        // every request must still land in its own bucket.
+        let req = request_with(&[("x-forwarded-for", "203.0.113.77, 198.51.100.9")], None);
+        assert_eq!(source_ip(&req), Some(ip(198, 51, 100, 9)));
+    }
+
+    #[test]
+    fn source_ip_prefers_real_ip_over_forwarded_for() {
+        let req = request_with(
+            &[
+                ("x-forwarded-for", "203.0.113.77, 192.0.2.50"),
+                ("x-real-ip", "198.51.100.9"),
+            ],
+            Some("127.0.0.1:40000"),
+        );
+        assert_eq!(source_ip(&req), Some(ip(198, 51, 100, 9)));
+    }
+
+    #[test]
+    fn source_ip_skips_unparseable_real_ip() {
+        let req = request_with(
+            &[
+                ("x-real-ip", "not-an-ip"),
+                ("x-forwarded-for", "198.51.100.9"),
+            ],
+            None,
+        );
+        assert_eq!(source_ip(&req), Some(ip(198, 51, 100, 9)));
+    }
+
+    #[test]
+    fn source_ip_rejects_unparseable_rightmost_forwarded_for() {
+        // A garbage last entry must not fall back to the client's leftmost claim.
+        let req = request_with(
+            &[("x-forwarded-for", "203.0.113.77, garbage")],
+            Some("127.0.0.1:40000"),
+        );
+        assert_eq!(source_ip(&req), Some(ip(127, 0, 0, 1)));
+    }
+
+    #[test]
+    fn source_ip_falls_back_to_connect_info() {
+        let req = request_with(&[], Some("[2001:db8::1]:5000"));
+        assert_eq!(source_ip(&req), "2001:db8::1".parse().ok());
     }
 
     #[test]

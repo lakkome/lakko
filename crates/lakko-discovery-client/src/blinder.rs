@@ -6,9 +6,20 @@
 //! Two-step API mirroring the wire protocol:
 //!
 //!   1. [`OprfBlinder::blind`] — normalise the typed username,
-//!      blind it via `voprf::OprfClient::blind`, hand back the
-//!      base64-encoded `BlindedElement` for the
-//!      `/discovery/oprf` request body.
+//!      refuse it unless it passes the ADR-0048 §4 character-set
+//!      rule ([`crate::validate_username`]), blind it via
+//!      `voprf::OprfClient::blind`, hand back the base64-encoded
+//!      `BlindedElement` for the `/discovery/oprf` request body.
+//!
+//! ## The blinder is the username chokepoint
+//!
+//! Registration and lookup both need an OPRF hash, and the only way a
+//! client obtains one is through [`OprfBlinder::blind`]. So refusing
+//! here refuses both, by construction, without either call site
+//! remembering to check — and the server, which only ever sees a
+//! blinded element, could not check even if asked. A modified client
+//! can still blind a non-conforming string with raw `voprf`; no
+//! conforming client can then find or display it.
 //!
 //!   2. [`OprfBlinder::finalize`] — consume the server's
 //!      `EvaluationElement`, run `OprfClient::finalize`, and
@@ -26,7 +37,7 @@ use rand::rngs::OsRng;
 use voprf::{EvaluationElement, OprfClient};
 
 use crate::error::DiscoveryClientError;
-use crate::normalize::normalize_username;
+use crate::normalize::{normalize_username, validate_username};
 use crate::LakkoOprfCs;
 
 /// VOPRF Ristretto255-SHA512 produces a 64-byte output (one
@@ -91,24 +102,25 @@ impl core::fmt::Debug for OprfBlinder {
 }
 
 impl OprfBlinder {
-    /// Normalise the typed username and produce a fresh blinded
-    /// element. Returns `(blinder, blinded_b64)`.
+    /// Normalise the typed username, require it to pass the
+    /// ADR-0048 §4 username rule, and produce a fresh blinded element.
+    /// Returns `(blinder, blinded_b64)`.
     ///
     /// The base64 string drops straight into the `blinded` field
-    /// of `/discovery/oprf`'s request body.
+    /// of `/discovery/oprf`'s request body. Both `/discovery/register`
+    /// and `/discovery/lookup` consume the hash this produces, so a
+    /// name refused here can be neither registered nor looked up.
     ///
     /// # Errors
     ///
-    /// * [`DiscoveryClientError::EmptyUsername`] — the input
-    ///   reduces to an empty string after normalisation
-    ///   (e.g. caller passed `"@"` or `"   "`).
+    /// * [`DiscoveryClientError::InvalidUsername`] — the normalised
+    ///   input is empty (e.g. `"@"`, `"   "`), shorter than 3 or longer
+    ///   than 32 characters, or contains a character outside
+    ///   `[a-z0-9_]`. Carries the reason code, never the input.
     /// * [`DiscoveryClientError::Voprf`] — `voprf` rejected the
     ///   blind (extremely unlikely on a sane RNG; treat as fatal).
     pub fn blind(username: &str) -> Result<(Self, String), DiscoveryClientError> {
-        let normalised = normalize_username(username);
-        if normalised.is_empty() {
-            return Err(DiscoveryClientError::EmptyUsername);
-        }
+        let normalised = validate_username(username)?;
         // @username namespace: the OPRF input is the bare normalised
         // bytes — unchanged wire, so existing registrations stay valid.
         let oprf_input = normalised.as_bytes().to_vec();
@@ -127,9 +139,15 @@ impl OprfBlinder {
     ///
     /// # Errors
     ///
-    /// Same as [`Self::blind`] — [`DiscoveryClientError::EmptyUsername`]
-    /// when the handle reduces to empty, or [`DiscoveryClientError::Voprf`]
-    /// on a `voprf` blind failure.
+    /// [`DiscoveryClientError::EmptyUsername`] when the handle reduces to
+    /// empty, or [`DiscoveryClientError::Voprf`] on a `voprf` blind failure.
+    ///
+    /// **The ADR-0048 §4 username character-set rule is NOT applied
+    /// here.** A `@channel` handle is a separate namespace (its own
+    /// OPRF domain, its own table) whose policy that ADR does not set;
+    /// applying the username rule to it would be a silent policy change
+    /// for channels. Handles keep the pre-ADR-0048 behaviour: normalise,
+    /// refuse empty.
     pub fn blind_channel(handle: &str) -> Result<(Self, String), DiscoveryClientError> {
         let normalised = normalize_username(handle);
         if normalised.is_empty() {
@@ -304,14 +322,67 @@ mod tests {
 
     #[test]
     fn blind_rejects_empty_username() {
-        let err = OprfBlinder::blind("").expect_err("must fail");
-        assert!(matches!(err, DiscoveryClientError::EmptyUsername));
+        for empty in ["", "@", "   "] {
+            let err = OprfBlinder::blind(empty).expect_err("must fail");
+            assert!(
+                matches!(
+                    err,
+                    DiscoveryClientError::InvalidUsername(crate::UsernameError::Empty)
+                ),
+                "{empty:?} -> {err:?}"
+            );
+        }
+    }
 
-        let err = OprfBlinder::blind("@").expect_err("must fail");
-        assert!(matches!(err, DiscoveryClientError::EmptyUsername));
+    /// ADR-0048 §4: the blinder is the chokepoint. A name that fails the
+    /// username rule never yields a blinded element — so it can reach
+    /// neither `/discovery/register` nor `/discovery/lookup`, which both
+    /// consume only what `blind` + `finalize` produce.
+    #[test]
+    fn blind_refuses_names_that_fail_the_username_rule() {
+        use crate::UsernameError;
+        for (bad, why) in [
+            ("al", UsernameError::TooShort { min: 3 }),
+            (
+                "abcdefghijklmnopqrstuvwxyz0123456",
+                UsernameError::TooLong { max: 32 },
+            ),
+            ("p\u{430}vel", UsernameError::InvalidCharacters),
+            ("ali-ce", UsernameError::InvalidCharacters),
+            ("ali.ce", UsernameError::InvalidCharacters),
+            ("ali ce", UsernameError::InvalidCharacters),
+            ("\u{1F600}alice", UsernameError::InvalidCharacters),
+        ] {
+            let err = OprfBlinder::blind(bad).expect_err("must refuse");
+            assert!(
+                matches!(err, DiscoveryClientError::InvalidUsername(r) if r == why),
+                "{bad:?} -> {err:?}"
+            );
+        }
+    }
 
-        let err = OprfBlinder::blind("   ").expect_err("must fail");
-        assert!(matches!(err, DiscoveryClientError::EmptyUsername));
+    /// The register and lookup paths are the same call, so the refusal
+    /// covers both; this pins that a CONFORMING name still round-trips to
+    /// one hash whichever spelling was typed (fullwidth folds via NFKC).
+    #[test]
+    fn register_and_lookup_agree_on_a_conforming_name() {
+        let server = OprfServer::<LakkoOprfCs>::new_from_seed(&[0x31u8; 32], b"lakko/oprf/v1")
+            .expect("server seed");
+        let registered = oneshot(&server, "Bob_42");
+        let looked_up = oneshot(&server, "@bob_42");
+        let fullwidth = oneshot(&server, "\u{ff42}\u{ff4f}\u{ff42}_42");
+        assert_eq!(registered, looked_up);
+        assert_eq!(registered, fullwidth);
+    }
+
+    /// `@channel` handles are a separate namespace and deliberately keep
+    /// their pre-ADR-0048 policy — the username rule does not leak into
+    /// `blind_channel`.
+    #[test]
+    fn channel_handles_are_not_subject_to_the_username_rule() {
+        assert!(OprfBlinder::blind("my-channel").is_err());
+        assert!(OprfBlinder::blind_channel("my-channel").is_ok());
+        assert!(OprfBlinder::blind_channel("ab").is_ok());
     }
 
     #[test]
@@ -411,11 +482,20 @@ mod tests {
         let server =
             OprfServer::<LakkoOprfCs>::new_from_seed(&seed, b"lakko/oprf/v1").expect("server seed");
         // A username crafted to mimic the readable part of the channel
-        // domain still hashes into the username namespace (no 0xFF
-        // lead byte), so it cannot collide with any channel handle.
-        let crafted_user = oneshot(&server, "lakko/discovery/channel/v1\u{1f}alice");
-        let real_channel = oneshot_channel(&server, "alice");
-        assert_ne!(crafted_user, real_channel);
+        // domain is now refused outright by the ADR-0048 username rule
+        // (`/` and U+001F are outside `[a-z0-9_]`) — a stronger outcome
+        // than the hash separation, but not a substitute for it: the
+        // separation must hold on its own, since the rule is client-side.
+        assert!(OprfBlinder::blind("lakko/discovery/channel/v1\u{1f}alice").is_err());
+        // So prove the separation at the OPRF-input level directly: a
+        // username's input is valid UTF-8 and never starts with 0xFF.
+        let (user, _) = OprfBlinder::blind("alice").expect("blind");
+        let (channel, _) = OprfBlinder::blind_channel("alice").expect("blind_channel");
+        assert_ne!(user.oprf_input.first().copied(), Some(0xFF));
+        assert!(channel.oprf_input.starts_with(CHANNEL_OPRF_DOMAIN));
+        let crafted_channel = oneshot_channel(&server, "alice");
+        let real_user = oneshot(&server, "alice");
+        assert_ne!(crafted_channel, real_user);
     }
 
     #[test]

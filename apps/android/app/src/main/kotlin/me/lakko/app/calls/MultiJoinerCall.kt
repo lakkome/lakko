@@ -487,6 +487,12 @@ class MultiJoinerCall private constructor(
             // ADR-0032 election here is leaf/presence-based and independent).
             // A peer that relays one is off-contract — fail-closed drop.
             FfiIncomingEnvelopeKind.COMMITTER_BEACON -> Unit
+            // ADR-0048 — a profile envelope rides the GROUP JOURNAL as an MLS
+            // application message, where the sender is the MLS-authenticated
+            // leaf. A relay payload has no such binding (the SFU peer id is not
+            // an identity), so a profile arriving here could be bound to nobody
+            // and is dropped, never stored (C-68).
+            FfiIncomingEnvelopeKind.PROFILE -> Unit
         }
     }
 

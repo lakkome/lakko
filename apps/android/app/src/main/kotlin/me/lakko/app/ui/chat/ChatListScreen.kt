@@ -27,6 +27,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberCoroutineScope
@@ -41,8 +42,6 @@ import kotlinx.coroutines.launch
 import me.lakko.app.devices.sync.DeviceGroupSyncRepository
 import me.lakko.app.devices.sync.FlagsState
 import me.lakko.app.devices.sync.ReadCursorState
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import me.lakko.app.chat.ChatRepository
 import me.lakko.app.chat.ChatThread
@@ -81,6 +80,10 @@ public fun ChatListScreen(
 ) {
     val state by repository.state.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
+    // ADR-0048 UX §5 — a two-member chat is listed under the other person's
+    // resolved name (`Name · @username` when verified); a group keeps its label.
+    val directory = remember(repository) { me.lakko.app.profile.ProfileDirectory.get(repository.context) }
+    val nameVersion by directory.version.collectAsStateWithLifecycle()
     // Phase 2a3e2c-Android — cross-device flags. Nullable
     // `deviceGroupSync` keeps the screen mountable in tests /
     // older callers that haven't wired the sync runtime yet.
@@ -93,18 +96,14 @@ public fun ChatListScreen(
         readCursorState?.value ?: emptyMap()
 
     LaunchedEffect(Unit) {
-        // First tick: immediate refresh so the list is fresh
-        // when the user lands. Subsequent ticks: continuous
-        // long-poll across every active group. Cancels when
-        // the composable leaves composition.
-        scope.launch { repository.pollAllGroups() }
-        while (isActive) {
-            try {
-                repository.pollAllGroups(waitSecs = LONG_POLL_SECS)
-            } catch (_: Throwable) {
-                delay(POLL_RETRY_BACKOFF_MS)
-            }
-        }
+        // An immediate refresh so the list is fresh when the user lands. The
+        // continuous long poll across every group is NOT here any more: it runs
+        // app-wide from `MainActivity`'s session root while the app is in the
+        // foreground, whatever screen is showing, because call signaling and
+        // the unread counts must arrive for chats that are not open on screens
+        // that are not this one. A second loop here would only lose the
+        // per-group in-flight race to it.
+        repository.pollAllGroups()
     }
 
     Column(
@@ -140,8 +139,10 @@ public fun ChatListScreen(
                         thread = thread,
                         cursor = readCursorMap[thread.groupIdHex],
                     )
+                    val peerKey = repository.oneToOnePeerKey(thread.groupIdHex)
                     ThreadRow(
                         thread = thread,
+                        title = nameVersion.let { peerKey?.let { directory.resolve(it).listLabel } },
                         flags = flagsMap[thread.groupIdHex],
                         unread = unread,
                         onClick = { onOpenThread(thread.groupIdHex) },
@@ -187,19 +188,28 @@ public fun ChatListScreen(
 
 internal enum class FlagField { Pin, Mute, Archive }
 
-/** Compute unread count for a thread (Phase 2a3e2c-followup).
- *  Counts every incoming / system row whose `messageId` is
- *  strictly greater than the last broadcast read cursor.
- *  Outgoing rows never count — the sender already "read" them
- *  by composing. */
+/** Compute unread count for a thread.
+ *
+ *  Two sources, folded by [me.lakko.app.chat.combinedUnread]:
+ *   - the cross-device read cursor (Phase 2a3e2c-followup): every incoming /
+ *     system row whose `messageId` is strictly greater than the last broadcast
+ *     cursor. Outgoing rows never count — the sender already "read" them by
+ *     composing. `null` when the chat has no cursor.
+ *   - the local count of incoming messages this device's polls applied while
+ *     the chat was not on screen ([ChatThread.localUnread]). Without it a chat
+ *     with no cursor never showed a badge, whatever arrived. */
 internal fun unreadCount(thread: ChatThread, cursor: ReadCursorState?): Int {
-    val cursorId = cursor?.let { decodeBeI64(it.upToMessageId) } ?: Long.MAX_VALUE
-    var unread = 0
-    for (m in thread.messages) {
-        if (m.direction == Direction.Outgoing) continue
-        if (m.messageId > cursorId) unread += 1
+    val cursorCount = cursor?.let { c ->
+        val cursorId = decodeBeI64(c.upToMessageId)
+        thread.messages.count { m -> m.direction != Direction.Outgoing && m.messageId > cursorId }
     }
-    return unread
+    return me.lakko.app.chat.combinedUnread(
+        cursorCount = cursorCount,
+        local = me.lakko.app.chat.LocalUnread(
+            count = thread.localUnread,
+            viewedThisSession = thread.unreadViewedThisSession,
+        ),
+    )
 }
 
 private fun decodeBeI64(bytes: ByteArray): Long {
@@ -249,6 +259,8 @@ private fun Header(
 @Composable
 private fun ThreadRow(
     thread: ChatThread,
+    /** ADR-0048 — the other person's resolved name for a 1x1 chat, else `null`. */
+    title: String?,
     flags: FlagsState?,
     unread: Int,
     onClick: () -> Unit,
@@ -279,9 +291,10 @@ private fun ThreadRow(
                             Text("📌 ", style = MaterialTheme.typography.titleSmall)
                         }
                         Text(
-                            text = "Group ${shortHex(thread.groupIdHex)}",
+                            text = title ?: "Group ${shortHex(thread.groupIdHex)}",
                             style = MaterialTheme.typography.titleSmall,
-                            fontFamily = FontFamily.Monospace,
+                            fontFamily = if (title == null) FontFamily.Monospace else FontFamily.Default,
+                            maxLines = 1,
                         )
                         if (muted) {
                             Text(
@@ -440,10 +453,6 @@ private fun EmptyPanel() {
     }
 }
 
-/** Long-poll constants — same values as the per-thread
- *  ChatScreen + the ContactsScreen polling loops. */
-private const val LONG_POLL_SECS: Int = 30
-private const val POLL_RETRY_BACKOFF_MS: Long = 5_000L
 
 /** Show the first six + last four hex chars of a long string —
  *  same preview format as

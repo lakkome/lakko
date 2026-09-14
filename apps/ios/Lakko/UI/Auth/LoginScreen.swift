@@ -57,6 +57,7 @@ public struct LoginScreen: View {
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled(true)
                     .disabled(viewModel.busy)
+                UsernameRuleHint(input: viewModel.username)
 
                 SecureField("Password", text: $viewModel.password)
                     .textFieldStyle(.roundedBorder)
