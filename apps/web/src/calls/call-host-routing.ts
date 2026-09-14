@@ -27,8 +27,9 @@
  *   - a fresh `offer` for a different call while one is ringing or live is
  *     answered `End{busy}` rather than silently dropped, so the caller stops
  *     ringing ("one call at a time");
- *   - a group call starting or in progress (the SFU session, in the call
- *     host's group slot) also makes this device busy for a 1x1 offer.
+ *   - a group call or a call-link call starting or in progress (both SFU
+ *     sessions, in the call host's one call slot — `call-slot.ts`) also makes
+ *     this device busy for a 1x1 offer.
  *
  * Unchanged from the chat view, and pinned in the tests: C-11 (a group-control
  * body never reaches the 1x1 session), the stale-offer rule (an offer whose DS
@@ -59,7 +60,8 @@ export interface InboundSignalingInput {
   readonly active: ActiveOneToOneCall | null;
   /** Call ids of 1x1 calls that ended on this device this session. */
   readonly endedCallIds: ReadonlySet<string>;
-  /** A group (SFU) call is starting or live on this device. */
+  /** A group or call-link (SFU) call is starting, waiting for admission, or
+   *  live on this device. */
   readonly groupCallBusy: boolean;
   /** The group-call record for this row's group already knows this call id. */
   readonly groupRecordKnowsCall: boolean;

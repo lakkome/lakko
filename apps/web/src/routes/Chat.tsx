@@ -655,8 +655,7 @@ function ChatView(props: {
   const callAffordance = (): ChatCallAffordance =>
     chatCallAffordance({
       membershipEnded: membershipEnded(),
-      oneToOneInCall: callHost.inCall(),
-      groupCallActive: callHost.groupCallBusy(),
+      callInProgress: callHost.anyCallInProgress(),
       liveCallInThisChat: liveGroupCall() !== null,
       memberCount: memberCount(),
     });
@@ -664,7 +663,11 @@ function ChatView(props: {
   /** Place a 1x1 call. The session lives in the call host, so it survives
    *  leaving this chat. */
   async function startOneToOneCall(withVideo: boolean): Promise<void> {
-    if (callHost.inCall() || callHost.groupCallBusy()) return;
+    const busy = callHost.callBusyMessage("start");
+    if (busy !== null) {
+      setError(busy);
+      return;
+    }
     try {
       await callHost.dial(props.entry.groupIdB64, withVideo);
     } catch (err) {
@@ -688,7 +691,9 @@ function ChatView(props: {
     });
     switch (outcome.kind) {
       case "connected":
+        return;
       case "busy":
+        setError(outcome.message);
         return;
       case "ended":
         setNotice("That group call has ended.");

@@ -19,7 +19,6 @@ import { forgetDeviceConfirmation } from "../auth/destructive-confirm";
 import { requestConfirm } from "./confirm-dialog";
 import { cycleTheme, useTheme } from "./theme";
 import { autoplayVideoNotes, setAutoplayVideoNotes } from "../media/media-prefs";
-import { CallHostView } from "../calls/CallHostContext";
 
 /**
  * Layout wrapper rendered around every protected route. The actual
@@ -127,12 +126,9 @@ export function AppShell(props: { children?: JSX.Element }): JSX.Element {
         </div>
       </nav>
       <main>{props.children}</main>
-      {/* The call UI — the 1x1 ringing banner, the in-call overlay and remote
-          audio of a 1x1 or group call, the banner for a group call in a chat
-          that is not open — on every authenticated screen, outside the routed
-          content so a route change neither hides a ringing call nor unmounts a
-          live one. */}
-      <CallHostView />
+      {/* The call UI (`CallHostView`) is mounted by the router's root layout in
+          `App.tsx`, not here: a call from a `/c/` link runs on a public route
+          outside this shell, and must show the same overlay there. */}
     </div>
   );
 }

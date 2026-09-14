@@ -29,8 +29,17 @@
  * automatically. Claiming a username is a later onboarding step (the account
  * is full from the start, just username-less).
  *
- * Once live it presents the shared in-call UI (`<Call embedded>`), driven by
- * the same `callActions` store the orchestrator populates.
+ * ## The call belongs to the app-level call host
+ *
+ * This screen used to own the `MultiJoinerCall`, and its cleanup hung it up —
+ * leaving the route ended the call for this device, and a link call could start
+ * while a 1x1 or group call was live, both driving one in-call UI. The call now
+ * lives in `calls/CallHostContext.tsx` ({@link CallHostApi.startLinkCall}): the
+ * in-call overlay, audio, controls and hang-up are the host's and work on every
+ * screen; returning here shows the host's state for this call. This screen
+ * decodes the link, runs the guest sign-up, and asks. While another call holds
+ * the one call slot the request is refused with the reason, and the user can
+ * end that call from here.
  *
  * Public route, mirroring the `/i/` contact-invite + `/g/` group-join routes.
  */
@@ -44,7 +53,7 @@ import {
   createSignal,
   onCleanup,
 } from "solid-js";
-import { A, useNavigate, useParams } from "@solidjs/router";
+import { A, useParams } from "@solidjs/router";
 
 import { useAuth } from "../auth/AuthContext";
 import { useChats } from "../chat/ChatContext";
@@ -55,23 +64,16 @@ import SaveFreshPhrasePrompt from "../auth/SaveFreshPhrasePrompt";
 import { loadWasm } from "../wasm";
 import { DiscoveryClient, DiscoveryHttpError } from "../discovery/client";
 import { parseCallInviteSlug } from "../calls/invite";
-import { sfuBaseUrl } from "../calls/sfu-config";
-import { MultiJoinerCall } from "../calls/multi-joiner-call";
+import { useCallHost, type CallHostApi } from "../calls/CallHostContext";
+import { callIdHex } from "../calls/call-signaling-dispatch";
 import { hexKey } from "../calls/multi-joiner-election";
-import Call from "./Call";
+import { linkCallOccupiesSlot, type LinkCallPhase } from "../calls/link-call-host";
 import { paths } from "./paths";
 
-/** The landing screen's own state machine. "waiting" is the ADR-0032
- *  joiner-side pre-admission phase (the shared call store stays `connecting`
- *  throughout it); "dead" is the no-live-committer timeout. */
-type Phase =
-  | "idle"
-  | "starting"
-  | "waiting"
-  | "live"
-  | "ended"
-  | "dead"
-  | "error";
+/** What this screen shows: its own pre-call states (`idle`, and `starting`
+ *  while a guest account is being created) until the host holds this call,
+ *  then the host's phase for it. */
+type Phase = "idle" | LinkCallPhase;
 
 interface DecodedCall {
   /** Decoded + verified capability fields the flow needs. */
@@ -91,7 +93,7 @@ export default function JoinCall() {
   const auth = useAuth();
   const chats = useChats();
   const profiles = useProfiles();
-  const navigate = useNavigate();
+  const callHost: CallHostApi = useCallHost();
 
   // ADR-0048 UX §4 — a guest (no account yet) is asked their name here,
   // prefilled `Guest`, and it becomes the new account's profile name.
@@ -146,20 +148,42 @@ export default function JoinCall() {
     },
   );
 
-  const [phase, setPhase] = createSignal<Phase>("idle");
+  /** This screen's own state before the host holds the call. */
+  const [localPhase, setLocalPhase] = createSignal<"idle" | "starting" | "error">("idle");
   const [error, setError] = createSignal<string | null>(null);
+  /** Why the start was refused while another call holds the slot. */
+  const [busyMessage, setBusyMessage] = createSignal<string | null>(null);
   // The join to resume once a guest account's session has landed (after the
   // SaveFreshPhrasePrompt acknowledgement). `null` on the logged-in path.
   const [pendingJoin, setPendingJoin] = createSignal<DecodedCall | null>(null);
-  let call: MultiJoinerCall | null = null;
-  // FINDING 5: synchronous double-tap latches (set BEFORE any await), so a
-  // rapid second tap can't mint a SECOND guest account or start a second call.
+  // FINDING 5: synchronous double-tap latch (set BEFORE any await), so a rapid
+  // second tap can't mint a SECOND guest account. A second call is prevented by
+  // the host, which refuses a call while one holds the slot.
   let mintingGuest = false;
-  let beginning = false;
 
+  /** The host's link slot, when it is THIS link's call. */
+  const hostSlot = createMemo(() => {
+    const slot = callHost.linkCall();
+    const d = decoded();
+    if (slot === null || d === null || d === undefined) return null;
+    return slot.callIdHex === callIdHex(d.callId) ? slot : null;
+  });
+
+  const phase = (): Phase => {
+    const slot = hostSlot();
+    if (slot !== null) return slot.phase;
+    return localPhase();
+  };
+  const shownError = (): string | null => hostSlot()?.errorMessage ?? error();
+
+  // While this screen is up it shows the host's state for its call itself, so
+  // the host does not repeat it as a notice. An outcome seen here is not
+  // repeated on the next screen either.
+  const releaseView = callHost.claimLinkCallView();
   onCleanup(() => {
-    call?.hangUp();
-    call = null;
+    releaseView();
+    const slot = hostSlot();
+    if (slot !== null && !linkCallOccupiesSlot(slot.phase)) callHost.dismissLinkCallOutcome();
   });
 
   // Guest-join resume: once `signupGuest` + the SaveFreshPhrasePrompt land a
@@ -191,6 +215,15 @@ export default function JoinCall() {
    *  account first (username-less full account) and resume after the phrase
    *  is saved. */
   async function onStart(d: DecodedCall): Promise<void> {
+    setBusyMessage(null);
+    const mine = hostSlot();
+    if (mine !== null && linkCallOccupiesSlot(mine.phase)) return;
+    // Refuse before minting a guest account for a call that could not start.
+    const busy = callHost.callBusyMessage(d.isOwner ? "start" : "join");
+    if (busy !== null) {
+      setBusyMessage(busy);
+      return;
+    }
     if (chats.identity() !== null && auth.identitySecrets() !== null) {
       await beginJoin(d);
       return;
@@ -204,7 +237,7 @@ export default function JoinCall() {
     pendingGuestName = savedDisplayName(guestNameCheck());
     mintingGuest = true;
     setError(null);
-    setPhase("starting");
+    setLocalPhase("starting");
     setPendingJoin(d);
     try {
       await auth.signupGuest();
@@ -213,82 +246,49 @@ export default function JoinCall() {
       pendingGuestName = undefined;
       setPendingJoin(null);
       setError(err instanceof Error ? err.message : String(err));
-      setPhase("error");
+      setLocalPhase("error");
     }
   }
 
-  /** Run the actual ADR-0032 host/join now that a live session exists. */
+  /** Hand the ADR-0032 host / join to the call host now that a live session
+   *  exists. */
   async function beginJoin(d: DecodedCall): Promise<void> {
-    // Synchronous latch (FINDING 5): guard against a rapid double-tap starting
-    // two SFU sessions before `call` is assigned past the first `await`.
-    if (call !== null || beginning) return;
-    beginning = true;
-    const identity = chats.identity();
-    const secrets = auth.identitySecrets();
-    const base = sfuBaseUrl();
-    if (identity === null || secrets === null) {
-      beginning = false;
-      setError("Re-authenticate to join this call (no live session).");
-      setPhase("error");
-      return;
-    }
-    if (base === null) {
-      beginning = false;
-      setError(
-        "This client has no SFU endpoint — set VITE_LAKKO_SFU_URL and rebuild.",
-      );
-      setPhase("error");
-      return;
-    }
     setError(null);
-    setPhase("starting");
-
-    const opts = {
-      identity,
+    setLocalPhase("starting");
+    const outcome = await callHost.startLinkCall({
       callId: d.callId,
       ownerAccountId: d.ownerAccountId,
       ownerSignatureKey: d.ownerSignatureKey,
-      sfuBaseUrl: base,
-      sessionToken: secrets.sessionToken,
-      media: { audio: true, video: d.mediaVideo },
-      onJoined: (): void => {
-        setPhase("live");
-      },
-      onEnded: (): void => {
-        setPhase("ended");
-      },
-      onNoCommitter: (): void => {
-        call = null;
-        setPhase("dead");
-      },
-      onError: (err: unknown): void => {
-        setError(err instanceof Error ? err.message : String(err));
-        setPhase("error");
-      },
-    };
-
-    try {
-      if (d.isOwner) {
-        // Owner founds + hosts; `onJoined` fires synchronously inside host().
-        call = await MultiJoinerCall.host(opts);
-      } else {
-        // Joiner connects signaling-only + relays its KeyPackage; the shared
-        // store is `connecting` and we sit in "waiting" until the Welcome
-        // arrives (onJoined → "live").
-        call = await MultiJoinerCall.join(opts);
-        if (phase() === "starting") setPhase("waiting");
-      }
-    } catch (err) {
-      beginning = false; // start failed (call unset) — allow a retry
-      setError(err instanceof Error ? err.message : String(err));
-      setPhase("error");
+      mediaVideo: d.mediaVideo,
+      isOwner: d.isOwner,
+      routePath: paths.joinCall(params.slug),
+    });
+    switch (outcome.kind) {
+      case "started":
+      case "already-in-this-call":
+        // The host's slot is what this screen shows from here on.
+        setLocalPhase("idle");
+        return;
+      case "busy":
+        setLocalPhase("idle");
+        setBusyMessage(outcome.message);
+        return;
+      case "failed":
+        setError(outcome.message);
+        setLocalPhase("error");
+        return;
     }
   }
 
-  function onExit(): void {
-    call?.hangUp();
-    call = null;
-    navigate(paths.home);
+  async function onEndCurrentCall(): Promise<void> {
+    await callHost.endCurrentCall();
+    setBusyMessage(null);
+  }
+
+  function onTryAgain(): void {
+    callHost.dismissLinkCallOutcome();
+    setError(null);
+    setLocalPhase("idle");
   }
 
   return (
@@ -320,6 +320,16 @@ export default function JoinCall() {
             <p>
               Host: <code>{decoded()?.ownerFingerprint}</code>
             </p>
+            <Show when={busyMessage()}>
+              {(message) => (
+                <div role="alert">
+                  <p>{message()}</p>
+                  <button type="button" onClick={() => void onEndCurrentCall()}>
+                    End current call
+                  </button>
+                </div>
+              )}
+            </Show>
             <Show when={phase() === "idle"}>
               <Show when={isAnonymousVisitor() && !decoded()?.isOwner}>
                 <label>
@@ -360,6 +370,15 @@ export default function JoinCall() {
             </Show>
             <Show when={phase() === "waiting"}>
               <p>Waiting for the owner to admit you…</p>
+              <p style={{ color: "var(--surface-muted)", "font-size": "0.85rem" }}>
+                You can leave this screen; you will join when you are admitted.
+              </p>
+              <button type="button" onClick={() => callHost.leaveLinkCall()}>
+                Cancel
+              </button>
+            </Show>
+            <Show when={phase() === "live"}>
+              <p>You are in this call.</p>
             </Show>
             <Show when={phase() === "dead"}>
               <p>This call has ended or isn't active.</p>
@@ -370,7 +389,10 @@ export default function JoinCall() {
               <A href={paths.home}>Go home</A>
             </Show>
             <Show when={phase() === "error"}>
-              <p style={{ color: "var(--error)" }}>Failed: {error()}</p>
+              <p style={{ color: "var(--error)" }}>Failed: {shownError()}</p>
+              <button type="button" onClick={onTryAgain}>
+                Try again
+              </button>
             </Show>
           </Show>
         </article>
@@ -383,15 +405,8 @@ export default function JoinCall() {
       <Match when={auth.state().kind === "save-fresh-phrase"}>
         <SaveFreshPhrasePrompt />
       </Match>
-      <Match when={phase() === "live"}>
-        <Call
-          embedded
-          onExit={onExit}
-          remoteStreamFor={(id): MediaStream | undefined =>
-            call?.remoteStreamFor(id)
-          }
-        />
-      </Match>
+      {/* A live call is shown by the call host's overlay, on this screen and
+          every other one. */}
     </Switch>
   );
 }

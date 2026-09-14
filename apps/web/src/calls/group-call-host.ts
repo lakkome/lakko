@@ -135,7 +135,8 @@ export interface GroupCallBannerInput {
   readonly isChatOpen: (groupIdB64: string) => boolean;
   /** Whether this device is still a member (`Group.isActive !== false`). */
   readonly isMember: (groupIdB64: string) => boolean;
-  /** Any call — 1x1 or group — is ringing, starting or live on this device. */
+  /** Any call — 1x1, group or call link — is ringing, starting, waiting or
+   *  live on this device. */
   readonly inAnyCall: boolean;
   /** Calls the user dismissed, or left, this session. */
   readonly dismissedCallIds: ReadonlySet<string>;
@@ -173,10 +174,9 @@ export type ChatCallAffordance =
 
 export interface ChatCallAffordanceInput {
   readonly membershipEnded: boolean;
-  /** A 1x1 call is ringing / dialing / live anywhere. */
-  readonly oneToOneInCall: boolean;
-  /** A group call is starting or live anywhere. */
-  readonly groupCallActive: boolean;
+  /** Any call — 1x1, group or call link — is ringing, starting, waiting or
+   *  live anywhere (`call-slot.ts`). */
+  readonly callInProgress: boolean;
   /** This chat has a live group-call record. */
   readonly liveCallInThisChat: boolean;
   readonly memberCount: number;
@@ -192,7 +192,7 @@ export interface ChatCallAffordanceInput {
  * an SFU call and a two-member chat a 1x1 P2P call.
  */
 export function chatCallAffordance(input: ChatCallAffordanceInput): ChatCallAffordance {
-  if (input.membershipEnded || input.oneToOneInCall || input.groupCallActive) return "hidden";
+  if (input.membershipEnded || input.callInProgress) return "hidden";
   if (input.liveCallInThisChat) return "join-group";
   return input.memberCount > 2 ? "start-group" : "start-one-to-one";
 }

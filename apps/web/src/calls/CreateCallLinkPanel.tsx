@@ -6,8 +6,9 @@
  *
  * A call link is independent of any chat, so this lives on Home rather than
  * in a chat header. The owner shares the link and hosts the call from the
- * `/c/<slug>` landing ("Start call" navigates there; `JoinCall.tsx` founds and
- * hosts when the visitor is the capability owner). Anyone holding the link
+ * `/c/<slug>` landing ("Start call" navigates there; `JoinCall.tsx` asks the
+ * app-level call host to found and host when the visitor is the capability
+ * owner, so the call survives leaving that screen). Anyone holding the link
  * asks to be admitted.
  *
  * The form's decisions (preset lists, label limit, the in-app route) live in
@@ -18,6 +19,7 @@ import { useNavigate } from "@solidjs/router";
 
 import { useAuth } from "../auth/AuthContext";
 import { useChats } from "../chat/ChatContext";
+import { useCallHost } from "./CallHostContext";
 import { DiscoveryClient } from "../discovery/client";
 import { composeAndUploadCallInvite } from "./composer";
 import type { CallMediaPreset, ExpiryPreset, MaxUsesPreset } from "./invite";
@@ -34,6 +36,7 @@ export default function CreateCallLinkPanel(): JSX.Element {
   const auth = useAuth();
   const chats = useChats();
   const navigate = useNavigate();
+  const callHost = useCallHost();
 
   const [media, setMedia] = createSignal<CallMediaPreset>("audio-video");
   const [expiry, setExpiry] = createSignal<ExpiryPreset>(CALL_LINK_DEFAULT_EXPIRY);
@@ -97,6 +100,12 @@ export default function CreateCallLinkPanel(): JSX.Element {
   }
 
   function onStart(): void {
+    // One call at a time: say so here rather than on the next screen.
+    const busy = callHost.callBusyMessage("start");
+    if (busy !== null) {
+      setError(busy);
+      return;
+    }
     const url = link();
     const path = url === null ? null : callLinkRoutePath(url);
     if (path === null) {

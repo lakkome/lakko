@@ -199,21 +199,14 @@ class SfuSignalingClient(
      */
     private fun connectTunneled(config: AntiCensorshipConfig) {
         receiveJob = scope.launch(Dispatchers.IO) {
-            val uri = try {
-                java.net.URI(baseUrl)
-            } catch (_: Throwable) {
+            val target = tunneledSignalingTarget(baseUrl, jwt)
+            if (target == null) {
                 callbacks.onClosed()
                 return@launch
             }
-            val host = uri.host
-            if (host == null) {
-                callbacks.onClosed()
-                return@launch
-            }
-            val isSecure = baseUrl.startsWith("https") || baseUrl.startsWith("wss")
-            val port = (if (uri.port > 0) uri.port else if (isSecure) 443 else 80).toUShort()
-            // Inner URL is plain ws:// — the tunnel provides the encryption.
-            val innerUrl = "ws://$host/v1/connect?token=$jwt"
+            val host = target.host
+            val port = target.port
+            val innerUrl = target.innerUrl
             val nowSecs = (System.currentTimeMillis() / 1000L).toULong()
 
             val conn = try {
@@ -346,4 +339,36 @@ class SfuSignalingClient(
         }
         client.close()
     }
+}
+
+/** Where the tunneled signaling socket dials and which request it sends. */
+internal data class TunneledSignalingTarget(
+    val host: String,
+    val port: UShort,
+    val innerUrl: String,
+)
+
+/**
+ * The tunnel endpoint and the inner WebSocket URL for [baseUrl].
+ *
+ * The inner URL is plain `ws://` (the obfuscated tunnel provides the
+ * encryption) and keeps the base URL's path: an SFU served under a prefix
+ * (`wss://test.lakko.me/sfu`) is reached at `/sfu/v1/connect`, exactly like the
+ * direct path. `null` when the base URL does not parse or has no host.
+ */
+internal fun tunneledSignalingTarget(baseUrl: String, jwt: String): TunneledSignalingTarget? {
+    val uri = try {
+        java.net.URI(baseUrl)
+    } catch (_: Exception) {
+        return null
+    }
+    val host = uri.host?.takeIf { it.isNotEmpty() } ?: return null
+    val isSecure = baseUrl.startsWith("https") || baseUrl.startsWith("wss")
+    val port = when {
+        uri.port in 1..65535 -> uri.port
+        isSecure -> 443
+        else -> 80
+    }.toUShort()
+    val path = (uri.rawPath ?: "").trimEnd('/')
+    return TunneledSignalingTarget(host, port, "ws://$host$path/v1/connect?token=$jwt")
 }

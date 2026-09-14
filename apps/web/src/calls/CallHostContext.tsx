@@ -28,7 +28,7 @@
  *   - **Group-call announcements** (`GroupCallStart` / `Join` / `Leave`) for
  *     every chat, folded into `group-call-store.ts`, so a chat opened after its
  *     start row was consumed in the background still knows the call is live.
- *   - **The call UI** ({@link CallHostView}, mounted in the authenticated
+ *   - **The call UI** ({@link CallHostView}, mounted in the router's root
  *     layout): the ringing banner with Accept / Accept with video / Decline on
  *     any screen, the full in-call overlay, and the remote audio sink.
  *
@@ -51,11 +51,29 @@
  *     closed the background receive's call lane long-polls the group, so a
  *     commit is applied (and the key rotated) within one poll.
  *   - **The overlay, the remote audio sinks and the hang-up** are rendered by
- *     {@link CallHostView} on every authenticated screen.
+ *     {@link CallHostView} on every screen.
  *   - **A call started in a chat that is not open** is announced by a banner in
  *     {@link CallHostView}, from the group-call records both receive paths feed.
  *
  * The decisions are in `group-call-host.ts` (pure, tested).
+ *
+ * ## And the call-link (`/c/<slug>`, ADR-0032) call
+ *
+ * `routes/JoinCall.tsx` owned its `MultiJoinerCall`, so leaving the route hung
+ * it up, and nothing kept a link call from starting while a 1x1 or group call
+ * was live — both then drove the one shared in-call UI store. The host now
+ * holds a third slot for it, with the orchestrator, the overlay, the remote
+ * audio sinks, the controls and the hang-up; the route decodes the link, runs
+ * the guest sign-up and asks {@link CallHostApi.startLinkCall}. Before the call
+ * is live, and after it ends, {@link CallHostView} carries its status on other
+ * screens. The protocol itself (owner-founds, committer election, admission
+ * dedup, per-admission rekey, the owner-membership check, the admission
+ * timeout) is `MultiJoinerCall`'s and unchanged.
+ *
+ * The three slots are one: `call-slot.ts` decides which call occupies it, and
+ * every entry point — dial, group start / join, link start / join, and a 1x1
+ * offer (answered busy) — refuses while it is taken. Link-call decisions are in
+ * `link-call-host.ts`.
  */
 import {
   createContext,
@@ -116,6 +134,16 @@ import {
   type GroupLeaveReason,
 } from "./group-call-host";
 import { hexToBytes, isGroupCallLive, type GroupCallEvent } from "./group-call-record";
+import { callBusyMessage, callSlotOccupant, type CallKind } from "./call-slot";
+import {
+  decideLinkCallStart,
+  linkCallNotice,
+  linkCallOccupiesSlot,
+  reduceLinkCallPhase,
+  type LinkCallEvent,
+  type LinkCallPhase,
+} from "./link-call-host";
+import { MultiJoinerCall, type MultiJoinerCallOptions } from "./multi-joiner-call";
 import {
   applyGroupCallEventFor,
   clearGroupCallStore,
@@ -167,7 +195,55 @@ export interface CallHostApi {
   startGroupCall(opts: StartGroupCallOptions): Promise<GroupCallStartOutcome>;
   /** Leave the group call this device is in (publishes Leave / End as owed). */
   leaveGroupCall(): Promise<void>;
+  /** The call occupying the one call slot, or `null` when it is free. */
+  callOccupant(): CallKind | null;
+  /** Why starting / joining a call now would be refused, or `null` when the
+   *  slot is free. */
+  callBusyMessage(verb: "start" | "join"): string | null;
+  /** End whatever call occupies the slot (declines a ringing 1x1 call). */
+  endCurrentCall(): Promise<void>;
+  /** The call-link call in the host's link slot — occupying the slot, or kept
+   *  after it ended so its outcome can be shown — or `null`. */
+  readonly linkCall: Accessor<LinkCallSlot | null>;
+  /** Found (owner) or join a call from a `/c/` link. Never rejects. */
+  startLinkCall(opts: StartLinkCallOptions): Promise<LinkCallStartOutcome>;
+  /** Leave the link call (or stop waiting to be admitted). */
+  leaveLinkCall(): void;
+  /** Forget a link call's outcome once it has been shown. */
+  dismissLinkCallOutcome(): void;
+  /** The `/c/` route is showing the link call; the host does not repeat its
+   *  status elsewhere meanwhile. Returns the release. */
+  claimLinkCallView(): () => void;
 }
+
+/** The call-link call in the host's link slot. */
+export interface LinkCallSlot {
+  /** Lowercase hex of the capability's 16-byte `call_id`. */
+  readonly callIdHex: string;
+  /** The `/c/<slug>` route the call was started from, to return to it. */
+  readonly routePath: string;
+  readonly role: "owner" | "joiner";
+  readonly phase: LinkCallPhase;
+  /** The reason, for `phase === "error"`. */
+  readonly errorMessage: string | null;
+}
+
+/** A verified `CallInviteCapability`, as the link route decoded it. */
+export interface StartLinkCallOptions {
+  readonly callId: Uint8Array;
+  readonly ownerAccountId: Uint8Array;
+  readonly ownerSignatureKey: Uint8Array;
+  readonly mediaVideo: boolean;
+  /** The local identity IS the capability owner: found + host. */
+  readonly isOwner: boolean;
+  readonly routePath: string;
+}
+
+export type LinkCallStartOutcome =
+  | { readonly kind: "started" }
+  | { readonly kind: "already-in-this-call" }
+  | { readonly kind: "busy"; readonly message: string }
+  | { readonly kind: "failed"; readonly message: string };
 
 /** The group call in the host's group slot. */
 export interface GroupCallSlot {
@@ -195,7 +271,7 @@ export interface StartGroupCallOptions {
 export type GroupCallStartOutcome =
   | { readonly kind: "connected" }
   /** Another call is starting or live; nothing was done. */
-  | { readonly kind: "busy" }
+  | { readonly kind: "busy"; readonly message: string }
   /** The call to join is no longer live. */
   | { readonly kind: "ended" }
   | { readonly kind: "failed"; readonly message: string };
@@ -248,6 +324,12 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
   const [dismissedGroupCalls, setDismissedGroupCalls] = createSignal<ReadonlySet<string>>(
     new Set(),
   );
+  /** The call-link slot. */
+  const [linkSlot, setLinkSlot] = createSignal<LinkCallSlot | null>(null);
+  /** The link call's orchestrator, while it holds a session. */
+  const [linkHandle, setLinkHandle] = createSignal<MultiJoinerCall | null>(null);
+  /** How many `/c/` route views are showing the link call. */
+  const [linkViewClaims, setLinkViewClaims] = createSignal(0);
 
   let activeCall: CallSession | null = null;
   /** The session that last occupied the slot. Unlike `activeCall` it is NOT
@@ -440,7 +522,8 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
             ? null
             : { callIdHex: callIdHex(activeCall.callId), groupIdB64: callGroup() ?? "" },
         endedCallIds,
-        groupCallBusy: groupSlot() !== null,
+        // A group or link call makes this device busy for a 1x1 offer too.
+        groupCallBusy: groupSlot() !== null || linkOccupies(),
         groupRecordKnowsCall: groupCallsFor(account, item.groupIdB64).has(hex),
       });
 
@@ -526,7 +609,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
   // ----- controls ---------------------------------------------------------
 
   async function dial(groupIdB64: string, withVideo: boolean): Promise<void> {
-    if (activeCall !== null || groupSlot() !== null) return;
+    if (currentOccupant() !== null) return;
     if (groupEntry(groupIdB64) === undefined) return;
     setVideoCall(withVideo);
     const session = buildCallSession(groupIdB64, mintCallId());
@@ -733,7 +816,12 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
    * (see `onGroupSessionState`); leaving is `leaveGroupCall`.
    */
   async function startGroupCall(opts: StartGroupCallOptions): Promise<GroupCallStartOutcome> {
-    if (groupCallStarting || groupSlot() !== null || activeCall !== null) return { kind: "busy" };
+    {
+      const occupant = groupCallStarting ? "group" : currentOccupant();
+      if (occupant !== null) {
+        return { kind: "busy", message: callBusyMessage(occupant, opts.joinCallIdHex === null ? "start" : "join") };
+      }
+    }
     const initiator = opts.joinCallIdHex === null;
     const verb = initiator ? "start" : "join";
     let callId: Uint8Array;
@@ -1104,6 +1192,217 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     callActions.setVideoPublishState(h.videoPublishState());
   });
 
+  // ----- the call-link (ADR-0032) call ---------------------------------------
+
+  function linkOccupies(): boolean {
+    const slot = linkSlot();
+    return slot !== null && linkCallOccupiesSlot(slot.phase);
+  }
+
+  function currentOccupant(): CallKind | null {
+    return callSlotOccupant({
+      oneToOneInCall: inCall(),
+      groupCallActive: groupSlot() !== null,
+      linkCallActive: linkOccupies(),
+    });
+  }
+
+  /** The attempt the link slot belongs to. A report from an older attempt —
+   *  one the user already left — never touches the slot. */
+  let linkAttempt: object | null = null;
+
+  function applyLinkEvent(attempt: object, event: LinkCallEvent, errorMessage?: string): void {
+    if (linkAttempt !== attempt) return;
+    const slot = linkSlot();
+    if (slot === null) return;
+    const phase = reduceLinkCallPhase(slot.phase, event);
+    if (phase === slot.phase) return;
+    setLinkSlot({
+      ...slot,
+      phase,
+      errorMessage: phase === "error" ? (errorMessage ?? slot.errorMessage) : slot.errorMessage,
+    });
+    if (!linkCallOccupiesSlot(phase)) {
+      // Over on its own: drop the session (idempotent — it also resets the
+      // shared in-call store) and keep the outcome for the user to see.
+      const h = linkHandle();
+      setLinkHandle(null);
+      h?.hangUp();
+    }
+  }
+
+  async function startLinkCall(opts: StartLinkCallOptions): Promise<LinkCallStartOutcome> {
+    const hex = callIdHex(opts.callId);
+    const verb = opts.isOwner ? "start" : "join";
+    const active = linkSlot();
+    // No await between this decision and the slot write below, so a double tap
+    // finds the slot taken (`already-in-this-call`) rather than starting twice.
+    const decision = decideLinkCallStart({
+      occupant: currentOccupant(),
+      activeLinkCallIdHex:
+        active !== null && linkCallOccupiesSlot(active.phase) ? active.callIdHex : null,
+      requestedCallIdHex: hex,
+      verb,
+    });
+    if (decision.kind !== "start") return decision;
+    const identity = chats.identity();
+    const secrets = auth.identitySecrets();
+    if (identity === null || secrets === null) {
+      return { kind: "failed", message: "Re-authenticate to join this call (no live session)." };
+    }
+    const base = sfuBaseUrl();
+    if (base === null) {
+      return {
+        kind: "failed",
+        message: "This client has no SFU endpoint — set VITE_LAKKO_SFU_URL and rebuild.",
+      };
+    }
+
+    const attempt = {};
+    linkAttempt = attempt;
+    setLinkHandle(null);
+    setLinkSlot({
+      callIdHex: hex,
+      routePath: opts.routePath,
+      role: opts.isOwner ? "owner" : "joiner",
+      phase: "starting",
+      errorMessage: null,
+    });
+
+    const callOpts: MultiJoinerCallOptions = {
+      identity,
+      callId: opts.callId,
+      ownerAccountId: opts.ownerAccountId,
+      ownerSignatureKey: opts.ownerSignatureKey,
+      sfuBaseUrl: base,
+      sessionToken: secrets.sessionToken,
+      media: { audio: true, video: opts.mediaVideo },
+      onJoined: () => applyLinkEvent(attempt, { kind: "joined" }),
+      onEnded: () => applyLinkEvent(attempt, { kind: "ended" }),
+      onNoCommitter: () => applyLinkEvent(attempt, { kind: "no-committer" }),
+      onError: (err: unknown) =>
+        applyLinkEvent(attempt, { kind: "error" }, err instanceof Error ? err.message : String(err)),
+    };
+
+    try {
+      // Owner founds + hosts (`onJoined` fires inside `host()`); a joiner
+      // connects signaling-only, relays its KeyPackage and waits for a Welcome.
+      const call = opts.isOwner
+        ? await MultiJoinerCall.host(callOpts)
+        : await MultiJoinerCall.join(callOpts);
+      const slot = linkSlot();
+      if (linkAttempt !== attempt || slot === null || !linkCallOccupiesSlot(slot.phase)) {
+        // Left, replaced, or already over while the start was in flight.
+        call.hangUp();
+        return { kind: "started" };
+      }
+      setLinkHandle(call);
+      applyLinkEvent(attempt, { kind: "signaling-open", role: opts.isOwner ? "owner" : "joiner" });
+      return { kind: "started" };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      applyLinkEvent(attempt, { kind: "error" }, message);
+      return { kind: "failed", message };
+    }
+  }
+
+  /** Leave the link call: no outcome to show, the user chose it. */
+  function leaveLinkCall(): void {
+    linkAttempt = null;
+    const h = linkHandle();
+    setLinkHandle(null);
+    setLinkSlot(null);
+    h?.hangUp();
+  }
+
+  function dismissLinkCallOutcome(): void {
+    const slot = linkSlot();
+    if (slot !== null && !linkCallOccupiesSlot(slot.phase)) setLinkSlot(null);
+  }
+
+  // The embedded in-call UI's End button moves the store to `ended`. A session
+  // that is still up means the user is ending it; one already closed ended on
+  // its own, and `onEnded` keeps that outcome for the user to see.
+  createEffect(() => {
+    if (callUi.phase().kind !== "ended") return;
+    const h = linkHandle();
+    if (h === null) return;
+    const s = h.sessionState();
+    if (s !== "closed" && s !== "failed") untrack(() => leaveLinkCall());
+  });
+
+  // Link-call controls: mic, camera, device picker, camera lifecycle — the same
+  // bindings the group call has. Only once the call is live: a joiner still
+  // waiting for its Welcome has published nothing (invariant #4), and must not
+  // start announcing camera state to a room it has not been admitted to.
+  const liveLinkHandle = (): MultiJoinerCall | null =>
+    linkSlot()?.phase === "live" ? linkHandle() : null;
+  createEffect(() => {
+    const local = callUi.participants().find((p) => p.isLocal);
+    const h = liveLinkHandle();
+    if (local === undefined || h === null) return;
+    h.setMicrophoneEnabled(local.micOn);
+  });
+  createEffect(() => {
+    const local = callUi.participants().find((p) => p.isLocal);
+    const h = liveLinkHandle();
+    if (local === undefined || h === null) return;
+    if (local.camOn) {
+      void h.publishVideo().catch((err: unknown) => {
+        callActions.setCamera(false);
+        // eslint-disable-next-line no-console
+        console.warn("could not start the camera", err);
+      });
+    } else {
+      h.setCameraEnabled(false);
+    }
+  });
+  let lastLinkAudioInput: string | null = null;
+  let lastLinkVideoInput: string | null = null;
+  createEffect(() => {
+    const audioId = callUi.settings().selectedAudioInput;
+    const videoId = callUi.settings().selectedVideoInput;
+    const h = liveLinkHandle();
+    if (h === null) {
+      lastLinkAudioInput = null;
+      lastLinkVideoInput = null;
+      return;
+    }
+    if (audioId !== null && audioId !== lastLinkAudioInput) {
+      lastLinkAudioInput = audioId;
+      void h.switchAudioInput(audioId);
+    }
+    if (videoId !== null && videoId !== lastLinkVideoInput) {
+      lastLinkVideoInput = videoId;
+      void h.switchVideoInput(videoId);
+    }
+  });
+  createEffect(() => {
+    const h = liveLinkHandle();
+    if (h === null) return;
+    callActions.setVideoPublishState(h.videoPublishState());
+  });
+
+  async function endCurrentCall(): Promise<void> {
+    switch (currentOccupant()) {
+      case "one-to-one": {
+        const call = activeCall;
+        if (call === null) return;
+        if (call.getState() === "ringing") await call.decline();
+        else await call.hangUp("hungUp");
+        return;
+      }
+      case "group":
+        await leaveGroupCall("hungUp");
+        return;
+      case "link":
+        leaveLinkCall();
+        return;
+      case null:
+        return;
+    }
+  }
+
   // Sign-out ends the call and forgets the session's call bookkeeping.
   createEffect(() => {
     const signedIn = auth.state().kind === "session";
@@ -1116,6 +1415,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       }
       // The session is gone, so nothing can be published: tear down locally.
       releaseGroupSlot();
+      leaveLinkCall();
       setDismissedGroupCalls(new Set<string>());
       queue.close();
       queue = newQueue();
@@ -1124,7 +1424,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     });
   });
 
-  const anyCallInProgress = (): boolean => inCall() || groupSlot() !== null;
+  const anyCallInProgress = (): boolean => currentOccupant() !== null;
 
   // A reload or tab close cannot publish an End or a Leave reliably; the
   // browser's own prompt is the most that can be done.
@@ -1140,6 +1440,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     const call = activeCall;
     if (call !== null) void call.hangUp("hungUp");
     if (activeGroupCall !== null || groupHandle() !== null) void leaveGroupCall("hungUp");
+    leaveLinkCall();
   });
 
   const api: CallHostApi = {
@@ -1159,6 +1460,25 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     anyCallInProgress,
     startGroupCall,
     leaveGroupCall: () => leaveGroupCall("hungUp"),
+    callOccupant: currentOccupant,
+    callBusyMessage: (verb) => {
+      const occupant = currentOccupant();
+      return occupant === null ? null : callBusyMessage(occupant, verb);
+    },
+    endCurrentCall,
+    linkCall: linkSlot,
+    startLinkCall,
+    leaveLinkCall,
+    dismissLinkCallOutcome,
+    claimLinkCallView() {
+      setLinkViewClaims((n) => n + 1);
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        setLinkViewClaims((n) => Math.max(0, n - 1));
+      };
+    },
   };
 
   const internals: CallHostInternals = {
@@ -1174,6 +1494,8 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     dismissedGroupCalls,
     dismissGroupCall,
     anyCallInProgress,
+    linkHandle,
+    linkViewShown: () => linkViewClaims() > 0,
   };
 
   return (
@@ -1200,6 +1522,10 @@ interface CallHostInternals {
   readonly dismissedGroupCalls: Accessor<ReadonlySet<string>>;
   dismissGroupCall(callIdHex: string): void;
   anyCallInProgress(): boolean;
+  /** The link call's orchestrator, while it holds a session. */
+  readonly linkHandle: Accessor<MultiJoinerCall | null>;
+  /** A `/c/` route view is showing the link call. */
+  linkViewShown(): boolean;
 }
 
 const CallHostInternalsContext = createContext<CallHostInternals>();
@@ -1211,10 +1537,13 @@ export function useCallHost(): CallHostApi {
 }
 
 /**
- * The call UI, on every authenticated screen: the 1x1 ringing banner, the full
- * in-call overlay and remote audio of both call kinds, and the banner for a
- * group call in a chat that is not open. Mounted once, in the app shell, so a
- * route change neither hides a ringing call nor unmounts a live one.
+ * The call UI, on every screen: the 1x1 ringing banner, the full in-call
+ * overlay and remote audio of every call kind, the banner for a group call in a
+ * chat that is not open, and a call-link call's status away from its route.
+ * Mounted once, in the router's root layout (`App.tsx`) — not the authenticated
+ * app shell, because a call-link call runs on the public `/c/` route — so a
+ * route change neither hides a ringing call nor unmounts a live one. Renders
+ * nothing while no call exists.
  *
  * Rendered inside `<BackgroundReceiveProvider>` (the router is), which the
  * group-call banner reads for which chat is open and to sync a group before
@@ -1362,8 +1691,115 @@ export function CallHostView(): JSX.Element {
         )}
       </Show>
 
+      {/* The call-link call's in-call UI, once this device is in the call's
+          group (owner: from founding; joiner: from its Welcome). */}
+      <Show when={host.linkCall()?.phase === "live"}>
+        <Call
+          embedded={true}
+          onExit={() => host.leaveLinkCall()}
+          remoteStreamFor={(participantId): MediaStream | undefined =>
+            internals.linkHandle()?.remoteStreamFor(participantId)
+          }
+          localStream={(): MediaStream | undefined =>
+            internals.linkHandle()?.localStream() ?? undefined
+          }
+        />
+      </Show>
+      <Show when={internals.linkHandle()}>
+        {(handle) => (
+          <For each={[...handle().remoteStreams().values()]}>
+            {(stream) => (
+              <audio
+                autoplay
+                style={{ display: "none" }}
+                ref={(el) => {
+                  el.srcObject = stream;
+                }}
+              />
+            )}
+          </For>
+        )}
+      </Show>
+
+      <LinkCallNoticeView />
       <GroupCallBanner />
     </>
+  );
+}
+
+/** A call-link call's status on a screen other than its `/c/` route. */
+function LinkCallNoticeView(): JSX.Element {
+  const host = useCallHost();
+  const maybeInternals = useContext(CallHostInternalsContext);
+  if (maybeInternals === undefined) throw new Error("LinkCallNoticeView outside <CallHostProvider>");
+  const internals: CallHostInternals = maybeInternals;
+
+  const notice = createMemo(() => {
+    const slot = host.linkCall();
+    return linkCallNotice(slot?.phase ?? null, internals.linkViewShown(), slot?.errorMessage ?? null);
+  });
+
+  const buttonStyle = {
+    background: "var(--surface-elevated)",
+    color: "var(--surface-fg)",
+    border: "none",
+    padding: "0.5rem 0.9rem",
+    "border-radius": "var(--radius-sm)",
+    "font-weight": "600",
+    cursor: "pointer",
+    "text-decoration": "none",
+  } as const;
+
+  return (
+    <Show when={notice()}>
+      {(n) => (
+        <div
+          role="status"
+          aria-label="Call from a link"
+          style={{
+            position: "fixed",
+            bottom: "1rem",
+            left: "50%",
+            transform: "translateX(-50%)",
+            "z-index": 1100,
+            "max-width": "calc(100vw - 2rem)",
+            padding: "0.75rem 1rem",
+            background: "var(--surface-elevated)",
+            color: "var(--surface-fg)",
+            border: "1px solid var(--surface-border)",
+            "border-radius": "var(--radius-md)",
+            "box-shadow": "0 4px 16px rgba(0, 0, 0, 0.25)",
+            display: "flex",
+            "align-items": "center",
+            gap: "1rem",
+            "flex-wrap": "wrap",
+          }}
+        >
+          <span>{n().text}</span>
+          <div style={{ display: "flex", gap: "0.4rem", "flex-wrap": "wrap" }}>
+            <Show when={n().actions.includes("open")}>
+              <A href={host.linkCall()?.routePath ?? "/"} style={buttonStyle}>
+                Open
+              </A>
+            </Show>
+            <Show when={n().actions.includes("cancel")}>
+              <button type="button" style={buttonStyle} onClick={() => host.leaveLinkCall()}>
+                Cancel
+              </button>
+            </Show>
+            <Show when={n().actions.includes("dismiss")}>
+              <button
+                type="button"
+                style={buttonStyle}
+                onClick={() => host.dismissLinkCallOutcome()}
+              >
+                Dismiss
+              </button>
+            </Show>
+          </div>
+        </div>
+      )}
+    </Show>
   );
 }
 
@@ -1427,7 +1863,7 @@ function GroupCallBanner(): JSX.Element {
         syncGroup: () => receive.syncGroupNow(ref.groupIdB64),
       });
       if (outcome.kind === "ended") internals.dismissGroupCall(ref.callIdHex);
-      else if (outcome.kind === "failed") {
+      else if (outcome.kind === "failed" || outcome.kind === "busy") {
         setFailure({ callIdHex: ref.callIdHex, message: outcome.message });
       }
     } finally {

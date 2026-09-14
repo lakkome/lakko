@@ -66,7 +66,12 @@ import { callActions, type Participant } from "../state/call-state";
 import { loadWasm } from "../wasm";
 import { groupIdHex } from "../devices/sync/state";
 import { CallJwtClient } from "./call-jwt-client";
-import { SfuCallSession, type SfuRemoteTrack } from "./sfu-call-session";
+import {
+  SfuCallSession,
+  type SfuCallState,
+  type SfuRemoteTrack,
+  type VideoPublishState,
+} from "./sfu-call-session";
 import type { SfuPeerSnapshot } from "./sfu-signaling-client";
 import {
   CallPresence,
@@ -130,7 +135,7 @@ export interface MultiJoinerCallOptions {
     peerTag: string | undefined,
   ) => string;
   /** Fired once this client has an MLS group + derived seed (owner: at
-   *  founding; joiner: on the Welcome). The landing page switches from
+   *  founding; joiner: on the Welcome). The app-level call host switches from
    *  "waiting for owner" to the in-call view. */
   readonly onJoined?: () => void;
   /** Fired on the first `connected` SFU transition (media flowing). */
@@ -156,6 +161,12 @@ export class MultiJoinerCall {
     fn: (prev: ReadonlyMap<string, MediaStream>) => ReadonlyMap<string, MediaStream>,
   ) => void;
   readonly remoteStreams: Accessor<ReadonlyMap<string, MediaStream>>;
+  /** Local capture stream once media is published (the self-preview tile). */
+  readonly localStream: Accessor<MediaStream | null>;
+  private readonly setLocalStream: (stream: MediaStream | null) => void;
+  /** Mid-call camera-on lifecycle, for the camera button. */
+  readonly videoPublishState: Accessor<VideoPublishState>;
+  private readonly setVideoPublishState: (state: VideoPublishState) => void;
 
   /** The call MLS group (owner: founded; joiner: after the Welcome). */
   private group: WasmGroup | null = null;
@@ -212,6 +223,16 @@ export class MultiJoinerCall {
     >(new Map());
     this.remoteStreams = remoteStreams;
     this.setRemoteStreams = setRemoteStreams;
+    const [localStream, setLocalStream] = createSignal<MediaStream | null>(null);
+    this.localStream = localStream;
+    this.setLocalStream = (stream): void => {
+      setLocalStream(stream);
+    };
+    const [videoPublishState, setVideoPublishState] = createSignal<VideoPublishState>("off");
+    this.videoPublishState = videoPublishState;
+    this.setVideoPublishState = (state): void => {
+      setVideoPublishState(state);
+    };
     this.localLeaf = initialLeaf ?? null;
 
     this.presence = new CallPresence(
@@ -251,6 +272,8 @@ export class MultiJoinerCall {
           callActions.setParticipantCamera(id, cameraOn);
         },
         onSignalRelay: (from, payload): void => this.onRelay(from, payload),
+        onLocalStream: (stream): void => this.setLocalStream(stream),
+        onVideoPublishState: (state): void => this.setVideoPublishState(state),
       },
     );
   }
@@ -356,7 +379,15 @@ export class MultiJoinerCall {
     this.lastKnownCameraOn.clear();
     this.session.hangUp();
     this.setRemoteStreams(() => new Map());
+    this.setLocalStream(null);
+    this.setVideoPublishState("off");
     callActions.reset();
+  }
+
+  /** The SFU session's lifecycle state. `closed` / `failed` means the call
+   *  ended on its own (or was torn down), not that the user is ending it. */
+  sessionState(): SfuCallState {
+    return this.session.getState();
   }
 
   private clearAdmissionTimer(): void {
@@ -385,6 +416,25 @@ export class MultiJoinerCall {
   /** Enable / disable the local camera. */
   setCameraEnabled(on: boolean): void {
     this.session.setCameraEnabled(on);
+  }
+
+  /** Turn the camera on mid-call (acquire + SFrame-attach + renegotiate when
+   *  the call started audio-only). A no-op before media is published — a
+   *  joiner publishes only once admitted (invariant #4). Throws on a capture
+   *  failure so the caller can revert the toggle. */
+  publishVideo(): Promise<void> {
+    return this.session.publishVideo();
+  }
+
+  /** In-call device picker: `replaceTrack` on the live sender (SFrame stays
+   *  armed). */
+  switchAudioInput(deviceId: string): Promise<void> {
+    return this.session.switchAudioInput(deviceId);
+  }
+
+  /** In-call device picker for the camera; a no-op while audio-only. */
+  switchVideoInput(deviceId: string): Promise<void> {
+    return this.session.switchVideoInput(deviceId);
   }
 
   // -----------------------------------------------------------------

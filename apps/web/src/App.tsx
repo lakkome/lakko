@@ -32,7 +32,7 @@ import { Router, type RouteSectionProps } from "@solidjs/router";
 import { AuthProvider } from "./auth/AuthContext";
 import { ChatProvider } from "./chat/ChatContext";
 import { BackgroundReceiveProvider } from "./chat/BackgroundReceiveContext";
-import { CallHostProvider } from "./calls/CallHostContext";
+import { CallHostProvider, CallHostView } from "./calls/CallHostContext";
 import { DeviceGroupSyncProvider } from "./devices/sync/DeviceGroupSyncContext";
 import {
   MailboxJoinFailureBanner,
@@ -53,11 +53,17 @@ import { ConfirmDialog } from "./ui/ConfirmDialog";
  * but OUTSIDE any individual route, so that a tap captured on a cold
  * `/?wake=…` open survives the `/` -> `/login` -> `/` bounce a
  * password re-entry performs. `<Router root>` is exactly that slot.
+ *
+ * The call UI (`CallHostView`) lives here for the same reason: inside the
+ * router (its banners link to routes) and outside every route, including the
+ * public `/c/` call-link landing, so no route change hides a ringing call or
+ * unmounts a live one of any kind. It renders nothing without a call.
  */
 const RootLayout: Component<RouteSectionProps> = (props) => (
   <>
     <WakeNavigator />
     {props.children}
+    <CallHostView />
   </>
 );
 
@@ -88,12 +94,12 @@ const RootLayout: Component<RouteSectionProps> = (props) => (
  *     AuthProvider for the same reason, and above the router so the
  *     loop does not stop when the user leaves the Contacts route.
  *
- *   <CallHostProvider> — the 1x1 call slot, the group (SFU) call slot and
- *     the one call-signaling queue for every chat, so a call rings on any
- *     screen and survives a route change. Its UI (`CallHostView`) is rendered
- *     by the app shell, inside the router (and so inside the background
- *     receive, which its group-call banner reads); its state lives here,
- *     above it.
+ *   <CallHostProvider> — the one call slot (a 1x1, group or call-link call)
+ *     and the one call-signaling queue for every chat, so a call rings on
+ *     any screen and survives a route change. Its UI (`CallHostView`) is
+ *     rendered by the router's root layout, inside the router (and so inside
+ *     the background receive, which its group-call banner reads); its state
+ *     lives here, above it.
  *
  *   <BackgroundReceiveProvider> — receives every joined group whose chat
  *     view is not open, feeding the call host and the message log. Inside

@@ -176,8 +176,7 @@ describe("selectGroupCallBanner", () => {
 function affordance(over: Partial<ChatCallAffordanceInput>): ChatCallAffordanceInput {
   return {
     membershipEnded: false,
-    oneToOneInCall: false,
-    groupCallActive: false,
+    callInProgress: false,
     liveCallInThisChat: false,
     memberCount: 2,
     ...over,
@@ -185,17 +184,14 @@ function affordance(over: Partial<ChatCallAffordanceInput>): ChatCallAffordanceI
 }
 
 describe("chatCallAffordance", () => {
-  it("a live group call anywhere hides the buttons, so a return to its chat never starts a second one", () => {
-    expect(chatCallAffordance(affordance({ groupCallActive: true, memberCount: 5 }))).toBe(
+  it("a call in progress anywhere hides the buttons, so a return to its chat never starts a second one", () => {
+    expect(chatCallAffordance(affordance({ callInProgress: true, memberCount: 5 }))).toBe(
       "hidden",
     );
     expect(
-      chatCallAffordance(affordance({ groupCallActive: true, liveCallInThisChat: true })),
+      chatCallAffordance(affordance({ callInProgress: true, liveCallInThisChat: true })),
     ).toBe("hidden");
-  });
-
-  it("a 1x1 call anywhere hides them too", () => {
-    expect(chatCallAffordance(affordance({ oneToOneInCall: true }))).toBe("hidden");
+    expect(chatCallAffordance(affordance({ callInProgress: true }))).toBe("hidden");
   });
 
   it("hides them once membership has ended", () => {

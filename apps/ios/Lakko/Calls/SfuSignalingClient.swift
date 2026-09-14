@@ -159,24 +159,46 @@ final class SfuSignalingClient {
         }
     }
 
+    /// Where the tunneled signaling socket dials and which request it sends.
+    struct TunneledTarget: Equatable {
+        let host: String
+        let port: UInt16
+        let innerUrl: String
+    }
+
+    /// The tunnel endpoint and the inner WebSocket URL for `baseUrl`.
+    ///
+    /// The inner URL is plain `ws://` (the obfuscated tunnel provides the
+    /// encryption) and keeps the base URL's path: an SFU served under a prefix
+    /// (`wss://test.lakko.me/sfu`) is reached at `/sfu/v1/connect`, exactly
+    /// like the direct path. `nil` when the base URL has no host or port.
+    static func tunneledTarget(baseUrl: String, jwt: String) -> TunneledTarget? {
+        guard let comps = URLComponents(string: baseUrl), let host = comps.host, !host.isEmpty else {
+            return nil
+        }
+        let isSecure = baseUrl.hasPrefix("https") || baseUrl.hasPrefix("wss")
+        guard let port = UInt16(exactly: comps.port ?? (isSecure ? 443 : 80)) else { return nil }
+        var path = comps.percentEncodedPath
+        while path.hasSuffix("/") { path.removeLast() }
+        let escaped = jwt.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? jwt
+        return TunneledTarget(
+            host: host,
+            port: port,
+            innerUrl: "ws://\(host)\(path)/v1/connect?token=\(escaped)"
+        )
+    }
+
     /// ADR-0026 — open the signaling WebSocket over the obfuscated tunnel and
     /// run a blocking receive loop on the dedicated serial queue. The dial +
     /// handshake block, so they run off the calling thread; a failure surfaces
     /// via `onClosed` (the same loud teardown the direct path uses).
     private func connectTunneled(_ config: AntiCensorshipConfig) throws {
-        guard
-            let comps = URLComponents(string: baseUrl),
-            let host = comps.host
-        else {
+        guard let target = Self.tunneledTarget(baseUrl: baseUrl, jwt: jwt) else {
             throw SfuSignalingError.badUrl
         }
-        let isSecure = baseUrl.hasPrefix("https") || baseUrl.hasPrefix("wss")
-        let port = UInt16(comps.port ?? (isSecure ? 443 : 80))
-        let escaped =
-            jwt.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? jwt
-        // Inner URL is plain ws:// — the obfuscated tunnel provides the
-        // encryption, so there is no inner TLS.
-        let innerUrl = "ws://\(host)/v1/connect?token=\(escaped)"
+        let host = target.host
+        let port = target.port
+        let innerUrl = target.innerUrl
         let now = UInt64(Date().timeIntervalSince1970)
 
         tunnelRecvQueue.async { [weak self] in

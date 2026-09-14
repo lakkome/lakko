@@ -46,6 +46,8 @@ const hooks = vi.hoisted(() => ({
       stream: unknown;
     }) => void;
     onRemoteMediaState?: (peerId: string, cameraOn: boolean) => void;
+    onLocalStream?: (stream: unknown) => void;
+    onVideoPublishState?: (state: "off" | "starting" | "live" | "failed") => void;
   } | null,
 }));
 
@@ -302,5 +304,34 @@ describe("MultiJoinerCall — camera-state join-race guard", () => {
     const { rt } = fakeRemote("peerX", "video", []);
     hooks.captured?.onRemoteTrack?.(rt);
     expect(camOn("peerX")).toBe(true);
+  });
+});
+
+// ---- Local media surfaced to the app-level call host --------------------
+//
+// The call host renders the link call's self-preview and camera button from
+// these accessors; before the call moved there, the session's local-stream and
+// camera-lifecycle callbacks were not wired at all.
+
+describe("MultiJoinerCall — local stream + camera lifecycle for the call host", () => {
+  it("surfaces the local capture stream and the camera lifecycle", async () => {
+    call = await MultiJoinerCall.join(makeOpts());
+    expect(call.localStream()).toBeNull();
+    expect(call.videoPublishState()).toBe("off");
+
+    const stream = { id: "local" };
+    hooks.captured?.onLocalStream?.(stream);
+    hooks.captured?.onVideoPublishState?.("live");
+    expect(call.localStream()).toBe(stream);
+    expect(call.videoPublishState()).toBe("live");
+  });
+
+  it("hangUp clears them", async () => {
+    call = await MultiJoinerCall.join(makeOpts());
+    hooks.captured?.onLocalStream?.({ id: "local" });
+    hooks.captured?.onVideoPublishState?.("live");
+    call.hangUp();
+    expect(call.localStream()).toBeNull();
+    expect(call.videoPublishState()).toBe("off");
   });
 });
