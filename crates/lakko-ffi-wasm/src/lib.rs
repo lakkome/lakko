@@ -88,6 +88,7 @@ pub mod storage;
 pub mod supersession;
 pub mod sync;
 pub mod transparency;
+pub mod word_vault;
 
 // Phase 1.16f3 — wasm-bindgen-test smoke suite. Gated on BOTH
 // `cfg(test)` (so the lib build never tries to pull in the
@@ -119,3 +120,7 @@ pub use storage::{
     EncryptedStore, GroupStateStore, InMemoryStore, LocalMessage, MessageKind, MessageStore, Table,
 };
 pub use sync::{Draft, EditChain, EditOp, EditResolved, Hlc, HybridLogicalClock};
+pub use word_vault::{
+    passkey_vault_open, passkey_vault_seal, word_vault_answer, word_vault_enroll, WordVaultAnswer,
+    WordVaultEnrollment,
+};

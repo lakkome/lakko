@@ -2703,6 +2703,7 @@ version = "0.0.0"
 dependencies = [
  "bip39",
  "getrandom 0.2.17",
+ "lakko-crypto",
  "thiserror 1.0.69",
  "zeroize",
 ]
@@ -2829,6 +2830,7 @@ dependencies = [
  "lakko-auth-token",
  "lakko-call-jwt",
  "lakko-crypto",
+ "lakko-mnemonic",
  "lakko-pow-server",
  "lakko-transparency",
  "lettre",

@@ -38,6 +38,7 @@ export default function SignupPhrasePrompt(): JSX.Element {
     <AuthLayout>
         <RecoveryPhrasePanel
           phrase={auth.signupPhrase() ?? ""}
+          vaultPositions={auth.signupVaultPositions}
           acknowledged={acknowledged}
           setAcknowledged={setAcknowledged}
           onAcknowledge={() => auth.acknowledgeSignupPhrase()}
@@ -52,6 +53,8 @@ export default function SignupPhrasePrompt(): JSX.Element {
 
 interface PhrasePanelProps {
   readonly phrase: string;
+  /** ADR-0049: the three positions the word vault enrolled, once known. */
+  readonly vaultPositions: () => number[] | null;
   readonly acknowledged: () => boolean;
   readonly setAcknowledged: (v: boolean) => void;
   readonly onAcknowledge: () => void;
@@ -72,10 +75,19 @@ function RecoveryPhrasePanel(props: PhrasePanelProps): JSX.Element {
       <ol
         class="lk-phrase"
       >
-        {words().map((w) => (
-          <li>{w}</li>
+        {words().map((w, i) => (
+          <li classList={{ "lk-phrase-pick": props.vaultPositions()?.includes(i + 1) === true }}>
+            <span>{w}</span>
+          </li>
         ))}
       </ol>
+      <Show when={props.vaultPositions() !== null}>
+        <p class="form-info">
+          On a new device you will normally be asked for just three of these:
+          words {props.vaultPositions()?.join(", ")}. Keep the whole list safe
+          anyway; it is the only way back if the shortcut is ever switched off.
+        </p>
+      </Show>
 
       <label
         style={{

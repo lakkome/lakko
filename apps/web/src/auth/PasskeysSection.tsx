@@ -33,6 +33,9 @@
  * does not produce one. THIS section is purely about managing
  * the server-side credential set (list / add / delete).
  */
+import { AuthClient } from "./client";
+import { loadWasm } from "../wasm";
+import { ensurePasskeyVaultEnrolled, PASSKEY_PRF_SALT } from "../recovery/passkey-vault";
 import {
   createEffect,
   createResource,
@@ -112,7 +115,29 @@ export default function PasskeysSection(): JSX.Element {
     setBusy(true);
     setMessage(null);
     try {
-      await c.registerPasskey({ user_name: name, nickname: label });
+      const registered = await c.registerPasskey(
+        { user_name: name, nickname: label },
+        { prfSalt: PASSKEY_PRF_SALT },
+      );
+      // ADR-0049 section 3: when the authenticator evaluated PRF at
+      // creation, seal the phrase under it so this passkey carries the
+      // identity to a new device. Authenticators that only evaluate PRF on
+      // assertion get enrolled at the next passkey sign-in instead.
+      {
+        const s = auth.state();
+        const secrets = auth.identitySecrets();
+        if (registered.prfOutput !== null && s.kind === "session" && secrets !== null) {
+          const wasm = await loadWasm();
+          void ensurePasskeyVaultEnrolled({
+            wasm,
+            client: new AuthClient(),
+            sessionToken: secrets.sessionToken,
+            accountIdB64: s.account.accountId,
+            credentialId: registered.credentialId,
+            prfOutput: registered.prfOutput,
+          });
+        }
+      }
       // G-13 (ADR-0015): now that the account has a passkey, enable attested
       // removals so device removals require a peer-verified passkey gesture.
       // Non-fatal: the policy can be enabled on a later passkey action.

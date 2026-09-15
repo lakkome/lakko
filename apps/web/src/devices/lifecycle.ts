@@ -92,7 +92,16 @@ export async function ensureDeviceGroup(
   const identity = wasm.Identity.fromSeed(deviceIdentitySeed);
 
   // Try to restore prior MLS state.
-  const snapshot = await getDeviceGroupSnapshot(accountIdB64, deviceKey);
+  // A snapshot wrapped under a previous device key (the password-recover
+  // path rotates the key) does not open; that is a fresh start for this
+  // device's DeviceGroup, not a fatal error, and the old row is replaced.
+  let snapshot: Uint8Array | null = null;
+  try {
+    snapshot = await getDeviceGroupSnapshot(accountIdB64, deviceKey);
+  } catch (err) {
+    console.warn("DeviceGroup snapshot unreadable under this device key, bootstrapping", err);
+    snapshot = null;
+  }
   if (snapshot !== null && snapshot.length > 0) {
     try {
       identity.restoreStorage(snapshot);

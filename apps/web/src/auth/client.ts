@@ -25,6 +25,7 @@
  */
 import { loadWasm } from "../wasm";
 import {
+  base64Decode,
   base64Encode,
   base64UrlDecodeNoPad,
   base64UrlEncodeNoPad,
@@ -64,6 +65,20 @@ import type {
   TotpEnrollStartResponse,
   TotpRecoverRequest,
   TotpRecoverResponse,
+  WordVaultEnrollRequest,
+  WordVaultRecoverFinishRequest,
+  WordVaultRecoverFinishResponse,
+  WordVaultRecoverStartRequest,
+  WordVaultRecoverStartResponse,
+  WordVaultStatusResponse,
+  PasskeyVaultGetRequest,
+  PasskeyVaultGetResponse,
+  PasskeyVaultPutRequest,
+  DeviceRequestCreateRequest,
+  DeviceRequestCreateResponse,
+  DeviceRequestStatusRequest,
+  DeviceRequestStatusResponse,
+  DeviceRequestsListResponse,
 } from "./wire";
 
 /** Default base URL for the dev environment. Vite's proxy maps
@@ -939,6 +954,217 @@ export class AuthClient {
   // -----------------------------------------------------------------
   // Internal HTTP helper
   // -----------------------------------------------------------------
+
+  // -----------------------------------------------------------------
+  // Word vault — ADR-0049, three-word identity recovery
+  // -----------------------------------------------------------------
+
+  /** `GET /vault` — whether this account has a word vault and at which
+   *  positions. Bearer-authenticated. A 503 means the server has the vault
+   *  disabled (`LAKKO_VAULT_ENC_KEY` unset). */
+  async wordVaultStatus(sessionToken: string): Promise<WordVaultStatusResponse> {
+    if (sessionToken.length === 0) {
+      throw new AuthClientArgError("sessionToken must be non-empty");
+    }
+    return this.get<WordVaultStatusResponse>("/vault", sessionToken);
+  }
+
+  /** `POST /vault/enroll` — store (or replace) the account's word vault.
+   *  Bearer-authenticated, no PoW. */
+  async wordVaultEnroll(sessionToken: string, req: WordVaultEnrollRequest): Promise<void> {
+    if (sessionToken.length === 0) {
+      throw new AuthClientArgError("sessionToken must be non-empty");
+    }
+    await this.post<WordVaultEnrollRequest, unknown>("/vault/enroll", req, sessionToken);
+  }
+
+  /** `POST /vault/recover/start` — the positions, salt and Argon2 cost to
+   *  answer with. Anonymous + PoW; an unknown account gets stable decoys, so
+   *  a 200 says nothing about whether the account exists. */
+  async wordVaultRecoverStart(accountId: Uint8Array): Promise<WordVaultRecoverStartResponse> {
+    if (accountId.length !== 16) {
+      throw new AuthClientArgError("accountId must be 16 bytes");
+    }
+    const challenge = await this.powChallenge();
+    const pow = await solvePow(challenge.seed, challenge.effort_bits);
+    return this.post<WordVaultRecoverStartRequest, WordVaultRecoverStartResponse>(
+      "/vault/recover/start",
+      { pow, account_id_b64: base64UrlEncodeNoPad(accountId) },
+    );
+  }
+
+  /** `POST /vault/recover/finish` — submit the guess. Anonymous + PoW. A
+   *  generic 401 `AuthHttpError` means a wrong answer, an unknown account or
+   *  a destroyed vault (indistinguishable by design); 429 is the
+   *  5-in-15-minutes lockout; 503 means the vault is disabled server-side.
+   *  Returns the sealed entropy the wasm `WordVaultAnswer.open` unseals. */
+  async wordVaultRecoverFinish(accountId: Uint8Array, verifier: Uint8Array): Promise<Uint8Array> {
+    if (accountId.length !== 16) {
+      throw new AuthClientArgError("accountId must be 16 bytes");
+    }
+    if (verifier.length !== 32) {
+      throw new AuthClientArgError("verifier must be 32 bytes");
+    }
+    const challenge = await this.powChallenge();
+    const pow = await solvePow(challenge.seed, challenge.effort_bits);
+    const resp = await this.post<WordVaultRecoverFinishRequest, WordVaultRecoverFinishResponse>(
+      "/vault/recover/finish",
+      {
+        pow,
+        account_id_b64: base64UrlEncodeNoPad(accountId),
+        verifier_b64: base64Encode(verifier),
+      },
+    );
+    return base64Decode(resp.sealed_entropy_b64);
+  }
+
+  /** `PUT /vault/passkey` — store the entropy sealed under one of this
+   *  account's passkeys (ADR-0049 section 3). Bearer-authenticated. */
+  async passkeyVaultPut(
+    sessionToken: string,
+    credentialId: Uint8Array,
+    sealedEntropy: Uint8Array,
+  ): Promise<void> {
+    if (sessionToken.length === 0) {
+      throw new AuthClientArgError("sessionToken must be non-empty");
+    }
+    await this.request<PasskeyVaultPutRequest, unknown>(
+      "PUT",
+      "/vault/passkey",
+      {
+        credential_id_b64: base64UrlEncodeNoPad(credentialId),
+        sealed_entropy_b64: base64Encode(sealedEntropy),
+      },
+      sessionToken,
+    );
+  }
+
+  /** `POST /vault/passkey/get` — the blob for one credential, or `null`.
+   *  Bearer-authenticated. */
+  async passkeyVaultGet(sessionToken: string, credentialId: Uint8Array): Promise<Uint8Array | null> {
+    if (sessionToken.length === 0) {
+      throw new AuthClientArgError("sessionToken must be non-empty");
+    }
+    const resp = await this.post<PasskeyVaultGetRequest, PasskeyVaultGetResponse>(
+      "/vault/passkey/get",
+      { credential_id_b64: base64UrlEncodeNoPad(credentialId) },
+      sessionToken,
+    );
+    return resp.sealed_entropy_b64 === null ? null : base64Decode(resp.sealed_entropy_b64);
+  }
+
+  // -----------------------------------------------------------------
+  // Device requests — ADR-0049 section 2, the camera-less add-device
+  // confirmation
+  // -----------------------------------------------------------------
+
+  /** `POST /device/request` — the fresh device posts its pairing payload.
+   *  Anonymous + PoW. A 200 says nothing about whether the account exists. */
+  async deviceRequestCreate(
+    accountId: Uint8Array,
+    pairingPayload: Uint8Array,
+  ): Promise<{ requestId: string; expiresInSecs: number }> {
+    if (accountId.length !== 16) {
+      throw new AuthClientArgError("accountId must be 16 bytes");
+    }
+    const challenge = await this.powChallenge();
+    const pow = await solvePow(challenge.seed, challenge.effort_bits);
+    const resp = await this.post<DeviceRequestCreateRequest, DeviceRequestCreateResponse>(
+      "/device/request",
+      {
+        pow,
+        account_id_b64: base64UrlEncodeNoPad(accountId),
+        pairing_payload_b64: base64Encode(pairingPayload),
+      },
+    );
+    return { requestId: resp.request_id_b64, expiresInSecs: resp.expires_in_secs };
+  }
+
+  /** `POST /device/request/status` — is the request still open? */
+  async deviceRequestPending(requestId: string): Promise<boolean> {
+    const resp = await this.post<DeviceRequestStatusRequest, DeviceRequestStatusResponse>(
+      "/device/request/status",
+      { request_id_b64: requestId },
+    );
+    return resp.pending;
+  }
+
+  /** `GET /device/requests` — the pending request for the signed-in
+   *  account, or `null`. Bearer-authenticated. */
+  async deviceRequestsList(
+    sessionToken: string,
+  ): Promise<{ requestId: string; pairingPayload: Uint8Array; createdAtMs: number } | null> {
+    if (sessionToken.length === 0) {
+      throw new AuthClientArgError("sessionToken must be non-empty");
+    }
+    const resp = await this.get<DeviceRequestsListResponse>("/device/requests", sessionToken);
+    if (resp.request === null) return null;
+    return {
+      requestId: resp.request.request_id_b64,
+      pairingPayload: base64Decode(resp.request.pairing_payload_b64),
+      createdAtMs: resp.request.created_at_ms,
+    };
+  }
+
+  /** `DELETE /device/requests/{id}` — decline, or consume after a confirmed
+   *  pairing. Bearer-authenticated. */
+  async deviceRequestDelete(sessionToken: string, requestId: string): Promise<void> {
+    if (sessionToken.length === 0) {
+      throw new AuthClientArgError("sessionToken must be non-empty");
+    }
+    await this.request<undefined, unknown>(
+      "DELETE",
+      `/device/requests/${encodeURIComponent(requestId)}`,
+      undefined,
+      sessionToken,
+    );
+  }
+
+  private async request<Req, Res>(
+    method: "PUT" | "DELETE",
+    endpoint: string,
+    body: Req,
+    bearer: string,
+  ): Promise<Res> {
+    const url = `${this.baseUrl}${endpoint}`;
+    const headers: Record<string, string> = { authorization: `Bearer ${bearer}` };
+    if (body !== undefined) {
+      headers["content-type"] = "application/json";
+    }
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method,
+        headers,
+        body: body === undefined ? null : JSON.stringify(body),
+      });
+    } catch (err) {
+      throw new AuthNetworkError(endpoint, err);
+    }
+    if (!response.ok) {
+      const text = await safeReadBody(response);
+      throw new AuthHttpError(response.status, endpoint, text);
+    }
+    return (await response.json()) as Res;
+  }
+
+  private async get<Res>(endpoint: string, bearer: string): Promise<Res> {
+    const url = `${this.baseUrl}${endpoint}`;
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: "GET",
+        headers: { authorization: `Bearer ${bearer}` },
+      });
+    } catch (err) {
+      throw new AuthNetworkError(endpoint, err);
+    }
+    if (!response.ok) {
+      const text = await safeReadBody(response);
+      throw new AuthHttpError(response.status, endpoint, text);
+    }
+    return (await response.json()) as Res;
+  }
 
   private async post<Req, Res>(
     endpoint: string,

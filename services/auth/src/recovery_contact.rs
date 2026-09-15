@@ -64,7 +64,7 @@ const OTP_TTL_SECS: i64 = 600;
 /// Verification attempts allowed against one challenge before it is rejected.
 /// The 5th failure leaves `attempts == 5`; the next verify (or any verify at
 /// or above the cap) is refused.
-const MAX_OTP_ATTEMPTS: i16 = 5;
+const MAX_OTP_ATTEMPTS: u8 = 5;
 
 /// Domain separator for the keyed contact / code hash. Bumping the version
 /// invalidates all stored hashes (a deliberate migration tool).
@@ -523,7 +523,7 @@ pub(crate) async fn recover_finish(
     // Lockout check first: at/over the cap -> 429 (carries no
     // account-existence info — a non-existent challenge is below the cap and
     // falls through to the generic 401).
-    let row: Option<(i16,)> = sqlx::query_as(
+    let row: Option<(u8,)> = sqlx::query_as(
         "SELECT attempts FROM otp_challenges \
          WHERE account_id = ? AND kind = ? AND expires_at > NOW(3)",
     )
@@ -581,7 +581,7 @@ async fn verify_challenge(
     kind: ContactKind,
     code: &str,
 ) -> Result<bool, ApiError> {
-    let row: Option<(Vec<u8>, i16)> = sqlx::query_as(
+    let row: Option<(Vec<u8>, u8)> = sqlx::query_as(
         "SELECT code_hash, attempts FROM otp_challenges \
          WHERE account_id = ? AND kind = ? AND expires_at > NOW(3)",
     )
@@ -862,6 +862,7 @@ mod recovery_contact_e2e_tests {
             turn: None,
             totp_enc_key: None,
             recovery_contact_pepper: with_pepper.then(|| Arc::new(PEPPER)),
+            vault_enc_key: None,
             otp_sender: sender,
             throttle: crate::throttle::ThrottleConfig::disabled(),
             backup_head_mint_rate: crate::backup_head::MintRateConfig::disabled(),

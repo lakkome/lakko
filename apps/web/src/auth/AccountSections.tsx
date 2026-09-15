@@ -6,7 +6,7 @@
  * portability), and the session / device / account controls, with the
  * destructive ones last and behind the in-page confirmation (ADR-0045 UX §14).
  */
-import { createSignal, Show, type JSX } from "solid-js";
+import { createResource, createSignal, Show, type JSX } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 
 import { useAuth } from "./AuthContext";
@@ -23,6 +23,7 @@ import {
 import { DiscoveryClient } from "../discovery/client";
 import { paths } from "../routes/paths";
 import { Icon } from "../ui/icons";
+import { AuthClient } from "./client";
 
 type Message = { readonly kind: "ok" | "error"; readonly text: string } | null;
 
@@ -97,6 +98,26 @@ export function AccountCard(): JSX.Element {
   const { client } = useWebauthnClient();
   const [busy, setBusy] = createSignal(false);
   const [message, setMessage] = createSignal<Message>(null);
+  // ADR-0049: whether the three-word shortcut is set up for this account.
+  const [vault] = createResource(
+    () => auth.identitySecrets()?.sessionToken ?? null,
+    async (token) => {
+      if (token === null) return null;
+      try {
+        return await new AuthClient().wordVaultStatus(token);
+      } catch {
+        return null;
+      }
+    },
+  );
+  const recoveryLine = (): string => {
+    const v = vault();
+    if (v === undefined) return "Checking…";
+    if (v === null) return "Three-word recovery: not available on this server. Your 24-word phrase and your other devices still work.";
+    return v.enrolled && v.positions !== null
+      ? `Three-word recovery: on (words ${v.positions.join(", ")}). Another signed-in device and your 24-word phrase work too.`
+      : "Three-word recovery: not set up on this account yet. It is set up the next time you sign in on a device that holds your phrase.";
+  };
 
   function onLogout(): void {
     // Keeps local stores intact: re-login on this device stays cheap.
@@ -152,6 +173,15 @@ export function AccountCard(): JSX.Element {
   return (
     <section class="lk-card danger">
       <h2>Account</h2>
+      <div class="lk-card-row">
+        <span class="lk-card-row-icon">
+          <Icon name="key" size={18} />
+        </span>
+        <div class="lk-card-row-body">
+          <span class="lk-card-row-title">Recovery</span>
+          <span class="lk-card-row-sub">{recoveryLine()}</span>
+        </div>
+      </div>
       <div class="lk-card-row">
         <span class="lk-card-row-icon">
           <Icon name="logout" size={18} />

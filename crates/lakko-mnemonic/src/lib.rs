@@ -62,6 +62,7 @@
 mod error;
 mod mnemonic;
 mod secret;
+pub mod vault;
 
 pub use error::MnemonicError;
 pub use mnemonic::{Mnemonic, SecretEntropy, SecretSeed, ENTROPY_LEN, WORD_COUNT};

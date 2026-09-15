@@ -86,10 +86,10 @@ type HmacSha1 = Hmac<Sha1>;
 /// last_accepted_step, failed_attempts, last_failed_at)`.
 type RecoverRow = (
     Vec<u8>,
-    Option<sqlx::types::chrono::NaiveDateTime>,
+    Option<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>>,
     i64,
-    i16,
-    Option<sqlx::types::chrono::NaiveDateTime>,
+    u8,
+    Option<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>>,
 );
 
 // ---------------------------------------------------------------------------
@@ -345,7 +345,7 @@ pub(crate) async fn enroll_start(
     let account_id = auth.0;
 
     // Refuse a swap of an ALREADY-confirmed authenticator.
-    let existing: Option<(Option<sqlx::types::chrono::NaiveDateTime>,)> =
+    let existing: Option<(Option<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>>,)> =
         sqlx::query_as("SELECT confirmed_at FROM totp_secrets WHERE account_id = ?")
             .bind(account_id.as_slice())
             .fetch_optional(&state.db)
@@ -401,12 +401,14 @@ pub(crate) async fn enroll_finish(
     let account_id = auth.0;
     let code = parse_code(&req.code)?;
 
-    let row: Option<(Vec<u8>, Option<sqlx::types::chrono::NaiveDateTime>)> =
-        sqlx::query_as("SELECT secret_enc, confirmed_at FROM totp_secrets WHERE account_id = ?")
-            .bind(account_id.as_slice())
-            .fetch_optional(&state.db)
-            .await
-            .map_err(ApiError::Db)?;
+    let row: Option<(
+        Vec<u8>,
+        Option<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>>,
+    )> = sqlx::query_as("SELECT secret_enc, confirmed_at FROM totp_secrets WHERE account_id = ?")
+        .bind(account_id.as_slice())
+        .fetch_optional(&state.db)
+        .await
+        .map_err(ApiError::Db)?;
     let Some((secret_enc, confirmed_at)) = row else {
         // No pending enrollment — caller must run /enroll/start first.
         return Err(ApiError::BadInput("no pending TOTP enrollment"));
@@ -477,9 +479,9 @@ pub(crate) async fn recover(
     };
 
     // Lockout: >= threshold failures within the window since the last failure.
-    if u32::try_from(failed.max(0)).unwrap_or(u32::MAX) >= LOCKOUT_THRESHOLD {
+    if u32::from(failed) >= LOCKOUT_THRESHOLD {
         if let Some(last) = last_failed {
-            let last_secs = last.and_utc().timestamp();
+            let last_secs = last.timestamp();
             let now_secs = i64::try_from(now).unwrap_or(i64::MAX);
             if now_secs - last_secs < LOCKOUT_WINDOW_SECS {
                 tracing::warn!(
@@ -739,6 +741,7 @@ mod totp_e2e_tests {
             turn: None,
             totp_enc_key: with_totp_key.then(|| Arc::new(TOTP_KEY)),
             recovery_contact_pepper: None,
+            vault_enc_key: None,
             otp_sender: Arc::new(crate::otp_sender::LogOnlyOtpSender),
             throttle: crate::throttle::ThrottleConfig::disabled(),
             backup_head_mint_rate: crate::backup_head::MintRateConfig::disabled(),
@@ -838,6 +841,10 @@ mod totp_e2e_tests {
             return;
         };
         std::env::set_var("LAKKO_POW_EFFORT_BITS", "0");
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter("lakko_svc_auth=debug")
+            .with_test_writer()
+            .try_init();
         let pool = MySqlPoolOptions::new()
             .max_connections(4)
             .connect(&url)

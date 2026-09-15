@@ -24,6 +24,7 @@ import { A, useNavigate } from "@solidjs/router";
 import { useAuth } from "../auth/AuthContext";
 import { base64Encode, base64UrlEncodeNoPad } from "../auth/account-id";
 import { getDeviceKey } from "../auth/key-store";
+import { restoredKind } from "../auth/restore-marker";
 import { useChats, type ActiveGroup } from "./ChatContext";
 import { chatListLine, membershipState, readIsActive } from "./membership-ended";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
@@ -245,14 +246,36 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
       <Show
         when={chats.groups().length > 0}
         fallback={
-          <div class="lk-empty">
-            <Icon name="chat" size={40} strokeWidth={1.4} />
-            <strong>No conversations yet</strong>
-            <span>Start a chat with a contact, or share your invite link.</span>
-            <button type="button" class="primary" onClick={() => navigate(paths.contacts)}>
-              New chat
-            </button>
-          </div>
+          <Show
+            when={restoredKind() !== null}
+            fallback={
+              <div class="lk-empty">
+                <Icon name="chat" size={40} strokeWidth={1.4} />
+                <strong>No conversations yet</strong>
+                <span>Start a chat with a contact, or share your invite link.</span>
+                <button type="button" class="primary" onClick={() => navigate(paths.contacts)}>
+                  New chat
+                </button>
+              </div>
+            }
+          >
+            {/* ADR-0049 section 5: a restored device holds the identity, not
+                the account's existing conversations. Say so; never a spinner. */}
+            <div class="lk-empty">
+              <Icon name="key" size={40} strokeWidth={1.4} />
+              <strong>Your identity is restored</strong>
+              <span>
+                Your existing chats stay on your other devices for now: a newly
+                added device does not yet join the account's conversations.
+                Chats you start here work as usual. If no other device is left,
+                ask your contacts to add you back; they will see you as the same
+                person.
+              </span>
+              <button type="button" class="primary" onClick={() => navigate(paths.contacts)}>
+                New chat
+              </button>
+            </div>
+          </Show>
         }
       >
         <div class="lk-pane-body">

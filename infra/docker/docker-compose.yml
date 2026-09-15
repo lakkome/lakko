@@ -75,6 +75,10 @@ services:
       # after decode). Dev fixture only; never a production value. Unset it
       # to disable the /totp/* routes (they return 503).
       LAKKO_TOTP_ENC_KEY: ${LAKKO_TOTP_ENC_KEY:-ZGV2LXRvdHAtZW5jLWtleS0zMi1ieXRlcy1maXhlZCE=}
+      # ADR-0049 — word-vault row-encryption key (base64, 32 bytes after
+      # decode). Dev fixture only; never a production value. Unset it to
+      # disable the /vault/* routes (they return 503).
+      LAKKO_VAULT_ENC_KEY: ${LAKKO_VAULT_ENC_KEY:-ZGV2LXZhdWx0LWVuYy1rZXktMzItYnl0ZXMtZml4ZWQh}
       # ADR-0018 factor (d) — recovery-contact pepper that KEYS the contact +
       # OTP-code hashes (base64, 32 bytes after decode). Dev fixture only;
       # never a production value. Unset it to disable the /recovery-contact/*

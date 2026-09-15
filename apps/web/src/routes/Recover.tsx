@@ -65,7 +65,14 @@ import { A, useNavigate } from "@solidjs/router";
 import { paths } from "./paths";
 import { AuthLayout } from "../ui/AuthLayout";
 import { PhraseInput } from "../ui/PhraseInput";
+import { WordSlots } from "../ui/WordSlots";
 import { useAuth } from "../auth/AuthContext";
+import {
+  WORD_VAULT_DESTRUCTION_CAP,
+  wordVaultErrorMessage,
+  wordsAreAnswerable,
+  type WordVaultChallenge,
+} from "../recovery/word-vault";
 import { AuthHttpError } from "../auth/client";
 import { normalizeTotpCode } from "../auth/totp-code";
 import { isPlausibleContact } from "../auth/contact-shape";
@@ -83,13 +90,13 @@ import RestoreViaDevicePanel, {
 } from "../devices/RestoreViaDevicePanel";
 
 /** Which input mode the user is filling. */
-type RecoverMode = "phrase" | "shares" | "device" | "totp" | "contact";
+type RecoverMode = "words" | "phrase" | "shares" | "device" | "totp" | "contact";
 
 export default function Recover(): JSX.Element {
   const auth = useAuth();
   const navigate = useNavigate();
 
-  const [mode, setMode] = createSignal<RecoverMode>("phrase");
+  const [mode, setMode] = createSignal<RecoverMode>("words");
   const [phrase, setPhrase] = createSignal("");
   const [sharesInput, setSharesInput] = createSignal("");
   const [password, setPassword] = createSignal("");
@@ -182,13 +189,13 @@ export default function Recover(): JSX.Element {
     <AuthLayout>
         <h1>Recover your account</h1>
         <p class="auth-lede">
-          Choose how to prove this account is yours. Your{" "}
-          <strong>24-word phrase</strong> or <strong>another signed-in
-          device</strong> restores your full identity — your contacts keep
-          trusting you. An <strong>authenticator</strong> or{" "}
-          <strong>email/SMS code</strong> restores access only; if this
-          device doesn't already hold your identity, you'll then save a new
-          recovery phrase.
+          Choose how to prove this account is yours. <strong>Three words</strong>{" "}
+          of your recovery phrase, the <strong>full phrase</strong> or{" "}
+          <strong>another signed-in device</strong> restore your identity, so
+          your contacts keep trusting you. An <strong>authenticator</strong> or{" "}
+          <strong>email/SMS code</strong> restores access only; if this device
+          doesn't already hold your identity, you'll then save a new recovery
+          phrase.
         </p>
         <ModeTabs mode={mode} setMode={setMode} busy={busy} />
         <Switch
@@ -213,6 +220,15 @@ export default function Recover(): JSX.Element {
             />
           }
         >
+          <Match when={mode() === "words"}>
+            <WordsRecoverSection
+              username={username}
+              setUsername={setUsername}
+              cachedUsername={cachedUsername()}
+              onDone={() => navigate(paths.home, { replace: true })}
+              onUnavailable={() => setMode("phrase")}
+            />
+          </Match>
           <Match when={mode() === "device"}>
             <DeviceRestoreSection
               username={username}
@@ -234,6 +250,194 @@ export default function Recover(): JSX.Element {
           </Match>
         </Switch>
     </AuthLayout>
+  );
+}
+
+// ---- ADR-0049: three words of the recovery phrase ------------------
+
+/**
+ * Forgot-password recovery with three words. Step 1 resolves the username
+ * to an account and asks the server which words to type; step 2 takes the
+ * three words plus a new password, opens the vault into the full phrase, and
+ * runs the SAME `auth.recover` the 24-word tab runs (so the published
+ * identity check and the password rotation are unchanged).
+ */
+function WordsRecoverSection(props: {
+  readonly username: () => string;
+  readonly setUsername: (v: string) => void;
+  readonly cachedUsername: string | null;
+  readonly onDone: () => void;
+  readonly onUnavailable: () => void;
+}): JSX.Element {
+  const auth = useAuth();
+  const [accountIdB64, setAccountIdB64] = createSignal<string | null>(null);
+  const [canonicalUsername, setCanonicalUsername] = createSignal("");
+  const [challenge, setChallenge] = createSignal<WordVaultChallenge | null>(null);
+  const [words, setWords] = createSignal<string[]>(["", "", ""]);
+  const [password, setPassword] = createSignal("");
+  const [confirm, setConfirm] = createSignal("");
+  const [busy, setBusy] = createSignal(false);
+  const [error, setError] = createSignal<string | null>(null);
+  const [misses, setMisses] = createSignal(0);
+
+  async function onStart(e: SubmitEvent): Promise<void> {
+    e.preventDefault();
+    setError(null);
+    if (props.username().trim().length === 0) {
+      setError("Enter the username of the account to recover.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const canonical = await requireValidUsername(props.username());
+      const id = await auth.resolveRecoverAccountId(canonical);
+      const c = await auth.wordVaultStart(id);
+      setCanonicalUsername(canonical);
+      setAccountIdB64(id);
+      setChallenge(c);
+    } catch (err) {
+      if (err instanceof AuthHttpError && err.status === 503) {
+        setError("Three-word recovery is not available on this server.");
+        props.onUnavailable();
+      } else {
+        setError(wordVaultErrorMessage(err, null));
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onAnswer(e: SubmitEvent): Promise<void> {
+    e.preventDefault();
+    setError(null);
+    const id = accountIdB64();
+    const c = challenge();
+    if (id === null || c === null) return;
+    if (password() !== confirm()) {
+      setError("Passwords do not match.");
+      return;
+    }
+    if (password().length < 8) {
+      setError("Password must be at least 8 characters.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const fullPhrase = await auth.wordVaultOpen(id, c, words());
+      await auth.recover(fullPhrase, password(), canonicalUsername());
+      setWords(["", "", ""]);
+      setPassword("");
+      setConfirm("");
+      props.onDone();
+    } catch (err) {
+      if (err instanceof AuthHttpError && err.status === 401) {
+        const next = misses() + 1;
+        setMisses(next);
+        setWords(["", "", ""]);
+        if (next >= WORD_VAULT_DESTRUCTION_CAP) {
+          setError(
+            "The three-word shortcut is no longer available for this account. Use your full 24-word phrase or another device.",
+          );
+          props.onUnavailable();
+        } else {
+          setError(wordVaultErrorMessage(err, WORD_VAULT_DESTRUCTION_CAP - next));
+        }
+      } else {
+        setError(wordVaultErrorMessage(err, null));
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <>
+      <p style={{ color: "var(--surface-muted)", "margin-top": 0 }}>
+        Type three words from your recovery phrase and choose a new password.
+        <Show when={props.cachedUsername !== null}>
+          {" "}
+          Account on this device: <strong>@{props.cachedUsername}</strong>.
+        </Show>
+      </p>
+      <Show
+        when={challenge() !== null}
+        fallback={
+          <form onSubmit={onStart}>
+            <label>
+              Username
+              <input
+                type="text"
+                autocomplete="username"
+                required
+                value={props.username()}
+                onInput={(e) => props.setUsername(e.currentTarget.value)}
+                disabled={busy()}
+                placeholder="alice"
+              />
+            </label>
+            <UsernameHint value={props.username} />
+            <Show when={error() !== null}>
+              <div class="form-error">{error()}</div>
+            </Show>
+            <button class="primary" type="submit" disabled={busy()}>
+              {busy() ? "Looking up…" : "Continue"}
+            </button>
+          </form>
+        }
+      >
+        <form onSubmit={onAnswer}>
+          <p style={{ color: "var(--surface-muted)", "margin-top": 0 }}>
+            <strong>@{canonicalUsername()}</strong>: type words{" "}
+            <strong>{challenge()?.positions.join(", ")}</strong> of your recovery
+            phrase.
+          </p>
+          <WordSlots
+            positions={() => challenge()?.positions ?? []}
+            value={words}
+            setValue={setWords}
+            disabled={busy}
+          />
+          <label>
+            New password
+            <input
+              type="password"
+              autocomplete="new-password"
+              required
+              value={password()}
+              onInput={(e) => setPassword(e.currentTarget.value)}
+              disabled={busy()}
+            />
+          </label>
+          <label>
+            Confirm new password
+            <input
+              type="password"
+              autocomplete="new-password"
+              required
+              value={confirm()}
+              onInput={(e) => setConfirm(e.currentTarget.value)}
+              disabled={busy()}
+            />
+          </label>
+          <Show when={error() !== null}>
+            <div class="form-error">{error()}</div>
+          </Show>
+          <button
+            class="primary"
+            type="submit"
+            disabled={busy() || !wordsAreAnswerable(words())}
+          >
+            {busy() ? "Checking…" : "Recover account"}
+          </button>
+          <Show when={misses() > 0}>
+            <p class="form-info">{WORD_VAULT_DESTRUCTION_CAP - misses()} tries left.</p>
+          </Show>
+        </form>
+      </Show>
+      <p class="form-footer">
+        Remembered your password? <A href={paths.login}>Log in</A>
+      </p>
+    </>
   );
 }
 
@@ -335,11 +539,11 @@ function DeviceRestoreSection(props: {
   return (
     <div>
       <p style={{ color: "var(--surface-muted)", "margin-top": 0 }}>
-        Lost your password AND your phrase is not at hand? If another
-        device is still signed in to your account, it can restore this
-        one: enter your username, then scan the code below from that
-        device (Devices → Add a device). Identity and access transfer
-        end-to-end encrypted — the server never sees them.
+        If another device is still signed in to your account, it can
+        restore this one: enter your username, then confirm the request
+        on that device and compare the code it shows. Identity and access
+        transfer end-to-end encrypted; the server never sees them. No
+        camera needed; a QR code is there if you prefer.
       </p>
       <label>
         Username
@@ -353,7 +557,11 @@ function DeviceRestoreSection(props: {
         />
       </label>
       <UsernameHint value={props.username} />
-      <RestoreViaDevicePanel prepare={prepare} onRestored={onRestored} />
+      <RestoreViaDevicePanel
+        prepare={prepare}
+        onRestored={onRestored}
+        requestAccount={() => resolved?.accountIdBytes ?? null}
+      />
     </div>
   );
 }
@@ -726,7 +934,7 @@ function RecoverForm(props: RecoverFormProps): JSX.Element {
   return (
     <>
       <p style={{ color: "var(--surface-muted)", "margin-top": 0 }}>
-        Recover your account using either the 24-word phrase or 3+
+        Recover your account using the full 24-word phrase or 3+
         social-recovery shares. We'll prove ownership to the server
         and rotate the password envelope.{" "}
         <Show when={props.cachedUsername !== null}>
@@ -816,10 +1024,16 @@ function ModeTabs(props: {
       }}
     >
       <TabButton
+        active={props.mode() === "words"}
+        disabled={props.busy()}
+        onClick={() => props.setMode("words")}
+        label="Three words"
+      />
+      <TabButton
         active={props.mode() === "phrase"}
         disabled={props.busy()}
         onClick={() => props.setMode("phrase")}
-        label="24-word phrase"
+        label="All 24 words"
       />
       <TabButton
         active={props.mode() === "shares"}

@@ -44,6 +44,19 @@ pub struct RecoveryMnemonic {
     inner: Mnemonic,
 }
 
+impl RecoveryMnemonic {
+    /// Borrow the wrapped mnemonic (crate-internal: the word vault seals its
+    /// entropy without round-tripping through JS).
+    pub(crate) const fn inner(&self) -> &Mnemonic {
+        &self.inner
+    }
+
+    /// Wrap a mnemonic the crate rebuilt itself (the word vault's `open`).
+    pub(crate) const fn from_inner(inner: Mnemonic) -> Self {
+        Self { inner }
+    }
+}
+
 #[wasm_bindgen]
 impl RecoveryMnemonic {
     /// Generate a fresh 24-word mnemonic from the OS CSPRNG.

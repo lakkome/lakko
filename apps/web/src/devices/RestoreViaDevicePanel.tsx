@@ -19,9 +19,14 @@
  * diverge (authenticated vs anonymous join, `completeFromPairing`
  * vs `completeFromDeviceRestore`).
  */
-import { createSignal, onCleanup, Switch, Match, type JSX } from "solid-js";
+import { createSignal, onCleanup, Show, Switch, Match, type JSX } from "solid-js";
 import QRCode from "qrcode";
 import { base64UrlEncodeNoPad } from "../auth/account-id";
+import { AuthClient } from "../auth/client";
+import {
+  comparisonCode,
+  DEVICE_REQUEST_STATUS_POLL_MS,
+} from "./device-request";
 import type { JoinRecoveryOutcome } from "./orchestrator";
 import type { WelcomeOutcome } from "./welcome-courier";
 
@@ -54,6 +59,12 @@ export default function RestoreViaDevicePanel(props: {
   readonly onRestored: (outcome: JoinRecoveryOutcome) => Promise<void>;
   /** Disable the start affordance (parent form busy). */
   readonly disabled?: boolean;
+  /** ADR-0049 section 2: when given, the pairing payload is ALSO posted to
+   *  the auth service so a signed-in device can confirm without a camera;
+   *  the panel then leads with the comparison code and keeps the QR code
+   *  behind a toggle. Evaluated after `prepare()` (the account may only be
+   *  known then). `null` keeps the QR-only behaviour. */
+  readonly requestAccount?: () => Uint8Array | null;
 }): JSX.Element {
   type State =
     | { kind: "idle" }
@@ -70,6 +81,60 @@ export default function RestoreViaDevicePanel(props: {
   const [canvasRef, setCanvasRef] = createSignal<HTMLCanvasElement | null>(
     null,
   );
+  // ADR-0049 section 2 — the camera-less route.
+  const [code, setCode] = createSignal<string | null>(null);
+  const [showQr, setShowQr] = createSignal(false);
+  const [requestNote, setRequestNote] = createSignal<string | null>(null);
+  let statusTimer: ReturnType<typeof setInterval> | null = null;
+  let declinedTimer: ReturnType<typeof setTimeout> | null = null;
+  const stopStatusPolling = (): void => {
+    if (statusTimer !== null) {
+      clearInterval(statusTimer);
+      statusTimer = null;
+    }
+    if (declinedTimer !== null) {
+      clearTimeout(declinedTimer);
+      declinedTimer = null;
+    }
+  };
+
+  /** Post the payload so the other device can confirm it, and watch for a
+   *  decline. A vanished request is NOT declared declined at once: the
+   *  confirming device deletes it right after publishing the Welcome, so
+   *  the Welcome poll is given a grace period to land first. */
+  async function publishRequest(flow: DeviceRestoreFlowHandle, abort: AbortController): Promise<void> {
+    const account = props.requestAccount?.() ?? null;
+    if (account === null) return;
+    setCode(await comparisonCode(flow.qrPayload));
+    const client = new AuthClient();
+    let requestId: string;
+    try {
+      requestId = (await client.deviceRequestCreate(account, flow.qrPayload)).requestId;
+    } catch (err) {
+      setRequestNote(
+        "Could not reach the server to ask your other device; the QR code still works. " +
+          (err instanceof Error ? err.message : String(err)),
+      );
+      setShowQr(true);
+      return;
+    }
+    statusTimer = setInterval(() => {
+      void client
+        .deviceRequestPending(requestId)
+        .then((pending) => {
+          if (pending || state().kind !== "waiting" || declinedTimer !== null) return;
+          declinedTimer = setTimeout(() => {
+            if (state().kind === "waiting") {
+              abort.abort();
+              flow.dispose();
+              stopStatusPolling();
+              setState({ kind: "error", message: "Declined on another device." });
+            }
+          }, 20_000);
+        })
+        .catch(() => undefined);
+    }, DEVICE_REQUEST_STATUS_POLL_MS);
+  }
 
   async function start(): Promise<void> {
     setState({ kind: "preparing" });
@@ -88,7 +153,11 @@ export default function RestoreViaDevicePanel(props: {
       // the matching branch synchronously), THEN paint the QR into
       // it.
       const abort = new AbortController();
+      setCode(null);
+      setShowQr(false);
+      setRequestNote(null);
       setState({ kind: "waiting", flow, abort });
+      void publishRequest(flow, abort);
       const b64 = base64UrlEncodeNoPad(flow.qrPayload);
       const canvas = canvasRef();
       if (canvas !== null) {
@@ -100,7 +169,21 @@ export default function RestoreViaDevicePanel(props: {
       }
       void (async (): Promise<void> => {
         try {
-          const outcome = await flow.awaitWelcome(abort.signal);
+          // A confirmation on another device can take minutes (the request
+          // itself lives ten); a QR scan is quick. Keep polling for the
+          // Welcome as long as the request is alive, in one-minute legs.
+          const confirmRoute = (props.requestAccount?.() ?? null) !== null;
+          const deadline = Date.now() + (confirmRoute ? 10 * 60_000 : 60_000);
+          let outcome = await flow.awaitWelcome(abort.signal);
+          while (
+            outcome.kind === "timeout" &&
+            Date.now() < deadline &&
+            !abort.signal.aborted &&
+            state().kind === "waiting"
+          ) {
+            outcome = await flow.awaitWelcome(abort.signal);
+          }
+          stopStatusPolling();
           if (outcome.kind === "received") {
             setState({ kind: "joining" });
             const recovery = await flow.accept(
@@ -156,6 +239,7 @@ export default function RestoreViaDevicePanel(props: {
   }
 
   onCleanup(() => {
+    stopStatusPolling();
     const s = state();
     if (s.kind === "waiting") {
       s.abort.abort();
@@ -181,11 +265,28 @@ export default function RestoreViaDevicePanel(props: {
         </Match>
         <Match when={state().kind === "waiting"}>
           <div style={{ "text-align": "center", padding: "1rem 0" }}>
-            <canvas ref={(el) => setCanvasRef(el)} />
-            <p style={{ color: "var(--surface-muted)" }}>
+            <Show when={code() !== null}>
+              <p style={{ "margin-top": 0 }}>
+                Open Lakko on a device that is already signed in and confirm
+                this sign-in there.
+              </p>
+              <p class="form-info" style={{ "margin-bottom": "4px" }}>Comparison code</p>
+              <div class="lk-sas-code" aria-label="Comparison code">{code()}</div>
+              <p class="form-info">Make sure the other device shows the same code.</p>
+              <Show when={requestNote() !== null}>
+                <p class="form-error">{requestNote()}</p>
+              </Show>
+              <button type="button" onClick={() => setShowQr((v) => !v)}>
+                {showQr() ? "Hide the QR code" : "Show a QR code instead"}
+              </button>
+            </Show>
+            <canvas ref={(el) => setCanvasRef(el)} hidden={code() !== null && !showQr()} />
+            <Show when={code() === null || showQr()}>
+              <p style={{ color: "var(--surface-muted)" }}>
               On your other device, open Devices → Add a device and
               scan this code…
             </p>
+            </Show>
             <button type="button" onClick={cancel}>
               Cancel
             </button>

@@ -54,6 +54,7 @@ LAKKO_CHANNELS_DATABASE_URL=mysql://lakko_test:${DB_PASS}@127.0.0.1:3306/lakko_t
 
 LAKKO_SESSION_TOKEN_SECRET=$(openssl rand -base64 32)
 LAKKO_TOTP_ENC_KEY=$(openssl rand -base64 32)
+LAKKO_VAULT_ENC_KEY=$(openssl rand -base64 32)
 LAKKO_RECOVERY_CONTACT_PEPPER=$(openssl rand -base64 32)
 
 LAKKO_WEBAUTHN_RP_ID=${DOMAIN}
@@ -116,6 +117,14 @@ DB_PASS=$(grep -m1 '^LAKKO_AUTH_DATABASE_URL=' $ENV_FILE | sed -E 's#^.*lakko_te
 if ! grep -q '^LAKKO_CHANNELS_DATABASE_URL=' $ENV_FILE; then
   echo "LAKKO_CHANNELS_DATABASE_URL=mysql://lakko_test:${DB_PASS}@127.0.0.1:3306/lakko_test_channels" >> $ENV_FILE
   echo "channels database URL added to the env file"
+fi
+
+# The word vault (ADR-0049) arrived later still: an older env file gains its
+# key here, generated once and then kept (regenerating it would destroy every
+# vault enrolled on this stack).
+if ! grep -q '^LAKKO_VAULT_ENC_KEY=' $ENV_FILE; then
+  echo "LAKKO_VAULT_ENC_KEY=$(openssl rand -base64 32)" >> $ENV_FILE
+  echo "word-vault key added to the env file"
 fi
 
 {

@@ -77,7 +77,7 @@ export default function Login(): JSX.Element {
     setError(null);
     setBusy(true);
     try {
-      await auth.loginWithPasskey();
+      await auth.loginWithPasskey(username());
       navigate(readReturnUrl(location), { replace: true });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));

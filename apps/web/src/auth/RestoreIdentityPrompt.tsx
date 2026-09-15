@@ -23,10 +23,18 @@
  *     rendezvous channel; `completeFromPairing` runs the SAME
  *     fail-closed verification before caching anything.
  */
-import { createSignal, Show, type JSX } from "solid-js";
+import { createSignal, Match, onMount, Show, Switch, type JSX } from "solid-js";
 import { useAuth } from "./AuthContext";
 import { AuthLayout } from "../ui/AuthLayout";
 import { PhraseInput } from "../ui/PhraseInput";
+import { WordSlots } from "../ui/WordSlots";
+import {
+  WORD_VAULT_DESTRUCTION_CAP,
+  wordVaultErrorMessage,
+  wordsAreAnswerable,
+  type WordVaultChallenge,
+} from "../recovery/word-vault";
+import { AuthHttpError } from "./client";
 import { base64Decode } from "./account-id";
 import { getDeviceKey } from "./key-store";
 import {
@@ -37,14 +45,21 @@ import RestoreViaDevicePanel, {
   type DeviceRestoreFlowHandle,
 } from "../devices/RestoreViaDevicePanel";
 
-type Mode = "phrase" | "device";
+type Mode = "words" | "phrase" | "device";
 
 export default function RestoreIdentityPrompt(): JSX.Element {
   const auth = useAuth();
-  const [mode, setMode] = createSignal<Mode>("phrase");
+  const [mode, setMode] = createSignal<Mode>("words");
   const [phrase, setPhrase] = createSignal("");
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
+  // ADR-0049 three-word route.
+  const [challenge, setChallenge] = createSignal<WordVaultChallenge | null>(null);
+  const [challengeError, setChallengeError] = createSignal<string | null>(null);
+  const [words, setWords] = createSignal<string[]>(["", "", ""]);
+  const [misses, setMisses] = createSignal(0);
+  const triesLeft = (): number => WORD_VAULT_DESTRUCTION_CAP - misses();
+  const wordsUnavailable = (): boolean => misses() >= WORD_VAULT_DESTRUCTION_CAP;
 
   const account = (): { username: string; accountIdB64: string } | null => {
     const s = auth.state();
@@ -55,6 +70,48 @@ export default function RestoreIdentityPrompt(): JSX.Element {
         }
       : null;
   };
+
+  onMount(() => {
+    const acct = account();
+    if (acct === null) return;
+    void auth
+      .wordVaultStart(acct.accountIdB64)
+      .then((c) => setChallenge(c))
+      .catch((err: unknown) => {
+        setChallengeError(wordVaultErrorMessage(err, null));
+        if (err instanceof AuthHttpError && err.status === 503) setMode("phrase");
+      });
+  });
+
+  async function onSubmitWords(e: SubmitEvent): Promise<void> {
+    e.preventDefault();
+    const acct = account();
+    const c = challenge();
+    if (acct === null || c === null) return;
+    setError(null);
+    setBusy(true);
+    try {
+      const fullPhrase = await auth.wordVaultOpen(acct.accountIdB64, c, words());
+      await auth.provideRecoveryPhrase(fullPhrase);
+      setWords(["", "", ""]);
+    } catch (err) {
+      if (err instanceof AuthHttpError && err.status === 401) {
+        const next = misses() + 1;
+        setMisses(next);
+        setWords(["", "", ""]);
+        setError(
+          next >= WORD_VAULT_DESTRUCTION_CAP
+            ? "The three-word shortcut is no longer available for this account. Use another device or your full 24-word phrase."
+            : wordVaultErrorMessage(err, WORD_VAULT_DESTRUCTION_CAP - next),
+        );
+        if (next >= WORD_VAULT_DESTRUCTION_CAP) setMode("phrase");
+      } else {
+        setError(wordVaultErrorMessage(err, null));
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function onSubmit(e: SubmitEvent): Promise<void> {
     e.preventDefault();
@@ -128,19 +185,38 @@ export default function RestoreIdentityPrompt(): JSX.Element {
         <h1>Restore your identity</h1>
         <p class="auth-lede">
           You are signed in as <strong>@{account()?.username ?? ""}</strong> on
-          a new device. The key your contacts trust is restored from your
-          recovery phrase, or from a device that is still signed in.
+          a new device. The key your contacts trust is restored from three
+          words of your recovery phrase, from a device that is still signed
+          in, or from the full phrase.
         </p>
         <div role="tablist" class="lk-actions">
+          <Show when={!wordsUnavailable()}>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={mode() === "words"}
+              class={mode() === "words" ? "primary" : ""}
+              disabled={busy()}
+              onClick={() => {
+                setError(null);
+                setMode("words");
+              }}
+            >
+              Three words
+            </button>
+          </Show>
           <button
             type="button"
             role="tab"
             aria-selected={mode() === "phrase"}
             class={mode() === "phrase" ? "primary" : ""}
             disabled={busy()}
-            onClick={() => setMode("phrase")}
+            onClick={() => {
+              setError(null);
+              setMode("phrase");
+            }}
           >
-            Recovery phrase
+            All 24 words
           </button>
           <button
             type="button"
@@ -148,23 +224,65 @@ export default function RestoreIdentityPrompt(): JSX.Element {
             aria-selected={mode() === "device"}
             class={mode() === "device" ? "primary" : ""}
             disabled={busy()}
-            onClick={() => setMode("device")}
+            onClick={() => {
+              setError(null);
+              setMode("device");
+            }}
           >
             Another device
           </button>
         </div>
-        <Show
-          when={mode() === "phrase"}
-          fallback={
+        <Switch>
+          <Match when={mode() === "words"}>
+            <form onSubmit={onSubmitWords}>
+              <Show
+                when={challenge() !== null}
+                fallback={
+                  <p class="form-info">
+                    {challengeError() ?? "Fetching which words to type…"}
+                  </p>
+                }
+              >
+                <p style={{ color: "var(--surface-muted)", "margin-top": 0 }}>
+                  Type words <strong>{challenge()?.positions.join(", ")}</strong>{" "}
+                  of your recovery phrase.
+                </p>
+                <WordSlots
+                  positions={() => challenge()?.positions ?? []}
+                  value={words}
+                  setValue={setWords}
+                  disabled={busy}
+                />
+              </Show>
+              <Show when={error() !== null}>
+                <div class="form-error">{error()}</div>
+              </Show>
+              <button
+                class="primary"
+                type="submit"
+                disabled={busy() || challenge() === null || !wordsAreAnswerable(words())}
+              >
+                {busy() ? "Checking…" : "Continue"}
+              </button>
+              <Show when={misses() > 0 && !wordsUnavailable()}>
+                <p class="form-info">{triesLeft()} tries left.</p>
+              </Show>
+            </form>
+          </Match>
+          <Match when={mode() === "device"}>
             <div>
               <p style={{ color: "var(--surface-muted)" }}>
-                Restore from your other device: show the pairing code
-                below to a device that is still signed in to this
-                account. It transfers your identity end-to-end
-                encrypted — the server never sees it.
+                Restore from a device that is still signed in: it shows a
+                confirmation prompt, you compare the code, and it transfers
+                your identity end-to-end encrypted. The server never sees
+                it. No camera needed; a QR code is there if you prefer.
               </p>
               <RestoreViaDevicePanel
                 prepare={prepareDeviceFlow}
+                requestAccount={() => {
+                  const acct = account();
+                  return acct === null ? null : base64Decode(acct.accountIdB64);
+                }}
                 onRestored={async (outcome) => {
                   await auth.completeFromPairing(
                     outcome.phraseSeed,
@@ -175,18 +293,19 @@ export default function RestoreIdentityPrompt(): JSX.Element {
                 disabled={busy()}
               />
             </div>
-          }
-        >
-          <form onSubmit={onSubmit}>
-            <PhraseInput value={phrase} setValue={setPhrase} disabled={busy} />
-            <Show when={error() !== null}>
-              <div class="form-error">{error()}</div>
-            </Show>
-            <button class="primary" type="submit" disabled={busy()}>
-              {busy() ? "Restoring…" : "Restore identity"}
-            </button>
-          </form>
-        </Show>
+          </Match>
+          <Match when={mode() === "phrase"}>
+            <form onSubmit={onSubmit}>
+              <PhraseInput value={phrase} setValue={setPhrase} disabled={busy} />
+              <Show when={error() !== null}>
+                <div class="form-error">{error()}</div>
+              </Show>
+              <button class="primary" type="submit" disabled={busy()}>
+                {busy() ? "Restoring…" : "Restore identity"}
+              </button>
+            </form>
+          </Match>
+        </Switch>
         <LostEverythingPanel busy={busy()} />
         <p class="form-footer">
           <button

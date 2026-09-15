@@ -18,6 +18,11 @@ workspace = true
 [dependencies]
 thiserror.workspace = true
 
+# ADR-0049 word vault: Argon2id stretch + HKDF + AEAD + SHA-256 for the
+# three-word client-side sealing of the phrase entropy. Workspace crate,
+# no new external dependency.
+lakko-crypto.workspace = true
+
 # Canonical Rust BIP39. We pin to 2.x for the stable wordlist API.
 # Features:
 #   * `std`  — needed for the PBKDF2 seed implementation.

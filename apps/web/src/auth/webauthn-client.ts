@@ -331,7 +331,8 @@ export class WebauthnClient {
    */
   async registerPasskey(
     req: RegisterStartRequest,
-  ): Promise<RegisterFinishResponse> {
+    opts: { prfSalt?: Uint8Array } = {},
+  ): Promise<RegisterFinishResponse & PasskeyCeremonyExtras> {
     if (!WebauthnClient.isWebauthnAvailable()) {
       throw new WebauthnUnsupportedError();
     }
@@ -340,6 +341,9 @@ export class WebauthnClient {
       req,
     );
     const publicKey = decodeCreationOptions(start.options.publicKey);
+    if (opts.prfSalt !== undefined) {
+      publicKey.extensions = { ...(publicKey.extensions ?? {}), ...prfExtensionInput(opts.prfSalt) };
+    }
     let cred: Credential | null;
     try {
       cred = await navigator.credentials.create({ publicKey });
@@ -349,15 +353,16 @@ export class WebauthnClient {
     if (cred === null) {
       throw new WebauthnUserCancelledError();
     }
+    const pk = cred as PublicKeyCredential;
     const finish = await this.post<RegisterFinishRequest, RegisterFinishResponse>(
       "/webauthn/register/finish",
       {
         state_id: start.state_id,
         nickname: start.nickname,
-        credential: encodeRegisterCredential(cred as PublicKeyCredential),
+        credential: encodeRegisterCredential(pk),
       },
     );
-    return finish;
+    return { ...finish, ...ceremonyExtras(pk) };
   }
 
   /** `GET /webauthn/credentials` — bearer-auth required. */
@@ -421,8 +426,14 @@ export class WebauthnClient {
    * Phase 2a2c UI doesn't drive conditional mediation yet.
    */
   async loginWithPasskey(
-    options: { accountIdB64?: string; mediation?: CredentialMediationRequirement } = {},
-  ): Promise<AuthFinishResponse> {
+    options: {
+      accountIdB64?: string;
+      mediation?: CredentialMediationRequirement;
+      /** ADR-0049: evaluate the PRF extension with this salt so the
+       *  assertion also yields the credential's 32-byte secret. */
+      prfSalt?: Uint8Array;
+    } = {},
+  ): Promise<AuthFinishResponse & PasskeyCeremonyExtras> {
     if (!WebauthnClient.isWebauthnAvailable()) {
       throw new WebauthnUnsupportedError();
     }
@@ -433,6 +444,9 @@ export class WebauthnClient {
         : { account_id_b64: options.accountIdB64 },
     );
     const publicKey = decodeRequestOptions(start.options.publicKey);
+    if (options.prfSalt !== undefined) {
+      publicKey.extensions = { ...(publicKey.extensions ?? {}), ...prfExtensionInput(options.prfSalt) };
+    }
     let cred: Credential | null;
     try {
       const getOptions: CredentialRequestOptions = { publicKey };
@@ -446,13 +460,15 @@ export class WebauthnClient {
     if (cred === null) {
       throw new WebauthnUserCancelledError();
     }
-    return this.post<AuthFinishRequest, AuthFinishResponse>(
+    const pk = cred as PublicKeyCredential;
+    const finish = await this.post<AuthFinishRequest, AuthFinishResponse>(
       "/webauthn/auth/finish",
       {
         state_id: start.state_id,
-        credential: encodeAuthCredential(cred as PublicKeyCredential),
+        credential: encodeAuthCredential(pk),
       },
     );
+    return { ...finish, ...ceremonyExtras(pk) };
   }
 
   /**
@@ -733,7 +749,7 @@ function encodeRegisterCredential(cred: PublicKeyCredential): RegisterPublicKeyC
     rawId: bufferToBase64url(cred.rawId),
     type: "public-key",
     response: responseJson,
-    extensions: cred.getClientExtensionResults() as Record<string, unknown>,
+    extensions: serverSafeExtensionResults(cred),
   };
 }
 
@@ -749,6 +765,45 @@ function encodeAuthCredential(cred: PublicKeyCredential): AuthPublicKeyCredentia
       signature: bufferToBase64url(r.signature),
       userHandle: r.userHandle === null ? null : bufferToBase64url(r.userHandle),
     },
-    extensions: cred.getClientExtensionResults() as Record<string, unknown>,
+    extensions: serverSafeExtensionResults(cred),
   };
+}
+
+/** What a ceremony yields beyond the server's answer (ADR-0049): the raw
+ *  credential id, and the PRF `first` output when the authenticator
+ *  evaluated it (`null` otherwise: unsupported, or not requested). */
+export interface PasskeyCeremonyExtras {
+  readonly credentialId: Uint8Array;
+  readonly prfOutput: Uint8Array | null;
+}
+
+function ceremonyExtras(cred: PublicKeyCredential): PasskeyCeremonyExtras {
+  const results = cred.getClientExtensionResults() as {
+    prf?: { results?: { first?: ArrayBuffer | ArrayBufferView } };
+  };
+  const first = results.prf?.results?.first;
+  let prfOutput: Uint8Array | null = null;
+  if (first !== undefined) {
+    const bytes =
+      first instanceof ArrayBuffer
+        ? new Uint8Array(first)
+        : new Uint8Array(first.buffer, first.byteOffset, first.byteLength);
+    prfOutput = bytes.length === 32 ? new Uint8Array(bytes) : null;
+  }
+  return { credentialId: new Uint8Array(cred.rawId), prfOutput };
+}
+
+/** The extension inputs that ask the authenticator to evaluate PRF. */
+function prfExtensionInput(salt: Uint8Array): AuthenticationExtensionsClientInputs {
+  return { prf: { eval: { first: salt } } } as unknown as AuthenticationExtensionsClientInputs;
+}
+
+/** The client extension results the server receives. The PRF output is a
+ *  secret the server must never see, so it is dropped before the blob is
+ *  serialised (JSON would turn the ArrayBuffer into `{}` anyway; this makes
+ *  the omission deliberate rather than accidental). */
+function serverSafeExtensionResults(cred: PublicKeyCredential): Record<string, unknown> {
+  const all = { ...(cred.getClientExtensionResults() as Record<string, unknown>) };
+  delete all["prf"];
+  return all;
 }

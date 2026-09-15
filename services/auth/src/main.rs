@@ -78,6 +78,7 @@
 mod backup_head;
 mod call_jwt;
 mod device_authorize;
+mod device_request;
 mod genesis_attest;
 mod opaque;
 mod otp_sender;
@@ -88,6 +89,7 @@ mod totp;
 mod turn;
 mod webauthn;
 mod webauthn_action;
+mod word_vault;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -97,7 +99,7 @@ use anyhow::{Context, Result};
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::Router;
 use opaque_ke::ServerSetup;
 use serde_json::json;
@@ -178,6 +180,9 @@ pub(crate) struct AppState {
     /// `None` when unset, in which case the three `/totp/*` routes
     /// return 503 — loud refusal, no silent fallback.
     pub(crate) totp_enc_key: Option<Arc<[u8; 32]>>,
+    /// ADR-0049 — word-vault body-encryption key (`LAKKO_VAULT_ENC_KEY`).
+    /// `None` disables the `/vault/*` routes (503).
+    pub(crate) vault_enc_key: Option<Arc<[u8; 32]>>,
     /// ADR-0018 factor (d) — server-static pepper keying the
     /// recovery-contact + OTP-code hashes (`recovery_contacts.contact_hash`,
     /// `otp_challenges.code_hash`). Loaded from
@@ -326,6 +331,15 @@ async fn main() -> Result<()> {
         tracing::info!("totp endpoints disabled (LAKKO_TOTP_ENC_KEY not set)");
     }
 
+    // ADR-0049 — word-vault body-encryption key. Loud-fail on a malformed
+    // value; soft-disable when unset (the /vault/* routes then return 503).
+    let vault_enc_key = word_vault::load_vault_enc_key().context("load LAKKO_VAULT_ENC_KEY")?;
+    if vault_enc_key.is_some() {
+        tracing::info!("word-vault endpoints enabled");
+    } else {
+        tracing::info!("word-vault endpoints disabled (LAKKO_VAULT_ENC_KEY not set)");
+    }
+
     // ADR-0018 factor (d) — recovery-contact pepper. Loud-fail on a malformed
     // value (bad base64 / wrong length); soft-disable when unset (the
     // /recovery-contact/* routes then return 503).
@@ -388,6 +402,7 @@ async fn main() -> Result<()> {
         attest_key: Arc::new(attest_key),
         turn: turn_config.map(Arc::new),
         totp_enc_key: totp_enc_key.map(Arc::new),
+        vault_enc_key: vault_enc_key.map(Arc::new),
         recovery_contact_pepper: recovery_contact_pepper.map(Arc::new),
         otp_sender,
         throttle: throttle_config,
@@ -469,6 +484,22 @@ fn build_app(state: AppState) -> Router {
         // The matching `/totp/recover` is anonymous (public router).
         .route("/totp/enroll/start", post(totp::enroll_start))
         .route("/totp/enroll/finish", post(totp::enroll_finish))
+        // ADR-0049 — word vault enrollment + status. Bearer-auth: the caller
+        // is a signed-in account sealing its own phrase entropy. The matching
+        // `/vault/recover/*` are anonymous (public router).
+        .route("/vault", get(word_vault::status))
+        .route("/vault/enroll", post(word_vault::enroll))
+        // ADR-0049 section 3 — the entropy sealed under a passkey's PRF
+        // output; opaque per-credential blobs only the account reads.
+        .route("/vault/passkey", put(word_vault::passkey_put))
+        .route("/vault/passkey/get", post(word_vault::passkey_get))
+        // ADR-0049 section 2 — the signed-in device's side of a camera-less
+        // add-device confirmation: see and close the pending request.
+        .route("/device/requests", get(device_request::list))
+        .route(
+            "/device/requests/{request_id_b64}",
+            delete(device_request::delete),
+        )
         // ADR-0018 factor (d) — phone / email contact enrollment. Bearer-auth:
         // the caller is an already-logged-in account adding an OTP-recovery
         // contact. The matching `/recovery-contact/recover/*` are anonymous
@@ -574,6 +605,19 @@ fn build_app(state: AppState) -> Router {
         // code. ANONYMOUS (the caller lost their device); PoW-gated +
         // lockout + replay-protected inside the handler.
         .route("/totp/recover", post(totp::recover))
+        // ADR-0049 — three-word recovery. ANONYMOUS (the caller has nothing
+        // yet); PoW-gated + enumeration-safe + lockout + destruction-capped
+        // inside the handlers. `/start` serves positions + salt + cost,
+        // `/finish` compares the guess and releases the sealed entropy.
+        .route("/vault/recover/start", post(word_vault::recover_start))
+        // ADR-0049 section 2 — the fresh device posts its pairing payload
+        // (anonymous + PoW) and polls whether the request is still open.
+        .route("/device/request", post(device_request::create))
+        .route("/device/request/status", post(device_request::status))
+        .route(
+            "/vault/recover/finish",
+            post(word_vault::recover_finish),
+        )
         // ADR-0018 factor (d) — recover ACCESS with a phone / email OTP.
         // ANONYMOUS (the caller lost their device); PoW-gated + enumeration-
         // safe + attempt-capped inside the handlers. `/recover/start` sends a

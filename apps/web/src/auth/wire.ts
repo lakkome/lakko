@@ -371,3 +371,112 @@ export interface GenesisAttestResponse {
    *  verifies it on a first observation against the pinned attest key. */
   genesis_attest_b64: string;
 }
+
+// ----------------------------------------------------------------------------
+// Word vault — ADR-0049 (services/auth/src/word_vault.rs)
+// ----------------------------------------------------------------------------
+
+/** `POST /vault/enroll` request body. Every field is what the wasm
+ *  `wordVaultEnroll` produced; the server stores them and can open none of
+ *  them. Byte fields are standard base64. */
+export interface WordVaultEnrollRequest {
+  /** Three distinct 1-based word positions, ascending. */
+  positions: number[];
+  salt_b64: string;
+  argon2_m_kib: number;
+  argon2_t: number;
+  argon2_p: number;
+  /** `SHA-256(K_verify)`, 32 bytes. */
+  verifier_b64: string;
+  /** The 32-byte entropy sealed under `K_seal`. */
+  sealed_entropy_b64: string;
+}
+
+/** `GET /vault` response body. */
+export interface WordVaultStatusResponse {
+  enrolled: boolean;
+  positions: number[] | null;
+}
+
+/** `POST /vault/recover/start` request body. Anonymous + PoW. */
+export interface WordVaultRecoverStartRequest {
+  pow: PowProofPayload;
+  /** URL-safe base64 (no pad) of the 16-byte account_id. */
+  account_id_b64: string;
+}
+
+/** `POST /vault/recover/start` response body — identical in shape for a
+ *  real account and an unknown one (decoys). */
+export interface WordVaultRecoverStartResponse {
+  positions: number[];
+  salt_b64: string;
+  argon2_m_kib: number;
+  argon2_t: number;
+  argon2_p: number;
+}
+
+/** `POST /vault/recover/finish` request body. Anonymous + PoW. */
+export interface WordVaultRecoverFinishRequest {
+  pow: PowProofPayload;
+  account_id_b64: string;
+  /** The guess: `SHA-256(K_verify)` for the typed words, 32 bytes. */
+  verifier_b64: string;
+}
+
+/** `POST /vault/recover/finish` response body on a match. */
+export interface WordVaultRecoverFinishResponse {
+  sealed_entropy_b64: string;
+}
+
+/** `PUT /vault/passkey` request body (ADR-0049 section 3). */
+export interface PasskeyVaultPutRequest {
+  /** URL-safe base64 (no pad) of the WebAuthn credential id. */
+  credential_id_b64: string;
+  /** The 32-byte entropy sealed under the credential's PRF output. */
+  sealed_entropy_b64: string;
+}
+
+/** `POST /vault/passkey/get` request body. */
+export interface PasskeyVaultGetRequest {
+  credential_id_b64: string;
+}
+
+/** `POST /vault/passkey/get` response body. */
+export interface PasskeyVaultGetResponse {
+  sealed_entropy_b64: string | null;
+}
+
+// ----------------------------------------------------------------------------
+// Device requests — ADR-0049 section 2 (services/auth/src/device_request.rs)
+// ----------------------------------------------------------------------------
+
+/** `POST /device/request` request body. Anonymous + PoW. */
+export interface DeviceRequestCreateRequest {
+  pow: PowProofPayload;
+  account_id_b64: string;
+  /** Standard base64 of the pairing payload (the bytes the QR carries). */
+  pairing_payload_b64: string;
+}
+
+/** `POST /device/request` response body. */
+export interface DeviceRequestCreateResponse {
+  request_id_b64: string;
+  expires_in_secs: number;
+}
+
+/** `POST /device/request/status` request / response bodies. */
+export interface DeviceRequestStatusRequest {
+  request_id_b64: string;
+}
+export interface DeviceRequestStatusResponse {
+  pending: boolean;
+}
+
+/** `GET /device/requests` response body. */
+export interface DeviceRequestsListResponse {
+  request: {
+    request_id_b64: string;
+    pairing_payload_b64: string;
+    created_at_ms: number;
+  } | null;
+}

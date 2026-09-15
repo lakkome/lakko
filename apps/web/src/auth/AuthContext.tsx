@@ -132,7 +132,19 @@ import { clearOwnProfile } from "../profile/own-profile";
 import { rehydrateMlsState } from "../chat/rehydrate";
 import { subscribeToPush, unsubscribeFromPush } from "../push/subscribe";
 import { bootstrapBackupFromPhraseString } from "../backup/bootstrap";
-import { deletePhrase, getPhrase } from "../backup/phrase-store";
+import { deletePhrase, getPhrase, putPhrase } from "../backup/phrase-store";
+import { clearRestored, markRestored } from "./restore-marker";
+import {
+  ensureWordVaultEnrolled,
+  openWordVault,
+  startWordVault,
+  type WordVaultChallenge,
+} from "../recovery/word-vault";
+import {
+  ensurePasskeyVaultEnrolled,
+  openPasskeyVault,
+  PASSKEY_PRF_SALT,
+} from "../recovery/passkey-vault";
 import {
   clearSignupPhraseOwed,
   isSignupPhraseOwed,
@@ -444,7 +456,13 @@ export interface AuthApi {
    *  Throws when the local cache is absent — passkey is an
    *  auth-convenience, not a fresh-device onboarding path. The
    *  recovery phrase remains the only fresh-device entry route. */
-  loginWithPasskey(): Promise<void>;
+  /** Passkey sign-in. On a device that already holds this account it lands
+   *  from the cached seed; on a fresh device (ADR-0049 section 3) it lands
+   *  from the passkey-carried identity when the passkey's PRF output opens a
+   *  stored blob, and otherwise parks in `needs-recovery-phrase` like the
+   *  other ACCESS-only factors. `usernameHint` names the account on a fresh
+   *  device (the assertion carries only the account id). */
+  loginWithPasskey(usernameHint?: string): Promise<void>;
   /** ADR-0017 fresh-device fail-safe completion. Called only while
    *  the state is `needs-recovery-phrase`: the user typed their
    *  recovery phrase, we derive the BIP39 seed, cache it under the
@@ -453,6 +471,25 @@ export interface AuthApi {
    *  (the derived pubkey does not match the account's published
    *  bundle) so the user cannot silently fork their identity. */
   provideRecoveryPhrase(mnemonicPhrase: string): Promise<void>;
+  /** ADR-0049 three-word recovery, step 1: which words to type and how to
+   *  stretch them. Anonymous; an unknown account gets stable decoys. */
+  wordVaultStart(accountIdB64: string): Promise<WordVaultChallenge>;
+  /** ADR-0049 three-word recovery, step 2: stretch the typed words, submit
+   *  the guess, open the sealed entropy, and return the FULL 24-word phrase
+   *  for the existing phrase paths (`provideRecoveryPhrase` / `recover`).
+   *  Throws an `AuthHttpError` 401 on a wrong answer, 429 when locked. */
+  wordVaultOpen(
+    accountIdB64: string,
+    challenge: WordVaultChallenge,
+    words: readonly string[],
+  ): Promise<string>;
+  /** Resolve a username to the account id the recovery endpoints take,
+   *  through the device cache or a discovery lookup. */
+  resolveRecoverAccountId(username: string): Promise<string>;
+  /** The three positions the signup phrase was enrolled under, once the
+   *  enrollment lands (so the phrase screen can highlight them); `null`
+   *  before that or when enrollment was not possible. */
+  readonly signupVaultPositions: Accessor<number[] | null>;
   /** ADR-0018 factor (a), path (a) — finish the
    *  `needs-recovery-phrase` state with a seed transferred from
    *  another device over the E2EE pairing channel instead of a
@@ -678,6 +715,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   // The signup recovery phrase awaiting acknowledgement — see
   // `AuthApi.signupPhrase` and `phrase-gate.ts`.
   const [signupPhrase, setSignupPhrase] = createSignal<string | null>(null);
+  const [signupVaultPositions, setSignupVaultPositions] = createSignal<number[] | null>(null);
   // ADR-0017 defence-in-depth (lakko-security Phase-3A follow-up (i)):
   // a non-null value means this device's canonical AccountIdentity did
   // NOT match the account's currently-published bundle at login — i.e.
@@ -900,6 +938,12 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         kind: "session",
         account: { accountId: args.accountIdB64, username: args.username },
       });
+      void ensureWordVaultEnrolled({
+        wasm: args.wasm,
+        client,
+        accountIdB64: args.accountIdB64,
+        sessionToken: args.sessionToken,
+      });
       void (async (): Promise<void> => {
         await refreshPublishedIdentity(canonical, args.accountIdBytes, true);
         if (chats.identity() !== canonical) return;
@@ -928,6 +972,14 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     setState({
       kind: "session",
       account: { accountId: args.accountIdB64, username: args.username },
+    });
+    // ADR-0049: make sure a word vault exists when this device can build
+    // one (a cached phrase). Best-effort, off the sign-in path.
+    void ensureWordVaultEnrolled({
+      wasm: args.wasm,
+      client,
+      accountIdB64: args.accountIdB64,
+      sessionToken: args.sessionToken,
     });
     void subscribeToPush().catch((err) => {
       // eslint-disable-next-line no-console
@@ -1376,10 +1428,26 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         accountIdB64,
       );
       setSignupPhrase(result.recoveryPhrase);
+      setSignupVaultPositions(null);
       setState({
         kind: "session",
         account: { accountId: accountIdB64, username: normalisedUsername },
       });
+      // ADR-0049: enroll the three-word vault while the phrase is in hand.
+      // Best-effort here; `finishCanonicalSession` retries on later sign-ins
+      // from the cached phrase, and the phrase screen highlights the
+      // positions once this lands.
+      const enrolledPhrase = result.recoveryPhrase;
+      void (async (): Promise<void> => {
+        const positions = await ensureWordVaultEnrolled({
+          wasm,
+          client,
+          accountIdB64,
+          sessionToken: result.sessionToken,
+          phrase: enrolledPhrase,
+        });
+        setSignupVaultPositions(positions);
+      })();
       // Phase 2a1c: post-auth backup bootstrap. Caches the
       // phrase under the device root key + posts a baseline
       // backup envelope to /backup. Best-effort end-to-end; the
@@ -1680,7 +1748,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         username: resolvedUsername,
       });
     },
-    async loginWithPasskey() {
+    async loginWithPasskey(usernameHint) {
       // Phase 2a2c2 — sign in with a WebAuthn passkey on a
       // device that has already been seen by this account at
       // least once (signup / login / recover ran here in the
@@ -1695,7 +1763,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       const webauthn = new WebauthnClient();
       let assertion;
       try {
-        assertion = await webauthn.loginWithPasskey();
+        assertion = await webauthn.loginWithPasskey({ prfSalt: PASSKEY_PRF_SALT });
       } catch (err) {
         if (err instanceof WebauthnUserCancelledError) {
           throw new Error("Passkey sign-in cancelled.");
@@ -1723,27 +1791,59 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
 
       const accountIdB64 = assertion.account_id_b64;
       const accountIdBytes = base64Decode(accountIdB64);
-      const cached = loadPersisted();
-      if (cached === null || cached.accountIdB64 !== accountIdB64) {
-        // The passkey resolved to an account this device has
-        // never seen — without a locally-cached export key we
-        // can't reconstruct the session. Tell the user to log
-        // in with password first; the password flow populates
-        // the cache and the next passkey tap will work.
-        throw new Error(
-          "This passkey belongs to a different account than the one " +
-            "cached on this device. Sign in with password first to " +
-            "enable passkey on this device.",
-        );
-      }
+      const cachedAny = loadPersisted();
+      const sameDevice =
+        cachedAny !== null && cachedAny.accountIdB64 === accountIdB64;
+      const deviceKeyProbe = sameDevice ? await getDeviceKey(accountIdB64) : null;
 
-      const deviceKey = await getDeviceKey(accountIdB64);
-      if (deviceKey === null) {
-        throw new Error(
-          "No device key on this device. Sign in with password or " +
-            "recover with your phrase to enable passkey sign-in.",
-        );
+      if (!sameDevice || deviceKeyProbe === null) {
+        // ADR-0049 section 3 — a fresh device (or one whose device key is
+        // gone). ACCESS is granted; IDENTITY comes from the passkey vault
+        // when this credential's PRF output opens a stored blob, else from
+        // the ordinary restore prompt (three words / another device / the
+        // full phrase).
+        const username = sameDevice
+          ? cachedAny.username
+          : (usernameHint ?? "").trim().toLowerCase();
+        discovery.setSessionToken(assertion.session_token);
+        savePersisted({ v: 1, accountIdB64, username });
+        setPendingRecovery({
+          accountIdBytes,
+          accountIdB64,
+          exportKey: new Uint8Array(0),
+          deviceKey: deviceKeyProbe,
+          sessionToken: assertion.session_token,
+          sessionExpiresAtMs: assertion.session_expires_at_ms,
+          username,
+        });
+        let phrase: string | null = null;
+        if (assertion.prfOutput !== null) {
+          try {
+            const wasm = await loadWasm();
+            phrase = await openPasskeyVault({
+              wasm,
+              client,
+              sessionToken: assertion.session_token,
+              credentialId: assertion.credentialId,
+              prfOutput: assertion.prfOutput,
+            });
+          } catch (err) {
+            console.warn("passkey-vault open failed; falling back to the restore prompt", err);
+            phrase = null;
+          }
+        }
+        if (phrase !== null) {
+          await api.provideRecoveryPhrase(phrase);
+          return;
+        }
+        setState({
+          kind: "needs-recovery-phrase",
+          account: { accountId: accountIdB64, username },
+        });
+        return;
       }
+      const cached = cachedAny;
+      const deviceKey = deviceKeyProbe;
 
       let exportKey: Uint8Array | null;
       try {
@@ -1848,8 +1948,45 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         sessionExpiresAtMs: assertion.session_expires_at_ms,
         username: cached.username,
       });
+      // ADR-0049 section 3: this ceremony yielded the credential's PRF
+      // output and this device holds the phrase, so make sure the passkey
+      // carries the identity from now on. Best-effort.
+      if (assertion.prfOutput !== null) {
+        void ensurePasskeyVaultEnrolled({
+          wasm,
+          client,
+          sessionToken: assertion.session_token,
+          accountIdB64,
+          credentialId: assertion.credentialId,
+          prfOutput: assertion.prfOutput,
+        });
+      }
     },
+    async wordVaultStart(accountIdB64) {
+      return startWordVault(client, base64Decode(accountIdB64));
+    },
+    async wordVaultOpen(accountIdB64, challenge, words) {
+      const wasm = await loadWasm();
+      return openWordVault({
+        wasm,
+        client,
+        accountId: base64Decode(accountIdB64),
+        challenge,
+        words,
+      });
+    },
+    async resolveRecoverAccountId(username) {
+      const { accountIdB64 } = await resolveRecoverAccount({
+        cached: loadPersisted(),
+        username,
+        lookup: (u) => discovery.lookup(u),
+        encodeAccountId: base64Encode,
+      });
+      return accountIdB64;
+    },
+    signupVaultPositions,
     async provideRecoveryPhrase(mnemonicPhrase) {
+      markRestored("phrase");
       // ADR-0017 fresh-device fail-safe completion. Only valid while
       // a `pendingRecovery` is parked (set by login / passkey when
       // the auth succeeded but no AccountIdentity seed was cached).
@@ -1938,6 +2075,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       });
     },
     async completeFromPairing(phraseSeed, sessionToken, sessionExpiresAtMs) {
+      markRestored("device");
       // ADR-0018 factor (a), path (a) — same precondition as
       // `provideRecoveryPhrase`: only valid while a login/passkey
       // auth is parked in the `needs-recovery-phrase` fail-safe.
@@ -2045,6 +2183,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       });
     },
     async completeFromDeviceRestore(restoreArgs) {
+      markRestored("device");
       // ADR-0018 factor (a), path (b) — NO-PASSWORD bootstrap. The
       // caller ran the anonymous pairing and holds the transferred
       // seed + the REDEEMED session token (the only ACCESS here).
@@ -2317,8 +2456,20 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         sessionExpiresAtMs: pending.sessionExpiresAtMs,
         username: pending.username,
       });
+      // ADR-0049: the new phrase replaces whatever vault the old one had.
+      void ensureWordVaultEnrolled({
+        wasm,
+        client,
+        accountIdB64: pending.accountIdB64,
+        sessionToken: pending.sessionToken,
+        phrase: pending.phrase,
+      });
     },
     async recover(mnemonicPhrase, newPassword, username) {
+      // Every route on /recover ends here (three words, the full phrase, the
+      // Shamir shares), so this is where a phrase-based restore is recorded
+      // for the chat list's honest empty state (ADR-0049 section 5).
+      markRestored("phrase");
       // Resolve the account_id the same way `login` does so recover works on a
       // FRESH device: a local cache hit wins; otherwise a discovery.lookup on
       // the supplied username binds it (extracted to `resolveRecoverAccount`
@@ -2453,6 +2604,24 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           // eslint-disable-next-line no-console
           console.warn("deleteMlsSnapshot during recover failed", err);
         }
+        // The DeviceGroup snapshot was wrapped under the old device key too,
+        // and the device identity above was regenerated, so the old leaf is
+        // orphaned either way: drop the snapshot rather than leave a row the
+        // next add-device flow cannot open.
+        try {
+          await deleteDeviceGroupSnapshot(accountIdB64);
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("deleteDeviceGroupSnapshot during recover failed", err);
+        }
+        // Re-cache the phrase under the new device key so the backup and the
+        // ADR-0049 vault enrollment keep working from this device.
+        try {
+          await putPhrase(accountIdB64, new TextEncoder().encode(mnemonicPhrase), deviceKey);
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("phrase cache (recover) failed", err);
+        }
         // ADR-0040 (G-35) — purge any pending-commit outbox entries for the old
         // session too; they reference the now-discarded MLS snapshot and must
         // never be swept into the fresh state.
@@ -2558,6 +2727,15 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
             accountId: accountIdB64,
             username: resolvedUsername,
           },
+        });
+        // ADR-0049: the phrase just proved the account; (re)enroll the
+        // three-word vault from it so the next recovery needs three words.
+        void ensureWordVaultEnrolled({
+          wasm,
+          client,
+          accountIdB64,
+          sessionToken: result.sessionToken,
+          phrase: mnemonicPhrase,
         });
         // Phase 2a1d: post-recovery the prior accepted-contacts
         // list only lives inside the encrypted backup envelope
@@ -2823,6 +3001,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       );
     },
     logout() {
+      clearRestored();
       // Keep localStorage + IDB device key intact. Re-login on
       // this device remains cheap, and the device key stays
       // available for any encrypted local stores 1.16f wires up.
@@ -2877,6 +3056,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       });
     },
     async forgetDevice() {
+      clearRestored();
       const cached = loadPersisted();
       // The device-key-wrapped phrase cache is wiped below, so an owed phrase
       // can no longer be shown on this device; drop the marker and the copy.

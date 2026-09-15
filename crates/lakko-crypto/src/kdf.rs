@@ -36,6 +36,29 @@ pub fn hkdf_sha256<const L: usize>(ikm: &[u8], salt: &[u8], info: &[u8]) -> Resu
     Ok(SecretBytes::new(out))
 }
 
+/// Argon2id cost parameters, carried explicitly so a caller that persists
+/// them beside a ciphertext (the ADR-0049 word vault) can raise them later
+/// without breaking what was sealed under the old values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Argon2Params {
+    /// Memory cost in KiB.
+    pub m_kib: u32,
+    /// Number of passes over the memory.
+    pub t: u32,
+    /// Degree of parallelism (lanes).
+    pub p: u32,
+}
+
+impl Argon2Params {
+    /// OWASP 2024 interactive setting: 64 MiB, 3 passes, 4 lanes. What the
+    /// backup KEK has always used.
+    pub const INTERACTIVE: Self = Self {
+        m_kib: 64 * 1024,
+        t: 3,
+        p: 4,
+    };
+}
+
 /// Argon2id-based key derivation for backup-encryption KEK.
 ///
 /// Uses OWASP-recommended interactive parameters: m=64 MiB, t=3, p=4.
@@ -47,8 +70,26 @@ pub fn hkdf_sha256<const L: usize>(ikm: &[u8], salt: &[u8], info: &[u8]) -> Resu
 /// Returns [`Error::PasswordHashing`] if Argon2 internal limits are exceeded
 /// (cannot happen with our fixed parameters, but the API surfaces it).
 pub fn argon2id_kek(password: &[u8], salt: &[u8]) -> Result<SecretBytes<32>> {
-    // OWASP 2024 interactive: 64 MiB, 3 iterations, 4 lanes.
-    let params = Params::new(64 * 1024, 3, 4, Some(32)).map_err(|_| Error::PasswordHashing)?;
+    argon2id_kek_with_params(password, salt, Argon2Params::INTERACTIVE)
+}
+
+/// Argon2id key derivation with caller-supplied cost parameters.
+///
+/// Same output shape as [`argon2id_kek`] (32 bytes); the caller owns the
+/// choice of cost and must persist it beside the ciphertext it protects.
+///
+/// # Errors
+///
+/// Returns [`Error::PasswordHashing`] when the parameters are outside
+/// Argon2's own limits (for example `m_kib < 8 * p`) or the salt is shorter
+/// than 8 bytes.
+pub fn argon2id_kek_with_params(
+    password: &[u8],
+    salt: &[u8],
+    params: Argon2Params,
+) -> Result<SecretBytes<32>> {
+    let params = Params::new(params.m_kib, params.t, params.p, Some(32))
+        .map_err(|_| Error::PasswordHashing)?;
     let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
 
     let mut out = [0u8; 32];

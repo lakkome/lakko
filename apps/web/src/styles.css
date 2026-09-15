@@ -1267,6 +1267,92 @@ a.lk-row.active {
   border-color: var(--danger);
   background: var(--danger-soft);
 }
+
+/* Three-word recovery (ADR-0049): three big numbered slots. */
+.lk-word-slots {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 4px 0 12px;
+}
+.lk-word-slot {
+  position: relative;
+  display: block;
+  margin: 0;
+}
+.lk-word-slot-num {
+  position: absolute;
+  left: 10px;
+  top: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  pointer-events: none;
+}
+.lk-word-slot input {
+  min-height: 52px;
+  padding: 20px 10px 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 16px;
+}
+.lk-word-slot input.invalid {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+}
+/* Comparison code for the another-device confirmation (ADR-0049). */
+.lk-sas-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 34px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+  margin: 4px 0 8px;
+}
+.lk-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 18, 32, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  z-index: 60;
+}
+.lk-modal {
+  background: var(--surface-elevated);
+  color: var(--surface-fg);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.28);
+  padding: 20px 22px;
+  width: min(440px, 100%);
+}
+.lk-modal h2 {
+  margin: 0 0 8px;
+  font-size: 18px;
+}
+.lk-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 20px;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  background: var(--surface-elevated);
+  color: var(--surface-fg);
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+  padding: 10px 14px;
+  max-width: min(560px, calc(100% - 32px));
+  z-index: 60;
+}
+.lk-phrase li.lk-phrase-pick > span {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+  background: var(--accent-soft);
+}
 @media (max-width: 520px) {
   .lk-phrase-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
