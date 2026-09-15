@@ -153,6 +153,8 @@ pub enum ProcessedMessage {
         data: Vec<u8>,
         /// The sender's leaf index, or `None` for an external sender.
         sender_leaf: Option<u32>,
+        /// The account the sender leaf resolves to (ADR-0050), or `None`.
+        sender_account: Option<Vec<u8>>,
     },
     /// A commit was processed and merged. Group state advanced.
     Commit,
@@ -243,9 +245,14 @@ impl Group {
         let result = g.process_incoming_verifying_roles(&identity.inner, &bytes)?;
         drop(g); // release the lock before classifying — the result is owned.
         Ok(match result {
-            MlsIncoming::Application { bytes, sender_leaf } => ProcessedMessage::Application {
+            MlsIncoming::Application {
+                bytes,
+                sender_leaf,
+                sender_account,
+            } => ProcessedMessage::Application {
                 data: bytes,
                 sender_leaf,
+                sender_account,
             },
             MlsIncoming::Commit => ProcessedMessage::Commit,
             // ADR-0045: the record is discarded on purpose — see
@@ -356,7 +363,9 @@ mod tests {
             .process_incoming_verifying_roles(&slim_bob, sealed_wire)
             .unwrap();
         let data = match processed {
-            ProcessedMessage::Application { data, sender_leaf } => {
+            ProcessedMessage::Application {
+                data, sender_leaf, ..
+            } => {
                 assert!(
                     sender_leaf.is_some(),
                     "a group member's message carries a sender leaf",

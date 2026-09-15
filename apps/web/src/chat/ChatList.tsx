@@ -22,9 +22,10 @@ import {
 import { A, useNavigate } from "@solidjs/router";
 
 import { useAuth } from "../auth/AuthContext";
-import { base64Encode, base64UrlEncodeNoPad } from "../auth/account-id";
+import { base64UrlEncodeNoPad } from "../auth/account-id";
 import { getDeviceKey } from "../auth/key-store";
 import { restoredKind } from "../auth/restore-marker";
+import { ownPersonKeyB64, peopleCountOf, personKeysOf } from "./person-key";
 import { useChats, type ActiveGroup } from "./ChatContext";
 import { chatListLine, membershipState, readIsActive } from "./membership-ended";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
@@ -63,32 +64,18 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
    *  however the chat was created. A group keeps its own label. */
   /** The other member's key in a 1x1 chat, else `null`. */
   const peerKeyOf = (g: ActiveGroup): string | null => {
-    const own = chats.identity();
-    const ownB64 = own === null ? null : base64Encode(own.signaturePublicKey);
-    let memberB64s: string[] = [];
-    try {
-      memberB64s = (g.group.members() as Array<{ signaturePublicKey: Uint8Array }>).map((m) =>
-        base64Encode(m.signaturePublicKey),
-      );
-    } catch {
-      return null;
-    }
+    const ownB64 = ownPersonKeyB64(chats.identity());
+    const memberB64s = personKeysOf(g.group);
+    if (memberB64s.length === 0) return null;
     const peers = memberB64s.filter((k) => k !== ownB64);
     return memberB64s.length === 2 && peers.length === 1 ? (peers[0] ?? null) : null;
   };
 
   const chatLabel = (g: ActiveGroup): string => {
     accepted();
-    const own = chats.identity();
-    const ownB64 = own === null ? null : base64Encode(own.signaturePublicKey);
-    let memberB64s: string[] = [];
-    try {
-      memberB64s = (g.group.members() as Array<{ signaturePublicKey: Uint8Array }>).map((m) =>
-        base64Encode(m.signaturePublicKey),
-      );
-    } catch {
-      // members() can throw on a torn group; fall through to the label.
-    }
+    const ownB64 = ownPersonKeyB64(chats.identity());
+    // ADR-0050 — people, not leaves.
+    const memberB64s = personKeysOf(g.group);
     const peers = memberB64s.filter((k) => k !== ownB64);
     if (memberB64s.length === 2 && peers.length === 1 && peers[0] !== undefined) {
       return profiles.resolve(peers[0]).name;
@@ -165,6 +152,12 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
     return items;
   };
 
+  /** ADR-0050 — a device that landed through a recovery route (three words,
+   *  the phrase, another device, a passkey) holds the identity and is admitted
+   *  to the account's chats by its other devices or its contacts. Until the
+   *  first chat arrives there is exactly one thing to say. */
+  const synchronizing = (): boolean => restoredKind() !== null && chats.groups().length === 0;
+
   /** ADR-0045 UX §6.2.4: the row's one muted line once the membership is
    *  over, or `null` while the reader is still a member. The chat stays in
    *  the list; only the badge goes quiet. */
@@ -202,6 +195,15 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
     <aside class="lk-pane" aria-label="Chats">
       <div class="lk-pane-head">
         <h1>Chats</h1>
+        {/* ADR-0050 / docs/ux/second-device.md section 2: one label while a
+            device that landed through a recovery route is still being admitted
+            to the account's chats. Chats appear as they arrive; the label goes
+            when the first one does. Never a counter, never a per-chat row. */}
+        <Show when={synchronizing()}>
+          <span class="lk-pane-status" role="status">
+            Synchronizing...
+          </span>
+        </Show>
         <div class="lk-menu-anchor">
           <button
             type="button"
@@ -246,36 +248,14 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
       <Show
         when={chats.groups().length > 0}
         fallback={
-          <Show
-            when={restoredKind() !== null}
-            fallback={
-              <div class="lk-empty">
-                <Icon name="chat" size={40} strokeWidth={1.4} />
-                <strong>No conversations yet</strong>
-                <span>Start a chat with a contact, or share your invite link.</span>
-                <button type="button" class="primary" onClick={() => navigate(paths.contacts)}>
-                  New chat
-                </button>
-              </div>
-            }
-          >
-            {/* ADR-0049 section 5: a restored device holds the identity, not
-                the account's existing conversations. Say so; never a spinner. */}
-            <div class="lk-empty">
-              <Icon name="key" size={40} strokeWidth={1.4} />
-              <strong>Your identity is restored</strong>
-              <span>
-                Your existing chats stay on your other devices for now: a newly
-                added device does not yet join the account's conversations.
-                Chats you start here work as usual. If no other device is left,
-                ask your contacts to add you back; they will see you as the same
-                person.
-              </span>
-              <button type="button" class="primary" onClick={() => navigate(paths.contacts)}>
-                New chat
-              </button>
-            </div>
-          </Show>
+          <div class="lk-empty">
+            <Icon name="chat" size={40} strokeWidth={1.4} />
+            <strong>No conversations yet</strong>
+            <span>Start a chat with a contact, or share your invite link.</span>
+            <button type="button" class="primary" onClick={() => navigate(paths.contacts)}>
+              New chat
+            </button>
+          </div>
         }
       >
         <div class="lk-pane-body">
@@ -303,7 +283,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                 // group its size. A member count on a 1x1 says nothing.
                 const peer = peerKeyOf(g);
                 if (peer !== null) return profiles.resolve(peer).username ?? "";
-                const n = g.group.memberCount;
+                const n = peopleCountOf(g.group);
                 return `${n} member${n === 1 ? "" : "s"}`;
               };
               return (

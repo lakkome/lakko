@@ -40,6 +40,20 @@ impl Identity {
             .leaf_node_capabilities(crate::device_group::lakko_leaf_capabilities(
                 self.ciphersuite,
             ))
+            // ADR-0050 section 2.6 — a device's published KeyPackage is a
+            // LAST-RESORT package (RFC 9420 section 10, `last_resort`
+            // extension): OpenMLS keeps its private init key after a Welcome
+            // built on it is opened, so ONE published package opens every
+            // Welcome sealed to it. That is what admitting a device to N
+            // groups in one pass needs (the pairing fan-out and a contact's
+            // re-admission both fetch one package and propose N Adds), and
+            // what the previous one-time posture broke: the second Welcome hit
+            // a deleted key. The forward-secrecy cost — the init key survives
+            // until the identity's storage is wiped — is recorded in the ADR
+            // together with the follow-up (a batch of one-time packages beside
+            // this one; pruning of superseded bundles). Clients still republish
+            // after every consumed Welcome, so later adds use fresher keys.
+            .mark_as_last_resort()
             .build(
                 self.ciphersuite,
                 &self.provider,
@@ -72,6 +86,39 @@ impl Identity {
     ///
     /// [`Error::KeyPackage`] on KeyPackage generation failure, [`Error::Group`]
     /// on proposal construction failure, or [`Error::Codec`] on encode failure.
+    /// **Adversary, for tests only.** Mint a KeyPackage whose leaf credential
+    /// carries `credential_identity` verbatim — what a non-Lakko client that
+    /// copied or corrupted a device binding would publish. Not part of the
+    /// supported API; it exists so integration tests can prove every gate
+    /// refuses such a leaf.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::KeyPackage`] on any OpenMLS-side failure.
+    #[doc(hidden)]
+    pub fn adversary_key_package_with_credential(
+        &self,
+        credential_identity: Vec<u8>,
+    ) -> Result<KeyPackage> {
+        use openmls::credentials::{BasicCredential, CredentialWithKey};
+        let credential = CredentialWithKey {
+            credential: BasicCredential::new(credential_identity).into(),
+            signature_key: self.signature_keys.public().into(),
+        };
+        let bundle = KeyPackage::builder()
+            .leaf_node_capabilities(crate::device_group::lakko_leaf_capabilities(
+                self.ciphersuite,
+            ))
+            .build(
+                self.ciphersuite,
+                &self.provider,
+                &self.signature_keys,
+                credential,
+            )
+            .map_err(|e| Error::KeyPackage(format!("{e:?}")))?;
+        Ok(bundle.key_package().clone())
+    }
+
     pub fn create_external_join_proposal(&self, group_id: &[u8], epoch: u64) -> Result<Vec<u8>> {
         let kp = self.create_key_package()?;
         let msg = JoinProposal::new::<MemoryStorage>(
@@ -233,6 +280,28 @@ pub fn signature_key(bytes: &[u8]) -> Result<Vec<u8>> {
     let kp_in = deserialize(bytes)?;
     let cwk = kp_in.unverified_credential();
     Ok(cwk.signature_key.as_slice().to_vec())
+}
+
+/// Resolve a wire-form KeyPackage's leaf to the **account** key it belongs to
+/// (ADR-0050): the device binding's account key when the leaf credential
+/// carries a valid binding for this leaf, the leaf key itself for an unbound
+/// Phase 1 leaf, and `None` for a leaf whose credential is neither — which every
+/// admission gate refuses.
+///
+/// This is what the ADR-0032 call-admission dedup and a contact's device list
+/// key on, since both must resolve a KeyPackage from a **non-member** before
+/// any shared group exists.
+///
+/// # Errors
+///
+/// Returns [`Error::Codec`] on parse failure.
+pub fn account_key(bytes: &[u8]) -> Result<Option<[u8; 32]>> {
+    let kp_in = deserialize(bytes)?;
+    let cwk = kp_in.unverified_credential();
+    Ok(crate::device_binding::account_key_of_credential(
+        cwk.credential.serialized_content(),
+        cwk.signature_key.as_slice(),
+    ))
 }
 
 #[cfg(test)]

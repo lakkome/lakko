@@ -102,6 +102,9 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
   const profiles = useProfiles();
   const client = new ContactsClient(undefined, undefined, {
     identityProvider: () => chats.identity(),
+    // ADR-0050: requests, acks and the account mailbox are the person's;
+    // groups and the device mailbox are this device's.
+    accountIdentityProvider: () => chats.accountIdentity(),
     onPersist: async () => {
       const s = auth.state();
       if (s.kind !== "session") return;
@@ -230,6 +233,34 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
     dispatch,
   });
 
+  // ADR-0050 — the DEVICE mailbox, where Welcomes sealed to this device's
+  // KeyPackages arrive. Its own cursor: a different DS queue.
+  const DEVICE_CURSOR_KEY = "lakko.contacts.device-mailbox.v1";
+  let deviceCursor = loadDeviceCursor();
+  function loadDeviceCursor(): number {
+    try {
+      const raw = globalThis.localStorage?.getItem(DEVICE_CURSOR_KEY);
+      const n = raw === null || raw === undefined ? 0 : Number(raw);
+      return Number.isFinite(n) && n >= 0 ? n : 0;
+    } catch {
+      return 0;
+    }
+  }
+  const devicePoller: MailboxPoller = createMailboxPoller<IncomingMailboxEvent>({
+    readCursor: () => deviceCursor,
+    writeCursor: (next) => {
+      deviceCursor = next;
+      try {
+        globalThis.localStorage?.setItem(DEVICE_CURSOR_KEY, String(next));
+      } catch {
+        /* storage unavailable: re-fetch after reload is harmless */
+      }
+    },
+    fetch: async (after, waitSecs, signal) =>
+      client.pollDeviceMailbox(auth.identitySecrets(), after, waitSecs, signal),
+    dispatch,
+  });
+
   function isHidden(): boolean {
     return globalThis.document?.visibilityState === "hidden";
   }
@@ -246,7 +277,12 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
       isPaused: isHidden,
       waitUntilResumed: (signal) => resume.wait(signal),
       tick: async (signal) => {
-        await poller.poll(LONG_POLL_WAIT_SECS, signal);
+        // Long-poll the account mailbox and the device mailbox together; the
+        // tick ends when both return (each returns early on a new row).
+        await Promise.all([
+          poller.poll(LONG_POLL_WAIT_SECS, signal),
+          devicePoller.poll(LONG_POLL_WAIT_SECS, signal),
+        ]);
         return 0;
       },
       classifyFailure: (err) => (isDsNetworkFailure(err) ? "network" : "other"),
@@ -309,7 +345,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
       }
       setBusy(true);
       try {
-        await poller.poll(0);
+        await Promise.all([poller.poll(0), devicePoller.poll(0)]);
       } catch (err) {
         setError(formatMailboxError(err));
       } finally {

@@ -83,6 +83,8 @@ import {
 import {
   deleteDeviceIdentitySeed,
   ensureDeviceIdentitySeed,
+  getDeviceBinding,
+  putDeviceBinding,
 } from "./device-identity-store";
 import {
   ACCOUNT_IDENTITY_SEED_LENGTH,
@@ -768,8 +770,13 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     createKeyPackage: (ctx) => ctx.identity.createKeyPackage(),
     persistDurable: (ctx) =>
       chats.persistSnapshotDurable(ctx.accountIdB64, ctx.identity),
+    // ADR-0050: the row is keyed by this device's leaf key.
     upload: (ctx, keyPackage) =>
-      discovery.uploadKeyPackage(ctx.accountIdBytes, keyPackage),
+      discovery.uploadKeyPackage(
+        ctx.accountIdBytes,
+        keyPackage,
+        ctx.identity.signaturePublicKey,
+      ),
   });
 
   /** Session-start KeyPackage publish on the explicit auth flows. Awaited
@@ -892,6 +899,65 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     }
   }
 
+  /**
+   * ADR-0050 — install the session's two identities. `canonical` is the
+   * phrase-seeded ACCOUNT identity (contacts, discovery, safety number); the
+   * DEVICE identity — a per-install random seed bound to the account key by a
+   * signed binding carried in its leaf credential — is what every
+   * conversation group and every KeyPackage uses from now on, so a person's
+   * devices are distinct MLS leaves that all resolve to one account.
+   *
+   * The binding is minted once and persisted so its `issued_at` is stable;
+   * a missing device key (a half-reset device) falls back to an unbound
+   * canonical identity for the chats, which is the pre-ADR-0050 behaviour.
+   */
+  async function installSessionIdentities(
+    wasm: Wasm,
+    canonical: WasmIdentity,
+    accountIdB64: string,
+  ): Promise<void> {
+    chats.setAccountIdentity(canonical);
+    let device: WasmIdentity | null = null;
+    try {
+      const deviceKey = await getDeviceKey(accountIdB64);
+      if (deviceKey !== null) {
+        const seed = await ensureDeviceIdentitySeed(accountIdB64, deviceKey);
+        const stored = await getDeviceBinding(accountIdB64);
+        if (stored !== null) {
+          try {
+            device = wasm.Identity.fromSeedWithBinding(seed, stored);
+          } catch (err) {
+            // A binding that no longer verifies (the account key rotated
+            // by a fresh-identity mint): re-mint below.
+            // eslint-disable-next-line no-console
+            console.warn("stored device binding rejected, re-minting", err);
+          }
+        }
+        if (device === null) {
+          device = wasm.Identity.fromSeedBound(
+            seed,
+            canonical.ed25519Seed,
+            BigInt(Math.floor(Date.now() / 1000)),
+          );
+          const binding = device.deviceBinding;
+          if (binding !== undefined) await putDeviceBinding(accountIdB64, binding);
+        }
+      }
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("device identity install failed; chats fall back to the account identity", err);
+      device = null;
+    }
+    if (device === null) {
+      // The canonical identity now serves both roles; `setIdentity` would
+      // free the instance `setAccountIdentity` holds, so hand the chats a
+      // second instance of the same seed.
+      chats.setIdentity(wasm.Identity.fromSeed(canonical.ed25519Seed));
+      return;
+    }
+    chats.setIdentity(device);
+  }
+
   async function finishCanonicalSession(args: {
     wasm: Wasm;
     accountIdentitySeed: Uint8Array;
@@ -904,7 +970,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     silentRestore?: boolean;
   }): Promise<void> {
     const canonical = args.wasm.Identity.fromSeed(args.accountIdentitySeed);
-    chats.setIdentity(canonical);
+    await installSessionIdentities(args.wasm, canonical, args.accountIdB64);
     keyPackageAccount = {
       accountIdBytes: args.accountIdBytes,
       accountIdB64: args.accountIdB64,
@@ -1352,7 +1418,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // lifetime of the session and will free() it on
       // logout/forgetDevice. ADR-0017: seeded from the phrase seed.
       const canonical = wasm.Identity.fromSeed(accountIdentitySeed);
-      chats.setIdentity(canonical);
+      await installSessionIdentities(wasm, canonical, accountIdB64);
       keyPackageAccount = { accountIdBytes: result.accountId, accountIdB64 };
 
       // 1.16e6c3: rehydrate prior MLS state if any. For signup
@@ -2648,7 +2714,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // never re-verify. ChatProvider free()s the prior
         // (pre-recovery) Identity if anything was lingering.
         const canonical = wasm.Identity.fromSeed(accountIdentitySeed);
-        chats.setIdentity(canonical);
+        await installSessionIdentities(wasm, canonical, accountIdB64);
         keyPackageAccount = { accountIdBytes, accountIdB64 };
 
         // 1.16e6c3: rehydrate path is a guaranteed no-op here —

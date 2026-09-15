@@ -126,8 +126,13 @@ pub enum ProposalKind {
     /// Add a prospective member, carrying their Ed25519 signature public key
     /// (the stable identity handle the role table and the contact graph key on).
     Add {
-        /// The prospective member's 32-byte Ed25519 signature public key.
+        /// The prospective member's 32-byte Ed25519 **leaf** signature key.
         signature_key: Vec<u8>,
+        /// The account the leaf belongs to, resolved from its credential
+        /// (ADR-0050): the device binding's account key, or the leaf key itself
+        /// for an unbound Phase 1 leaf. `None` when the credential carries a
+        /// binding that does not verify for this leaf — refused everywhere.
+        account_key: Option<Vec<u8>>,
     },
     /// Remove the member sitting at `target_leaf`.
     Remove {
@@ -169,28 +174,34 @@ pub struct ProposalRecord {
     pub stored: bool,
 }
 
-/// The author of a proposal as the gate sees them: the MLS-authenticated sender
-/// leaf plus that leaf's signature public key, resolved from the **pre-merge**
-/// roster. A sender that cannot be resolved to a member has no `Proposer` at
-/// all, and [`authorise`] refuses every kind in that case.
+/// The author of a proposal as the gate sees them: the **account** the
+/// MLS-authenticated sender leaf resolves to in the **pre-merge** roster
+/// (ADR-0050). A sender that cannot be resolved to a member, or whose leaf
+/// resolves to no account, has no `Proposer` at all, and [`authorise`] refuses
+/// every kind in that case. Every authority question is asked about the
+/// account, never the leaf, so a person holds the same authority from each of
+/// their devices.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct Proposer<'a> {
-    /// The sender's leaf index.
-    pub leaf: u32,
-    /// The sender's Ed25519 signature public key at that leaf.
-    pub pubkey: &'a [u8],
+pub(crate) struct Proposer {
+    /// The account the sender leaf belongs to.
+    pub account: [u8; 32],
 }
 
 /// Classify an OpenMLS [`Proposal`] into its Lakko [`ProposalKind`].
 pub(crate) fn classify(proposal: &Proposal) -> ProposalKind {
     match proposal {
-        Proposal::Add(add) => ProposalKind::Add {
-            signature_key: add
-                .key_package()
-                .leaf_node()
-                .signature_key()
-                .as_slice()
-                .to_vec(),
+        Proposal::Add(add) => {
+            let leaf = add.key_package().leaf_node();
+            let signature_key = leaf.signature_key().as_slice().to_vec();
+            let account_key = crate::device_binding::account_key_of_credential(
+                leaf.credential().serialized_content(),
+                &signature_key,
+            )
+            .map(|k| k.to_vec());
+            ProposalKind::Add {
+                signature_key,
+                account_key,
+            }
         },
         Proposal::Remove(remove) => ProposalKind::Remove {
             target_leaf: remove.removed().u32(),
@@ -204,22 +215,43 @@ pub(crate) fn classify(proposal: &Proposal) -> ProposalKind {
     }
 }
 
-/// Resolve a leaf index to that leaf's signature public key in `members`.
-pub(crate) fn pubkey_at_leaf(members: &[MemberRecord], leaf: u32) -> Option<&[u8]> {
+/// Resolve a leaf index to the **account** key the leaf belongs to
+/// (ADR-0050) — `None` for a leaf that is not in `members` or whose credential
+/// did not resolve.
+pub(crate) fn account_key_at_leaf(members: &[MemberRecord], leaf: u32) -> Option<[u8; 32]> {
     members
         .iter()
         .find(|m| m.leaf_index == leaf)
-        .map(|m| m.signature_public_key.as_slice())
+        .and_then(|m| m.account_key.as_slice().try_into().ok())
 }
 
-/// `true` when `leaf` currently holds the group owner's signature key.
+/// The [`Proposer`] at `leaf`, or `None` when the leaf is not in `members` or
+/// resolves to no account. **The** leaf-to-identity step every gate takes.
+pub(crate) fn proposer_at(members: &[MemberRecord], leaf: u32) -> Option<Proposer> {
+    account_key_at_leaf(members, leaf).map(|account| Proposer { account })
+}
+
+/// `true` when `leaf` currently belongs to the group owner's account.
 ///
 /// A leaf that is not in `members` is **not** the owner — the same reading the
 /// pre-ADR-0045 commit gate used, so an unknown leaf still falls through to the
 /// owner-or-admin requirement below rather than being silently blessed.
 fn leaf_is_owner(table: &RoleTable, members: &[MemberRecord], leaf: u32) -> bool {
-    pubkey_at_leaf(members, leaf).is_some_and(|pk| table.is_owner(pk))
+    account_key_at_leaf(members, leaf).is_some_and(|k| table.is_owner(&k))
 }
+
+/// Number of leaves in `members` that resolve to `account`.
+pub(crate) fn leaves_of_account(members: &[MemberRecord], account: &[u8]) -> usize {
+    members
+        .iter()
+        .filter(|m| m.account_key.as_slice() == account)
+        .count()
+}
+
+/// Upper bound on leaves one account may hold in a group (ADR-0050). Enforced
+/// at the receipt gate and in the sweep filter, so the self-service `Add` arm
+/// cannot be used to fill a group.
+pub const MAX_LEAVES_PER_ACCOUNT: usize = 8;
 
 /// **The** ADR-0045 proposal-authorisation rule.
 ///
@@ -233,11 +265,19 @@ fn leaf_is_owner(table: &RoleTable, members: &[MemberRecord], leaf: u32) -> bool
 ///
 /// | Ask | Who may |
 /// |---|---|
-/// | [`ProposalKind::Add`] | owner or admin |
-/// | [`ProposalKind::Remove`] of the **owner's** leaf | nobody — the owner is unremovable |
-/// | [`ProposalKind::Remove`] of the **proposer's own** leaf | anyone (this is leaving) |
+/// | [`ProposalKind::Add`] of a leaf of the **proposer's own account** | anyone (ADR-0050: adding my own device) |
+/// | [`ProposalKind::Add`] of a leaf of an account **already in the group** | anyone (ADR-0050: re-admitting a member's new device) |
+/// | [`ProposalKind::Add`] of a leaf whose binding does not resolve | nobody |
+/// | [`ProposalKind::Add`] of anyone else | owner or admin |
+/// | [`ProposalKind::Remove`] of the owner account's **last** leaf | nobody — the owner is unremovable |
+/// | [`ProposalKind::Remove`] of a leaf of the **proposer's own account** | anyone (leaving, or removing my own device) |
 /// | [`ProposalKind::Remove`] of any other leaf | owner or admin |
-/// | [`ProposalKind::Leave`] by the **owner** | nobody — transfer first (see below) |
+/// | [`ProposalKind::Leave`] by the owner's **last** leaf | nobody — transfer first (see below) |
+///
+/// "Own account" is the ADR-0050 resolution of the leaf, so a person acting
+/// from any of their devices holds the same authority. The owner's *last* leaf
+/// is judged against the current roster here as a courtesy; the commit-level
+/// rule [`owner_survives`] is what enforces it on every peer.
 /// | [`ProposalKind::Leave`] by anyone else | anyone |
 /// | [`ProposalKind::Update`] | nobody — see below |
 /// | [`ProposalKind::RoleChange`] | the owner only |
@@ -329,7 +369,7 @@ fn leaf_is_owner(table: &RoleTable, members: &[MemberRecord], leaf: u32) -> bool
 pub(crate) fn authorise(
     table: &RoleTable,
     members: &[MemberRecord],
-    proposer: Option<Proposer<'_>>,
+    proposer: Option<Proposer>,
     kind: &ProposalKind,
 ) -> Result<()> {
     let Some(proposer) = proposer else {
@@ -338,12 +378,23 @@ pub(crate) fn authorise(
             "proposal refused: sender is not a resolvable group member",
         ));
     };
-    let is_owner = table.is_owner(proposer.pubkey);
-    let can_administer = table.can_administer(proposer.pubkey);
+    let is_owner = table.is_owner(&proposer.account);
+    let can_administer = table.can_administer(&proposer.account);
 
     match kind {
-        ProposalKind::Add { .. } => {
-            if !can_administer {
+        ProposalKind::Add {
+            account_key,
+            signature_key: _,
+        } => {
+            let Some(added) = account_key else {
+                return Err(Error::refused(
+                    RefusalReason::DeviceBindingInvalid,
+                    "add proposal refused: the added leaf's device binding does not verify",
+                ));
+            };
+            let own_device = added.as_slice() == proposer.account;
+            let account_already_present = leaves_of_account(members, added) > 0;
+            if !can_administer && !own_device && !account_already_present {
                 return Err(Error::refused(
                     RefusalReason::AddNotOwnerOrAdmin,
                     "add proposal refused: proposer is not owner or admin",
@@ -351,14 +402,24 @@ pub(crate) fn authorise(
             }
         },
         ProposalKind::Remove { target_leaf } => {
+            let target_account = account_key_at_leaf(members, *target_leaf);
+            let own_account = target_account.is_some_and(|a| a == proposer.account);
             if leaf_is_owner(table, members, *target_leaf) {
-                return Err(Error::refused(
-                    RefusalReason::OwnerUnremovable,
-                    "removal proposal refused: the group owner cannot be removed",
-                ));
+                // The owner may retire one of its own devices as long as
+                // another stays; the owner's last leaf is unremovable by
+                // anyone, the owner included.
+                let owner_keeps_a_leaf =
+                    own_account && leaves_of_account(members, table.owner()) > 1;
+                if !owner_keeps_a_leaf {
+                    return Err(Error::refused(
+                        RefusalReason::OwnerUnremovable,
+                        "removal proposal refused: the group owner cannot be removed",
+                    ));
+                }
             }
-            // Removing exactly your own leaf is leaving, and needs no role.
-            if *target_leaf != proposer.leaf && !can_administer {
+            // Removing a leaf of your own account is leaving, or retiring one
+            // of your devices; neither needs a role.
+            if !own_account && !can_administer {
                 return Err(Error::refused(
                     RefusalReason::RemoveNotOwnerOrAdmin,
                     "removal proposal refused: proposer is not owner or admin",
@@ -366,7 +427,7 @@ pub(crate) fn authorise(
             }
         },
         ProposalKind::Leave => {
-            if is_owner {
+            if is_owner && leaves_of_account(members, table.owner()) <= 1 {
                 return Err(Error::refused(
                     RefusalReason::OwnerCannotLeave,
                     "self-removal proposal refused: the group owner cannot leave",
@@ -455,13 +516,13 @@ pub(crate) fn authorise(
 /// predicate is written down here, once, beside the rule it qualifies.
 pub(crate) fn is_owner_response(
     table: &RoleTable,
-    proposer: Option<Proposer<'_>>,
+    proposer: Option<Proposer>,
     kind: &ProposalKind,
 ) -> bool {
     let Some(proposer) = proposer else {
         return false;
     };
-    table.is_owner(proposer.pubkey)
+    table.is_owner(&proposer.account)
         && matches!(kind, ProposalKind::Remove { .. } | ProposalKind::RoleChange)
 }
 
@@ -495,6 +556,9 @@ pub(crate) struct CommitEffects {
     removed_leaves: Vec<u32>,
     /// Signature keys the commit adds.
     added_keys: Vec<Vec<u8>>,
+    /// The accounts those added leaves resolve to (ADR-0050), in the same
+    /// order; `None` for a leaf whose binding does not resolve.
+    added_accounts: Vec<Option<Vec<u8>>>,
 }
 
 /// Summarise what `proposals` would do if committed together.
@@ -504,7 +568,13 @@ pub(crate) fn commit_effects<'a>(
     let mut effects = CommitEffects::default();
     for qp in proposals {
         match classify(qp.proposal()) {
-            ProposalKind::Add { signature_key } => effects.added_keys.push(signature_key),
+            ProposalKind::Add {
+                signature_key,
+                account_key,
+            } => {
+                effects.added_keys.push(signature_key);
+                effects.added_accounts.push(account_key);
+            },
             ProposalKind::Remove { target_leaf } => effects.removed_leaves.push(target_leaf),
             ProposalKind::Leave => {
                 // `SelfRemove` names no target: the removed leaf is the sender's
@@ -595,22 +665,41 @@ fn role_table_of(proposal: &Proposal) -> Option<RoleTable> {
 /// [`Error::Group`] when the commit would leave the group's owner outside it, or
 /// would erase the role table. A commit carrying no role change is always
 /// authorised by this rule.
-pub(crate) fn owner_survives(effects: &CommitEffects, members: &[MemberRecord]) -> Result<()> {
+pub(crate) fn owner_survives(
+    effects: &CommitEffects,
+    members: &[MemberRecord],
+    current_owner: &[u8],
+) -> Result<()> {
     if effects.role_table_would_vanish {
         return Err(Error::refused(
             RefusalReason::RoleTableWouldVanish,
             "commit refused: it would remove this group's role table",
         ));
     }
-    if effects.proposed_owners.is_empty() {
-        return Ok(());
-    }
+    // ADR-0050: an owner is an account, and it survives when at least one of
+    // its leaves is in the roster the commit produces — a leaf that stays, or
+    // one the commit adds.
     let survives = |key: &[u8]| {
         let stays = members.iter().any(|m| {
-            m.signature_public_key == key && !effects.removed_leaves.contains(&m.leaf_index)
+            m.account_key.as_slice() == key && !effects.removed_leaves.contains(&m.leaf_index)
         });
-        stays || effects.added_keys.iter().any(|k| k == key)
+        stays
+            || effects
+                .added_accounts
+                .iter()
+                .any(|a| a.as_deref() == Some(key))
     };
+    if effects.proposed_owners.is_empty() {
+        // No role change: the current owner must still hold a leaf afterwards,
+        // or the group could never be administered again.
+        if !survives(current_owner) {
+            return Err(Error::refused(
+                RefusalReason::OwnerUnremovable,
+                "commit refused: it would remove the group owner's last device",
+            ));
+        }
+        return Ok(());
+    }
     for owner in &effects.proposed_owners {
         if !survives(owner) {
             return Err(Error::refused(
@@ -637,26 +726,32 @@ mod tests {
             MemberRecord {
                 leaf_index: 0,
                 signature_public_key: pk(1).to_vec(),
+                account_key: pk(1).to_vec(),
             },
             MemberRecord {
                 leaf_index: 1,
                 signature_public_key: pk(2).to_vec(),
+                account_key: pk(2).to_vec(),
             },
             MemberRecord {
                 leaf_index: 2,
                 signature_public_key: pk(3).to_vec(),
+                account_key: pk(3).to_vec(),
             },
         ];
         (table, members)
     }
 
-    fn proposer(leaf: u32, key: &[u8]) -> Proposer<'_> {
-        Proposer { leaf, pubkey: key }
+    fn proposer(_leaf: u32, key: &[u8]) -> Proposer {
+        Proposer {
+            account: key.try_into().expect("32-byte test key"),
+        }
     }
 
     fn add_kind() -> ProposalKind {
         ProposalKind::Add {
             signature_key: pk(9).to_vec(),
+            account_key: Some(pk(9).to_vec()),
         }
     }
 
@@ -825,7 +920,7 @@ mod tests {
         let admin = pk(2);
         let member = pk(3);
 
-        let cases: Vec<(&str, Option<Proposer<'_>>, ProposalKind, RefusalReason)> = vec![
+        let cases: Vec<(&str, Option<Proposer>, ProposalKind, RefusalReason)> = vec![
             (
                 "unresolvable sender",
                 None,
@@ -898,7 +993,7 @@ mod tests {
             ..CommitEffects::default()
         };
         assert_eq!(
-            owner_survives(&vanishing, &m)
+            owner_survives(&vanishing, &m, &pk(1))
                 .expect_err("an erased role table must be refused")
                 .refusal_reason(),
             Some(RefusalReason::RoleTableWouldVanish),
@@ -909,7 +1004,7 @@ mod tests {
             ..CommitEffects::default()
         };
         assert_eq!(
-            owner_survives(&stranger, &m)
+            owner_survives(&stranger, &m, &pk(1))
                 .expect_err("an owner outside the group must be refused")
                 .refusal_reason(),
             Some(RefusalReason::OwnerNotAMember),
@@ -922,7 +1017,7 @@ mod tests {
             ..CommitEffects::default()
         };
         assert_eq!(
-            owner_survives(&self_removing, &m)
+            owner_survives(&self_removing, &m, &pk(1))
                 .expect_err("an owner the same commit removes must be refused")
                 .refusal_reason(),
             Some(RefusalReason::OwnerNotAMember),

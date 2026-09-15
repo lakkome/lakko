@@ -20,6 +20,7 @@
 import { createSignal, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { useAuth } from "../auth/AuthContext";
 import { AuthClient } from "../auth/client";
+import { useBackgroundReceive } from "../chat/BackgroundReceiveContext";
 import { getDeviceKey } from "../auth/key-store";
 import { base64Decode } from "../auth/account-id";
 import { comparisonCode, DEVICE_REQUEST_POLL_MS } from "./device-request";
@@ -27,6 +28,8 @@ import { runScanFlow } from "./orchestrator";
 
 export function DeviceRequestPrompt(): JSX.Element {
   const auth = useAuth();
+  // ADR-0050 section 2.8 — the confirmed device is admitted to every chat.
+  const receive = useBackgroundReceive();
   type Pending = {
     requestId: string;
     payload: Uint8Array;
@@ -105,7 +108,7 @@ export function DeviceRequestPrompt(): JSX.Element {
         throw new Error("No device key on this browser. Sign in again.");
       }
       const client = new AuthClient();
-      await runScanFlow({
+      const scanned = await runScanFlow({
         scannedBytes: p.payload,
         accountIdBytes: base64Decode(s.account.accountId),
         accountIdB64: s.account.accountId,
@@ -116,6 +119,12 @@ export function DeviceRequestPrompt(): JSX.Element {
             client.deviceAuthorizeStart(secrets.sessionToken),
         },
       });
+      // ADR-0050 section 2.8 — not awaited: it waits for the device to land
+      // and publish its KeyPackage, which is minutes.
+      void receive.admitDevice(scanned.newDeviceKey).catch((err: unknown) => {
+        // eslint-disable-next-line no-console
+        console.warn("ADR-0050 admit device: fan-out failed", err);
+      });
       handled.add(p.requestId);
       try {
         await client.deviceRequestDelete(secrets.sessionToken, p.requestId);
@@ -123,10 +132,7 @@ export function DeviceRequestPrompt(): JSX.Element {
         // The request expires on its own.
       }
       setPending(null);
-      setResult(
-        "Device added. It now holds your identity and your message history; " +
-          "your chats keep living on this device.",
-      );
+      setResult("Device added.");
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error("device-request: confirm failed", err);

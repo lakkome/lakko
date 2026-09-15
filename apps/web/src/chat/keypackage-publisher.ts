@@ -6,17 +6,16 @@
  *
  * ## Why this exists
  *
- * A KeyPackage is single-use on the receiving side. OpenMLS deletes the
- * KeyPackage's private init key when it processes a Welcome built on it
- * (unless the package is marked last-resort, which Lakko never does), so
- * after this device joins ONE group the KeyPackage the directory still serves
- * is dead: the next peer that fetches it and sends a Welcome gets a Welcome
- * this device can no longer open. Discovery stores one row per account and
- * fetching does not consume it, so nothing server-side notices either. Before
- * this module the web client only uploaded a KeyPackage at signup / login /
- * recover, so an identity that had joined one group could not be added to a
- * second until the user logged in again — and the failure was a
- * `console.warn`.
+ * Until ADR-0050 a KeyPackage was single-use on the receiving side: OpenMLS
+ * deletes the package's private init key when it processes a Welcome built on
+ * it, so after this device joined ONE group the package the directory still
+ * served was dead. Since ADR-0050 section 2.6 the published package is a
+ * LAST-RESORT package (the core marks it), so every Welcome sealed to it
+ * opens — that is what lets one device be admitted to N chats from one fetch
+ * (the pairing fan-out, a contact's re-admission). Republishing after each
+ * consumed Welcome stays: it is now the forward-secrecy rotation rather than
+ * a liveness fix, and it keeps the directory serving a fresh key.
+ * Discovery stores one row per device and fetching does not consume it.
  *
  * ## The order, and why it is fail-closed
  *

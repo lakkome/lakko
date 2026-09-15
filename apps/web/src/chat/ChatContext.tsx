@@ -103,6 +103,11 @@ export interface ChatApi {
    *  login / recover); also `null` after a session restored
    *  from IDB until the user re-enters their password. */
   readonly identity: Accessor<WasmIdentity | null>;
+  /** ADR-0050 — the account identity (phrase-seeded), kept beside the
+   *  device identity above for everything that is about the PERSON rather
+   *  than a leaf: contact requests and acks, invite capabilities, the
+   *  discovery bundle, the safety number. `identity()` is the device. */
+  readonly accountIdentity: Accessor<WasmIdentity | null>;
   /** Look up a group by its base64-encoded `group_id`. Returns
    *  `undefined` if the group isn't in the registry — the UI
    *  surfaces a "group not found, please re-create" panel. */
@@ -119,6 +124,8 @@ export interface ChatApi {
    *  (used by `clear()` internally and by `logout` to keep the
    *  provider order tidy). */
   setIdentity(identity: WasmIdentity | null): void;
+  /** Replace the account identity (ADR-0050). Frees the previous one. */
+  setAccountIdentity(identity: WasmIdentity | null): void;
   /** Capture the canonical Identity's provider storage, encrypt
    *  under the device root key for `accountIdB64`, and write
    *  the resulting blob to the `mls-store` IDB row.
@@ -188,6 +195,21 @@ const ChatContext = createContext<ChatApi>();
 export function ChatProvider(props: { children: JSX.Element }): JSX.Element {
   const [groups, setGroups] = createSignal<readonly ActiveGroup[]>([]);
   const [identity, setIdentitySig] = createSignal<WasmIdentity | null>(null);
+  const [accountIdentity, setAccountIdentitySig] =
+    createSignal<WasmIdentity | null>(null);
+
+  function replaceAccountIdentity(next: WasmIdentity | null): void {
+    const prev = accountIdentity();
+    if (prev !== null && prev !== next) {
+      try {
+        prev.free();
+      } catch {
+        // eslint-disable-next-line no-console
+        console.warn("ChatProvider: free() on a stale account Identity threw");
+      }
+    }
+    setAccountIdentitySig(next);
+  }
 
   function replaceIdentity(next: WasmIdentity | null): void {
     const prev = identity();
@@ -212,6 +234,10 @@ export function ChatProvider(props: { children: JSX.Element }): JSX.Element {
   const api: ChatApi = {
     groups,
     identity,
+    accountIdentity,
+    setAccountIdentity(next) {
+      replaceAccountIdentity(next);
+    },
     get(groupIdB64) {
       return groups().find((g) => g.groupIdB64 === groupIdB64);
     },
@@ -267,6 +293,7 @@ export function ChatProvider(props: { children: JSX.Element }): JSX.Element {
         deviceKey,
         snapshotBytes,
         knownGroupIds,
+        base64Encode(id.signaturePublicKey),
       );
     },
     async persistSnapshotDurable(accountIdB64, expectedIdentity) {
@@ -292,7 +319,13 @@ export function ChatProvider(props: { children: JSX.Element }): JSX.Element {
       }
       const snapshotBytes = id.snapshotStorage();
       const knownGroupIds = groups().map((g) => g.groupIdB64);
-      await saveMlsSnapshot(accountIdB64, deviceKey, snapshotBytes, knownGroupIds);
+      await saveMlsSnapshot(
+        accountIdB64,
+        deviceKey,
+        snapshotBytes,
+        knownGroupIds,
+        base64Encode(id.signaturePublicKey),
+      );
     },
     async persistSnapshotWithCommit(accountIdB64, entry) {
       // FAIL-CLOSED (unlike persistSnapshot's no-op returns): a commit path is
@@ -324,6 +357,7 @@ export function ChatProvider(props: { children: JSX.Element }): JSX.Element {
         snapshotBytes,
         knownGroupIds,
         full,
+        base64Encode(id.signaturePublicKey),
       );
     },
     async resetGroupToDurableSnapshot(accountIdB64, groupIdB64) {
@@ -387,6 +421,7 @@ export function ChatProvider(props: { children: JSX.Element }): JSX.Element {
     clear() {
       setGroups([]);
       replaceIdentity(null);
+      replaceAccountIdentity(null);
     },
   };
 

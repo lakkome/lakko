@@ -82,6 +82,12 @@ export interface MlsSnapshotRecord {
    *  the snapshot carries. Used by the rehydration path to
    *  drive `Group.load` per id. */
   knownGroupIds: string[];
+  /** ADR-0050 — base64 of the leaf signature key of the identity the
+   *  snapshot was taken under. A snapshot taken under another identity (a
+   *  pre-ADR-0050 account-key snapshot, or another device's seed) must not
+   *  be restored into this one; `undefined` on a row written before the
+   *  field existed, which the rehydrate path treats as a mismatch. */
+  leafKeyB64?: string;
 }
 
 /** Internal on-disk row shape. The `ciphertext` here actually
@@ -91,6 +97,7 @@ interface PersistedRow {
   accountId: string;
   ciphertext: Uint8Array;
   knownGroupIds: string[];
+  leafKeyB64?: string;
 }
 
 /**
@@ -201,12 +208,14 @@ export async function saveMlsSnapshot(
   deviceKey: CryptoKey,
   snapshotBytes: Uint8Array,
   knownGroupIds: readonly string[],
+  leafKeyB64?: string,
 ): Promise<void> {
   const ciphertext = await encryptSnapshot(deviceKey, snapshotBytes);
   const row: PersistedRow = {
     accountId: accountIdB64,
     ciphertext,
     knownGroupIds: [...knownGroupIds],
+    ...(leafKeyB64 === undefined ? {} : { leafKeyB64 }),
   };
   const db = await openMlsDb();
   try {
@@ -246,12 +255,14 @@ export async function saveSnapshotWithCommitEntry(
   snapshotBytes: Uint8Array,
   knownGroupIds: readonly string[],
   entry: PendingCommitEntry,
+  leafKeyB64?: string,
 ): Promise<void> {
   const ciphertext = await encryptSnapshot(deviceKey, snapshotBytes);
   const snapshotRow: PersistedRow = {
     accountId: accountIdB64,
     ciphertext,
     knownGroupIds: [...knownGroupIds],
+    ...(leafKeyB64 === undefined ? {} : { leafKeyB64 }),
   };
   const db = await openMlsDb();
   try {
@@ -297,6 +308,7 @@ export async function loadMlsSnapshot(
   return {
     snapshotBytes,
     knownGroupIds: row.knownGroupIds,
+    ...(row.leafKeyB64 === undefined ? {} : { leafKeyB64: row.leafKeyB64 }),
   };
 }
 

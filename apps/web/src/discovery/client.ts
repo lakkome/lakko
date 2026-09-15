@@ -227,6 +227,14 @@ export class DiscoveryNetworkError extends Error {
   }
 }
 
+/** One device of an account, as the directory serves it (ADR-0050). */
+export interface DeviceKeyPackage {
+  /** The device leaf's 32-byte Ed25519 signature key. */
+  readonly deviceId: Uint8Array;
+  /** TLS-encoded MLS KeyPackage bytes. */
+  readonly keyPackage: Uint8Array;
+}
+
 export class DiscoveryClient {
   /**
    * Phase 1.5b: bearer token threaded into the
@@ -781,9 +789,13 @@ export class DiscoveryClient {
   async uploadKeyPackage(
     accountId: Uint8Array,
     keyPackageBytes: Uint8Array,
+    deviceId: Uint8Array,
   ): Promise<void> {
     if (accountId.length !== 16) {
       throw new DiscoveryClientArgError("accountId must be 16 bytes");
+    }
+    if (deviceId.length !== 32) {
+      throw new DiscoveryClientArgError("deviceId must be 32 bytes");
     }
     if (keyPackageBytes.length === 0) {
       throw new DiscoveryClientArgError("keyPackageBytes must be non-empty");
@@ -805,6 +817,7 @@ export class DiscoveryClient {
     const resp = await this.keypackageUpload({
       pow,
       account_id: base64Encode(accountId),
+      device_id: base64Encode(deviceId),
       keypackage: base64Encode(keyPackageBytes),
     });
     if (!resp.ok) {
@@ -817,19 +830,43 @@ export class DiscoveryClient {
   }
 
   /**
-   * Resolve `accountId → KeyPackage bytes` (TLS-encoded MLS).
-   * Returns `null` when the recipient hasn't published one yet.
-   *
-   * Convenience wrapper around `keypackageFetch` that decodes
-   * the base64 wrapper to `Uint8Array` so the caller can hand
-   * the bytes straight to `wasm.Group.addMember(...)`.
+   * Resolve `accountId` to every device's KeyPackage bytes (TLS-encoded
+   * MLS), oldest device first (ADR-0050). Returns `null` when the account
+   * has published none. A caller adding the account adds ALL of them; the
+   * peer's device binding inside each leaf is what the core verifies.
    */
-  async fetchKeyPackage(
+  async fetchKeyPackages(
     accountId: Uint8Array,
-  ): Promise<Uint8Array | null> {
+  ): Promise<DeviceKeyPackage[] | null> {
     const raw = await this.keypackageFetch(accountId);
     if (raw === null) return null;
-    return base64Decode(raw.keypackage);
+    return raw.keypackages.map((d) => ({
+      deviceId: base64Decode(d.device_id),
+      keyPackage: base64Decode(d.keypackage),
+    }));
+  }
+
+  /** `DELETE /discovery/keypackage/device/{device_id_b64url}` — remove one of the
+   *  authenticated account's device KeyPackages (ADR-0050 device removal).
+   *  Idempotent (204). */
+  async deleteKeyPackage(deviceId: Uint8Array): Promise<void> {
+    if (deviceId.length !== 32) {
+      throw new DiscoveryClientArgError("deviceId must be 32 bytes");
+    }
+    const endpoint = `/discovery/keypackage/device/${base64UrlEncodeNoPad(deviceId)}`;
+    const url = `${this.baseUrl}${endpoint}`;
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: "DELETE",
+        headers: { ...this.authHeaders() },
+      });
+    } catch (err) {
+      throw new DiscoveryNetworkError(`${endpoint} (DELETE)`, err);
+    }
+    if (response.status === 204) return;
+    const text = await safeReadBody(response);
+    throw new DiscoveryHttpError(response.status, `${endpoint} (DELETE)`, text);
   }
 
   /**

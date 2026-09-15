@@ -71,6 +71,10 @@ interface DeviceIdentityRecord {
   /** `[12-byte IV | AES-GCM ciphertext+tag]`. The plaintext is
    *  the raw 32-byte DeviceIdentity seed. */
   ciphertext: Uint8Array;
+  /** ADR-0050 device binding wire bytes (public: the account key's
+   *  signature over this device's key), kept so `issued_at` stays stable
+   *  across restarts. Absent until the device is first bound. */
+  binding?: Uint8Array;
 }
 
 function openDb(): Promise<IDBDatabase> {
@@ -243,4 +247,56 @@ export async function ensureDeviceIdentitySeed(
   const seed = crypto.getRandomValues(new Uint8Array(DEVICE_IDENTITY_SEED_LENGTH));
   await putDeviceIdentitySeed(accountIdB64, seed, deviceKey);
   return seed;
+}
+
+/** Read the persisted ADR-0050 device binding for `accountIdB64`, or
+ *  `null` when the device has not been bound yet. */
+export async function getDeviceBinding(
+  accountIdB64: string,
+): Promise<Uint8Array | null> {
+  const db = await openDb();
+  try {
+    const row: DeviceIdentityRecord | undefined = await new Promise(
+      (resolve, reject) => {
+        const tx = db.transaction(STORE, "readonly");
+        const req = tx.objectStore(STORE).get(accountIdB64);
+        req.onsuccess = (): void =>
+          resolve(req.result as DeviceIdentityRecord | undefined);
+        req.onerror = (): void =>
+          reject(req.error ?? new Error("IDB get failed"));
+      },
+    );
+    return row?.binding ?? null;
+  } finally {
+    db.close();
+  }
+}
+
+/** Persist the ADR-0050 device binding beside the seed. The seed row must
+ *  already exist; the binding is public and stored as-is. */
+export async function putDeviceBinding(
+  accountIdB64: string,
+  binding: Uint8Array,
+): Promise<void> {
+  const db = await openDb();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(STORE, "readwrite");
+      const store = tx.objectStore(STORE);
+      const get = store.get(accountIdB64);
+      get.onsuccess = (): void => {
+        const row = get.result as DeviceIdentityRecord | undefined;
+        if (row === undefined) {
+          reject(new Error("no DeviceIdentity seed row to bind"));
+          return;
+        }
+        store.put({ ...row, binding });
+      };
+      get.onerror = (): void => reject(get.error ?? new Error("IDB get failed"));
+      tx.oncomplete = (): void => resolve();
+      tx.onerror = (): void => reject(tx.error ?? new Error("IDB put failed"));
+    });
+  } finally {
+    db.close();
+  }
 }

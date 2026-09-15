@@ -213,6 +213,63 @@ impl Identity {
         Ok(Self { inner })
     }
 
+    /// A **device** identity bound to an account (ADR-0050): derive it from
+    /// `seed` and mint its device binding under `accountSeed` (the account
+    /// identity's `ed25519Seed`). Every KeyPackage and every group this
+    /// identity creates carries the binding in its leaf credential.
+    #[wasm_bindgen(js_name = fromSeedBound)]
+    pub fn from_seed_bound(
+        seed: &[u8],
+        account_seed: &[u8],
+        issued_at_unix_secs: u64,
+    ) -> Result<Identity, JsValue> {
+        let account: [u8; 32] = account_seed
+            .try_into()
+            .map_err(|_| js_error("account seed must be 32 bytes"))?;
+        let inner =
+            MlsIdentity::from_seed_bound(seed, &account, issued_at_unix_secs).map_err(mls_err)?;
+        Ok(Self { inner })
+    }
+
+    /// Rebuild a bound device identity from its persisted seed and its
+    /// persisted binding bytes (ADR-0050), so `issuedAt` stays what it was.
+    #[wasm_bindgen(js_name = fromSeedWithBinding)]
+    pub fn from_seed_with_binding(seed: &[u8], binding: &[u8]) -> Result<Identity, JsValue> {
+        let inner = MlsIdentity::from_seed_with_binding(seed, binding).map_err(mls_err)?;
+        Ok(Self { inner })
+    }
+
+    /// Bind this identity to an account in place (ADR-0050); see
+    /// `fromSeedBound`.
+    #[wasm_bindgen(js_name = bindToAccount)]
+    pub fn bind_to_account(
+        &mut self,
+        account_seed: &[u8],
+        issued_at_unix_secs: u64,
+    ) -> Result<(), JsValue> {
+        let account: [u8; 32] = account_seed
+            .try_into()
+            .map_err(|_| js_error("account seed must be 32 bytes"))?;
+        self.inner
+            .bind_to_account(&account, issued_at_unix_secs)
+            .map_err(mls_err)
+    }
+
+    /// The wire bytes of this identity's ADR-0050 device binding, or
+    /// `undefined` for an unbound identity. Persist them beside the device
+    /// seed.
+    #[wasm_bindgen(getter, js_name = deviceBinding)]
+    pub fn device_binding(&self) -> Option<Vec<u8>> {
+        self.inner.device_binding().map(<[u8]>::to_vec)
+    }
+
+    /// The account key this identity acts for (ADR-0050): the binding's
+    /// account key when bound, else its own signature key.
+    #[wasm_bindgen(getter, js_name = accountPublicKey)]
+    pub fn account_public_key(&self) -> Option<Vec<u8>> {
+        self.inner.account_public_key().map(|k| k.to_vec())
+    }
+
     /// Public signature key bytes.
     #[wasm_bindgen(getter, js_name = signaturePublicKey)]
     pub fn signature_public_key(&self) -> Vec<u8> {
@@ -322,6 +379,17 @@ pub fn key_package_signature_key(key_package: &[u8]) -> Result<Vec<u8>, JsValue>
     key_package::signature_key(key_package).map_err(mls_err)
 }
 
+/// Resolve a wire-form KeyPackage's leaf to the **account** it belongs to
+/// (ADR-0050): the device binding's account key, the leaf key itself for an
+/// unbound Phase 1 leaf, or `undefined` for a leaf whose binding does not
+/// verify. The call-admission dedup and a contact's device list key on this.
+#[wasm_bindgen(js_name = keyPackageAccountKey)]
+pub fn key_package_account_key(key_package: &[u8]) -> Result<Option<Vec<u8>>, JsValue> {
+    key_package::account_key(key_package)
+        .map(|k| k.map(|k| k.to_vec()))
+        .map_err(mls_err)
+}
+
 // ============================================================================
 // AddMember (record)
 // ============================================================================
@@ -368,6 +436,7 @@ impl AddMember {
 pub struct GroupMember {
     leaf_index_val: u32,
     signature_public_key_val: Vec<u8>,
+    account: Vec<u8>,
 }
 
 #[wasm_bindgen]
@@ -378,11 +447,19 @@ impl GroupMember {
         self.leaf_index_val
     }
 
-    /// 32-byte Ed25519 verifying key — the member's long-term
-    /// identity signing key.
+    /// 32-byte Ed25519 verifying key of the member's **leaf** (its device).
     #[wasm_bindgen(getter, js_name = signaturePublicKey)]
     pub fn signature_public_key(&self) -> Vec<u8> {
         self.signature_public_key_val.clone()
+    }
+
+    /// The **account** key the leaf belongs to (ADR-0050) — what the UI
+    /// matches against the contacts list to render a name, so one person with
+    /// three devices is one person. Empty when the leaf's credential did not
+    /// resolve (never admitted by a Lakko gate).
+    #[wasm_bindgen(getter, js_name = accountKey)]
+    pub fn account_key(&self) -> Vec<u8> {
+        self.account.clone()
     }
 }
 
@@ -420,6 +497,7 @@ pub struct ProcessedMessage {
     kind: ProcessedMessageKind,
     application_data: Option<Vec<u8>>,
     sender_leaf: Option<u32>,
+    sender_account: Option<Vec<u8>>,
     external_join_signature_key: Option<Vec<u8>>,
     external_join_retained: bool,
     proposal: Option<ProposalRecord>,
@@ -428,11 +506,16 @@ pub struct ProcessedMessage {
 impl ProcessedMessage {
     /// Construct an Application result carrying the sender's leaf
     /// (ADR-0023).
-    fn application(data: Vec<u8>, sender_leaf: Option<u32>) -> Self {
+    fn application(
+        data: Vec<u8>,
+        sender_leaf: Option<u32>,
+        sender_account: Option<Vec<u8>>,
+    ) -> Self {
         Self {
             kind: ProcessedMessageKind::Application,
             application_data: Some(data),
             sender_leaf,
+            sender_account,
             external_join_signature_key: None,
             external_join_retained: false,
             proposal: None,
@@ -446,6 +529,7 @@ impl ProcessedMessage {
             kind,
             application_data: None,
             sender_leaf: None,
+            sender_account: None,
             external_join_signature_key: None,
             external_join_retained: false,
             proposal: None,
@@ -459,6 +543,7 @@ impl ProcessedMessage {
             kind: ProcessedMessageKind::Proposal,
             application_data: None,
             sender_leaf: record.sender_leaf,
+            sender_account: None,
             external_join_signature_key: None,
             external_join_retained: false,
             proposal: Some(record.into()),
@@ -473,6 +558,7 @@ impl ProcessedMessage {
             kind: ProcessedMessageKind::ExternalJoinProposal,
             application_data: None,
             sender_leaf: None,
+            sender_account: None,
             external_join_signature_key: Some(joiner_signature_key),
             external_join_retained: retained,
             proposal: None,
@@ -508,6 +594,16 @@ impl ProcessedMessage {
     #[wasm_bindgen(getter, js_name = senderLeaf)]
     pub fn sender_leaf(&self) -> Option<u32> {
         self.sender_leaf
+    }
+
+    /// The **account** key the sender leaf resolves to (ADR-0050), or
+    /// `undefined` for a control message, an external sender or an
+    /// unresolvable leaf. This — never the leaf — is what authorship,
+    /// reactions and read state key on, so one person is one author across
+    /// all their devices.
+    #[wasm_bindgen(getter, js_name = senderAccount)]
+    pub fn sender_account(&self) -> Option<Vec<u8>> {
+        self.sender_account.clone()
     }
 
     /// The prospective joiner's signature key, present iff
@@ -588,7 +684,9 @@ pub struct ProposalRecord {
 impl From<lakko_mls::ProposalRecord> for ProposalRecord {
     fn from(r: lakko_mls::ProposalRecord) -> Self {
         let (kind, add_signature_key, remove_target_leaf) = match r.kind {
-            lakko_mls::ProposalKind::Add { signature_key } => ("add", Some(signature_key), None),
+            lakko_mls::ProposalKind::Add { signature_key, .. } => {
+                ("add", Some(signature_key), None)
+            },
             lakko_mls::ProposalKind::Remove { target_leaf } => ("remove", None, Some(target_leaf)),
             lakko_mls::ProposalKind::Leave => ("leave", None, None),
             lakko_mls::ProposalKind::Update => ("update", None, None),
@@ -949,6 +1047,33 @@ impl Group {
         })
     }
 
+    /// Add several members in ONE commit with ONE Welcome (ADR-0050): a
+    /// person's devices, or a founder's own other devices, must share a
+    /// commit, else every leaf but the last is stranded at a Welcome epoch the
+    /// founder advanced past with nobody to broadcast the commit to. The
+    /// returned Welcome is delivered byte-identical to each added leaf's
+    /// mailbox. `keyPackages` is a JS `Uint8Array[]`.
+    #[wasm_bindgen(js_name = addMembers)]
+    pub fn add_members(
+        &self,
+        identity: &Identity,
+        key_packages: Vec<js_sys::Uint8Array>,
+    ) -> Result<AddMember, JsValue> {
+        let owned: Vec<Vec<u8>> = key_packages.into_iter().map(|a| a.to_vec()).collect();
+        let borrowed: Vec<&[u8]> = owned.iter().map(Vec::as_slice).collect();
+        let mut g = self
+            .inner
+            .lock()
+            .map_err(|_| js_error("internal lock poisoned"))?;
+        let MemberAddition { commit, welcome } = g
+            .add_members_from_wire(&identity.inner, &borrowed)
+            .map_err(mls_err)?;
+        Ok(AddMember {
+            commit_bytes: group::encode_message(&commit).map_err(mls_err)?,
+            welcome_bytes: group::encode_message(&welcome).map_err(mls_err)?,
+        })
+    }
+
     /// Approve a retained external-join request — **proposes** adding the
     /// joiner (ADR-0027 G-3, on the ADR-0045 proposal path since S7).
     /// `proposal_ref` is the joiner's signature key from a
@@ -1058,9 +1183,11 @@ impl Group {
             .process_incoming(&identity.inner, bytes)
             .map_err(mls_err)?;
         Ok(match result {
-            MlsIncoming::Application { bytes, sender_leaf } => {
-                ProcessedMessage::application(bytes, sender_leaf)
-            },
+            MlsIncoming::Application {
+                bytes,
+                sender_leaf,
+                sender_account,
+            } => ProcessedMessage::application(bytes, sender_leaf, sender_account),
             MlsIncoming::Commit => ProcessedMessage::control(ProcessedMessageKind::Commit),
             MlsIncoming::Proposal(record) => ProcessedMessage::from_proposal(record),
             MlsIncoming::ExternalJoinProposal {
@@ -1614,6 +1741,7 @@ impl Group {
                 JsValue::from(GroupMember {
                     leaf_index_val: m.leaf_index,
                     signature_public_key_val: m.signature_public_key,
+                    account: m.account_key,
                 })
             })
             .collect())
@@ -1664,9 +1792,11 @@ impl Group {
             .process_incoming_verifying_roles(&identity.inner, bytes)
             .map_err(MlsFailure::from)?;
         Ok(match result {
-            MlsIncoming::Application { bytes, sender_leaf } => {
-                ProcessedMessage::application(bytes, sender_leaf)
-            },
+            MlsIncoming::Application {
+                bytes,
+                sender_leaf,
+                sender_account,
+            } => ProcessedMessage::application(bytes, sender_leaf, sender_account),
             MlsIncoming::Commit => ProcessedMessage::control(ProcessedMessageKind::Commit),
             MlsIncoming::Proposal(record) => ProcessedMessage::from_proposal(record),
             MlsIncoming::ExternalJoinProposal {
@@ -1728,10 +1858,7 @@ impl Group {
 
     /// Core of [`Self::committer_rank`].
     fn committer_rank_core(&self, signature_key: &[u8]) -> Result<Option<u32>, MlsFailure> {
-        Ok(self
-            .locked()?
-            .group_roles()
-            .and_then(|table| lakko_mls::committer_rank(&table, signature_key)))
+        Ok(self.locked()?.committer_rank_of(signature_key))
     }
 
     /// Core of [`Self::commit_pending_proposals`].
@@ -2015,9 +2142,11 @@ impl PublisherGroup {
             .process_incoming_verifying_roles(&identity.inner, bytes)
             .map_err(mls_err)?;
         Ok(match result {
-            MlsIncoming::Application { bytes, sender_leaf } => {
-                ProcessedMessage::application(bytes, sender_leaf)
-            },
+            MlsIncoming::Application {
+                bytes,
+                sender_leaf,
+                sender_account,
+            } => ProcessedMessage::application(bytes, sender_leaf, sender_account),
             MlsIncoming::Commit => ProcessedMessage::control(ProcessedMessageKind::Commit),
             MlsIncoming::Proposal(record) => ProcessedMessage::from_proposal(record),
             MlsIncoming::ExternalJoinProposal {
@@ -2217,6 +2346,7 @@ impl DeviceGroup {
                 JsValue::from(GroupMember {
                     leaf_index_val: m.leaf_index,
                     signature_public_key_val: m.signature_public_key,
+                    account: m.account_key,
                 })
             })
             .collect())
@@ -2435,9 +2565,11 @@ impl DeviceGroup {
             .process_incoming(&identity.inner, message_bytes)
             .map_err(mls_err)?;
         Ok(match incoming {
-            lakko_mls::Incoming::Application { bytes, sender_leaf } => {
-                ProcessedMessage::application(bytes, sender_leaf)
-            },
+            lakko_mls::Incoming::Application {
+                bytes,
+                sender_leaf,
+                sender_account,
+            } => ProcessedMessage::application(bytes, sender_leaf, sender_account),
             lakko_mls::Incoming::Commit => ProcessedMessage::control(ProcessedMessageKind::Commit),
             lakko_mls::Incoming::Proposal(record) => ProcessedMessage::from_proposal(record),
             lakko_mls::Incoming::ExternalJoinProposal {
@@ -2513,9 +2645,11 @@ impl DeviceGroup {
             )
             .map_err(mls_err)?;
         Ok(match incoming {
-            lakko_mls::Incoming::Application { bytes, sender_leaf } => {
-                ProcessedMessage::application(bytes, sender_leaf)
-            },
+            lakko_mls::Incoming::Application {
+                bytes,
+                sender_leaf,
+                sender_account,
+            } => ProcessedMessage::application(bytes, sender_leaf, sender_account),
             lakko_mls::Incoming::Commit => ProcessedMessage::control(ProcessedMessageKind::Commit),
             lakko_mls::Incoming::Proposal(record) => ProcessedMessage::from_proposal(record),
             lakko_mls::Incoming::ExternalJoinProposal {
@@ -5549,7 +5683,7 @@ mod tests {
     fn processed_message_kind_strings_match_uniffi_enum() {
         // Every variant has a string literal — guards against
         // accidental rename on the Rust side breaking the JS API.
-        let app = ProcessedMessage::application(vec![1, 2, 3], Some(0));
+        let app = ProcessedMessage::application(vec![1, 2, 3], Some(0), None);
         assert_eq!(app.kind(), "Application");
         assert_eq!(app.application_data().as_deref(), Some(&[1, 2, 3][..]));
         assert_eq!(app.sender_leaf(), Some(0));

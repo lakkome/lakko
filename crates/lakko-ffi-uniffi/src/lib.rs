@@ -407,6 +407,18 @@ pub enum FfiError {
     /// A display name is longer than 255 UTF-8 bytes.
     #[error("{0}")]
     DisplayNameTooManyBytes(String),
+
+    // ------------------------------------------------------------------
+    // ADR-0050 per-device leaves — appended, for the ordinal reason above.
+    // ------------------------------------------------------------------
+    /// The added leaf's device binding does not verify (ADR-0050).
+    #[error("{0}")]
+    MembershipDeviceBindingInvalid(String),
+
+    /// The account already holds the maximum number of devices in this group
+    /// (ADR-0050).
+    #[error("{0}")]
+    MembershipDeviceLimitReached(String),
 }
 
 impl From<lakko_contacts::username::UsernameError> for FfiError {
@@ -496,6 +508,8 @@ impl FfiError {
             MlsRefusalReason::NoSuchJoinRequest => Self::MembershipNoSuchJoinRequest(detail),
             MlsRefusalReason::JoinerAlreadyAMember => Self::MembershipJoinerAlreadyAMember(detail),
             MlsRefusalReason::SweepAlreadyStaged => Self::SweepAlreadyStaged(detail),
+            MlsRefusalReason::DeviceBindingInvalid => Self::MembershipDeviceBindingInvalid(detail),
+            MlsRefusalReason::DeviceLimitReached => Self::MembershipDeviceLimitReached(detail),
         }
     }
 
@@ -529,6 +543,8 @@ impl FfiError {
             Self::MembershipNoSuchJoinRequest(_) => FfiRefusalReason::NoSuchJoinRequest,
             Self::MembershipJoinerAlreadyAMember(_) => FfiRefusalReason::JoinerAlreadyAMember,
             Self::SweepAlreadyStaged(_) => FfiRefusalReason::SweepAlreadyStaged,
+            Self::MembershipDeviceBindingInvalid(_) => FfiRefusalReason::DeviceBindingInvalid,
+            Self::MembershipDeviceLimitReached(_) => FfiRefusalReason::DeviceLimitReached,
             _ => return None,
         })
     }
@@ -588,6 +604,11 @@ pub enum FfiRefusalReason {
     JoinerAlreadyAMember,
     /// A staged sweep is already awaiting its journal verdict.
     SweepAlreadyStaged,
+    /// The added leaf's device binding does not verify (ADR-0050).
+    DeviceBindingInvalid,
+    /// The account already holds the maximum number of devices in this group
+    /// (ADR-0050).
+    DeviceLimitReached,
 }
 
 impl From<MlsRefusalReason> for FfiRefusalReason {
@@ -611,6 +632,8 @@ impl From<MlsRefusalReason> for FfiRefusalReason {
             MlsRefusalReason::NoSuchJoinRequest => Self::NoSuchJoinRequest,
             MlsRefusalReason::JoinerAlreadyAMember => Self::JoinerAlreadyAMember,
             MlsRefusalReason::SweepAlreadyStaged => Self::SweepAlreadyStaged,
+            MlsRefusalReason::DeviceBindingInvalid => Self::DeviceBindingInvalid,
+            MlsRefusalReason::DeviceLimitReached => Self::DeviceLimitReached,
         }
     }
 }
@@ -636,6 +659,8 @@ impl From<FfiRefusalReason> for MlsRefusalReason {
             FfiRefusalReason::NoSuchJoinRequest => Self::NoSuchJoinRequest,
             FfiRefusalReason::JoinerAlreadyAMember => Self::JoinerAlreadyAMember,
             FfiRefusalReason::SweepAlreadyStaged => Self::SweepAlreadyStaged,
+            FfiRefusalReason::DeviceBindingInvalid => Self::DeviceBindingInvalid,
+            FfiRefusalReason::DeviceLimitReached => Self::DeviceLimitReached,
         }
     }
 }
@@ -801,7 +826,7 @@ pub struct ProposalCommit {
 impl From<lakko_mls::ProposalKind> for ProposalKind {
     fn from(k: lakko_mls::ProposalKind) -> Self {
         match k {
-            lakko_mls::ProposalKind::Add { signature_key } => Self::Add { signature_key },
+            lakko_mls::ProposalKind::Add { signature_key, .. } => Self::Add { signature_key },
             lakko_mls::ProposalKind::Remove { target_leaf } => Self::Remove { target_leaf },
             lakko_mls::ProposalKind::Leave => Self::Leave,
             lakko_mls::ProposalKind::Update => Self::Update,
@@ -1006,9 +1031,14 @@ pub enum ProcessedMessage {
         /// Plaintext bytes the application can consume.
         data: Vec<u8>,
         /// The sender's leaf index (ADR-0023), or `None` for an external
-        /// sender. The chat receive path uses it for the author-only
-        /// edit/delete gate + reaction attribution.
+        /// sender. Still surfaced because SFrame and the DeviceGroup key on
+        /// the leaf; authorship does not (see `sender_account`).
         sender_leaf: Option<u32>,
+        /// The **account** the sender leaf resolves to (ADR-0050), or `None`
+        /// for an external sender or an unresolvable leaf. This is what the
+        /// author-only edit/delete gate, reaction attribution and read state
+        /// key on, so a person is one author across all their devices.
+        sender_account: Option<Vec<u8>>,
     },
     /// A commit was processed and merged. Group state advanced.
     Commit,
@@ -1220,6 +1250,42 @@ impl Identity {
         Ok(Self { inner })
     }
 
+    /// A **device** identity bound to an account (ADR-0050): derive it from
+    /// `seed` and mint its device binding under `account_seed` (the account
+    /// identity's 32-byte Ed25519 seed, `Identity::ed25519_seed` of the
+    /// phrase-derived identity). Every KeyPackage and every group this identity
+    /// creates carries the binding in its leaf credential.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::Identity`] when either seed is malformed.
+    #[uniffi::constructor]
+    pub fn from_seed_bound(
+        seed: Vec<u8>,
+        account_seed: Vec<u8>,
+        issued_at_unix_secs: u64,
+    ) -> Result<Self, FfiError> {
+        let account: [u8; 32] = account_seed
+            .as_slice()
+            .try_into()
+            .map_err(|_| FfiError::Identity("account seed must be 32 bytes".into()))?;
+        let inner = MlsIdentity::from_seed_bound(&seed, &account, issued_at_unix_secs)?;
+        Ok(Self { inner })
+    }
+
+    /// Rebuild a bound device identity from its persisted seed and its
+    /// persisted binding bytes (ADR-0050), so `issued_at` stays what it was.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::Identity`] when `binding` is not a valid binding for this
+    /// identity's key.
+    #[uniffi::constructor]
+    pub fn from_seed_with_binding(seed: Vec<u8>, binding: Vec<u8>) -> Result<Self, FfiError> {
+        let inner = MlsIdentity::from_seed_with_binding(&seed, &binding)?;
+        Ok(Self { inner })
+    }
+
     /// Public signature key bytes (Ed25519, 32 bytes).
     pub fn signature_public_key(&self) -> Vec<u8> {
         self.inner.signature_public_key().to_vec()
@@ -1253,6 +1319,18 @@ impl Identity {
     /// [`x25519_secret_key`].
     pub fn ed25519_seed(&self) -> Vec<u8> {
         self.inner.ed25519_seed_bytes().to_vec()
+    }
+
+    /// The wire bytes of this identity's ADR-0050 device binding, or `None`
+    /// for an unbound identity. Persist them beside the device seed.
+    pub fn device_binding(&self) -> Option<Vec<u8>> {
+        self.inner.device_binding().map(<[u8]>::to_vec)
+    }
+
+    /// The account key this identity acts for (ADR-0050): the binding's
+    /// account key when bound, else its own signature key.
+    pub fn account_public_key(&self) -> Option<Vec<u8>> {
+        self.inner.account_public_key().map(|k| k.to_vec())
     }
 
     /// Create a fresh KeyPackage in TLS wire form.
@@ -1325,10 +1403,13 @@ pub struct GroupMember {
     /// OpenMLS leaf position. Stable inside an epoch; can renumber on the next
     /// add/remove cycle, so the UI MUST NOT cache it across a state change.
     pub leaf_index: u32,
-    /// 32-byte Ed25519 verifying key for the member's signature credential.
-    /// The UI matches it against the contacts list (the same key a
-    /// `ContactRequest` is signed with) to render a name, else a fingerprint.
+    /// 32-byte Ed25519 verifying key of the member's **leaf** (its device).
     pub signature_public_key: Vec<u8>,
+    /// The **account** key the leaf belongs to (ADR-0050) — what the UI
+    /// matches against the contacts list to render a name, so one person with
+    /// three devices is one person. Empty when the leaf's credential did not
+    /// resolve (never admitted by a Lakko gate).
+    pub account_key: Vec<u8>,
 }
 
 /// A member's role in an ADR-0022 role-enabled group. The UI gates the
@@ -1409,6 +1490,27 @@ impl Group {
         let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
         let MemberAddition { commit, welcome } =
             g.add_member_from_wire(&identity.inner, &key_package)?;
+        Ok(AddMember {
+            commit: group::encode_message(&commit)?,
+            welcome: group::encode_message(&welcome)?,
+        })
+    }
+
+    /// Add several members in ONE commit with ONE Welcome (ADR-0050): a
+    /// person's devices, or a founder's own other devices, must share a
+    /// commit, else every leaf but the last is stranded at a Welcome epoch the
+    /// founder advanced past with nobody to broadcast the commit to. The
+    /// returned Welcome is delivered byte-identical to each added leaf's
+    /// mailbox.
+    pub fn add_members_from_wire(
+        &self,
+        identity: &Identity,
+        key_packages: Vec<Vec<u8>>,
+    ) -> Result<AddMember, FfiError> {
+        let borrowed: Vec<&[u8]> = key_packages.iter().map(Vec::as_slice).collect();
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        let MemberAddition { commit, welcome } =
+            g.add_members_from_wire(&identity.inner, &borrowed)?;
         Ok(AddMember {
             commit: group::encode_message(&commit)?,
             welcome: group::encode_message(&welcome)?,
@@ -1596,8 +1698,7 @@ impl Group {
     /// [`FfiError::LockPoisoned`] if the group mutex was poisoned.
     pub fn committer_rank(&self, signature_key: Vec<u8>) -> Result<Option<u32>, FfiError> {
         let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
-        Ok(g.group_roles()
-            .and_then(|table| lakko_mls::committer_rank(&table, &signature_key)))
+        Ok(g.committer_rank_of(&signature_key))
     }
 
     /// Sweep the authorised pending proposals into **one** Commit and merge it
@@ -1897,9 +1998,14 @@ impl Group {
         let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
         let result = g.process_incoming(&identity.inner, &bytes)?;
         Ok(match result {
-            MlsIncoming::Application { bytes, sender_leaf } => ProcessedMessage::Application {
+            MlsIncoming::Application {
+                bytes,
+                sender_leaf,
+                sender_account,
+            } => ProcessedMessage::Application {
                 data: bytes,
                 sender_leaf,
+                sender_account,
             },
             MlsIncoming::Commit => ProcessedMessage::Commit,
             MlsIncoming::Proposal(record) => ProcessedMessage::Proposal {
@@ -1991,6 +2097,7 @@ impl Group {
             .map(|m| GroupMember {
                 leaf_index: m.leaf_index,
                 signature_public_key: m.signature_public_key,
+                account_key: m.account_key,
             })
             .collect())
     }
@@ -2047,9 +2154,14 @@ impl Group {
         let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
         let result = g.process_incoming_verifying_roles(&identity.inner, &bytes)?;
         Ok(match result {
-            MlsIncoming::Application { bytes, sender_leaf } => ProcessedMessage::Application {
+            MlsIncoming::Application {
+                bytes,
+                sender_leaf,
+                sender_account,
+            } => ProcessedMessage::Application {
                 data: bytes,
                 sender_leaf,
+                sender_account,
             },
             MlsIncoming::Commit => ProcessedMessage::Commit,
             MlsIncoming::Proposal(record) => ProcessedMessage::Proposal {
@@ -2128,6 +2240,19 @@ pub fn load_group(identity: &Identity, group_id: Vec<u8>) -> Result<Option<Arc<G
 #[uniffi::export]
 pub fn key_package_signature_key(key_package: Vec<u8>) -> Result<Vec<u8>, FfiError> {
     Ok(key_package::signature_key(&key_package)?)
+}
+
+/// Resolve a wire-form KeyPackage's leaf to the **account** it belongs to
+/// (ADR-0050): the device binding's account key, the leaf key itself for an
+/// unbound Phase 1 leaf, or `None` for a leaf whose binding does not verify.
+/// The call-admission dedup and a contact's device list key on this.
+///
+/// # Errors
+///
+/// [`FfiError::Codec`] on parse failure.
+#[uniffi::export]
+pub fn key_package_account_key(key_package: Vec<u8>) -> Result<Option<Vec<u8>>, FfiError> {
+    Ok(key_package::account_key(&key_package)?.map(|k| k.to_vec()))
 }
 
 // ============================================================================
@@ -2242,9 +2367,14 @@ impl PublisherGroup {
             .inner_mut()
             .process_incoming_verifying_roles(&identity.inner, &bytes)?;
         Ok(match result {
-            MlsIncoming::Application { bytes, sender_leaf } => ProcessedMessage::Application {
+            MlsIncoming::Application {
+                bytes,
+                sender_leaf,
+                sender_account,
+            } => ProcessedMessage::Application {
                 data: bytes,
                 sender_leaf,
+                sender_account,
             },
             MlsIncoming::Commit => ProcessedMessage::Commit,
             MlsIncoming::Proposal(record) => ProcessedMessage::Proposal {
@@ -2680,11 +2810,14 @@ impl DeviceGroup {
         let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
         let incoming = g.process_incoming(&identity.inner, &message_bytes)?;
         Ok(match incoming {
-            lakko_mls::Incoming::Application { bytes, sender_leaf } => {
-                ProcessedMessage::Application {
-                    data: bytes,
-                    sender_leaf,
-                }
+            lakko_mls::Incoming::Application {
+                bytes,
+                sender_leaf,
+                sender_account,
+            } => ProcessedMessage::Application {
+                data: bytes,
+                sender_leaf,
+                sender_account,
             },
             lakko_mls::Incoming::Commit => ProcessedMessage::Commit,
             lakko_mls::Incoming::Proposal(record) => ProcessedMessage::Proposal {
@@ -2747,11 +2880,14 @@ impl DeviceGroup {
             now_unix_secs,
         )?;
         Ok(match incoming {
-            lakko_mls::Incoming::Application { bytes, sender_leaf } => {
-                ProcessedMessage::Application {
-                    data: bytes,
-                    sender_leaf,
-                }
+            lakko_mls::Incoming::Application {
+                bytes,
+                sender_leaf,
+                sender_account,
+            } => ProcessedMessage::Application {
+                data: bytes,
+                sender_leaf,
+                sender_account,
             },
             lakko_mls::Incoming::Commit => ProcessedMessage::Commit,
             lakko_mls::Incoming::Proposal(record) => ProcessedMessage::Proposal {
@@ -4861,7 +4997,9 @@ mod tests {
             .unwrap();
         let received = bob_group.process_incoming(&bob, msg).unwrap();
         match received {
-            ProcessedMessage::Application { data, sender_leaf } => {
+            ProcessedMessage::Application {
+                data, sender_leaf, ..
+            } => {
                 assert_eq!(data, b"hello via ffi");
                 // ADR-0023 — the sender's leaf is surfaced (Alice's, here).
                 assert_eq!(sender_leaf, Some(alice_group.own_leaf_index().unwrap()));
@@ -5078,7 +5216,7 @@ mod tests {
         };
         assert!(record.stored, "an owner's add proposal must be stored");
         assert_eq!(record.sender_leaf, Some(alice_g.own_leaf_index().unwrap()));
-        let ProposalKind::Add { signature_key } = &record.kind else {
+        let ProposalKind::Add { signature_key, .. } = &record.kind else {
             panic!("expected Add, got {:?}", record.kind);
         };
         assert_eq!(signature_key, &dave_key);
@@ -5337,7 +5475,7 @@ mod tests {
             panic!("expected a Proposal");
         };
         match &add_rec.kind {
-            ProposalKind::Add { signature_key } => assert_eq!(signature_key, &dave_key),
+            ProposalKind::Add { signature_key, .. } => assert_eq!(signature_key, &dave_key),
             other => panic!("an Add must classify as Add, got {other:?}"),
         }
 

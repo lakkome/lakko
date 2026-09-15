@@ -45,6 +45,7 @@ import {
 import { Icon } from "../ui/icons";
 import { useAuth } from "../auth/AuthContext";
 import { AuthClient, AuthHttpError } from "../auth/client";
+import { useBackgroundReceive } from "../chat/BackgroundReceiveContext";
 import { normalizeTotpCode } from "../auth/totp-code";
 import { isPlausibleContact } from "../auth/contact-shape";
 import { ContactKind } from "../auth/wire";
@@ -166,6 +167,8 @@ function DevicesListView(props: {
   // Same auth context the outer page reads — used to bind the device-
   // removal action to a fresh passkey gesture (G-13).
   const auth = useAuth();
+  // ADR-0050 section 2.10 — the removal fan-out over every chat.
+  const receive = useBackgroundReceive();
   type State =
     | { kind: "loading" }
     | { kind: "ready"; devices: readonly DeviceListItem[] }
@@ -251,6 +254,16 @@ function DevicesListView(props: {
         leafIndex,
         attestation,
       });
+      // ADR-0050 section 2.10 — the device is out of the DeviceGroup; now out
+      // of every chat and out of the directory. Runs on after the list refresh;
+      // a chat it fails on is logged and retried by nothing (the leaf stays
+      // until a member removes it by hand), so the warning is worth reading.
+      if (target !== undefined) {
+        void receive.retireDevice(target.signaturePublicKey).catch((err: unknown) => {
+          // eslint-disable-next-line no-console
+          console.warn("ADR-0050 retire device: fan-out failed", err);
+        });
+      }
       // Re-fetch — the new epoch has its own leaf numbering.
       await refresh();
     } catch (err) {
@@ -530,6 +543,8 @@ function ScanView(props: {
   // IDENTITY to the fresh device (grant + phrase seed, sealed over
   // the pairing channel). Needs the live IdentitySecrets.
   const auth = useAuth();
+  // ADR-0050 section 2.8 — the admission fan-out over every chat.
+  const receive = useBackgroundReceive();
   type State =
     | { kind: "idle" }
     | { kind: "opening" }
@@ -590,12 +605,19 @@ function ScanView(props: {
                 new AuthClient().deviceAuthorizeStart(secrets.sessionToken),
             }
           : undefined;
-      await runScanFlow({
+      const scanned = await runScanFlow({
         scannedBytes,
         accountIdBytes: props.accountIdBytes,
         accountIdB64: props.accountIdB64,
         deviceKey,
         ...(recovery !== undefined ? { recovery } : {}),
+      });
+      // ADR-0050 section 2.8 — admit the new device to every chat. Not
+      // awaited: it waits for the device to land and publish its KeyPackage,
+      // which is minutes, and the pairing itself is done.
+      void receive.admitDevice(scanned.newDeviceKey).catch((err: unknown) => {
+        // eslint-disable-next-line no-console
+        console.warn("ADR-0050 admit device: fan-out failed", err);
       });
       setState({ kind: "done" });
     } catch (err) {

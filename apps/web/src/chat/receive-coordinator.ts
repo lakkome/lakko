@@ -45,6 +45,7 @@ export class ReceiveCoordinator<E> {
   private readonly buffers = new Map<string, E[]>();
   private readonly views = new Map<string, (events: readonly E[]) => void>();
   private readonly listeners = new Set<() => void>();
+  private readonly pollRequests = new Map<string, () => void>();
 
   // ----- cursor ---------------------------------------------------------
 
@@ -134,6 +135,31 @@ export class ReceiveCoordinator<E> {
     };
   }
 
+  // ----- poll requests ----------------------------------------------------
+
+  /**
+   * Ask the chat view that holds `groupId`'s foreground claim to poll now.
+   * The background receive must not sweep a foreground group (two sweepers
+   * over two cursors re-feed consumed rows), but it can want one swept at
+   * once — the ADR-0050 device fan-out publishes a proposal and the view's
+   * long poll may be parked (tab hidden). Returns whether a view was listening;
+   * a `false` means the view's own next poll picks it up.
+   */
+  requestPoll(groupId: string): boolean {
+    const handler = this.pollRequests.get(groupId);
+    if (handler === undefined) return false;
+    handler();
+    return true;
+  }
+
+  /** The chat view's side of {@link requestPoll}. Returns a detach. */
+  onPollRequested(groupId: string, handler: () => void): () => void {
+    this.pollRequests.set(groupId, handler);
+    return () => {
+      if (this.pollRequests.get(groupId) === handler) this.pollRequests.delete(groupId);
+    };
+  }
+
   /** Diagnostics + tests. */
   bufferedCount(groupId: string): number {
     return this.buffers.get(groupId)?.length ?? 0;
@@ -145,6 +171,7 @@ export class ReceiveCoordinator<E> {
     this.claims.clear();
     this.buffers.clear();
     this.views.clear();
+    this.pollRequests.clear();
     this.notify();
   }
 

@@ -428,6 +428,7 @@ fn the_three_dispositions_partition_the_reasons_exactly_like_this() {
             RefusalReason::JoinerAlreadyAMember,
             RefusalReason::ProposalsPending,
             RefusalReason::SweepAlreadyStaged,
+            RefusalReason::DeviceLimitReached,
         ],
         "a refusal about the request's own state is never retryable, however \
          much the group's pending work drains",
@@ -442,6 +443,7 @@ fn the_three_dispositions_partition_the_reasons_exactly_like_this() {
             RefusalReason::OwnerCannotLeave,
             RefusalReason::NotOwner,
             RefusalReason::NotACommitter,
+            RefusalReason::DeviceBindingInvalid,
         ],
         "an authority answer offers no action at all",
     );

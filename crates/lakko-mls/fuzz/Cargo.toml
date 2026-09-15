@@ -73,3 +73,10 @@ path = "fuzz_targets/role_table_decode.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "device_binding_decode"
+path = "fuzz_targets/device_binding_decode.rs"
+test = false
+doc = false
+bench = false

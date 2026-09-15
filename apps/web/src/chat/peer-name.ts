@@ -13,7 +13,7 @@
  */
 
 import type { Group as WasmGroup } from "../../wasm/lakko_ffi_wasm";
-import { base64Encode } from "../auth/account-id";
+import { personKeysOf } from "./person-key";
 
 export interface PeerNameInputs {
   /** This account's signature public key, base64, or `null` when unknown. */
@@ -40,13 +40,9 @@ export function peerName(inputs: PeerNameInputs): string {
   return inputs.label.length > 0 ? inputs.label : "Peer";
 }
 
-/** The roster's signature keys; a torn group reads as empty (label fallback). */
+/** The roster's PEOPLE — distinct account keys (ADR-0050), so a 1x1 between
+ *  two people with three devices each is still a 1x1. A torn group reads as
+ *  empty (label fallback). */
 export function memberKeysOf(group: WasmGroup): string[] {
-  try {
-    return (group.members() as Array<{ signaturePublicKey: Uint8Array }>).map((m) =>
-      base64Encode(m.signaturePublicKey),
-    );
-  } catch {
-    return [];
-  }
+  return personKeysOf(group);
 }

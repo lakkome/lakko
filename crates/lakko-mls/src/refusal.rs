@@ -235,6 +235,17 @@ pub enum RefusalReason {
     /// is already awaiting its journal verdict. Reach that verdict — merge or
     /// abandon — rather than retrying the stage.
     SweepAlreadyStaged,
+
+    // ---- ADR-0050 per-device leaves --------------------------------------
+    /// The leaf an `Add` names carries a device binding that does not verify
+    /// for that leaf (or is malformed). Nobody may admit it: a leaf whose
+    /// account cannot be resolved has no place in a Lakko group.
+    DeviceBindingInvalid,
+
+    /// The account the added leaf belongs to already holds
+    /// [`crate::group_proposals::MAX_LEAVES_PER_ACCOUNT`] leaves in this group.
+    /// Remove a device first.
+    DeviceLimitReached,
 }
 
 impl RefusalReason {
@@ -244,7 +255,7 @@ impl RefusalReason {
     /// Exists so a test can assert over the whole set — adding a variant without
     /// classifying it deliberately then fails a test rather than defaulting
     /// silently — and so an FFI surface can enumerate without re-listing.
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 20] = [
         Self::NotAMember,
         Self::AddNotOwnerOrAdmin,
         Self::RemoveNotOwnerOrAdmin,
@@ -263,6 +274,8 @@ impl RefusalReason {
         Self::ProposalsPending,
         Self::PendingSetFull,
         Self::SweepAlreadyStaged,
+        Self::DeviceBindingInvalid,
+        Self::DeviceLimitReached,
     ];
 
     /// What the caller should do about this refusal.
@@ -299,7 +312,8 @@ impl RefusalReason {
             | Self::ProposalsPending
             | Self::SweepAlreadyStaged
             | Self::NoSuchJoinRequest
-            | Self::JoinerAlreadyAMember => RefusalDisposition::DoNotRetry,
+            | Self::JoinerAlreadyAMember
+            | Self::DeviceLimitReached => RefusalDisposition::DoNotRetry,
 
             // An authority answer.
             Self::NotAMember
@@ -308,7 +322,8 @@ impl RefusalReason {
             | Self::OwnerUnremovable
             | Self::OwnerCannotLeave
             | Self::NotOwner
-            | Self::NotACommitter => RefusalDisposition::NotPermitted,
+            | Self::NotACommitter
+            | Self::DeviceBindingInvalid => RefusalDisposition::NotPermitted,
         }
     }
 
@@ -354,6 +369,8 @@ impl RefusalReason {
             Self::ProposalsPending => "proposalsPending",
             Self::PendingSetFull => "pendingSetFull",
             Self::SweepAlreadyStaged => "sweepAlreadyStaged",
+            Self::DeviceBindingInvalid => "deviceBindingInvalid",
+            Self::DeviceLimitReached => "deviceLimitReached",
         }
     }
 }

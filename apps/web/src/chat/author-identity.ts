@@ -40,6 +40,7 @@
  */
 
 import { base64Encode } from "../auth/account-id";
+import { personKeyOf } from "./person-key";
 
 /**
  * A member's stable identity: their Ed25519 signature public key,
@@ -57,6 +58,9 @@ export type MemberIdentity = string;
 export interface RosterMember {
   readonly leafIndex: number;
   readonly signaturePublicKey: Uint8Array;
+  /** ADR-0050 — the account the leaf belongs to; the identity an author
+   *  resolves to, so one person is one author across their devices. */
+  readonly accountKey?: Uint8Array;
 }
 
 /**
@@ -84,7 +88,7 @@ export function resolveMemberIdentity(
   leafIndex: number,
 ): MemberIdentity | undefined {
   const hit = roster.find((m) => m.leafIndex === leafIndex);
-  return hit === undefined ? undefined : base64Encode(hit.signaturePublicKey);
+  return hit === undefined ? undefined : base64Encode(personKeyOf(hit));
 }
 
 /**

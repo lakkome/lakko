@@ -257,6 +257,12 @@ interface Copy {
  * listed in {@link COLLAPSED_TO_FALLBACK} rather than merely omitted — see
  * that constant for why the difference is load-bearing.
  */
+/** ADR-0050 — the per-account device cap (`MAX_LEAVES_PER_ACCOUNT`). */
+export const DEVICE_LIMIT_REACHED = "Up to 8 devices per account. Remove one first.";
+/** ADR-0050 — a device whose binding the group refuses. */
+export const DEVICE_BINDING_INVALID =
+  "Something is wrong with this device's key. Remove it from Devices and add it again.";
+
 const TABLE: Readonly<Record<string, Copy>> = {
   addNotOwnerOrAdmin: { fact: ADD_NOT_OWNER_OR_ADMIN },
   removeNotOwnerOrAdmin: { fact: REMOVE_NOT_OWNER_OR_ADMIN },
@@ -268,6 +274,11 @@ const TABLE: Readonly<Record<string, Copy>> = {
   joinerAlreadyAMember: { fact: JOINER_ALREADY_A_MEMBER },
   roleChangePending: { fact: ROLE_CHANGE_PENDING, invitation: RETRY_WHEN_IT_LANDS },
   pendingSetFull: { fact: PENDING_SET_FULL, invitation: RETRY_WHEN_THEY_LAND },
+  // ADR-0050 (docs/ux/second-device.md section 5): the only per-device
+  // refusal a user is shown is the cap; a binding the peers reject is a
+  // client bug and gets the same plain sentence rather than a screen.
+  deviceLimitReached: { fact: DEVICE_LIMIT_REACHED },
+  deviceBindingInvalid: { fact: DEVICE_BINDING_INVALID },
 };
 
 /**

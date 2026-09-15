@@ -1922,3 +1922,10 @@ li:focus-within > .lakko-msg-actions {
   clip: rect(0 0 0 0);
   white-space: nowrap;
 }
+
+/* ADR-0050 — the chat list's one synchronizing label (docs/ux/second-device.md). */
+.lk-pane-status {
+  margin-left: auto;
+  font-size: 13px;
+  color: var(--surface-muted);
+}

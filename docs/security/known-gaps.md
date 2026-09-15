@@ -765,6 +765,50 @@ auth-served current-version marker (above) + a live
 recovery e2e (mint → framed PUT → restore gate) on a
 deployed environment.
 
+## Multi-device chat membership
+
+### G-40: A second device never joins the account's existing conversations — **OPEN, closing under ADR-0050 (web built and live-tested 2026-09-15; natives not started)**
+
+**Status 2026-09-15 (evening).** [ADR-0050](../adr/0050-per-device-conversation-leaves.md)
+S1 core, S2 FFI, S3 discovery and S4 web are built; verified live on `test.lakko.me`
+with three web clients: a device added through the ADR-0049 confirmation prompt was
+admitted to the account's existing 1x1 chat by the confirming device and received the
+messages sent after it joined. Still open under this gap: the natives (S5), the
+scheduled re-admission arm for a device restored with no other device online, the
+pairing history bundle landing under the joined chat (did not show in the live run),
+StateBundle v2 (contacts and channel subscriptions), and the removal fan-out unverified
+live. The text below is the entry as minted that morning.
+
+**Symptom.** Sign in on a second device by any route (QR pairing, the ADR-0049
+confirmation prompt, the three-word vault, the full phrase, a passkey): the chat list
+is empty, and a chat the first device holds never appears. Observed live on
+`test.lakko.me` on 2026-09-15 with two Chrome profiles on one account.
+
+**Cause.** Conversation groups are still on the ADR-0007 **Phase 1** model: one leaf
+per *user*, signed by the AccountIdentity key. RFC 9420 section 5.3 requires every
+leaf's signature key to be unique within a group, so a second device cannot be added
+under the same key (OpenMLS `DuplicateSignatureKey`); discovery publishes one
+KeyPackage per *account*, so a contact opening a chat adds one device; and pairing
+hands over the DeviceGroup, the phrase seed and a plaintext history bundle only — the
+bundle fills the message log, but the chat list is built from MLS group state the new
+device does not hold. ADR-0007 named the fix — a per-device `DeviceIdentity` leaf in
+every conversation group, bound to the account through the DeviceGroup — as
+**Phase 2b** and only ever built Phase 2a (the DeviceGroup itself).
+
+**Why it went unrecorded.** Every ADR that touched membership reported its own scope
+as done, and the roadmap's Phase 2a line reads "multi-device sync via DeviceGroup
+substrate", which the substrate satisfied. The missing product capability lived only
+as an ADR-0007 open question and an ADR-0022 follow-up line, never as a gap. This
+entry exists so that "multi-device" is not read as done again until it is.
+
+**What closes it.** Phase 2b end to end: per-device conversation leaves with a
+peer-verified device-to-account binding; per-device KeyPackages in discovery; the
+existing device adding the new one to every conversation on pairing / confirmation
+(ADR-0045 proposals where a role table exists); and every site that today equates a
+leaf or the account key with a member (ADR-0022 roles, ADR-0023 authorship, ADR-0042
+routing-secret authority, the ADR-0021 peer tag) resolving device to account. It is a
+`lakko-mls` change and needs its own ADR plus property tests (invariant #3).
+
 ## Auth
 
 ### G-12: Session token validation is single-process in-memory — **CLOSED (was already addressed; text was stale)**

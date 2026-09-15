@@ -134,10 +134,12 @@ export interface IdentityFetchResponse {
 // /discovery/keypackage   (services/discovery/src/keypackage.rs — 1.16e1)
 // ----------------------------------------------------------------------------
 
-/** Body of `POST /discovery/keypackage`. */
+/** Body of `POST /discovery/keypackage` (ADR-0050: one row per device). */
 export interface KeyPackageUploadRequest {
   pow: PowProofPayload;
   account_id: string;
+  /** base64 of the device leaf's 32-byte Ed25519 signature key. */
+  device_id: string;
   /** base64(TLS-encoded MLS KeyPackage). Server caps decoded
    *  size at 2048 bytes — mirrors `MAX_KEYPACKAGE_BYTES` in the
    *  Rust handler. */
@@ -149,10 +151,19 @@ export interface KeyPackageUploadResponse {
   ok: boolean;
 }
 
-/** Response body of `GET /discovery/keypackage/{acct_b64url}`.
- *  404 surfaces as `null` in the high-level client. */
-export interface KeyPackageFetchResponse {
+/** One device's entry in `KeyPackageFetchResponse`. */
+export interface DeviceKeyPackagePayload {
+  /** base64 of the device leaf's 32-byte signature key. */
+  device_id: string;
+  /** base64(TLS-encoded MLS KeyPackage). */
   keypackage: string;
+}
+
+/** Response body of `GET /discovery/keypackage/{acct_b64url}`: every
+ *  device of the account with a published KeyPackage, oldest first
+ *  (ADR-0050). 404 surfaces as `null` in the high-level client. */
+export interface KeyPackageFetchResponse {
+  keypackages: DeviceKeyPackagePayload[];
 }
 
 // ----------------------------------------------------------------------------

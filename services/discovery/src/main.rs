@@ -84,8 +84,9 @@
 //! - `POST   /discovery/lookup`    — resolve OPRF-hashed username → account_id
 //! - `POST   /discovery/identity`           — upsert public identity bundle (Phase 1.16d3a)
 //! - `GET    /discovery/identity/{acct}`    — fetch public identity bundle (Phase 1.16d3a)
-//! - `POST   /discovery/keypackage`         — upsert public MLS KeyPackage (Phase 1.16e1)
-//! - `GET    /discovery/keypackage/{acct}`  — fetch public MLS KeyPackage (Phase 1.16e1)
+//! - `POST   /discovery/keypackage`         — upsert one device's MLS KeyPackage (ADR-0050)
+//! - `DELETE /discovery/keypackage/device/{dev}` — remove one device's KeyPackage (ADR-0050)
+//! - `GET    /discovery/keypackage/{acct}`  — fetch every device's KeyPackage (ADR-0050)
 //! - `POST   /discovery/invite`             — upload InviteCapability blob (Phase 1.18d1)
 //! - `GET    /discovery/invite/{blob_id}`   — fetch InviteCapability blob (Phase 1.18d1)
 //! - `POST   /discovery/invite/{blob_id}/consume` — atomic max_uses bump (Phase 1.18d2a)
@@ -376,6 +377,11 @@ pub(crate) fn build_app(state: AppState) -> Router {
         )
         .route("/discovery/identity", post(identity_bundle::upload))
         .route("/discovery/keypackage", post(keypackage::upload))
+        // ADR-0050 — remove one device's KeyPackage (device removal).
+        .route(
+            "/discovery/keypackage/device/{device_id}",
+            axum::routing::delete(keypackage::delete),
+        )
         .route("/discovery/invite", post(invite::upload))
         // Phase 3c3-server — call-invite blob upload. Session-
         // token-gated like the contact-invite upload above; the

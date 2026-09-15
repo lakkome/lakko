@@ -53,7 +53,7 @@
  * session. The user can always send a fresh ContactRequest /
  * accept a fresh Welcome to recover an active group.
  */
-import { base64Decode } from "../auth/account-id";
+import { base64Decode, base64Encode } from "../auth/account-id";
 import { getDeviceKey } from "../auth/key-store";
 import { ensureGroupPushRouting } from "../push/group-routing";
 import { loadWasm } from "../wasm";
@@ -131,6 +131,21 @@ export async function rehydrateMlsState(
     // First signup, or post-recover after the snapshot was
     // explicitly deleted, or a device that's never been
     // snapshotted. Either way: nothing to do.
+    return;
+  }
+
+  // ADR-0050 — a snapshot taken under another leaf identity (every
+  // pre-ADR-0050 snapshot was taken under the ACCOUNT identity; the chats now
+  // run on the DEVICE identity) must not be restored: the groups in it were
+  // signed by a key this identity does not hold, and `restoreStorage`
+  // replaces the whole provider. Start empty instead; the next persist
+  // overwrites the row under the right key.
+  const ownLeafB64 = base64Encode(canonical.signaturePublicKey);
+  if (snapshot.leafKeyB64 !== ownLeafB64) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      "rehydrateMlsState: snapshot belongs to another leaf identity; starting empty",
+    );
     return;
   }
 

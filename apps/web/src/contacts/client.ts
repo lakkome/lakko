@@ -126,6 +126,12 @@ export interface ContactsClientOptions {
    *  call — only acceptable for tests; production paths MUST
    *  wire this so MLS state stays coherent across calls. */
   identityProvider?: () => WasmIdentity | null;
+  /** ADR-0050 — the ACCOUNT identity (phrase-seeded), for everything that
+   *  is about the person rather than a leaf: signing contact requests and
+   *  acks, opening sealed envelopes, minting invite capabilities, the
+   *  account mailbox. When unset, falls back to `identityProvider`, then to
+   *  a throwaway `Identity.fromSeed(accountIdentitySeed)`. */
+  accountIdentityProvider?: () => WasmIdentity | null;
   /** Fires after every successful MLS state-mutating call so
    *  the route layer can persist the canonical Identity's
    *  provider snapshot to disk. Best-effort — exceptions are
@@ -279,6 +285,57 @@ export type IncomingMailboxEvent =
   | { kind: "contact-ack"; ack: IncomingContactAck };
 
 /** Result of `ContactsClient.pollMailbox`. */
+/** ADR-0050 — every leaf index in `group` whose account is the account of
+ *  `leafIndex`, the named leaf first. Falls back to `[leafIndex]` when the
+ *  roster cannot be read or the leaf is not in it (the core then refuses). */
+/** The leaf that holds `signatureKey` in `group`, or `null`. A torn roster
+ *  read answers `null` too: the callers treat that as "not admitted yet" and a
+ *  duplicate Add is refused by the core, never merged. */
+function leafIndexOfSignatureKey(group: WasmGroup, signatureKey: Uint8Array): number | null {
+  let roster: Array<{ leafIndex: number; signaturePublicKey: Uint8Array }>;
+  try {
+    roster = group.members() as Array<{ leafIndex: number; signaturePublicKey: Uint8Array }>;
+  } catch {
+    return null;
+  }
+  const hit = roster.find((m) => bytesEqualCc(m.signaturePublicKey, signatureKey));
+  return hit === undefined ? null : hit.leafIndex;
+}
+
+function leavesOfSameAccount(group: WasmGroup, leafIndex: number): number[] {
+  let roster: Array<{ leafIndex: number; signaturePublicKey: Uint8Array; accountKey?: Uint8Array }>;
+  try {
+    roster = group.members() as Array<{
+      leafIndex: number;
+      signaturePublicKey: Uint8Array;
+      accountKey?: Uint8Array;
+    }>;
+  } catch {
+    return [leafIndex];
+  }
+  const named = roster.find((m) => m.leafIndex === leafIndex);
+  if (named === undefined) return [leafIndex];
+  const person = (m: (typeof roster)[number]): string =>
+    base64Encode(
+      m.accountKey !== undefined && m.accountKey.length === 32
+        ? m.accountKey
+        : m.signaturePublicKey,
+    );
+  const account = person(named);
+  const rest = roster
+    .filter((m) => m.leafIndex !== leafIndex && person(m) === account)
+    .map((m) => m.leafIndex);
+  return [leafIndex, ...rest];
+}
+
+/** Constant-shape byte equality for two public keys. */
+function bytesEqualCc(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i += 1) diff |= a[i]! ^ b[i]!;
+  return diff === 0;
+}
+
 export interface PollResult {
   /** Discriminated events, in the order DS returned them
    *  (oldest first by message id). Mixed kinds are interleaved
@@ -747,6 +804,7 @@ function toSweepEntry(row: PendingCommitEntry): SweepDurableEntry {
 
 export class ContactsClient {
   private readonly identityProvider: (() => WasmIdentity | null) | undefined;
+  private readonly accountIdentityProvider: (() => WasmIdentity | null) | undefined;
   private readonly onPersist: (() => Promise<void>) | undefined;
   private readonly onPersistWithCommit:
     | ((entry: NewCommitEntry) => Promise<void>)
@@ -765,6 +823,7 @@ export class ContactsClient {
     options: ContactsClientOptions = {},
   ) {
     this.identityProvider = options.identityProvider;
+    this.accountIdentityProvider = options.accountIdentityProvider;
     this.onPersist = options.onPersist;
     this.onPersistWithCommit = options.onPersistWithCommit;
     this.onCommitPersistAbort = options.onCommitPersistAbort;
@@ -826,6 +885,41 @@ export class ContactsClient {
     // ADR-0017: the canonical AccountIdentity is seeded from the
     // BIP39 phrase seed, not the OPAQUE export key.
     return wasm.Identity.fromSeed(secrets.accountIdentitySeed);
+  }
+
+  /** ADR-0050 — the ACCOUNT identity for person-level operations (see
+   *  `ContactsClientOptions.accountIdentityProvider`). */
+  private async resolveAccountIdentity(
+    secrets: IdentitySecrets | null,
+  ): Promise<WasmIdentity> {
+    if (this.accountIdentityProvider !== undefined) {
+      const account = this.accountIdentityProvider();
+      if (account !== null) return account;
+      throw ContactsError.noIdentitySecrets();
+    }
+    return this.resolveIdentity(secrets);
+  }
+
+  /** ADR-0050 — this account's OTHER devices' KeyPackages, so a group this
+   *  device creates includes the person's other devices from the first
+   *  epoch. Best-effort: with no secrets (no account id) or a directory
+   *  failure it is an empty list, and the ADR-0050 re-admission arm adds
+   *  the missing devices later. */
+  private async ownOtherDevices(
+    secrets: IdentitySecrets | null,
+    myIdentity: WasmIdentity,
+  ): Promise<readonly { keyPackage: Uint8Array }[]> {
+    if (secrets === null) return [];
+    const ownKey = myIdentity.signaturePublicKey;
+    try {
+      const list = await this.discovery.fetchKeyPackages(secrets.accountId);
+      if (list === null) return [];
+      return list.filter((d) => !bytesEqualCc(d.deviceId, ownKey));
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("own devices lookup failed; adding this device only", err);
+      return [];
+    }
   }
 
   /** Fire the persist hook, swallow + log failures. */
@@ -1678,7 +1772,7 @@ export class ContactsClient {
     // keys consistent across operations and avoids the
     // throwaway-provider trap.
     const wasm = await loadWasm();
-    const senderIdentity = await this.resolveIdentity(identity);
+    const senderIdentity = await this.resolveAccountIdentity(identity);
     const senderSigningSeed = senderIdentity.ed25519Seed;
     const senderAccountId = identity?.accountId ?? null;
     if (senderAccountId === null) {
@@ -1779,7 +1873,7 @@ export class ContactsClient {
     originalRequest: IncomingContactRequest,
   ): Promise<{ messageId: number; createdAt: string }> {
     const wasm = await loadWasm();
-    const myIdentity = await this.resolveIdentity(identity);
+    const myIdentity = await this.resolveAccountIdentity(identity);
 
     const myAccountId = identity?.accountId ?? null;
     if (myAccountId === null) {
@@ -1865,6 +1959,51 @@ export class ContactsClient {
   }
 
   /**
+   * ADR-0050 — poll this DEVICE's mailbox: the pseudonym of the device leaf
+   * key, where Welcomes sealed to this device's KeyPackages arrive. Only
+   * Welcome envelopes are surfaced; anything else in a device mailbox is
+   * dropped (the cursor still advances).
+   */
+  async pollDeviceMailbox(
+    identity: IdentitySecrets | null,
+    after: number,
+    waitSecs = 0,
+    signal?: AbortSignal,
+  ): Promise<PollResult> {
+    const wasm = await loadWasm();
+    const device = await this.resolveIdentity(identity);
+    const pseudonym = wasm.IdentityPseudonym.fromIdentity(
+      device.signaturePublicKey,
+    ).asBytes();
+    let raw;
+    try {
+      raw = await this.ds.fetchMailbox(pseudonym, {
+        after,
+        waitSecs,
+        ...(signal !== undefined ? { signal } : {}),
+      });
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+    const events: IncomingMailboxEvent[] = [];
+    let cursor = after;
+    for (const message of raw.messages) {
+      cursor = message.id;
+      const env = parseEnvelope(message.payload);
+      if (env.kind !== KIND_WELCOME) continue;
+      events.push({
+        kind: "welcome",
+        welcome: {
+          messageId: message.id,
+          welcomeBytes: env.body,
+          createdAt: message.createdAt,
+        },
+      });
+    }
+    return { events, cursor, hasMore: raw.hasMore };
+  }
+
+  /**
    * Poll the user's stranger-inbox mailbox for new
    * ContactRequests, decode + verify each, return the
    * processed list plus a fresh cursor.
@@ -1902,7 +2041,7 @@ export class ContactsClient {
     signal?: AbortSignal,
   ): Promise<PollResult> {
     const wasm = await loadWasm();
-    const myIdentity = await this.resolveIdentity(identity);
+    const myIdentity = await this.resolveAccountIdentity(identity);
     const myPseudonym = wasm.IdentityPseudonym.fromIdentity(
       myIdentity.signaturePublicKey,
     ).asBytes();
@@ -2051,12 +2190,13 @@ export class ContactsClient {
    *      `/discovery/keypackage/{acct}` (Phase 1.16e1).
    *   2. Build our own `Group` with the local Identity
    *      derived from the OPAQUE export key.
-   *   3. `group.addMember(keyPackageBytes)` produces the
-   *      `(commit, welcome)` pair. Per MLS, `commit` would
-   *      normally be broadcast to all existing members — but
+   *   3. `group.addMembers(allDeviceKeyPackages)` produces ONE
+   *      `(commit, welcome)` pair for every device of the recipient
+   *      plus our own other devices (ADR-0050). Per MLS, `commit`
+   *      would normally be broadcast to all existing members — but
    *      our group is one-of-one before this call, so there's
    *      no one to broadcast to. The commit is dropped.
-   *   4. POST the welcome bytes to the recipient's mailbox
+   *   4. POST the same welcome bytes to each device's mailbox
    *      via `sendWelcome`.
    *
    * Returns the freshly-created `Group` reference. The caller
@@ -2072,49 +2212,58 @@ export class ContactsClient {
   ): Promise<{ group: WasmGroup; welcomeMessageId: number }> {
     const wasm = await loadWasm();
 
-    // 1. Fetch recipient's KeyPackage.
-    let keyPackageBytes;
+    // 1. Fetch every device KeyPackage of the recipient (ADR-0050): a
+    //    person is added as all of their devices, each its own leaf.
+    let recipientDevices;
     try {
-      keyPackageBytes = await this.discovery.fetchKeyPackage(
-        recipientAccountId,
+      recipientDevices = await this.discovery.fetchKeyPackages(recipientAccountId);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+    if (recipientDevices === null || recipientDevices.length === 0) {
+      throw ContactsError.noIdentityBundle(recipientAccountId);
+    }
+    void recipientSignaturePubkey;
+
+    // 2. Resolve our DEVICE identity (ADR-0050 — the leaf this device holds
+    //    in every group; same instance every Group on this device shares, so
+    //    mutations to its provider survive across calls and get snapshotted
+    //    to IDB after this method returns).
+    const myIdentity = await this.resolveIdentity(identity);
+    const group = new wasm.Group(myIdentity);
+
+    // 3. Add every device of the recipient AND our own OTHER devices in ONE
+    //    commit (ADR-0050). We are the only member, so the commit fans out to
+    //    nobody and is dropped; the ONE Welcome carries every added leaf's
+    //    secrets and goes, byte-identical, to each leaf's own mailbox. One
+    //    commit per device would strand every device but the last at a
+    //    Welcome epoch we then advanced past with nobody to tell.
+    const ownDevices = await this.ownOtherDevices(identity, myIdentity);
+    const devices = [...recipientDevices, ...ownDevices];
+    let added;
+    try {
+      added = group.addMembers(
+        myIdentity,
+        devices.map((d) => d.keyPackage),
       );
     } catch (err) {
       throw ContactsError.wrap(err);
     }
-    if (keyPackageBytes === null) {
-      throw ContactsError.noIdentityBundle(recipientAccountId);
-    }
-
-    // 2. Resolve our canonical Identity (1.16e6c2 — same instance
-    //    every Group on this device shares; mutations to its
-    //    provider survive across calls and get snapshotted to
-    //    IDB after this method returns).
-    const myIdentity = await this.resolveIdentity(identity);
-    const group = new wasm.Group(myIdentity);
-
-    // 3. Add the recipient. `addMember` takes the local
-    //    Identity as its first argument (the wasm-bindgen
-    //    surface decouples Group state from the Identity that
-    //    operates on it). The commit would normally fan out to
-    //    existing members; we have none, so we drop it.
-    let added;
-    try {
-      added = group.addMember(myIdentity, keyPackageBytes);
-    } catch (err) {
-      throw ContactsError.wrap(err);
-    }
-    // `commit` returned by addMember — unused in 1-of-1, but
-    // grab it explicitly so the dropped value is documented.
     void added.commit;
-    const welcomeBytes = added.welcome;
-
-    // 4. Ship the welcome to the recipient via DS.
-    let publish;
-    try {
-      publish = await this.sendWelcome(recipientSignaturePubkey, welcomeBytes);
-    } catch (err) {
-      throw ContactsError.wrap(err);
+    let firstWelcomeMessageId = 0;
+    for (const dev of devices) {
+      let publish;
+      try {
+        publish = await this.sendWelcome(
+          wasm.keyPackageSignatureKey(dev.keyPackage),
+          added.welcome,
+        );
+      } catch (err) {
+        throw ContactsError.wrap(err);
+      }
+      if (firstWelcomeMessageId === 0) firstWelcomeMessageId = publish.messageId;
     }
+    const publish = { messageId: firstWelcomeMessageId };
 
     // 1.16e6c2: Group::create + addMember mutated the canonical
     // provider's storage (initial epoch state, leaf private key,
@@ -2262,17 +2411,17 @@ export class ContactsClient {
     recipientAccountId: Uint8Array,
     recipientSignaturePubkey: Uint8Array,
   ): Promise<MembershipOutcome> {
-    // 1. Fetch the new member's KeyPackage from discovery.
-    //    Identical to `startGroupWith`'s step 1.
-    let keyPackageBytes;
+    // 1. Fetch every device KeyPackage of the new member (ADR-0050).
+    let devices;
     try {
-      keyPackageBytes = await this.discovery.fetchKeyPackage(recipientAccountId);
+      devices = await this.discovery.fetchKeyPackages(recipientAccountId);
     } catch (err) {
       throw ContactsError.wrap(err);
     }
-    if (keyPackageBytes === null) {
+    if (devices === null || devices.length === 0) {
       throw ContactsError.noIdentityBundle(recipientAccountId);
     }
+    void recipientSignaturePubkey;
 
     // 2. Resolve the canonical Identity — same instance every
     //    Group on this device uses (1.16e6c2). The `addMember`
@@ -2297,15 +2446,17 @@ export class ContactsClient {
       // paths are built on sweeps the whole pending set alongside the one change
       // it was asked for — an admin asking to add one member would add two, and
       // route the single Welcome to only one of them.
-      if (usesProposalPath(group)) {
-        return this.proposeAddMemberLocked(myIdentity, group, keyPackageBytes);
+      // ADR-0050: one proposal / one commit per device of the person. The
+      // outcome reported is the last device's; every earlier one either
+      // landed or threw.
+      let outcome: MembershipOutcome | null = null;
+      for (const dev of devices) {
+        outcome = usesProposalPath(group)
+          ? await this.proposeAddMemberLocked(myIdentity, group, dev.keyPackage)
+          : await this.addMemberToGroupLocked(myIdentity, group, dev.keyPackage);
       }
-      return this.addMemberToGroupLocked(
-        myIdentity,
-        group,
-        keyPackageBytes,
-        recipientSignaturePubkey,
-      );
+      // `devices` is non-empty (checked above), so `outcome` is set.
+      return outcome as MembershipOutcome;
     });
   }
 
@@ -2356,7 +2507,6 @@ export class ContactsClient {
     myIdentity: WasmIdentity,
     group: WasmGroup,
     keyPackageBytes: Uint8Array,
-    recipientSignaturePubkey: Uint8Array,
   ): Promise<MembershipOutcome> {
     // 3. Drive the MLS add. Returns `{ commit, welcome }` — the
     //    commit is the wire bytes existing members process to
@@ -2394,8 +2544,10 @@ export class ContactsClient {
     try {
       groupIdBytes = group.groupId;
       const wasm = await loadWasm();
+      // ADR-0050: the Welcome is sealed to THIS leaf's KeyPackage, so it is
+      // addressed to the leaf's own mailbox, never the account's.
       welcomePseudonym = wasm.IdentityPseudonym.fromIdentity(
-        recipientSignaturePubkey,
+        wasm.keyPackageSignatureKey(keyPackageBytes),
       ).asBytes();
       welcomeEnvelope = wrapEnvelope(KIND_WELCOME, welcomeBytes);
       entryId = newOutboxEntryId();
@@ -2480,12 +2632,76 @@ export class ContactsClient {
     // SERIALIZED per group — the create-commit below eager-merges N -> N+1, so
     // it must run against the epoch the predecessor region actually published.
     return withGroupMlsLock(base64Encode(group.groupId), async () => {
+      // ADR-0050 — removing a member removes the PERSON: every leaf of the
+      // account the named leaf belongs to. Leaving (naming one's own leaf)
+      // therefore leaves from every device at once.
+      const leaves = leavesOfSameAccount(group, leafIndex);
       // ADR-0045 — proposal path for a role-table group; the direct commit
       // survives only where there is no role table and therefore no committer.
-      if (usesProposalPath(group)) {
-        return this.proposeRemoveMemberLocked(myIdentity, group, leafIndex);
+      let outcome: MembershipOutcome | null = null;
+      for (const leaf of leaves) {
+        outcome = usesProposalPath(group)
+          ? await this.proposeRemoveMemberLocked(myIdentity, group, leaf)
+          : await this.removeMemberFromGroupLocked(myIdentity, group, leaf);
       }
-      return this.removeMemberFromGroupLocked(myIdentity, group, leafIndex);
+      return outcome as MembershipOutcome;
+    });
+  }
+
+  /**
+   * ADR-0050 section 2.8 / 2.10 — admit ONE device (by its published
+   * KeyPackage) to a group this device is in: the pairing / confirmation
+   * fan-out on the old device, and a contact's re-admission of a person's new
+   * device. Self-service on the core side: a member may add a leaf of its own
+   * account or of an account already in the group, no role needed.
+   *
+   * Resolves `null` when a leaf with that signature key is already in the
+   * roster — nothing to do, not an error. Otherwise the ADR-0045 split:
+   * a role-table group gets a proposal (swept by the caller; see
+   * `BackgroundReceiveApi.admitDevice`), a table-less group a direct commit
+   * with its Welcome sent to the device's own mailbox.
+   */
+  async admitDeviceToGroup(
+    identity: IdentitySecrets | null,
+    group: WasmGroup,
+    keyPackage: Uint8Array,
+  ): Promise<MembershipOutcome | null> {
+    const wasm = await loadWasm();
+    const deviceKey = wasm.keyPackageSignatureKey(keyPackage);
+    if (leafIndexOfSignatureKey(group, deviceKey) !== null) return null;
+    const myIdentity = await this.resolveIdentity(identity);
+    return withGroupMlsLock(base64Encode(group.groupId), async () => {
+      // Re-checked under the lock: a poll may have applied the very commit
+      // that admitted this device while we waited.
+      if (leafIndexOfSignatureKey(group, deviceKey) !== null) return null;
+      return usesProposalPath(group)
+        ? this.proposeAddMemberLocked(myIdentity, group, keyPackage)
+        : this.addMemberToGroupLocked(myIdentity, group, keyPackage);
+    });
+  }
+
+  /**
+   * ADR-0050 section 2.10 — retire ONE device's leaf from a group: the
+   * removal fan-out (Devices screen, forget-this-device). Unlike
+   * {@link removeMemberFromGroup}, which removes the PERSON, this names a
+   * single leaf by its signature key and leaves the account's other devices
+   * in place. Self-service on the core side for the account's own leaves.
+   *
+   * Resolves `null` when no leaf holds that key in this group.
+   */
+  async retireDeviceFromGroup(
+    identity: IdentitySecrets | null,
+    group: WasmGroup,
+    deviceKey: Uint8Array,
+  ): Promise<MembershipOutcome | null> {
+    if (leafIndexOfSignatureKey(group, deviceKey) === null) return null;
+    const myIdentity = await this.resolveIdentity(identity);
+    return withGroupMlsLock(base64Encode(group.groupId), async () => {
+      const leaf = leafIndexOfSignatureKey(group, deviceKey);
+      if (leaf === null) return null;
+      return usesProposalPath(group)
+        ? this.proposeRemoveMemberLocked(myIdentity, group, leaf)
+        : this.removeMemberFromGroupLocked(myIdentity, group, leaf);
     });
   }
 
@@ -2970,7 +3186,7 @@ export class ContactsClient {
     maxUses: number = 0xff_ff_ff_ff,
   ): Promise<string> {
     const wasm = await loadWasm();
-    const myIdentity = await this.resolveIdentity(identity);
+    const myIdentity = await this.resolveAccountIdentity(identity);
     let wire: Uint8Array;
     try {
       wire = wasm.composeGroupInviteCapability(myIdentity.ed25519Seed, group.groupId, expiryMs);
@@ -3011,7 +3227,7 @@ export class ContactsClient {
       return false;
     }
     if (blobId.length !== 32) return false; // inline link — no ledger row
-    const myIdentity = await this.resolveIdentity(identity);
+    const myIdentity = await this.resolveAccountIdentity(identity);
     try {
       await this.discovery.revokeGroupInvite(blobId, myIdentity.ed25519Seed);
     } catch (err) {

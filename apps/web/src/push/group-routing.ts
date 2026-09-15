@@ -1115,12 +1115,20 @@ export function receivePushRoutingSecretGated(
         adminKeys.push(flatAdmins.slice(i, i + 32));
       }
       if (senderLeaf !== undefined) {
+        // ADR-0050 — authority is the PERSON's: the role table names account
+        // keys, so the sender leaf resolves to its account key.
         const members = group.members() as Array<{
           leafIndex: number;
           signaturePublicKey: Uint8Array;
+          accountKey?: Uint8Array;
         }>;
-        senderKey = members.find((m) => m.leafIndex === senderLeaf)
-          ?.signaturePublicKey;
+        const hit = members.find((m) => m.leafIndex === senderLeaf);
+        senderKey =
+          hit === undefined
+            ? undefined
+            : hit.accountKey !== undefined && hit.accountKey.length === 32
+              ? hit.accountKey
+              : hit.signaturePublicKey;
       }
     } catch {
       // A torn group / unreadable role table — authorship is unverifiable.

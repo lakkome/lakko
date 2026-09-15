@@ -100,6 +100,10 @@ pub(crate) fn lakko_leaf_capabilities(cs: Ciphersuite) -> Capabilities {
         Some(&[
             ExtensionType::Unknown(DEVICE_POLICY_EXTENSION_TYPE),
             ExtensionType::Unknown(crate::group_roles::ROLE_EXTENSION_TYPE),
+            // ADR-0050 section 2.6 — the published KeyPackage carries the
+            // `last_resort` extension; `KeyPackageIn::validate` refuses a
+            // package whose leaf does not advertise every extension it carries.
+            ExtensionType::LastResort,
         ]),
         None,
         None,

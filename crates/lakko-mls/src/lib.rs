@@ -16,6 +16,7 @@
 #![forbid(unsafe_code)]
 
 pub mod ciphersuite;
+pub mod device_binding;
 pub mod device_group;
 pub mod error;
 pub mod group;
@@ -30,6 +31,7 @@ pub mod publisher_group;
 pub mod refusal;
 pub mod welcome_rendezvous;
 
+pub use device_binding::{account_key_of_credential, DeviceBinding, DEVICE_BINDING_LEN};
 pub use device_group::{AccountId, DeviceGroup};
 pub use error::{Error, Result};
 pub use group::{
@@ -144,5 +146,26 @@ pub mod fuzz_api {
     #[must_use]
     pub fn decode_role_table(bytes: &[u8]) -> bool {
         crate::group_roles::RoleTable::decode(bytes).is_ok()
+    }
+
+    /// Decode + verify an ADR-0050 device binding (`DeviceBinding::decode`).
+    /// The bytes are attacker-touchable: they are a leaf's `BasicCredential`
+    /// identity, which travels inside every KeyPackage, Add proposal and
+    /// Welcome a stranger or a malicious member can craft, and reach this
+    /// bounded, fail-closed parser at every admission gate before any state
+    /// is consulted. The fuzzer cannot forge a valid Ed25519 signature, so it
+    /// exercises the length / version / key-parse / verify-fail path; a valid
+    /// input is unreachable and the resolver is asserted to answer `None` for
+    /// any non-empty credential that does not verify.
+    #[must_use]
+    pub fn decode_device_binding(bytes: &[u8]) -> bool {
+        let ok = crate::device_binding::DeviceBinding::decode(bytes).is_ok();
+        if !ok && !bytes.is_empty() {
+            assert!(
+                crate::device_binding::account_key_of_credential(bytes, &[0u8; 32]).is_none(),
+                "an unverifiable non-empty credential must resolve to no account"
+            );
+        }
+        ok
     }
 }

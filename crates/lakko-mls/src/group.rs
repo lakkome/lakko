@@ -60,8 +60,8 @@ use zeroize::Zeroizing;
 
 use crate::error::{Error, Result};
 use crate::group_proposals::{
-    authorise, classify, commit_effects, is_owner_response, owner_survives, pubkey_at_leaf,
-    ProposalKind, ProposalRecord, Proposer,
+    account_key_at_leaf, authorise, classify, commit_effects, is_owner_response, leaves_of_account,
+    owner_survives, proposer_at, ProposalKind, ProposalRecord, Proposer, MAX_LEAVES_PER_ACCOUNT,
 };
 use crate::group_roles::{OutgoingOwner, Role, RoleTable, ROLE_EXTENSION_TYPE};
 use crate::identity::Identity;
@@ -289,8 +289,13 @@ pub struct MemberRecord {
     /// OpenMLS leaf position. `u32` mirrors `LeafNodeIndex`'s
     /// internal repr.
     pub leaf_index: u32,
-    /// 32-byte Ed25519 verifying key.
+    /// 32-byte Ed25519 verifying key of the **leaf**.
     pub signature_public_key: Vec<u8>,
+    /// The account this leaf belongs to (ADR-0050): the device binding's
+    /// account key, or the leaf key itself for an unbound Phase 1 leaf. Empty
+    /// when the credential resolved to nothing — such a leaf should never have
+    /// been admitted, and every gate treats it as unauthorised.
+    pub account_key: Vec<u8>,
 }
 
 /// Result of [`Group::process_incoming`].
@@ -306,6 +311,11 @@ pub enum Incoming {
         bytes: Vec<u8>,
         /// The sender's leaf index, or `None` for an external sender.
         sender_leaf: Option<u32>,
+        /// The account the sender leaf resolves to (ADR-0050), or `None` for an
+        /// external sender or an unresolvable leaf. This — not the leaf, not
+        /// the leaf key — is what authorship, reactions and read state key on,
+        /// so a person is one author across all their devices.
+        sender_account: Option<Vec<u8>>,
     },
     /// A commit was processed and merged into the group state. The local
     /// view advanced to a new epoch.
@@ -367,10 +377,12 @@ impl Group {
         // `set_group_roles` commit rewrite it (promote / demote). Seeding the
         // owner at creation closes the bootstrap window — there is never a
         // moment when the group has no owner for a member to claim.
+        // ADR-0050: the owner slot names the creator's ACCOUNT key (the device
+        // binding's account, or the identity's own key when it is unbound), so
+        // every device of the creator is the owner.
         let owner: [u8; 32] = identity
-            .signature_public_key()
-            .try_into()
-            .map_err(|_| Error::Group("identity signature key is not 32 bytes".into()))?;
+            .account_public_key()
+            .ok_or_else(|| Error::Group("identity signature key is not 32 bytes".into()))?;
         let initial = RoleTable::owner_only(owner);
         let exts = Extensions::from_vec(vec![
             role_required_capabilities(),
@@ -506,7 +518,17 @@ impl Group {
             .into_group(&identity.provider)
             .map_err(|e| Error::Group(format!("welcome -> group: {e:?}")))?;
 
-        Ok(Self::from_mls_group(inner))
+        let group = Self::from_mls_group(inner);
+        // ADR-0050: the joiner checks the roster it lands in. A leaf whose
+        // credential resolves to no account was admitted by a gate that is
+        // not Lakko's; refuse the group rather than reason about it.
+        if group.members().iter().any(|m| m.account_key.is_empty()) {
+            return Err(Error::refused(
+                RefusalReason::DeviceBindingInvalid,
+                "welcome refused: a member's device binding does not verify",
+            ));
+        }
+        Ok(group)
     }
 
     /// **A direct commit must never carry a proposal it did not ask for.**
@@ -631,6 +653,8 @@ impl Group {
     ///
     /// Consumes one of the new member's published KeyPackages on success.
     /// The local group state is advanced to the new epoch atomically.
+    /// One KeyPackage; see [`Self::add_members`] for several leaves in one
+    /// commit.
     ///
     /// # Errors
     ///
@@ -642,10 +666,59 @@ impl Group {
         identity: &Identity,
         key_package: KeyPackage,
     ) -> Result<MemberAddition> {
+        self.add_members(identity, vec![key_package])
+    }
+
+    /// Add several members in ONE commit with ONE Welcome (ADR-0050).
+    ///
+    /// A person is added as all of their devices, each its own leaf, and a
+    /// group founder also admits its own other devices. Those leaves must
+    /// land in a single commit: with one direct commit per leaf, every leaf
+    /// but the last would hold a Welcome for an epoch the founder then
+    /// advanced past, and — the founder being the only member at that point,
+    /// with nobody to broadcast the intermediate commits to — would be
+    /// stranded at its Welcome epoch forever. One commit gives every added
+    /// leaf a Welcome for the same epoch; the returned Welcome carries the
+    /// secrets of every added leaf and is delivered, byte-identical, to each
+    /// of their mailboxes.
+    ///
+    /// Every leaf is checked for a device binding that resolves to an
+    /// account, as [`Self::add_member`] does. An empty list is refused.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Group`] for an empty list, when a member proposal is
+    /// pending, or for any OpenMLS-side failure; a typed
+    /// [`RefusalReason::DeviceBindingInvalid`] refusal when any leaf's binding
+    /// does not verify.
+    pub fn add_members(
+        &mut self,
+        identity: &Identity,
+        key_packages: Vec<KeyPackage>,
+    ) -> Result<MemberAddition> {
+        if key_packages.is_empty() {
+            return Err(Error::Group("add_members: no KeyPackage given".to_owned()));
+        }
         self.refuse_if_proposals_pending("add_member")?;
+        // ADR-0050: the direct path admits nothing the proposal path would
+        // refuse — a leaf whose credential does not resolve to an account.
+        for key_package in &key_packages {
+            let leaf = key_package.leaf_node();
+            if crate::device_binding::account_key_of_credential(
+                leaf.credential().serialized_content(),
+                leaf.signature_key().as_slice(),
+            )
+            .is_none()
+            {
+                return Err(Error::refused(
+                    RefusalReason::DeviceBindingInvalid,
+                    "add_member refused: the added leaf's device binding does not verify",
+                ));
+            }
+        }
         let (commit, welcome, _group_info) = self
             .inner
-            .add_members(&identity.provider, &identity.signature_keys, &[key_package])
+            .add_members(&identity.provider, &identity.signature_keys, &key_packages)
             .map_err(|e| Error::Group(format!("add_members: {e:?}")))?;
 
         self.inner
@@ -710,6 +783,32 @@ impl Group {
             .validate(identity.provider.crypto(), ProtocolVersion::Mls10)
             .map_err(|e| Error::KeyPackage(format!("validate: {e:?}")))?;
         self.add_member(identity, validated)
+    }
+
+    /// Add several members from their wire-format KeyPackages in one commit.
+    ///
+    /// The multi-leaf form of [`Self::add_member_from_wire`]; see
+    /// [`Self::add_members`] for why a person's devices must share a commit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::KeyPackage`] for a validation failure of any package,
+    /// else what [`Self::add_members`] returns.
+    pub fn add_members_from_wire(
+        &mut self,
+        identity: &Identity,
+        key_packages: &[&[u8]],
+    ) -> Result<MemberAddition> {
+        let mut validated = Vec::with_capacity(key_packages.len());
+        for bytes in key_packages {
+            let kp_in = crate::key_package::deserialize(bytes)?;
+            validated.push(
+                kp_in
+                    .validate(identity.provider.crypto(), ProtocolVersion::Mls10)
+                    .map_err(|e| Error::KeyPackage(format!("validate: {e:?}")))?,
+            );
+        }
+        self.add_members(identity, validated)
     }
 
     /// Remove a member identified by their leaf index.
@@ -804,8 +903,35 @@ impl Group {
     /// (Finding 1). A member not named in the table is [`Role::Member`].
     #[must_use]
     pub fn own_role(&self, identity: &Identity) -> Option<Role> {
-        self.group_roles()
-            .map(|table| table.role_of(identity.signature_public_key()))
+        let account = identity.account_public_key()?;
+        self.group_roles().map(|table| table.role_of(&account))
+    }
+
+    /// The account key the leaf at `leaf` resolves to (ADR-0050), or `None`
+    /// for a leaf that is not in the roster or whose credential did not
+    /// resolve.
+    #[must_use]
+    pub fn account_key_at(&self, leaf: u32) -> Option<Vec<u8>> {
+        account_key_at_leaf(&self.members(), leaf).map(|k| k.to_vec())
+    }
+
+    /// Whether this device is its account's **acting** leaf in the group
+    /// (ADR-0050): the one with the lexicographically lowest leaf signature
+    /// key among the account's leaves. Only that leaf sweeps, so two devices of
+    /// one admin never both act. A device that is not in the roster is not
+    /// acting.
+    fn is_accounts_acting_leaf(&self, identity: &Identity) -> bool {
+        let Some(account) = identity.account_public_key() else {
+            return false;
+        };
+        let own_key = identity.signature_public_key();
+        let members = self.members();
+        if !members.iter().any(|m| m.signature_public_key == own_key) {
+            return false;
+        }
+        !members.iter().any(|m| {
+            m.account_key.as_slice() == account && m.signature_public_key.as_slice() < own_key
+        })
     }
 
     /// Retain a non-member's external-join proposal for an owner/admin decision
@@ -827,7 +953,16 @@ impl Group {
             ));
         };
         let key_package = add.key_package().clone();
-        let joiner_signature_key = key_package.leaf_node().signature_key().as_slice().to_vec();
+        let joiner_leaf = key_package.leaf_node();
+        let joiner_signature_key = joiner_leaf.signature_key().as_slice().to_vec();
+        // ADR-0050: a leaf whose credential does not resolve to an account is
+        // never retained — surfaced, like a full quarantine, as `retained:
+        // false`, since a stranger must not be able to fail a member's loop.
+        let binding_resolves = crate::device_binding::account_key_of_credential(
+            joiner_leaf.credential().serialized_content(),
+            &joiner_signature_key,
+        )
+        .is_some();
 
         // ADR-0045 S7 — reap first, so a request whose joiner has since landed
         // frees the slot it was occupying instead of holding it to the cap.
@@ -838,7 +973,8 @@ impl Group {
             .iter()
             .any(|p| p.joiner_signature_key == joiner_signature_key);
         let already_a_member = self.joiner_is_already_a_member(&joiner_signature_key);
-        if !already_pending
+        if binding_resolves
+            && !already_pending
             && !already_a_member
             && self.pending_external_joins.len() < MAX_PENDING_EXTERNAL_JOINS
         {
@@ -1236,9 +1372,11 @@ impl Group {
         let table = self.role_table_or_refuse("proposal")?;
         let members = self.members();
         let proposer = Proposer {
-            leaf: self.own_leaf_index().u32(),
-            pubkey: identity.signature_public_key(),
+            account: identity.account_public_key().ok_or_else(|| {
+                Error::Group("proposal refused: identity signature key is not 32 bytes".into())
+            })?,
         };
+        self.refuse_if_device_limit_reached(&members, kind)?;
         let capacity = pending_capacity(is_owner_response(&table, Some(proposer), kind));
         if self.inner.pending_proposals().count() >= capacity {
             return Err(Error::refused(
@@ -1269,8 +1407,15 @@ impl Group {
         identity: &Identity,
         key_package: KeyPackage,
     ) -> Result<Vec<u8>> {
+        let leaf = key_package.leaf_node();
+        let signature_key = leaf.signature_key().as_slice().to_vec();
         let kind = ProposalKind::Add {
-            signature_key: key_package.leaf_node().signature_key().as_slice().to_vec(),
+            account_key: crate::device_binding::account_key_of_credential(
+                leaf.credential().serialized_content(),
+                &signature_key,
+            )
+            .map(|k| k.to_vec()),
+            signature_key,
         };
         self.authorise_own_proposal(identity, &kind)?;
         let (proposal, _proposal_ref) = self
@@ -1407,7 +1552,8 @@ impl Group {
         outgoing: OutgoingOwner,
     ) -> Result<RoleTable> {
         let table = self.role_table_or_refuse("ownership transfer")?;
-        if !table.is_owner(identity.signature_public_key()) {
+        let own_account = identity.account_public_key().unwrap_or_default();
+        if !table.is_owner(&own_account) {
             return Err(Error::refused(
                 RefusalReason::NotOwner,
                 "ownership transfer refused: this device is not the group owner",
@@ -1426,11 +1572,7 @@ impl Group {
         // removed (the owner's leaf is unremovable), so the group would be
         // permanently un-administrable. Refused here for a clear error, and
         // again by every peer's commit gate, which is where it is enforced.
-        if !self
-            .members()
-            .iter()
-            .any(|m| m.signature_public_key == new_owner)
-        {
+        if !self.members().iter().any(|m| m.account_key == new_owner) {
             return Err(Error::refused(
                 RefusalReason::OwnerNotAMember,
                 "ownership transfer refused: the named owner is not a member of this group",
@@ -1540,7 +1682,127 @@ impl Group {
     #[must_use]
     pub fn own_committer_rank(&self, identity: &Identity) -> Option<u32> {
         let table = self.group_roles()?;
-        crate::group_roles::committer_rank(&table, identity.signature_public_key())
+        // ADR-0050: rank the ACCOUNT, and let only the account's acting leaf
+        // hold it, so two devices of one admin never both sweep.
+        if !self.is_accounts_acting_leaf(identity) {
+            return None;
+        }
+        let account = identity.account_public_key()?;
+        if let Some(rank) = crate::group_roles::committer_rank(&table, &account) {
+            return Some(rank);
+        }
+        // ADR-0050 section 2.5: a pending set that holds only this account's
+        // own self-service proposals may be swept by this account, ranked
+        // right after the last admin, so a second device joins a chat without
+        // waiting for the other person to come online.
+        if self.pending_is_self_service_of(&account) {
+            return u32::try_from(table.admins().len()).ok()?.checked_add(1);
+        }
+        None
+    }
+
+    /// A **peer's** ADR-0045 committer rank, from this device's view: the rank
+    /// of the account the leaf with `leaf_signature_key` belongs to, held only
+    /// by that account's acting leaf (ADR-0050 — the lowest leaf signature key
+    /// among the account's leaves). `None` for a plain member, a leaf not in
+    /// the roster, a non-acting leaf of a ranked account, or a group with no
+    /// role table.
+    ///
+    /// Rank the key when you take the verdict, not when a beacon arrived: a
+    /// rank is a position in the role table's canonical order and renumbers
+    /// on every role change.
+    #[must_use]
+    pub fn committer_rank_of(&self, leaf_signature_key: &[u8]) -> Option<u32> {
+        let table = self.group_roles()?;
+        let members = self.members();
+        let member = members
+            .iter()
+            .find(|m| m.signature_public_key.as_slice() == leaf_signature_key)?;
+        let account: [u8; 32] = member.account_key.as_slice().try_into().ok()?;
+        let acting = !members.iter().any(|m| {
+            m.account_key.as_slice() == account
+                && m.signature_public_key.as_slice() < leaf_signature_key
+        });
+        if !acting {
+            return None;
+        }
+        crate::group_roles::committer_rank(&table, &account)
+    }
+
+    /// `true` when the pending set is non-empty and every proposal in it is a
+    /// self-service proposal of `account` (ADR-0050): an `Add` of a leaf bound
+    /// to `account`, a `Remove` of one of `account`'s leaves, or a `Leave`
+    /// proposed by one of them.
+    fn pending_is_self_service_of(&self, account: &[u8; 32]) -> bool {
+        let members = self.members();
+        let mut any = false;
+        for qp in self.inner.pending_proposals() {
+            any = true;
+            let sender_account = match qp.sender() {
+                Sender::Member(idx) => account_key_at_leaf(&members, idx.u32()),
+                _ => None,
+            };
+            let own = match classify(qp.proposal()) {
+                ProposalKind::Add { account_key, .. } => {
+                    account_key.as_deref() == Some(account.as_slice())
+                },
+                ProposalKind::Remove { target_leaf } => {
+                    account_key_at_leaf(&members, target_leaf) == Some(*account)
+                },
+                ProposalKind::Leave => sender_account == Some(*account),
+                _ => false,
+            };
+            if !own {
+                return false;
+            }
+        }
+        any
+    }
+
+    /// Refuse an `Add` that would take its account past
+    /// [`MAX_LEAVES_PER_ACCOUNT`] in this group (ADR-0050). Counted over the
+    /// current roster plus the pending `Add`s of the same account, so N devices
+    /// proposed in one round cannot overshoot together.
+    fn refuse_if_device_limit_reached(
+        &self,
+        members: &[MemberRecord],
+        kind: &ProposalKind,
+    ) -> Result<()> {
+        let ProposalKind::Add {
+            account_key: Some(account),
+            ..
+        } = kind
+        else {
+            return Ok(());
+        };
+        // Distinct pending device keys of that account: N proposals naming one
+        // device are one device (the sweep admits each key once).
+        let mut pending_keys: Vec<Vec<u8>> = Vec::new();
+        for qp in self.inner.pending_proposals() {
+            if let ProposalKind::Add {
+                account_key: Some(a),
+                signature_key,
+            } = classify(qp.proposal())
+            {
+                if &a == account
+                    && !pending_keys.contains(&signature_key)
+                    && !members
+                        .iter()
+                        .any(|m| m.signature_public_key == signature_key)
+                {
+                    pending_keys.push(signature_key);
+                }
+            }
+        }
+        if leaves_of_account(members, account) + pending_keys.len() >= MAX_LEAVES_PER_ACCOUNT {
+            return Err(Error::refused(
+                RefusalReason::DeviceLimitReached,
+                format!(
+                    "add proposal refused: that account already holds                      {MAX_LEAVES_PER_ACCOUNT} devices in this group"
+                ),
+            ));
+        }
+        Ok(())
     }
 
     /// Sweep the authorised pending proposals into **one** Commit (ADR-0045).
@@ -1714,7 +1976,12 @@ impl Group {
             ));
         }
         let table = self.role_table_or_refuse("sweep")?;
-        if !table.can_administer(identity.signature_public_key()) {
+        // ADR-0050: authority is the ACCOUNT's, and a pending set made only of
+        // this account's own self-service proposals may be swept by it
+        // (section 2.5) — which is how a second device joins a chat without
+        // waiting for the other person to come online.
+        let own_account = identity.account_public_key().unwrap_or_default();
+        if !table.can_administer(&own_account) && !self.pending_is_self_service_of(&own_account) {
             return Err(Error::refused(
                 RefusalReason::NotACommitter,
                 "sweep refused: this device is not owner or admin",
@@ -1738,7 +2005,7 @@ impl Group {
                 .pending_proposals()
                 .filter(|qp| proposal_is_authorised(&table, &members, qp)),
         );
-        let role_change_survives = owner_survives(&effects, &members).is_ok();
+        let role_change_survives = owner_survives(&effects, &members, table.owner()).is_ok();
         // Removes and leaves are never excluded by the filter, so the authorised
         // set's removals are exactly the emitted commit's removals — which is
         // what makes this the right roster for the key-collision clause.
@@ -2035,7 +2302,8 @@ impl Group {
     ) -> bool {
         let mut trial = accepted.to_vec();
         trial.push(candidate.clone());
-        if !selection_keeps_an_owner(queued, &trial, members) {
+        let owner = self.group_roles().map(|t| *t.owner()).unwrap_or_default();
+        if !selection_keeps_an_owner(queued, &trial, members, &owner) {
             return false;
         }
         self.sweep_selection_builds(identity, &trial)
@@ -2184,6 +2452,7 @@ impl Group {
             ProcessedMessageContent::ApplicationMessage(app) => Ok(Incoming::Application {
                 bytes: app.into_bytes(),
                 sender_leaf: committer_leaf,
+                sender_account: committer_leaf.and_then(|l| self.account_key_at(l)),
             }),
             ProcessedMessageContent::StagedCommitMessage(staged) => {
                 // Read the role table from the PRE-MERGE GroupContext. `None` =>
@@ -2243,10 +2512,14 @@ impl Group {
             return refused(kind);
         };
         let members = self.members();
-        let proposer = sender_leaf.and_then(|leaf| {
-            pubkey_at_leaf(&members, leaf).map(|pubkey| Proposer { leaf, pubkey })
-        });
+        let proposer = sender_leaf.and_then(|leaf| proposer_at(&members, leaf));
         if authorise(&table, &members, proposer, &kind).is_err() {
+            return refused(kind);
+        }
+        if self
+            .refuse_if_device_limit_reached(&members, &kind)
+            .is_err()
+        {
             return refused(kind);
         }
 
@@ -2471,6 +2744,7 @@ impl Group {
             ProcessedMessageContent::ApplicationMessage(app) => Ok(Incoming::Application {
                 bytes: app.into_bytes(),
                 sender_leaf,
+                sender_account: sender_leaf.and_then(|l| self.account_key_at(l)),
             }),
             ProcessedMessageContent::StagedCommitMessage(staged) => {
                 self.inner
@@ -2542,6 +2816,7 @@ impl Group {
             ProcessedMessageContent::ApplicationMessage(app) => Ok(Incoming::Application {
                 bytes: app.into_bytes(),
                 sender_leaf,
+                sender_account: sender_leaf.and_then(|l| self.account_key_at(l)),
             }),
             ProcessedMessageContent::StagedCommitMessage(staged) => {
                 // Read removed leaves + their pre-merge signature keys.
@@ -2702,9 +2977,18 @@ impl Group {
     pub fn members(&self) -> Vec<MemberRecord> {
         self.inner
             .members()
-            .map(|m| MemberRecord {
-                leaf_index: m.index.u32(),
-                signature_public_key: m.signature_key,
+            .map(|m| {
+                let account_key = crate::device_binding::account_key_of_credential(
+                    m.credential.serialized_content(),
+                    &m.signature_key,
+                )
+                .map(|k| k.to_vec())
+                .unwrap_or_default();
+                MemberRecord {
+                    leaf_index: m.index.u32(),
+                    signature_public_key: m.signature_key,
+                    account_key,
+                }
             })
             .collect()
     }
@@ -2796,8 +3080,7 @@ fn proposal_is_authorised(
         Sender::Member(idx) => Some(idx.u32()),
         _ => None,
     };
-    let proposer =
-        leaf.and_then(|leaf| pubkey_at_leaf(members, leaf).map(|pubkey| Proposer { leaf, pubkey }));
+    let proposer = leaf.and_then(|leaf| proposer_at(members, leaf));
     authorise(table, members, proposer, &classify(qp.proposal())).is_ok()
 }
 
@@ -2836,13 +3119,14 @@ fn selection_keeps_an_owner(
     queued: &[QueuedProposal],
     selection: &[ProposalRef],
     members: &[MemberRecord],
+    current_owner: &[u8],
 ) -> bool {
     let effects = commit_effects(
         queued
             .iter()
             .filter(|qp| selection.contains(qp.proposal_reference_ref())),
     );
-    owner_survives(&effects, members).is_ok()
+    owner_survives(&effects, members, current_owner).is_ok()
 }
 
 // Counts every `CommitBuilder::build` the sweep path performs, in test builds
@@ -2941,6 +3225,9 @@ struct SweepState {
     /// Signature keys of the `Add` proposals this pass has taken (each key is
     /// admissible at most once per commit).
     kept_added_keys: Vec<Vec<u8>>,
+    /// The accounts of the `Add` proposals this pass has taken (ADR-0050 —
+    /// the per-account leaf cap counts them alongside the staying roster).
+    kept_added_accounts: Vec<Vec<u8>>,
     /// HPKE **encryption** keys of the `Add` proposals this pass has taken.
     kept_encryption_keys: Vec<EncryptionKey>,
     /// HPKE **init** keys of the `Add` proposals this pass has taken, held as
@@ -3042,10 +3329,33 @@ fn sweep_keeps(ctx: &SweepContext<'_>, state: &mut SweepState, qp: &QueuedPropos
         return false;
     }
     match classify(qp.proposal()) {
-        ProposalKind::Add { signature_key } => {
+        ProposalKind::Add {
+            signature_key,
+            account_key,
+        } => {
             if state.kept_added_keys.contains(&signature_key) {
                 return false;
             }
+            // ADR-0050: an unresolvable binding never joins, and an account
+            // never exceeds its leaf cap — counted over the staying roster plus
+            // the Adds this pass has already taken for the same account.
+            let Some(account) = account_key else {
+                return false;
+            };
+            let staying = ctx
+                .members
+                .iter()
+                .filter(|m| m.account_key == account && !ctx.removed_leaves.contains(&m.leaf_index))
+                .count();
+            let taken = state
+                .kept_added_accounts
+                .iter()
+                .filter(|a| **a == account)
+                .count();
+            if staying + taken >= MAX_LEAVES_PER_ACCOUNT {
+                return false;
+            }
+            state.kept_added_accounts.push(account);
             let collides_with_a_staying_member = ctx.members.iter().any(|m| {
                 m.signature_public_key == signature_key
                     && !ctx.removed_leaves.contains(&m.leaf_index)
@@ -3379,7 +3689,11 @@ fn authorise_role_commit(
     // whatever else this commit does, it must not leave the group with an owner
     // who is not in it. See `owner_survives` for the two ways that happens and
     // why neither is visible to a per-proposal check.
-    owner_survives(&commit_effects(staged.queued_proposals()), members)?;
+    owner_survives(
+        &commit_effects(staged.queued_proposals()),
+        members,
+        table.owner(),
+    )?;
     for qp in staged.queued_proposals() {
         // The proposal's own author: the sender OpenMLS recorded for it. A
         // by-value proposal carries the committer; a by-reference one carries
@@ -3394,8 +3708,7 @@ fn authorise_role_commit(
             // with an unresolvable committer too.
             _ => None,
         };
-        let author = author_leaf
-            .and_then(|leaf| pubkey_at_leaf(members, leaf).map(|pubkey| Proposer { leaf, pubkey }));
+        let author = author_leaf.and_then(|leaf| proposer_at(members, leaf));
         authorise(table, members, author, &classify(qp.proposal()))?;
     }
     Ok(())
@@ -3751,7 +4064,8 @@ mod proposal_gate_tests {
         assert_eq!(
             record.kind,
             ProposalKind::Add {
-                signature_key: dave_key
+                account_key: Some(dave_key.clone()),
+                signature_key: dave_key,
             },
             "the refusal must still describe what was refused",
         );
@@ -6097,7 +6411,7 @@ mod external_join_tests {
             .expect("a commit was produced");
         assert_eq!(sweep.swept.len(), 1, "the sweep carried the approval");
         assert!(
-            matches!(&sweep.swept[0].kind, ProposalKind::Add { signature_key } if *signature_key == dave_pk),
+            matches!(&sweep.swept[0].kind, ProposalKind::Add { signature_key, .. } if *signature_key == dave_pk),
             "and it is dave's Add: {:?}",
             sweep.swept[0].kind,
         );

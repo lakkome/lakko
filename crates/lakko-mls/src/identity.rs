@@ -28,6 +28,7 @@ use openmls_traits::OpenMlsProvider as _;
 use lakko_crypto::{agreement, kdf, signing};
 
 use crate::ciphersuite;
+use crate::device_binding::{DeviceBinding, DEVICE_BINDING_LEN};
 use crate::error::{Error, Result};
 
 /// HKDF salt for deterministic Identity derivation. Pinned ASCII;
@@ -73,13 +74,21 @@ pub struct Identity {
     /// `from_seed()` produce the SignatureKeyPair via
     /// `from_raw(seed, pub)` so the seed is always available.
     pub(crate) ed25519_seed: [u8; 32],
+    /// ADR-0050 device binding: the account-key-signed statement that this
+    /// identity's signature key is one of the account's devices. `None` for an
+    /// identity that has not been bound — the account identity itself (a
+    /// Phase 1 leaf, whose key *is* the account key) or a device identity
+    /// before [`Identity::bind_to_account`] ran. When present it is the leaf's
+    /// `BasicCredential` identity bytes on every KeyPackage and every group
+    /// this identity creates from then on.
+    pub(crate) device_binding: Option<[u8; DEVICE_BINDING_LEN]>,
 }
 
 impl Identity {
-    /// Generate a fresh identity with the given user-visible name.
-    ///
-    /// The name is wrapped in a [`BasicCredential`] and is opaque to the
-    /// protocol; treat it as a user-display label, not as authentication.
+    /// Generate a fresh identity. `name` is accepted for API compatibility and
+    /// **not carried** anywhere: since ADR-0050 the leaf credential's identity
+    /// bytes are the device-binding slot (empty = unbound), and no caller ever
+    /// read the name back.
     ///
     /// Uses [`ciphersuite::DEFAULT`].
     ///
@@ -132,7 +141,14 @@ impl Identity {
             .store(provider.storage())
             .map_err(|e| Error::Identity(format!("keypair storage: {e:?}")))?;
 
-        let basic = BasicCredential::new(name.as_bytes().to_vec());
+        // ADR-0050: the leaf credential's identity bytes are the device
+        // binding slot, and an EMPTY credential means "an unbound leaf whose
+        // key is the account key". A display name in here would read as a
+        // malformed binding and the leaf would be refused at every gate, so
+        // the name is not carried — nothing has ever read it back
+        // (`Credential::identity()` has no caller in this crate).
+        let _ = name;
+        let basic = BasicCredential::new(Vec::new());
         let credential = CredentialWithKey {
             credential: basic.into(),
             signature_key: signature_keys.public().into(),
@@ -152,6 +168,7 @@ impl Identity {
             ciphersuite: cs,
             x25519_secret,
             ed25519_seed,
+            device_binding: None,
         })
     }
 
@@ -245,7 +262,38 @@ impl Identity {
             // exit; we keep the raw bytes so the accessor can
             // serve them.
             ed25519_seed: ed25519_secret,
+            device_binding: None,
         })
+    }
+
+    /// [`Identity::from_seed`] followed by [`Identity::bind_to_account`] — the
+    /// one-call shape the FFI constructors need, since an FFI object cannot be
+    /// mutated after construction.
+    ///
+    /// # Errors
+    ///
+    /// As [`Identity::from_seed`] and [`Identity::bind_to_account`].
+    pub fn from_seed_bound(
+        seed: &[u8],
+        account_seed: &[u8; 32],
+        issued_at_unix_secs: u64,
+    ) -> Result<Self> {
+        let mut id = Self::from_seed(seed)?;
+        id.bind_to_account(account_seed, issued_at_unix_secs)?;
+        Ok(id)
+    }
+
+    /// [`Identity::from_seed`] followed by [`Identity::set_device_binding`] —
+    /// rebuild a device identity from its persisted seed and its persisted
+    /// binding.
+    ///
+    /// # Errors
+    ///
+    /// As [`Identity::from_seed`] and [`Identity::set_device_binding`].
+    pub fn from_seed_with_binding(seed: &[u8], binding: &[u8]) -> Result<Self> {
+        let mut id = Self::from_seed(seed)?;
+        id.set_device_binding(binding)?;
+        Ok(id)
     }
 
     /// Public signature key as raw bytes (Ed25519 or ECDSA-P384 depending on
@@ -253,6 +301,72 @@ impl Identity {
     #[must_use]
     pub fn signature_public_key(&self) -> &[u8] {
         self.signature_keys.public()
+    }
+
+    /// Bind this identity to an account (ADR-0050): mint the device binding
+    /// under `account_seed` (the account identity's 32-byte Ed25519 seed —
+    /// `Identity::ed25519_seed_bytes` of the phrase-derived identity) and make
+    /// it this identity's leaf credential. Every KeyPackage and every group
+    /// created afterwards carries it; leaves already in groups keep the
+    /// credential they were added with.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Identity`] when this identity's signature key is not 32 bytes.
+    pub fn bind_to_account(
+        &mut self,
+        account_seed: &[u8; 32],
+        issued_at_unix_secs: u64,
+    ) -> Result<()> {
+        let device: [u8; 32] = self
+            .signature_public_key()
+            .try_into()
+            .map_err(|_| Error::Identity("device binding: signature key is not 32 bytes".into()))?;
+        let bytes = DeviceBinding::sign(account_seed, device, issued_at_unix_secs);
+        self.install_device_binding(bytes);
+        Ok(())
+    }
+
+    /// Install a previously minted binding (the bytes a client persisted so
+    /// `issued_at` stays stable across restarts). Verified against this
+    /// identity's own signature key; a binding for another device or one that
+    /// does not verify is refused.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Identity`] when `bytes` is not a valid binding for this key.
+    pub fn set_device_binding(&mut self, bytes: &[u8]) -> Result<()> {
+        DeviceBinding::verify_for_leaf(bytes, self.signature_public_key())?;
+        let fixed: [u8; DEVICE_BINDING_LEN] = bytes
+            .try_into()
+            .map_err(|_| Error::Identity("device binding: wrong length".into()))?;
+        self.install_device_binding(fixed);
+        Ok(())
+    }
+
+    fn install_device_binding(&mut self, bytes: [u8; DEVICE_BINDING_LEN]) {
+        self.credential = CredentialWithKey {
+            credential: BasicCredential::new(bytes.to_vec()).into(),
+            signature_key: self.signature_keys.public().into(),
+        };
+        self.device_binding = Some(bytes);
+    }
+
+    /// The wire bytes of this identity's device binding, when bound.
+    #[must_use]
+    pub fn device_binding(&self) -> Option<&[u8]> {
+        self.device_binding.as_ref().map(|b| &b[..])
+    }
+
+    /// The account key this identity acts for: the binding's account key when
+    /// bound, else its own signature key (an unbound identity is the account
+    /// identity itself, or a Phase 1 leaf). `None` only for a non-32-byte key.
+    #[must_use]
+    pub fn account_public_key(&self) -> Option<[u8; 32]> {
+        match self.device_binding {
+            Some(bytes) => DeviceBinding::decode(&bytes).ok().map(|b| b.account_pubkey),
+            None => self.signature_public_key().try_into().ok(),
+        }
     }
 
     /// Raw 32-byte Ed25519 signing seed.

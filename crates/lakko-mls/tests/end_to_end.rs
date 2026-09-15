@@ -65,7 +65,9 @@ fn three_party_group_lifecycle_and_exporter_consistency() {
     // the chat receive path can run the author-only edit/delete gate + attribute
     // reactions. Bob sees Alice's leaf, not his own.
     match bob_received {
-        Incoming::Application { bytes, sender_leaf } => {
+        Incoming::Application {
+            bytes, sender_leaf, ..
+        } => {
             assert_eq!(bytes, b"hi bob, this is alice".to_vec());
             assert_eq!(sender_leaf, Some(alice_group.own_leaf_index().u32()));
         },

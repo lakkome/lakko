@@ -44,6 +44,8 @@ const hoisted = vi.hoisted(() => ({
 }));
 vi.mock("../wasm", () => ({
   loadWasm: async () => ({
+    // ADR-0050: the Welcome is addressed to the added leaf's own key.
+    keyPackageSignatureKey: (_kp: Uint8Array) => new Uint8Array(32).fill(9),
     IdentityPseudonym: {
       fromIdentity: (_pk: Uint8Array) => ({
         asBytes: (): Uint8Array => {
@@ -558,7 +560,9 @@ describe("ADR-0040 F1 — reset the in-memory group on a commit persist-abort", 
     const client = new ContactsClient(
       // addMemberToGroup fetches the new member's KeyPackage first.
       {
-        fetchKeyPackage: async () => new Uint8Array([9, 9, 9]),
+        fetchKeyPackages: async () => [
+          { deviceId: new Uint8Array(32).fill(9), keyPackage: new Uint8Array([9, 9, 9]) },
+        ],
       } as unknown as DiscoveryClient,
       { publishGroup, publishMailbox } as unknown as DsClient,
       {

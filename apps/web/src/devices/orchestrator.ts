@@ -489,6 +489,11 @@ export interface ScanResult {
   /** Number of devices in the local DeviceGroup AFTER the
    *  add. UI surfaces as "now N devices linked" toast. */
   readonly memberCount: number;
+  /** ADR-0050 section 2.8 — the added device's 32-byte signature key: its
+   *  DeviceGroup leaf, its conversation leaf and its discovery `device_id`
+   *  are one key. The caller hands it to `BackgroundReceiveApi.admitDevice`,
+   *  which admits the device to every chat this device is in. */
+  readonly newDeviceKey: Uint8Array;
 }
 
 /**
@@ -658,7 +663,11 @@ export async function runScanFlow(args: {
     // member count: founder + freshly-added leaf, plus any
     // prior members. We don't expose `devices()` through FFI
     // yet (2a3c), so surface a best-effort estimate.
-    return { memberCount: ensured.bootstrapped ? 2 : 0 };
+    const wasm = await loadWasm();
+    return {
+      memberCount: ensured.bootstrapped ? 2 : 0,
+      newDeviceKey: wasm.keyPackageSignatureKey(decoded.keyPackage),
+    };
   } finally {
     ensured.group.free();
     ensured.identity.free();

@@ -50,6 +50,7 @@ import { useCallHost } from "../calls/CallHostContext";
 import { useBackgroundReceive } from "../chat/BackgroundReceiveContext";
 import { eventToPersistedMessage, mergeForegroundSlot } from "../chat/background-log";
 import { memberKeysOf, peerName } from "../chat/peer-name";
+import { ownPersonKeyB64, peopleCountOf, personKeyOf } from "../chat/person-key";
 import { groupCallsFor } from "../calls/group-call-store";
 import { chatCallAffordance, type ChatCallAffordance } from "../calls/group-call-host";
 import {
@@ -648,8 +649,7 @@ function ChatView(props: {
   /** The other member's signature key in a 1x1 chat, else `null`. */
   const peerKeyB64 = (): string | null => {
     if (memberCount() !== 2) return null;
-    const own = chats.identity();
-    const ownB64 = own === null ? null : base64Encode(own.signaturePublicKey);
+    const ownB64 = ownPersonKeyB64(chats.identity());
     const peers = memberKeysOf(props.entry.group).filter((k) => k !== ownB64);
     return peers.length === 1 ? (peers[0] ?? null) : null;
   };
@@ -662,9 +662,8 @@ function ChatView(props: {
   };
 
   const resolvePeerName = (): string => {
-    const own = chats.identity();
     return peerName({
-      ownKeyB64: own === null ? null : base64Encode(own.signaturePublicKey),
+      ownKeyB64: ownPersonKeyB64(chats.identity()),
       memberKeysB64: memberKeysOf(props.entry.group),
       resolveName: (k) => profiles.resolve(k).name,
       linkedContactName: loadAccepted().find((c) => c.groupIdB64 === props.entry.groupIdB64)
@@ -864,14 +863,14 @@ function ChatView(props: {
   // ADR-0028 (G-3) — the minted group invite-link (the owner/admin
   // "create invite link" affordance), or `null` before it is generated.
   const [inviteLink, setInviteLink] = createSignal<string | null>(null);
-  // `memberCount` mirrors `props.entry.group.memberCount` into
+  // `memberCount` mirrors `peopleCountOf(props.entry.group)` into
   // a reactive signal so the header re-renders after
   // `addMember`. Without this the WASM-side property read in
   // JSX wouldn't re-evaluate on a render driven by a different
   // signal — Solid's fine-grained reactivity only tracks signal
   // accesses, not arbitrary object property reads.
   const [memberCount, setMemberCount] = createSignal(
-    props.entry.group.memberCount,
+    peopleCountOf(props.entry.group),
   );
   // 1.18h — members panel state. `membersVersion` is a
   // monotonic counter bumped on every epoch advance (refresh
@@ -906,20 +905,33 @@ function ChatView(props: {
   // reactions), `listLabel` (`Name · @username`) for roster rows.
   const memberName = (keyB64: string): string => profiles.resolve(keyB64).name;
   const memberListLabel = (keyB64: string): string => profiles.resolve(keyB64).listLabel;
-  const members = createMemo<readonly { leafIndex: number; sigPubkey: Uint8Array }[]>(
-    () => {
-      // Subscribe to the version signal so the memo re-runs.
-      membersVersion();
-      const arr = props.entry.group.members() as Array<{
-        leafIndex: number;
-        signaturePublicKey: Uint8Array;
-      }>;
-      return arr.map((m) => ({
-        leafIndex: m.leafIndex,
-        sigPubkey: m.signaturePublicKey,
-      }));
-    },
-  );
+  // ADR-0050 — one row per PERSON: `sigPubkey` is the member's account key
+  // (what roles, names and authorship key on), `leafIndex` its first leaf,
+  // `deviceCount` how many leaves the person holds. Removing the row removes
+  // every leaf of the account (`removeMemberFromGroup` fans out).
+  const members = createMemo<
+    readonly { leafIndex: number; sigPubkey: Uint8Array; deviceCount: number }[]
+  >(() => {
+    // Subscribe to the version signal so the memo re-runs.
+    membersVersion();
+    const arr = props.entry.group.members() as Array<{
+      leafIndex: number;
+      signaturePublicKey: Uint8Array;
+      accountKey?: Uint8Array;
+    }>;
+    const out: { leafIndex: number; sigPubkey: Uint8Array; deviceCount: number }[] = [];
+    for (const m of arr) {
+      const person = personKeyOf(m);
+      const personB64 = base64Encode(person);
+      const row = out.find((r) => base64Encode(r.sigPubkey) === personB64);
+      if (row !== undefined) {
+        row.deviceCount += 1;
+        continue;
+      }
+      out.push({ leafIndex: m.leafIndex, sigPubkey: person, deviceCount: 1 });
+    }
+    return out;
+  });
 
   // ADR-0048 §2 trigger 3 — when this group gains a member, republish this
   // device's profile (throttled + jittered per group by the scheduler), so the
@@ -1379,7 +1391,7 @@ function ChatView(props: {
     if (outcome === null) return null;
     if (outcome.kind !== "committed") return outcome;
 
-    setMemberCount(props.entry.group.memberCount);
+    setMemberCount(peopleCountOf(props.entry.group));
     setMembersVersion(membersVersion() + 1);
 
     const s = auth.state();
@@ -2929,7 +2941,7 @@ function ChatView(props: {
       // member; we processed their commit in pollMessages).
       // No-op when no commits came in: setSignal short-circuits
       // on equal values.
-      setMemberCount(props.entry.group.memberCount);
+      setMemberCount(peopleCountOf(props.entry.group));
       // 1.18h — bump membersVersion so the members panel's
       // createMemo re-reads the post-poll leaf set.
       //
@@ -3977,7 +3989,7 @@ function ChatView(props: {
     }
     // Mirror the post-add member count into the reactive
     // signal so the header re-renders.
-    setMemberCount(props.entry.group.memberCount);
+    setMemberCount(peopleCountOf(props.entry.group));
     // 1.18h — bump membersVersion so the members panel
     // (when open) re-reads the updated leaf set.
     setMembersVersion(membersVersion() + 1);
@@ -4193,7 +4205,7 @@ function ChatView(props: {
         );
         if (proposed.kind === "proposed") noteOwnRequest(`remove:${leafIndex}`);
         const swept = await sweepNow();
-        setMemberCount(props.entry.group.memberCount);
+        setMemberCount(peopleCountOf(props.entry.group));
         setMembersVersion(membersVersion() + 1);
         setNotice(
           swept?.kind === "committed"
@@ -4233,7 +4245,7 @@ function ChatView(props: {
           console.warn("push-routing rotation failed", err);
         },
       });
-      setMemberCount(props.entry.group.memberCount);
+      setMemberCount(peopleCountOf(props.entry.group));
       setMembersVersion(membersVersion() + 1);
       setNotice(
         result.kind === "committed"
@@ -4335,7 +4347,7 @@ function ChatView(props: {
       // If this device is the acting committer the sweep runs now, so the
       // common single-admin case still reads as "tap, done".
       const swept = await sweepNow();
-      setMemberCount(props.entry.group.memberCount);
+      setMemberCount(peopleCountOf(props.entry.group));
       setMembersVersion(membersVersion() + 1);
       if (swept?.kind === "committed") {
         setNotice("Join approved. They have been added to the group.");
@@ -4492,14 +4504,17 @@ function ChatView(props: {
   function onBackgroundEvents(events: readonly IncomingChatEvent[]): void {
     consumeEvents(events);
     if (events.some((e) => e.kind === "system" || e.kind === "externalJoinRequest")) {
-      setMemberCount(props.entry.group.memberCount);
+      setMemberCount(peopleCountOf(props.entry.group));
       setMembersVersion(membersVersion() + 1);
     }
   }
   let detachFromBackground: (() => void) | null = null;
+  let detachPollRequest: (() => void) | null = null;
   onCleanup(() => {
     detachFromBackground?.();
     detachFromBackground = null;
+    detachPollRequest?.();
+    detachPollRequest = null;
   });
 
   onMount(() => {
@@ -4512,6 +4527,17 @@ function ChatView(props: {
         detachFromBackground = receive.coordinator.attachView(
           props.entry.groupIdB64,
           onBackgroundEvents,
+        );
+        // ADR-0050 — the background receive publishes a device fan-out
+        // proposal into this (foreground) group and cannot sweep it itself;
+        // it asks this view to poll, whose tail sweeps. `refresh` is the
+        // same entry the Refresh button uses, so it runs while the tab is
+        // hidden too.
+        detachPollRequest = receive.coordinator.onPollRequested(
+          props.entry.groupIdB64,
+          () => {
+            void refresh();
+          },
         );
       }
       // ADR-0040 (G-35) — re-publish any pending commit that crashed mid-window
@@ -6691,6 +6717,13 @@ function TimelineBubble(props: {
 }): JSX.Element {
   // ADR-0048 — the author label goes through the one display resolver.
   const profiles = useProfiles();
+  // ADR-0050 — a message from this PERSON's other device arrives as an
+  // incoming row (another leaf sealed it) but is ours: same side, no sender
+  // name, exactly as if this device had sent it. The person key is the
+  // account key both leaves resolve to.
+  const chatsForOwn = useChats();
+  const fromOwnDevice = (senderKey: string | undefined): boolean =>
+    senderKey !== undefined && senderKey === ownPersonKeyB64(chatsForOwn.identity());
   // System rows + call signaling never carry an op overlay.
   if (props.row.kind === "incoming") {
     const ev = props.row.event;
@@ -6760,13 +6793,13 @@ function TimelineBubble(props: {
         attachments={ev.attachments}
         time={shortTime(ev.createdAt)}
         senderName={
-          props.showSender
+          props.showSender && !fromOwnDevice(ev.senderKey)
             ? ev.senderKey !== undefined
               ? profiles.resolve(ev.senderKey).name
               : "Unknown sender"
             : null
         }
-        tone="incoming"
+        tone={fromOwnDevice(ev.senderKey) ? "outgoing" : "incoming"}
         {...props}
       />
     );

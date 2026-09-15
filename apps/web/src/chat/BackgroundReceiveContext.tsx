@@ -60,7 +60,9 @@ import {
   receivePushRoutingSecretGated,
   rotatePushRoutingSecretIfMembershipShrank,
 } from "../push/group-routing";
-import { base64Encode } from "../auth/account-id";
+import { base64Decode, base64Encode } from "../auth/account-id";
+import { ContactsClient } from "../contacts/client";
+import { DiscoveryClient } from "../discovery/client";
 import { loadWasm } from "../wasm";
 import {
   appendToGroupSlot,
@@ -78,15 +80,21 @@ import {
 } from "./background-receive-scheduler";
 import { useChats, type ActiveGroup } from "./ChatContext";
 import { ChatClient, type IncomingChatEvent } from "./client";
-import { recordBeaconObservation } from "./committer-beacon";
+import {
+  decideActingCommitter,
+  recordBeaconObservation,
+  type ActingCommitter,
+} from "./committer-beacon";
 import { readIsActive } from "./membership-ended";
 import {
   loadMessageLog,
   MESSAGE_LOG_VERSION,
   updateMessageLog,
 } from "./message-log-store";
+import { markOwnPublished } from "./own-published";
 import { proposalKey, recordObservation } from "./pending-requests";
 import { ReceiveCoordinator } from "./receive-coordinator";
+import type { SweepOutcome } from "./sweep";
 
 export interface BackgroundReceiveApi {
   /** Shared with the chat view — see `receive-coordinator.ts`. */
@@ -100,9 +108,51 @@ export interface BackgroundReceiveApi {
    * failure.
    */
   syncGroupNow(groupIdB64: string): Promise<void>;
+  /**
+   * ADR-0050 section 2.8 — admit a device this device just added to the
+   * DeviceGroup (QR pairing, the ADR-0049 confirmation prompt) to EVERY chat
+   * this device is in. Waits, bounded, for the new device's conversation
+   * KeyPackage to appear in the directory (it publishes it once it has landed),
+   * then per chat: a self-service Add proposal, swept here when this device is
+   * the acting committer, or a direct commit on a table-less group. Chats whose
+   * view is open are proposed to and left to that view's own sweep.
+   *
+   * Resolves with a tally once every chat has been offered; rejects when the
+   * KeyPackage never appeared within the wait (the device is then admitted by
+   * a later re-admission, not by this call).
+   */
+  admitDevice(deviceKey: Uint8Array): Promise<DeviceFanOut>;
+  /**
+   * ADR-0050 section 2.10 — retire a device just removed from the DeviceGroup
+   * from EVERY chat this device is in (its one leaf per chat, the account's
+   * other devices untouched), then delete its directory KeyPackage.
+   */
+  retireDevice(deviceKey: Uint8Array): Promise<DeviceFanOut>;
 }
 
+/** What a device fan-out did, per chat. */
+export interface DeviceFanOut {
+  /** A proposal was published or a commit landed. */
+  readonly offered: number;
+  /** Nothing to do: already admitted / not present, or the membership ended. */
+  readonly skipped: number;
+  /** The chat threw; logged, the rest continued. */
+  readonly failed: number;
+}
+
+/** How long `admitDevice` waits for the new device's KeyPackage to appear in
+ *  the directory, and how often it looks. The fresh device publishes it after
+ *  it has landed a session, which includes a proof-of-work solve. */
+export const ADMIT_DEVICE_WAIT_MS = 180_000;
+export const ADMIT_DEVICE_POLL_MS = 3_000;
+
 const BackgroundReceiveContext = createContext<BackgroundReceiveApi>();
+
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) if (a[i] !== b[i]) return false;
+  return true;
+}
 
 export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX.Element {
   const auth = useAuth();
@@ -118,6 +168,27 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
       const s = auth.state();
       if (s.kind !== "session") return;
       await chats.persistSnapshot(s.account.accountId);
+    },
+  });
+  // ADR-0045 / ADR-0050 — the membership half for chats whose view is not
+  // open: the sweep at the tail of every background poll, and the device
+  // fan-outs. Same persist hooks the chat view's client uses, so a commit
+  // staged here is as durable as one staged there.
+  const discovery = new DiscoveryClient();
+  const contacts = new ContactsClient(discovery, undefined, {
+    identityProvider: () => chats.identity(),
+    accountIdentityProvider: () => chats.accountIdentity(),
+    onPersist: async () => {
+      const s = auth.state();
+      if (s.kind !== "session") return;
+      await chats.persistSnapshot(s.account.accountId);
+    },
+    onPersistWithCommit: async (entry) => {
+      const s = auth.state();
+      if (s.kind !== "session") {
+        throw new Error("no active session — commit aborted (ADR-0040)");
+      }
+      await chats.persistSnapshotWithCommit(s.account.accountId, entry);
     },
   });
 
@@ -224,7 +295,201 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     if (result.outcome === "cursor-moved") return { yieldedRows: false };
     const end = coordinator.cursor(groupIdB64) ?? start;
     await settle(account, entry, result.events, end > start, membersBefore);
+    // ADR-0045 — the sweep trigger, exactly as at the tail of the chat view's
+    // poll: it is the only thing that makes a pending proposal ever land, and
+    // before this a proposal in a chat nobody had open waited until somebody
+    // opened it. Cheap when nothing is pending; never awaited by the poll's
+    // own error path — a sweep failure is not a poll failure.
+    void sweepGroup(entry).catch((err: unknown) => {
+      // eslint-disable-next-line no-console
+      console.warn("background receive: tail sweep failed", err);
+    });
     return { yieldedRows: result.outcome === "applied" && end > start };
+  }
+
+  /** ADR-0045 S4b — the chat view's `actingCommitterNow`, for a group whose
+   *  view is not open: the beacon fold over this device's observations, ranks
+   *  re-derived through `committerRank` at verdict time. */
+  async function actingCommitterFor(entry: ActiveGroup, ownRank: number): Promise<ActingCommitter> {
+    const s = auth.state();
+    if (s.kind !== "session") return { kind: "defer", toRank: undefined };
+    const wasm = await loadWasm();
+    return decideActingCommitter({
+      accountIdB64: s.account.accountId,
+      groupIdB64: entry.groupIdB64,
+      ownRank,
+      rankOf: (senderKeyB64) => {
+        try {
+          return entry.group.committerRank(base64Decode(senderKeyB64));
+        } catch {
+          return undefined;
+        }
+      },
+      nowMs: Date.now(),
+      freshnessWindowMs: wasm.committerBeaconFreshnessWindowMs(),
+      fold: (rank, observed, windowMs) => {
+        const verdict = wasm.actingCommitterVerdict(
+          rank,
+          observed.map((o) => new wasm.BeaconObservation(o.rank, o.ageMs)),
+          windowMs,
+        );
+        try {
+          if (verdict.kind === "act") return { kind: "act" };
+          if (verdict.kind === "defer") {
+            return { kind: "defer", toRank: verdict.deferToRank };
+          }
+          return { kind: "not-a-candidate" };
+        } finally {
+          verdict.free();
+        }
+      },
+    });
+  }
+
+  /**
+   * One committer sweep of `entry`, from outside its chat view. The rows the
+   * verdict applied below this device's own commit are settled through the
+   * same path as a poll's, so they reach the log and the view. A group whose
+   * view is open is left alone: that view sweeps at the tail of its own poll,
+   * over its own cursor, and two sweepers over two cursors would re-feed
+   * consumed rows.
+   */
+  async function sweepGroup(entry: ActiveGroup): Promise<SweepOutcome | null> {
+    const s = auth.state();
+    const secrets = auth.identitySecrets();
+    if (s.kind !== "session" || secrets === null) return null;
+    if (coordinator.isForeground(entry.groupIdB64)) {
+      // The view sweeps at the tail of its own poll; ask it to poll now, since
+      // its long poll may be parked while the tab is hidden.
+      coordinator.requestPoll(entry.groupIdB64);
+      return null;
+    }
+    if (readIsActive(entry.group) === false) return null;
+    const account = s.account.accountId;
+    const start = await startCursor(account, entry);
+    const before = memberSignatureKeys(entry.group);
+    const swept: IncomingChatEvent[] = [];
+    let outcome: SweepOutcome | null = null;
+    try {
+      outcome = await contacts.sweepIfCommitter(
+        secrets,
+        entry.group,
+        {
+          read: () => coordinator.cursor(entry.groupIdB64) ?? start,
+          advance: (to) => {
+            coordinator.noteCursor(entry.groupIdB64, to);
+          },
+        },
+        (id) => chat.markOwnPublishedCommit(id),
+        (rank) => actingCommitterFor(entry, rank),
+        (event) => swept.push(event),
+      );
+    } finally {
+      // Applied and cursor-advanced whether or not our commit won: the only
+      // question left is whether they reach the log and the view.
+      if (swept.length > 0) await settle(account, entry, swept, true, before);
+    }
+    if (outcome?.kind === "committed") {
+      // ADR-0043 — a removal this sweep committed owes the push-routing
+      // rotation, as the chat view's sweep would.
+      void rotateIfShrank(account, entry, before);
+    }
+    return outcome;
+  }
+
+  /** Poll the directory until `deviceKey`'s KeyPackage is there, bounded. */
+  async function awaitDeviceKeyPackage(
+    accountId: Uint8Array,
+    deviceKey: Uint8Array,
+  ): Promise<Uint8Array> {
+    const deadline = Date.now() + ADMIT_DEVICE_WAIT_MS;
+    for (;;) {
+      const list = await discovery.fetchKeyPackages(accountId);
+      const hit = list?.find((d) => bytesEqual(d.deviceId, deviceKey));
+      if (hit !== undefined) return hit.keyPackage;
+      if (Date.now() >= deadline) {
+        throw new Error(
+          "the new device has not published a KeyPackage yet; it will be admitted to your chats later",
+        );
+      }
+      await sleepCancellable(ADMIT_DEVICE_POLL_MS, new AbortController().signal);
+    }
+  }
+
+  async function admitDevice(deviceKey: Uint8Array): Promise<DeviceFanOut> {
+    const secrets = auth.identitySecrets();
+    if (secrets === null) throw new Error("admitDevice: no session");
+    const keyPackage = await awaitDeviceKeyPackage(secrets.accountId, deviceKey);
+    let offered = 0;
+    let skipped = 0;
+    let failed = 0;
+    for (const entry of chats.groups()) {
+      if (readIsActive(entry.group) === false) {
+        skipped += 1;
+        continue;
+      }
+      try {
+        const outcome = await contacts.admitDeviceToGroup(secrets, entry.group, keyPackage);
+        if (outcome === null) {
+          skipped += 1;
+          continue;
+        }
+        offered += 1;
+        if (outcome.kind === "proposed") {
+          // Our own row: the next poll of this group (any client) drops it
+          // instead of handing it to OpenMLS as an incoming proposal.
+          markOwnPublished(entry.groupIdB64, outcome.proposalMessageId);
+          await sweepGroup(entry);
+        }
+      } catch (err) {
+        failed += 1;
+        // eslint-disable-next-line no-console
+        console.warn("ADR-0050 admit device: chat skipped", entry.groupIdB64, err);
+      }
+    }
+    return { offered, skipped, failed };
+  }
+
+  async function retireDevice(deviceKey: Uint8Array): Promise<DeviceFanOut> {
+    const secrets = auth.identitySecrets();
+    if (secrets === null) throw new Error("retireDevice: no session");
+    let offered = 0;
+    let skipped = 0;
+    let failed = 0;
+    for (const entry of chats.groups()) {
+      if (readIsActive(entry.group) === false) {
+        skipped += 1;
+        continue;
+      }
+      try {
+        const outcome = await contacts.retireDeviceFromGroup(secrets, entry.group, deviceKey);
+        if (outcome === null) {
+          skipped += 1;
+          continue;
+        }
+        offered += 1;
+        if (outcome.kind === "proposed") {
+          markOwnPublished(entry.groupIdB64, outcome.proposalMessageId);
+          await sweepGroup(entry);
+        }
+      } catch (err) {
+        failed += 1;
+        // eslint-disable-next-line no-console
+        console.warn("ADR-0050 retire device: chat skipped", entry.groupIdB64, err);
+      }
+    }
+    // The directory row last: a peer that fetched it meanwhile only produced a
+    // Welcome nobody will open.
+    discovery.setSessionToken(secrets.sessionToken);
+    try {
+      await discovery.deleteKeyPackage(deviceKey);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("ADR-0050 retire device: directory KeyPackage not deleted", err);
+    } finally {
+      discovery.setSessionToken(null);
+    }
+    return { offered, skipped, failed };
   }
 
   async function settle(
@@ -479,7 +744,9 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
   });
 
   return (
-    <BackgroundReceiveContext.Provider value={{ coordinator, syncGroupNow }}>
+    <BackgroundReceiveContext.Provider
+      value={{ coordinator, syncGroupNow, admitDevice, retireDevice }}
+    >
       {props.children}
     </BackgroundReceiveContext.Provider>
   );
