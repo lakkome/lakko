@@ -64,6 +64,7 @@ import { createSignal, Match, Show, Switch, type JSX } from "solid-js";
 import { A, useNavigate } from "@solidjs/router";
 import { paths } from "./paths";
 import { AuthLayout } from "../ui/AuthLayout";
+import { PhraseInput } from "../ui/PhraseInput";
 import { useAuth } from "../auth/AuthContext";
 import { AuthHttpError } from "../auth/client";
 import { normalizeTotpCode } from "../auth/totp-code";
@@ -883,25 +884,7 @@ function PhraseField(props: {
   setValue: (v: string) => void;
   busy: () => boolean;
 }): JSX.Element {
-  return (
-    <label>
-      Recovery phrase (24 words)
-      <textarea
-        rows={4}
-        placeholder="abandon abandon abandon … art"
-        required
-        value={props.value()}
-        onInput={(e) => props.setValue(e.currentTarget.value)}
-        disabled={props.busy()}
-        autocomplete="off"
-        spellcheck={false}
-        style={{
-          "font-family":
-            "ui-monospace, SFMono-Regular, Menlo, monospace",
-        }}
-      />
-    </label>
-  );
+  return <PhraseInput value={props.value} setValue={props.setValue} disabled={props.busy} />;
 }
 
 function SharesField(props: {

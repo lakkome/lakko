@@ -48,6 +48,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
   const sync = useDeviceGroupSync();
   const auth = useAuth();
   const navigate = useNavigate();
+  const [menuOpen, setMenuOpen] = createSignal(false);
 
   // Accepted contacts name a chat linked to one; a rename propagates here.
   const [accepted, setAccepted] = createSignal<AcceptedContact[]>(loadAccepted());
@@ -59,6 +60,22 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
   /** Best label for a chat row (ADR-0048 §5). A 1x1 chat is the other person,
    *  through the one resolver, read live from the MLS roster so it works
    *  however the chat was created. A group keeps its own label. */
+  /** The other member's key in a 1x1 chat, else `null`. */
+  const peerKeyOf = (g: ActiveGroup): string | null => {
+    const own = chats.identity();
+    const ownB64 = own === null ? null : base64Encode(own.signaturePublicKey);
+    let memberB64s: string[] = [];
+    try {
+      memberB64s = (g.group.members() as Array<{ signaturePublicKey: Uint8Array }>).map((m) =>
+        base64Encode(m.signaturePublicKey),
+      );
+    } catch {
+      return null;
+    }
+    const peers = memberB64s.filter((k) => k !== ownB64);
+    return memberB64s.length === 2 && peers.length === 1 ? (peers[0] ?? null) : null;
+  };
+
   const chatLabel = (g: ActiveGroup): string => {
     accepted();
     const own = chats.identity();
@@ -73,7 +90,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
     }
     const peers = memberB64s.filter((k) => k !== ownB64);
     if (memberB64s.length === 2 && peers.length === 1 && peers[0] !== undefined) {
-      return profiles.resolve(peers[0]).listLabel;
+      return profiles.resolve(peers[0]).name;
     }
     const byId = accepted().find((c) => c.groupIdB64 === g.groupIdB64);
     if (byId !== undefined && byId.displayName.length > 0) return byId.displayName;
@@ -184,15 +201,46 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
     <aside class="lk-pane" aria-label="Chats">
       <div class="lk-pane-head">
         <h1>Chats</h1>
-        <button
-          type="button"
-          class="lk-icon-button accent"
-          title="New chat"
-          aria-label="New chat"
-          onClick={() => navigate(paths.contacts)}
-        >
-          <Icon name="compose" size={18} />
-        </button>
+        <div class="lk-menu-anchor">
+          <button
+            type="button"
+            class="lk-icon-button accent"
+            title="New chat"
+            aria-label="New chat"
+            aria-haspopup="menu"
+            aria-expanded={menuOpen()}
+            onClick={() => setMenuOpen(!menuOpen())}
+          >
+            <Icon name="compose" size={18} />
+          </button>
+          <Show when={menuOpen()}>
+            <div class="lk-menu-backdrop" onClick={() => setMenuOpen(false)} />
+            <div class="lk-menu" role="menu">
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setMenuOpen(false);
+                  navigate(paths.contacts);
+                }}
+              >
+                <Icon name="chat" size={18} />
+                New chat
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setMenuOpen(false);
+                  navigate(paths.newGroup);
+                }}
+              >
+                <Icon name="contacts" size={18} />
+                New group
+              </button>
+            </div>
+          </Show>
+        </div>
       </div>
       <Show
         when={chats.groups().length > 0}
@@ -228,6 +276,10 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                 if (ended !== null) return ended;
                 const s = summary();
                 if (s.preview) return `${s.previewIsOwn ? "You: " : ""}${s.preview}`;
+                // Nothing said yet: a 1x1 shows the person's username, a
+                // group its size. A member count on a 1x1 says nothing.
+                const peer = peerKeyOf(g);
+                if (peer !== null) return profiles.resolve(peer).username ?? "";
                 const n = g.group.memberCount;
                 return `${n} member${n === 1 ? "" : "s"}`;
               };

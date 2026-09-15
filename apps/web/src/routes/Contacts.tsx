@@ -451,7 +451,12 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
                   />
                   <div class="lk-row-body">
                     <span class="lk-row-title">{profiles.resolve(c.signaturePubkeyB64).listLabel}</span>
-                    <span class="lk-row-sub">{profiles.resolve(c.signaturePubkeyB64).fingerprint}</span>
+                    {/* A second line only when there is something to say: the
+                        person's own name under a local rename. The key
+                        fingerprint stays in the detail's Security card. */}
+                    <Show when={profiles.resolve(c.signaturePubkeyB64).theirName}>
+                      {(their) => <span class="lk-row-sub">{their()}</span>}
+                    </Show>
                   </div>
                 </div>
               )}
@@ -1457,17 +1462,6 @@ function ContactDetail(props: ContactDetailProps): JSX.Element {
               </Show>
             </div>
           </Show>
-          <div class="lk-card-row">
-            <span class="lk-card-row-icon">
-              <Icon name="key" size={18} />
-            </span>
-            <div class="lk-card-row-body">
-              <span class="lk-card-row-title">Key fingerprint</span>
-              <span class="lk-card-row-sub" style={{ "font-family": "ui-monospace, monospace" }}>
-                {resolved().fingerprint}
-              </span>
-            </div>
-          </div>
           <div class="lk-card-row">
             <span class="lk-card-row-icon">
               <Icon name="check" size={18} />

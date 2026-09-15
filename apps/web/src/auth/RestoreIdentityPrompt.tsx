@@ -25,6 +25,8 @@
  */
 import { createSignal, Show, type JSX } from "solid-js";
 import { useAuth } from "./AuthContext";
+import { AuthLayout } from "../ui/AuthLayout";
+import { PhraseInput } from "../ui/PhraseInput";
 import { base64Decode } from "./account-id";
 import { getDeviceKey } from "./key-store";
 import {
@@ -122,25 +124,14 @@ export default function RestoreIdentityPrompt(): JSX.Element {
   }
 
   return (
-    <div class="auth-shell">
-      <section class="auth-card">
-        <h1>Restore your secure identity</h1>
-        <p style={{ color: "var(--surface-muted)", "margin-top": 0 }}>
-          New device — enter your recovery phrase or pair an existing
-          device to restore your secure identity for{" "}
-          <strong>@{account()?.username ?? ""}</strong>. Your password
-          got you in, but your long-term identity (the key your
-          contacts trust) lives in your 24-word recovery phrase — or on
-          a device that is still signed in.
+    <AuthLayout>
+        <h1>Restore your identity</h1>
+        <p class="auth-lede">
+          You are signed in as <strong>@{account()?.username ?? ""}</strong> on
+          a new device. The key your contacts trust is restored from your
+          recovery phrase, or from a device that is still signed in.
         </p>
-        <div
-          role="tablist"
-          style={{
-            display: "flex",
-            gap: "0.4rem",
-            "margin-bottom": "0.75rem",
-          }}
-        >
+        <div role="tablist" class="lk-actions">
           <button
             type="button"
             role="tab"
@@ -187,23 +178,7 @@ export default function RestoreIdentityPrompt(): JSX.Element {
           }
         >
           <form onSubmit={onSubmit}>
-            <label>
-              Recovery phrase (24 words)
-              <textarea
-                rows={4}
-                placeholder="abandon abandon abandon … art"
-                required
-                value={phrase()}
-                onInput={(ev) => setPhrase(ev.currentTarget.value)}
-                disabled={busy()}
-                autocomplete="off"
-                spellcheck={false}
-                style={{
-                  "font-family":
-                    "ui-monospace, SFMono-Regular, Menlo, monospace",
-                }}
-              />
-            </label>
+            <PhraseInput value={phrase} setValue={setPhrase} disabled={busy} />
             <Show when={error() !== null}>
               <div class="form-error">{error()}</div>
             </Show>
@@ -222,8 +197,7 @@ export default function RestoreIdentityPrompt(): JSX.Element {
             Sign out
           </button>
         </p>
-      </section>
-    </div>
+    </AuthLayout>
   );
 }
 

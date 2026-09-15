@@ -11,6 +11,7 @@
  */
 
 import { createEffect, createSignal, For, onCleanup, Show, type JSX } from "solid-js";
+import { Icon } from "../ui/icons";
 
 import { formatClock, capFor, spokenDuration, type RecState } from "./recording-machine";
 import { DENIED_COPY, NOTICE_COPY, type Recorder } from "./recording-controller";
@@ -30,7 +31,7 @@ export function RecordButton(props: { recorder: Recorder }): JSX.Element {
       style={{
         display: "inline-flex",
         "align-items": "stretch",
-        gap: "0.1rem",
+        gap: "2px",
         // Hidden, never unmounted, once the take no longer needs it: the
         // button may still hold the pointer capture of the gesture that
         // locked the take.
@@ -40,16 +41,17 @@ export function RecordButton(props: { recorder: Recorder }): JSX.Element {
     >
       <button
         type="button"
-        class="lakko-mode-switch"
+        class="lk-icon-button"
         aria-label={isVideo() ? "Switch to voice message" : "Switch to video message"}
+        title={isVideo() ? "Switch to voice message" : "Switch to video message"}
         disabled={r.state().phase !== "idle"}
         onClick={() => r.toggleMode()}
       >
-        ⇄
+        <Icon name={isVideo() ? "mic" : "video"} size={18} />
       </button>
       <button
         type="button"
-        class="lakko-icon-btn lakko-record-btn"
+        class="lk-icon-button lakko-record-btn"
         aria-label={label()}
         aria-disabled={r.disabledReason() !== null}
         disabled={r.disabledReason() !== null}
@@ -66,7 +68,7 @@ export function RecordButton(props: { recorder: Recorder }): JSX.Element {
           if (e.detail === 0) r.onKeyboardActivate();
         }}
       >
-        <span aria-hidden="true">{isVideo() ? "📹" : "🎙"}</span>
+        <Icon name={isVideo() ? "video" : "mic"} size={20} />
       </button>
     </span>
   );

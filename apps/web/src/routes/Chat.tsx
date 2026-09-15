@@ -295,6 +295,11 @@ import {
 } from "../chat/presence-ops";
 import { paths } from "./paths";
 import { Avatar } from "../ui/Avatar";
+import {
+  accountIdBytesFromHex,
+  takePendingGroupSetup,
+  type PendingGroupSetup,
+} from "../chat/pending-group-setup";
 import { Icon } from "../ui/icons";
 
 /** A timeline entry — verified incoming events PLUS optimistic
@@ -640,6 +645,22 @@ function ChatView(props: {
 
   /** Best name for this chat (ADR-0048 §5) — `chat/peer-name.ts`, shared with
    *  the call host's ringing banner. */
+  /** The other member's signature key in a 1x1 chat, else `null`. */
+  const peerKeyB64 = (): string | null => {
+    if (memberCount() !== 2) return null;
+    const own = chats.identity();
+    const ownB64 = own === null ? null : base64Encode(own.signaturePublicKey);
+    const peers = memberKeysOf(props.entry.group).filter((k) => k !== ownB64);
+    return peers.length === 1 ? (peers[0] ?? null) : null;
+  };
+  /** Under the name: the person's username in a 1x1, the size of a group. */
+  const headerSub = (): string => {
+    const peer = peerKeyB64();
+    if (peer !== null) return profiles.resolve(peer).username ?? "";
+    const n = memberCount();
+    return `${n} member${n === 1 ? "" : "s"}`;
+  };
+
   const resolvePeerName = (): string => {
     const own = chats.identity();
     return peerName({
@@ -3917,6 +3938,88 @@ function ChatView(props: {
   // Final step is a `refresh()` — pulls the (now-suppressed)
   // commit off the wire + re-renders the header (memberCount
   // signal updates from `group.memberCount` post-add).
+  /** Everything an add owes once the artifact is on the wire, shared by the
+   *  typed add and the New-group setup. */
+  function afterMemberAdded(
+    outcome: { kind: "committed"; commitMessageId: number } | { kind: "proposed"; proposalMessageId: number },
+    recipientKeyB64: string,
+  ): void {
+    // Suppress the echo so the sender's next pollMessages
+    // doesn't try to processIncoming on its own artifact at
+    // an epoch we've already advanced past. ADR-0045: the artifact is a
+    // PROPOSAL in a role-table group and a commit only in a legacy one.
+    chat.markOwnPublishedCommit(
+      outcome.kind === "committed" ? outcome.commitMessageId : outcome.proposalMessageId,
+    );
+    // ADR-0045 — record when the request landed, so the quiet window is
+    // measured against the DS row rather than a local clock, and so this
+    // device knows the request is its own (the UX §10 visibility exception).
+    if (outcome.kind === "proposed") {
+      noteOwnRequest(`add:${recipientKeyB64}`);
+    }
+    // ADR-0042 — re-broadcast the CURRENT push-routing secret so the
+    // newly-added member learns it on their next poll (no-op if this
+    // device holds no secret; idempotent for existing members). Runs
+    // AFTER the add commit so the new member is already in the group.
+    // Fire-and-forget; failures retry on the next add / launch sweep.
+    {
+      const s = auth.state();
+      if (s.kind === "session") {
+        void redistributeSecretToGroup(
+          s.account.accountId,
+          props.entry.group,
+          broadcastToGroup,
+        ).catch((err) => {
+          // eslint-disable-next-line no-console
+          console.warn("push-routing secret redistribute failed", err);
+        });
+      }
+    }
+    // Mirror the post-add member count into the reactive
+    // signal so the header re-renders.
+    setMemberCount(props.entry.group.memberCount);
+    // 1.18h — bump membersVersion so the members panel
+    // (when open) re-reads the updated leaf set.
+    setMembersVersion(membersVersion() + 1);
+  }
+
+  /** The New-group screen's remaining picks (`docs/ux/new-group.md` §2 step
+   *  3): added one after another through the same path as a typed add, then
+   *  swept once. A failed add is reported and skipped; the rest still land. */
+  async function runPendingGroupSetup(setup: PendingGroupSetup): Promise<void> {
+    setBusy(true);
+    setError(null);
+    const failed: string[] = [];
+    for (const m of setup.members) {
+      try {
+        const outcome = await contacts.addMemberToGroup(
+          props.requireIdentity(),
+          props.entry.group,
+          accountIdBytesFromHex(m.accountIdHex),
+          base64Decode(m.signaturePubkeyB64),
+        );
+        afterMemberAdded(outcome, m.signaturePubkeyB64);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("new group: add failed", m.label, err);
+        failed.push(m.label);
+      }
+    }
+    try {
+      await sweepNow();
+    } finally {
+      setBusy(false);
+    }
+    void refresh();
+    if (failed.length > 0) {
+      setError(`Could not add ${failed.join(", ")}. Add them from the members panel.`);
+    }
+  }
+  onMount(() => {
+    const setup = takePendingGroupSetup(props.entry.groupIdB64);
+    if (setup !== null) void runPendingGroupSetup(setup);
+  });
+
   async function onAddMember(): Promise<void> {
     const username = addMemberInput().trim();
     if (username.length === 0) return;
@@ -3950,47 +4053,7 @@ function ChatView(props: {
           addPendingBefore = pendingCountNow();
         },
       );
-      // Suppress the echo so the sender's next pollMessages
-      // doesn't try to processIncoming on its own artifact at
-      // an epoch we've already advanced past. ADR-0045: the artifact is a
-      // PROPOSAL in a role-table group and a commit only in a legacy one.
-      chat.markOwnPublishedCommit(
-        result.outcome.kind === "committed"
-          ? result.outcome.commitMessageId
-          : result.outcome.proposalMessageId,
-      );
-      // ADR-0045 — record when the request landed, so the quiet window is
-      // measured against the DS row rather than a local clock, and so this
-      // device knows the request is its own (the UX §10 visibility exception).
-      if (result.outcome.kind === "proposed") {
-        noteOwnRequest(
-          `add:${base64Encode(result.recipientSignaturePubkey)}`,
-        );
-      }
-      // ADR-0042 — re-broadcast the CURRENT push-routing secret so the
-      // newly-added member learns it on their next poll (no-op if this
-      // device holds no secret; idempotent for existing members). Runs
-      // AFTER the add commit so the new member is already in the group.
-      // Fire-and-forget; failures retry on the next add / launch sweep.
-      {
-        const s = auth.state();
-        if (s.kind === "session") {
-          void redistributeSecretToGroup(
-            s.account.accountId,
-            props.entry.group,
-            broadcastToGroup,
-          ).catch((err) => {
-            // eslint-disable-next-line no-console
-            console.warn("push-routing secret redistribute failed", err);
-          });
-        }
-      }
-      // Mirror the post-add member count into the reactive
-      // signal so the header re-renders.
-      setMemberCount(props.entry.group.memberCount);
-      // 1.18h — bump membersVersion so the members panel
-      // (when open) re-reads the updated leaf set.
-      setMembersVersion(membersVersion() + 1);
+      afterMemberAdded(result.outcome, base64Encode(result.recipientSignaturePubkey));
       setNotice(
         result.outcome.kind === "committed"
           ? `${memberName(base64Encode(result.recipientSignaturePubkey))} added (commit #${result.outcome.commitMessageId}).`
@@ -4761,9 +4824,7 @@ function ChatView(props: {
           {/* ADR-0021 follow-up: show the linked contact's user-chosen
               name in the chat header (falls back to the chat label). */}
           <h1>{resolvePeerName()}</h1>
-          <div class="lk-chat-sub">
-            {memberCount()} member{memberCount() === 1 ? "" : "s"}
-          </div>
+          <div class="lk-chat-sub">{headerSub()}</div>
         </div>
         <div class="lk-chat-actions">
           {/* Phase 3a8 — call buttons. Visible whenever no call is active in
@@ -6117,9 +6178,36 @@ function ChatView(props: {
           }}
         >
           <For each={rows()}>
-            {(row) => (
+            {(row, i) => {
+              const prev = (): TimelineRow | undefined => rows()[i() - 1];
+              const dayLabel = (): string | null => {
+                const cur = rowCreatedAt(row);
+                if (cur === undefined) return null;
+                const before = prev();
+                const prevAt = before === undefined ? undefined : rowCreatedAt(before);
+                return sameDay(prevAt, cur) ? null : dayLabelOf(cur);
+              };
+              // The sender is named once per run of consecutive messages from
+              // the same person, in a group only; a 1x1 has one other person.
+              const showSender = (): boolean => {
+                if (memberCount() <= 2 || row.kind !== "incoming") return false;
+                const before = prev();
+                if (before === undefined || before.kind !== "incoming") return true;
+                if (dayLabel() !== null) return true;
+                return rowSenderKey(before) !== rowSenderKey(row);
+              };
+              return (
+              <>
+              <Show when={dayLabel()}>
+                {(label) => (
+                  <li class="lk-day-sep" aria-label={label()}>
+                    <span>{label()}</span>
+                  </li>
+                )}
+              </Show>
               <TimelineBubble
                 row={row}
+                showSender={showSender()}
                 onDownload={onDownloadAttachment}
                 onPreview={onPreviewAttachment}
                 onHidePreview={onHideAttachmentPreview}
@@ -6168,7 +6256,9 @@ function ChatView(props: {
                 }}
                 onCloseFullReactPicker={() => setFullReactPickerId(null)}
               />
-            )}
+              </>
+              );
+            }}
           </For>
         </ol>
       </Show>
@@ -6506,8 +6596,56 @@ function ChatView(props: {
 // Subcomponents
 // ---------------------------------------------------------------
 
+/** `17:21` in the viewer's locale and zone; empty for an unparseable stamp. */
+function shortTime(iso: string | undefined): string {
+  if (iso === undefined) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+/** Today / Yesterday / a short local date, for the day separator. */
+function dayLabelOf(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const now = new Date();
+  const startOf = (x: Date): number => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const days = Math.round((startOf(now) - startOf(d)) / 86_400_000);
+  if (days === 0) return "Today";
+  if (days === 1) return "Yesterday";
+  return d.toLocaleDateString([], {
+    day: "numeric",
+    month: "short",
+    year: d.getFullYear() === now.getFullYear() ? undefined : "numeric",
+  });
+}
+
+function sameDay(a: string | undefined, b: string): boolean {
+  if (a === undefined) return false;
+  const x = new Date(a);
+  const y = new Date(b);
+  if (Number.isNaN(x.getTime()) || Number.isNaN(y.getTime())) return false;
+  return x.getFullYear() === y.getFullYear() && x.getMonth() === y.getMonth() && x.getDate() === y.getDate();
+}
+
+/** When a timeline row was created, for the day separator. */
+function rowCreatedAt(row: TimelineRow): string | undefined {
+  if (row.kind === "incoming") {
+    return (row.event as { createdAt?: string }).createdAt;
+  }
+  return row.createdAt;
+}
+
+/** The sender key of an incoming row, for sender runs. */
+function rowSenderKey(row: TimelineRow): string | undefined {
+  if (row.kind !== "incoming") return undefined;
+  return (row.event as { senderKey?: string }).senderKey;
+}
+
 function TimelineBubble(props: {
   row: TimelineRow;
+  /** Name the sender above this bubble (a group, first of a run). */
+  showSender: boolean;
   onDownload: (ref: AttachmentRefBytes) => void | Promise<void>;
   onPreview: (ref: AttachmentRefBytes) => void | Promise<void>;
   onHidePreview: (ref: AttachmentRefBytes) => void;
@@ -6620,7 +6758,14 @@ function TimelineBubble(props: {
         ack="sent"
         originalText={ev.text}
         attachments={ev.attachments}
-        meta={`${ev.senderKey !== undefined ? profiles.resolve(ev.senderKey).name : "Unknown sender"} · #${ev.messageId} · ${ev.createdAt}`}
+        time={shortTime(ev.createdAt)}
+        senderName={
+          props.showSender
+            ? ev.senderKey !== undefined
+              ? profiles.resolve(ev.senderKey).name
+              : "Unknown sender"
+            : null
+        }
         tone="incoming"
         {...props}
       />
@@ -6636,13 +6781,8 @@ function TimelineBubble(props: {
       ack={r.ack}
       originalText={r.plaintext}
       attachments={r.attachments}
-      meta={
-        r.ack === "pending"
-          ? "you · sending…"
-          : r.ack === "failed"
-            ? "you · not sent"
-            : `you · sent · #${r.messageId ?? "?"} · ${r.createdAt ?? ""}`
-      }
+      time={r.ack === "pending" ? "Sending…" : r.ack === "failed" ? "Not sent" : shortTime(r.createdAt)}
+      senderName={null}
       tone="outgoing"
       mediaLocalKey={r.mediaLocalKey}
       {...props}
@@ -6669,7 +6809,10 @@ function ChatBubbleBody(props: {
   attachments: AttachmentRefBytes[];
   /** ADR-0047 — an outgoing media message's local key before upload. */
   mediaLocalKey?: string | undefined;
-  meta: string;
+  /** The local short time (`17:21`), or the pending / failed word. */
+  time: string;
+  /** The sender's name above the bubble, or `null` (a 1x1, or a run). */
+  senderName: string | null;
   tone: "incoming" | "outgoing";
   onDownload: (ref: AttachmentRefBytes) => void | Promise<void>;
   onPreview: (ref: AttachmentRefBytes) => void | Promise<void>;
@@ -6796,6 +6939,7 @@ function ChatBubbleBody(props: {
         position: "relative",
       }}
     >
+      <Show when={props.senderName}>{(n) => <div class="lk-sender">{n()}</div>}</Show>
       <Show
         when={!isDeleted()}
         fallback={
@@ -6985,14 +7129,16 @@ function ChatBubbleBody(props: {
       <div
         style={{
           color: metaColour,
-          "font-size": "0.75rem",
-          "margin-top": "0.2rem",
+          "font-size": "11px",
+          "margin-top": "2px",
           display: "flex",
           "align-items": "center",
-          gap: "0.35rem",
+          "justify-content": "flex-end",
+          gap: "4px",
+          opacity: 0.85,
         }}
       >
-        <span>{props.meta}</span>
+        <span>{props.time}</span>
         {/* ADR-0024 — read state on our OWN acked messages. A single
             check once published ("Sent"); a filled double check once
             EVERY other member's read watermark covers this message
@@ -7020,13 +7166,9 @@ function ChatBubbleBody(props: {
               <span
                 title={read() && readers().length > 0 ? `Read by ${readers()}` : read() ? "Read" : "Sent"}
                 aria-label={read() ? "Read" : "Sent"}
-                style={{
-                  "font-size": "0.72rem",
-                  opacity: read() ? 1 : 0.8,
-                  "font-weight": read() ? 600 : 400,
-                }}
+                style={{ display: "inline-flex", opacity: read() ? 1 : 0.7 }}
               >
-                {read() ? "✓✓ Read" : "✓ Sent"}
+                <Icon name={read() ? "dcheck" : "check"} size={14} />
               </span>
             );
           })()}

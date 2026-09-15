@@ -31,6 +31,7 @@ import Recover from "./Recover";
 import Signup from "./Signup";
 import Home from "./Home";
 import ChatsLayout from "./ChatsLayout";
+import NewGroup from "./NewGroup";
 import Contacts from "./Contacts";
 import Settings from "./Settings";
 import Calls from "./Calls";
@@ -118,6 +119,7 @@ export const routes: RouteDefinition[] = [
         component: ChatsLayout,
         children: [
           { path: paths.home, component: Home },
+          { path: paths.newGroup, component: NewGroup },
           { path: chatRoutePattern, component: Chat },
         ],
       },

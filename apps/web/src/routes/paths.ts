@@ -35,6 +35,8 @@ export const paths = {
   recover: "/recover",
   /** Authenticated home / inbox. */
   home: "/",
+  /** New group: name it, pick the first members from your contacts. */
+  newGroup: "/new-group",
   /** Contact list and add-contact entry point. */
   contacts: "/contacts",
   /** Settings — Profile · Security · Appearance · Data · Account. */

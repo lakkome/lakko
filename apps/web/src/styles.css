@@ -1220,6 +1220,129 @@ a.lk-row.active {
   outline-offset: 0;
 }
 
+/* The recovery phrase as 24 numbered slots. */
+.lk-phrase-input {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.lk-phrase-head {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+  font-weight: 500;
+}
+.lk-phrase-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+  counter-reset: lk-word;
+}
+.lk-phrase-grid li {
+  position: relative;
+  counter-increment: lk-word;
+}
+.lk-phrase-grid li::before {
+  content: counter(lk-word);
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 26px;
+  text-align: right;
+  font-size: 11px;
+  color: var(--surface-faint);
+  pointer-events: none;
+}
+.lk-phrase-grid input {
+  min-height: 36px;
+  padding: 6px 8px 6px 32px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 14px;
+}
+.lk-phrase-grid input.invalid {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+}
+@media (max-width: 520px) {
+  .lk-phrase-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+/* Chat timeline: the sender line in a group, the day separators. */
+.lk-sender {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  margin-bottom: 2px;
+}
+.lk-day-sep {
+  display: flex;
+  justify-content: center;
+  margin: 8px 0 4px;
+  list-style: none;
+}
+.lk-day-sep span {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--surface-muted);
+  background: var(--surface-elevated);
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius-pill);
+  padding: 3px 10px;
+}
+
+/* A small popover menu under an icon button. */
+.lk-menu-anchor {
+  position: relative;
+}
+.lk-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  min-width: 190px;
+  padding: 6px;
+  background: var(--surface-elevated);
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-2);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  z-index: 30;
+}
+.lk-menu button {
+  justify-content: flex-start;
+  border: none;
+  background: transparent;
+  min-height: 38px;
+  padding: 0 10px;
+  font-weight: 500;
+  color: var(--surface-fg);
+}
+.lk-menu button:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+.lk-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 29;
+}
+
+/* A selectable contact row (New group). */
+.lk-row.pick {
+  cursor: pointer;
+}
+.lk-row.pick input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+}
+
 /*
  * ADR-0023 — per-message action strip (React / Edit / Delete).
  * Hidden by default; revealed when the hosting bubble (`<li>`)

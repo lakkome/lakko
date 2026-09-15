@@ -8,12 +8,14 @@
  * pane shows at a time: the list, or the open chat.
  */
 import type { JSX } from "solid-js";
-import { useParams, type RouteSectionProps } from "@solidjs/router";
+import { useLocation, useParams, type RouteSectionProps } from "@solidjs/router";
+import { paths } from "./paths";
 import { ChatList } from "../chat/ChatList";
 
 export default function ChatsLayout(props: RouteSectionProps): JSX.Element {
   const params = useParams<{ id?: string }>();
-  const open = (): boolean => params.id !== undefined;
+  const location = useLocation();
+  const open = (): boolean => params.id !== undefined || location.pathname === paths.newGroup;
   return (
     <div class="lk-split" data-open={open() ? "true" : "false"}>
       <ChatList activeGroupIdB64={params.id ?? null} />
