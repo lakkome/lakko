@@ -101,11 +101,39 @@ function isChannelApiError(x: unknown): x is ChannelApiError {
  *  stable error codes. */
 export const apiError = { is: isChannelApiError };
 
+/** The code `fetchJson` uses when the reply is not the channels service at
+ *  all: an HTML page from a proxy or the SPA fallback, an empty body, a
+ *  connection that never produced a JSON envelope. */
+export const CHANNELS_UNREACHABLE = "channels-unreachable";
+
+/** One sentence for the user about a channels error: what happened, not the
+ *  wire code. The code stays available on the error for callers that branch. */
+export function channelErrorText(err: ChannelApiError): string {
+  if (err.code === CHANNELS_UNREACHABLE) {
+    return "The channels service is not reachable right now. Try again in a moment.";
+  }
+  if (err.detail.length > 0) return err.detail;
+  return `The server refused the request (${err.code}).`;
+}
+
+function unreachable(status: number): ChannelApiError {
+  return {
+    status,
+    code: CHANNELS_UNREACHABLE,
+    detail: "The channels service is not reachable right now. Try again in a moment.",
+  };
+}
+
+function isJsonResponse(resp: Response): boolean {
+  const ct = resp.headers.get("content-type") ?? "";
+  return ct.toLowerCase().includes("application/json");
+}
+
 async function parseError(resp: Response): Promise<ChannelApiError> {
-  // The server promises a stable {code, detail} JSON envelope
-  // on every 4xx / 5xx. Fall back to a stub envelope if the
-  // body is unparseable (would only happen on a server bug or
-  // a proxy injecting HTML).
+  // The server promises a stable {code, detail} JSON envelope on every
+  // 4xx / 5xx. Anything else (a proxy's HTML error page, the SPA fallback, a
+  // 502 with no body) is the service not being there, and says so.
+  if (!isJsonResponse(resp)) return unreachable(resp.status);
   try {
     const body = (await resp.json()) as { code?: string; detail?: string };
     return {
@@ -114,11 +142,7 @@ async function parseError(resp: Response): Promise<ChannelApiError> {
       detail: body.detail ?? resp.statusText,
     };
   } catch {
-    return {
-      status: resp.status,
-      code: "unknown",
-      detail: resp.statusText,
-    };
+    return unreachable(resp.status);
   }
 }
 
@@ -152,6 +176,10 @@ async function fetchJson<T>(
   if (resp.status === 204) {
     return undefined as T;
   }
+  // A 200 that is not JSON is not the channels service either: a misrouted
+  // request answered by the SPA fallback would otherwise surface as a JSON
+  // parse error with no hint of what went wrong.
+  if (!isJsonResponse(resp)) throw unreachable(resp.status);
   return (await resp.json()) as T;
 }
 

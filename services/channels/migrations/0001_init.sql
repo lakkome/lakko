@@ -75,7 +75,9 @@ CREATE TABLE IF NOT EXISTS channel_posts (
     channel_id      BINARY(16)      NOT NULL,
     -- Monotone per-channel cursor — handed out by the
     -- `channels.next_cursor` sequence above on every insert.
-    cursor          BIGINT UNSIGNED NOT NULL,
+    -- Quoted: CURSOR is a reserved word in MariaDB (10.6 refuses it bare;
+    -- newer releases happened to accept it, which is how this shipped).
+    `cursor`        BIGINT UNSIGNED NOT NULL,
     -- Server wall-clock at insert time, unix milliseconds.
     -- The client never trusts this; it's surfaced for UI
     -- timestamps and metrics.
@@ -85,9 +87,9 @@ CREATE TABLE IF NOT EXISTS channel_posts (
     -- the runtime `max_post_bytes` config (default 1 MB) —
     -- enforced at handler entry before we even touch the DB.
     payload         LONGBLOB        NOT NULL,
-    PRIMARY KEY (channel_id, cursor),
-    -- Hot path: WHERE channel_id = ? AND cursor > ? ORDER BY cursor LIMIT ?
-    INDEX idx_channel_cursor (channel_id, cursor),
+    PRIMARY KEY (channel_id, `cursor`),
+    -- Hot path: WHERE channel_id = ? AND `cursor` > ? ORDER BY `cursor` LIMIT ?
+    INDEX idx_channel_cursor (channel_id, `cursor`),
     CONSTRAINT fk_channel_posts_channel
         FOREIGN KEY (channel_id) REFERENCES channels(id)
         ON DELETE CASCADE

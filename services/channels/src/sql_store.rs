@@ -190,7 +190,7 @@ impl ChannelStore for SqlChannelStore {
             .map_err(db_err)?;
         sqlx::query(
             "INSERT INTO channel_posts \
-                 (channel_id, cursor, server_ts_ms, payload) \
+                 (channel_id, `cursor`, server_ts_ms, payload) \
              VALUES (?, ?, ?, ?)",
         )
         .bind(channel.as_bytes().as_slice())
@@ -223,10 +223,10 @@ impl ChannelStore for SqlChannelStore {
         }
         let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
         let rows = sqlx::query(
-            "SELECT cursor, server_ts_ms, payload \
+            "SELECT `cursor`, server_ts_ms, payload \
              FROM channel_posts \
-             WHERE channel_id = ? AND cursor > ? \
-             ORDER BY cursor ASC \
+             WHERE channel_id = ? AND `cursor` > ? \
+             ORDER BY `cursor` ASC \
              LIMIT ?",
         )
         .bind(channel.as_bytes().as_slice())

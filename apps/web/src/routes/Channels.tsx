@@ -49,6 +49,7 @@ import {
   publishPost,
   subscribe,
   type ChannelPostView,
+  channelErrorText,
 } from "../channels/api";
 import {
   bytesToHex,
@@ -305,9 +306,9 @@ const NewChannel: Component = () => {
       if (err instanceof LegacyChannelError) {
         setError(err.message);
       } else if (apiError.is(err)) {
-        setError(`Server rejected: ${err.code} — ${err.detail}`);
+        setError(channelErrorText(err));
       } else {
-        setError(`Network error: ${String(err)}`);
+        setError(`Could not reach the server: ${String(err)}`);
       }
       setBusy(false);
     }
@@ -665,7 +666,7 @@ const ChannelView: Component = () => {
       await refetch();
     } catch (err) {
       if (apiError.is(err)) {
-        setPublishError(`Server rejected: ${err.code} — ${err.detail}`);
+        setPublishError(channelErrorText(err));
       } else {
         setPublishError(`Compose / network error: ${String(err)}`);
       }
@@ -1540,7 +1541,7 @@ const SubscribersPanel: Component<{ readonly channelIdHex: string }> = (
     } catch (err) {
       if (trigger === "manual") {
         if (apiError.is(err)) {
-          setError(`Deliver failed: ${err.code} — ${err.detail}`);
+          setError(`Could not deliver the key: ${channelErrorText(err)}`);
         } else {
           setError(`Deliver failed: ${String(err)}`);
         }
@@ -1803,7 +1804,7 @@ const ChannelSubscribe: Component = () => {
       }
     } catch (err) {
       if (apiError.is(err)) {
-        setBootstrapError(`${err.code} — ${err.detail}`);
+        setBootstrapError(channelErrorText(err));
       } else {
         setBootstrapError(String(err));
       }
