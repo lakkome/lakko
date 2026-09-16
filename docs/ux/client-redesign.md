@@ -1,0 +1,316 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- SPDX-FileCopyrightText: 2026 Lakko Contributors -->
+
+# UX spec: client redesign (web, iOS, Android)
+
+Status: proposed, 2026-09-16. Written after the first native live run, which the
+maintainer stopped: the clients do not look or behave like one modern messenger.
+This spec is the contract every client is rebuilt against. It defines the
+navigation model, the visual system, the per-screen shape and the copy rules.
+Feature semantics (membership, recovery, media, second device) stay as their
+own UX specs define them; this document changes how they are presented, not
+what they do.
+
+Order of work agreed with the maintainer: redesign, then stabilisation, then a
+verified readiness table, then the next feature arc.
+
+## 1. What is wrong today
+
+Findings from a code inventory of the three clients (2026-09-16).
+
+Navigation
+- iOS and Android open on a "home" screen that is a vertical stack of seven
+  full-width buttons (Contacts, Chats, Channels, Passkeys, Devices, Profile,
+  Anti-censorship) plus Log out and Forget device. Every screen returns to it.
+- Neither native uses the platform navigation container: iOS switches a
+  `@State` enum with a hand-made "Home" toolbar button in each leaf screen;
+  Android switches a destination state with a `"<- Back"` text button and has
+  no system back handling at all. Opening a chat from Contacts and pressing
+  Back lands on the chat list.
+- Web has a navigation rail with five destinations (Chats, Contacts, Channels,
+  Calls, Settings); Calls has no history, only a create-link panel.
+
+Visual system
+- Android has no theme: a bare `MaterialTheme {}` renders the Material 3
+  baseline purple in light mode only, while Calls and Channels each carry a
+  private hard-coded dark palette. No edge-to-edge handling, so headers sit
+  under the status bar.
+- iOS has no asset catalog, no accent colour, no app icon set; Channels forces
+  dark mode on itself, Calls hard-codes the same dark palette a second time,
+  every other screen follows the system.
+- Web has real tokens (light and dark), an inline SVG icon set and a two-pane
+  layout, but Channels bypasses the tokens with inline styles and a local
+  colour map, long strings never wrap, and the chat header keeps 32 px side
+  padding down to phone width.
+
+Icons and copy
+- Android uses emoji as icons (pin, mute, archive, call, video, attach,
+  emoji picker) and text buttons everywhere else; Home shows the raw base64
+  account id and a "Contacts (1.15e) and 1x1 chat (1.15f) are live" hint.
+- iOS shows the raw account id on Home, identifies groups by a hex prefix,
+  and puts five buttons in the chat toolbar.
+- All three explain OPAQUE-PAKE on the login and signup screens, mention MLS,
+  rendezvous pseudonyms, epochs and cursors in end-user copy, and show
+  signature-key hex prefixes as member and device labels.
+- Every client carries manual Refresh buttons (chat, contacts, devices,
+  channel subscribers) that predate the automatic receive loops.
+
+Timeline
+- Neither native renders a message time. No date separators, no avatars, no
+  grouping. Read state is the text "checkmark Sent" under own bubbles.
+
+## 2. Principles
+
+1. One product, three native shells. The information architecture, the
+   states and the copy are identical; the controls are the platform's own.
+2. The platform owns navigation. iOS: `TabView` and `NavigationStack` with
+   the system back button and edge swipe. Android: Navigation Compose with a
+   Material 3 `NavigationBar`, `TopAppBar` and predictive back. Web: the
+   router and browser history.
+3. Nothing the app does by itself gets a button. Receiving is automatic on
+   every client, so there is no Refresh anywhere. Natives keep
+   pull-to-refresh on the chat list and contact list as the platform gesture
+   users expect, and it runs the same poll the app already runs.
+4. No protocol in the interface. Users see names, avatars, usernames and
+   safety numbers. They never see MLS, OPAQUE, PAKE, OPRF, epochs, cursors,
+   leaf indices, pseudonyms, hex keys, base64 ids or sprint numbers.
+5. Icons are icons. SF Symbols on iOS, Material Symbols on Android, the
+   existing inline SVG set on web. Emoji appear only as content (messages,
+   reactions, the picker).
+6. Honest indicators, as before: no lock or "encrypted" chip unless the
+   surface is actually end-to-end encrypted, no fake presence, no fake
+   quality.
+
+## 3. Navigation model
+
+Four primary destinations, in this order, on every client:
+
+| Destination | Contents |
+|---|---|
+| Chats | Chat list, new chat, new group, the chat screen |
+| Contacts | Contact list, requests, add by username, invite links, QR, contact detail |
+| Channels | Channel list, channel view, create, subscribe |
+| Settings | Profile, security (passkeys, devices, recovery), appearance, media, network, account |
+
+- iOS: bottom `TabView`; each tab is its own `NavigationStack`.
+- Android: Material 3 `NavigationBar`; one `NavHost` per tab or a single host
+  with tab-level start destinations. Predictive back enabled.
+- Web: the existing left rail on wide screens, bottom tab bar below 720 px.
+  The rail's "Calls" destination is removed; call links move to the
+  Contacts "+" menu ("Create call link") and to the chat header.
+- The app opens on Chats. There is no home screen.
+- Devices, passkeys, recovery factors and anti-censorship are rows inside
+  Settings, never primary destinations.
+- Deep links (`/i/`, `/g/`, `/c/`) open as a sheet or a pushed screen over
+  the current tab, not as a replacement of the whole app.
+
+Back behaviour: always to the screen the user came from. A chat opened from a
+contact detail returns to that detail.
+
+## 4. Visual system
+
+One token set, defined once per platform from the same values. The web
+`styles.css` tokens are the source; iOS gets an asset catalog with light and
+dark variants, Android gets a `lightColorScheme` and `darkColorScheme` built
+from the same values (dynamic colour off, so the brand is the same on every
+device).
+
+Colour (light / dark):
+
+| Token | Light | Dark |
+|---|---|---|
+| background | #F6F7FB | #0F1220 |
+| surface | #FFFFFF | #171B2E |
+| surface sunken | #EEF0F6 | #1F2439 |
+| surface selected | #E0E7FF | #26295A |
+| border | #E4E7EF | #2A3145 |
+| text | #1A1D2B | #E6E9F4 |
+| text muted | #6B7280 | #9AA3BD |
+| accent | #3730A3 | #818CF8 |
+| accent foreground | #FFFFFF | #0F1220 |
+| accent soft | #E0E7FF | #26295A |
+| outgoing bubble | accent | accent |
+| incoming bubble | surface sunken | surface sunken |
+| danger | #DC2626 | #F87171 |
+| success | #16A34A | #4ADE80 |
+
+- Light and dark follow the system on all three; web keeps its
+  system / light / dark switch in Settings, natives add the same switch.
+- Calls are dark by design on every platform and use the dark half of the
+  same tokens. Channels use the normal scheme; the forced dark mode and the
+  two duplicated palettes are deleted.
+- Type: the platform system font (SF Pro, Roboto, system-ui). Sizes come from
+  the platform ramp (Dynamic Type, Material type scale) mapped to the web
+  ramp: title 22, section 17, body 15, meta 13.
+- Shape: radius 8 for controls, 12 for cards and rows, 18 for bubbles,
+  pill for badges. Consistent on all three.
+- Spacing: 4 px base, 8 / 12 / 16 / 24 steps. Page side padding 16 on phones,
+  24 on wide layouts.
+- Avatars: initials on one of four tints derived from the identity (the web
+  `Avatar` rule); groups get a two-letter initial from the group name or a
+  group glyph when unnamed. Sizes 40 (rows), 32 (headers), 72 (details).
+
+Platform-specific layout hygiene, all required:
+- Android: `enableEdgeToEdge()`, every screen inside a `Scaffold`, content
+  padded by the scaffold insets, status and navigation bar transparent.
+- iOS: every screen scrolls; no fixed `VStack` pages; toolbars use the
+  system layout, at most two trailing items plus an overflow menu.
+- Web: `overflow-wrap: anywhere` on message text, names and ids; the chat
+  header padding follows the page breakpoints; the split breakpoints and the
+  rail breakpoint are the same value (720 px).
+
+## 5. Screens
+
+### 5.1 Chat list
+
+- Top bar: title "Chats", a search field (inline on Android and iOS, in the
+  pane head on web), a compose action with a menu: New chat, New group.
+- Row: avatar, name (bold when unread), time of the last message on the
+  right, last message preview on the second line (sender name prefix in
+  groups, "Photo", "Voice message", "GIF" for media), an unread count badge,
+  a small muted icon when muted, a pin glyph when pinned. Pinned rows sort
+  first.
+- Row actions: swipe on natives (pin, mute, archive), hover actions and a
+  context menu on web. Never three permanent buttons in the row.
+- States: loading skeleton on first open; empty state with an illustration
+  glyph, "No chats yet" and a "Start a chat" button; the single
+  "Synchronizing..." label while the device is still being admitted to the
+  account's chats (docs/ux/second-device.md section 2).
+- Group names: a group without a name is titled from its members ("Anna,
+  Ivan, Maria" and "+2" beyond three), never from a hex id.
+
+### 5.2 Chat
+
+- Top bar: system back; avatar + name; second line: "@username" in a 1x1
+  chat, "N members" in a group, "typing..." while a typing indicator is live.
+  Trailing: call, video call, overflow menu (Members or Group info, Search
+  later, Mute, Leave). On phone widths the two call actions stay and
+  everything else is in the overflow.
+- Timeline: date separators; consecutive messages from one sender within
+  five minutes are grouped (sender name and avatar once per group, in
+  groups only); each bubble carries the time in the corner and, for own
+  messages, a delivery glyph: one check sent, two checks read. Incoming
+  bubbles left on the sunken surface, outgoing right on the accent. Own
+  messages sent from another device of the same account are outgoing.
+- Reactions as chips under the bubble; a long-press or hover opens the
+  reaction bar and the message actions (Reply later, Edit, Delete, Copy).
+- Message actions and the composer keep the ADR-0023, ADR-0024 and ADR-0047
+  behaviour; only the chrome changes.
+- Composer: attach, text field growing to five lines, emoji or GIF picker,
+  a trailing button that is a microphone with an empty draft and a send
+  arrow otherwise. Voice and video note recording as docs/ux/media-messages.md
+  specifies.
+- Membership states (request pending, withdrawn, evicted) keep the shapes of
+  docs/ux/proposal-based-membership.md; their copy is rewritten without
+  protocol terms.
+- States: loading spinner only on first open; "No messages yet. Say hi." as
+  the empty state; a plain error bar for a send failure with a retry.
+
+### 5.3 Contacts
+
+- Top bar: "Contacts", search, an add action with a menu: Add by username,
+  Share invite link, Show my QR code, Scan QR code, Create call link.
+- Sections: Requests (incoming, with Accept and Decline on the row; sent
+  requests as a collapsed "Sent" group with a waiting label), then the
+  alphabetical contact list with section index letters on natives.
+- Contact detail: avatar, name, @username; actions Message, Call, Video;
+  a "Verify safety number" row that opens the number and the QR; Rename;
+  Remove. No key fingerprints on the detail; the safety number is the
+  verification surface.
+- Invite links are managed in a sheet ("Invite links": active links with
+  copy, share and revoke), never as a textarea with a raw URL.
+
+### 5.4 Channels
+
+- Same list and detail vocabulary as chats: avatar, name, @handle,
+  subscriber count, last post time.
+- Channel view: posts as cards with time; the publish composer for owners.
+- Subscribers, co-publishers and rotation live under a "Manage" screen for
+  owners. Key material, epochs, cursors and seed status are not shown; an
+  unreadable post renders "Not available" with a one-line reason.
+
+### 5.5 Settings
+
+- Header: avatar, name, @username; tapping opens Profile.
+- Sections and rows:
+  - Account: Profile (name), Username.
+  - Security: Passkeys, Devices, Recovery (phrase, three-word vault,
+    authenticator, email or phone), Safety numbers explanation.
+  - Appearance: theme (System, Light, Dark).
+  - Media: autoplay video notes.
+  - Network (natives only): Anti-censorship toggle and status.
+  - About: version, licences.
+  - Danger zone: Log out, Forget this device, Delete account, each with the
+    confirmation the current flows already have.
+- Devices screen: the list of this account's devices (name or platform,
+  "This device" marker, added date, Remove), one "Add a device" button that
+  opens the pairing flow (show QR or scan QR, and the another-device prompt
+  of docs/ux/identity-recovery.md). The five-way segmented control is
+  removed; TOTP and contact enrolment move under Recovery.
+
+### 5.6 Auth
+
+- Welcome: brand mark, one line, "Create account" and "Log in".
+- Log in: username, password, Log in, "Use passkey", "Forgot password?".
+  No paragraph about how the protocol works; a small "How Lakko protects
+  your password" link may open an explainer sheet.
+- Sign up: username with the live availability hint, name, password,
+  confirm password; then the recovery phrase step as a guided screen
+  (numbered words in a grid, copy, confirm by re-entering three words).
+- Recover: a list of methods (Recovery phrase, Another device, Three words,
+  Authenticator, Email or phone) as tappable rows, not a segmented control.
+- Copy rule for every auth error: say what to do next, not what failed
+  internally.
+
+### 5.7 Calls
+
+- Existing call UI is kept; it is restyled from the shared dark tokens and
+  loses the second copy of the palette. Raised hand becomes an icon.
+
+## 6. Copy rules
+
+- Never on screen: MLS, OPAQUE, PAKE, OPRF, KeyPackage, epoch, cursor, leaf,
+  pseudonym, rendezvous, commit, proposal (as a protocol word), sprint or
+  version numbers such as "1.15e", hex or base64 identifiers.
+- Identity is shown as name and @username. Verification is the safety
+  number, shown in the contact detail and the group member detail.
+- Loading and progress use one word each: "Loading...", "Sending...",
+  "Synchronizing...".
+- Errors are one sentence plus an action. Example: "Could not send. Retry."
+- Empty states are one sentence plus one action.
+
+## 7. Data the UI needs from the core and the repositories
+
+- Message time (`created_at` from the DS row) surfaced per message on all
+  three; the natives already carry it in their message records.
+- A display name and avatar tint for every account key: from the profile
+  envelope (ADR-0048), the contact rename, or the username; the group title
+  derived from member names when the group has none.
+- Delivery state per own message (sent, read) as today.
+- Device rows with a human label (platform and model, or a user-set name)
+  and an added date; the leaf index and key stay internal.
+- Nothing new from the server.
+
+## 8. Build order
+
+Phase A, foundations, all three clients in parallel:
+- tokens and theme (iOS asset catalog, Android colour schemes, web token
+  cleanup in Channels), dark mode everywhere;
+- the navigation shell (tabs, native back, no home screen);
+- icons instead of emoji and text; the Refresh buttons removed; pull-to-
+  refresh on the two lists;
+- insets and scrolling hygiene; copy pass removing protocol terms and raw
+  ids.
+
+Phase B: chat list and chat screen (rows, timeline with time, grouping,
+delivery glyphs, header, composer).
+
+Phase C: contacts and settings (including the devices screen).
+
+Phase D: auth and recovery screens.
+
+Phase E: channels and calls restyle.
+
+Each phase ends with a screenshot pass on all three clients and an update of
+docs/PRODUCT-READINESS.md; stabilisation of the native receive paths follows
+Phase B, before Phase C.
