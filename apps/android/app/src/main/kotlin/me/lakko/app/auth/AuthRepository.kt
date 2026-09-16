@@ -197,15 +197,25 @@ public class AuthRepository(
     private val pendingFreshPhrase: AtomicReference<PendingFreshPhrase?> =
         AtomicReference(null)
 
+    /** Cold-start restore scope — see [init]. */
+    private val restoreScope: CoroutineScope =
+        CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     init {
-        // Rehydrate synchronously — the reads are small and the stores are
-        // process-cached after first open. Doing it here, before any UI
-        // observes `state`, is what keeps the "Session without identity
-        // secrets" half state unreachable: both flows are set together, before
-        // the first collector subscribes. If we ever switch to DataStore
-        // (suspend-only) this must move to a coroutine that stays in
-        // [AuthState.Loading] until the decision is made.
-        rehydrate()
+        // Rehydrate OFF the main thread, staying in [AuthState.Loading] until
+        // the decision is made. The reads are small but not cheap: the device
+        // key is an Android Keystore decrypt and the session token, the
+        // AccountIdentity seed and the export key each live in their own
+        // `EncryptedSharedPreferences`, whose first open per process builds a
+        // Tink keyset behind a Keystore master key. Measured on the emulator
+        // this constructor cost ~650 ms of `MainActivity.onCreate` — before
+        // `setContent`, so before the first frame could even be composed.
+        //
+        // The "Session without identity secrets" half state stays
+        // unreachable: [rehydrate] still writes the secrets flow BEFORE the
+        // state flow, in one coroutine, and nothing observes `Session` until
+        // the state flips. `AppRoot` renders its loading screen meanwhile.
+        restoreScope.launch { rehydrate() }
         // Discovery's rate-limited reads (OPRF / lookup / channel lookup) are
         // charged per account when they carry this session's token, per IP
         // otherwise; most discovery clients are built without a token, so

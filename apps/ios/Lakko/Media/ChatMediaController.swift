@@ -18,8 +18,8 @@ import UIKit
 public final class ChatMediaController: ObservableObject {
 
     /// What the controller needs from the chat, as closures over long-lived
-    /// objects (the repository), never over the view model — `ChatScreen` is
-    /// handed a fresh view model on re-render.
+    /// objects (the repository), never over the view model, so the controller
+    /// holds no reference back to the screen that owns it.
     public struct Port {
         /// Send one attachment as its own message (empty text).
         public let sendAttachment: (AttachmentRef) async throws -> Void

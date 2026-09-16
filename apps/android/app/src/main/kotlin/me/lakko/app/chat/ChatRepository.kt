@@ -133,9 +133,13 @@ private const val DEVICE_MAILBOX_PREFS: String = "lakko-device-mailbox"
  */
 public class ChatRepository(
     private val applicationContext: Context,
-    private val chatClient: ChatClient = ChatClient(),
-    private val dsClient: DsClient = DsClient(),
-    private val discovery: DiscoveryClient = DiscoveryClient(),
+    /** Built LAZILY (cold start): each Ktor client costs an OkHttp engine + a
+     *  thread pool at construction, and the repository is constructed on the
+     *  main thread in `MainActivity.onCreate`, before the first frame. Nothing
+     *  needs a client until the session's first network call. */
+    chatClientFactory: () -> ChatClient = { ChatClient() },
+    dsClientFactory: () -> DsClient = { DsClient() },
+    discoveryFactory: () -> DiscoveryClient = { DiscoveryClient() },
     private val snapshotStore: IdentitySnapshotStore = IdentitySnapshotStore,
     private val knownGroupsStore: KnownGroupsStore = KnownGroupsStore(applicationContext),
     /** ADR-0042 — plaintext `push_gid -> (account, group)` reverse index the
@@ -160,6 +164,13 @@ public class ChatRepository(
      * owns the lifecycle.
      */
     public val context: Context get() = applicationContext
+
+    private val chatClientLazy = lazy(chatClientFactory)
+    private val dsClientLazy = lazy(dsClientFactory)
+    private val discoveryLazy = lazy(discoveryFactory)
+    private val chatClient: ChatClient by chatClientLazy
+    private val dsClient: DsClient by dsClientLazy
+    private val discovery: DiscoveryClient by discoveryLazy
 
     /**
      * The canonical [Identity] for the current session. `null`
@@ -325,6 +336,33 @@ public class ChatRepository(
     private val providerLock = Mutex()
 
     /**
+     * The dispatcher every MLS / FFI / persistence region of this repository
+     * runs on. Each `public suspend fun` hops onto it at its entry
+     * (`withContext(mlsDispatcher)`), so a caller may `launch` from
+     * `viewModelScope` or a Compose `LaunchedEffect` — the main dispatcher —
+     * and the synchronous UniFFI calls (decrypt, commit, `snapshotStorage`,
+     * the Keystore-wrapped snapshot write) never run on the main thread.
+     * Before this they did: the chat screen's poll loop was dispatched by
+     * `AndroidUiDispatcher`, and an ANR stack showed `main` inside
+     * `Group.ownCommitterRank` / `Group.members` / `Group.pendingProposals`
+     * under `pollGroup` -> `sweepIfCommitter`.
+     *
+     * The dispatcher changes WHERE the regions run, not their ordering: the
+     * per-group lock, [providerLock], the ADR-0040 persist-before-publish
+     * order and the G-37 split-poll cursor rules are all coroutine `Mutex`es
+     * and sequencing inside one coroutine, which hold on any thread. Every
+     * shared structure the regions touch was already thread-safe (the
+     * `synchronizedMap` of records, the `AtomicReference`s, `StateFlow`), and
+     * the collectors stay on main. `Dispatchers.Default` rather than a single
+     * thread because the work is CPU-bound crypto and the locks already give
+     * the serialisation that matters; a network wait suspends and frees the
+     * thread either way. The `MainThreadGuard` tripwires in the apply / sweep /
+     * persist sections turn a region that slips back onto main into a debug
+     * crash instead of jank.
+     */
+    private val mlsDispatcher: kotlinx.coroutines.CoroutineDispatcher = Dispatchers.Default
+
+    /**
      * The account + bearer token the current session's KeyPackage is
      * published for. Set by [bootstrap], cleared by [clear]. Kept separately
      * from [canonicalIdentity] because the token is not MLS state.
@@ -415,7 +453,10 @@ public class ChatRepository(
      * conversation list on this device, and peers re-bootstrap
      * via fresh KeyPackages.
      */
-    public fun bootstrap(secrets: IdentitySecrets) {
+    public suspend fun bootstrap(secrets: IdentitySecrets): Unit =
+        withContext(mlsDispatcher) { bootstrapOnMlsThread(secrets) }
+
+    private suspend fun bootstrapOnMlsThread(secrets: IdentitySecrets) {
         val newAccountIdB64 = base64UrlSafe(secrets.accountId)
         // Refresh the publish credentials even on the same-account early
         // return below: a re-authentication hands us a newer token.
@@ -444,96 +485,111 @@ public class ChatRepository(
             newAccountIdB64,
             account,
         ) ?: Identity.fromSeed(secrets.accountIdentitySeed)
-        // Restore the snapshot — best-effort. The Identity is
-        // valid even if the restore fails (we just lose the
-        // prior MLS state, peers re-bootstrap).
-        val restoreResult = runCatching {
-            val blob = snapshotStore.getSnapshot(applicationContext, newAccountIdB64)
-            // ADR-0050 — a snapshot taken under another leaf identity (every
-            // pre-ADR-0050 snapshot, a snapshot restored from another device's
-            // backup) must not be restored: `restoreStorage` replaces the whole
-            // provider with groups signed by a key this identity does not hold.
-            // Start empty; the next persist overwrites it under the right key.
-            val recordedLeaf = snapshotStore.getSnapshotLeafKey(applicationContext, newAccountIdB64)
-            if (blob != null &&
-                (recordedLeaf == null || !recordedLeaf.contentEquals(identity.signaturePublicKey()))
-            ) {
-                android.util.Log.w(
-                    "ChatRepository",
-                    "MLS snapshot belongs to another leaf identity; starting empty",
-                )
-                false
-            } else if (blob != null) {
-                identity.restoreStorage(blob)
-                true
-            } else {
-                false
-            }
-        }
-        val restored = restoreResult.getOrDefault(false)
-        if (restoreResult.isFailure) {
-            android.util.Log.w(
-                "ChatRepository",
-                "MLS snapshot present but not restorable",
-                restoreResult.exceptionOrNull(),
-            )
-        }
-        snapshotUnreadable.set(restoreResult.isFailure)
-
-        canonicalIdentity.set(identity)
-        accountIdentity.getAndSet(account)?.close()
-        currentAccountIdB64.set(newAccountIdB64)
-
-        // Eagerly rebuild `Group` handles for every previously-
-        // known group id (1.15f5). `restoreStorage` laid down
-        // OpenMLS provider storage; without this loop the in-
-        // memory map would still be empty + peers' commits to
-        // those groups would miss `pollGroup`'s lookup until
-        // the user re-opened each thread.
-        //
-        // Best-effort per group: a load failure on one row
-        // (e.g. epoch advanced too far, OpenMLS state file
-        // corrupted) doesn't block the others. The store
-        // entry stays — future bootstrap retries the load + a
-        // future sprint can wire a "drop stale entries"
-        // sweeper. Silent failures match 1.15f4a's posture
-        // (no logger plumbed yet; 1.15d7 wires a tracing sink).
-        if (restored) {
-            for (groupIdHex in knownGroupsStore.load(newAccountIdB64)) {
-                try {
-                    val groupId = hexToBytes(groupIdHex) ?: continue
-                    val group = loadGroup(identity, groupId) ?: continue
-                    groups[groupIdHex] = GroupRecord(group = group, groupId = groupId)
-                    // ADR-0042 legacy-sweep — provision opaque push routing for
-                    // each rehydrated group: OWNER + no secret -> mint + persist
-                    // + distribute the envelope + subscribe under push_gid; a
-                    // member holding a secret -> subscribe under push_gid;
-                    // anyone else -> defer (never subscribe under group_id).
-                    // Idempotent + race-safe (per-group in-flight lock).
-                    ensurePushRoutingBestEffort(group, identity)
-                } catch (_: Throwable) {
-                    // best-effort
+        // Cold start: the restore below is the single heaviest thing the app
+        // does before its lists can render — the Keystore unwrap of the
+        // snapshot, `restoreStorage` of the whole provider, one `loadGroup`
+        // per known chat, the message-log parse. It used to run on the main
+        // thread from `SessionRoot`'s `LaunchedEffect`, freezing the shell
+        // for its whole duration; it now runs here on [mlsDispatcher], and
+        // the shell renders a loading state until `bootstrapped` flips.
+        MainThreadGuard.assertOffMain("ChatRepository.bootstrap")
+        // Under the provider lock: `restoreStorage` replaces the WHOLE
+        // provider and the per-group `loadGroup` / log seeding must land
+        // before any poll's apply (which takes this same lock) can run
+        // against a half-populated record set. Polls are additionally gated
+        // on `bootstrapped`, which flips only at the end of this region.
+        providerLock.withLock {
+            // Restore the snapshot — best-effort. The Identity is
+            // valid even if the restore fails (we just lose the
+            // prior MLS state, peers re-bootstrap).
+            val restoreResult = runCatching {
+                val blob = snapshotStore.getSnapshot(applicationContext, newAccountIdB64)
+                // ADR-0050 — a snapshot taken under another leaf identity (every
+                // pre-ADR-0050 snapshot, a snapshot restored from another device's
+                // backup) must not be restored: `restoreStorage` replaces the whole
+                // provider with groups signed by a key this identity does not hold.
+                // Start empty; the next persist overwrites it under the right key.
+                val recordedLeaf = snapshotStore.getSnapshotLeafKey(applicationContext, newAccountIdB64)
+                if (blob != null &&
+                    (recordedLeaf == null || !recordedLeaf.contentEquals(identity.signaturePublicKey()))
+                ) {
+                    android.util.Log.w(
+                        "ChatRepository",
+                        "MLS snapshot belongs to another leaf identity; starting empty",
+                    )
+                    false
+                } else if (blob != null) {
+                    identity.restoreStorage(blob)
+                    true
+                } else {
+                    false
                 }
             }
-            publishThreadList()
-        }
-
-        // Phase 2a3f1 — restore the plaintext message log on
-        // top of the rehydrated Group handles. The two stores
-        // are independent (MLS state ⊥ message timeline), so
-        // a corrupt / missing log doesn't block the rest of
-        // the bootstrap.
-        val log = MessageLogStore.getLog(applicationContext, newAccountIdB64)
-        if (log != null) {
-            for ((groupIdHex, persisted) in log.groups) {
-                val record = groups[groupIdHex] ?: continue
-                val seeded = persisted.messages.mapNotNull { it.toChatMessage() }
-                record.seed(messages = seeded, cursor = persisted.cursor)
+            val restored = restoreResult.getOrDefault(false)
+            if (restoreResult.isFailure) {
+                android.util.Log.w(
+                    "ChatRepository",
+                    "MLS snapshot present but not restorable",
+                    restoreResult.exceptionOrNull(),
+                )
             }
-            publishThreadList()
-        }
+            snapshotUnreadable.set(restoreResult.isFailure)
 
-        mutableState.update { it.copy(bootstrapped = true) }
+            canonicalIdentity.set(identity)
+            accountIdentity.getAndSet(account)?.close()
+            currentAccountIdB64.set(newAccountIdB64)
+
+            // Eagerly rebuild `Group` handles for every previously-
+            // known group id (1.15f5). `restoreStorage` laid down
+            // OpenMLS provider storage; without this loop the in-
+            // memory map would still be empty + peers' commits to
+            // those groups would miss `pollGroup`'s lookup until
+            // the user re-opened each thread.
+            //
+            // Best-effort per group: a load failure on one row
+            // (e.g. epoch advanced too far, OpenMLS state file
+            // corrupted) doesn't block the others. The store
+            // entry stays — future bootstrap retries the load + a
+            // future sprint can wire a "drop stale entries"
+            // sweeper. Silent failures match 1.15f4a's posture
+            // (no logger plumbed yet; 1.15d7 wires a tracing sink).
+            if (restored) {
+                for (groupIdHex in knownGroupsStore.load(newAccountIdB64)) {
+                    try {
+                        val groupId = hexToBytes(groupIdHex) ?: continue
+                        val group = loadGroup(identity, groupId) ?: continue
+                        groups[groupIdHex] = GroupRecord(group = group, groupId = groupId)
+                        // ADR-0042 legacy-sweep — provision opaque push routing for
+                        // each rehydrated group: OWNER + no secret -> mint + persist
+                        // + distribute the envelope + subscribe under push_gid; a
+                        // member holding a secret -> subscribe under push_gid;
+                        // anyone else -> defer (never subscribe under group_id).
+                        // Idempotent + race-safe (per-group in-flight lock).
+                        ensurePushRoutingBestEffort(group, identity)
+                    } catch (_: Throwable) {
+                        // best-effort
+                    }
+                }
+                publishThreadList()
+            }
+
+            // Phase 2a3f1 — restore the plaintext message log on
+            // top of the rehydrated Group handles. The two stores
+            // are independent (MLS state ⊥ message timeline), so
+            // a corrupt / missing log doesn't block the rest of
+            // the bootstrap.
+            val log = MessageLogStore.getLog(applicationContext, newAccountIdB64)
+            if (log != null) {
+                for ((groupIdHex, persisted) in log.groups) {
+                    val record = groups[groupIdHex] ?: continue
+                    val seeded = persisted.messages.mapNotNull { it.toChatMessage() }
+                    record.seed(messages = seeded, cursor = persisted.cursor)
+                }
+                publishThreadList()
+            }
+
+            mutableState.update { it.copy(bootstrapped = true) }
+        }
 
         // Every session start — a password / passkey / recovery landing AND
         // the silent cold-start restore — publishes a KeyPackage minted from
@@ -556,7 +612,7 @@ public class ChatRepository(
      * [KeyPackageRepublisher] for the ordering and coalescing rules.
      */
     public suspend fun republishKeyPackage(): KeyPackageRepublishOutcome =
-        keyPackageRepublisher.republish()
+        withContext(mlsDispatcher) { keyPackageRepublisher.republish() }
 
     /**
      * Fire-and-forget [republishKeyPackage]. The request is numbered BEFORE
@@ -616,6 +672,12 @@ public class ChatRepository(
      *         been called yet.
      */
     public suspend fun startGroupWith(
+        recipientAccountId: ByteArray,
+        recipientSignaturePubkey: ByteArray,
+    ): String =
+        withContext(mlsDispatcher) { startGroupWithOnMlsThread(recipientAccountId = recipientAccountId, recipientSignaturePubkey = recipientSignaturePubkey) }
+
+    private suspend fun startGroupWithOnMlsThread(
         recipientAccountId: ByteArray,
         recipientSignaturePubkey: ByteArray,
     ): String {
@@ -759,7 +821,10 @@ public class ChatRepository(
      * @throws IllegalStateException when [bootstrap] hasn't
      *         been called yet.
      */
-    public suspend fun joinGroupFromWelcome(welcomeBytes: ByteArray): String {
+    public suspend fun joinGroupFromWelcome(welcomeBytes: ByteArray): String =
+        withContext(mlsDispatcher) { joinGroupFromWelcomeOnMlsThread(welcomeBytes = welcomeBytes) }
+
+    private suspend fun joinGroupFromWelcomeOnMlsThread(welcomeBytes: ByteArray): String {
         try {
             return joinGroupFromWelcomeAttempt(welcomeBytes)
         } finally {
@@ -979,6 +1044,12 @@ public class ChatRepository(
     public suspend fun deriveCallKey(
         groupIdHex: String,
         callId: ByteArray,
+    ): CallKeyMaterial? =
+        withContext(mlsDispatcher) { deriveCallKeyOnMlsThread(groupIdHex = groupIdHex, callId = callId) }
+
+    private suspend fun deriveCallKeyOnMlsThread(
+        groupIdHex: String,
+        callId: ByteArray,
     ): CallKeyMaterial? {
         val identity = canonicalIdentity.get() ?: run {
             android.util.Log.w("ChatRepository", "deriveCallKey: not bootstrapped")
@@ -1020,6 +1091,12 @@ public class ChatRepository(
      * false and reports its own drain later.
      */
     public suspend fun readSettledCallKey(
+        groupIdHex: String,
+        callId: ByteArray,
+    ): me.lakko.app.calls.SettledGroupRead =
+        withContext(mlsDispatcher) { readSettledCallKeyOnMlsThread(groupIdHex = groupIdHex, callId = callId) }
+
+    private suspend fun readSettledCallKeyOnMlsThread(
         groupIdHex: String,
         callId: ByteArray,
     ): me.lakko.app.calls.SettledGroupRead {
@@ -1080,6 +1157,12 @@ public class ChatRepository(
      * never claims more than the group was told.
      */
     internal suspend fun publishGroupCallSignal(
+        groupIdHex: String,
+        body: uniffi.lakko_ffi_uniffi.FfiCallSignalingBody,
+    ): Boolean =
+        withContext(mlsDispatcher) { publishGroupCallSignalOnMlsThread(groupIdHex = groupIdHex, body = body) }
+
+    private suspend fun publishGroupCallSignalOnMlsThread(
         groupIdHex: String,
         body: uniffi.lakko_ffi_uniffi.FfiCallSignalingBody,
     ): Boolean {
@@ -1249,6 +1332,13 @@ public class ChatRepository(
      * commit (own-marked for echo suppression). Returns the commit's DS id.
      */
     public suspend fun setMemberAdmin(
+        groupIdHex: String,
+        memberSignaturePubkey: ByteArray,
+        makeAdmin: Boolean,
+    ): MembershipOutcome =
+        withContext(mlsDispatcher) { setMemberAdminOnMlsThread(groupIdHex = groupIdHex, memberSignaturePubkey = memberSignaturePubkey, makeAdmin = makeAdmin) }
+
+    private suspend fun setMemberAdminOnMlsThread(
         groupIdHex: String,
         memberSignaturePubkey: ByteArray,
         makeAdmin: Boolean,
@@ -1435,6 +1525,13 @@ public class ChatRepository(
         groupIdHex: String,
         newOwnerSignaturePubkey: ByteArray,
         outgoing: OutgoingOwner,
+    ): MembershipOutcome =
+        withContext(mlsDispatcher) { transferGroupOwnershipOnMlsThread(groupIdHex = groupIdHex, newOwnerSignaturePubkey = newOwnerSignaturePubkey, outgoing = outgoing) }
+
+    private suspend fun transferGroupOwnershipOnMlsThread(
+        groupIdHex: String,
+        newOwnerSignaturePubkey: ByteArray,
+        outgoing: OutgoingOwner,
     ): MembershipOutcome {
         val identity = canonicalIdentity.get()
             ?: throw IllegalStateException(
@@ -1519,6 +1616,13 @@ public class ChatRepository(
      * fork the MLS epoch. Returns the commit's DS message id.
      */
     public suspend fun addMemberToGroup(
+        groupIdHex: String,
+        recipientAccountId: ByteArray,
+        recipientSignaturePubkey: ByteArray,
+    ): MembershipOutcome =
+        withContext(mlsDispatcher) { addMemberToGroupOnMlsThread(groupIdHex = groupIdHex, recipientAccountId = recipientAccountId, recipientSignaturePubkey = recipientSignaturePubkey) }
+
+    private suspend fun addMemberToGroupOnMlsThread(
         groupIdHex: String,
         recipientAccountId: ByteArray,
         recipientSignaturePubkey: ByteArray,
@@ -1759,6 +1863,12 @@ public class ChatRepository(
      * pending for the existing `ensure` re-broadcast branch.
      */
     public suspend fun removeMemberFromGroup(
+        groupIdHex: String,
+        leafIndex: UInt,
+    ): MembershipOutcome =
+        withContext(mlsDispatcher) { removeMemberFromGroupOnMlsThread(groupIdHex = groupIdHex, leafIndex = leafIndex) }
+
+    private suspend fun removeMemberFromGroupOnMlsThread(
         groupIdHex: String,
         leafIndex: UInt,
     ): MembershipOutcome {
@@ -2005,7 +2115,10 @@ public class ChatRepository(
      * in the current roster. Advisory — the role-gated approval gate is the
      * boundary, so failures degrade to an empty list.
      */
-    public suspend fun fetchJoinAttributions(groupIdHex: String): List<JoinAttributionInfo> {
+    public suspend fun fetchJoinAttributions(groupIdHex: String): List<JoinAttributionInfo> =
+        withContext(mlsDispatcher) { fetchJoinAttributionsOnMlsThread(groupIdHex = groupIdHex) }
+
+    private suspend fun fetchJoinAttributionsOnMlsThread(groupIdHex: String): List<JoinAttributionInfo> {
         val record = groups[groupIdHex] ?: return emptyList()
         val groupId = try {
             record.group.groupId()
@@ -2085,6 +2198,12 @@ public class ChatRepository(
     public suspend fun approveExternalJoin(
         groupIdHex: String,
         proposalRef: ByteArray,
+    ): Long =
+        withContext(mlsDispatcher) { approveExternalJoinOnMlsThread(groupIdHex = groupIdHex, proposalRef = proposalRef) }
+
+    private suspend fun approveExternalJoinOnMlsThread(
+        groupIdHex: String,
+        proposalRef: ByteArray,
     ): Long {
         val identity = canonicalIdentity.get()
             ?: throw IllegalStateException(
@@ -2140,7 +2259,13 @@ public class ChatRepository(
     public suspend fun rejectExternalJoin(
         groupIdHex: String,
         proposalRef: ByteArray,
-    ) {
+    ): Unit =
+        withContext(mlsDispatcher) { rejectExternalJoinOnMlsThread(groupIdHex = groupIdHex, proposalRef = proposalRef) }
+
+    private suspend fun rejectExternalJoinOnMlsThread(
+        groupIdHex: String,
+        proposalRef: ByteArray,
+    ): Unit {
         // G-37 — local-only (no DS call): provider work start to finish.
         groupLock(groupIdHex).withLock {
             providerLock.withLock {
@@ -2168,7 +2293,10 @@ public class ChatRepository(
      * (ADR-0027). The link conveys only the group_id -- it authorizes nobody;
      * the admin gate is the security boundary. `0` = never expires.
      */
-    public suspend fun createGroupInviteLink(groupIdHex: String): String {
+    public suspend fun createGroupInviteLink(groupIdHex: String): String =
+        withContext(mlsDispatcher) { createGroupInviteLinkOnMlsThread(groupIdHex = groupIdHex) }
+
+    private suspend fun createGroupInviteLinkOnMlsThread(groupIdHex: String): String {
         // ADR-0050: an invite capability is the person's, signed by the account key.
         val identity = accountIdentity.get() ?: canonicalIdentity.get()
             ?: throw IllegalStateException(
@@ -2212,7 +2340,10 @@ public class ChatRepository(
      * revocable; an inline link has no ledger row. Returns `true` when a ledger
      * row was revoked, `false` for an inline / malformed link (nothing to do).
      */
-    public suspend fun revokeGroupInviteLink(link: String): Boolean {
+    public suspend fun revokeGroupInviteLink(link: String): Boolean =
+        withContext(mlsDispatcher) { revokeGroupInviteLinkOnMlsThread(link = link) }
+
+    private suspend fun revokeGroupInviteLinkOnMlsThread(link: String): Boolean {
         val identity = accountIdentity.get() ?: canonicalIdentity.get()
             ?: throw IllegalStateException(
                 "ChatRepository not bootstrapped — call bootstrap() first",
@@ -2247,7 +2378,10 @@ public class ChatRepository(
      * pointer form) so the caller can drive the consume gate before requesting
      * to join.
      */
-    public suspend fun resolveGroupInviteSlug(slug: String): Pair<ByteArray, ByteArray?> {
+    public suspend fun resolveGroupInviteSlug(slug: String): Pair<ByteArray, ByteArray?> =
+        withContext(mlsDispatcher) { resolveGroupInviteSlugOnMlsThread(slug = slug) }
+
+    private suspend fun resolveGroupInviteSlugOnMlsThread(slug: String): Pair<ByteArray, ByteArray?> {
         val parsed = try {
             parseGroupInviteSlug(slug)
         } catch (e: GroupInviteUrlException) {
@@ -2280,6 +2414,13 @@ public class ChatRepository(
      * admin approves and the Welcome arrives.
      */
     public suspend fun requestToJoinFromLink(
+        capabilityWire: ByteArray,
+        nowMs: ULong,
+        blobId: ByteArray? = null,
+    ): Pair<ByteArray, ByteArray> =
+        withContext(mlsDispatcher) { requestToJoinFromLinkOnMlsThread(capabilityWire = capabilityWire, nowMs = nowMs, blobId = blobId) }
+
+    private suspend fun requestToJoinFromLinkOnMlsThread(
         capabilityWire: ByteArray,
         nowMs: ULong,
         blobId: ByteArray? = null,
@@ -2386,6 +2527,12 @@ public class ChatRepository(
     public suspend fun pollForJoinWelcome(
         groupId: ByteArray,
         joinerSignatureKey: ByteArray,
+    ): String? =
+        withContext(mlsDispatcher) { pollForJoinWelcomeOnMlsThread(groupId = groupId, joinerSignatureKey = joinerSignatureKey) }
+
+    private suspend fun pollForJoinWelcomeOnMlsThread(
+        groupId: ByteArray,
+        joinerSignatureKey: ByteArray,
     ): String? {
         val raw = try {
             dsClient.fetchGroup(groupId, after = 0L, waitSecs = 0)
@@ -2408,7 +2555,13 @@ public class ChatRepository(
     public suspend fun publishApplicationMessage(
         groupIdHex: String,
         plaintextBytes: ByteArray,
-    ) {
+    ): Unit =
+        withContext(mlsDispatcher) { publishApplicationMessageOnMlsThread(groupIdHex = groupIdHex, plaintextBytes = plaintextBytes) }
+
+    private suspend fun publishApplicationMessageOnMlsThread(
+        groupIdHex: String,
+        plaintextBytes: ByteArray,
+    ): Unit {
         val identity = canonicalIdentity.get()
             ?: throw IllegalStateException("ChatRepository not bootstrapped")
         val record = groups[groupIdHex]
@@ -2449,7 +2602,14 @@ public class ChatRepository(
         groupIdHex: String,
         plaintext: String,
         attachments: List<uniffi.lakko_ffi_uniffi.AttachmentRef> = emptyList(),
-    ) {
+    ): Unit =
+        withContext(mlsDispatcher) { sendMessageOnMlsThread(groupIdHex = groupIdHex, plaintext = plaintext, attachments = attachments) }
+
+    private suspend fun sendMessageOnMlsThread(
+        groupIdHex: String,
+        plaintext: String,
+        attachments: List<uniffi.lakko_ffi_uniffi.AttachmentRef> = emptyList(),
+    ): Unit {
         val identity = canonicalIdentity.get()
             ?: throw IllegalStateException("ChatRepository not bootstrapped")
         val record = groups[groupIdHex]
@@ -2544,7 +2704,14 @@ public class ChatRepository(
         groupIdHex: String,
         targetMessageId: Long,
         newText: String,
-    ) {
+    ): Unit =
+        withContext(mlsDispatcher) { editMessageOnMlsThread(groupIdHex = groupIdHex, targetMessageId = targetMessageId, newText = newText) }
+
+    private suspend fun editMessageOnMlsThread(
+        groupIdHex: String,
+        targetMessageId: Long,
+        newText: String,
+    ): Unit {
         val identity = canonicalIdentity.get()
             ?: throw IllegalStateException("ChatRepository not bootstrapped")
         val record = groups[groupIdHex]
@@ -2595,7 +2762,13 @@ public class ChatRepository(
     public suspend fun deleteMessage(
         groupIdHex: String,
         targetMessageId: Long,
-    ) {
+    ): Unit =
+        withContext(mlsDispatcher) { deleteMessageOnMlsThread(groupIdHex = groupIdHex, targetMessageId = targetMessageId) }
+
+    private suspend fun deleteMessageOnMlsThread(
+        groupIdHex: String,
+        targetMessageId: Long,
+    ): Unit {
         val identity = canonicalIdentity.get()
             ?: throw IllegalStateException("ChatRepository not bootstrapped")
         val record = groups[groupIdHex]
@@ -2649,7 +2822,14 @@ public class ChatRepository(
         groupIdHex: String,
         targetMessageId: Long,
         emoji: String,
-    ) {
+    ): Unit =
+        withContext(mlsDispatcher) { reactToMessageOnMlsThread(groupIdHex = groupIdHex, targetMessageId = targetMessageId, emoji = emoji) }
+
+    private suspend fun reactToMessageOnMlsThread(
+        groupIdHex: String,
+        targetMessageId: Long,
+        emoji: String,
+    ): Unit {
         val identity = canonicalIdentity.get()
             ?: throw IllegalStateException("ChatRepository not bootstrapped")
         val record = groups[groupIdHex]
@@ -2705,7 +2885,10 @@ public class ChatRepository(
      * indicator anyway). It NEVER throws past the caller, so a
      * typing publish can never block the chat.
      */
-    public suspend fun sendTyping(groupIdHex: String, isTyping: Boolean) {
+    public suspend fun sendTyping(groupIdHex: String, isTyping: Boolean): Unit =
+        withContext(mlsDispatcher) { sendTypingOnMlsThread(groupIdHex = groupIdHex, isTyping = isTyping) }
+
+    private suspend fun sendTypingOnMlsThread(groupIdHex: String, isTyping: Boolean): Unit {
         val identity = canonicalIdentity.get() ?: return
         val record = groups[groupIdHex] ?: return
         try {
@@ -2747,7 +2930,10 @@ public class ChatRepository(
      * Best-effort: a failure is logged + swallowed (the next
      * advance re-publishes). Never throws past the caller.
      */
-    public suspend fun sendReadReceipt(groupIdHex: String, upTo: Long) {
+    public suspend fun sendReadReceipt(groupIdHex: String, upTo: Long): Unit =
+        withContext(mlsDispatcher) { sendReadReceiptOnMlsThread(groupIdHex = groupIdHex, upTo = upTo) }
+
+    private suspend fun sendReadReceiptOnMlsThread(groupIdHex: String, upTo: Long): Unit {
         val identity = canonicalIdentity.get() ?: return
         val record = groups[groupIdHex] ?: return
         try {
@@ -3439,16 +3625,39 @@ public class ChatRepository(
      *   `LaunchedEffect` passes `30`.
      */
     /**
-     * Returns `true` when this call fetched and applied a batch itself. `false`
-     * means another poll of the same group was in flight (or moved the cursor
-     * first), so nothing was fetched here: a caller looping on this must WAIT
-     * before calling again, or the loop spins on the in-flight latch for the
-     * whole 30 s window of the other poll — on the chat screen that is the main
-     * thread, and it showed up as an ANR on opening a chat.
+     * Returns what this call did — see [GroupPollOutcome]. Only
+     * [GroupPollOutcome.APPLIED] fetched and applied a batch here; a loop must
+     * stop or back off after [GroupPollOutcome.UNAVAILABLE], since that call
+     * returned at once and the next would too.
      */
-    public suspend fun pollGroup(groupIdHex: String, waitSecs: Int = 0): Boolean {
-        val identity = canonicalIdentity.get() ?: return false
-        val record = groups[groupIdHex] ?: return false
+    /**
+     * @param joinInFlight when another poll of this group is in flight, WAIT
+     *   for it to finish (its apply included) before returning
+     *   [GroupPollOutcome.SKIPPED_IN_FLIGHT], instead of returning at once. The
+     *   chat screen's continuous loop passes `true`, which is what lets it call
+     *   straight back in without a blind sleep. A one-shot refresh keeps the
+     *   default and returns immediately.
+     */
+    public suspend fun pollGroup(
+        groupIdHex: String,
+        waitSecs: Int = 0,
+        joinInFlight: Boolean = false,
+    ): GroupPollOutcome = withContext(mlsDispatcher) {
+        pollGroupOnMlsThread(groupIdHex, waitSecs, joinInFlight)
+    }
+
+    private suspend fun pollGroupOnMlsThread(
+        groupIdHex: String,
+        waitSecs: Int,
+        joinInFlight: Boolean,
+    ): GroupPollOutcome {
+        // Not before the bootstrap has finished restoring + seeding: a poll
+        // that ran between `canonicalIdentity` landing and the message-log
+        // seed would fetch from cursor 0 only to have the batch dropped as
+        // cursor-moved under the lock.
+        if (!mutableState.value.bootstrapped) return GroupPollOutcome.UNAVAILABLE
+        val identity = canonicalIdentity.get() ?: return GroupPollOutcome.UNAVAILABLE
+        val record = groups[groupIdHex] ?: return GroupPollOutcome.UNAVAILABLE
 
         // ADR-0045 UX §6.2.8 item 1 — the poll must STOP for a group this
         // device is no longer in, and stopping is not an optimisation.
@@ -3471,7 +3680,7 @@ public class ChatRepository(
         // The cursor is deliberately left where the last applied row put it
         // (§6.2.13): it costs nothing, and whether a rejoin wants it reset is
         // the rejoin path's question, not this one's.
-        if (readIsActive { record.group.isActive() } == false) return false
+        if (readIsActive { record.group.isActive() } == false) return GroupPollOutcome.UNAVAILABLE
 
         // G-37 — the DS long poll (30 s on the live chat screen) used to be
         // awaited INSIDE the single repository-wide mutex. An open chat screen
@@ -3491,6 +3700,7 @@ public class ChatRepository(
         // still blocks neither.
         val outcome = runSplitPoll(
             inFlight = record.pollInFlight,
+            joinInFlight = joinInFlight,
             lock = groupLock(groupIdHex),
             providerLock = providerLock,
             readCursor = { record.cursor },
@@ -3504,6 +3714,7 @@ public class ChatRepository(
                 )
             },
         ) { after, raw ->
+            MainThreadGuard.assertOffMain("pollGroup apply")
             // ADR-0043 — baseline for the membership diff, captured BEFORE
             // this batch applies any commit. A Commit carries no membership
             // delta out of the poll loop, so a removal committed by SOMEONE
@@ -3662,7 +3873,7 @@ public class ChatRepository(
         // flight (or that moved the cursor) runs its own tail. Re-running the
         // sweep prelude and the re-admission check here would only burn the
         // provider lock and FFI reads on a result that cannot have changed.
-        if (outcome != SplitPollOutcome.APPLIED) return false
+        if (outcome != SplitPollOutcome.APPLIED) return outcome.toGroupPollOutcome()
         // ADR-0045 — the committer sweep runs at the TAIL of every poll, AFTER
         // [runSplitPoll] has released the per-group lock: the sweep takes that
         // same lock itself and holds it across its own two DS round-trips, and
@@ -3685,7 +3896,7 @@ public class ChatRepository(
         } catch (cause: Throwable) {
             android.util.Log.w("ChatRepository", "ADR-0050 re-admission check failed", cause)
         }
-        return true
+        return GroupPollOutcome.APPLIED
     }
 
     // -----------------------------------------------------------------
@@ -3699,8 +3910,8 @@ public class ChatRepository(
      * arrive. Only Welcome envelopes are acted on; anything else advances the
      * cursor. The cursor is persisted per account (its own DS queue).
      */
-    public suspend fun pollDeviceMailbox(waitSecs: Int = 0): Unit = deviceMailboxLock.withLock {
-        pollDeviceMailboxLocked(waitSecs)
+    public suspend fun pollDeviceMailbox(waitSecs: Int = 0): Unit = withContext(mlsDispatcher) {
+        deviceMailboxLock.withLock { pollDeviceMailboxLocked(waitSecs) }
     }
 
     /** One device-mailbox poller at a time: two over one cursor would join the
@@ -3767,7 +3978,10 @@ public class ChatRepository(
      * @throws ChatError when the KeyPackage never appeared within the wait (the
      *   device is then admitted by a later re-admission check).
      */
-    public suspend fun admitDevice(deviceKey: ByteArray): DeviceFanOut {
+    public suspend fun admitDevice(deviceKey: ByteArray): DeviceFanOut =
+        withContext(mlsDispatcher) { admitDeviceOnMlsThread(deviceKey = deviceKey) }
+
+    private suspend fun admitDeviceOnMlsThread(deviceKey: ByteArray): DeviceFanOut {
         val identity = canonicalIdentity.get()
             ?: throw IllegalStateException("ChatRepository not bootstrapped — call bootstrap() first")
         val account = keyPackageAccount.get()
@@ -3808,7 +4022,10 @@ public class ChatRepository(
      * from EVERY chat this device is in (its one leaf per chat, the account's
      * other devices untouched), then delete its directory KeyPackage.
      */
-    public suspend fun retireDevice(deviceKey: ByteArray): DeviceFanOut {
+    public suspend fun retireDevice(deviceKey: ByteArray): DeviceFanOut =
+        withContext(mlsDispatcher) { retireDeviceOnMlsThread(deviceKey = deviceKey) }
+
+    private suspend fun retireDeviceOnMlsThread(deviceKey: ByteArray): DeviceFanOut {
         val identity = canonicalIdentity.get()
             ?: throw IllegalStateException("ChatRepository not bootstrapped — call bootstrap() first")
         val account = keyPackageAccount.get()
@@ -3929,6 +4146,7 @@ public class ChatRepository(
      * that is neither is left as is.
      */
     private suspend fun readmitIfDue(groupIdHex: String) {
+        MainThreadGuard.assertOffMain("readmitIfDue")
         val identity = canonicalIdentity.get() ?: return
         val account = keyPackageAccount.get() ?: return
         val record = groups[groupIdHex] ?: return
@@ -4038,7 +4256,11 @@ public class ChatRepository(
      *   per-group in-flight race and return at once, so a loop whose every
      *   group is excluded would spin instead of waiting.
      */
-    public suspend fun pollAllGroups(waitSecs: Int = 0, exclude: Set<String> = emptySet()) {
+    public suspend fun pollAllGroups(waitSecs: Int = 0, exclude: Set<String> = emptySet()): Unit =
+        withContext(mlsDispatcher) { pollAllGroupsOnMlsThread(waitSecs = waitSecs, exclude = exclude) }
+
+    private suspend fun pollAllGroupsOnMlsThread(waitSecs: Int = 0, exclude: Set<String> = emptySet()): Unit {
+        if (!mutableState.value.bootstrapped) return
         canonicalIdentity.get() ?: return
         // Snapshot the keys under the map's own monitor — `groups` is a
         // `synchronizedMap`, whose iterators are NOT self-synchronising.
@@ -4221,9 +4443,11 @@ public class ChatRepository(
     }
 
     override fun close() {
-        chatClient.close()
-        dsClient.close()
-        discovery.close()
+        // A client never built has nothing to close (and building one just to
+        // close it would cost the engine it was made lazy to avoid).
+        if (chatClientLazy.isInitialized()) chatClient.close()
+        if (dsClientLazy.isInitialized()) dsClient.close()
+        if (discoveryLazy.isInitialized()) discovery.close()
         canonicalIdentity.getAndSet(null)?.close()
         accountIdentity.getAndSet(null)?.close()
         synchronized(groups) {
@@ -4296,6 +4520,7 @@ public class ChatRepository(
     private val cursorGate = DurableCursorGate()
 
     private fun persistSnapshotBestEffort() {
+        MainThreadGuard.assertOffMain("persistSnapshotBestEffort")
         val identity = canonicalIdentity.get() ?: return
         val accountIdB64 = currentAccountIdB64.get() ?: return
         try {
@@ -4355,6 +4580,7 @@ public class ChatRepository(
      *         write.
      */
     private fun persistSnapshotDurableOrThrow() {
+        MainThreadGuard.assertOffMain("persistSnapshotDurableOrThrow")
         val identity = canonicalIdentity.get()
             ?: throw IllegalStateException(
                 "cannot persist MLS snapshot — no canonical Identity",
@@ -5142,6 +5368,12 @@ public class ChatRepository(
     public suspend fun emitCommitterBeaconIfDue(
         groupIdHex: String,
         foreground: Boolean,
+    ): String =
+        withContext(mlsDispatcher) { emitCommitterBeaconIfDueOnMlsThread(groupIdHex = groupIdHex, foreground = foreground) }
+
+    private suspend fun emitCommitterBeaconIfDueOnMlsThread(
+        groupIdHex: String,
+        foreground: Boolean,
     ): String {
         // Short-circuited FIRST so a backgrounded app does no work at all — the
         // same answer [beaconEmitVerdict] gives below, reached before the
@@ -5218,7 +5450,10 @@ public class ChatRepository(
      * the middle would not merely slow it down, it would make the verdict wrong.
      * The blast radius is one group — G-37's concern was a repository-wide lock.
      */
-    public suspend fun sweepIfCommitter(groupIdHex: String): SweepOutcome? {
+    public suspend fun sweepIfCommitter(groupIdHex: String): SweepOutcome? =
+        withContext(mlsDispatcher) { sweepIfCommitterOnMlsThread(groupIdHex = groupIdHex) }
+
+    private suspend fun sweepIfCommitterOnMlsThread(groupIdHex: String): SweepOutcome? {
         val identity = canonicalIdentity.get() ?: return null
         val record = groups[groupIdHex] ?: return null
         if (currentAccountIdB64.get() == null) return null
@@ -5229,6 +5464,7 @@ public class ChatRepository(
         var membersBefore: List<String>? = null
         val outcome = try {
             groupLock(groupIdHex).withLock {
+                MainThreadGuard.assertOffMain("sweepIfCommitter")
                 membersBefore = providerLock.withLock { memberSignatureKeysOrNull(record.group) }
                 runCommitterSweep(sweepPortsFor(record, identity, groupIdHex))
             }
@@ -5610,7 +5846,10 @@ public class ChatRepository(
         )
     }
 
-    public suspend fun sweepPendingCommits(groupIdHex: String) {
+    public suspend fun sweepPendingCommits(groupIdHex: String): Unit =
+        withContext(mlsDispatcher) { sweepPendingCommitsOnMlsThread(groupIdHex = groupIdHex) }
+
+    private suspend fun sweepPendingCommitsOnMlsThread(groupIdHex: String): Unit {
         val accountIdB64 = currentAccountIdB64.get() ?: return
         val record = groups[groupIdHex] ?: return
         val groupIdB64 = outboxB64(record.groupId)
@@ -6017,12 +6256,12 @@ private class GroupRecord(
      * G-37 — per-group poll latch. Now that the DS fetch runs OUTSIDE
      * the provider lock, two concurrent `pollGroup` calls for the same group could
      * otherwise both fetch from the same cursor and then apply overlapping
-     * batches. The loser of this CAS skips entirely (it does not even fetch);
-     * the winner clears it in a `finally`, so a failed / cancelled fetch never
-     * wedges the group. See [runSplitPoll].
+     * batches. The loser of this CAS skips entirely (it does not even fetch),
+     * or — the chat screen's loop — waits for the winner to finish; the winner
+     * releases it in a `finally`, so a failed / cancelled fetch never wedges
+     * the group. See [runSplitPoll] and [PollLatch].
      */
-    val pollInFlight: java.util.concurrent.atomic.AtomicBoolean =
-        java.util.concurrent.atomic.AtomicBoolean(false)
+    val pollInFlight: PollLatch = PollLatch()
 
     fun appendOutgoing(
         text: String,

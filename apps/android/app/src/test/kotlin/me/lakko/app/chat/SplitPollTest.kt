@@ -4,7 +4,6 @@
 package me.lakko.app.chat
 
 import java.io.IOException
-import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.launch
@@ -62,7 +61,7 @@ class SplitPollTest {
 
         val poll = launch {
             runSplitPoll(
-                inFlight = AtomicBoolean(false),
+                inFlight = PollLatch(),
                 lock = lock,
                 providerLock = Mutex(),
                 readCursor = { 0L },
@@ -147,7 +146,7 @@ class SplitPollTest {
             var appliedBatch = ""
 
             val outcome = runSplitPoll(
-                inFlight = AtomicBoolean(false),
+                inFlight = PollLatch(),
                 lock = lock,
                 providerLock = Mutex(),
                 readCursor = { cursor },
@@ -180,7 +179,7 @@ class SplitPollTest {
         var applyCalls = 0
 
         val outcome = runSplitPoll(
-            inFlight = AtomicBoolean(false),
+            inFlight = PollLatch(),
             lock = lock,
             providerLock = Mutex(),
             readCursor = { cursor },
@@ -205,7 +204,7 @@ class SplitPollTest {
     @Test
     fun `a second concurrent poll of the same group skips without fetching`() = runTest {
         val lock = Mutex()
-        val inFlight = AtomicBoolean(false)
+        val inFlight = PollLatch()
         val firstFetchStarted = CompletableDeferred<Unit>()
         val releaseFirstFetch = CompletableDeferred<Unit>()
         var fetchCalls = 0
@@ -245,12 +244,12 @@ class SplitPollTest {
         advanceUntilIdle()
         first.join()
         assertEquals("the winner still applies its batch", 1, applyCalls)
-        assertFalse("the latch is cleared afterwards", inFlight.get())
+        assertFalse("the latch is cleared afterwards", inFlight.isHeld)
     }
 
     @Test
     fun `a fetch failure releases the in-flight latch`() = runTest {
-        val inFlight = AtomicBoolean(false)
+        val inFlight = PollLatch()
 
         try {
             runSplitPoll(
@@ -265,7 +264,7 @@ class SplitPollTest {
             // expected — the caller handles / backs off
         }
 
-        assertFalse("a failed fetch must not wedge the group's polling", inFlight.get())
+        assertFalse("a failed fetch must not wedge the group's polling", inFlight.isHeld)
 
         // and the next poll runs normally
         var applied = false
@@ -279,6 +278,113 @@ class SplitPollTest {
         )
         assertEquals(SplitPollOutcome.APPLIED, outcome)
         assertTrue(applied)
+    }
+
+
+    // -----------------------------------------------------------------
+    // 6. joining an in-flight poll (the chat-screen loop's shape)
+    // -----------------------------------------------------------------
+
+    @Test
+    fun `with joinInFlight the loser waits for the holder's apply before returning`() = runTest {
+        val lock = Mutex()
+        val inFlight = PollLatch()
+        val firstFetchStarted = CompletableDeferred<Unit>()
+        val releaseFirstFetch = CompletableDeferred<Unit>()
+        var applyCalls = 0
+        var fetchCalls = 0
+
+        val first = launch {
+            runSplitPoll(
+                inFlight = inFlight,
+                lock = lock,
+                providerLock = Mutex(),
+                readCursor = { 0L },
+                fetch = {
+                    fetchCalls++
+                    firstFetchStarted.complete(Unit)
+                    releaseFirstFetch.await()
+                },
+                apply = { _, _ -> applyCalls++ },
+            )
+        }
+        advanceUntilIdle()
+        assertTrue(firstFetchStarted.isCompleted)
+
+        var secondOutcome: SplitPollOutcome? = null
+        val second = launch {
+            secondOutcome = runSplitPoll(
+                inFlight = inFlight,
+                lock = lock,
+                providerLock = Mutex(),
+                readCursor = { 0L },
+                fetch = { fetchCalls++ },
+                joinInFlight = true,
+                apply = { _, _ -> applyCalls++ },
+            )
+        }
+        advanceUntilIdle()
+        assertTrue("the joiner is parked while the holder is in flight", second.isActive)
+        assertEquals("and has not returned", null, secondOutcome)
+        assertEquals("nor fetched", 1, fetchCalls)
+
+        releaseFirstFetch.complete(Unit)
+        advanceUntilIdle()
+        first.join()
+        second.join()
+        assertEquals(SplitPollOutcome.SKIPPED_IN_FLIGHT, secondOutcome)
+        assertEquals("only the holder applied", 1, applyCalls)
+        assertEquals("the joiner never fetched", 1, fetchCalls)
+        assertFalse(inFlight.isHeld)
+    }
+
+    @Test
+    fun `without joinInFlight the loser still returns at once`() = runTest {
+        val inFlight = PollLatch()
+        assertTrue(inFlight.tryAcquire())
+        val outcome = runSplitPoll(
+            inFlight = inFlight,
+            lock = Mutex(),
+            providerLock = Mutex(),
+            readCursor = { 0L },
+            fetch = { },
+            apply = { _, _ -> },
+        )
+        assertEquals(SplitPollOutcome.SKIPPED_IN_FLIGHT, outcome)
+        assertTrue("the holder still holds it", inFlight.isHeld)
+        inFlight.release()
+    }
+
+    @Test
+    fun `PollLatch — awaitIdle returns at once when unheld and wakes on release`() = runTest {
+        val latch = PollLatch()
+        latch.awaitIdle() // unheld: no suspension
+        assertTrue(latch.tryAcquire())
+        assertFalse("a second claim loses", latch.tryAcquire())
+        var woke = false
+        val waiter = launch {
+            latch.awaitIdle()
+            woke = true
+        }
+        advanceUntilIdle()
+        assertFalse("parked while held", woke)
+        latch.release()
+        advanceUntilIdle()
+        assertTrue("released wakes the waiter", woke)
+        assertFalse(latch.isHeld)
+        latch.release() // idempotent
+        assertTrue("re-acquirable after release", latch.tryAcquire())
+        waiter.join()
+    }
+
+    @Test
+    fun `SplitPollOutcome maps one-to-one onto GroupPollOutcome`() {
+        assertEquals(GroupPollOutcome.APPLIED, SplitPollOutcome.APPLIED.toGroupPollOutcome())
+        assertEquals(GroupPollOutcome.SKIPPED_IN_FLIGHT, SplitPollOutcome.SKIPPED_IN_FLIGHT.toGroupPollOutcome())
+        assertEquals(
+            GroupPollOutcome.SKIPPED_CURSOR_MOVED,
+            SplitPollOutcome.SKIPPED_CURSOR_MOVED.toGroupPollOutcome(),
+        )
     }
 
     // -----------------------------------------------------------------

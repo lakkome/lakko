@@ -41,6 +41,19 @@ drops the first burst of typed characters on a freshly opened chat (a
 stabilisation item, not a design one); Enter-to-send on web was not verified
 by hand.
 
+Stabilisation pass (same day, natives): the iOS shell no longer observes
+whole repositories (a non-observable services bundle, Equatable root views),
+which removed the flicker and the lost first keystrokes; a 58-character
+burst typed immediately after opening a chat landed in full. Android moved
+every MLS, FFI and persistence section of the repository onto a background
+dispatcher with a debug-only main-thread guard, joins an in-flight poll
+instead of spinning or sleeping, and bootstraps off the main thread; a chat
+opens without an ANR. Time to first frame on Android did not improve in the
+debug build (process start and the first Compose composition dominate).
+Still open: the native QR pairing and re-admission were not run on a device
+(no camera on the simulator or emulator, no camera-free path on the
+natives); iOS still decrypts and persists on the main actor inside the poll.
+
 ## 1. What is wrong today
 
 Findings from a code inventory of the three clients (2026-09-16).

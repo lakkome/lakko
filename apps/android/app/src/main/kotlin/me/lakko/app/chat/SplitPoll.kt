@@ -4,8 +4,9 @@
 package me.lakko.app.chat
 
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.CompletableDeferred
 import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.supervisorScope
@@ -13,6 +14,77 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
+
+/**
+ * What one `ChatRepository.pollGroup` call did, for the loops that drive it.
+ *
+ * The three [SplitPollOutcome] values map one-to-one; [UNAVAILABLE] is the
+ * repository's own gate — no bootstrapped session, no live record for the id,
+ * or a membership that has ended. A loop must treat the two groups differently:
+ * after [APPLIED], [SKIPPED_IN_FLIGHT] (which, on the screen loop, means the
+ * in-flight poll was WAITED FOR, see [PollLatch]) and [SKIPPED_CURSOR_MOVED] the
+ * next call is a real long poll and may follow at once; after [UNAVAILABLE] the
+ * next call would return immediately again, so the loop must stop or back off.
+ */
+public enum class GroupPollOutcome {
+    /** This call fetched and applied a batch itself. */
+    APPLIED,
+
+    /** Another poll of the same group was in flight; this call fetched nothing.
+     *  With `joinInFlight` it returned only once that poll had finished. */
+    SKIPPED_IN_FLIGHT,
+
+    /** The cursor moved during the fetch; the batch was dropped unapplied. */
+    SKIPPED_CURSOR_MOVED,
+
+    /** Nothing to poll: no session, no record, or membership ended. */
+    UNAVAILABLE,
+}
+
+internal fun SplitPollOutcome.toGroupPollOutcome(): GroupPollOutcome = when (this) {
+    SplitPollOutcome.APPLIED -> GroupPollOutcome.APPLIED
+    SplitPollOutcome.SKIPPED_IN_FLIGHT -> GroupPollOutcome.SKIPPED_IN_FLIGHT
+    SplitPollOutcome.SKIPPED_CURSOR_MOVED -> GroupPollOutcome.SKIPPED_CURSOR_MOVED
+}
+
+/**
+ * The per-group poll in-flight latch — an `AtomicBoolean` whose release can be
+ * AWAITED.
+ *
+ * [runSplitPoll]'s loser used to return at once, and the chat screen's
+ * `while (isActive)` loop then re-entered it at once: a spin on the main
+ * dispatcher for the whole 30 s window of the poll that held the latch, which
+ * showed up as an ANR on opening a chat. The stop-gap was a fixed 5 s sleep
+ * after every skipped poll — a blind wait that is too long when the holder is
+ * a 0 s refresh and too short when it is a long poll. A latch that can be
+ * joined removes the guess: the loser parks until the holder's `finally`
+ * releases, which is exactly after the holder's apply, so the loser's NEXT poll
+ * reads a current cursor.
+ *
+ * One [CompletableDeferred] per acquisition. [awaitIdle] reads whichever is
+ * current at the moment of the call and awaits that one; a latch re-acquired
+ * between the release and the waiter's resumption is a new poll, and the
+ * waiter's next `pollGroup` will either win it or join it — it never spins.
+ */
+internal class PollLatch {
+    private val current = AtomicReference<CompletableDeferred<Unit>?>(null)
+
+    /** Claim the latch. `false` when a poll already holds it. */
+    fun tryAcquire(): Boolean = current.compareAndSet(null, CompletableDeferred())
+
+    /** Release the latch and wake every [awaitIdle] waiter. Idempotent. */
+    fun release() {
+        current.getAndSet(null)?.complete(Unit)
+    }
+
+    /** `true` while a poll holds the latch. */
+    val isHeld: Boolean get() = current.get() != null
+
+    /** Suspend until the poll holding the latch (if any) has released it. */
+    suspend fun awaitIdle() {
+        current.get()?.await()
+    }
+}
 
 /** The outcome of one [runSplitPoll] attempt. */
 internal enum class SplitPollOutcome {
@@ -79,7 +151,10 @@ internal enum class SplitPollOutcome {
  * the FFI offers), so provider-touching work still needs a global mutex. The
  * ordering is always per-group FIRST, provider SECOND — never the reverse.
  *
- * @param inFlight per-group guard; `false` means "no poll running for this group".
+ * @param inFlight per-group latch; unheld means "no poll running for this group".
+ * @param joinInFlight when the latch is held by another poll, wait for that
+ *   poll to finish before returning [SplitPollOutcome.SKIPPED_IN_FLIGHT]
+ *   (default `false`: return at once, the pre-existing behaviour).
  * @param lock the PER-GROUP mutex — guards this group's cursor + timeline record.
  * @param providerLock the GLOBAL mutex guarding the shared OpenMLS provider.
  * @param readCursor reads the group record's current cursor. Called once before
@@ -91,14 +166,19 @@ internal enum class SplitPollOutcome {
  *   design: no network wait can be reintroduced here.
  */
 internal suspend fun <T> runSplitPoll(
-    inFlight: AtomicBoolean,
+    inFlight: PollLatch,
     lock: Mutex,
     providerLock: Mutex,
     readCursor: () -> Long,
     fetch: suspend (after: Long) -> T,
+    joinInFlight: Boolean = false,
     apply: (after: Long, fetched: T) -> Unit,
 ): SplitPollOutcome {
-    if (!inFlight.compareAndSet(false, true)) {
+    if (!inFlight.tryAcquire()) {
+        // The loser never fetches. With [joinInFlight] it also does not RETURN
+        // until the holder has released — i.e. after the holder's apply — so a
+        // loop that calls straight back in neither spins nor sleeps blindly.
+        if (joinInFlight) inFlight.awaitIdle()
         return SplitPollOutcome.SKIPPED_IN_FLIGHT
     }
     try {
@@ -114,7 +194,7 @@ internal suspend fun <T> runSplitPoll(
             }
         }
     } finally {
-        inFlight.set(false)
+        inFlight.release()
     }
 }
 

@@ -68,7 +68,7 @@ A Telegram-class secure messenger with **E2EE by default for everything** (1×1,
 
 The full strategic plan and trade-offs live in `~/.claude/plans/1-nested-wreath.md`.
 The tactical decomposition of all 6 phases with sprint breakdowns lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
-**What an ordinary user can actually rely on today lives in [`docs/PRODUCT-READINESS.md`](docs/PRODUCT-READINESS.md) (2026-09-15): it is the product-level truth and overrides any per-ADR "built end-to-end" claim in the table above; update it with every change that moves one of its rows, and never mark a row OK on the strength of an ADR.**
+**What an ordinary user can actually rely on today lives in [`docs/PRODUCT-READINESS.md`](docs/PRODUCT-READINESS.md) (2026-09-16): it is the product-level truth and overrides any per-ADR "built end-to-end" claim in the table above; update it with every change that moves one of its rows, and never mark a row OK on the strength of an ADR.**
 The Phase 3 closeout punch list — gap inventory + sprint waves with exit criteria — lives in [`docs/ROADMAP-PHASE3-CLOSEOUT.md`](docs/ROADMAP-PHASE3-CLOSEOUT.md).
 
 ## Module map

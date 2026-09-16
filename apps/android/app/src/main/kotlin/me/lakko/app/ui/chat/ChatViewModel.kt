@@ -6,6 +6,7 @@ package me.lakko.app.ui.chat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Job
+import me.lakko.app.chat.GroupPollOutcome
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -2531,9 +2532,10 @@ public class ChatViewModel(
      * loop the composable drives via
      * `LaunchedEffect(Unit) { while (isActive) { pollOnce(...) } }`.
      */
-    /** `true` when this call fetched and applied a batch; see [ChatRepository.pollGroup]. */
-    public suspend fun pollOnceLongPoll(waitSecs: Int = DEFAULT_LONG_POLL_SECS): Boolean =
-        repo.pollGroup(groupIdHex, waitSecs = waitSecs)
+    /** What the poll did; see [GroupPollOutcome]. Joins a poll already in
+     *  flight rather than returning at once, so the loop never spins. */
+    public suspend fun pollOnceLongPoll(waitSecs: Int = DEFAULT_LONG_POLL_SECS): GroupPollOutcome =
+        repo.pollGroup(groupIdHex, waitSecs = waitSecs, joinInFlight = true)
 
     /**
      * ADR-0045 UX §6.2.8 item 4 — may this screen offer a call?

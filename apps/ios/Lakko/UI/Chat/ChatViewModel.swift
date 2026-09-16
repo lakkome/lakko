@@ -510,9 +510,8 @@ public final class ChatViewModel: ObservableObject {
     let callHost: CallHost
 
     /// The app-level group (SFU) call host. The group call lives there, not on
-    /// this view model: SwiftUI rebuilds this view model on unrelated
-    /// re-renders and the chat is replaced wholesale by navigation, and a call
-    /// owned here went with it (see ``GroupCallHostRules``).
+    /// this view model: the chat is replaced wholesale by navigation, and a
+    /// call owned here went with it (see ``GroupCallHostRules``).
     let groupCallHost: GroupCallHost
 
     /// The app's active 1x1 call, on any chat, or `nil`. Read-only here: the
@@ -1710,21 +1709,20 @@ public final class ChatViewModel: ObservableObject {
     private var readCursorWork: DispatchWorkItem?
 
     /// Bind to the process-scoped
-    /// ``DeviceGroupSyncRepository`` (Phase 2a3e2b). Called
-    /// from `ChatScreen.onAppear`. Subscribes to:
+    /// ``DeviceGroupSyncRepository`` (Phase 2a3e2b). Called once
+    /// where the model is made (`SessionRoot`). Subscribes to:
     ///
     ///   * incoming `Draft` payloads keyed on this thread —
-    ///     seed `draft` once on first mount when local is
-    ///     empty (avoids stomping mid-typing on this device).
+    ///     seed `draft` once when local is empty (a non-empty
+    ///     local draft is never overwritten).
     ///   * local `draft` changes — debounce 500 ms then
     ///     broadcast.
     ///   * local `messages` mutations — debounce 1.5 s then
     ///     broadcast a `ReadCursor` payload pointing at the
     ///     highest message-id (Phase 2a3e2c).
     public func attachSync(_ sync: DeviceGroupSyncRepository) {
-        // The view model now outlives one appearance of its screen (see
-        // `ChatViewModelHolder`), so `onAppear` reaches here again on every
-        // return to the chat; the subscriptions below must not stack.
+        // Idempotent for the same repository: the subscriptions below must
+        // not stack if a caller attaches twice.
         if deviceGroupSync === sync, groupIdBytes != nil { return }
         deviceGroupSync = sync
         // Resolve groupIdBytes lazily — the ChatRepository
@@ -2406,9 +2404,8 @@ public final class ChatViewModel: ObservableObject {
     }
 
     /// ADR-0047 — what the per-chat media runtime needs, as closures over the
-    /// long-lived repository and this chat's id, never over this view model:
-    /// `ChatScreen` keeps its ``ChatMediaController`` across re-renders that
-    /// hand it a fresh view model.
+    /// long-lived repository and this chat's id, never over this view model,
+    /// so the ``ChatMediaController`` holds no reference back to it.
     public func mediaPort() -> ChatMediaController.Port {
         let repository = repository
         let groupIdHex = groupIdHex

@@ -647,6 +647,11 @@ private fun SessionRoot(
     val identitySecrets by authRepository.identitySecrets.collectAsStateWithLifecycle()
     LaunchedEffect(identitySecrets) {
         val secrets = identitySecrets ?: return@LaunchedEffect
+        // Cold start — everything in this effect used to run synchronously on
+        // the main thread: the MLS snapshot restore, one `loadGroup` per chat,
+        // the message-log parse, the DeviceGroup restore. The shell now draws
+        // first and these populate it; `bootstrap` hops onto the repository's
+        // own dispatcher, the two stores below are hopped here.
         chatRepository.bootstrap(secrets)
         // ADR-0048 — make sure this account's own profile exists and states
         // its current username (normalised; `null` for a guest). Republished
@@ -657,17 +662,21 @@ private fun SessionRoot(
                 (me.lakko.app.profile.checkUsername(typed) as? me.lakko.app.profile.UsernameCheck.Valid)
                     ?.normalized
             }
-        val (_, profileChanged) = me.lakko.app.profile.OwnProfileStore.ensureUsername(
-            context = chatRepository.context,
-            accountId = secrets.accountId,
-            username = canonicalUsername,
-        )
+        val (_, profileChanged) = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            me.lakko.app.profile.OwnProfileStore.ensureUsername(
+                context = chatRepository.context,
+                accountId = secrets.accountId,
+                username = canonicalUsername,
+            )
+        }
         if (profileChanged) chatRepository.publishOwnProfileToAllGroups()
         // Phase 2a3e2b — bootstrap the cross-device sync
         // runtime alongside the chat bootstrap so the poll
         // loop starts at the same moment chat surfaces become
         // usable. Idempotent for the same account id.
-        deviceGroupSync.bootstrap(secrets)
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+            deviceGroupSync.bootstrap(secrets)
+        }
     }
 
     val navController = rememberNavController()
@@ -1277,14 +1286,22 @@ private inline fun <reified VM : ViewModel> singletonViewModelFactory(
 
 /**
  * Loading splash for the brief window between Activity start
- * and [AuthRepository] rehydration. Practically invisible
- * (rehydrate is synchronous), but rendered for symmetry.
+ * and [AuthRepository] rehydration, which runs off the main thread (a
+ * Keystore decrypt plus three `EncryptedSharedPreferences` opens), so this is
+ * what the first frame shows on a signed-in cold start.
  */
 @Composable
 private fun LoadingScreen() {
-    Text(
-        text = "Lakko",
-        style = MaterialTheme.typography.displaySmall,
-        modifier = Modifier.padding(24.dp),
-    )
+    Column(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = androidx.compose.foundation.layout.Arrangement.Center,
+        horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally,
+    ) {
+        Text(
+            text = "Lakko",
+            style = MaterialTheme.typography.displaySmall,
+            modifier = Modifier.padding(24.dp),
+        )
+        androidx.compose.material3.CircularProgressIndicator()
+    }
 }

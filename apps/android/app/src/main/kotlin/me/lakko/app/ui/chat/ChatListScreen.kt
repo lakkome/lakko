@@ -35,6 +35,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -218,6 +219,15 @@ public fun ChatListScreen(
                     )
                 }
                 when {
+                    // Cold start: the MLS restore that populates the list runs
+                    // off the main thread after the first frame, so an empty
+                    // list before it finishes is "loading", not "no chats".
+                    rows.isEmpty() && !state.bootstrapped -> Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        CircularProgressIndicator()
+                    }
                     rows.isEmpty() -> EmptyPanel(isChats = isChats, onCompose = onCompose)
                     visible.isEmpty() -> NoMatchPanel()
                     else -> LazyColumn(

@@ -50,6 +50,9 @@ public struct ChatListScreen: View {
     private var title: String { kind == .chat ? "Chats" : "Groups" }
 
     public var body: some View {
+#if DEBUG
+        let _ = BodyEvaluationCounter.tick("ChatListScreen")
+#endif
         content
             .navigationTitle(title)
             .navigationBarTitleDisplayMode(.large)

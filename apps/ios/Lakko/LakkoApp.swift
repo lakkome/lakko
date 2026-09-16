@@ -68,11 +68,16 @@ struct LakkoApp: App {
     /// (Phase 2a3e2b-iOS). Holds the per-session DeviceGroup
     /// handle + reactive maps for cross-device drafts /
     /// flags / read cursors / conversation order.
-    @StateObject private var deviceGroupSync = DeviceGroupSyncRepository()
+    @StateObject private var deviceGroupSync: DeviceGroupSyncRepository
 
     /// Process-scoped ``InviteIntake`` — populated by
     /// `.onOpenURL` when iOS hands us a Universal Link.
-    @StateObject private var inviteIntake = InviteIntake()
+    @StateObject private var inviteIntake: InviteIntake
+
+    /// The same objects as plain references, for the shell views that hand
+    /// them down without observing them (see ``AppServices``). Built once in
+    /// `init` from the very instances the `@StateObject`s above own.
+    private let services: AppServices
 
     /// Scene lifecycle — used to schedule a background contact-inbox refresh
     /// (G-29) when the app leaves the foreground.
@@ -109,9 +114,6 @@ struct LakkoApp: App {
         // it into ContactsRepository's init.
         let auth = AuthRepository()
         self._authRepository = StateObject(wrappedValue: auth)
-        self._contactsRepository = StateObject(
-            wrappedValue: ContactsRepository(authRepository: auth)
-        )
         let chat = ChatRepository()
         let host = CallHost.live(repository: chat)
         host.attach(to: chat)
@@ -133,11 +135,46 @@ struct LakkoApp: App {
                     repository: chat, callHost: host, groupCallHost: groupHost)
             )
         )
+        let sync = DeviceGroupSyncRepository()
+        let intake = InviteIntake()
+        self._deviceGroupSync = StateObject(wrappedValue: sync)
+        self._inviteIntake = StateObject(wrappedValue: intake)
+        // Wire the chat bridge on the contacts repository so refreshInbox can
+        // forward Welcomes + acceptInviteLink can drive startGroupWith. Both
+        // repositories live for the process, so this is wired once, here,
+        // rather than on every evaluation of a view init.
+        let contacts = ContactsRepository(authRepository: auth)
+        self._contactsRepository = StateObject(wrappedValue: contacts)
+        contacts.chatRepository = chat
+        // ADR-0050 section 2.4 — the accounts the re-admission check can look
+        // up: every accepted contact whose account id is known.
+        chat.readmissionContactsProvider = { [weak contacts] in
+            (contacts?.state.accepted ?? []).compactMap { contact in
+                guard let accountId = contact.request.fromAccountId, accountId.count == 16 else {
+                    return nil
+                }
+                return (personKey: contact.request.fromPubkey, accountId: accountId)
+            }
+        }
+        self.services = AppServices(
+            authRepository: auth,
+            contactsRepository: contacts,
+            chatRepository: chat,
+            callHost: host,
+            groupCallHost: groupHost,
+            linkCallHost: linkHost,
+            deviceGroupSync: sync,
+            inviteIntake: intake
+        )
     }
 
     var body: some Scene {
         WindowGroup {
-            AppRoot()
+            // This scene body observes every `@StateObject` above, so it runs
+            // on each repository publish; `.equatable()` keeps that from
+            // re-evaluating the router, whose only input is the bundle.
+            AppRoot(services: services)
+                .equatable()
                 .environmentObject(authRepository)
                 .environmentObject(contactsRepository)
                 .environmentObject(chatRepository)
@@ -209,22 +246,34 @@ struct LakkoApp: App {
     }
 }
 
-/// Top-level router. Subscribes to ``AuthRepository/state`` via
-/// `@EnvironmentObject` and picks the destination subtree.
-struct AppRoot: View {
-    @EnvironmentObject private var authRepository: AuthRepository
-    @EnvironmentObject private var contactsRepository: ContactsRepository
-    @EnvironmentObject private var chatRepository: ChatRepository
-    @EnvironmentObject private var callHost: CallHost
-    @EnvironmentObject private var groupCallHost: GroupCallHost
-    @EnvironmentObject private var linkCallHost: LinkCallHost
-    @EnvironmentObject private var deviceGroupSync: DeviceGroupSyncRepository
-    @EnvironmentObject private var inviteIntake: InviteIntake
+/// Top-level router. Observes ``AuthRepository/state`` and picks the
+/// destination subtree.
+///
+/// Observes ONLY what its own body reads: the auth repository (the state
+/// switch, the two backup alarms) and the invite intake (the anonymous `/c/`
+/// branch). Every other repository is reached through ``AppServices`` and
+/// never observed here — the chat repository publishes on every poll and the
+/// sync repository on every draft broadcast, and an `@EnvironmentObject` for
+/// either re-evaluated this body, and the whole tab shell under it, each time.
+struct AppRoot: View, Equatable {
+    let services: AppServices
+    @ObservedObject private var authRepository: AuthRepository
+    @ObservedObject private var inviteIntake: InviteIntake
+
+    nonisolated static func == (lhs: AppRoot, rhs: AppRoot) -> Bool {
+        lhs.services === rhs.services
+    }
 
     /// ADR-0038 S4 — the "update available" notice controller. `@StateObject`
     /// wrapping the process-wide singleton so the banner mount below observes its
     /// published ``UpdateBannerDecision``.
     @StateObject private var releaseChecker = ReleaseUpdateChecker.shared
+
+    init(services: AppServices) {
+        self.services = services
+        self._authRepository = ObservedObject(wrappedValue: services.authRepository)
+        self._inviteIntake = ObservedObject(wrappedValue: services.inviteIntake)
+    }
 
     /// Settings > Appearance (UX spec section 4): System / Light / Dark,
     /// persisted per device. Applied once here so every screen and every
@@ -237,6 +286,9 @@ struct AppRoot: View {
     }
 
     var body: some View {
+#if DEBUG
+        let _ = BodyEvaluationCounter.tick("AppRoot")
+#endif
         content
             .preferredColorScheme(appearance.colorScheme)
             // Design system section 1 — the brand accent, applied at the root
@@ -318,7 +370,7 @@ struct AppRoot: View {
                             slug: callSlug,
                             authRepository: authRepository,
                             intake: inviteIntake,
-                            linkCallHost: linkCallHost
+                            linkCallHost: services.linkCallHost
                         ),
                         onDone: {}
                     )
@@ -339,14 +391,14 @@ struct AppRoot: View {
                 // Defensive: returning to anon (logout /
                 // forgetDevice) tears down the cross-device sync
                 // runtime so the next login bootstraps fresh.
-                deviceGroupSync.clear()
+                services.deviceGroupSync.clear()
                 // ADR-0048 — no account, no own profile to publish.
                 ProfileDirectory.shared.deactivate()
                 // No session, no call: end anything live and forget the
                 // session's call bookkeeping.
-                callHost.reset()
-                groupCallHost.reset()
-                linkCallHost.reset()
+                services.callHost.reset()
+                services.groupCallHost.reset()
+                services.linkCallHost.reset()
             }
 
         case .session(let account):
@@ -369,24 +421,20 @@ struct AppRoot: View {
                         onDismiss: { releaseChecker.dismiss() }
                     )
                 }
-                SessionRoot(
-                    account: account,
-                    authRepository: authRepository,
-                    contactsRepository: contactsRepository,
-                    chatRepository: chatRepository,
-                    callHost: callHost,
-                    groupCallHost: groupCallHost,
-                    linkCallHost: linkCallHost,
-                    inviteIntake: inviteIntake
-                )
+                // `.equatable()` — the shell re-evaluates on its own state
+                // (tab, paths), on the intake it observes, and when the
+                // account changes; never merely because this router did.
+                SessionRoot(account: account, services: services)
+                    .equatable()
             }
             // Every call, app-wide: the 1x1 ringing banner and a call link's
             // status above every signed-in screen, and the one full-screen call
-            // (1x1, group or link) over them.
+            // (1x1, group or link) over them. The modifier observes the hosts
+            // itself.
             .callHostOverlay(
-                oneToOne: callHost,
-                group: groupCallHost,
-                link: linkCallHost,
+                oneToOne: services.callHost,
+                group: services.groupCallHost,
+                link: services.linkCallHost,
                 inviteIntake: inviteIntake
             )
 
@@ -408,7 +456,7 @@ struct AppRoot: View {
                 // Same defensive teardown as the anon branch — no live
                 // session runtime should linger while we await the
                 // phrase.
-                deviceGroupSync.clear()
+                services.deviceGroupSync.clear()
             }
         case .saveFreshPhrase:
             // ADR-0017 lost-everything fallback — the user minted a
@@ -418,7 +466,7 @@ struct AppRoot: View {
                 phrase: authRepository.freshPhrase() ?? "",
                 onConfirm: { try? authRepository.confirmFreshPhraseSaved() }
             )
-            .onAppear { deviceGroupSync.clear() }
+            .onAppear { services.deviceGroupSync.clear() }
         }
     }
 }
@@ -460,55 +508,90 @@ enum TabRoute: Hashable {
     }
 }
 
-/// Keeps one `ChatViewModel` per OPEN chat alive across `SessionRoot` body
-/// re-evaluations. Not `@Published`: swapping a model is never a reason to
+/// The view models the signed-in shell owns: the two shared list models and
+/// one `ChatViewModel` per OPEN chat, for as long as some tab's stack shows
+/// that chat.
+///
+/// Held by `SessionRoot` as ONE `@StateObject` that never publishes. A
+/// `@StateObject` both owns and OBSERVES its object, so `ChatListViewModel`
+/// held directly as a `@StateObject` re-ran the whole shell body on every
+/// chat poll (it republishes `threads` from the repository state), and
+/// `ContactsViewModel` on every contacts publish. Wrapped here, each list
+/// model is observed only by the screens that render it (`ChatListScreen`,
+/// `ContactsScreen`, `ContactPickerScreen` take them as `@ObservedObject`).
+///
+/// The chat models: `SessionRoot` builds every pushed screen inside `body`
+/// (the `navigationDestination` closures), and `body` still runs on every
+/// navigation change — a tab switch, a push on another tab, a deep link. A
+/// `ChatViewModel` built inline there would be replaced on each of those,
+/// taking the composer's draft with it; a `@StateObject` cannot live inside a
+/// destination closure. So the model's lifetime is keyed here to "open on a
+/// stack" instead of to a body evaluation, and released by
+/// `reconcileAfterNavigation` once no stack shows the chat any more.
+///
+/// Nothing here is `@Published`: swapping a chat model is never a reason to
 /// re-render on its own, the navigation change that opens a chat already is.
 ///
-/// Keyed by group id because a chat can be open on more than one tab's stack
-/// at once (the same conversation pushed from Chats and from Contacts, or two
-/// different chats on two tabs); a single "current" slot would rebuild the
-/// other chat's model on the next re-render and take its draft with it.
+/// Chat models are keyed by group id because a chat can be open on more than
+/// one tab's stack at once (the same conversation pushed from Chats and from
+/// Contacts, or two different chats on two tabs); a single "current" slot
+/// would rebuild the other chat's model on the next navigation and take its
+/// draft with it.
 @MainActor
-private final class ChatViewModelHolder: ObservableObject {
-    private var models: [String: ChatViewModel] = [:]
+private final class SessionModels: ObservableObject {
+    let contactsVM: ContactsViewModel
+    let chatListVM: ChatListViewModel
+    private var chatModels: [String: ChatViewModel] = [:]
 
-    func viewModel(for groupIdHex: String, make: () -> ChatViewModel) -> ChatViewModel {
-        if let existing = models[groupIdHex] {
+    init(services: AppServices) {
+        contactsVM = ContactsViewModel(
+            repository: services.contactsRepository,
+            chatRepository: services.chatRepository
+        )
+        chatListVM = ChatListViewModel(repository: services.chatRepository)
+    }
+
+    func chatViewModel(for groupIdHex: String, make: () -> ChatViewModel) -> ChatViewModel {
+        if let existing = chatModels[groupIdHex] {
             return existing
         }
         let made = make()
-        models[groupIdHex] = made
+        chatModels[groupIdHex] = made
         return made
     }
 
     /// Drop the models of chats no stack shows any more.
-    func retain(only open: Set<String>) {
-        models = models.filter { open.contains($0.key) }
+    func retainChats(only open: Set<String>) {
+        chatModels = chatModels.filter { open.contains($0.key) }
     }
 }
 
 /// Authenticated-state shell: a bottom `TabView` of Chats, Groups, Channels,
 /// Contacts and Settings, each tab owning its own `NavigationStack` (UX spec
 /// sections 2 and 3). The app opens on Chats; there is no home screen.
-private struct SessionRoot: View {
+///
+/// Its inputs are the account and the ``AppServices`` bundle, and it is
+/// `Equatable` on exactly those (identity for the bundle), so a re-evaluation
+/// of `AppRoot` does not re-run this body. What does re-run it: its own state
+/// (the selected tab, the five paths) and the invite intake it observes for
+/// deep links. No repository and no list model is observed here — a draft
+/// broadcast, a read cursor, a sync poll or a chat poll used to re-evaluate
+/// this whole shell, and with it every `navigationDestination` under it.
+private struct SessionRoot: View, Equatable {
     let account: SessionAccount
-    let authRepository: AuthRepository
-    let contactsRepository: ContactsRepository
-    let chatRepository: ChatRepository
-    let callHost: CallHost
-    let groupCallHost: GroupCallHost
-    let linkCallHost: LinkCallHost
-    @EnvironmentObject var deviceGroupSync: DeviceGroupSyncRepository
+    let services: AppServices
     @ObservedObject var inviteIntake: InviteIntake
 
-    @StateObject private var contactsVM: ContactsViewModel
-    @StateObject private var chatListVM: ChatListViewModel
-    /// The open chats' view models, held OUTSIDE `body`. `SessionRoot`
-    /// re-renders on every publish of the observed repositories (a draft
-    /// broadcast, a read cursor, the sync poll), and a `ChatViewModel` built
-    /// inline in `body` was replaced on each of them, taking the composer's
-    /// draft with it.
-    @StateObject private var chatVMHolder = ChatViewModelHolder()
+    private var authRepository: AuthRepository { services.authRepository }
+    private var contactsRepository: ContactsRepository { services.contactsRepository }
+    private var chatRepository: ChatRepository { services.chatRepository }
+
+    /// The shell's view models, in one never-publishing holder — see
+    /// ``SessionModels`` for why neither the list models nor a chat model may
+    /// be a `@StateObject` of this view directly.
+    @StateObject private var models: SessionModels
+    private var contactsVM: ContactsViewModel { models.contactsVM }
+    private var chatListVM: ChatListViewModel { models.chatListVM }
 
     @State private var selectedTab: SessionTab = .chats
     @State private var chatsPath: [TabRoute] = []
@@ -517,52 +600,21 @@ private struct SessionRoot: View {
     @State private var contactsPath: [TabRoute] = []
     @State private var settingsPath: [TabRoute] = []
 
-    init(
-        account: SessionAccount,
-        authRepository: AuthRepository,
-        contactsRepository: ContactsRepository,
-        chatRepository: ChatRepository,
-        callHost: CallHost,
-        groupCallHost: GroupCallHost,
-        linkCallHost: LinkCallHost,
-        inviteIntake: InviteIntake
-    ) {
+    init(account: SessionAccount, services: AppServices) {
         self.account = account
-        self.authRepository = authRepository
-        self.contactsRepository = contactsRepository
-        self.chatRepository = chatRepository
-        self.callHost = callHost
-        self.groupCallHost = groupCallHost
-        self.linkCallHost = linkCallHost
-        self.inviteIntake = inviteIntake
-        // Wire the chat bridge on the contacts repository so
-        // refreshInbox can forward Welcomes + acceptInviteLink can
-        // drive startGroupWith. The assignment is idempotent on
-        // body re-evaluations (same `chatRepository` reference
-        // each time).
-        contactsRepository.chatRepository = chatRepository
-        // ADR-0050 section 2.4 — the accounts the re-admission check can look
-        // up: every accepted contact whose account id is known.
-        chatRepository.readmissionContactsProvider = { [weak contactsRepository] in
-            (contactsRepository?.state.accepted ?? []).compactMap { contact in
-                guard let accountId = contact.request.fromAccountId, accountId.count == 16 else {
-                    return nil
-                }
-                return (personKey: contact.request.fromPubkey, accountId: accountId)
-            }
-        }
-        self._contactsVM = StateObject(
-            wrappedValue: ContactsViewModel(
-                repository: contactsRepository,
-                chatRepository: chatRepository
-            )
-        )
-        self._chatListVM = StateObject(
-            wrappedValue: ChatListViewModel(repository: chatRepository)
-        )
+        self.services = services
+        self._inviteIntake = ObservedObject(wrappedValue: services.inviteIntake)
+        self._models = StateObject(wrappedValue: SessionModels(services: services))
+    }
+
+    nonisolated static func == (lhs: SessionRoot, rhs: SessionRoot) -> Bool {
+        lhs.account == rhs.account && lhs.services === rhs.services
     }
 
     var body: some View {
+#if DEBUG
+        let _ = BodyEvaluationCounter.tick("SessionRoot")
+#endif
         TabView(selection: $selectedTab) {
             NavigationStack(path: $chatsPath) {
                 ChatListScreen(
@@ -630,14 +682,13 @@ private struct SessionRoot: View {
         .onChange(of: allPaths) { old, new in
             reconcileAfterNavigation(old: old, new: new)
         }
-        // Bootstrap the ChatRepository whenever the auth
-        // repository has `identitySecrets`. The publisher fires on
-        // every login/signup/recover AND on a relaunch that restored
-        // the session from the Keychain (`AuthRepository.rehydrate`),
-        // so this runs at every session start; bootstrap is
-        // idempotent for the same account id, so re-running on a
-        // body re-evaluation is harmless.
-        .task(id: authRepository.identitySecrets?.accountId) {
+        // Bootstrap the ChatRepository for the signed-in account. Keyed on the
+        // account this shell was built for (an input, so it is current on
+        // every evaluation); every path that lands `.session` adopts
+        // `identitySecrets` first, so the read below sees them. Runs on every
+        // login/signup/recover AND on a relaunch that restored the session from
+        // the Keychain; bootstrap is idempotent for the same account id.
+        .task(id: account.accountIdB64) {
             if let secrets = authRepository.identitySecrets {
                 // ADR-0048 — the profile directory first: the chat bootstrap
                 // can join groups, and a join publishes the own profile.
@@ -657,7 +708,7 @@ private struct SessionRoot: View {
                 // runtime alongside the chat bootstrap so the
                 // poll loop starts at the same moment the chat
                 // surfaces become usable.
-                deviceGroupSync.bootstrap(secrets: secrets)
+                services.deviceGroupSync.bootstrap(secrets: secrets)
             }
         }
     }
@@ -802,7 +853,7 @@ private struct SessionRoot: View {
                     slug: slug,
                     authRepository: authRepository,
                     intake: inviteIntake,
-                    linkCallHost: linkCallHost
+                    linkCallHost: services.linkCallHost
                 ),
                 onDone: { pop(route, from: tab) }
             )
@@ -810,20 +861,26 @@ private struct SessionRoot: View {
     }
 
     private func chatViewModel(for groupIdHex: String) -> ChatViewModel {
-        chatVMHolder.viewModel(for: groupIdHex) {
-            ChatViewModel(
-                repository: chatRepository,
+        models.chatViewModel(for: groupIdHex) {
+            let services = services
+            let model = ChatViewModel(
+                repository: services.chatRepository,
                 groupIdHex: groupIdHex,
-                callHost: callHost,
-                groupCallHost: groupCallHost,
+                callHost: services.callHost,
+                groupCallHost: services.groupCallHost,
                 sessionTokenProvider: {
-                    authRepository.identitySecrets?.sessionToken
+                    services.authRepository.identitySecrets?.sessionToken
                 },
                 resolveRecipient: { username in
-                    try await contactsRepository
+                    try await services.contactsRepository
                         .resolveVerifiedRecipient(username: username)
                 }
             )
+            // Phase 2a3e2b — the cross-device draft / read-cursor sync is
+            // attached where the model is made, once per model, so the chat
+            // screen does not need to observe the sync repository to reach it.
+            model.attachSync(services.deviceGroupSync)
+            return model
         }
     }
 
@@ -907,7 +964,7 @@ private struct SessionRoot: View {
                 break
             }
         }
-        chatVMHolder.retain(only: Set(after.compactMap(\.chatGroupIdHex)))
+        models.retainChats(only: Set(after.compactMap(\.chatGroupIdHex)))
     }
 }
 

@@ -120,6 +120,7 @@ import kotlinx.coroutines.withContext
 import me.lakko.app.chat.AttachmentBridge
 import me.lakko.app.chat.ChatMessage
 import me.lakko.app.chat.Direction
+import me.lakko.app.chat.GroupPollOutcome
 import me.lakko.app.chat.UploadStage
 import uniffi.lakko_ffi_uniffi.AttachmentRef
 
@@ -268,11 +269,15 @@ public fun ChatScreen(
                 // top so a membership that ends mid-window exits on the next pass.
                 if (viewModel.membershipEnded.value) break
                 try {
-                    // A poll that found another poll of this group in flight
-                    // returns at once without fetching. Looping straight back
-                    // into it spun this loop — on the main dispatcher — for the
-                    // other poll's whole long-poll window; wait it out instead.
-                    if (!viewModel.pollOnceLongPoll()) delay(POLL_RETRY_BACKOFF_MS)
+                    // A poll that finds another poll of this group in flight
+                    // JOINS it (waits for its apply) instead of returning at
+                    // once, so calling straight back in neither spins on the
+                    // latch nor sleeps a blind interval. Only an UNAVAILABLE
+                    // answer (no session / no record) would return instantly
+                    // again, so that one backs off.
+                    if (viewModel.pollOnceLongPoll() == GroupPollOutcome.UNAVAILABLE) {
+                        delay(POLL_RETRY_BACKOFF_MS)
+                    }
                 } catch (cancel: kotlinx.coroutines.CancellationException) {
                     throw cancel
                 } catch (_: Throwable) {
@@ -1673,7 +1678,17 @@ private fun Composer(
                         containerColor = MaterialTheme.colorScheme.primary,
                         contentColor = MaterialTheme.colorScheme.onPrimary,
                     ),
-                    modifier = Modifier.height(48.dp).width(48.dp),
+                    // The label lives on the BUTTON node (the clickable,
+                    // focusable one TalkBack lands on and UI tests find by
+                    // `content-desc`), not on the icon inside it, so it is the
+                    // same node and the same text whether the icon is showing
+                    // or the in-flight spinner has replaced it. The mic
+                    // (`RecordButton`) labels its own clickable node the same
+                    // way.
+                    modifier = Modifier
+                        .height(48.dp)
+                        .width(48.dp)
+                        .semantics { contentDescription = "Send" },
                 ) {
                     if (sending) {
                         CircularProgressIndicator(
@@ -1684,7 +1699,7 @@ private fun Composer(
                             color = MaterialTheme.colorScheme.onPrimary,
                         )
                     } else {
-                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
+                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null)
                     }
                 }
             } else if (recState !is me.lakko.app.media.RecState.Preview) {

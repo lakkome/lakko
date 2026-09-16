@@ -26,12 +26,6 @@ public struct ChatScreen: View {
     /// the members sheet, when there is nothing left to show.
     public var onBack: () -> Void
 
-    /// Phase 2a3e2b-iOS — cross-device sync runtime. Attached
-    /// to the VM on first appearance so the composer's `draft`
-    /// seeds from sibling-device drafts and rebroadcasts every
-    /// change (debounced).
-    @EnvironmentObject private var deviceGroupSync: DeviceGroupSyncRepository
-
     // 1.19c3 — picker state. Swift's `PhotosPicker` returns
     // `PhotosPickerItem`s asynchronously (we resolve them to
     // `Data` + MIME inside the `.onChange`); the file
@@ -47,9 +41,9 @@ public struct ChatScreen: View {
     @State private var previewImageData: Data?
 
     /// ADR-0047 — the per-chat media runtime (recording, the media send queue,
-    /// playback, decrypted-media temp files). A `@StateObject`, so it survives
-    /// the re-renders that hand this screen a fresh view model and goes away —
-    /// taking its temp files with it — when the chat closes.
+    /// playback, decrypted-media temp files). A `@StateObject`, so it lives
+    /// exactly as long as this screen and goes away — taking its temp files
+    /// with it — when the chat closes.
     @StateObject private var media: ChatMediaController
     /// ADR-0047 §4 — the caret the emoji picker inserts at.
     @StateObject private var caret = ComposerCaret()
@@ -79,6 +73,9 @@ public struct ChatScreen: View {
     }
 
     public var body: some View {
+#if DEBUG
+        let _ = BodyEvaluationCounter.tick("ChatScreen")
+#endif
         chatBody
             .overlay { VideoNoteOverlay(media: media) }
             .environmentObject(media)
@@ -145,11 +142,9 @@ public struct ChatScreen: View {
         }
         .background(Color.lakkoBackground)
         .onAppear {
-            // Phase 2a3e2b — wire the cross-device sync hook
-            // on first mount. Idempotent: subsequent calls
-            // overwrite the weak reference but the existing
-            // Combine subscriptions stay intact.
-            viewModel.attachSync(deviceGroupSync)
+            // Phase 2a3e2b — the cross-device draft / read-cursor sync is
+            // attached where the view model is made (`SessionRoot`), so this
+            // screen observes nothing but its own view model.
             // ADR-0024 — mark the thread visible: arms read-receipt
             // publishing for the loaded timeline.
             viewModel.screenVisible = true
@@ -257,9 +252,9 @@ public struct ChatScreen: View {
             //
             // While this loop runs the chat is "open": the app-wide foreground
             // receive skips it (it polls itself) and its messages do not count
-            // as unread. Registered on the task, not the view model, because
-            // SwiftUI hands this screen a fresh view model on unrelated
-            // re-renders while the task lives on.
+            // as unread. Opened and closed on the same model instance, captured
+            // here, so the pair always balances even if the screen's model were
+            // ever swapped while the task lives on.
             let openedModel = viewModel
             openedModel.chatScreenOpened()
             while !Task.isCancelled, viewModel.pollLoopShouldContinue {

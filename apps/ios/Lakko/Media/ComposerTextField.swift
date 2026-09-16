@@ -15,6 +15,23 @@ final class ComposerCaret: ObservableObject {
     /// The last selection as UTF-16 offsets, when the platform reports one.
     var utf16Range: Range<Int>?
 
+    /// Record the field's current selection against the text it belongs to.
+    ///
+    /// SwiftUI can report a selection whose indices belong to an earlier value
+    /// of `text` (the chat screen opening with a restored draft, a draft
+    /// cleared after send), and `utf16Offset(in:)` traps on an index past the
+    /// end, so the indices are clamped to the current text rather than
+    /// trusted. A field with no selection leaves the last record in place;
+    /// ``insert(_:into:at:)`` re-checks it against the text at insert time.
+    @available(iOS 18.0, *)
+    func record(selection: TextSelection?, in text: String) {
+        guard let selection, case .selection(let range) = selection.indices else { return }
+        let end = text.endIndex
+        let lower = min(range.lowerBound, end)
+        let upper = min(max(range.upperBound, lower), end)
+        utf16Range = lower.utf16Offset(in: text)..<upper.utf16Offset(in: text)
+    }
+
     /// Insert `insertion` into `text` at the tracked caret (replacing a
     /// selection), or append when no caret is known or it no longer fits the
     /// text. Returns the new caret offset.
@@ -65,6 +82,20 @@ extension View {
     }
 }
 
+/// The iOS 18 field: `TextField(text:selection:)`, with the selection kept
+/// in this view's own state so the platform owns the caret and the parent
+/// never writes it.
+///
+/// The caret is recorded as part of `body`, NOT through `.onChange(of:)`.
+/// Injected typing (a UI test, the simulator's text action) can land more
+/// than one keystroke per frame, and an `onChange` observing the text or the
+/// selection then fires more than once per frame — SwiftUI reports that as
+/// `onChange(of: String) action tried to update multiple times per frame`
+/// (an "Invalid Configuration" fault in the unified log) and coalesces to the
+/// last value. The body already runs for every change of either input, so
+/// recording there gives the same freshest-value semantics with no per-frame
+/// fault. The write is to a plain, unpublished cache on a class the parent
+/// owns, so it invalidates nothing.
 @available(iOS 18.0, *)
 private struct SelectionTrackingField: View {
     @Binding var text: String
@@ -73,29 +104,10 @@ private struct SelectionTrackingField: View {
     @State private var selection: TextSelection?
 
     var body: some View {
+        let _ = caret.record(selection: selection, in: text)
         TextField("Message", text: $text, selection: $selection, axis: .vertical)
             .lineLimit(1...5)
             .disabled(disabled)
             .composerFieldChrome()
-            .onChange(of: selection) { _, new in
-                guard let new, case .selection(let range) = new.indices else { return }
-                // SwiftUI can report a selection whose indices belong to an
-                // earlier value of `text` (the chat screen opening with a
-                // restored draft, a draft cleared after send), and
-                // `utf16Offset(in:)` traps on an index past the end. Clamp to
-                // the current text instead of trusting the index.
-                let end = text.endIndex
-                let lower = min(range.lowerBound, end)
-                let upper = min(max(range.upperBound, lower), end)
-                caret.utf16Range = lower.utf16Offset(in: text)..<upper.utf16Offset(in: text)
-            }
-            .onChange(of: text) { _, new in
-                // An edit the selection did not report (an insert from the
-                // picker) leaves the caret at the recorded end of the insert,
-                // clamped to the text.
-                if let r = caret.utf16Range, r.upperBound > new.utf16.count {
-                    caret.utf16Range = new.utf16.count..<new.utf16.count
-                }
-            }
     }
 }
