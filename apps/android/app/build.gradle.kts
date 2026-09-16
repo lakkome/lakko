@@ -411,6 +411,9 @@ dependencies {
     // `compose.material3` which is the Compose UI toolkit.
     implementation(libs.material.android)
     implementation(libs.activity.compose)
+    // Client redesign Phase A — Navigation Compose drives the five-tab shell,
+    // the pushed chat / settings destinations and predictive back.
+    implementation(libs.androidx.navigation.compose)
 
     // Compose tooling (Layout Inspector previews etc.) — debug
     // only so they don't bloat release APKs.

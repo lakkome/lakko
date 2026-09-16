@@ -2,9 +2,11 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * `/settings/:section?` — Profile · Security · Appearance · Data · Account
- * (design system §4). A section list on the left, the section on the right;
- * a narrow screen shows one of the two. `/settings` lands on Profile.
+ * `/settings/:section?` — Profile · Security · Appearance · Media · Account
+ * (docs/ux/client-redesign.md section 5.5). A section list on the left, the
+ * section on the right; a narrow screen shows one of the two. `/settings`
+ * lands on Profile. `recovery` (authenticator, email or phone) is a page
+ * under Security rather than a section of its own.
  */
 import { Show, type JSX } from "solid-js";
 import { A, useParams } from "@solidjs/router";
@@ -12,6 +14,7 @@ import { A, useParams } from "@solidjs/router";
 import { useAuth } from "../auth/AuthContext";
 import PasskeysSection from "../auth/PasskeysSection";
 import { AccountCard, ExportDataCard } from "../auth/AccountSections";
+import { ContactEnrollView, TotpEnrollView } from "../auth/RecoveryFactors";
 import { autoplayVideoNotes, setAutoplayVideoNotes } from "../media/media-prefs";
 import { useProfiles } from "../profile/ProfileContext";
 import { Avatar } from "../ui/Avatar";
@@ -20,18 +23,22 @@ import { setTheme, useTheme, type Theme } from "../ui/theme";
 import Profile from "./Profile";
 import { paths } from "./paths";
 
-type Section = "profile" | "security" | "appearance" | "data" | "account";
+type Section = "profile" | "security" | "appearance" | "media" | "account";
+type Page = Section | "recovery";
 
 const SECTIONS: ReadonlyArray<{ id: Section; label: string; icon: IconName }> = [
   { id: "profile", label: "Profile", icon: "user" },
   { id: "security", label: "Security", icon: "shield" },
   { id: "appearance", label: "Appearance", icon: "palette" },
-  { id: "data", label: "Data", icon: "db" },
+  { id: "media", label: "Media", icon: "video" },
   { id: "account", label: "Account", icon: "logout" },
 ];
 
-function isSection(s: string | undefined): s is Section {
-  return SECTIONS.some((x) => x.id === s);
+function pageOf(s: string | undefined): Page | null {
+  if (s === "recovery") return "recovery";
+  // The former Data section: its export card now sits under Account.
+  if (s === "data") return "account";
+  return SECTIONS.some((x) => x.id === s) ? (s as Section) : null;
 }
 
 export default function Settings(): JSX.Element {
@@ -41,8 +48,13 @@ export default function Settings(): JSX.Element {
 
   // `/settings` (no section) shows the list alone on a narrow screen and
   // Profile beside it on a wide one.
-  const section = (): Section | null => (isSection(params.section) ? params.section : null);
-  const shown = (): Section => section() ?? "profile";
+  const page = (): Page | null => pageOf(params.section);
+  const shown = (): Page => page() ?? "profile";
+  // The list highlights the section a page belongs to.
+  const highlighted = (): Section => {
+    const p = shown();
+    return p === "recovery" ? "security" : p;
+  };
 
   const username = (): string => {
     const s = auth.state();
@@ -51,7 +63,7 @@ export default function Settings(): JSX.Element {
   const displayName = (): string => profiles.ownProfile().displayName ?? "";
 
   return (
-    <div class="lk-settings" data-open={section() === null ? "false" : "true"}>
+    <div class="lk-settings" data-open={page() === null ? "false" : "true"}>
       <nav class="lk-settings-nav" aria-label="Settings">
         <h1>Settings</h1>
         <div class="lk-settings-me">
@@ -72,7 +84,7 @@ export default function Settings(): JSX.Element {
         {SECTIONS.map((s) => (
           <A
             href={paths.settingsSection(s.id)}
-            classList={{ active: shown() === s.id && section() !== null }}
+            classList={{ active: highlighted() === s.id && page() !== null }}
             activeClass=""
             inactiveClass=""
           >
@@ -83,27 +95,31 @@ export default function Settings(): JSX.Element {
       </nav>
       <div class="lk-settings-body">
         <div class="lk-page lk-stack">
+          <A href={paths.settings} class="ghost small lk-narrow-only" style={{ "align-self": "flex-start" }}>
+            <Icon name="back" size={16} />
+            Settings
+          </A>
           <Show when={shown() === "profile"}>
             <Profile />
           </Show>
           <Show when={shown() === "security"}>
             <SecuritySection />
           </Show>
+          <Show when={shown() === "recovery"}>
+            <RecoverySection />
+          </Show>
           <Show when={shown() === "appearance"}>
             <AppearanceSection />
           </Show>
-          <Show when={shown() === "data"}>
-            <div class="lk-page-head">
-              <h1>Data</h1>
-              <p>What Lakko's servers hold, and how to take it with you.</p>
-            </div>
-            <ExportDataCard />
+          <Show when={shown() === "media"}>
+            <MediaSection />
           </Show>
           <Show when={shown() === "account"}>
             <div class="lk-page-head">
               <h1>Account</h1>
-              <p>Signing out, this device, and deleting your account.</p>
+              <p>Your data, signing out, this device, and deleting your account.</p>
             </div>
+            <ExportDataCard />
             <AccountCard />
           </Show>
         </div>
@@ -117,23 +133,18 @@ function SecuritySection(): JSX.Element {
     <>
       <div class="lk-page-head">
         <h1>Security</h1>
-        <p>How you sign in and which devices can read your messages.</p>
+        <p>How you sign in, which devices can read your messages, and how you get back in.</p>
       </div>
       <PasskeysSection />
       <section class="lk-card">
         <h2>Devices and recovery</h2>
-        <p class="lk-card-desc">
-          Every linked device holds its own keys and can read your messages.
-          Two-step verification and a recovery contact are set up on the same
-          page.
-        </p>
         <div class="lk-card-row">
           <span class="lk-card-row-icon">
             <Icon name="devices" size={18} />
           </span>
           <div class="lk-card-row-body">
-            <span class="lk-card-row-title">Linked devices</span>
-            <span class="lk-card-row-sub">See, link and remove devices.</span>
+            <span class="lk-card-row-title">Devices</span>
+            <span class="lk-card-row-sub">See, add and remove the devices on this account.</span>
           </div>
           <A href={paths.devices} class="lk-card-row-action">
             Manage
@@ -144,15 +155,54 @@ function SecuritySection(): JSX.Element {
             <Icon name="lock" size={18} />
           </span>
           <div class="lk-card-row-body">
-            <span class="lk-card-row-title">Two-step verification and recovery contact</span>
+            <span class="lk-card-row-title">Recovery</span>
             <span class="lk-card-row-sub">
-              Extra ways to get back into your account if you lose your password.
+              An authenticator app, an email address or a phone number that gets you back in.
             </span>
           </div>
-          <A href={paths.devices} class="lk-card-row-action">
+          <A href={paths.settingsSection("recovery")} class="lk-card-row-action">
             Set up
           </A>
         </div>
+        <div class="lk-card-row">
+          <span class="lk-card-row-icon">
+            <Icon name="shield" size={18} />
+          </span>
+          <div class="lk-card-row-body">
+            <span class="lk-card-row-title">Safety numbers</span>
+            <span class="lk-card-row-sub">
+              Each contact has a safety number. Compare it in person or on a call; matching
+              numbers mean nobody is in between. Find it in the contact's details.
+            </span>
+          </div>
+        </div>
+      </section>
+    </>
+  );
+}
+
+function RecoverySection(): JSX.Element {
+  return (
+    <>
+      <A href={paths.settingsSection("security")} class="ghost small lk-wide-only" style={{ "align-self": "flex-start" }}>
+        <Icon name="back" size={16} />
+        Security
+      </A>
+      <div class="lk-page-head">
+        <h1>Recovery</h1>
+        <p>
+          Your recovery phrase restores everything. These get you back into the account when
+          you have lost your password; your messages then come from the phrase or from another
+          of your devices.
+        </p>
+      </div>
+      <section class="lk-card">
+        <h2>Authenticator app</h2>
+        <TotpEnrollView />
+      </section>
+      <section class="lk-card">
+        <h2>Email or phone</h2>
+        <ContactEnrollView />
       </section>
     </>
   );
@@ -168,7 +218,7 @@ function AppearanceSection(): JSX.Element {
     <>
       <div class="lk-page-head">
         <h1>Appearance</h1>
-        <p>Theme and media playback on this device.</p>
+        <p>The theme on this device.</p>
       </div>
       <section class="lk-card">
         <h2>Theme</h2>
@@ -188,8 +238,18 @@ function AppearanceSection(): JSX.Element {
           ))}
         </div>
       </section>
+    </>
+  );
+}
+
+function MediaSection(): JSX.Element {
+  return (
+    <>
+      <div class="lk-page-head">
+        <h1>Media</h1>
+        <p>Playback on this device.</p>
+      </div>
       <section class="lk-card">
-        <h2>Media</h2>
         <div class="lk-card-row">
           <span class="lk-card-row-icon">
             <Icon name="video" size={18} />

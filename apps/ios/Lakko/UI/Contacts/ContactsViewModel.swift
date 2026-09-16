@@ -12,7 +12,7 @@ import Foundation
 ///   * `apps/android/.../ui/contacts/ContactsViewModel.kt`
 ///     (1.15e6 + 1.15e7's `pollOnceLongPoll`)
 ///
-/// **Scope**: search/send + refresh + accept/decline +
+/// **Scope**: search/send + pull-to-refresh + accept/decline +
 /// requires-reauth panel (1.14e4), the invite generate/revoke
 /// surface (1.14e7; 1.15e10 on Android), and continuous
 /// `pollOnceLongPoll` (1.14e5) — all wired.
@@ -148,8 +148,11 @@ public final class ContactsViewModel: ObservableObject {
         checkUsername(usernameInput).inlineMessage
     }
 
-    public func onRefreshClicked() {
-        Task { await repository.refreshInbox() }
+    /// Pull-to-refresh: one immediate inbox fetch plus the live-invites
+    /// list. The long-poll loop keeps running regardless.
+    public func pullToRefresh() async {
+        await repository.refreshInbox()
+        await loadActiveInvites()
     }
 
     // MARK: - Continuous foreground polling (1.14e5)
@@ -302,15 +305,12 @@ public final class ContactsViewModel: ObservableObject {
     // MARK: - Active invites (Phase 1.18d2b-list)
 
     /// Whether the "Active invites" panel has ever successfully
-    /// loaded its list in this session. Distinguishes
-    /// "user hasn't tapped Refresh yet" from "Refresh ran and
-    /// returned an empty list" — the empty-state copy differs.
+    /// loaded its list in this session. Distinguishes "not loaded yet"
+    /// from "loaded and empty" — the empty-state copy differs.
     @Published public private(set) var activeInvitesLoaded: Bool = false
     /// Owner-side list pulled via the signed
-    /// `POST /discovery/invite/by-owner` endpoint. Refreshed on
-    /// explicit user gesture (``onRefreshActiveInvitesClicked()``);
-    /// not auto-loaded so the timing-correlation side-channel
-    /// stays under user control.
+    /// `POST /discovery/invite/by-owner` endpoint. Loaded when the
+    /// Contacts tab opens and on pull-to-refresh (``loadActiveInvites()``).
     @Published public private(set) var activeInvites: [ActiveInvite] = []
     @Published public private(set) var loadingActiveInvites: Bool = false
     @Published public private(set) var activeInvitesError: String?
@@ -319,33 +319,31 @@ public final class ContactsViewModel: ObservableObject {
     /// a spinner.
     @Published public private(set) var revokingActiveInviteSlug: String?
 
-    /// Refresh the owner-side active-invites list.
-    public func onRefreshActiveInvitesClicked() {
+    /// Load the owner-side active-invites list.
+    public func loadActiveInvites() async {
         guard !loadingActiveInvites else { return }
         loadingActiveInvites = true
         activeInvitesError = nil
-        Task {
-            defer { loadingActiveInvites = false }
-            do {
-                let result = try await repository.listActiveInvites()
-                switch result {
-                case .list(let rows):
-                    activeInvites = rows
-                case .notFoundOrNotOwner:
-                    // No identity bundle for this account, or
-                    // signature mismatch — surface as a clean
-                    // empty list. The most common reason is "this
-                    // owner has never uploaded an invite", same
-                    // ergonomics as the web client.
-                    activeInvites = []
-                }
-                activeInvitesLoaded = true
-            } catch let err as ContactsError {
-                activeInvitesError = userFacing(err)
-            } catch {
-                activeInvitesError = (error as? LocalizedError)?.errorDescription
-                    ?? "Could not load invites."
+        defer { loadingActiveInvites = false }
+        do {
+            let result = try await repository.listActiveInvites()
+            switch result {
+            case .list(let rows):
+                activeInvites = rows
+            case .notFoundOrNotOwner:
+                // No identity bundle for this account, or
+                // signature mismatch — surface as a clean
+                // empty list. The most common reason is "this
+                // owner has never uploaded an invite", same
+                // ergonomics as the web client.
+                activeInvites = []
             }
+            activeInvitesLoaded = true
+        } catch let err as ContactsError {
+            activeInvitesError = userFacing(err)
+        } catch {
+            activeInvitesError = (error as? LocalizedError)?.errorDescription
+                ?? "Could not load invites."
         }
     }
 
@@ -358,7 +356,7 @@ public final class ContactsViewModel: ObservableObject {
             return
         }
         guard let blobId = base64UrlDecodeNoPad(row.blobIdSlug) else {
-            activeInvitesError = "malformed blob_id slug — cannot revoke"
+            activeInvitesError = "This invite link cannot be revoked."
             return
         }
         revokingActiveInviteSlug = slug

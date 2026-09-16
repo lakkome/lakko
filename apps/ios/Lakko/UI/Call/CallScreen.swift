@@ -28,21 +28,6 @@ import WebRTC
 /// web (Solid.js) and Android (Compose). A change to the
 /// design here should land in the other two ports in lock-step.
 
-// MARK: - Theme tokens (dark)
-
-private enum CallTheme {
-    static let background = Color(red: 0.06, green: 0.06, blue: 0.06)         // #0F0F0F
-    static let surface = Color(red: 0.10, green: 0.10, blue: 0.10)            // #1A1A1A
-    static let border = Color(red: 0.16, green: 0.16, blue: 0.16)             // #2A2A2A
-    static let textPrimary = Color(red: 0.98, green: 0.98, blue: 0.98)        // #FAFAFA
-    static let textSecondary = Color(red: 0.63, green: 0.63, blue: 0.66)      // #A1A1AA
-    static let accentBlue = Color(red: 0.23, green: 0.51, blue: 0.96)         // #3B82F6
-    static let endCallRed = Color(red: 0.86, green: 0.15, blue: 0.15)         // #DC2626
-    static let mutedRed = Color(red: 0.94, green: 0.27, blue: 0.27)           // #EF4444
-    static let qualityGreen = Color(red: 0.06, green: 0.72, blue: 0.51)       // #10B981
-    static let qualityYellow = Color(red: 0.98, green: 0.75, blue: 0.14)      // #FBBF24
-}
-
 // MARK: - QualityDot
 
 private struct QualityDot: View {
@@ -76,12 +61,12 @@ private struct E2eePill: View {
                 .font(.system(.caption2, design: .monospaced))
                 .fontWeight(.semibold)
         }
-        .foregroundColor(verified ? CallTheme.qualityGreen : CallTheme.qualityYellow)
+        .foregroundColor(verified ? Color.lakkoSuccess : Color.lakkoWarning)
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
-        .background(CallTheme.surface)
+        .background(Color.lakkoSurface)
         .overlay(
-            Capsule().stroke(CallTheme.border, lineWidth: 1)
+            Capsule().stroke(Color.lakkoBorder, lineWidth: 1)
         )
         .clipShape(Capsule())
         .accessibilityLabel(
@@ -136,9 +121,9 @@ private struct QualityIndicator: View {
                 Text(connectionTypeLabel)
                     .foregroundColor(connectionTypeColour)
             }
-            Divider().background(CallTheme.border)
+            Divider().background(Color.lakkoBorder)
             HStack(spacing: 4) {
-                Text("RTT:").foregroundColor(CallTheme.textSecondary)
+                Text("RTT:").foregroundColor(Color.lakkoTextMuted)
                 Text(state.connectionDetail.rttMs.map { "\($0) ms" } ?? "—")
             }
             HStack(spacing: 6) {
@@ -148,10 +133,10 @@ private struct QualityIndicator: View {
         }
         .font(.caption)
         .padding(10)
-        .foregroundColor(CallTheme.textPrimary)
-        .background(CallTheme.surface)
+        .foregroundColor(Color.lakkoText)
+        .background(Color.lakkoSurface)
         .overlay(
-            RoundedRectangle(cornerRadius: 8).stroke(CallTheme.border, lineWidth: 1)
+            RoundedRectangle(cornerRadius: 8).stroke(Color.lakkoBorder, lineWidth: 1)
         )
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .shadow(color: .black.opacity(0.5), radius: 8, y: 2)
@@ -168,9 +153,9 @@ private struct QualityIndicator: View {
 
     private var connectionTypeColour: Color {
         switch state.connectionDetail.connectionType {
-        case .direct: return CallTheme.qualityGreen
-        case .relay: return CallTheme.qualityYellow
-        case .unknown: return CallTheme.textSecondary
+        case .direct: return Color.lakkoSuccess
+        case .relay: return Color.lakkoWarning
+        case .unknown: return Color.lakkoTextMuted
         }
     }
 
@@ -202,10 +187,10 @@ private struct ParticipantTile: View {
                 HStack(spacing: 8) {
                     ProgressView()
                         .progressViewStyle(.circular)
-                        .tint(CallTheme.textPrimary)
+                        .tint(Color.lakkoText)
                     Text("Starting camera…")
                         .font(.caption)
-                        .foregroundColor(CallTheme.textPrimary)
+                        .foregroundColor(Color.lakkoText)
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
@@ -216,7 +201,7 @@ private struct ParticipantTile: View {
             if !participant.micOn && !participant.isLocal {
                 Image(systemName: "mic.slash.fill")
                     .font(large ? .title : .body)
-                    .foregroundColor(CallTheme.mutedRed)
+                    .foregroundColor(Color.lakkoDanger)
                     .padding(large ? 16 : 10)
                     .background(Color.black.opacity(0.55))
                     .clipShape(Circle())
@@ -231,7 +216,7 @@ private struct ParticipantTile: View {
                             .padding(.vertical, 2)
                             .background(Color.black.opacity(0.6))
                             .clipShape(RoundedRectangle(cornerRadius: 6))
-                            .foregroundColor(CallTheme.textPrimary)
+                            .foregroundColor(Color.lakkoText)
                         Spacer()
                     }
                     Spacer()
@@ -243,7 +228,7 @@ private struct ParticipantTile: View {
                 VStack {
                     HStack {
                         Spacer()
-                        Text("✋")
+                        Image(systemName: "hand.raised.fill")
                             .font(.body)
                             .padding(4)
                             .background(Color.black.opacity(0.6))
@@ -260,7 +245,7 @@ private struct ParticipantTile: View {
                     if !participant.micOn {
                         Image(systemName: "mic.slash.fill")
                             .font(.caption)
-                            .foregroundColor(CallTheme.mutedRed)
+                            .foregroundColor(Color.lakkoDanger)
                     }
                     Text(displayLabel)
                         .lineLimit(1)
@@ -274,11 +259,11 @@ private struct ParticipantTile: View {
                     if isPinned {
                         Image(systemName: "pin.fill")
                             .font(.caption2)
-                            .foregroundColor(CallTheme.accentBlue)
+                            .foregroundColor(Color.lakkoAccent)
                     }
                 }
                 .font(.caption)
-                .foregroundColor(CallTheme.textPrimary)
+                .foregroundColor(Color.lakkoText)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 8)
                 .background(Color.black.opacity(0.45))
@@ -288,15 +273,15 @@ private struct ParticipantTile: View {
         .overlay(
             RoundedRectangle(cornerRadius: 12)
                 .stroke(
-                    participant.speaking ? CallTheme.accentBlue : CallTheme.border,
+                    participant.speaking ? Color.lakkoAccent : Color.lakkoBorder,
                     lineWidth: participant.speaking ? 2 : 1
                 )
         )
         .clipShape(RoundedRectangle(cornerRadius: 12))
-        .background(CallTheme.surface)
+        .background(Color.lakkoSurface)
         .shadow(
             color: participant.speaking
-                ? CallTheme.accentBlue.opacity(0.6) : .clear,
+                ? Color.lakkoAccent.opacity(0.6) : .clear,
             radius: 6
         )
         .onTapGesture {
@@ -347,27 +332,19 @@ private struct ParticipantTile: View {
                 )
                 .id(participant.id)
             } else {
-                LinearGradient(
-                    gradient: Gradient(colors: [
-                        Color(red: 0.12, green: 0.16, blue: 0.22),
-                        Color(red: 0.07, green: 0.09, blue: 0.16),
-                        Color(red: 0.04, green: 0.06, blue: 0.10),
-                    ]),
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
+                Color.lakkoSurfaceSunken
                 .overlay(
                     Text("(video)")
                         .font(.caption)
-                        .foregroundColor(CallTheme.textSecondary.opacity(0.6))
+                        .foregroundColor(Color.lakkoTextMuted.opacity(0.6))
                 )
             }
         } else {
             ZStack {
-                Color(red: 0.15, green: 0.15, blue: 0.17)
+                Color.lakkoSurfaceSunken
                 Text(initial)
                     .font(.system(size: large ? 80 : 40, weight: .semibold))
-                    .foregroundColor(CallTheme.textPrimary)
+                    .foregroundColor(Color.lakkoText)
             }
         }
     }
@@ -418,11 +395,11 @@ private struct CircleButton: View {
                 if busy {
                     ProgressView()
                         .progressViewStyle(.circular)
-                        .tint(CallTheme.textPrimary)
+                        .tint(Color.lakkoText)
                 } else {
                     Image(systemName: systemImage)
                         .font(.body)
-                        .foregroundColor(CallTheme.textPrimary)
+                        .foregroundColor(Color.lakkoText)
                 }
             }
             .frame(width: 52, height: 52)
@@ -430,7 +407,7 @@ private struct CircleButton: View {
             .clipShape(Circle())
             .shadow(
                 color: destructive
-                    ? CallTheme.endCallRed.opacity(0.5)
+                    ? Color.lakkoDanger.opacity(0.5)
                     : .black.opacity(0.4),
                 radius: 4
             )
@@ -440,9 +417,9 @@ private struct CircleButton: View {
     }
 
     private var bg: Color {
-        if destructive { return CallTheme.endCallRed }
-        if active { return CallTheme.accentBlue }
-        return CallTheme.surface
+        if destructive { return Color.lakkoDanger }
+        if active { return Color.lakkoAccent }
+        return Color.lakkoSurface
     }
 }
 
@@ -470,7 +447,7 @@ private struct ChatToggleButton: View {
                     .foregroundColor(.white)
                     .padding(.horizontal, 5)
                     .frame(minWidth: 18, minHeight: 18)
-                    .background(Capsule().fill(CallTheme.endCallRed))
+                    .background(Capsule().fill(Color.lakkoDanger))
                     .offset(x: 2, y: -2)
                     .allowsHitTesting(false)
             }
@@ -557,11 +534,11 @@ private struct ControlsBar: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 14)
-        .background(CallTheme.surface)
+        .background(Color.lakkoSurface)
         .overlay(
             Rectangle()
                 .frame(height: 1)
-                .foregroundColor(CallTheme.border),
+                .foregroundColor(Color.lakkoBorder),
             alignment: .top
         )
     }
@@ -577,17 +554,17 @@ private struct ParticipantListDrawer: View {
             HStack {
                 Text("Participants (\(state.participants.count))")
                     .font(.headline)
-                    .foregroundColor(CallTheme.textPrimary)
+                    .foregroundColor(Color.lakkoText)
                 Spacer()
                 Button(action: { state.setParticipantListOpen(false) }) {
                     Image(systemName: "xmark")
-                        .foregroundColor(CallTheme.textSecondary)
+                        .foregroundColor(Color.lakkoTextMuted)
                 }
                 .accessibilityLabel("Close participant list")
             }
             .padding(16)
 
-            Divider().background(CallTheme.border)
+            Divider().background(Color.lakkoBorder)
 
             ScrollView {
                 VStack(spacing: 0) {
@@ -597,14 +574,14 @@ private struct ParticipantListDrawer: View {
                             Text(p.displayName.isEmpty
                                  ? (p.isLocal ? "You" : "Unknown")
                                  : p.displayName)
-                                .foregroundColor(CallTheme.textPrimary)
+                                .foregroundColor(Color.lakkoText)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                             if p.handRaised {
-                                Text("✋").accessibilityLabel("Hand raised")
+                                Image(systemName: "hand.raised.fill").accessibilityLabel("Hand raised")
                             }
                             if !p.micOn {
                                 Image(systemName: "mic.slash.fill")
-                                    .foregroundColor(CallTheme.mutedRed)
+                                    .foregroundColor(Color.lakkoDanger)
                                     .accessibilityLabel("Muted")
                             }
                             if p.screenSharing {
@@ -614,18 +591,18 @@ private struct ParticipantListDrawer: View {
                         }
                         .padding(.vertical, 10)
                         .padding(.horizontal, 16)
-                        Divider().background(CallTheme.border)
+                        Divider().background(Color.lakkoBorder)
                     }
                 }
             }
         }
         .frame(width: 320)
         .frame(maxHeight: .infinity)
-        .background(CallTheme.surface)
+        .background(Color.lakkoSurface)
         .overlay(
             Rectangle()
                 .frame(width: 1)
-                .foregroundColor(CallTheme.border),
+                .foregroundColor(Color.lakkoBorder),
             alignment: .leading
         )
     }
@@ -648,15 +625,15 @@ private struct PrejoinView: View {
 
     var body: some View {
         ZStack {
-            CallTheme.background.ignoresSafeArea()
+            Color.lakkoBackground.ignoresSafeArea()
             VStack(spacing: 20) {
                 Text("Join Call")
                     .font(.title2)
                     .fontWeight(.semibold)
-                    .foregroundColor(CallTheme.textPrimary)
+                    .foregroundColor(Color.lakkoText)
                 Text("Set up your camera and microphone")
                     .font(.subheadline)
-                    .foregroundColor(CallTheme.textSecondary)
+                    .foregroundColor(Color.lakkoTextMuted)
 
                 // Video preview box with overlays.
                 ZStack {
@@ -679,27 +656,19 @@ private struct PrejoinView: View {
                                 contentMode: .scaleAspectFill
                             )
                         } else {
-                            LinearGradient(
-                                gradient: Gradient(colors: [
-                                    Color(red: 0.12, green: 0.16, blue: 0.22),
-                                    Color(red: 0.07, green: 0.09, blue: 0.16),
-                                    Color(red: 0.04, green: 0.06, blue: 0.10),
-                                ]),
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
+                            Color.lakkoSurfaceSunken
                             .overlay(
                                 Text("(camera preview)")
                                     .font(.subheadline)
-                                    .foregroundColor(CallTheme.textSecondary)
+                                    .foregroundColor(Color.lakkoTextMuted)
                             )
                         }
                     } else {
                         ZStack {
-                            CallTheme.surface
+                            Color.lakkoSurface
                             Image(systemName: "video.slash.fill")
                                 .font(.largeTitle)
-                                .foregroundColor(CallTheme.textSecondary)
+                                .foregroundColor(Color.lakkoTextMuted)
                         }
                     }
 
@@ -710,22 +679,22 @@ private struct PrejoinView: View {
                             HStack(spacing: 8) {
                                 Button(action: { camOn.toggle() }) {
                                     Image(systemName: camOn ? "video.fill" : "video.slash.fill")
-                                        .foregroundColor(CallTheme.textPrimary)
+                                        .foregroundColor(Color.lakkoText)
                                         .frame(width: 36, height: 36)
                                         .background(
                                             camOn ? Color.black.opacity(0.55)
-                                                  : CallTheme.mutedRed
+                                                  : Color.lakkoDanger
                                         )
                                         .clipShape(Circle())
                                 }
                                 .accessibilityLabel(camOn ? "Turn off camera" : "Turn on camera")
                                 Button(action: { micOn.toggle() }) {
                                     Image(systemName: micOn ? "mic.fill" : "mic.slash.fill")
-                                        .foregroundColor(CallTheme.textPrimary)
+                                        .foregroundColor(Color.lakkoText)
                                         .frame(width: 36, height: 36)
                                         .background(
                                             micOn ? Color.black.opacity(0.55)
-                                                  : CallTheme.mutedRed
+                                                  : Color.lakkoDanger
                                         )
                                         .clipShape(Circle())
                                 }
@@ -741,16 +710,16 @@ private struct PrejoinView: View {
                         Spacer()
                         TextField("", text: $displayName, prompt:
                             Text("Your name")
-                                .foregroundColor(CallTheme.textSecondary)
+                                .foregroundColor(Color.lakkoTextMuted)
                         )
                         .textInputAutocapitalization(.words)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
-                        .foregroundColor(CallTheme.textPrimary)
+                        .foregroundColor(Color.lakkoText)
                         .background(Color.white.opacity(0.08))
                         .overlay(
                             RoundedRectangle(cornerRadius: 8)
-                                .stroke(CallTheme.border, lineWidth: 1)
+                                .stroke(Color.lakkoBorder, lineWidth: 1)
                         )
                         .clipShape(RoundedRectangle(cornerRadius: 8))
                         .padding(12)
@@ -764,12 +733,12 @@ private struct PrejoinView: View {
                 Button(action: { onJoin(displayName, micOn, camOn) }) {
                     Text("Join")
                         .font(.headline)
-                        .foregroundColor(CallTheme.textPrimary)
+                        .foregroundColor(Color.lakkoText)
                         .padding(.horizontal, 32)
                         .padding(.vertical, 12)
-                        .background(CallTheme.accentBlue)
+                        .background(Color.lakkoAccent)
                         .clipShape(RoundedRectangle(cornerRadius: 10))
-                        .shadow(color: CallTheme.accentBlue.opacity(0.4), radius: 4, y: 2)
+                        .shadow(color: Color.lakkoAccent.opacity(0.4), radius: 4, y: 2)
                 }
                 .accessibilityLabel("Join the call")
 
@@ -777,7 +746,7 @@ private struct PrejoinView: View {
                     Button(action: onCancel) {
                         Text("Cancel")
                             .font(.subheadline)
-                            .foregroundColor(CallTheme.textSecondary)
+                            .foregroundColor(Color.lakkoTextMuted)
                             .padding(.horizontal, 24)
                             .padding(.vertical, 10)
                     }
@@ -814,11 +783,11 @@ private struct PhaseBanner: View {
         case .prejoin, .connected:
             return nil
         case .connecting:
-            return ("Connecting…", CallTheme.accentBlue)
+            return ("Connecting…", Color.lakkoAccent)
         case .reconnecting(let reason):
-            return ("Reconnecting — \(reason)", CallTheme.qualityYellow)
+            return ("Reconnecting — \(reason)", Color.lakkoWarning)
         case .ended:
-            return ("Call ended", CallTheme.endCallRed)
+            return ("Call ended", Color.lakkoDanger)
         }
     }
 }
@@ -829,13 +798,13 @@ private struct WaitingMessageOverlay: View {
     var body: some View {
         Text("Waiting for participant…")
             .font(.subheadline)
-            .foregroundColor(CallTheme.textPrimary)
+            .foregroundColor(Color.lakkoText)
             .padding(.horizontal, 24)
             .padding(.vertical, 16)
-            .background(CallTheme.surface.opacity(0.9))
+            .background(Color.lakkoSurface.opacity(0.9))
             .overlay(
                 RoundedRectangle(cornerRadius: 12)
-                    .stroke(CallTheme.border, lineWidth: 1)
+                    .stroke(Color.lakkoBorder, lineWidth: 1)
             )
             .clipShape(RoundedRectangle(cornerRadius: 12))
             .accessibilityLabel("Waiting for another participant to join the call")
@@ -849,14 +818,14 @@ private struct CallEndedOverlay: View {
 
     var body: some View {
         ZStack {
-            CallTheme.background.opacity(0.85).ignoresSafeArea()
+            Color.lakkoBackground.opacity(0.85).ignoresSafeArea()
             VStack(spacing: 12) {
                 Text("Call ended")
                     .font(.largeTitle)
                     .fontWeight(.semibold)
-                    .foregroundColor(CallTheme.textPrimary)
+                    .foregroundColor(Color.lakkoText)
                 Text("Returning to your chats…")
-                    .foregroundColor(CallTheme.textSecondary)
+                    .foregroundColor(Color.lakkoTextMuted)
             }
         }
         .task {
@@ -1043,6 +1012,10 @@ public struct CallScreen: View {
         } message: { message in
             Text(message)
         }
+        // Calls are dark by design on every platform (UX spec section 4): the
+        // shared tokens resolve to their dark variants inside this screen and
+        // every sheet it presents; no second palette.
+        .preferredColorScheme(.dark)
     }
 
     /// Drive the camera choice onto whatever owns the call. Turning the
@@ -1080,7 +1053,7 @@ public struct CallScreen: View {
 
     private var callView: some View {
         ZStack(alignment: .top) {
-            CallTheme.background.ignoresSafeArea()
+            Color.lakkoBackground.ignoresSafeArea()
 
             VStack(spacing: 0) {
                 // Header bar: E2EE pill on the left, quality dot
@@ -1092,11 +1065,11 @@ public struct CallScreen: View {
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
-                .background(CallTheme.surface)
+                .background(Color.lakkoSurface)
                 .overlay(
                     Rectangle()
                         .frame(height: 1)
-                        .foregroundColor(CallTheme.border),
+                        .foregroundColor(Color.lakkoBorder),
                     alignment: .bottom
                 )
 
@@ -1355,13 +1328,9 @@ private struct ChatSheet: View {
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 10) {
                             if state.chatMessages.isEmpty {
-                                Text(
-                                    "No messages yet. Anything you send is end-to-end "
-                                    + "encrypted inside this call's MLS group — the "
-                                    + "server cannot read it."
-                                )
+                                Text("No messages yet. Only people in this call can read what you send.")
                                 .font(.system(size: 13))
-                                .foregroundColor(CallTheme.textSecondary)
+                                .foregroundColor(Color.lakkoTextMuted)
                                 .multilineTextAlignment(.center)
                                 .frame(maxWidth: .infinity)
                                 .padding(.top, 40)
@@ -1385,7 +1354,7 @@ private struct ChatSheet: View {
                     }
                 }
 
-                Divider().background(CallTheme.border)
+                Divider().background(Color.lakkoBorder)
 
                 HStack(spacing: 8) {
                     TextField(
@@ -1408,7 +1377,7 @@ private struct ChatSheet: View {
                             .padding(.vertical, 8)
                             .background(
                                 RoundedRectangle(cornerRadius: 8)
-                                    .fill(canSend ? CallTheme.accentBlue : CallTheme.surface)
+                                    .fill(canSend ? Color.lakkoAccent : Color.lakkoSurface)
                             )
                     }
                     .disabled(!canSend)
@@ -1416,7 +1385,7 @@ private struct ChatSheet: View {
                 .padding(.horizontal, 12)
                 .padding(.vertical, 10)
             }
-            .background(CallTheme.background)
+            .background(Color.lakkoBackground)
             .navigationTitle("Chat")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -1452,7 +1421,7 @@ private struct ChatMessageRow: View {
                 Spacer()
                 Text(msg.text)
                     .font(.system(size: 12).italic())
-                    .foregroundColor(CallTheme.textSecondary)
+                    .foregroundColor(Color.lakkoTextMuted)
                     .multilineTextAlignment(.center)
                 Spacer()
             }
@@ -1461,14 +1430,14 @@ private struct ChatMessageRow: View {
                 HStack(spacing: 8) {
                     Text(msg.senderName)
                         .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(CallTheme.accentBlue)
+                        .foregroundColor(Color.lakkoAccent)
                     Text(Self.timeFormatter.string(from: msg.ts))
                         .font(.system(size: 12))
-                        .foregroundColor(CallTheme.textSecondary)
+                        .foregroundColor(Color.lakkoTextMuted)
                 }
                 Text(msg.text)
                     .font(.system(size: 14))
-                    .foregroundColor(CallTheme.textPrimary)
+                    .foregroundColor(Color.lakkoText)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }

@@ -12,20 +12,18 @@ import SwiftUI
 /// not configured) immediately.
 struct AntiCensorshipSettingsView: View {
     @ObservedObject var manager: AntiCensorshipManager
-    var onBack: () -> Void
 
     @State private var enabled: Bool
 
-    init(manager: AntiCensorshipManager, onBack: @escaping () -> Void) {
+    init(manager: AntiCensorshipManager) {
         self.manager = manager
-        self.onBack = onBack
         self._enabled = State(initialValue: manager.isEnabled)
     }
 
     var body: some View {
         Form {
             Section {
-                Toggle("Route through obfuscated tunnel", isOn: $enabled)
+                Toggle("Hide Lakko from network blocking", isOn: $enabled)
                     .onChange(of: enabled) { _, on in
                         manager.setEnabled(on)
                     }
@@ -33,10 +31,9 @@ struct AntiCensorshipSettingsView: View {
                 Text("Anti-censorship")
             } footer: {
                 Text(
-                    "When on, Lakko fetches a signed network-bootstrap config and "
-                    + "routes its API calls through a censorship-resistant transport. "
-                    + "Your messages stay end-to-end encrypted either way; this only "
-                    + "hides the connection metadata from a network that blocks Lakko."
+                    "When on, Lakko connects in a way that is harder for a network "
+                    + "to detect and block. Your messages stay end-to-end encrypted "
+                    + "either way."
                 )
             }
 
@@ -47,11 +44,7 @@ struct AntiCensorshipSettingsView: View {
             }
         }
         .navigationTitle("Anti-censorship")
-        .toolbar {
-            ToolbarItem(placement: .navigationBarLeading) {
-                Button("Back", action: onBack)
-            }
-        }
+        .navigationBarTitleDisplayMode(.inline)
     }
 
     @ViewBuilder
@@ -62,17 +55,17 @@ struct AntiCensorshipSettingsView: View {
         case .unconfigured:
             label(
                 "Not available in this build",
-                "No bootstrap key was pinned at build time",
-                color: .orange
+                "This build was made without the setting.",
+                color: .lakkoWarning
             )
         case .arming:
             HStack {
                 ProgressView()
-                Text("Fetching bootstrap config…")
+                Text("Connecting...")
                     .foregroundStyle(.secondary)
             }
         case .armed:
-            label("Active", "Routing through the obfuscated tunnel", color: .green)
+            label("Active", "Connections are hidden from network blocking.", color: .lakkoSuccess)
         case .unavailable(let reason):
             label("Unavailable", reason, color: .red)
         }

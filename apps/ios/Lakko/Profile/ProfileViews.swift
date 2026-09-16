@@ -117,18 +117,12 @@ final class ProfileSettingsViewModel: ObservableObject {
 struct ProfileSettingsScreen: View {
     /// Owned here so a parent re-render never discards a draft being typed.
     @StateObject private var viewModel: ProfileSettingsViewModel
-    var onBack: () -> Void
 
-    init(
-        viewModel: @autoclosure @escaping () -> ProfileSettingsViewModel,
-        onBack: @escaping () -> Void
-    ) {
+    init(viewModel: @autoclosure @escaping () -> ProfileSettingsViewModel) {
         self._viewModel = StateObject(wrappedValue: viewModel())
-        self.onBack = onBack
     }
 
     var body: some View {
-        NavigationStack {
             Form {
                 Section {
                     TextField("Your name", text: $viewModel.draftName)
@@ -151,7 +145,7 @@ struct ProfileSettingsScreen: View {
                     if let preview = viewModel.preview {
                         Text(preview)
                     } else {
-                        Text("Your key fingerprint, until you set a name.")
+                        Text("Nothing yet. Set a name so people recognise you.")
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -191,14 +185,6 @@ struct ProfileSettingsScreen: View {
             }
             .navigationTitle("Profile")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarLeading) {
-                    Button(action: onBack) {
-                        Label("Home", systemImage: "chevron.backward")
-                    }
-                }
-            }
-        }
     }
 }
 

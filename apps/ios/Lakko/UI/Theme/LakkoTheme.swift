@@ -1,0 +1,182 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+import SwiftUI
+
+// MARK: - Colour tokens
+
+/// The one colour vocabulary every iOS screen draws from
+/// (docs/ux/client-redesign.md section 4). Each name is a colour set in
+/// `Lakko/Assets.xcassets` carrying a light and a dark variant, so a screen
+/// never decides its own palette and dark mode follows the system (or the
+/// override in Settings > Appearance) everywhere.
+///
+/// Calls opt into `.preferredColorScheme(.dark)` and read the same tokens,
+/// which resolve to the dark half there; nothing else forces a scheme.
+extension Color {
+    /// Page / window background.
+    static let lakkoBackground = Color("LakkoBackground")
+    /// Cards, panes, the composer, dialogs.
+    static let lakkoSurface = Color("LakkoSurface")
+    /// Search fields, incoming bubbles, code.
+    static let lakkoSurfaceSunken = Color("LakkoSurfaceSunken")
+    /// Selected list row / nav item.
+    static let lakkoSurfaceSelected = Color("LakkoSurfaceSelected")
+    /// Hairlines, input borders.
+    static let lakkoBorder = Color("LakkoBorder")
+    /// Primary text.
+    static let lakkoText = Color("LakkoText")
+    /// Secondary text, timestamps.
+    static let lakkoTextMuted = Color("LakkoTextMuted")
+    /// Primary actions, links, the outgoing bubble.
+    static let lakkoAccent = Color("LakkoAccent")
+    /// Text on the accent.
+    static let lakkoAccentForeground = Color("LakkoAccentForeground")
+    /// Accent tint (unread badge ground, avatar tint).
+    static let lakkoAccentSoft = Color("LakkoAccentSoft")
+    /// Destructive actions, errors.
+    static let lakkoDanger = Color("LakkoDanger")
+    /// Delivered / connected.
+    static let lakkoSuccess = Color("LakkoSuccess")
+    /// Recoverable warnings (design system `--warning`; not in the section-4
+    /// table, added because the call quality glyph needs a middle tier).
+    static let lakkoWarning = Color("LakkoWarning")
+}
+
+// MARK: - Shape and spacing
+
+/// Corner radii from the spec: controls 8, cards and rows 12, bubbles 18.
+enum LakkoRadius {
+    static let control: CGFloat = 8
+    static let card: CGFloat = 12
+    static let bubble: CGFloat = 18
+}
+
+// MARK: - Appearance override
+
+/// Settings > Appearance: follow the system, or force light / dark.
+/// Persisted in `UserDefaults` under ``storageKey`` and applied once at the
+/// root with `.preferredColorScheme`, so every screen (and every sheet
+/// presented from it) follows the choice.
+enum AppearanceSetting: String, CaseIterable, Identifiable {
+    case system
+    case light
+    case dark
+
+    static let storageKey = "lakko.appearance"
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .system: return "System"
+        case .light: return "Light"
+        case .dark: return "Dark"
+        }
+    }
+
+    /// `nil` means "do not override" (follow the system).
+    var colorScheme: ColorScheme? {
+        switch self {
+        case .system: return nil
+        case .light: return .light
+        case .dark: return .dark
+        }
+    }
+}
+
+// MARK: - Initials avatar
+
+/// A circle with one or two initials on one of four tints chosen by a hash of
+/// the identity, the iOS form of the web `Avatar` rule (design system
+/// section 2). The identity string is only hashed, never shown.
+struct InitialsAvatar: View {
+    let name: String
+    /// What the tint is derived from: an account id, a signature key, a
+    /// group id. Falls back to the name when `nil`.
+    var identity: String? = nil
+    var size: CGFloat = 40
+    /// `true` renders the group glyph instead of initials.
+    var isGroup: Bool = false
+
+    var body: some View {
+        let tint = Self.tint(for: identity ?? name)
+        ZStack {
+            Circle().fill(tint.background)
+            if isGroup && initials.isEmpty {
+                Image(systemName: "person.3.fill")
+                    .font(.system(size: size * 0.38, weight: .semibold))
+                    .foregroundStyle(tint.foreground)
+            } else {
+                Text(initials)
+                    .font(.system(size: size * 0.4, weight: .semibold, design: .rounded))
+                    .foregroundStyle(tint.foreground)
+            }
+        }
+        .frame(width: size, height: size)
+        .accessibilityHidden(true)
+    }
+
+    /// Up to two initials: the first letter of the first two words, or the
+    /// first letter alone. Empty for a name that carries no letter or digit.
+    var initials: String {
+        Self.initials(of: name)
+    }
+
+    static func initials(of name: String) -> String {
+        let words = name
+            .split(whereSeparator: { $0.isWhitespace })
+            .map { String($0).trimmingCharacters(in: .punctuationCharacters) }
+            .filter { !$0.isEmpty }
+        let letters = words.prefix(2).compactMap { word -> Character? in
+            word.first { $0.isLetter || $0.isNumber }
+        }
+        return String(letters).uppercased()
+    }
+
+    /// Four tints (indigo, teal, slate, sand), light and dark, per the design
+    /// system; the pick is a stable hash of the identity string.
+    struct Tint {
+        let background: Color
+        let foreground: Color
+    }
+
+    static func tint(for identity: String) -> Tint {
+        var hash: UInt32 = 2_166_136_261
+        for byte in identity.utf8 {
+            hash ^= UInt32(byte)
+            hash = hash &* 16_777_619
+        }
+        switch hash % 4 {
+        case 0:
+            return Tint(background: .lakkoAccentSoft, foreground: .lakkoAccent)
+        case 1:
+            return Tint(
+                background: Color(light: 0xE0F2F6, dark: 0x12313A),
+                foreground: Color(light: 0x0F6F80, dark: 0x6FD0E0))
+        case 2:
+            return Tint(
+                background: Color(light: 0xE9EBF3, dark: 0x252A3D),
+                foreground: Color(light: 0x46506E, dark: 0xAEB6D0))
+        default:
+            return Tint(
+                background: Color(light: 0xF6EFE3, dark: 0x3A2F17),
+                foreground: Color(light: 0x8A5A17, dark: 0xE5B96B))
+        }
+    }
+}
+
+extension Color {
+    /// A colour with one value per scheme, for the avatar tints that have no
+    /// asset of their own. Everything else goes through the catalog.
+    init(light: UInt32, dark: UInt32) {
+        self.init(uiColor: UIColor { traits in
+            let value = traits.userInterfaceStyle == .dark ? dark : light
+            return UIColor(
+                red: CGFloat((value >> 16) & 0xFF) / 255,
+                green: CGFloat((value >> 8) & 0xFF) / 255,
+                blue: CGFloat(value & 0xFF) / 255,
+                alpha: 1)
+        })
+    }
+}

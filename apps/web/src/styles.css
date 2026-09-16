@@ -11,126 +11,77 @@
  *
  * Three theme states: an explicit `data-theme="light" | "dark"` on `<html>`
  * (the user's choice, persisted by `ui/theme.ts`) or none, in which case
- * `prefers-color-scheme` decides. The light block is the default; the dark
- * block is repeated once for the explicit attribute and once for the media
- * query so a token is never defined only inside one of them.
+ * `prefers-color-scheme` decides. Both are expressed through `color-scheme`,
+ * and every token names its light and dark value once via `light-dark()`.
  */
 
-:root,
-:root[data-theme="light"] {
+/* One token set; each colour carries its light and dark value in one place
+   through `light-dark()`, and `color-scheme` on `<html>` picks the half:
+   `light dark` (no `data-theme`) lets `prefers-color-scheme` decide,
+   `data-theme="light" | "dark"` (the user's choice, persisted by
+   `ui/theme.ts`) pins it. The light values are the design system's source
+   for the other platforms (docs/ux/client-redesign.md section 4). */
+:root {
+  color-scheme: light dark;
   /* Surfaces */
-  --surface-bg: #f6f7fb;
-  --surface-elevated: #ffffff;
-  --surface-sunken: #eef0f6;
-  --surface-hover: #f1f2f8;
-  --surface-selected: #e0e7ff;
-  --surface-border: #e4e7ef;
+  --surface-bg: light-dark(#f6f7fb, #0f1220);
+  --surface-elevated: light-dark(#ffffff, #171b2e);
+  --surface-sunken: light-dark(#eef0f6, #1f2439);
+  --surface-hover: light-dark(#f1f2f8, #1c2136);
+  --surface-selected: light-dark(#e0e7ff, #26295a);
+  --surface-border: light-dark(#e4e7ef, #2a3145);
   /* Text */
-  --surface-fg: #1a1d2b;
-  --surface-muted: #6b7280;
-  --surface-faint: #9aa1b1;
+  --surface-fg: light-dark(#1a1d2b, #e6e9f4);
+  --surface-muted: light-dark(#6b7280, #9aa3bd);
+  --surface-faint: light-dark(#9aa1b1, #6c7590);
   /* Brand */
-  --accent: #3730a3;
-  --accent-strong: #312e81;
-  --accent-fg: #ffffff;
-  --accent-soft: #e0e7ff;
+  --accent: light-dark(#3730a3, #818cf8);
+  --accent-strong: light-dark(#312e81, #a5b4fc);
+  --accent-fg: light-dark(#ffffff, #0f1220);
+  --accent-soft: light-dark(#e0e7ff, #26295a);
   --brand-gradient: linear-gradient(135deg, #312e81 0%, #818cf8 100%);
-  --auth-ground: #eef2ff;
-  --auth-card: #ffffff;
+  --auth-ground: light-dark(#eef2ff, #4338ca);
+  --auth-card: light-dark(#ffffff, #1e1b4b);
   /* Semantic */
-  --success: #22c55e;
-  --warning: #b45309;
-  --danger: #dc2626;
-  --danger-soft: #fef2f2;
-  --danger-fg: #ffffff;
+  --success: light-dark(#22c55e, #4ade80);
+  --warning: light-dark(#b45309, #f59e0b);
+  --danger: light-dark(#dc2626, #f87171);
+  --danger-soft: light-dark(#fef2f2, #3a1f24);
+  --danger-fg: light-dark(#ffffff, #14080a);
   /* `--error` is the historical name every form uses for its error line. */
-  --error: #dc2626;
+  --error: light-dark(#dc2626, #f87171);
   /* Avatar tints, chosen by hash of the id (no violet) */
-  --av-1-bg: #e0e7ff; --av-1-fg: #3730a3;
-  --av-2-bg: #e0f2f6; --av-2-fg: #0f6f80;
-  --av-3-bg: #e9ebf3; --av-3-fg: #46506e;
-  --av-4-bg: #f6efe3; --av-4-fg: #8a5a17;
+  --av-1-bg: light-dark(#e0e7ff, #26295a); --av-1-fg: light-dark(#3730a3, #a5b4fc);
+  --av-2-bg: light-dark(#e0f2f6, #12313a); --av-2-fg: light-dark(#0f6f80, #6fd0e0);
+  --av-3-bg: light-dark(#e9ebf3, #252a3d); --av-3-fg: light-dark(#46506e, #aeb6d0);
+  --av-4-bg: light-dark(#f6efe3, #3a2f17); --av-4-fg: light-dark(#8a5a17, #e5b96b);
   /* Shape */
   --radius-sm: 8px;
   --radius-md: 12px;
   --radius-lg: 18px;
   --radius-pill: 999px;
-  --shadow-1: 0 1px 2px rgba(16, 20, 40, 0.04), 0 1px 3px rgba(16, 20, 40, 0.06);
-  --shadow-2: 0 8px 24px rgba(16, 20, 40, 0.12);
+  --shadow-1: 0 1px 2px light-dark(rgba(16, 20, 40, 0.04), rgba(0, 0, 0, 0.4)),
+    0 1px 3px light-dark(rgba(16, 20, 40, 0.06), rgba(0, 0, 0, 0.35));
+  --shadow-2: 0 8px 24px light-dark(rgba(16, 20, 40, 0.12), rgba(0, 0, 0, 0.5));
   /* Layout */
   --rail-w: 72px;
   --pane-w: 340px;
   --content-w: 720px;
   --control-h: 40px;
+  /* The one breakpoint: the rail becomes a tab bar and every split collapses
+     to a single pane at the same width (720px). Media queries cannot read a
+     custom property, so the number is repeated in each `@media` below. */
 
   font-family: system-ui, -apple-system, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
   font-size: 15px;
   line-height: 1.45;
+}
+
+:root[data-theme="light"] {
   color-scheme: light;
 }
-
 :root[data-theme="dark"] {
-  --surface-bg: #0f1220;
-  --surface-elevated: #171b2e;
-  --surface-sunken: #1f2439;
-  --surface-hover: #1c2136;
-  --surface-selected: #26295a;
-  --surface-border: #2a3145;
-  --surface-fg: #e6e9f4;
-  --surface-muted: #9aa3bd;
-  --surface-faint: #6c7590;
-  --accent: #818cf8;
-  --accent-strong: #a5b4fc;
-  --accent-fg: #0f1220;
-  --accent-soft: #26295a;
-  --auth-ground: #4338ca;
-  --auth-card: #1e1b4b;
-  --success: #4ade80;
-  --warning: #f59e0b;
-  --danger: #f87171;
-  --danger-soft: #3a1f24;
-  --danger-fg: #14080a;
-  --error: #f87171;
-  --av-1-bg: #26295a; --av-1-fg: #a5b4fc;
-  --av-2-bg: #12313a; --av-2-fg: #6fd0e0;
-  --av-3-bg: #252a3d; --av-3-fg: #aeb6d0;
-  --av-4-bg: #3a2f17; --av-4-fg: #e5b96b;
-  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4), 0 1px 3px rgba(0, 0, 0, 0.35);
-  --shadow-2: 0 8px 24px rgba(0, 0, 0, 0.5);
   color-scheme: dark;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme]) {
-    --surface-bg: #0f1220;
-    --surface-elevated: #171b2e;
-    --surface-sunken: #1f2439;
-    --surface-hover: #1c2136;
-    --surface-selected: #26295a;
-    --surface-border: #2a3145;
-    --surface-fg: #e6e9f4;
-    --surface-muted: #9aa3bd;
-    --surface-faint: #6c7590;
-    --accent: #818cf8;
-    --accent-strong: #a5b4fc;
-    --accent-fg: #0f1220;
-    --accent-soft: #26295a;
-    --auth-ground: #4338ca;
-    --auth-card: #1e1b4b;
-    --success: #4ade80;
-    --warning: #f59e0b;
-    --danger: #f87171;
-    --danger-soft: #3a1f24;
-    --danger-fg: #14080a;
-    --error: #f87171;
-    --av-1-bg: #26295a; --av-1-fg: #a5b4fc;
-    --av-2-bg: #12313a; --av-2-fg: #6fd0e0;
-    --av-3-bg: #252a3d; --av-3-fg: #aeb6d0;
-    --av-4-bg: #3a2f17; --av-4-fg: #e5b96b;
-    --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4), 0 1px 3px rgba(0, 0, 0, 0.35);
-    --shadow-2: 0 8px 24px rgba(0, 0, 0, 0.5);
-    color-scheme: dark;
-  }
 }
 
 /* ------------------------------------------------------------------ base */
@@ -152,6 +103,26 @@ body {
   background: var(--surface-bg);
   color: var(--surface-fg);
   -webkit-font-smoothing: antialiased;
+}
+
+/* User-supplied strings (message text, names, ids, links) never widen a
+   pane: they break anywhere. Rows that ellipsise keep `nowrap` on top of it. */
+.lk-chat-scroll,
+.lk-row-body,
+.lk-card-row-body,
+.lk-chat-title,
+.lk-page,
+.lk-empty,
+.lk-post,
+.lk-link-row,
+code {
+  overflow-wrap: anywhere;
+}
+.lk-ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
 }
 
 h1 {
@@ -465,7 +436,7 @@ a:focus-visible {
   padding: 24px;
 }
 /* A narrow screen shows one pane at a time: the list, or the open item. */
-@media (max-width: 900px) {
+@media (max-width: 720px) {
   .lk-split {
     grid-template-columns: 1fr;
   }
@@ -553,6 +524,9 @@ a.lk-row.active {
 }
 .lk-row.ended {
   opacity: 0.7;
+}
+.lk-row.archived {
+  opacity: 0.6;
 }
 .lk-row-body {
   flex: 1;
@@ -828,7 +802,7 @@ a.lk-row.active {
   overflow: auto;
   padding: 32px 40px;
 }
-@media (max-width: 900px) {
+@media (max-width: 720px) {
   .lk-settings {
     grid-template-columns: 1fr;
   }
@@ -1104,12 +1078,24 @@ a.lk-row.active {
 
 /* ------------------------------------------------------------------ chat */
 
-.lk-narrow-only {
+/* `a.ghost.small` (below) out-specifies a bare class, hence the qualified
+   selectors: a back link must still hide on a wide screen. */
+.lk-narrow-only,
+a.ghost.small.lk-narrow-only {
   display: none;
 }
-@media (max-width: 900px) {
-  .lk-narrow-only {
+.lk-wide-only,
+a.ghost.small.lk-wide-only {
+  display: inline-flex;
+}
+@media (max-width: 720px) {
+  .lk-narrow-only,
+  a.ghost.small.lk-narrow-only {
     display: inline-flex;
+  }
+  .lk-wide-only,
+  a.ghost.small.lk-wide-only {
+    display: none;
   }
 }
 .lk-row[role="button"] {
@@ -1130,6 +1116,11 @@ a.lk-row.active {
 }
 .lk-chat > :not(.lk-chat-body) {
   padding: 24px 32px;
+}
+@media (max-width: 720px) {
+  .lk-chat > :not(.lk-chat-body) {
+    padding: 16px;
+  }
 }
 .lk-chat-body {
   flex: 1;
@@ -1154,6 +1145,16 @@ a.lk-row.active {
   background: var(--surface-elevated);
   border-bottom: 1px solid var(--surface-border);
   flex: 0 0 auto;
+  min-width: 0;
+}
+@media (max-width: 720px) {
+  .lk-chat-head {
+    padding: 6px 8px 6px 4px;
+    gap: 8px;
+  }
+  .lk-chat-scroll {
+    padding: 12px 16px;
+  }
 }
 .lk-chat-title {
   flex: 1;
@@ -1172,6 +1173,9 @@ a.lk-row.active {
 .lk-chat-sub {
   font-size: 13px;
   color: var(--surface-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .lk-chat-actions {
   display: flex;
@@ -1417,6 +1421,21 @@ a.lk-row.active {
   position: fixed;
   inset: 0;
   z-index: 29;
+}
+/* A context menu anchored at the pointer rather than under a button. */
+.lk-menu.lk-menu-floating {
+  position: fixed;
+  right: auto;
+  top: auto;
+  z-index: 31;
+}
+.lk-menu button.danger-item {
+  color: var(--danger);
+}
+.lk-menu-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--surface-border);
 }
 
 /* A selectable contact row (New group). */
@@ -1928,4 +1947,303 @@ li:focus-within > .lakko-msg-actions {
   margin-left: auto;
   font-size: 13px;
   color: var(--surface-muted);
+}
+
+/* ------------------------------------------------- page + shared blocks */
+
+/* A page in a main pane that is not a card list: the same padding as
+   `main > article`, an optional width cap. */
+.lk-main > .lk-page-pane {
+  padding: 24px 32px;
+}
+@media (max-width: 720px) {
+  .lk-main > .lk-page-pane {
+    padding: 16px;
+  }
+}
+.lk-page-pane.narrow {
+  max-width: 560px;
+}
+.lk-page-pane.wide {
+  max-width: 720px;
+}
+.lk-page-head.row {
+  flex-direction: row;
+  align-items: center;
+  gap: 12px;
+}
+.lk-page-head.row h1 {
+  font-size: 22px;
+  line-height: 28px;
+}
+.lk-page-head.row p {
+  font-size: 13px;
+}
+.lk-page-head.row > div {
+  min-width: 0;
+}
+
+/* One-line notices. */
+.lk-alert {
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  line-height: 18px;
+}
+.lk-alert.danger {
+  background: var(--danger-soft);
+  color: var(--danger);
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
+}
+.lk-alert.info {
+  background: var(--surface-sunken);
+  color: var(--surface-muted);
+}
+.lk-alert.accent {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.lk-muted {
+  color: var(--surface-muted);
+}
+.lk-meta {
+  font-size: 13px;
+  color: var(--surface-muted);
+}
+.lk-fill {
+  flex: 1;
+  min-width: 0;
+}
+.lk-row-end {
+  justify-content: flex-end;
+}
+.lk-inline-notice {
+  color: var(--accent);
+  font-size: 13px;
+}
+.lk-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.lk-list.tight {
+  gap: 2px;
+}
+.lk-list > li {
+  min-width: 0;
+}
+.lk-list.bordered > li {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius-sm);
+}
+.lk-center {
+  text-align: center;
+}
+.lk-center-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+.lk-code-box {
+  padding: 12px 14px;
+  background: var(--surface-sunken);
+  border-radius: var(--radius-sm);
+  text-align: center;
+}
+.lk-code-box code {
+  font-size: 17px;
+  line-height: 1.6;
+  background: transparent;
+  letter-spacing: 0.04em;
+}
+
+/* A shareable link: the shortened URL, Copy, Share (docs/ux section 5.3). */
+.lk-link-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: var(--control-h);
+  padding: 4px 4px 4px 12px;
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  min-width: 0;
+}
+.lk-link-row .lk-link-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--surface-fg);
+}
+.lk-link-row .lk-icon-button {
+  width: 32px;
+  height: 32px;
+}
+
+/* Channel view: posts as cards with a time (docs/ux section 5.4). */
+.lk-post {
+  padding: 14px 16px;
+  background: var(--surface-elevated);
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius-md);
+  max-width: 640px;
+}
+.lk-post + .lk-post {
+  margin-top: 10px;
+}
+.lk-post-text {
+  font-size: 15px;
+  line-height: 22px;
+  white-space: pre-wrap;
+}
+.lk-post-placeholder {
+  font-size: 13px;
+  color: var(--surface-muted);
+  font-style: italic;
+}
+.lk-post-time {
+  font-size: 12px;
+  color: var(--surface-muted);
+  margin-top: 8px;
+  text-align: right;
+}
+.lk-status-tag {
+  font-size: 12px;
+  color: var(--surface-muted);
+  flex: 0 0 auto;
+}
+.lk-status-tag.ok {
+  color: var(--success);
+}
+.lk-status-tag.bad {
+  color: var(--danger);
+}
+
+/* Message bubble actions (React / Edit / Delete): icon buttons in a small
+   floating strip, revealed on hover of the hosting bubble. */
+.lakko-msg-actions {
+  position: absolute;
+  top: -14px;
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-elevated);
+  border: 1px solid var(--surface-border);
+  box-shadow: var(--shadow-1);
+  color: var(--surface-muted);
+}
+.lakko-msg-actions button {
+  width: 26px;
+  height: 26px;
+  min-height: 0;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+}
+.lakko-msg-actions button:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--surface-fg);
+}
+
+/* Devices (Settings > Security): the list and the add-a-device panel. */
+.lk-device-add {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+@media (max-width: 520px) {
+  .lk-device-add {
+    grid-template-columns: 1fr;
+  }
+}
+.lk-option-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 14px;
+  min-height: 0;
+  height: auto;
+  border-radius: var(--radius-md);
+  text-align: left;
+  white-space: normal;
+}
+.lk-option-card strong {
+  font-size: 15px;
+}
+.lk-option-card span {
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--surface-muted);
+}
+.lk-qr {
+  display: block;
+  margin: 8px auto;
+  border-radius: var(--radius-sm);
+  background: #ffffff;
+  padding: 8px;
+}
+.lk-camera {
+  display: block;
+  max-width: 100%;
+  max-height: 320px;
+  margin: 0 auto 12px;
+  border-radius: var(--radius-md);
+  background: #000000;
+}
+
+/* A back link styled like a ghost button (Settings, Devices). */
+a.ghost.small {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 10px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--surface-muted);
+  text-decoration: none;
+}
+a.ghost.small:hover {
+  background: var(--surface-hover);
+  color: var(--surface-fg);
+  text-decoration: none;
+}
+
+/* Layout utilities used where a one-off inline style would otherwise sit. */
+.lk-self-start {
+  align-self: flex-start;
+}
+.lk-m0 {
+  margin: 0;
+}
+.lk-mt-4 {
+  margin-top: 4px;
+}
+.lk-block {
+  display: block;
+}
+.lk-nowrap {
+  flex-wrap: nowrap;
+}
+.lk-regular {
+  font-weight: 400;
+}
+.lk-section-label.lk-flush {
+  padding: 4px 0 0;
 }

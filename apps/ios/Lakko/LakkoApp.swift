@@ -18,7 +18,7 @@ import SwiftUI
 ///     is synchronous), kept for symmetry with the web side.
 ///   * ``AuthState/anon(cachedUsername:)`` — ``AnonRoot`` with a
 ///     local `Signup` / `Login` / `Recover` toggle.
-///   * ``AuthState/session(_:)`` — ``HomeScreen``.
+///   * ``AuthState/session(_:)`` — ``SessionRoot`` (the tab shell).
 @main
 struct LakkoApp: App {
     /// 1.20c — `UIApplicationDelegate` adaptor that catches APNs
@@ -226,8 +226,19 @@ struct AppRoot: View {
     /// published ``UpdateBannerDecision``.
     @StateObject private var releaseChecker = ReleaseUpdateChecker.shared
 
+    /// Settings > Appearance (UX spec section 4): System / Light / Dark,
+    /// persisted per device. Applied once here so every screen and every
+    /// sheet follows it; Calls override to dark on their own screen.
+    @AppStorage(AppearanceSetting.storageKey)
+    private var appearanceRaw = AppearanceSetting.system.rawValue
+
+    private var appearance: AppearanceSetting {
+        AppearanceSetting(rawValue: appearanceRaw) ?? .system
+    }
+
     var body: some View {
         content
+            .preferredColorScheme(appearance.colorScheme)
             // ADR-0038 S4 — fetch + verify the signed release manifest at launch
             // (throttled to once per 24h internally), then publish the banner
             // decision. Dormant when no release key is pinned; fail-safe toward
@@ -290,7 +301,7 @@ struct AppRoot: View {
             // Practically invisible — rehydrate is synchronous. We
             // render a blank background so a slow tap on the launch
             // screen doesn't flash white.
-            Color(.systemBackground)
+            Color.lakkoBackground
                 .ignoresSafeArea()
         case .anon(let cachedUsername):
             Group {
@@ -380,7 +391,7 @@ struct AppRoot: View {
             // (password / passkey) but this device has no cached
             // AccountIdentity (phrase) seed — the canonical identity
             // cannot be rebuilt without the phrase. We render the
-            // restore-phrase prompt instead of `HomeScreen`; supplying
+            // restore-phrase prompt instead of the tab shell; supplying
             // the phrase flips the state to `.session`.
             RestoreIdentityPromptScreen(
                 viewModel: RestoreIdentityPromptViewModel(
@@ -408,30 +419,73 @@ struct AppRoot: View {
     }
 }
 
-/// Authenticated-state router — local toggle between ``HomeScreen``
-/// and the per-feature destinations that ship over 1.14e/f.
-///
-/// 1.14e4 introduces the first two-state toggle (Home / Contacts);
-/// 1.14e9 adds InviteLanding; 1.14f adds Chats + per-Chat. The
-/// pattern mirrors Android's `SessionRoot` from 1.15d6 + the
-/// `SessionDestination` sealed hierarchy.
-/// Keeps one `ChatViewModel` per open chat alive across `SessionRoot` body
-/// re-evaluations. Not `@Published`: swapping the model is never a reason to
-/// re-render on its own, the destination change that opens a chat already is.
-@MainActor
-private final class ChatViewModelHolder: ObservableObject {
-    private var current: (groupIdHex: String, viewModel: ChatViewModel)?
+/// The five primary destinations (UX spec section 3), in tab order.
+enum SessionTab: Hashable {
+    case chats
+    case groups
+    case channels
+    case contacts
+    case settings
+}
 
-    func viewModel(for groupIdHex: String, make: () -> ChatViewModel) -> ChatViewModel {
-        if let current, current.groupIdHex == groupIdHex {
-            return current.viewModel
-        }
-        let made = make()
-        current = (groupIdHex, made)
-        return made
+/// Every screen a tab can push. One route enum for all five stacks, so the
+/// chat screen is the same destination whether it was reached from Chats,
+/// Groups or Contacts, and back always returns to where it was opened from.
+enum TabRoute: Hashable {
+    case chat(groupIdHex: String)
+    /// The contact picker behind Chats > New chat.
+    case newChat
+    /// The contact picker behind Groups > New group (see ``ContactPickerScreen``).
+    case newGroup
+    case profile
+    case passkeys
+    case devices
+    case addDevice
+    case recoveryFactors
+    case antiCensorship
+    /// Deep links (`/i/`, `/g/`, `/c/`), pushed over the current tab rather
+    /// than replacing the app (UX spec section 3).
+    case inviteLanding(slug: String)
+    case groupJoinLanding(slug: String)
+    case callJoinLanding(slug: String)
+
+    /// The chat this route shows, if it is a chat.
+    var chatGroupIdHex: String? {
+        if case .chat(let id) = self { return id }
+        return nil
     }
 }
 
+/// Keeps one `ChatViewModel` per OPEN chat alive across `SessionRoot` body
+/// re-evaluations. Not `@Published`: swapping a model is never a reason to
+/// re-render on its own, the navigation change that opens a chat already is.
+///
+/// Keyed by group id because a chat can be open on more than one tab's stack
+/// at once (the same conversation pushed from Chats and from Contacts, or two
+/// different chats on two tabs); a single "current" slot would rebuild the
+/// other chat's model on the next re-render and take its draft with it.
+@MainActor
+private final class ChatViewModelHolder: ObservableObject {
+    private var models: [String: ChatViewModel] = [:]
+
+    func viewModel(for groupIdHex: String, make: () -> ChatViewModel) -> ChatViewModel {
+        if let existing = models[groupIdHex] {
+            return existing
+        }
+        let made = make()
+        models[groupIdHex] = made
+        return made
+    }
+
+    /// Drop the models of chats no stack shows any more.
+    func retain(only open: Set<String>) {
+        models = models.filter { open.contains($0.key) }
+    }
+}
+
+/// Authenticated-state shell: a bottom `TabView` of Chats, Groups, Channels,
+/// Contacts and Settings, each tab owning its own `NavigationStack` (UX spec
+/// sections 2 and 3). The app opens on Chats; there is no home screen.
 private struct SessionRoot: View {
     let account: SessionAccount
     let authRepository: AuthRepository
@@ -445,13 +499,19 @@ private struct SessionRoot: View {
 
     @StateObject private var contactsVM: ContactsViewModel
     @StateObject private var chatListVM: ChatListViewModel
-    /// The open chat's view model, held OUTSIDE `body`. `SessionRoot` re-renders
-    /// on every publish of the observed repositories (a draft broadcast, a read
-    /// cursor, the sync poll), and a `ChatViewModel` built inline in `body`
-    /// was replaced on each of them, taking the composer's draft with it.
+    /// The open chats' view models, held OUTSIDE `body`. `SessionRoot`
+    /// re-renders on every publish of the observed repositories (a draft
+    /// broadcast, a read cursor, the sync poll), and a `ChatViewModel` built
+    /// inline in `body` was replaced on each of them, taking the composer's
+    /// draft with it.
     @StateObject private var chatVMHolder = ChatViewModelHolder()
 
-    @State private var destination: SessionDestination = .home
+    @State private var selectedTab: SessionTab = .chats
+    @State private var chatsPath: [TabRoute] = []
+    @State private var groupsPath: [TabRoute] = []
+    @State private var channelsPath: [TabRoute] = []
+    @State private var contactsPath: [TabRoute] = []
+    @State private var settingsPath: [TabRoute] = []
 
     init(
         account: SessionAccount,
@@ -499,191 +559,72 @@ private struct SessionRoot: View {
     }
 
     var body: some View {
-        Group {
-            // Pending invite slug takes priority over the
-            // persistent destination toggle — when the user taps
-            // a deep link mid-session, the landing screen shows up
-            // over whatever they were doing.
-            if let slug = inviteIntake.pendingSlug {
-                InviteLandingScreen(
-                    viewModel: InviteLandingViewModel(
-                        slug: slug,
-                        repository: contactsRepository,
-                        intake: inviteIntake
-                    ),
-                    onDone: {
-                        // InviteLandingViewModel.dismiss() already
-                        // called intake.clear() — the publisher
-                        // flips to nil + this view tree rebuild
-                        // lands us back on the prior destination.
-                    }
+        TabView(selection: $selectedTab) {
+            NavigationStack(path: $chatsPath) {
+                ChatListScreen(
+                    viewModel: chatListVM,
+                    kind: .chat,
+                    onOpenChat: { chatsPath.append(.chat(groupIdHex: $0)) },
+                    onCompose: { chatsPath.append(.newChat) }
                 )
-            } else if let groupSlug = inviteIntake.pendingGroupJoinSlug {
-                // ADR-0028 (G-3) — a tapped `/g/<slug>` group join-ticket link.
-                // The landing screen requests to join + polls for the admin's
-                // approval; dismiss() flips the publisher back to nil.
-                JoinGroupLandingScreen(
-                    viewModel: JoinGroupLandingViewModel(
-                        slug: groupSlug,
-                        repository: chatRepository,
-                        intake: inviteIntake
-                    ),
-                    onDone: {}
-                )
-            } else if let callSlug = inviteIntake.pendingCallJoinSlug {
-                // ADR-0032 (G-21/G-22) — a tapped `/c/<slug>` multi-joiner call
-                // link while signed in. The landing decodes the capability then
-                // hosts (owner) or joins (relays its KeyPackage + waits for the
-                // committer's Welcome); dismiss() clears the parked slug.
-                JoinCallLandingScreen(
-                    viewModel: JoinCallLandingViewModel(
-                        slug: callSlug,
-                        authRepository: authRepository,
-                        intake: inviteIntake,
-                        linkCallHost: linkCallHost
-                    ),
-                    onDone: {}
-                )
-            } else {
-                switch destination {
-                case .home:
-                    HomeScreen(
-                        account: account,
-                        onOpenContacts: { destination = .contacts },
-                        onOpenChats: { destination = .chats },
-                        onOpenChannels: { destination = .channels },
-                        onOpenPasskeys: { destination = .passkeys },
-                        onOpenDevices: { destination = .devices },
-                        onOpenAntiCensorship: { destination = .antiCensorship },
-                        onOpenProfile: { destination = .profile },
-                        onLogout: authRepository.logout,
-                        onForgetDevice: {
-                            // ADR-0050 section 2.10 — take this device's
-                            // KeyPackage out of the directory BEFORE the wipe,
-                            // while the bearer token still exists: the
-                            // account's other devices retire this device's
-                            // leaves when their scheduled check sees the row
-                            // gone.
-                            Task { @MainActor in
-                                if let own = chatRepository.ownDeviceLeafKey {
-                                    await chatRepository.deleteDirectoryKeyPackage(deviceKey: own)
-                                }
-                                authRepository.forgetDevice()
-                            }
-                        }
-                    )
-                case .contacts:
-                    ContactsScreen(
-                        viewModel: contactsVM,
-                        onBack: { destination = .home },
-                        onOpenChat: { groupIdHex in
-                            destination = .chat(groupIdHex: groupIdHex)
-                        }
-                    )
-                case .chats:
-                    ChatListScreen(
-                        viewModel: chatListVM,
-                        onBack: { destination = .home },
-                        onOpenChat: { groupIdHex in
-                            destination = .chat(groupIdHex: groupIdHex)
-                        }
-                    )
-                case .channels:
-                    // ADR-0010 — broadcast channels. `ChannelsRootScreen`
-                    // needs the canonical AccountIdentity (phrase) seed to
-                    // build the MLS PublisherGroup (same seed the chat +
-                    // devices surfaces read from `identitySecrets`). A
-                    // session always carries the seed now (the relaunch
-                    // restore lands it too); the hint is a defensive
-                    // fallback rather than presenting a screen that cannot
-                    // publish.
-                    if let seed = authRepository.identitySecrets?.accountIdentitySeed {
-                        ChannelsRootScreen(
-                            accountIdentitySeed: seed,
-                            sessionTokenProvider: {
-                                authRepository.identitySecrets?.sessionToken
-                            },
-                            onBack: { destination = .home }
-                        )
-                    } else {
-                        VStack(spacing: 16) {
-                            Text("Sign in again to use Channels.")
-                                .foregroundStyle(.secondary)
-                            Button("Back") { destination = .home }
-                        }
-                        .padding()
-                    }
-                case .chat(let groupIdHex):
-                    NavigationStack {
-                        ChatScreen(
-                            viewModel: chatVMHolder.viewModel(for: groupIdHex) {
-                                ChatViewModel(
-                                    repository: chatRepository,
-                                    groupIdHex: groupIdHex,
-                                    callHost: callHost,
-                                    groupCallHost: groupCallHost,
-                                    sessionTokenProvider: {
-                                        authRepository.identitySecrets?.sessionToken
-                                    },
-                                    resolveRecipient: { username in
-                                        try await contactsRepository
-                                            .resolveVerifiedRecipient(username: username)
-                                    }
-                                )
-                            },
-                            onBack: { destination = .chats }
-                        )
-                    }
-                case .passkeys:
-                    PasskeysView(
-                        viewModel: PasskeysViewModel(
-                            authRepository: authRepository
-                        ),
-                        onBack: { destination = .home }
-                    )
-                case .devices:
-                    DevicesScreen(
-                        authRepository: authRepository,
-                        onBack: { destination = .home },
-                        onDeviceAdded: { deviceKey in
-                            // ADR-0050 section 2.8 — admit the new device to
-                            // every chat once its KeyPackage is published.
-                            Task { @MainActor in
-                                do {
-                                    let tally = try await chatRepository.admitDevice(deviceKey: deviceKey)
-                                    NSLog("ADR-0050 admit device: offered %d, skipped %d, failed %d",
-                                          tally.offered, tally.skipped, tally.failed)
-                                } catch {
-                                    NSLog("ADR-0050 admit device: fan-out failed: \(error)")
-                                }
-                            }
-                        },
-                        onDeviceRemoved: { deviceKey in
-                            // ADR-0050 section 2.10 — retire the removed device
-                            // from every chat, then from the directory.
-                            Task { @MainActor in
-                                await chatRepository.retireDevice(deviceKey: deviceKey)
-                            }
-                        }
-                    )
-                case .profile:
-                    // ADR-0048 — Settings -> Profile. A saved name is
-                    // published into every group this device is in.
-                    ProfileSettingsScreen(
-                        viewModel: ProfileSettingsViewModel(
-                            publishToAllGroups: { await chatRepository.publishOwnProfileToAllGroups() }
-                        ),
-                        onBack: { destination = .home }
-                    )
-                case .antiCensorship:
-                    NavigationStack {
-                        AntiCensorshipSettingsView(
-                            manager: AntiCensorshipManager.shared,
-                            onBack: { destination = .home }
-                        )
-                    }
-                }
+                .navigationDestination(for: TabRoute.self) { routeView($0, tab: .chats) }
             }
+            .tabItem { Label("Chats", systemImage: "bubble.left.and.bubble.right") }
+            .tag(SessionTab.chats)
+
+            NavigationStack(path: $groupsPath) {
+                ChatListScreen(
+                    viewModel: chatListVM,
+                    kind: .group,
+                    onOpenChat: { groupsPath.append(.chat(groupIdHex: $0)) },
+                    onCompose: { groupsPath.append(.newGroup) }
+                )
+                .navigationDestination(for: TabRoute.self) { routeView($0, tab: .groups) }
+            }
+            .tabItem { Label("Groups", systemImage: "person.3") }
+            .tag(SessionTab.groups)
+
+            NavigationStack(path: $channelsPath) {
+                channelsRoot
+                    .navigationDestination(for: TabRoute.self) { routeView($0, tab: .channels) }
+            }
+            .tabItem { Label("Channels", systemImage: "megaphone") }
+            .tag(SessionTab.channels)
+
+            NavigationStack(path: $contactsPath) {
+                ContactsScreen(
+                    viewModel: contactsVM,
+                    onOpenChat: { contactsPath.append(.chat(groupIdHex: $0)) }
+                )
+                .navigationDestination(for: TabRoute.self) { routeView($0, tab: .contacts) }
+            }
+            .tabItem { Label("Contacts", systemImage: "person.crop.circle") }
+            .tag(SessionTab.contacts)
+
+            NavigationStack(path: $settingsPath) {
+                SettingsScreen(
+                    account: account,
+                    onOpen: { settingsPath.append($0) },
+                    onLogout: authRepository.logout,
+                    onForgetDevice: forgetDevice
+                )
+                .navigationDestination(for: TabRoute.self) { routeView($0, tab: .settings) }
+            }
+            .tabItem { Label("Settings", systemImage: "gearshape") }
+            .tag(SessionTab.settings)
+        }
+        // Deep links: park on the current tab's stack when a slug arrives
+        // (a tap while signed in), and pick up one already parked (a tap
+        // while anonymous that the sign-in just completed).
+        .onAppear { pushPendingDeepLinks() }
+        .onChange(of: inviteIntake.pendingSlug) { _, _ in pushPendingDeepLinks() }
+        .onChange(of: inviteIntake.pendingGroupJoinSlug) { _, _ in pushPendingDeepLinks() }
+        .onChange(of: inviteIntake.pendingCallJoinSlug) { _, _ in pushPendingDeepLinks() }
+        // A landing popped with the back gesture (not its own Done) drops the
+        // parked slug, so the next tap of the same link opens it again; and a
+        // chat popped from every stack releases its view model.
+        .onChange(of: allPaths) { old, new in
+            reconcileAfterNavigation(old: old, new: new)
         }
         // Bootstrap the ChatRepository whenever the auth
         // repository has `identitySecrets`. The publisher fires on
@@ -716,6 +657,247 @@ private struct SessionRoot: View {
             }
         }
     }
+
+    // MARK: - Tabs
+
+    /// ADR-0010 — broadcast channels. `ChannelsRootScreen` needs the
+    /// canonical AccountIdentity (phrase) seed to build the MLS
+    /// PublisherGroup (same seed the chat + devices surfaces read from
+    /// `identitySecrets`). A session always carries the seed now (the
+    /// relaunch restore lands it too); the fallback is defensive rather than
+    /// presenting a screen that cannot publish.
+    @ViewBuilder private var channelsRoot: some View {
+        if let seed = authRepository.identitySecrets?.accountIdentitySeed {
+            ChannelsRootScreen(
+                accountIdentitySeed: seed,
+                sessionTokenProvider: {
+                    authRepository.identitySecrets?.sessionToken
+                }
+            )
+        } else {
+            VStack(spacing: 16) {
+                Text("Sign in again to use Channels.")
+                    .foregroundStyle(.secondary)
+            }
+            .padding()
+            .navigationTitle("Channels")
+        }
+    }
+
+    // MARK: - Routes
+
+    @ViewBuilder
+    private func routeView(_ route: TabRoute, tab: SessionTab) -> some View {
+        switch route {
+        case .chat(let groupIdHex):
+            ChatScreen(
+                viewModel: chatViewModel(for: groupIdHex),
+                onBack: { pop(route, from: tab) }
+            )
+        case .newChat:
+            ContactPickerScreen(
+                viewModel: contactsVM,
+                title: "New chat",
+                onPick: { groupIdHex in
+                    replaceTop(route, with: .chat(groupIdHex: groupIdHex), in: tab)
+                }
+            )
+        case .newGroup:
+            // No dedicated new-group flow exists on iOS yet: a group is made by
+            // opening a chat and adding members, so the picker lands in the
+            // chat with the members panel already open.
+            ContactPickerScreen(
+                viewModel: contactsVM,
+                title: "New group",
+                footer: "Pick the first member. Add the others from the members panel.",
+                onPick: { groupIdHex in
+                    chatViewModel(for: groupIdHex).membersPanelOpen = true
+                    replaceTop(route, with: .chat(groupIdHex: groupIdHex), in: tab)
+                }
+            )
+        case .profile:
+            // ADR-0048 — Settings -> Profile. A saved name is
+            // published into every group this device is in.
+            ProfileSettingsScreen(
+                viewModel: ProfileSettingsViewModel(
+                    publishToAllGroups: { await chatRepository.publishOwnProfileToAllGroups() }
+                )
+            )
+        case .passkeys:
+            PasskeysView(
+                viewModel: PasskeysViewModel(authRepository: authRepository)
+            )
+        case .devices:
+            DevicesScreen(
+                authRepository: authRepository,
+                onAddDevice: { push(.addDevice, on: tab) },
+                onDeviceRemoved: { deviceKey in
+                    // ADR-0050 section 2.10 — retire the removed device
+                    // from every chat, then from the directory.
+                    Task { @MainActor in
+                        await chatRepository.retireDevice(deviceKey: deviceKey)
+                    }
+                }
+            )
+        case .addDevice:
+            AddDeviceScreen(
+                authRepository: authRepository,
+                onDeviceAdded: { deviceKey in
+                    // ADR-0050 section 2.8 — admit the new device to
+                    // every chat once its KeyPackage is published.
+                    Task { @MainActor in
+                        do {
+                            let tally = try await chatRepository.admitDevice(deviceKey: deviceKey)
+                            NSLog("ADR-0050 admit device: offered %d, skipped %d, failed %d",
+                                  tally.offered, tally.skipped, tally.failed)
+                        } catch {
+                            NSLog("ADR-0050 admit device: fan-out failed: \(error)")
+                        }
+                    }
+                }
+            )
+        case .recoveryFactors:
+            RecoveryFactorsScreen(authRepository: authRepository)
+        case .antiCensorship:
+            AntiCensorshipSettingsView(manager: AntiCensorshipManager.shared)
+        case .inviteLanding(let slug):
+            InviteLandingScreen(
+                viewModel: InviteLandingViewModel(
+                    slug: slug,
+                    repository: contactsRepository,
+                    intake: inviteIntake
+                ),
+                onDone: { pop(route, from: tab) }
+            )
+        case .groupJoinLanding(let slug):
+            // ADR-0028 (G-3) — a tapped `/g/<slug>` group join-ticket link.
+            // The landing screen requests to join + polls for the admin's
+            // approval; dismiss() flips the publisher back to nil.
+            JoinGroupLandingScreen(
+                viewModel: JoinGroupLandingViewModel(
+                    slug: slug,
+                    repository: chatRepository,
+                    intake: inviteIntake
+                ),
+                onDone: { pop(route, from: tab) }
+            )
+        case .callJoinLanding(let slug):
+            // ADR-0032 (G-21/G-22) — a tapped `/c/<slug>` multi-joiner call
+            // link while signed in. The landing decodes the capability then
+            // hosts (owner) or joins (relays its KeyPackage + waits for the
+            // committer's Welcome); dismiss() clears the parked slug.
+            JoinCallLandingScreen(
+                viewModel: JoinCallLandingViewModel(
+                    slug: slug,
+                    authRepository: authRepository,
+                    intake: inviteIntake,
+                    linkCallHost: linkCallHost
+                ),
+                onDone: { pop(route, from: tab) }
+            )
+        }
+    }
+
+    private func chatViewModel(for groupIdHex: String) -> ChatViewModel {
+        chatVMHolder.viewModel(for: groupIdHex) {
+            ChatViewModel(
+                repository: chatRepository,
+                groupIdHex: groupIdHex,
+                callHost: callHost,
+                groupCallHost: groupCallHost,
+                sessionTokenProvider: {
+                    authRepository.identitySecrets?.sessionToken
+                },
+                resolveRecipient: { username in
+                    try await contactsRepository
+                        .resolveVerifiedRecipient(username: username)
+                }
+            )
+        }
+    }
+
+    /// ADR-0050 section 2.10 — take this device's KeyPackage out of the
+    /// directory BEFORE the wipe, while the bearer token still exists: the
+    /// account's other devices retire this device's leaves when their
+    /// scheduled check sees the row gone.
+    private func forgetDevice() {
+        Task { @MainActor in
+            if let own = chatRepository.ownDeviceLeafKey {
+                await chatRepository.deleteDirectoryKeyPackage(deviceKey: own)
+            }
+            authRepository.forgetDevice()
+        }
+    }
+
+    // MARK: - Path plumbing
+
+    private var allPaths: [[TabRoute]] {
+        [chatsPath, groupsPath, channelsPath, contactsPath, settingsPath]
+    }
+
+    private func path(for tab: SessionTab) -> Binding<[TabRoute]> {
+        switch tab {
+        case .chats: return $chatsPath
+        case .groups: return $groupsPath
+        case .channels: return $channelsPath
+        case .contacts: return $contactsPath
+        case .settings: return $settingsPath
+        }
+    }
+
+    private func push(_ route: TabRoute, on tab: SessionTab) {
+        path(for: tab).wrappedValue.append(route)
+    }
+
+    /// Remove `route` from `tab`'s stack (the last occurrence, and everything
+    /// above it). A no-op when it is not there, so a landing's Done after a
+    /// back gesture cannot pop an unrelated screen.
+    private func pop(_ route: TabRoute, from tab: SessionTab) {
+        let binding = path(for: tab)
+        guard let index = binding.wrappedValue.lastIndex(of: route) else { return }
+        binding.wrappedValue.removeSubrange(index...)
+    }
+
+    /// Swap the picker for the chat it picked, so back from the chat returns
+    /// to the list rather than to the picker.
+    private func replaceTop(_ route: TabRoute, with replacement: TabRoute, in tab: SessionTab) {
+        let binding = path(for: tab)
+        if let index = binding.wrappedValue.lastIndex(of: route) {
+            binding.wrappedValue.removeSubrange(index...)
+        }
+        binding.wrappedValue.append(replacement)
+    }
+
+    /// Push a landing for every parked deep link that no stack shows yet, on
+    /// the tab the user is looking at.
+    private func pushPendingDeepLinks() {
+        var wanted: [TabRoute] = []
+        if let slug = inviteIntake.pendingSlug { wanted.append(.inviteLanding(slug: slug)) }
+        if let slug = inviteIntake.pendingGroupJoinSlug { wanted.append(.groupJoinLanding(slug: slug)) }
+        if let slug = inviteIntake.pendingCallJoinSlug { wanted.append(.callJoinLanding(slug: slug)) }
+        let shown = Set(allPaths.flatMap { $0 })
+        for route in wanted where !shown.contains(route) {
+            push(route, on: selectedTab)
+        }
+    }
+
+    private func reconcileAfterNavigation(old: [[TabRoute]], new: [[TabRoute]]) {
+        let before = Set(old.flatMap { $0 })
+        let after = Set(new.flatMap { $0 })
+        for route in before.subtracting(after) {
+            switch route {
+            case .inviteLanding(let slug) where inviteIntake.pendingSlug == slug:
+                inviteIntake.clear()
+            case .groupJoinLanding(let slug) where inviteIntake.pendingGroupJoinSlug == slug:
+                inviteIntake.clearGroupJoin()
+            case .callJoinLanding(let slug) where inviteIntake.pendingCallJoinSlug == slug:
+                inviteIntake.clearCallJoin()
+            default:
+                break
+            }
+        }
+        chatVMHolder.retain(only: Set(after.compactMap(\.chatGroupIdHex)))
+    }
 }
 
 /// Owns the foreground receive scheduler for the process. A class, so the
@@ -727,18 +909,6 @@ final class ForegroundReceiveHolder: ObservableObject {
     init(scheduler: ForegroundReceiveScheduler) {
         self.scheduler = scheduler
     }
-}
-
-private enum SessionDestination: Equatable {
-    case home
-    case contacts
-    case chats
-    case channels
-    case chat(groupIdHex: String)
-    case passkeys
-    case devices
-    case antiCensorship
-    case profile
 }
 
 /// Anonymous-state router — three destinations (Signup / Login /
@@ -800,7 +970,7 @@ private struct AnonRoot: View {
                 viewModel: signupVM,
                 onAuthenticated: {
                     // No-op — the auth state flip already drives the
-                    // outer router to swap to ``HomeScreen``. The
+                    // outer router to swap to the tab shell. The
                     // signup VM uses this hook for the
                     // recovery-phrase acknowledgement gate; once the
                     // user acknowledges, the `.session` value is

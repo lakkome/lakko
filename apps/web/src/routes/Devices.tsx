@@ -2,35 +2,20 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * Multi-device management route (Phase 2a3b2-ui).
+ * Devices (Settings > Security > Devices; docs/ux/client-redesign.md
+ * section 5.5): the list of this account's devices with "This device" and
+ * Remove, and one "Add a device" button that reveals the pairing flow as a
+ * secondary panel — show a code for this device, or scan the code another
+ * device shows. A device without a camera asks through the "Is this you?"
+ * prompt (ADR-0049), which the app shell shows on every screen.
  *
- * Two flows on one page, picked via a local tab:
+ * The authenticator and email / phone recovery factors that used to share
+ * this page live under Settings > Security > Recovery
+ * (`auth/RecoveryFactors.tsx`).
  *
- *   1. **Pair this device with my existing one** — joining
- *      side. Generates an ephemeral DeviceIdentity-derived
- *      KeyPackage + rendezvous pseudonym, encodes the pairing
- *      QR, renders it via `qrcode`, long-polls the DS mailbox
- *      for the Welcome, drives `DeviceGroup.joinFromWelcome`
- *      on receipt.
- *
- *   2. **Add a device** — scanner side. Opens the camera,
- *      runs `jsqr` over each frame until a QR pops, decodes
- *      the wire bytes, runs `DeviceGroup.addDeviceFromWire`,
- *      PUTs the resulting Welcome to the rendezvous mailbox.
- *
- * Plus the account-management "Authenticator" section (ADR-0018
- * factor (c)): enroll a TOTP authenticator app as an
- * ACCESS-recovery factor — `/totp/enroll/start` renders the
- * `otpauth://` QR + manual-entry secret, `/totp/enroll/finish`
- * confirms with a live 6-digit code.
- *
- * Both flows pull credentials (accountId, deviceKey) from
- * `useAuth` + `getDeviceKey`. Page renders an "auth required"
- * state when the session isn't ready.
- *
- * The actual MLS / DS plumbing lives in
- * `apps/web/src/devices/orchestrator.ts`; this file is the
- * Solid view + the QR-render / camera bits.
+ * The device-group plumbing lives in `devices/orchestrator.ts` and
+ * `devices/remove.ts`; this file is the Solid view + the QR-render / camera
+ * bits.
  */
 import {
   createSignal,
@@ -42,13 +27,11 @@ import {
   For,
   type JSX,
 } from "solid-js";
+import { A } from "@solidjs/router";
 import { Icon } from "../ui/icons";
 import { useAuth } from "../auth/AuthContext";
-import { AuthClient, AuthHttpError } from "../auth/client";
+import { AuthClient } from "../auth/client";
 import { useBackgroundReceive } from "../chat/BackgroundReceiveContext";
-import { normalizeTotpCode } from "../auth/totp-code";
-import { isPlausibleContact } from "../auth/contact-shape";
-import { ContactKind } from "../auth/wire";
 import { getDeviceKey } from "../auth/key-store";
 import {
   WebauthnClient,
@@ -67,12 +50,13 @@ import {
 } from "../devices/remove";
 import QRCode from "qrcode";
 import jsQR from "jsqr";
+import { paths } from "./paths";
 
-type Tab = "list" | "pair" | "scan" | "totp" | "contact";
+type AddMode = "closed" | "pick" | "show" | "scan";
 
 export default function Devices(): JSX.Element {
   const auth = useAuth();
-  const [tab, setTab] = createSignal<Tab>("list");
+  const [add, setAdd] = createSignal<AddMode>("closed");
 
   const session = (): { accountIdB64: string; accountIdBytes: Uint8Array } | null => {
     const s = auth.state();
@@ -87,75 +71,95 @@ export default function Devices(): JSX.Element {
   return (
     <article>
       <div class="lk-page lk-stack">
-      <div class="lk-page-head">
-        <h1>Devices</h1>
-        <p>
-          Link another phone, tablet or computer to this account. Linking is
-          end-to-end encrypted; Lakko's servers cannot read it.
-        </p>
-      </div>
-      <Show
-        when={session() !== null}
-        fallback={
-          <p class="form-error">
-            Sign in first to manage devices.
+        <A href={paths.settingsSection("security")} class="ghost small" style={{ "align-self": "flex-start" }}>
+          <Icon name="back" size={16} />
+          Security
+        </A>
+        <div class="lk-page-head">
+          <h1>Devices</h1>
+          <p>
+            The phones, tablets and computers signed in to your account. Adding one is
+            end-to-end encrypted; Lakko's servers cannot read it.
           </p>
-        }
-      >
-        <div class="lk-segmented" role="tablist" aria-label="Devices">
-          {(
-            [
-              ["list", "Your devices"],
-              ["pair", "Pair this device"],
-              ["scan", "Add a device"],
-              ["totp", "Authenticator"],
-              ["contact", "Email or phone"],
-            ] as const
-          ).map(([id, label]) => (
-            <label>
-              <input
-                type="radio"
-                name="devices-tab"
-                value={id}
-                checked={tab() === id}
-                onChange={() => setTab(id)}
-              />
-              {label}
-            </label>
-          ))}
         </div>
-        <section class="lk-card">
-        <Switch>
-          <Match when={tab() === "list"}>
+        <Show
+          when={session() !== null}
+          fallback={<p class="form-error">Sign in first to manage devices.</p>}
+        >
+          <section class="lk-card">
             <DevicesListView
               accountIdB64={session()!.accountIdB64}
               accountIdBytes={session()!.accountIdBytes}
             />
-          </Match>
-          <Match when={tab() === "pair"}>
-            <PairView
-              accountIdB64={session()!.accountIdB64}
-              accountIdBytes={session()!.accountIdBytes}
-            />
-          </Match>
-          <Match when={tab() === "scan"}>
-            <ScanView
-              accountIdB64={session()!.accountIdB64}
-              accountIdBytes={session()!.accountIdBytes}
-            />
-          </Match>
-          <Match when={tab() === "totp"}>
-            <TotpEnrollView />
-          </Match>
-          <Match when={tab() === "contact"}>
-            <ContactEnrollView />
-          </Match>
-        </Switch>
-        </section>
-      </Show>
+            <div class="lk-actions">
+              <button
+                type="button"
+                class="primary"
+                aria-expanded={add() !== "closed"}
+                onClick={() => setAdd(add() === "closed" ? "pick" : "closed")}
+              >
+                <Icon name="plus" size={18} />
+                Add a device
+              </button>
+            </div>
+          </section>
+          <Show when={add() !== "closed"}>
+            <section class="lk-card" aria-label="Add a device">
+              <Switch>
+                <Match when={add() === "pick"}>
+                  <h2>Add a device</h2>
+                  <p class="lk-card-desc">
+                    Sign in to Lakko on the new device first. Then pick which of the two
+                    is showing a code.
+                  </p>
+                  <div class="lk-device-add">
+                    <button type="button" class="lk-option-card" onClick={() => setAdd("scan")}>
+                      <Icon name="qr" size={22} />
+                      <strong>Scan a code</strong>
+                      <span>The new device shows a code; scan it with this one.</span>
+                    </button>
+                    <button type="button" class="lk-option-card" onClick={() => setAdd("show")}>
+                      <Icon name="devices" size={22} />
+                      <strong>Show a code</strong>
+                      <span>This device is the new one; another device scans its code.</span>
+                    </button>
+                  </div>
+                  <p class="lk-meta" style={{ margin: 0 }}>
+                    A device without a camera can ask instead: its request appears here as
+                    "Is this you?" with a code to compare.
+                  </p>
+                </Match>
+                <Match when={add() === "show"}>
+                  <PairView
+                    accountIdB64={session()!.accountIdB64}
+                    accountIdBytes={session()!.accountIdBytes}
+                    onBack={() => setAdd("pick")}
+                  />
+                </Match>
+                <Match when={add() === "scan"}>
+                  <ScanView
+                    accountIdB64={session()!.accountIdB64}
+                    accountIdBytes={session()!.accountIdBytes}
+                    onBack={() => setAdd("pick")}
+                  />
+                </Match>
+              </Switch>
+            </section>
+          </Show>
+        </Show>
       </div>
     </article>
   );
+}
+
+/**
+ * The label for a device row. The store carries no name, platform or added
+ * date for a device (only its position and key), so the rule is: "This
+ * device" for the one you are on, otherwise "Device N" by order in the list.
+ * Never a key prefix or an internal index (docs/ux section 6).
+ */
+export function deviceRowLabel(index: number, isSelf: boolean): string {
+  return isSelf ? "This device" : `Device ${index + 1}`;
 }
 
 // ---- Your devices (list + remove) -------------------------------
@@ -176,14 +180,14 @@ function DevicesListView(props: {
     | { kind: "error"; message: string };
   const [state, setState] = createSignal<State>({ kind: "loading" });
 
-  async function refresh(): Promise<void> {
+  async function load(): Promise<void> {
     setState({ kind: "loading" });
     try {
       const deviceKey = await getDeviceKey(props.accountIdB64);
       if (deviceKey === null) {
         setState({
           kind: "error",
-          message: "No device key on this browser. Sign in again.",
+          message: "This browser is not set up for your account. Sign in again.",
         });
         return;
       }
@@ -213,7 +217,7 @@ function DevicesListView(props: {
       if (deviceKey === null) {
         setState({
           kind: "error",
-          message: "No device key on this browser. Sign in again.",
+          message: "This browser is not set up for your account. Sign in again.",
         });
         return;
       }
@@ -255,7 +259,7 @@ function DevicesListView(props: {
         attestation,
       });
       // ADR-0050 section 2.10 — the device is out of the DeviceGroup; now out
-      // of every chat and out of the directory. Runs on after the list refresh;
+      // of every chat and out of the directory. Runs on after the list reload;
       // a chat it fails on is logged and retried by nothing (the leaf stays
       // until a member removes it by hand), so the warning is worth reading.
       if (target !== undefined) {
@@ -265,7 +269,7 @@ function DevicesListView(props: {
         });
       }
       // Re-fetch — the new epoch has its own leaf numbering.
-      await refresh();
+      await load();
     } catch (err) {
       setState({
         kind: "error",
@@ -275,18 +279,18 @@ function DevicesListView(props: {
   }
 
   createEffect(() => {
-    void refresh();
+    void load();
   });
 
   return (
-    <div>
-      <p>
-        The devices linked to your account. A removed device loses access to
-        your messages from that moment on.
+    <div class="lk-stack" style={{ gap: "8px" }}>
+      <h2>Your devices</h2>
+      <p class="lk-card-desc">
+        A removed device loses access to your messages from that moment on.
       </p>
       <Switch>
         <Match when={state().kind === "loading"}>
-          <p>Loading devices…</p>
+          <p class="lk-muted">Loading...</p>
         </Match>
         <Match when={state().kind === "ready" || state().kind === "removing"}>
           {(_) => {
@@ -296,63 +300,47 @@ function DevicesListView(props: {
             const removingLeaf =
               s.kind === "removing" ? s.leafIndex : null;
             return (
-              <div>
-                <ul style={{ "list-style": "none", padding: 0, margin: 0 }}>
-                  <For each={devices}>
-                    {(device) => (
-                      <li class="lk-card-row">
-                        <span class="lk-card-row-icon">
-                          <Icon name="devices" size={18} />
+              <ul class="lk-list tight" aria-label="Devices">
+                <For each={devices}>
+                  {(device, i) => (
+                    <li class="lk-card-row">
+                      <span class="lk-card-row-icon">
+                        <Icon name={device.isSelf ? "monitor" : "devices"} size={18} />
+                      </span>
+                      <div class="lk-card-row-body">
+                        <span class="lk-card-row-title">
+                          {deviceRowLabel(i(), device.isSelf)}
                         </span>
-                        <div class="lk-card-row-body">
-                          <span class="lk-card-row-title">
-                            {device.isSelf ? "This device" : `Device #${device.leafIndex}`}
-                          </span>
-                          <span class="lk-card-row-sub" style={{ "font-family": "ui-monospace, monospace" }}>
-                            {hexPrefix(device.signaturePublicKey, 8)}
-                          </span>
-                        </div>
-                        <Show
-                          when={!device.isSelf}
-                          fallback={<span />}
-                        >
-                          <button
-                            type="button"
-                            class="ghost small"
-                            style={{ color: "var(--danger)" }}
-                            disabled={removingLeaf !== null}
-                            onClick={() => void remove(device.leafIndex)}
-                          >
-                            {removingLeaf === device.leafIndex
-                              ? "Removing…"
-                              : "Remove"}
-                          </button>
+                        <Show when={device.isSelf}>
+                          <span class="lk-card-row-sub">The device you are using now.</span>
                         </Show>
-                      </li>
-                    )}
-                  </For>
-                </ul>
-                <p style={{ "margin-top": "1rem" }}>
-                  <button
-                    type="button"
-                    disabled={removingLeaf !== null}
-                    onClick={() => void refresh()}
-                  >
-                    Refresh
-                  </button>
-                </p>
-              </div>
+                      </div>
+                      <Show when={!device.isSelf} fallback={<span />}>
+                        <button
+                          type="button"
+                          class="ghost small"
+                          style={{ color: "var(--danger)" }}
+                          disabled={removingLeaf !== null}
+                          onClick={() => void remove(device.leafIndex)}
+                        >
+                          {removingLeaf === device.leafIndex ? "Removing..." : "Remove"}
+                        </button>
+                      </Show>
+                    </li>
+                  )}
+                </For>
+              </ul>
             );
           }}
         </Match>
         <Match when={state().kind === "error"}>
           {(_) => {
             const s = state();
-            const message = s.kind === "error" ? s.message : "Unknown error.";
+            const message = s.kind === "error" ? s.message : "Something went wrong.";
             return (
               <div>
                 <p class="form-error">{message}</p>
-                <button type="button" onClick={() => void refresh()}>
+                <button type="button" onClick={() => void load()}>
                   Try again
                 </button>
               </div>
@@ -364,20 +352,12 @@ function DevicesListView(props: {
   );
 }
 
-function hexPrefix(bytes: Uint8Array, n: number): string {
-  const slice = bytes.subarray(0, n);
-  let out = "";
-  for (let i = 0; i < slice.length; i += 1) {
-    out += (slice[i] as number).toString(16).padStart(2, "0");
-  }
-  return out;
-}
-
-// ---- Pair (joining device) --------------------------------------
+// ---- Show a code (this device joins) ----------------------------
 
 function PairView(props: {
   readonly accountIdB64: string;
   readonly accountIdBytes: Uint8Array;
+  readonly onBack: () => void;
 }): JSX.Element {
   type State =
     | { kind: "idle" }
@@ -396,7 +376,7 @@ function PairView(props: {
       if (deviceKey === null) {
         setState({
           kind: "error",
-          message: "No device key on this browser. Sign in again.",
+          message: "This browser is not set up for your account. Sign in again.",
         });
         return;
       }
@@ -439,8 +419,7 @@ function PairView(props: {
             sess.dispose();
             setState({
               kind: "error",
-              message:
-                "Timed out waiting for the other device. Try again.",
+              message: "The other device did not scan in time. Try again.",
             });
           } else {
             // cancelled — silent (user closed the form).
@@ -478,43 +457,46 @@ function PairView(props: {
   });
 
   return (
-    <div>
-      <p>
-        Scan this code with a device that is already signed in. Once it
-        confirms, this device joins your account.
+    <div class="lk-stack" style={{ gap: "10px" }}>
+      <button type="button" class="ghost small" style={{ "align-self": "flex-start" }} onClick={props.onBack}>
+        <Icon name="back" size={16} />
+        Add a device
+      </button>
+      <h2>Show a code</h2>
+      <p class="lk-card-desc">
+        Scan this code with a device that is already signed in. Once it confirms, this
+        device joins your account.
       </p>
       <Switch>
         <Match when={state().kind === "idle"}>
-          <button class="primary" type="button" onClick={() => void start()}>
-            Show pairing code
-          </button>
+          <div class="lk-actions">
+            <button class="primary" type="button" onClick={() => void start()}>
+              Show the code
+            </button>
+          </div>
         </Match>
         <Match when={state().kind === "preparing"}>
-          <p>Preparing pairing material…</p>
+          <p class="lk-muted">Preparing...</p>
         </Match>
         <Match when={state().kind === "waiting"}>
-          <div style={{ "text-align": "center", padding: "1rem 0" }}>
-            <canvas ref={(el) => setCanvasRef(el)} />
-            <p style={{ color: "var(--surface-muted)" }}>
-              Waiting for the other device to scan this code…
-            </p>
+          <div class="lk-center">
+            <canvas class="lk-qr" ref={(el) => setCanvasRef(el)} />
+            <p class="lk-muted">Waiting for the other device to scan this code...</p>
             <button type="button" onClick={cancel}>
               Cancel
             </button>
           </div>
         </Match>
         <Match when={state().kind === "joining"}>
-          <p>Joining the device group…</p>
+          <p class="lk-muted">Joining your account...</p>
         </Match>
         <Match when={state().kind === "done"}>
-          <p class="form-info">
-            ✅ Linked. This device is now part of your DeviceGroup.
-          </p>
+          <p class="form-info">Done. This device is now on your account.</p>
         </Match>
         <Match when={state().kind === "error"}>
           {(_) => {
             const s = state();
-            const message = s.kind === "error" ? s.message : "Unknown error.";
+            const message = s.kind === "error" ? s.message : "Something went wrong.";
             return (
               <div>
                 <p class="form-error">{message}</p>
@@ -533,11 +515,12 @@ function PairView(props: {
   );
 }
 
-// ---- Scan (scanner device) --------------------------------------
+// ---- Scan a code (this device admits) ---------------------------
 
 function ScanView(props: {
   readonly accountIdB64: string;
   readonly accountIdBytes: Uint8Array;
+  readonly onBack: () => void;
 }): JSX.Element {
   // ADR-0018 factor (a): the scanner side also transfers ACCESS +
   // IDENTITY to the fresh device (grant + phrase seed, sealed over
@@ -587,7 +570,7 @@ function ScanView(props: {
       if (deviceKey === null) {
         setState({
           kind: "error",
-          message: "No device key on this browser. Sign in again.",
+          message: "This browser is not set up for your account. Sign in again.",
         });
         return;
       }
@@ -639,7 +622,7 @@ function ScanView(props: {
       setState({
         kind: "error",
         message:
-          "Camera access denied or unavailable. " +
+          "The camera is not available. " +
           (err instanceof Error ? err.message : String(err)),
       });
       return;
@@ -649,7 +632,7 @@ function ScanView(props: {
       stopCamera();
       setState({
         kind: "error",
-        message: "Internal: video element missing.",
+        message: "The camera view could not be opened.",
       });
       return;
     }
@@ -662,7 +645,7 @@ function ScanView(props: {
     if (ctx === null) {
       setState({
         kind: "error",
-        message: "Canvas 2D context unavailable.",
+        message: "The camera view could not be opened.",
       });
       return;
     }
@@ -701,28 +684,29 @@ function ScanView(props: {
   }
 
   return (
-    <div>
-      <p>
-        Aim your camera at the QR code your new device is showing.
-        The pairing completes within a couple of seconds.
+    <div class="lk-stack" style={{ gap: "10px" }}>
+      <button type="button" class="ghost small" style={{ "align-self": "flex-start" }} onClick={props.onBack}>
+        <Icon name="back" size={16} />
+        Add a device
+      </button>
+      <h2>Scan a code</h2>
+      <p class="lk-card-desc">
+        Point the camera at the code your new device is showing.
       </p>
       <Switch>
         <Match when={state().kind === "idle"}>
-          <button class="primary" type="button" onClick={() => void start()}>
-            Open camera
-          </button>
+          <div class="lk-actions">
+            <button class="primary" type="button" onClick={() => void start()}>
+              Open camera
+            </button>
+          </div>
         </Match>
         <Match when={state().kind === "opening"}>
-          <p>Opening camera…</p>
+          <p class="lk-muted">Opening the camera...</p>
         </Match>
         <Match when={state().kind === "scanning"}>
-          <div style={{ "text-align": "center", padding: "1rem 0" }}>
-            <video
-              ref={(el) => setVideoRef(el)}
-              style={{ "max-width": "100%", "max-height": "320px" }}
-              playsinline
-              muted
-            />
+          <div class="lk-center">
+            <video class="lk-camera" ref={(el) => setVideoRef(el)} playsinline muted />
             <button type="button" onClick={reset}>
               Cancel
             </button>
@@ -735,626 +719,46 @@ function ScanView(props: {
             return (
               <div>
                 <p>
-                  <strong>Link this device?</strong>
+                  <strong>Add this device?</strong>
                 </p>
                 <p>
-                  This gives the scanned device FULL access to your
-                  account: your messages, your contacts, and your
-                  secure identity. Only continue if the QR code is on
-                  YOUR OWN new device.
+                  It gets full access to your account: your messages, your contacts and
+                  your identity. Continue only if the code is on your own new device.
                 </p>
-                <button
-                  class="primary"
-                  type="button"
-                  onClick={() => {
-                    if (scanned !== null) void handleDecoded(scanned);
-                  }}
-                >
-                  Link device
-                </button>{" "}
-                <button type="button" onClick={reset}>
-                  Cancel
-                </button>
+                <div class="lk-actions">
+                  <button
+                    class="primary"
+                    type="button"
+                    onClick={() => {
+                      if (scanned !== null) void handleDecoded(scanned);
+                    }}
+                  >
+                    Add device
+                  </button>
+                  <button type="button" onClick={reset}>
+                    Cancel
+                  </button>
+                </div>
               </div>
             );
           }}
         </Match>
         <Match when={state().kind === "processing"}>
-          <p>Adding the device…</p>
+          <p class="lk-muted">Adding the device...</p>
         </Match>
         <Match when={state().kind === "done"}>
           <p class="form-info">
-            ✅ Device added. The other device should land on its
-            success screen any moment now.
+            Device added. It will appear in the list once it has finished joining.
           </p>
         </Match>
         <Match when={state().kind === "error"}>
           {(_) => {
             const s = state();
-            const message = s.kind === "error" ? s.message : "Unknown error.";
+            const message = s.kind === "error" ? s.message : "Something went wrong.";
             return (
               <div>
                 <p class="form-error">{message}</p>
                 <button type="button" onClick={reset}>
-                  Try again
-                </button>
-              </div>
-            );
-          }}
-        </Match>
-      </Switch>
-    </div>
-  );
-}
-
-// ---- Authenticator (TOTP) enrollment — ADR-0018 factor (c) ------
-
-function TotpEnrollView(): JSX.Element {
-  const auth = useAuth();
-  type State =
-    | { kind: "idle" }
-    | { kind: "starting" }
-    // Provisioning material on screen; waiting for the confirm code.
-    | { kind: "confirm"; otpauthUri: string; secretB32: string }
-    | { kind: "finishing"; otpauthUri: string; secretB32: string }
-    | { kind: "done" }
-    | { kind: "already-enabled" }
-    | { kind: "unavailable" }
-    | { kind: "error"; message: string };
-  const [state, setState] = createSignal<State>({ kind: "idle" });
-  const [code, setCode] = createSignal("");
-  const [confirmError, setConfirmError] = createSignal<string | null>(null);
-  const [canvasRef, setCanvasRef] = createSignal<HTMLCanvasElement | null>(
-    null,
-  );
-
-  // Render the otpauth:// provisioning URI as a QR whenever the
-  // confirm card is up. canvasRef is a signal, so this effect
-  // re-runs once the <canvas> mounts after the state flip — no
-  // draw-before-mount race.
-  createEffect(() => {
-    const s = state();
-    const canvas = canvasRef();
-    const uri =
-      s.kind === "confirm" || s.kind === "finishing" ? s.otpauthUri : null;
-    if (uri !== null && canvas !== null) {
-      void QRCode.toCanvas(canvas, uri, {
-        errorCorrectionLevel: "M",
-        width: 224,
-        margin: 1,
-      }).catch((err: unknown) => {
-        // eslint-disable-next-line no-console
-        console.warn("totp provisioning QR render failed", err);
-      });
-    }
-  });
-
-  const sessionToken = (): string | null =>
-    auth.identitySecrets()?.sessionToken ?? null;
-
-  async function start(): Promise<void> {
-    const token = sessionToken();
-    if (token === null) {
-      setState({
-        kind: "error",
-        message: "No live session token in this tab. Sign in again.",
-      });
-      return;
-    }
-    setState({ kind: "starting" });
-    try {
-      const result = await new AuthClient().totpEnrollStart(token);
-      setCode("");
-      setConfirmError(null);
-      setState({
-        kind: "confirm",
-        otpauthUri: result.otpauthUri,
-        secretB32: result.secretB32,
-      });
-    } catch (err) {
-      if (err instanceof AuthHttpError && err.status === 409) {
-        // A CONFIRMED authenticator already exists; the server
-        // refuses a silent swap.
-        setState({ kind: "already-enabled" });
-        return;
-      }
-      if (err instanceof AuthHttpError && err.status === 503) {
-        setState({ kind: "unavailable" });
-        return;
-      }
-      setState({
-        kind: "error",
-        message: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-
-  async function finish(e: SubmitEvent): Promise<void> {
-    e.preventDefault();
-    const s = state();
-    if (s.kind !== "confirm") return;
-    setConfirmError(null);
-    const normalized = normalizeTotpCode(code());
-    if (normalized === null) {
-      setConfirmError("Enter the 6-digit code from your authenticator app.");
-      return;
-    }
-    const token = sessionToken();
-    if (token === null) {
-      setState({
-        kind: "error",
-        message: "No live session token in this tab. Sign in again.",
-      });
-      return;
-    }
-    setState({
-      kind: "finishing",
-      otpauthUri: s.otpauthUri,
-      secretB32: s.secretB32,
-    });
-    try {
-      await new AuthClient().totpEnrollFinish(token, normalized);
-      setCode("");
-      setState({ kind: "done" });
-    } catch (err) {
-      if (err instanceof AuthHttpError && err.status === 401) {
-        // Wrong / stale code — the pending enrollment survives, so
-        // just let the user retry with the next code.
-        setConfirmError(
-          "That code didn't verify. Wait for the next code in the app " +
-            "and try again.",
-        );
-        setState({
-          kind: "confirm",
-          otpauthUri: s.otpauthUri,
-          secretB32: s.secretB32,
-        });
-        return;
-      }
-      if (err instanceof AuthHttpError && err.status === 409) {
-        setState({ kind: "already-enabled" });
-        return;
-      }
-      if (err instanceof AuthHttpError && err.status === 503) {
-        setState({ kind: "unavailable" });
-        return;
-      }
-      setState({
-        kind: "error",
-        message: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-
-  return (
-    <div>
-      <p>
-        Enroll an authenticator app (TOTP) as a recovery factor. If
-        you ever lose this device, a 6-digit code from the app
-        restores <em>access</em> to your account — your secure
-        identity is then restored from your recovery phrase or
-        another signed-in device.
-      </p>
-      <Switch>
-        <Match when={state().kind === "idle"}>
-          {/* HONESTY NOTE: the server has no TOTP "status" endpoint,
-              so the enrolled/not-enrolled state cannot be probed
-              up front. We render the enable button by default; a
-              409 from /totp/enroll/start flips this card to
-              "already enabled". */}
-          <button class="primary" type="button" onClick={() => void start()}>
-            Enable authenticator
-          </button>
-        </Match>
-        <Match when={state().kind === "starting"}>
-          <p>Generating the authenticator secret…</p>
-        </Match>
-        <Match
-          when={state().kind === "confirm" || state().kind === "finishing"}
-        >
-          {(_) => {
-            const s = state();
-            const secretB32 =
-              s.kind === "confirm" || s.kind === "finishing"
-                ? s.secretB32
-                : "";
-            const busy = s.kind === "finishing";
-            return (
-              <div>
-                <p>
-                  Scan this QR with your authenticator app (or type
-                  the secret in manually), then enter the 6-digit
-                  code it shows to confirm.
-                </p>
-                <div style={{ "text-align": "center", padding: "0.5rem 0" }}>
-                  <canvas ref={(el) => setCanvasRef(el)} />
-                </div>
-                <p>
-                  Manual-entry secret:{" "}
-                  <code
-                    style={{
-                      "user-select": "all",
-                      "word-break": "break-all",
-                    }}
-                  >
-                    {secretB32}
-                  </code>
-                </p>
-                <form onSubmit={(e) => void finish(e)}>
-                  <label>
-                    Confirmation code
-                    <input
-                      type="text"
-                      inputmode="numeric"
-                      autocomplete="one-time-code"
-                      pattern="[0-9]{6}"
-                      maxlength="6"
-                      required
-                      value={code()}
-                      onInput={(e) => setCode(e.currentTarget.value)}
-                      disabled={busy}
-                      placeholder="123456"
-                      style={{
-                        "font-family":
-                          "ui-monospace, SFMono-Regular, Menlo, monospace",
-                        "letter-spacing": "0.25em",
-                      }}
-                    />
-                  </label>
-                  <Show when={confirmError() !== null}>
-                    <p class="form-error">{confirmError()}</p>
-                  </Show>
-                  <button class="primary" type="submit" disabled={busy}>
-                    {busy ? "Confirming…" : "Confirm"}
-                  </button>{" "}
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={() => setState({ kind: "idle" })}
-                  >
-                    Cancel
-                  </button>
-                </form>
-              </div>
-            );
-          }}
-        </Match>
-        <Match when={state().kind === "done"}>
-          <p class="form-info">
-            Authenticator enabled. A code from the app can now recover
-            access to your account (Recover → Authenticator).
-          </p>
-        </Match>
-        <Match when={state().kind === "already-enabled"}>
-          <p class="form-info">
-            An authenticator is already enabled for this account. It cannot be
-            replaced from a signed-in session; recover with your phrase or
-            another device first, so a stolen session cannot swap it.
-          </p>
-        </Match>
-        <Match when={state().kind === "unavailable"}>
-          <p class="form-error">
-            Authenticator enrollment is not available on this server.
-          </p>
-        </Match>
-        <Match when={state().kind === "error"}>
-          {(_) => {
-            const s = state();
-            const message = s.kind === "error" ? s.message : "Unknown error.";
-            return (
-              <div>
-                <p class="form-error">{message}</p>
-                <button
-                  type="button"
-                  onClick={() => setState({ kind: "idle" })}
-                >
-                  Try again
-                </button>
-              </div>
-            );
-          }}
-        </Match>
-      </Switch>
-    </div>
-  );
-}
-
-// ---- Email / phone OTP enrollment (ADR-0018 factor (d)) ----------
-
-function ContactEnrollView(): JSX.Element {
-  const auth = useAuth();
-  type State =
-    | { kind: "idle" }
-    | { kind: "starting" }
-    // A code has been sent; waiting for the confirm code.
-    | { kind: "confirm"; contactKind: ContactKind; contact: string }
-    | { kind: "finishing"; contactKind: ContactKind; contact: string }
-    | { kind: "done" }
-    | { kind: "already-enabled" }
-    | { kind: "unavailable" }
-    | { kind: "error"; message: string };
-  const [state, setState] = createSignal<State>({ kind: "idle" });
-  const [contactKind, setContactKind] = createSignal<ContactKind>(
-    ContactKind.Email,
-  );
-  const [contact, setContact] = createSignal("");
-  const [code, setCode] = createSignal("");
-  const [confirmError, setConfirmError] = createSignal<string | null>(null);
-  const [requestError, setRequestError] = createSignal<string | null>(null);
-
-  const sessionToken = (): string | null =>
-    auth.identitySecrets()?.sessionToken ?? null;
-
-  async function start(e: SubmitEvent): Promise<void> {
-    e.preventDefault();
-    setRequestError(null);
-    const k = contactKind();
-    // Light client-side shape check — saves a PoW solve on an
-    // obviously-malformed contact. The server is authoritative.
-    if (!isPlausibleContact(k, contact())) {
-      setRequestError(
-        k === ContactKind.Email
-          ? "Enter a valid email address."
-          : "Enter a phone number in international format (e.g. +15551234567).",
-      );
-      return;
-    }
-    const token = sessionToken();
-    if (token === null) {
-      setState({
-        kind: "error",
-        message: "No live session token in this tab. Sign in again.",
-      });
-      return;
-    }
-    setState({ kind: "starting" });
-    try {
-      await new AuthClient().recoveryContactEnrollStart(token, k, contact());
-      setCode("");
-      setConfirmError(null);
-      setState({ kind: "confirm", contactKind: k, contact: contact() });
-    } catch (err) {
-      if (err instanceof AuthHttpError && err.status === 503) {
-        setState({ kind: "unavailable" });
-        return;
-      }
-      if (err instanceof AuthHttpError && err.status === 409) {
-        // The server returns 409 only if it refuses a swap of a
-        // confirmed contact; surface it the same way TOTP does.
-        setState({ kind: "already-enabled" });
-        return;
-      }
-      // A 400 (malformed contact) bounces back to the request step so
-      // the user can correct it.
-      if (err instanceof AuthHttpError && err.status === 400) {
-        setRequestError("That contact looks malformed. Check it and retry.");
-        setState({ kind: "idle" });
-        return;
-      }
-      setState({
-        kind: "error",
-        message: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-
-  async function finish(e: SubmitEvent): Promise<void> {
-    e.preventDefault();
-    const s = state();
-    if (s.kind !== "confirm") return;
-    setConfirmError(null);
-    const normalized = normalizeTotpCode(code());
-    if (normalized === null) {
-      setConfirmError("Enter the 6-digit code we sent.");
-      return;
-    }
-    const token = sessionToken();
-    if (token === null) {
-      setState({
-        kind: "error",
-        message: "No live session token in this tab. Sign in again.",
-      });
-      return;
-    }
-    setState({
-      kind: "finishing",
-      contactKind: s.contactKind,
-      contact: s.contact,
-    });
-    try {
-      await new AuthClient().recoveryContactEnrollFinish(
-        token,
-        s.contactKind,
-        normalized,
-      );
-      setCode("");
-      setState({ kind: "done" });
-    } catch (err) {
-      if (err instanceof AuthHttpError && err.status === 401) {
-        // Wrong / stale code — the pending challenge survives, so just
-        // let the user retry with the code (or re-send one).
-        setConfirmError(
-          "That code didn't verify. Check the code we sent, or re-send.",
-        );
-        setState({ kind: "confirm", contactKind: s.contactKind, contact: s.contact });
-        return;
-      }
-      if (err instanceof AuthHttpError && err.status === 409) {
-        setState({ kind: "already-enabled" });
-        return;
-      }
-      if (err instanceof AuthHttpError && err.status === 503) {
-        setState({ kind: "unavailable" });
-        return;
-      }
-      setState({
-        kind: "error",
-        message: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-
-  return (
-    <div>
-      <p>
-        Enroll a phone number or email as a recovery factor. If you ever
-        lose this device, a one-time code sent there restores{" "}
-        <em>access</em> to your account — your secure identity is then
-        restored from your recovery phrase or another signed-in device.
-      </p>
-      <Switch>
-        <Match when={state().kind === "idle" || state().kind === "starting"}>
-          {/* HONESTY NOTE: the server exposes no recovery-contact
-              "status" endpoint, so the enrolled/not-enrolled state
-              cannot be probed up front. We render the request form by
-              default; a 503 from enroll/start flips this card to
-              "not available", a 409 (if the server returns one) to
-              "already enabled". */}
-          {(_) => {
-            const busy = state().kind === "starting";
-            return (
-              <form onSubmit={(e) => void start(e)}>
-                <div
-                  role="tablist"
-                  style={{ display: "flex", gap: "0.4rem", margin: "0.5rem 0" }}
-                >
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={contactKind() === ContactKind.Email}
-                    disabled={busy}
-                    class={contactKind() === ContactKind.Email ? "primary" : ""}
-                    onClick={() => setContactKind(ContactKind.Email)}
-                  >
-                    Email
-                  </button>
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={contactKind() === ContactKind.Phone}
-                    disabled={busy}
-                    class={contactKind() === ContactKind.Phone ? "primary" : ""}
-                    onClick={() => setContactKind(ContactKind.Phone)}
-                  >
-                    Phone
-                  </button>
-                </div>
-                <label>
-                  {contactKind() === ContactKind.Email ? "Email" : "Phone number"}
-                  <input
-                    type={contactKind() === ContactKind.Email ? "email" : "tel"}
-                    autocomplete={
-                      contactKind() === ContactKind.Email ? "email" : "tel"
-                    }
-                    required
-                    value={contact()}
-                    onInput={(e) => setContact(e.currentTarget.value)}
-                    disabled={busy}
-                    placeholder={
-                      contactKind() === ContactKind.Email
-                        ? "alice@example.com"
-                        : "+15551234567"
-                    }
-                  />
-                </label>
-                <Show when={requestError() !== null}>
-                  <p class="form-error">{requestError()}</p>
-                </Show>
-                <button class="primary" type="submit" disabled={busy}>
-                  {busy ? "Sending…" : "Send code"}
-                </button>
-              </form>
-            );
-          }}
-        </Match>
-        <Match
-          when={state().kind === "confirm" || state().kind === "finishing"}
-        >
-          {(_) => {
-            const s = state();
-            const k =
-              s.kind === "confirm" || s.kind === "finishing"
-                ? s.contactKind
-                : ContactKind.Email;
-            const to =
-              s.kind === "confirm" || s.kind === "finishing" ? s.contact : "";
-            const busy = s.kind === "finishing";
-            return (
-              <div>
-                <p>
-                  We sent a 6-digit code to{" "}
-                  <code style={{ "word-break": "break-all" }}>{to}</code> (
-                  {k === ContactKind.Email ? "email" : "SMS"}). Enter it below
-                  to confirm.
-                </p>
-                <form onSubmit={(e) => void finish(e)}>
-                  <label>
-                    Confirmation code
-                    <input
-                      type="text"
-                      inputmode="numeric"
-                      autocomplete="one-time-code"
-                      pattern="[0-9]{6}"
-                      maxlength="6"
-                      required
-                      value={code()}
-                      onInput={(e) => setCode(e.currentTarget.value)}
-                      disabled={busy}
-                      placeholder="123456"
-                      style={{
-                        "font-family":
-                          "ui-monospace, SFMono-Regular, Menlo, monospace",
-                        "letter-spacing": "0.25em",
-                      }}
-                    />
-                  </label>
-                  <Show when={confirmError() !== null}>
-                    <p class="form-error">{confirmError()}</p>
-                  </Show>
-                  <button class="primary" type="submit" disabled={busy}>
-                    {busy ? "Confirming…" : "Confirm"}
-                  </button>{" "}
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={() => setState({ kind: "idle" })}
-                  >
-                    Cancel
-                  </button>
-                </form>
-              </div>
-            );
-          }}
-        </Match>
-        <Match when={state().kind === "done"}>
-          <p class="form-info">
-            Contact enrolled. A code sent there can now recover access to
-            your account (Recover → Email or SMS code).
-          </p>
-        </Match>
-        <Match when={state().kind === "already-enabled"}>
-          <p class="form-info">
-            A recovery contact is already set for this account. It cannot be
-            replaced from a signed-in session; recover with your phrase or
-            another device first, so a stolen session cannot swap it.
-          </p>
-        </Match>
-        <Match when={state().kind === "unavailable"}>
-          <p class="form-error">
-            Email / phone recovery is not available on this server.
-          </p>
-        </Match>
-        <Match when={state().kind === "error"}>
-          {(_) => {
-            const s = state();
-            const message = s.kind === "error" ? s.message : "Unknown error.";
-            return (
-              <div>
-                <p class="form-error">{message}</p>
-                <button
-                  type="button"
-                  onClick={() => setState({ kind: "idle" })}
-                >
                   Try again
                 </button>
               </div>

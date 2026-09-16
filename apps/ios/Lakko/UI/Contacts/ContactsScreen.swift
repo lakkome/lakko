@@ -11,20 +11,16 @@ import SwiftUI
 ///   * `apps/android/.../ui/contacts/ContactsScreen.kt` (1.15e6)
 ///
 /// **Scope**: send form + pending list with Accept / Decline +
-/// sent log + accepted log + Refresh action (1.14e4), the
-/// invite generate UI / `GeneratedInviteSheet` (1.14e7), and
-/// the `.task`-driven continuous-polling loop (1.14e5) — all
-/// wired.
+/// sent log + accepted log (1.14e4), the invite generate UI /
+/// `GeneratedInviteSheet` (1.14e7), and the `.task`-driven
+/// continuous-polling loop (1.14e5) — all wired. Receiving is automatic;
+/// pull-to-refresh runs the same poll once more on demand.
 ///
-/// `onBack` is the up-affordance back to ``HomeScreen``; the
-/// `AppRoot`-level router observes the
-/// ``SessionDestination`` toggle (1.14e7 adds the multi-destination
-/// session shell — for 1.14e4 we keep the existing two-state
-/// home/contacts toggle simple).
+/// Rendered as the root of the Contacts tab's `NavigationStack`; opening a
+/// chat asks the host to push ``ChatScreen``.
 public struct ContactsScreen: View {
 
     @ObservedObject public var viewModel: ContactsViewModel
-    public var onBack: () -> Void
     public var onOpenChat: (String) -> Void
 
     /// ADR-0032 call links — the session the owner signs the capability with,
@@ -35,23 +31,20 @@ public struct ContactsScreen: View {
 
     public init(
         viewModel: ContactsViewModel,
-        onBack: @escaping () -> Void,
         onOpenChat: @escaping (String) -> Void = { _ in }
     ) {
         self.viewModel = viewModel
-        self.onBack = onBack
         self.onOpenChat = onOpenChat
     }
 
     public var body: some View {
-        NavigationStack {
-            ScrollView {
+        ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
                     if viewModel.repositoryState.requiresReauth {
                         ReauthPanel()
                     } else {
                         sendForm
-                        actionsRow
+                        errorLine
                         inviteSection
                         callLinkSection
                         activeInvitesSection
@@ -60,8 +53,9 @@ public struct ContactsScreen: View {
                         sentSection
                     }
                 }
-                .padding(24)
+                .padding(16)
             }
+            .refreshable { await viewModel.pullToRefresh() }
             .sheet(item: invitePresentationBinding) { wrapper in
                 // `wrapper` is the `IdentifiableInvite` we
                 // adapted around `GeneratedInvite` so SwiftUI's
@@ -89,7 +83,7 @@ public struct ContactsScreen: View {
                 )
             }
             .navigationTitle("Contacts")
-            .navigationBarTitleDisplayMode(.inline)
+            .navigationBarTitleDisplayMode(.large)
             // Foreground continuous polling (1.14e5). SwiftUI's
             // `.task { … }` modifier ties the lifecycle of the
             // task to the view: the `while !Task.isCancelled`
@@ -102,6 +96,9 @@ public struct ContactsScreen: View {
             // dropped connection / catch-up cursor lands on the
             // UI within at most ~30s + a round-trip.
             .task {
+                // The server-side list of live invite links, loaded once per
+                // visit (it used to sit behind a Refresh button).
+                await viewModel.loadActiveInvites()
                 while !Task.isCancelled {
                     await viewModel.pollOnceLongPoll()
                     // No sleep: the long-poll holds the
@@ -114,14 +111,6 @@ public struct ContactsScreen: View {
                     await Task.yield()
                 }
             }
-            .toolbar {
-                ToolbarItem(placement: .navigationBarLeading) {
-                    Button(action: onBack) {
-                        Label("Home", systemImage: "chevron.backward")
-                    }
-                }
-            }
-        }
     }
 
     // MARK: - Sections
@@ -167,27 +156,15 @@ public struct ContactsScreen: View {
         }
     }
 
-    private var actionsRow: some View {
-        HStack {
-            Button(action: viewModel.onRefreshClicked) {
-                HStack {
-                    if viewModel.repositoryState.refreshing {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                    Text("Refresh inbox")
-                }
-            }
-            .buttonStyle(.bordered)
-            .disabled(viewModel.repositoryState.refreshing)
-            Spacer()
-            if let err = viewModel.repositoryState.lastError {
-                Text(err)
-                    .font(.footnote)
-                    .foregroundStyle(.red)
-                    .lineLimit(2)
-            }
+    /// The last receive error, when there is one. Receiving itself is
+    /// automatic (the long-poll loop below plus pull-to-refresh).
+    @ViewBuilder
+    private var errorLine: some View {
+        if let err = viewModel.repositoryState.lastError {
+            Text(err)
+                .font(.footnote)
+                .foregroundStyle(.red)
+                .lineLimit(2)
         }
     }
 
@@ -334,8 +311,8 @@ public struct ContactsScreen: View {
     /// Phase 1.18d2b-list — "Active invites" panel.
     ///
     /// Server-authoritative list of every live invite this owner
-    /// has uploaded across all devices. Refreshed on explicit
-    /// gesture; the local-session ``inviteSection`` above only
+    /// has uploaded across all devices. Loaded when the tab opens and on
+    /// pull-to-refresh; the local-session ``inviteSection`` above only
     /// tracks links generated in the current session.
     @ViewBuilder
     private var activeInvitesSection: some View {
@@ -349,19 +326,9 @@ public struct ContactsScreen: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                Button(action: viewModel.onRefreshActiveInvitesClicked) {
-                    HStack {
-                        if viewModel.loadingActiveInvites {
-                            ProgressView().controlSize(.small)
-                        } else {
-                            Image(systemName: "arrow.clockwise")
-                        }
-                        Text(viewModel.loadingActiveInvites ? "Loading…" : "Refresh")
-                    }
+                if viewModel.loadingActiveInvites {
+                    ProgressView().controlSize(.small)
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .disabled(viewModel.loadingActiveInvites)
             }
 
             if let err = viewModel.activeInvitesError {
@@ -371,7 +338,7 @@ public struct ContactsScreen: View {
             }
 
             if !viewModel.activeInvitesLoaded {
-                Text("Tap Refresh to load your live invites.")
+                Text("Loading...")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             } else if viewModel.activeInvites.isEmpty {
@@ -491,13 +458,9 @@ private struct AcceptedContactRow: View {
                     }
                 }
                 if entry.groupIdHex == nil {
-                    Text("Chat creation failed — retry from Chats")
+                    Text("Chat not set up yet")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
-                } else {
-                    Text("Chat ready")
-                        .font(.footnote)
-                        .foregroundStyle(.green)
                 }
             }
             Spacer()
@@ -681,14 +644,9 @@ private struct ActiveInviteRow: View {
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
             VStack(alignment: .leading, spacing: 4) {
-                Text(row.label.isEmpty ? "(unlabelled)" : row.label)
+                Text(row.label.isEmpty ? "Invite link" : row.label)
                     .font(.body)
                 HStack(spacing: 6) {
-                    Text(row.blobIdSlug.prefix(16) + "…")
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                    Text("·")
-                        .foregroundStyle(.secondary)
                     Text(expiryCopy)
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -753,11 +711,7 @@ private struct ReauthPanel: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Re-enter your password")
                 .font(.headline)
-            Text(
-                "Sending and reading contact requests needs the in-memory " +
-                "export key from your last login. Log out and log back in " +
-                "to repopulate it."
-            )
+            Text("Log out and log back in to send and receive contact requests.")
             .font(.body)
             .foregroundStyle(.secondary)
         }

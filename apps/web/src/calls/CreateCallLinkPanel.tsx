@@ -4,8 +4,8 @@
 /**
  * "Create call link" — mints a `/c/` call-invite link (ADR-0032).
  *
- * A call link is independent of any chat, so this lives under Calls rather
- * than in a chat header. The owner shares the link and hosts the call from the
+ * A call link is independent of any chat, so this lives in the Contacts add
+ * menu rather than in a chat header. The owner shares the link and hosts the call from the
  * `/c/<slug>` landing ("Start call" navigates there; `JoinCall.tsx` asks the
  * app-level call host to found and host when the visitor is the capability
  * owner, so the call survives leaving that screen). Anyone holding the link
@@ -19,6 +19,7 @@ import { useNavigate } from "@solidjs/router";
 
 import { useAuth } from "../auth/AuthContext";
 import { useChats } from "../chat/ChatContext";
+import { Icon } from "../ui/icons";
 import { useCallHost } from "./CallHostContext";
 import { DiscoveryClient } from "../discovery/client";
 import { composeAndUploadCallInvite } from "./composer";
@@ -133,22 +134,34 @@ export default function CreateCallLinkPanel(): JSX.Element {
       <Show
         when={link() === null}
         fallback={
-          <div>
-            <label style={{ display: "block", "margin-bottom": "0.6rem" }}>
-              <span>Call link</span>
-              <input
-                type="text"
-                readonly
-                value={link() ?? ""}
-                onFocus={(e) => e.currentTarget.select()}
-                style={{ width: "100%", "margin-top": "0.25rem" }}
-              />
-            </label>
-            {error() !== null && <div class="form-error">{error()}</div>}
-            <div style={{ display: "flex", gap: "0.5rem", "flex-wrap": "wrap" }}>
-              <button type="button" onClick={() => void onCopy()}>
-                {copied() ? "Copied" : "Copy"}
+          <div class="lk-stack" style={{ gap: "10px" }}>
+            <div class="lk-link-row" role="group" aria-label="Call link">
+              <span class="lk-link-text" title={link() ?? ""}>
+                {(link() ?? "").replace(/^https?:\/\//, "")}
+              </span>
+              <button
+                type="button"
+                class="lk-icon-button"
+                title={copied() ? "Copied" : "Copy link"}
+                aria-label={copied() ? "Copied" : "Copy link"}
+                onClick={() => void onCopy()}
+              >
+                <Icon name={copied() ? "check" : "copy"} size={16} />
               </button>
+              <Show when={typeof navigator !== "undefined" && typeof navigator.share === "function"}>
+                <button
+                  type="button"
+                  class="lk-icon-button"
+                  title="Share"
+                  aria-label="Share"
+                  onClick={() => void navigator.share({ url: link() ?? "" }).catch(() => undefined)}
+                >
+                  <Icon name="share" size={16} />
+                </button>
+              </Show>
+            </div>
+            {error() !== null && <div class="form-error">{error()}</div>}
+            <div class="lk-actions">
               <button class="primary" type="button" onClick={onStart}>
                 Start call
               </button>

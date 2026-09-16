@@ -17,7 +17,12 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -79,10 +84,10 @@ import me.lakko.app.profile.requestCardTitle
  * navigates into Contacts we kick off one auto-refresh via
  * [LaunchedEffect], then they refresh by tapping the button.
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 public fun ContactsScreen(
     viewModel: ContactsViewModel,
-    onNavigateBack: () -> Unit,
     /** Called when the user taps an accepted contact's "Open
      *  chat" affordance. The parent route navigates to the 1×1
      *  ChatScreen for the given group. `null` when 1.15f4c's
@@ -139,18 +144,25 @@ public fun ContactsScreen(
         )
     }
 
-    Column(
-        modifier = modifier
+    Scaffold(
+        modifier = modifier,
+        topBar = { TopAppBar(title = { Text("Contacts") }) },
+    ) { padding ->
+    // Receiving is automatic (the long poll above); pull-to-refresh runs the
+    // same inbox poll once, as the platform gesture users expect.
+    PullToRefreshBox(
+        isRefreshing = state.refreshing,
+        onRefresh = viewModel::onRefreshClicked,
+        modifier = Modifier
             .fillMaxSize()
-            .padding(16.dp),
+            .padding(padding),
     ) {
-        Header(
-            onNavigateBack = onNavigateBack,
-            refreshing = state.refreshing,
-            onRefresh = viewModel::onRefreshClicked,
-        )
-        Spacer(Modifier.height(8.dp))
-
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .imePadding()
+            .padding(horizontal = 16.dp),
+    ) {
         if (state.requiresReauth) {
             ReauthPanel()
             return@Column
@@ -240,43 +252,7 @@ public fun ContactsScreen(
             Spacer(Modifier.height(32.dp))
         }
     }
-}
-
-// =============================================================================
-// Header
-// =============================================================================
-
-@Composable
-private fun Header(
-    onNavigateBack: () -> Unit,
-    refreshing: Boolean,
-    onRefresh: () -> Unit,
-) {
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        TextButton(onClick = onNavigateBack) {
-            Text("← Back")
-        }
-        Spacer(Modifier.width(8.dp))
-        Text(
-            text = "Contacts",
-            style = MaterialTheme.typography.titleLarge,
-            modifier = Modifier.weight(1f),
-        )
-        if (refreshing) {
-            CircularProgressIndicator(
-                modifier = Modifier
-                    .height(20.dp)
-                    .width(20.dp),
-                strokeWidth = 2.dp,
-            )
-        } else {
-            TextButton(onClick = onRefresh) {
-                Text("Refresh")
-            }
-        }
+    }
     }
 }
 
@@ -299,8 +275,7 @@ private fun ReauthPanel() {
         )
         Spacer(Modifier.height(8.dp))
         Text(
-            text = "Contacts require your in-memory identity key. Log out and " +
-                "log back in to refresh it.",
+            text = "Log out and log back in to load your contacts.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -632,22 +607,22 @@ private fun ActiveInvitesSection(
         title = "Active invites",
         count = if (loaded) invites.size else 0,
     )
+    // Loads itself the first time the section shows; there is no Refresh
+    // button (redesign principle 3). A failure offers Try again.
+    LaunchedEffect(Unit) {
+        if (!loaded && !loading) onRefreshClicked()
+    }
     Spacer(Modifier.height(8.dp))
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Button(
-            onClick = onRefreshClicked,
-            enabled = !loading,
-        ) {
-            if (loading) {
-                CircularProgressIndicator(
-                    modifier = Modifier
-                        .height(18.dp)
-                        .width(18.dp),
-                    strokeWidth = 2.dp,
-                )
-                Spacer(Modifier.width(8.dp))
-            }
-            Text(if (loading) "Loading…" else "Refresh")
+    if (loading) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            CircularProgressIndicator(
+                modifier = Modifier
+                    .height(18.dp)
+                    .width(18.dp),
+                strokeWidth = 2.dp,
+            )
+            Spacer(Modifier.width(8.dp))
+            Text("Loading...", style = MaterialTheme.typography.bodySmall)
         }
     }
     if (error != null) {
@@ -657,10 +632,11 @@ private fun ActiveInvitesSection(
             color = MaterialTheme.colorScheme.error,
             style = MaterialTheme.typography.bodySmall,
         )
+        TextButton(onClick = onRefreshClicked, enabled = !loading) { Text("Try again") }
     }
     Spacer(Modifier.height(8.dp))
     if (!loaded) {
-        EmptyHint("Tap Refresh to load your live invites.")
+        if (!loading && error == null) EmptyHint("Loading...")
     } else if (invites.isEmpty()) {
         EmptyHint("No live invites — every link has been revoked or expired.")
     } else {

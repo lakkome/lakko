@@ -21,7 +21,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -29,6 +29,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -98,15 +99,6 @@ import java.util.TimeZone
  * Same palette + flow as the iOS / web sides.
  */
 
-private object Theme {
-    val background = Color(0xFF0F0F0F)
-    val surface = Color(0xFF1A1A1A)
-    val border = Color(0xFF2A2A2A)
-    val textPrimary = Color(0xFFFAFAFA)
-    val textSecondary = Color(0xFFA1A1AA)
-    val accent = Color(0xFF3B82F6)
-    val destructive = Color(0xFFDC2626)
-}
 
 private sealed class Route {
     object List : Route()
@@ -160,11 +152,13 @@ public fun ChannelsRootScreen(
     /** Back to the host (the app Home surface). Wired into the list
      *  screen's top-bar back arrow, matching the Contacts / Devices
      *  navigation idiom so the Channels entry is not a dead-end. */
-    onBack: () -> Unit,
+    onBack: (() -> Unit)? = null,
     state: ChannelsUiState = rememberChannelsUiState(),
     client: ChannelsClient = remember { ChannelsClient() },
 ) {
     var route by remember { mutableStateOf<Route>(Route.List) }
+    // System back leaves a nested channel screen for the list.
+    androidx.activity.compose.BackHandler(enabled = route != Route.List) { route = Route.List }
     when (val r = route) {
         Route.List -> ChannelsListScreen(
             state = state,
@@ -222,7 +216,7 @@ private fun ChannelsListScreen(
     /** G4-5: navigate to the subscriber route for a resolved 32-char
      *  hex channel id (from a typed `@handle` or a pasted raw id). */
     onFindSubscribe: (String) -> Unit,
-    onBack: () -> Unit,
+    onBack: (() -> Unit)?,
 ) {
     val channels by state.channels.collectAsState()
     // G4-5: subscribe entry point. Accepts EITHER a typed `@handle`
@@ -260,31 +254,33 @@ private fun ChannelsListScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Channels", color = Theme.textPrimary) },
+                title = { Text("Channels", color = MaterialTheme.colorScheme.onSurface) },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.Default.ArrowBack, "Back", tint = Theme.textPrimary)
+                    if (onBack != null) {
+                        IconButton(onClick = onBack) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = MaterialTheme.colorScheme.onSurface)
+                        }
                     }
                 },
                 actions = {
                     TextButton(onClick = onJoin) {
-                        Text("Join", color = Theme.accent)
+                        Text("Join", color = MaterialTheme.colorScheme.primary)
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = Theme.background,
+                    containerColor = MaterialTheme.colorScheme.background,
                 ),
             )
         },
         floatingActionButton = {
             FloatingActionButton(
                 onClick = onCreate,
-                containerColor = Theme.accent,
+                containerColor = MaterialTheme.colorScheme.primary,
             ) {
-                Icon(Icons.Default.Add, "New channel", tint = Color.White)
+                Icon(Icons.Default.Add, "New channel", tint = MaterialTheme.colorScheme.onPrimary)
             }
         },
-        containerColor = Theme.background,
+        containerColor = MaterialTheme.colorScheme.background,
     ) { inner ->
         Column(
             modifier = Modifier
@@ -311,12 +307,12 @@ private fun ChannelsListScreen(
                     modifier = Modifier.fillMaxWidth(),
                 )
                 findError?.let { msg ->
-                    Text(msg, color = Theme.destructive, fontSize = 13.sp)
+                    Text(msg, color = MaterialTheme.colorScheme.error, fontSize = 13.sp)
                 }
                 Button(
                     onClick = { runFind() },
                     enabled = !findBusy && findInput.trim().isNotEmpty(),
-                    colors = ButtonDefaults.buttonColors(containerColor = Theme.accent),
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text(if (findBusy) "Finding…" else "Find & subscribe")
@@ -334,13 +330,13 @@ private fun ChannelsListScreen(
                 ) {
                     Text(
                         "No channels yet.",
-                        color = Theme.textSecondary,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                         fontSize = 16.sp,
                     )
                     Spacer(Modifier.height(6.dp))
                     Text(
                         "Tap + to create one, or find one above.",
-                        color = Theme.textSecondary,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                         fontSize = 14.sp,
                     )
                 }
@@ -367,20 +363,20 @@ private fun ChannelRow(channel: ChannelHandle, onClick: () -> Unit) {
         modifier = Modifier
             .fillMaxWidth()
             .padding(vertical = 4.dp),
-        colors = CardDefaults.cardColors(containerColor = Theme.surface),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         onClick = onClick,
     ) {
         Column(Modifier.padding(14.dp)) {
             Text(
                 channel.localName.ifEmpty { "(unnamed)" },
-                color = Theme.textPrimary,
+                color = MaterialTheme.colorScheme.onSurface,
                 fontWeight = FontWeight.SemiBold,
             )
             if (channel.localDescription.isNotEmpty()) {
                 Spacer(Modifier.height(4.dp))
                 Text(
                     channel.localDescription,
-                    color = Theme.textSecondary,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontSize = 13.sp,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
@@ -389,7 +385,7 @@ private fun ChannelRow(channel: ChannelHandle, onClick: () -> Unit) {
             Spacer(Modifier.height(6.dp))
             Text(
                 "${channel.id.take(8)}…${channel.id.takeLast(8)}",
-                color = Theme.textSecondary,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontSize = 12.sp,
                 fontFamily = FontFamily.Monospace,
             )
@@ -425,18 +421,18 @@ private fun NewChannelScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("New channel", color = Theme.textPrimary) },
+                title = { Text("New channel", color = MaterialTheme.colorScheme.onSurface) },
                 navigationIcon = {
                     IconButton(onClick = onClose) {
-                        Icon(Icons.Default.ArrowBack, "Back", tint = Theme.textPrimary)
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = MaterialTheme.colorScheme.onSurface)
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = Theme.background,
+                    containerColor = MaterialTheme.colorScheme.background,
                 ),
             )
         },
-        containerColor = Theme.background,
+        containerColor = MaterialTheme.colorScheme.background,
     ) { inner ->
         Column(
             modifier = Modifier
@@ -472,12 +468,12 @@ private fun NewChannelScreen(
             Text(
                 "A public handle lets others find this channel by @name. " +
                     "Leave blank to share the channel id only.",
-                color = Theme.textSecondary,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontSize = 12.sp,
             )
             error?.let { msg ->
                 Card(
-                    colors = CardDefaults.cardColors(containerColor = Theme.destructive),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.error),
                 ) {
                     Text(
                         msg,
@@ -568,7 +564,7 @@ private fun NewChannelScreen(
                     }
                 },
                 enabled = !busy && name.trim().isNotEmpty(),
-                colors = ButtonDefaults.buttonColors(containerColor = Theme.accent),
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text(if (busy) "Creating…" else "Create")
@@ -654,20 +650,20 @@ private fun ChannelDetailScreen(
                 title = {
                     Text(
                         channel?.localName?.ifEmpty { "(channel)" } ?: "(channel)",
-                        color = Theme.textPrimary,
+                        color = MaterialTheme.colorScheme.onSurface,
                     )
                 },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.Default.ArrowBack, "Back", tint = Theme.textPrimary)
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = MaterialTheme.colorScheme.onSurface)
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = Theme.background,
+                    containerColor = MaterialTheme.colorScheme.background,
                 ),
             )
         },
-        containerColor = Theme.background,
+        containerColor = MaterialTheme.colorScheme.background,
     ) { inner ->
         Column(
             modifier = Modifier
@@ -677,23 +673,8 @@ private fun ChannelDetailScreen(
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            Text(
-                channelId,
-                color = Theme.textSecondary,
-                fontFamily = FontFamily.Monospace,
-                fontSize = 12.sp,
-            )
             channel?.localDescription?.takeIf { it.isNotEmpty() }?.let {
-                Text(it, color = Theme.textSecondary, fontSize = 14.sp)
-            }
-            Row {
-                Text("Server epoch: ", color = Theme.textSecondary, fontSize = 13.sp)
-                Text(
-                    "$epoch",
-                    color = Theme.textPrimary,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 13.sp,
-                )
+                Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp)
             }
 
             if (keys != null) {
@@ -781,14 +762,14 @@ private fun ChannelDetailScreen(
 
             Text(
                 "Posts",
-                color = Theme.textPrimary,
+                color = MaterialTheme.colorScheme.onSurface,
                 fontWeight = FontWeight.SemiBold,
                 fontSize = 16.sp,
             )
             if (posts.isEmpty()) {
                 Text(
                     if (loading) "Loading…" else "No posts yet. Publish the first one above.",
-                    color = Theme.textSecondary,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             } else {
                 for (post in posts) {
@@ -820,13 +801,13 @@ private fun ComposerSection(
             Button(
                 onClick = onPublish,
                 enabled = !busy && composeText.trim().isNotEmpty(),
-                colors = ButtonDefaults.buttonColors(containerColor = Theme.accent),
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
             ) {
                 Text(if (busy) "Publishing…" else "Publish")
             }
         }
         error?.let { msg ->
-            Card(colors = CardDefaults.cardColors(containerColor = Theme.destructive)) {
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.error)) {
                 Text(
                     msg,
                     color = Color.White,
@@ -841,13 +822,13 @@ private fun ComposerSection(
 @Composable
 private fun SubscriberPlaceholderSection(onOpenSubscribe: () -> Unit) {
     Card(
-        colors = CardDefaults.cardColors(containerColor = Theme.surface),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         shape = RoundedCornerShape(8.dp),
     ) {
         Column(Modifier.padding(12.dp)) {
             Text(
                 "No local publisher keys for this channel — you cannot publish to it from this device.",
-                color = Theme.textSecondary,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontSize = 13.sp,
             )
             Spacer(Modifier.height(8.dp))
@@ -857,7 +838,7 @@ private fun SubscriberPlaceholderSection(onOpenSubscribe: () -> Unit) {
             ) {
                 Text(
                     "Read as a subscriber →",
-                    color = Theme.accent,
+                    color = MaterialTheme.colorScheme.primary,
                     fontSize = 13.sp,
                 )
             }
@@ -887,7 +868,7 @@ private sealed interface PostRender {
 private fun PostRow(post: PostView, render: PostRender?) {
     Card(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = Theme.surface),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         shape = RoundedCornerShape(8.dp),
     ) {
         Column(Modifier.padding(12.dp)) {
@@ -896,41 +877,34 @@ private fun PostRow(post: PostView, render: PostRender?) {
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 Text(
-                    "cursor ${post.cursor}",
-                    color = Theme.textSecondary,
-                    fontSize = 12.sp,
-                    fontFamily = FontFamily.Monospace,
-                )
-                Text(
                     isoTimestamp(post.serverTsMs.toLong()),
-                    color = Theme.textSecondary,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontSize = 12.sp,
-                    fontFamily = FontFamily.Monospace,
                 )
             }
             Spacer(Modifier.height(6.dp))
             when (render) {
                 null -> Text(
                     "Decoding…",
-                    color = Theme.textSecondary,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontStyle = FontStyle.Italic,
                     fontSize = 13.sp,
                 )
                 PostRender.Unreadable -> Text(
-                    "[unreadable — wrong seed, tampered ciphertext, or another publisher's signing key]",
-                    color = Theme.textSecondary,
+                    "Not available. This post could not be opened on this device.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontStyle = FontStyle.Italic,
                     fontSize = 13.sp,
                 )
                 PostRender.OlderKeyWindow -> Text(
-                    "[message from an older key window — no longer available]",
-                    color = Theme.textSecondary,
+                    "Not available. This post is older than the keys this device holds.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontStyle = FontStyle.Italic,
                     fontSize = 13.sp,
                 )
                 is PostRender.Plain -> Text(
                     render.value,
-                    color = Theme.textPrimary,
+                    color = MaterialTheme.colorScheme.onSurface,
                     fontSize = 14.sp,
                 )
             }
@@ -1005,7 +979,7 @@ private fun SubscribersPanel(
         try {
             val parsed = hexToBytesOrNull(pubkeyHex)
             if (parsed == null) {
-                if (trigger == "manual") error = "Bad subscriber pubkey hex."
+                if (trigger == "manual") error = "This subscriber entry is not valid."
                 statusByPk[pubkeyHex] = "failed"
                 return
             }
@@ -1060,7 +1034,7 @@ private fun SubscribersPanel(
 
     Card(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = Theme.surface),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         shape = RoundedCornerShape(8.dp),
     ) {
         Column(Modifier.padding(12.dp)) {
@@ -1070,31 +1044,20 @@ private fun SubscribersPanel(
             ) {
                 Text(
                     "Subscribers",
-                    color = Theme.textPrimary,
+                    color = MaterialTheme.colorScheme.onSurface,
                     fontWeight = FontWeight.SemiBold,
                     fontSize = 15.sp,
                 )
                 Spacer(Modifier.width(6.dp))
                 Text(
                     "(${subscribers?.size?.toString() ?: "…"})",
-                    color = Theme.textSecondary,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontSize = 14.sp,
                 )
-                Spacer(Modifier.fillMaxWidth().weight(1f))
-                TextButton(
-                    onClick = { scope.launch { refresh() } },
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                ) {
-                    Text(
-                        "Refresh",
-                        color = Theme.textSecondary,
-                        fontSize = 12.sp,
-                    )
-                }
             }
             error?.let { msg ->
                 Spacer(Modifier.height(6.dp))
-                Card(colors = CardDefaults.cardColors(containerColor = Theme.destructive)) {
+                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.error)) {
                     Text(
                         msg,
                         color = Color.White,
@@ -1109,7 +1072,7 @@ private fun SubscribersPanel(
                     Spacer(Modifier.height(6.dp))
                     Text(
                         "Loading subscribers…",
-                        color = Theme.textSecondary,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                         fontSize = 12.sp,
                     )
                 }
@@ -1117,7 +1080,7 @@ private fun SubscribersPanel(
                     Spacer(Modifier.height(6.dp))
                     Text(
                         "No subscribers yet. Anyone with the channel id can open the subscribe screen and register their X25519 public key.",
-                        color = Theme.textSecondary,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                         fontSize = 12.sp,
                     )
                 }
@@ -1149,7 +1112,7 @@ private fun SubscriberRow(
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = Theme.background),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.background),
         shape = RoundedCornerShape(6.dp),
     ) {
         Row(
@@ -1160,7 +1123,7 @@ private fun SubscriberRow(
         ) {
             Text(
                 pubkeyHex,
-                color = Theme.textSecondary,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontFamily = FontFamily.Monospace,
                 fontSize = 11.sp,
                 maxLines = 1,
@@ -1170,10 +1133,10 @@ private fun SubscriberRow(
             Spacer(Modifier.width(6.dp))
             status?.let { s ->
                 val (label, color) = when (s) {
-                    "delivered" -> "delivered" to Theme.accent
-                    "auto"      -> "auto-delivered" to Theme.accent
-                    "failed"    -> "failed" to Theme.destructive
-                    else        -> s to Theme.textSecondary
+                    "delivered" -> "delivered" to MaterialTheme.colorScheme.primary
+                    "auto"      -> "auto-delivered" to MaterialTheme.colorScheme.primary
+                    "failed"    -> "failed" to MaterialTheme.colorScheme.error
+                    else        -> s to MaterialTheme.colorScheme.onSurfaceVariant
                 }
                 Text(
                     label,
@@ -1185,7 +1148,7 @@ private fun SubscriberRow(
             Button(
                 onClick = onDeliver,
                 enabled = !busy,
-                colors = ButtonDefaults.buttonColors(containerColor = Theme.accent),
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
             ) {
                 Text(
@@ -1429,18 +1392,18 @@ private fun ChannelSubscribeScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Subscribe", color = Theme.textPrimary) },
+                title = { Text("Subscribe", color = MaterialTheme.colorScheme.onSurface) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.Default.ArrowBack, "Back", tint = Theme.textPrimary)
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = MaterialTheme.colorScheme.onSurface)
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = Theme.background,
+                    containerColor = MaterialTheme.colorScheme.background,
                 ),
             )
         },
-        containerColor = Theme.background,
+        containerColor = MaterialTheme.colorScheme.background,
     ) { inner ->
         Column(
             modifier = Modifier
@@ -1452,7 +1415,7 @@ private fun ChannelSubscribeScreen(
         ) {
             Text(
                 channelId,
-                color = Theme.textSecondary,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontFamily = FontFamily.Monospace,
                 fontSize = 12.sp,
             )
@@ -1460,19 +1423,19 @@ private fun ChannelSubscribeScreen(
             keys?.let { kp ->
                 Card(
                     modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(containerColor = Theme.surface),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                     shape = RoundedCornerShape(8.dp),
                 ) {
                     Column(Modifier.padding(12.dp)) {
                         Text(
                             "Your subscriber public key (registered on this channel):",
-                            color = Theme.textSecondary,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                             fontSize = 12.sp,
                         )
                         Spacer(Modifier.height(4.dp))
                         Text(
                             ChannelsComposer.bytesToHex(kp.publicKey),
-                            color = Theme.textPrimary,
+                            color = MaterialTheme.colorScheme.onSurface,
                             fontFamily = FontFamily.Monospace,
                             fontSize = 11.sp,
                             maxLines = 2,
@@ -1484,17 +1447,17 @@ private fun ChannelSubscribeScreen(
 
             val (statusText, statusColor) = when (bootstrap) {
                 SubscribeBootstrap.Idle, SubscribeBootstrap.Registering ->
-                    "Registering your key on the channel…" to Theme.textSecondary
+                    "Registering your key on the channel…" to MaterialTheme.colorScheme.onSurfaceVariant
                 SubscribeBootstrap.Polling ->
-                    "Registered. Waiting for the publisher to fan out a seed envelope… (auto-refreshes every 3 s)" to Theme.textSecondary
+                    "Registered. Waiting for the publisher to fan out a seed envelope… (auto-refreshes every 3 s)" to MaterialTheme.colorScheme.onSurfaceVariant
                 SubscribeBootstrap.Active ->
-                    "Seed envelope opened. You can read posts on this channel." to Theme.accent
+                    "Seed envelope opened. You can read posts on this channel." to MaterialTheme.colorScheme.primary
                 SubscribeBootstrap.ErrorState ->
-                    (bootstrapError ?: "Unknown error.") to Theme.destructive
+                    (bootstrapError ?: "Unknown error.") to MaterialTheme.colorScheme.error
             }
             Card(
                 modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = Theme.surface),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                 shape = RoundedCornerShape(8.dp),
             ) {
                 Text(
@@ -1507,7 +1470,7 @@ private fun ChannelSubscribeScreen(
 
             Text(
                 "Posts",
-                color = Theme.textPrimary,
+                color = MaterialTheme.colorScheme.onSurface,
                 fontWeight = FontWeight.SemiBold,
                 fontSize = 16.sp,
             )
@@ -1519,15 +1482,15 @@ private fun ChannelSubscribeScreen(
                 }
                 bootstrap == SubscribeBootstrap.Active -> Text(
                     "No posts yet on this channel.",
-                    color = Theme.textSecondary,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 bootstrap == SubscribeBootstrap.Polling -> Text(
                     "Waiting for the publisher to deliver your seed.",
-                    color = Theme.textSecondary,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 else -> Text(
                     "Bootstrapping the subscribe flow…",
-                    color = Theme.textSecondary,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
             Spacer(Modifier.height(16.dp))
@@ -1603,7 +1566,7 @@ private fun RotationSection(
                 channelIdHex = channelIdHex,
                 channelsClient = client,
                 saveState = { next -> state = next },
-                onRotated = { epoch -> status = "Scheduled rotation — new server epoch $epoch." },
+                onRotated = { _ -> status = "Keys rotated on schedule." },
             ).start(
                 scope = scope,
                 policy = policy,
@@ -1618,19 +1581,19 @@ private fun RotationSection(
 
     Card(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = Theme.surface),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         shape = RoundedCornerShape(8.dp),
     ) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text(
                 "Content-key rotation",
-                color = Theme.textPrimary,
+                color = MaterialTheme.colorScheme.onSurface,
                 fontWeight = FontWeight.SemiBold,
             )
             Text(
-                "Rotate the channel content key now — advances the MLS epoch and " +
-                    "reseals the new seed to every subscriber (backward secrecy).",
-                color = Theme.textSecondary,
+                "Rotate the channel key now. Subscribers receive the new key " +
+                    "automatically; posts made before stay readable only for them.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontSize = 12.sp,
             )
             Button(
@@ -1666,7 +1629,7 @@ private fun RotationSection(
                             )
                             state = result.newState
                             status = if (result.rotated) {
-                                "Rotated — new server epoch ${result.newEpoch}."
+                                "Keys rotated."
                             } else {
                                 "No rotation needed."
                             }
@@ -1678,13 +1641,13 @@ private fun RotationSection(
                     }
                 },
                 enabled = !busy && publisherGroup != null,
-                colors = ButtonDefaults.buttonColors(containerColor = Theme.accent),
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
             ) {
                 Text(if (busy) "Rotating…" else "Rotate now", color = Color.White)
             }
-            status?.let { Text(it, color = Theme.textSecondary, fontSize = 12.sp) }
+            status?.let { Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp) }
             (openError ?: error)?.let {
-                Text(it, color = Theme.destructive, fontSize = 12.sp)
+                Text(it, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
             }
         }
     }
@@ -1736,18 +1699,18 @@ private fun CoPublishersPanel(
 
     Card(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = Theme.surface),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         shape = RoundedCornerShape(8.dp),
     ) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text(
                 "Co-publishers",
-                color = Theme.textPrimary,
+                color = MaterialTheme.colorScheme.onSurface,
                 fontWeight = FontWeight.SemiBold,
             )
             Text(
                 "Invite another device or person to publish to this channel.",
-                color = Theme.textSecondary,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontSize = 12.sp,
             )
             Button(
@@ -1768,14 +1731,14 @@ private fun CoPublishersPanel(
                     }
                 },
                 enabled = !busy && publisherGroup != null,
-                colors = ButtonDefaults.buttonColors(containerColor = Theme.accent),
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
             ) { Text("Create co-publisher link", color = Color.White) }
 
             link?.let {
                 SelectionContainer {
                     Text(
                         it,
-                        color = Theme.textSecondary,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                         fontFamily = FontFamily.Monospace,
                         fontSize = 12.sp,
                     )
@@ -1785,14 +1748,14 @@ private fun CoPublishersPanel(
             if (pending.isNotEmpty()) {
                 Text(
                     "Requests (${pending.size})",
-                    color = Theme.textPrimary,
+                    color = MaterialTheme.colorScheme.onSurface,
                     fontWeight = FontWeight.SemiBold,
                 )
                 for (ref in pending) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
                             shortHex(ref),
-                            color = Theme.textSecondary,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                             fontFamily = FontFamily.Monospace,
                             fontSize = 12.sp,
                             modifier = Modifier.weight(1f),
@@ -1816,7 +1779,7 @@ private fun CoPublishersPanel(
                                 }
                             },
                             enabled = !busy,
-                        ) { Text("Approve", color = Theme.accent) }
+                        ) { Text("Approve", color = MaterialTheme.colorScheme.primary) }
                         TextButton(
                             onClick = {
                                 val pg = publisherGroup ?: return@TextButton
@@ -1830,13 +1793,13 @@ private fun CoPublishersPanel(
                                 }
                             },
                             enabled = !busy,
-                        ) { Text("Reject", color = Theme.destructive) }
+                        ) { Text("Reject", color = MaterialTheme.colorScheme.error) }
                     }
                 }
             }
 
             (openError ?: error)?.let {
-                Text(it, color = Theme.destructive, fontSize = 12.sp)
+                Text(it, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
             }
         }
     }
@@ -1879,18 +1842,18 @@ private fun JoinCoPublisherScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Join as co-publisher", color = Theme.textPrimary) },
+                title = { Text("Join as co-publisher", color = MaterialTheme.colorScheme.onSurface) },
                 navigationIcon = {
                     IconButton(onClick = onClose) {
-                        Icon(Icons.Default.ArrowBack, "Back", tint = Theme.textPrimary)
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = MaterialTheme.colorScheme.onSurface)
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = Theme.background,
+                    containerColor = MaterialTheme.colorScheme.background,
                 ),
             )
         },
-        containerColor = Theme.background,
+        containerColor = MaterialTheme.colorScheme.background,
     ) { inner ->
         Column(
             modifier = Modifier
@@ -1917,7 +1880,7 @@ private fun JoinCoPublisherScreen(
             Text(
                 "The channel owner shares a co-publisher link. After they approve " +
                     "your request, this device can publish to the channel.",
-                color = Theme.textSecondary,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontSize = 13.sp,
             )
             Button(
@@ -1981,12 +1944,12 @@ private fun JoinCoPublisherScreen(
                     }
                 },
                 enabled = !busy && link.trim().isNotEmpty(),
-                colors = ButtonDefaults.buttonColors(containerColor = Theme.accent),
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
             ) { Text(if (busy) "Requesting…" else "Request", color = Color.White) }
 
-            status?.let { Text(it, color = Theme.textSecondary, fontSize = 13.sp) }
+            status?.let { Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp) }
             error?.let { msg ->
-                Card(colors = CardDefaults.cardColors(containerColor = Theme.destructive)) {
+                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.error)) {
                     Text(
                         msg,
                         color = Color.White,

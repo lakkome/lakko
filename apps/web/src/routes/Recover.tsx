@@ -1128,9 +1128,9 @@ function SharesField(props: {
         }}
       />
       <small style={{ color: "var(--surface-muted)" }}>
-        Paste at least the threshold number of shares (default
-        Lakko config is 3-of-5). Each share is one line of the
-        form <code>&lt;index&gt;:&lt;base64&gt;</code>.
+        Paste the shares your guardians gave you, one per line, exactly as
+        they were sent. You need at least the number agreed when they were
+        created (usually 3 of 5).
       </small>
     </label>
   );

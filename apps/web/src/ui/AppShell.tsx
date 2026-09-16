@@ -3,12 +3,14 @@
 
 /**
  * Persistent shell for authenticated routes: the navigation rail on the left
- * (Chats · Contacts · Channels · Calls · Settings, the design system's five
- * destinations) and a main pane that renders the active route via
- * `<Outlet />`. On a narrow screen the rail becomes a bottom tab bar.
+ * (Chats · Groups · Channels · Contacts · Settings, the five destinations of
+ * docs/ux/client-redesign.md section 3) and a main pane that renders the
+ * active route via `<Outlet />`. Below 720 px the rail becomes a bottom tab
+ * bar.
  *
  * Session actions (log out, forget this device, theme, media preferences)
- * live under Settings, not here: the rail is navigation only.
+ * live under Settings, not here: the rail is navigation only. Call links live
+ * in the Contacts add menu and the chat header; there is no Calls destination.
  */
 import type { JSX } from "solid-js";
 import { A, useLocation, useNavigate } from "@solidjs/router";
@@ -20,9 +22,9 @@ import { Icon, type IconName } from "./icons";
 
 const ITEMS: ReadonlyArray<{ href: string; label: string; icon: IconName; prefix: string[] }> = [
   { href: paths.home, label: "Chats", icon: "chat", prefix: ["/chat/"] },
-  { href: paths.contacts, label: "Contacts", icon: "contacts", prefix: [] },
+  { href: paths.groups, label: "Groups", icon: "groups", prefix: [] },
   { href: paths.channels, label: "Channels", icon: "channels", prefix: [] },
-  { href: paths.calls, label: "Calls", icon: "calls", prefix: ["/call/"] },
+  { href: paths.contacts, label: "Contacts", icon: "contacts", prefix: [] },
   { href: paths.settings, label: "Settings", icon: "settings", prefix: ["/devices"] },
 ];
 

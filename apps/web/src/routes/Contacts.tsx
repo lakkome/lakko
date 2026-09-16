@@ -13,9 +13,8 @@
  *   2. **Pending** — in memory only (no persistence; intro
  *      plaintext stays out of localStorage), held by the
  *      session-wide `<MailboxProvider>` whose long-poll loop fills
- *      it automatically. The "Refresh" button asks the same
- *      provider for an immediate fetch. Each row has Accept /
- *      Decline buttons.
+ *      it automatically; there is no manual refresh. Each row has
+ *      Accept / Decline buttons.
  *   3. **Accepted** — local address book (public-key shaped),
  *      persisted in `contacts/local-store.ts`.
  *
@@ -31,6 +30,7 @@ import {
   createSignal,
   For,
   on,
+  onMount,
   Show,
   type JSX,
 } from "solid-js";
@@ -44,6 +44,7 @@ import {
 } from "../auth/account-id";
 import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
+import CreateCallLinkPanel from "../calls/CreateCallLinkPanel";
 import {
   ContactsClient,
   ContactsError,
@@ -203,10 +204,7 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
         group: result.group,
       });
       profiles.groupJoined(active.groupIdB64);
-      setSendNotice(
-        `Group started with @${result.recipientUsername} ` +
-          `(Welcome shipped, DS id ${result.welcomeMessageId}).`,
-      );
+      setSendNotice(`Chat started with @${result.recipientUsername}.`);
       setSearchInput("");
       setIntroInput("");
     } catch (err) {
@@ -220,10 +218,9 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
   // Owned by the session-wide `<MailboxProvider>`: its long-poll loop
   // dispatches requests into this list, acks into the address book and
   // Welcomes into joined groups, whether or not this route is mounted.
-  // The Refresh button only asks it for an immediate fetch.
   const mailbox = useMailbox();
   // Errors from this route's own Accept path (group creation), shown in the
-  // same slot as a failed manual refresh.
+  // same slot as a failed poll.
   const [acceptError, setAcceptError] = createSignal<string | null>(null);
 
   // ---- active MLS groups ---------------------------------------
@@ -273,8 +270,7 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
     // format — surface a clean error for legacy senders.
     if (req.fromAccountId === null) {
       setAcceptError(
-        "this is a legacy v1 contact request — group creation " +
-          "needs the sender to upgrade to a 1.16e3b+ client",
+        "This request came from an older version of Lakko. Ask them to update and send it again.",
       );
       return;
     }
@@ -334,7 +330,10 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
 
   // ---- layout: the list pane + the detail / add pane ----------------
   const [selectedKey, setSelectedKey] = createSignal<string | null>(null);
-  const [adding, setAdding] = createSignal(false);
+  // The add menu's pick (docs/ux section 5.3): add by username, the invite
+  // links sheet, or a call link. `null` = nothing open.
+  const [adding, setAdding] = createSignal<"username" | "invite" | "call" | null>(null);
+  const [addMenuOpen, setAddMenuOpen] = createSignal(false);
   const [filter, setFilter] = createSignal("");
   const selected = (): AcceptedContact | undefined =>
     accepted().find((c) => c.signaturePubkeyB64 === selectedKey());
@@ -370,23 +369,51 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
   };
 
   return (
-    <div class="lk-split" data-open={selected() !== undefined || adding() ? "true" : "false"}>
+    <div
+      class="lk-split"
+      data-open={selected() !== undefined || adding() !== null ? "true" : "false"}
+    >
       <aside class="lk-pane" aria-label="Contacts">
         <div class="lk-pane-head">
           <h1>Contacts</h1>
-          <button
-            type="button"
-            class="lk-icon-button accent"
-            title="Add contact"
-            aria-label="Add contact"
-            aria-pressed={adding()}
-            onClick={() => {
-              setSelectedKey(null);
-              setAdding(true);
-            }}
-          >
-            <Icon name="plus" size={18} />
-          </button>
+          <div class="lk-menu-anchor">
+            <button
+              type="button"
+              class="lk-icon-button accent"
+              title="Add"
+              aria-label="Add"
+              aria-haspopup="menu"
+              aria-expanded={addMenuOpen()}
+              onClick={() => setAddMenuOpen(!addMenuOpen())}
+            >
+              <Icon name="plus" size={18} />
+            </button>
+            <Show when={addMenuOpen()}>
+              <div class="lk-menu-backdrop" onClick={() => setAddMenuOpen(false)} />
+              <div class="lk-menu" role="menu">
+                {(
+                  [
+                    ["username", "Add by username", "user"],
+                    ["invite", "Invite links", "link"],
+                    ["call", "Create call link", "phone"],
+                  ] as const
+                ).map(([mode, label, icon]) => (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setAddMenuOpen(false);
+                      setSelectedKey(null);
+                      setAdding(mode);
+                    }}
+                  >
+                    <Icon name={icon} size={18} />
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </Show>
+          </div>
         </div>
         <div class="lk-search">
           <Icon name="search" size={18} />
@@ -403,10 +430,6 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
             pending={mailbox.pending}
             busy={mailbox.busy}
             error={() => acceptError() ?? mailbox.error()}
-            onRefresh={() => {
-              setAcceptError(null);
-              void mailbox.refresh();
-            }}
             onAccept={onAccept}
             onDecline={onDecline}
           />
@@ -418,7 +441,7 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
                   <Icon name="contacts" size={40} strokeWidth={1.4} />
                   <strong>No contacts yet</strong>
                   <span>Add someone by username, or share your invite link.</span>
-                  <button type="button" class="primary" onClick={() => setAdding(true)}>
+                  <button type="button" class="primary" onClick={() => setAdding("username")}>
                     Add contact
                   </button>
                 </div>
@@ -434,13 +457,13 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
                   tabIndex={0}
                   classList={{ selected: selectedKey() === c.signaturePubkeyB64 }}
                   onClick={() => {
-                    setAdding(false);
+                    setAdding(null);
                     setSelectedKey(c.signaturePubkeyB64);
                   }}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" || e.key === " ") {
                       e.preventDefault();
-                      setAdding(false);
+                      setAdding(null);
                       setSelectedKey(c.signaturePubkeyB64);
                     }
                   }}
@@ -474,31 +497,46 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
                   type="button"
                   class="ghost small lk-narrow-only"
                   style={{ "align-self": "flex-start" }}
-                  onClick={() => setAdding(false)}
+                  onClick={() => setAdding(null)}
                 >
                   <Icon name="back" size={16} />
                   Contacts
                 </button>
-                <div class="lk-page-head">
-                  <h1>Add a contact</h1>
-                  <p>Requests are end-to-end encrypted; Lakko's servers cannot read them.</p>
-                </div>
-                <SendPanel
-                  searchCheck={searchCheck}
-                  searchInput={searchInput}
-                  setSearchInput={setSearchInput}
-                  introInput={introInput}
-                  setIntroInput={setIntroInput}
-                  busy={sendBusy}
-                  error={sendError}
-                  notice={sendNotice}
-                  onSubmit={onSend}
-                  onStartGroup={() => {
-                    void onStartGroup();
-                  }}
-                />
-                <InvitePanel />
-                <ActiveInvitesPanel />
+                <Show when={adding() === "username" || adding() === null}>
+                  <div class="lk-page-head">
+                    <h1>Add a contact</h1>
+                    <p>Requests are end-to-end encrypted; Lakko's servers cannot read them.</p>
+                  </div>
+                  <SendPanel
+                    searchCheck={searchCheck}
+                    searchInput={searchInput}
+                    setSearchInput={setSearchInput}
+                    introInput={introInput}
+                    setIntroInput={setIntroInput}
+                    busy={sendBusy}
+                    error={sendError}
+                    notice={sendNotice}
+                    onSubmit={onSend}
+                    onStartGroup={() => {
+                      void onStartGroup();
+                    }}
+                  />
+                </Show>
+                <Show when={adding() === "invite"}>
+                  <div class="lk-page-head">
+                    <h1>Invite links</h1>
+                    <p>Anyone who opens one of your links can send you a contact request.</p>
+                  </div>
+                  <InvitePanel />
+                  <ActiveInvitesPanel />
+                </Show>
+                <Show when={adding() === "call"}>
+                  <div class="lk-page-head">
+                    <h1>Call link</h1>
+                    <p>A call anyone with the link can ask to join. You host it.</p>
+                  </div>
+                  <CreateCallLinkPanel />
+                </Show>
               </div>
             </article>
           }
@@ -779,12 +817,12 @@ function InvitePanel(): JSX.Element {
         // banner — this is a terminal action; the form is
         // about to re-render).
         reset();
-        setError("Invite revoked.");
+        setError("Link revoked.");
       } else {
         // 404 — already gone or someone else's blob. Either
         // way, wipe the panel.
         reset();
-        setError("Invite no longer exists.");
+        setError("This link no longer exists.");
       }
     } catch (err) {
       setError(formatError(err));
@@ -795,11 +833,8 @@ function InvitePanel(): JSX.Element {
 
   return (
     <section class="lk-card">
-      <h2>Invite link</h2>
-      <p class="lk-card-desc">
-        Share it with someone you want to hear from. Anyone who opens the link
-        can send you a contact request.
-      </p>
+      <h2>New invite link</h2>
+      <p class="lk-card-desc">Share it with someone you want to hear from.</p>
 
       <Show
         when={generatedUrl() === null}
@@ -832,16 +867,8 @@ function InvitePanel(): JSX.Element {
               style={{ width: "100%", "margin-top": "0.25rem" }}
               disabled={busy()}
             />
-            <span
-              style={{
-                color: "var(--surface-muted)",
-                "font-size": "0.8rem",
-                display: "block",
-                "margin-top": "0.2rem",
-              }}
-            >
-              Optional, ≤ {INVITE_LABEL_MAX_LEN} chars. Shown to the
-              joiner before they accept.
+            <span class="lk-meta" style={{ display: "block", "margin-top": "0.2rem" }}>
+              Optional. Shown to the person who opens the link.
             </span>
           </label>
 
@@ -856,7 +883,7 @@ function InvitePanel(): JSX.Element {
               <option value="1d">1 day</option>
               <option value="7d">7 days (default)</option>
               <option value="30d">30 days</option>
-              <option value="never">Never (stalking risk — see ADR-0005)</option>
+              <option value="never">Never</option>
             </select>
           </label>
 
@@ -874,17 +901,6 @@ function InvitePanel(): JSX.Element {
               <option value="ten">Up to 10 uses</option>
               <option value="unlimited">Unlimited</option>
             </select>
-            <span
-              style={{
-                color: "var(--surface-muted)",
-                "font-size": "0.8rem",
-                display: "block",
-                "margin-top": "0.2rem",
-              }}
-            >
-              Enforced server-side on the pointer path (1.18d2a);
-              a UI hint only on the inline-fallback path.
-            </span>
           </label>
 
           <label
@@ -901,13 +917,13 @@ function InvitePanel(): JSX.Element {
               onChange={(e) => setBootstrapReferral(e.currentTarget.checked)}
               disabled={busy()}
             />
-            <span>Referral link (for someone without a Lakko account yet)</span>
+            <span>For someone without a Lakko account yet</span>
           </label>
 
           {error() !== null && <div class="form-error">{error()}</div>}
 
           <button class="primary" type="submit" disabled={busy()}>
-            {busy() ? "Generating…" : "Generate"}
+            {busy() ? "Creating…" : "Create link"}
           </button>
         </form>
       </Show>
@@ -920,14 +936,11 @@ function InvitePanel(): JSX.Element {
  * invite the current owner has uploaded across all their
  * devices, with a per-row Revoke button.
  *
- * Sits below [`InvitePanel`] in the Contacts route. The list is
- * **not auto-loaded** — the user clicks Refresh to pull it. The
- * round-trip is cheap (one signed SELECT) but doing it on every
- * page mount would be wasted work for users who never use
- * invites; explicit gesture also keeps the timing-correlation
- * side-channel ("Alice's discovery server sees an owner-list
- * query") under user control rather than firing on every
- * navigation.
+ * Sits below [`InvitePanel`] in the Contacts add pane. Loaded when the
+ * invite-links pane opens (one signed SELECT), never behind a button:
+ * the pane is only mounted when the user asks for invite links, so the
+ * timing side-channel ("Alice's discovery server sees an owner-list
+ * query") stays tied to that gesture.
  *
  * The Revoke flow reuses the existing
  * [`DiscoveryClient.revokeInvite`] surface from 1.18d2b-web; the
@@ -942,16 +955,18 @@ function ActiveInvitesPanel(): JSX.Element {
   discovery.setSessionToken(auth.identitySecrets()?.sessionToken ?? null);
 
   const [invites, setInvites] = createSignal<ActiveInvite[]>([]);
-  // `null` = never loaded yet; `"loaded"` = at least one
-  // successful refresh has populated `invites`. Distinguishes
-  // "user hasn't clicked Refresh yet" from "Refresh ran and
-  // returned empty list".
+  // `null` = not loaded yet; `"loaded"` = the list has been read at least
+  // once, so an empty list means "no links" rather than "not yet known".
   const [loadStatus, setLoadStatus] = createSignal<null | "loaded">(null);
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
   const [revokeBusySlug, setRevokeBusySlug] = createSignal<string | null>(null);
 
-  async function onRefresh(): Promise<void> {
+  onMount(() => {
+    void load();
+  });
+
+  async function load(): Promise<void> {
     setError(null);
     setBusy(true);
     try {
@@ -998,7 +1013,7 @@ function ActiveInvitesPanel(): JSX.Element {
       setInvites(invites().filter((r) => r.blobIdSlug !== row.blobIdSlug));
       if (result.kind === "not-found-or-not-owner") {
         setError(
-          `"${row.label || "(unlabelled)"}" was already gone server-side.`,
+          `"${row.label || "Invite link"}" had already been removed.`,
         );
       }
     } catch (err) {
@@ -1011,35 +1026,16 @@ function ActiveInvitesPanel(): JSX.Element {
   return (
     <section class="lk-card">
       <h2>
-        Active invite links
+        Active links
         <Show when={loadStatus() === "loaded" && invites().length > 0}>
-          <span
-            style={{
-              "margin-left": "0.5rem",
-              color: "var(--surface-muted)",
-              "font-weight": "normal",
-              "font-size": "0.9rem",
-            }}
-          >
+          <span class="lk-meta" style={{ "margin-left": "0.5rem", "font-weight": "normal" }}>
             ({invites().length})
           </span>
         </Show>
       </h2>
       <p class="lk-card-desc">
-        Every link this account has issued, on any of your devices.
+        Every link this account has created, on any of your devices.
       </p>
-
-      <div style={{ display: "flex", gap: "0.5rem", "margin-bottom": "0.75rem" }}>
-        <button
-          type="button"
-          disabled={busy()}
-          onClick={() => {
-            void onRefresh();
-          }}
-        >
-          {busy() ? "Loading…" : "Refresh"}
-        </button>
-      </div>
 
       <Show when={error() !== null}>
         <div class="form-error">{error()}</div>
@@ -1047,40 +1043,24 @@ function ActiveInvitesPanel(): JSX.Element {
 
       <Show
         when={loadStatus() === "loaded"}
-        fallback={
-          <p style={{ color: "var(--surface-muted)" }}>
-            Refresh to load your links.
-          </p>
-        }
+        fallback={<p class="lk-muted">{busy() ? "Loading..." : ""}</p>}
       >
         <Show
           when={invites().length > 0}
-          fallback={
-            <p style={{ color: "var(--surface-muted)" }}>
-              No active links.
-            </p>
-          }
+          fallback={<p class="lk-muted">No active links.</p>}
         >
           <ul style={listStyle()}>
             <For each={invites()}>
               {(row) => (
                 <li style={rowStyle()}>
                   <div style={{ flex: 1, "min-width": 0 }}>
-                    <strong>{row.label || "(unlabelled)"}</strong>
-                    <div
-                      style={{
-                        color: "var(--surface-muted)",
-                        "font-size": "0.85rem",
-                        "margin-top": "0.2rem",
-                      }}
-                    >
-                      <code>{row.blobIdSlug.slice(0, 16)}…</code>
-                      {" · "}
+                    <strong>{row.label || "Invite link"}</strong>
+                    <div class="lk-meta" style={{ "margin-top": "0.2rem" }}>
                       {describeExpiryUnixMs(row.expiryMs)}
                       {" · "}
                       {describeUsage(row.usedCount, row.maxUses)}
                       <Show when={row.bootstrapReferral}>
-                        {" · referral"}
+                        {" · for a new account"}
                       </Show>
                     </div>
                   </div>
@@ -1145,77 +1125,60 @@ function GeneratedUrlPanel(props: {
   onRevoke: () => void;
   onReset: () => void;
 }): JSX.Element {
+  const canShare = (): boolean =>
+    typeof navigator !== "undefined" && typeof navigator.share === "function";
   return (
-    <div>
-      <p style={{ margin: "0 0 0.5rem 0" }}>
-        <strong>Share this URL out-of-band.</strong>{" "}
-        <Show
-          when={props.kind === "pointer"}
-          fallback={
-            <span>
-              Discovery service was unreachable — falling back to an
-              <strong> inline-bytes URL</strong>. The capability sits
-              in the URL itself; anyone with the link can send you a
-              ContactRequest until it expires.
-            </span>
-          }
-        >
-          <span>
-            Short pointer URL — the capability lives on the
-            discovery service. Anyone with the link can send you a
-            ContactRequest until it expires.
-          </span>
-        </Show>
-      </p>
-      <textarea
-        readonly
-        value={props.url}
-        rows={3}
-        style={{
-          width: "100%",
-          "font-family": "monospace",
-          "font-size": "0.8rem",
-        }}
-        onClick={(e) => e.currentTarget.select()}
-      />
-      <div style={{ display: "flex", gap: "0.5rem", "margin-top": "0.5rem", "flex-wrap": "wrap" }}>
+    <div class="lk-stack" style={{ gap: "10px" }}>
+      <div class="lk-link-row" role="group" aria-label="Invite link">
+        <span class="lk-link-text" title={props.url}>
+          {props.url.replace(/^https?:\/\//, "")}
+        </span>
         <button
-          class="primary"
           type="button"
+          class="lk-icon-button"
+          title={props.copied() ? "Copied" : "Copy link"}
+          aria-label={props.copied() ? "Copied" : "Copy link"}
           onClick={props.onCopy}
           disabled={props.busy()}
         >
-          {props.copied() ? "Copied" : "Copy to clipboard"}
+          <Icon name={props.copied() ? "check" : "copy"} size={16} />
         </button>
+        <Show when={canShare()}>
+          <button
+            type="button"
+            class="lk-icon-button"
+            title="Share"
+            aria-label="Share"
+            onClick={() => void navigator.share({ url: props.url }).catch(() => undefined)}
+          >
+            <Icon name="share" size={16} />
+          </button>
+        </Show>
+      </div>
+      <p class="lk-meta" style={{ margin: 0 }}>
+        <Show
+          when={props.kind === "pointer"}
+          fallback="Lakko could not shorten this link, so it is long. It works the same way and cannot be revoked."
+        >
+          Anyone with the link can send you a contact request until it expires.
+        </Show>
+      </p>
+      <div class="lk-actions">
         <button type="button" onClick={props.onReset} disabled={props.busy()}>
-          Generate another
+          Create another
         </button>
         <Show when={props.canRevoke}>
           <button
             type="button"
+            class="ghost"
             onClick={props.onRevoke}
             disabled={props.busy()}
-            style={{
-              "margin-left": "auto",
-              color: "var(--danger-fg, currentColor)",
-            }}
+            style={{ "margin-left": "auto", color: "var(--danger)" }}
           >
-            {props.busy() ? "Revoking…" : "Revoke this invite"}
+            {props.busy() ? "Revoking..." : "Revoke"}
           </button>
         </Show>
       </div>
-      <Show when={!props.canRevoke}>
-        <p
-          style={{
-            color: "var(--surface-muted)",
-            "font-size": "0.8rem",
-            "margin-top": "0.5rem",
-          }}
-        >
-          (Revoke unavailable on the inline-bytes fallback — no server
-          row to delete.)
-        </p>
-      </Show>
     </div>
   );
 }
@@ -1224,7 +1187,6 @@ interface PendingRowsProps {
   readonly pending: () => readonly IncomingContactRequest[];
   readonly busy: () => boolean;
   readonly error: () => string | null;
-  readonly onRefresh: () => void;
   readonly onAccept: (r: IncomingContactRequest) => void;
   readonly onDecline: (r: IncomingContactRequest) => void;
 }
@@ -1235,22 +1197,10 @@ function PendingRows(props: PendingRowsProps): JSX.Element {
   const profiles = useProfiles();
   return (
     <>
-      <div class="lk-section-label" style={{ display: "flex", "align-items": "center", "justify-content": "space-between" }}>
-        <span>
-          Requests
-          <Show when={props.pending().length > 0}> ({props.pending().length})</Show>
-        </span>
-        <button
-          type="button"
-          class="lk-icon-button"
-          style={{ width: "28px", height: "28px" }}
-          title="Check for new requests"
-          aria-label="Check for new requests"
-          disabled={props.busy()}
-          onClick={props.onRefresh}
-        >
-          <Icon name="refresh" size={14} />
-        </button>
+      {/* Requests arrive on their own (the mailbox long-poll); no refresh. */}
+      <div class="lk-section-label">
+        Requests
+        <Show when={props.pending().length > 0}> ({props.pending().length})</Show>
       </div>
       <Show when={props.error() !== null}>
         <div class="form-error" style={{ padding: "0 12px 8px" }}>{props.error()}</div>

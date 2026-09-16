@@ -4,22 +4,26 @@
 import Combine
 import SwiftUI
 
-/// SwiftUI list of 1×1 chat threads.
+/// The conversation list, used twice (UX spec section 5.1): the Chats tab
+/// shows the two-person conversations, the Groups tab everything else. Same
+/// rows, same actions; only the title, the compose action and the row title
+/// rule differ.
 ///
 /// Mirror of:
 ///
 ///   * `apps/web/src/chat/ChatListRoute.tsx` (1.17f4b)
 ///   * `apps/android/.../ui/chat/ChatListScreen.kt` (1.15f4b)
 ///
-/// Shows every thread the ``ChatRepository`` knows about — one row
-/// per group, sorted by hex group id (the chronological-by-last-
-/// message sort is a 1.14g concern alongside read-receipts +
-/// unread-badge work). Tapping a row routes to ``ChatScreen``.
+/// Rendered as the root of its tab's `NavigationStack`; tapping a row asks
+/// the host to push ``ChatScreen``.
 public struct ChatListScreen: View {
 
     @ObservedObject public var viewModel: ChatListViewModel
-    public var onBack: () -> Void
+    /// Which list this is.
+    public var kind: ConversationKind
     public var onOpenChat: (String) -> Void
+    /// New chat (Chats) or New group (Groups).
+    public var onCompose: () -> Void
 
     /// Phase 2a3e2c-iOS — cross-device per-thread flags
     /// (pinned / muted / archived). The Combine subscription
@@ -30,48 +34,54 @@ public struct ChatListScreen: View {
 
     public init(
         viewModel: ChatListViewModel,
-        onBack: @escaping () -> Void,
-        onOpenChat: @escaping (String) -> Void
+        kind: ConversationKind,
+        onOpenChat: @escaping (String) -> Void,
+        onCompose: @escaping () -> Void
     ) {
         self.viewModel = viewModel
-        self.onBack = onBack
+        self.kind = kind
         self.onOpenChat = onOpenChat
+        self.onCompose = onCompose
     }
+
+    private var title: String { kind == .chat ? "Chats" : "Groups" }
 
     public var body: some View {
-        NavigationStack {
-            content
-                .navigationTitle("Chats")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
+        content
+            .navigationTitle(title)
+            .navigationBarTitleDisplayMode(.large)
+            // Receiving is automatic; the pull gesture runs the same poll
+            // once more, on demand (UX spec section 2, principle 3).
+            .refreshable { await viewModel.pollNow(kind: kind) }
+            .toolbar {
+                // ADR-0050 / docs/ux/second-device.md section 2: one label
+                // while this device is still being admitted to the chats a
+                // pairing named. Chats appear as they arrive; never a
+                // counter, never a per-chat row.
+                if viewModel.synchronizing {
                     ToolbarItem(placement: .navigationBarLeading) {
-                        Button(action: onBack) {
-                            Label("Home", systemImage: "chevron.backward")
-                        }
-                    }
-                    // ADR-0050 / docs/ux/second-device.md section 2: one label
-                    // while this device is still being admitted to the chats a
-                    // pairing named. Chats appear as they arrive; never a
-                    // counter, never a per-chat row.
-                    if viewModel.synchronizing {
-                        ToolbarItem(placement: .navigationBarTrailing) {
-                            Text("Synchronizing...")
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                                .accessibilityAddTraits(.updatesFrequently)
-                        }
+                        Text("Synchronizing...")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .accessibilityAddTraits(.updatesFrequently)
                     }
                 }
-        }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button(action: onCompose) {
+                        Image(systemName: kind == .chat ? "square.and.pencil" : "person.badge.plus")
+                    }
+                    .accessibilityLabel(kind == .chat ? "New chat" : "New group")
+                }
+            }
     }
 
-    /// Threads with the active flags applied:
+    /// This list's threads with the active flags applied:
     ///   * pinned → top of the list
     ///   * archived → bottom
     ///   * otherwise stable on the underlying repository order
     private var sortedThreads: [ChatThread] {
         let flagsMap = deviceGroupSync.flags
-        return viewModel.threads.sorted { lhs, rhs in
+        return viewModel.threads(of: kind).sorted { lhs, rhs in
             let lf = flagsMap[lhs.groupIdHex]
             let rf = flagsMap[rhs.groupIdHex]
             let lpinned = lf?.pinned == true
@@ -86,14 +96,17 @@ public struct ChatListScreen: View {
 
     @ViewBuilder
     private var content: some View {
-        if viewModel.threads.isEmpty {
-            emptyState
+        let threads = sortedThreads
+        if threads.isEmpty {
+            // Inside a scroll view so the pull gesture works on the empty list too.
+            ScrollView { emptyState }
         } else {
-            List(sortedThreads, id: \.groupIdHex) { thread in
+            List(threads, id: \.groupIdHex) { thread in
                 Button(action: { onOpenChat(thread.groupIdHex) }) {
                     ThreadRow(
                         thread: thread,
-                        title: viewModel.peerName(groupIdHex: thread.groupIdHex),
+                        title: viewModel.title(groupIdHex: thread.groupIdHex),
+                        isGroup: kind == .group,
                         flags: deviceGroupSync.flags[thread.groupIdHex],
                         unread: UnreadCounting.displayed(
                             local: thread.unread,
@@ -226,29 +239,30 @@ public struct ChatListScreen: View {
         return out
     }
 
+    /// UX spec section 5.1: one sentence and one action.
     @ViewBuilder
     private var emptyState: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("No conversations yet")
+        VStack(spacing: 12) {
+            Image(systemName: kind == .chat ? "bubble.left.and.bubble.right" : "person.3")
+                .font(.system(size: 40))
+                .foregroundStyle(Color.lakkoTextMuted)
+            Text(kind == .chat ? "No chats yet" : "No groups yet")
                 .font(.headline)
-            Text(
-                "Add a contact from the Contacts screen — once you accept " +
-                "their request (or they accept yours), a 1×1 chat lands " +
-                "here automatically."
-            )
-            .font(.body)
-            .foregroundStyle(.secondary)
+            Button(kind == .chat ? "Start a chat" : "Create a group", action: onCompose)
+                .buttonStyle(.borderedProminent)
         }
         .padding(24)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity)
+        .padding(.top, 80)
     }
 }
 
 private struct ThreadRow: View {
     let thread: ChatThread
-    /// ADR-0048 — the other person's resolved name for a 1x1 chat, `nil` for a
-    /// group (which keeps its group label).
-    let title: String?
+    /// The row title: the other person's name in a chat, the group's
+    /// member-derived title in a group. Never a hex id.
+    let title: String
+    let isGroup: Bool
     /// Phase 2a3e2c-iOS — cross-device flags snapshot for this
     /// thread. `nil` until a `Flags` payload lands.
     let flags: FlagsState?
@@ -257,24 +271,24 @@ private struct ThreadRow: View {
     let unread: Int
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 12) {
+            InitialsAvatar(
+                name: title,
+                // The group id is hashed for the tint only, never shown.
+                identity: thread.groupIdHex,
+                size: 40,
+                isGroup: isGroup
+            )
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 4) {
                     if flags?.pinned == true {
                         Image(systemName: "pin.fill")
                             .font(.caption)
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(Color.lakkoTextMuted)
                     }
-                    if let title {
-                        Text(title)
-                            .font(.body)
-                            .lineLimit(1)
-                    } else {
-                        // A group keeps its label: the first 16 chars of the
-                        // hex id.
-                        Text(thread.groupIdHex.prefix(16) + "…")
-                            .font(.system(.body, design: .monospaced))
-                    }
+                    Text(title)
+                        .font(.body)
+                        .lineLimit(1)
                     if flags?.muted == true {
                         Image(systemName: "bell.slash.fill")
                             .font(.caption)
@@ -322,10 +336,10 @@ private struct ThreadRow: View {
                     .background(
                         flags?.muted == true
                             ? Color.secondary.opacity(0.2)
-                            : Color.accentColor
+                            : Color.lakkoAccent
                     )
                     .foregroundStyle(
-                        flags?.muted == true ? .secondary : Color.white
+                        flags?.muted == true ? Color.lakkoTextMuted : Color.lakkoAccentForeground
                     )
                     .clipShape(Capsule())
             }
@@ -397,9 +411,45 @@ public final class ChatListViewModel: ObservableObject {
         StateBundle.pendingKnownGroups(joinedGroupIdHexes: threads.map { $0.groupIdHex }) > 0
     }
 
-    /// ADR-0048 — the other person's resolved name for a 1x1 chat.
-    func peerName(groupIdHex: String) -> String? {
-        repository.oneToOnePeerSignatureKey(groupIdHex: groupIdHex)
-            .map { ProfileDirectory.shared.resolve(signatureKey: $0).name }
+    /// The threads of one list (UX spec section 3): two people make a chat,
+    /// more make a group, counted by account rather than device leaf
+    /// (``ChatRepository/memberCount(groupIdHex:)``).
+    func threads(of kind: ConversationKind) -> [ChatThread] {
+        threads.filter { self.kind(of: $0.groupIdHex) == kind }
+    }
+
+    func kind(of groupIdHex: String) -> ConversationKind {
+        ConversationKind.of(peopleCount: repository.memberCount(groupIdHex: groupIdHex))
+    }
+
+    /// The row title: the other person's resolved name (ADR-0048) for a chat,
+    /// the members' names for a group. Never a hex id (UX spec section 6).
+    func title(groupIdHex: String) -> String {
+        if let peer = repository.oneToOnePeerSignatureKey(groupIdHex: groupIdHex) {
+            return ProfileDirectory.shared.resolve(signatureKey: peer).name
+        }
+        return ConversationTitle.groupTitle(
+            otherMemberNames: Self.otherMemberNames(repository: repository, groupIdHex: groupIdHex))
+    }
+
+    /// One entry per other person in the group; `nil` for a person whose
+    /// only label would be a key fingerprint.
+    static func otherMemberNames(repository: ChatRepository, groupIdHex: String) -> [String?] {
+        let members = repository.members(groupIdHex: groupIdHex) ?? []
+        let own = repository.ownLeafIndex(groupIdHex: groupIdHex)
+        return members
+            .filter { $0.leafIndex != own }
+            .map { member in
+                let resolved = ProfileDirectory.shared.resolve(signatureKey: member.signaturePublicKey)
+                return resolved.source == .fingerprint ? nil : resolved.name
+            }
+    }
+
+    /// The pull-to-refresh action: the same poll the app already runs, once,
+    /// for every thread of this list. Best-effort; a failing group is skipped.
+    func pollNow(kind: ConversationKind) async {
+        for thread in threads(of: kind) {
+            try? await repository.pollGroup(groupIdHex: thread.groupIdHex)
+        }
     }
 }

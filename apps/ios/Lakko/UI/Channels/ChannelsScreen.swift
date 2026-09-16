@@ -26,20 +26,6 @@ import SwiftUI
 /// without manual rebroadcast.
 
 // ============================================================================
-// Theme — palette mirrors apps/web/src/routes/Channels.tsx
-// ============================================================================
-
-private enum Theme {
-    static let background = Color(red: 0x0F / 255, green: 0x0F / 255, blue: 0x0F / 255)
-    static let surface = Color(red: 0x1A / 255, green: 0x1A / 255, blue: 0x1A / 255)
-    static let border = Color(red: 0x2A / 255, green: 0x2A / 255, blue: 0x2A / 255)
-    static let textPrimary = Color(red: 0xFA / 255, green: 0xFA / 255, blue: 0xFA / 255)
-    static let textSecondary = Color(red: 0xA1 / 255, green: 0xA1 / 255, blue: 0xA1 / 255)
-    static let accent = Color(red: 0x3B / 255, green: 0x82 / 255, blue: 0xF6 / 255)
-    static let destructive = Color(red: 0xDC / 255, green: 0x26 / 255, blue: 0x26 / 255)
-}
-
-// ============================================================================
 // ChannelsRootScreen — entry point + NavigationStack host
 // ============================================================================
 
@@ -65,35 +51,27 @@ public struct ChannelsRootScreen: View {
     /// `nil`-returning closure so a preview / standalone host that never
     /// claims a handle still compiles.
     private let sessionTokenProvider: () -> String?
-    /// Return to the caller's prior destination (Home). Wired by the
-    /// session router; a `Back` toolbar button in
-    /// [`ChannelsListScreen`] invokes it. Defaults to a no-op so a
-    /// preview / standalone host need not supply one.
-    private let onBack: () -> Void
 
     public init(
         client: ChannelsClient = ChannelsClient(),
         accountIdentitySeed: Data,
-        sessionTokenProvider: @escaping () -> String? = { nil },
-        onBack: @escaping () -> Void = {}
+        sessionTokenProvider: @escaping () -> String? = { nil }
     ) {
         self.client = client
         self.accountIdentitySeed = accountIdentitySeed
         self.sessionTokenProvider = sessionTokenProvider
-        self.onBack = onBack
     }
 
+    /// Rendered inside the Channels tab's `NavigationStack`; the detail, new
+    /// channel and subscribe screens push onto that stack. Follows the app's
+    /// colour scheme like every other tab (UX spec section 4).
     public var body: some View {
-        NavigationStack {
-            ChannelsListScreen(
-                state: state,
-                client: client,
-                accountIdentitySeed: accountIdentitySeed,
-                sessionTokenProvider: sessionTokenProvider,
-                onBack: onBack
-            )
-        }
-        .preferredColorScheme(.dark)
+        ChannelsListScreen(
+            state: state,
+            client: client,
+            accountIdentitySeed: accountIdentitySeed,
+            sessionTokenProvider: sessionTokenProvider
+        )
     }
 }
 
@@ -111,12 +89,6 @@ struct ChannelsListScreen: View {
     /// G4-5 — forwarded to [`NewChannelScreen`] for the
     /// session-token-gated `@handle` registration on create.
     var sessionTokenProvider: () -> String? = { nil }
-    /// Return to Home — the session router owns the destination
-    /// toggle; this screen is presented in place of Home, so it
-    /// carries its own back affordance (same idiom as
-    /// `DevicesScreen` / `ContactsScreen`).
-    var onBack: () -> Void = {}
-
     // G4-5: subscribe entry point. Accepts EITHER a typed `@handle`
     // (resolved to a channel id via OPRF discovery) OR a pasted 32-char
     // hex channel id (used verbatim). Both land on the same subscribe
@@ -131,7 +103,7 @@ struct ChannelsListScreen: View {
 
     var body: some View {
         ZStack {
-            Theme.background.ignoresSafeArea()
+            Color.lakkoBackground.ignoresSafeArea()
             VStack(spacing: 0) {
                 findSubscribeBar
                 if state.channels.isEmpty {
@@ -143,6 +115,7 @@ struct ChannelsListScreen: View {
             }
         }
         .navigationTitle("Channels")
+        .navigationBarTitleDisplayMode(.large)
         .navigationDestination(item: $subscribeTarget) { idHex in
             ChannelSubscribeScreen(
                 channelId: idHex,
@@ -152,10 +125,6 @@ struct ChannelsListScreen: View {
         }
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
-                Button("Back", action: onBack)
-                    .foregroundStyle(Theme.accent)
-            }
-            ToolbarItem(placement: .topBarLeading) {
                 NavigationLink {
                     JoinCoPublisherScreen(
                         state: state,
@@ -163,7 +132,7 @@ struct ChannelsListScreen: View {
                     )
                 } label: {
                     Image(systemName: "person.badge.plus")
-                        .foregroundStyle(Theme.accent)
+                        .foregroundStyle(Color.lakkoAccent)
                 }
             }
             ToolbarItem(placement: .topBarTrailing) {
@@ -176,7 +145,7 @@ struct ChannelsListScreen: View {
                     )
                 } label: {
                     Image(systemName: "plus")
-                        .foregroundStyle(Theme.accent)
+                        .foregroundStyle(Color.lakkoAccent)
                 }
             }
         }
@@ -188,12 +157,12 @@ struct ChannelsListScreen: View {
     private var findSubscribeBar: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                TextField("@handle or channel id", text: $findInput)
+                TextField("@handle", text: $findInput)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled(true)
-                    .foregroundStyle(Theme.textPrimary)
+                    .foregroundStyle(Color.lakkoText)
                     .padding(9)
-                    .background(Theme.surface)
+                    .background(Color.lakkoSurface)
                     .clipShape(RoundedRectangle(cornerRadius: 8))
                     .onSubmit { Task { await onFind() } }
                 Button(findBusy ? "Finding…" : "Find") {
@@ -205,14 +174,14 @@ struct ChannelsListScreen: View {
                 )
                 .padding(.horizontal, 14)
                 .padding(.vertical, 9)
-                .background(Theme.surface)
-                .foregroundStyle(Theme.textPrimary)
+                .background(Color.lakkoSurface)
+                .foregroundStyle(Color.lakkoText)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
             }
             if let findError {
                 Text(findError)
                     .font(.footnote)
-                    .foregroundStyle(Theme.destructive)
+                    .foregroundStyle(Color.lakkoDanger)
             }
         }
         .padding(12)
@@ -241,10 +210,10 @@ struct ChannelsListScreen: View {
         VStack(spacing: 16) {
             Image(systemName: "antenna.radiowaves.left.and.right")
                 .font(.system(size: 48))
-                .foregroundStyle(Theme.textSecondary)
-            Text("No channels yet.\nCreate one to start broadcasting.")
+                .foregroundStyle(Color.lakkoTextMuted)
+            Text("No channels yet. Create one or subscribe to one.")
                 .font(.body)
-                .foregroundStyle(Theme.textSecondary)
+                .foregroundStyle(Color.lakkoTextMuted)
                 .multilineTextAlignment(.center)
         }
         .padding()
@@ -263,28 +232,25 @@ struct ChannelsListScreen: View {
                 } label: {
                     channelRow(channel)
                 }
-                .listRowBackground(Theme.surface)
+                .listRowBackground(Color.lakkoSurface)
             }
         }
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
-        .background(Theme.background)
+        .background(Color.lakkoBackground)
     }
 
     private func channelRow(_ channel: ChannelHandle) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(channel.localName.isEmpty ? "(unnamed)" : channel.localName)
+            Text(channel.localName.isEmpty ? "Channel" : channel.localName)
                 .font(.headline)
-                .foregroundStyle(Theme.textPrimary)
+                .foregroundStyle(Color.lakkoText)
             if !channel.localDescription.isEmpty {
                 Text(channel.localDescription)
                     .font(.subheadline)
-                    .foregroundStyle(Theme.textSecondary)
+                    .foregroundStyle(Color.lakkoTextMuted)
                     .lineLimit(2)
             }
-            Text("\(channel.id.prefix(8))…\(channel.id.suffix(8))")
-                .font(.caption.monospaced())
-                .foregroundStyle(Theme.textSecondary)
         }
         .padding(.vertical, 4)
     }
@@ -320,35 +286,35 @@ struct NewChannelScreen: View {
 
     var body: some View {
         ZStack {
-            Theme.background.ignoresSafeArea()
+            Color.lakkoBackground.ignoresSafeArea()
             Form {
                 Section {
                     TextField("Name", text: $name)
-                        .listRowBackground(Theme.surface)
-                        .foregroundStyle(Theme.textPrimary)
+                        .listRowBackground(Color.lakkoSurface)
+                        .foregroundStyle(Color.lakkoText)
                     TextField("Description (optional)", text: $description, axis: .vertical)
                         .lineLimit(2...4)
-                        .listRowBackground(Theme.surface)
-                        .foregroundStyle(Theme.textPrimary)
+                        .listRowBackground(Color.lakkoSurface)
+                        .foregroundStyle(Color.lakkoText)
                 } footer: {
-                    Text("Name + description are local-only — never sent to the server.")
-                        .foregroundStyle(Theme.textSecondary)
+                    Text("The name and description stay on this device.")
+                        .foregroundStyle(Color.lakkoTextMuted)
                 }
                 Section {
                     TextField("@handle (optional)", text: $handle)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled(true)
-                        .listRowBackground(Theme.surface)
-                        .foregroundStyle(Theme.textPrimary)
+                        .listRowBackground(Color.lakkoSurface)
+                        .foregroundStyle(Color.lakkoText)
                 } footer: {
-                    Text("Public @handle — others can find + subscribe to this channel by @handle instead of the raw id. First-come-first-served; leave blank to skip.")
-                        .foregroundStyle(Theme.textSecondary)
+                    Text("Others find and subscribe to the channel by its @handle. Leave blank to skip.")
+                        .foregroundStyle(Color.lakkoTextMuted)
                 }
                 if let error = errorMessage {
                     Section {
                         Text(error)
                             .foregroundStyle(.white)
-                            .listRowBackground(Theme.destructive)
+                            .listRowBackground(Color.lakkoDanger)
                     }
                 }
             }
@@ -467,7 +433,7 @@ struct ChannelDetailScreen: View {
 
     var body: some View {
         ZStack {
-            Theme.background.ignoresSafeArea()
+            Color.lakkoBackground.ignoresSafeArea()
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     metaSection
@@ -506,26 +472,17 @@ struct ChannelDetailScreen: View {
     private var localNameOrFallback: String {
         let channel = state.channels.first(where: { $0.id == channelId })
         let n = channel?.localName ?? ""
-        return n.isEmpty ? "(channel)" : n
+        return n.isEmpty ? "Channel" : n
     }
 
+    /// The description only. The channel id and the server-side key
+    /// generation are bookkeeping, not something a reader acts on.
+    @ViewBuilder
     private var metaSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(channelId)
-                .font(.caption.monospaced())
-                .foregroundStyle(Theme.textSecondary)
-            if let desc = state.channels.first(where: { $0.id == channelId })?
-                .localDescription, !desc.isEmpty {
-                Text(desc)
-                    .foregroundStyle(Theme.textSecondary)
-            }
-            HStack {
-                Text("Server epoch:")
-                    .foregroundStyle(Theme.textSecondary)
-                Text("\(state.epochByChannel[channelId] ?? 0)")
-                    .font(.body.monospaced())
-                    .foregroundStyle(Theme.textPrimary)
-            }
+        if let desc = state.channels.first(where: { $0.id == channelId })?
+            .localDescription, !desc.isEmpty {
+            Text(desc)
+                .foregroundStyle(Color.lakkoTextMuted)
         }
     }
 
@@ -534,8 +491,8 @@ struct ChannelDetailScreen: View {
             TextField("Write a post…", text: $composeText, axis: .vertical)
                 .lineLimit(2...6)
                 .padding(10)
-                .background(Theme.surface)
-                .foregroundStyle(Theme.textPrimary)
+                .background(Color.lakkoSurface)
+                .foregroundStyle(Color.lakkoText)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
                 .disabled(publishBusy)
             HStack {
@@ -544,7 +501,7 @@ struct ChannelDetailScreen: View {
                     Task { await publish() }
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(Theme.accent)
+                .tint(Color.lakkoAccent)
                 .disabled(
                     publishBusy
                         || composeText.trimmingCharacters(in: .whitespaces).isEmpty
@@ -555,7 +512,7 @@ struct ChannelDetailScreen: View {
                     .font(.footnote)
                     .padding(10)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Theme.destructive)
+                    .background(Color.lakkoDanger)
                     .foregroundStyle(.white)
                     .clipShape(RoundedRectangle(cornerRadius: 8))
             }
@@ -564,11 +521,9 @@ struct ChannelDetailScreen: View {
 
     private var subscriberPlaceholderSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(
-                "No local publisher keys for this channel — you cannot publish to it from this device."
-            )
+            Text("You can read this channel here, but publishing is set up on another device.")
             .font(.footnote)
-            .foregroundStyle(Theme.textSecondary)
+            .foregroundStyle(Color.lakkoTextMuted)
 
             NavigationLink {
                 ChannelSubscribeScreen(
@@ -577,14 +532,14 @@ struct ChannelDetailScreen: View {
                     client: client
                 )
             } label: {
-                Text("Read as a subscriber →")
+                Text("Read as a subscriber")
                     .font(.footnote)
-                    .foregroundStyle(Theme.accent)
+                    .foregroundStyle(Color.lakkoAccent)
             }
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.surface)
+        .background(Color.lakkoSurface)
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
@@ -592,11 +547,11 @@ struct ChannelDetailScreen: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Posts")
                 .font(.headline)
-                .foregroundStyle(Theme.textPrimary)
+                .foregroundStyle(Color.lakkoText)
             let posts = state.postsByChannel[channelId] ?? []
             if posts.isEmpty {
                 Text(loading ? "Loading…" : "No posts yet. Publish the first one above.")
-                    .foregroundStyle(Theme.textSecondary)
+                    .foregroundStyle(Color.lakkoTextMuted)
             } else {
                 ForEach(posts, id: \.cursor) { post in
                     postRow(post)
@@ -607,18 +562,14 @@ struct ChannelDetailScreen: View {
 
     private func postRow(_ post: PostView) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text("cursor \(post.cursor)")
-                Spacer()
-                Text(isoTimestamp(ms: post.serverTsMs))
-            }
-            .font(.caption.monospaced())
-            .foregroundStyle(Theme.textSecondary)
+            Text(isoTimestamp(ms: post.serverTsMs))
+                .font(.caption)
+                .foregroundStyle(Color.lakkoTextMuted)
             decodedTextView(for: post)
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.surface)
+        .background(Color.lakkoSurface)
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
@@ -627,20 +578,15 @@ struct ChannelDetailScreen: View {
         if let entry = decodedByCursor[post.cursor] {
             if let text = entry {
                 Text(text)
-                    .foregroundStyle(Theme.textPrimary)
+                    .foregroundStyle(Color.lakkoText)
             } else {
-                Text(
-                    "[unreadable — wrong seed, tampered ciphertext, or another publisher's signing key]"
-                )
-                .font(.footnote)
-                .italic()
-                .foregroundStyle(Theme.textSecondary)
+                unavailablePost("This post could not be verified on this device.")
             }
         } else {
             Text("Decoding…")
                 .font(.footnote)
                 .italic()
-                .foregroundStyle(Theme.textSecondary)
+                .foregroundStyle(Color.lakkoTextMuted)
         }
     }
 
@@ -756,16 +702,11 @@ struct SubscribersPanelView: View {
             HStack {
                 Text("Subscribers")
                     .font(.subheadline.bold())
-                    .foregroundStyle(Theme.textPrimary)
+                    .foregroundStyle(Color.lakkoText)
                 Text("(\(subscribers?.count.description ?? "…"))")
                     .font(.subheadline)
-                    .foregroundStyle(Theme.textSecondary)
+                    .foregroundStyle(Color.lakkoTextMuted)
                 Spacer()
-                Button("Refresh") {
-                    Task { await refresh() }
-                }
-                .font(.caption)
-                .foregroundStyle(Theme.textSecondary)
             }
 
             if let error {
@@ -773,32 +714,30 @@ struct SubscribersPanelView: View {
                     .font(.caption)
                     .padding(8)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Theme.destructive)
+                    .background(Color.lakkoDanger)
                     .foregroundStyle(.white)
                     .clipShape(RoundedRectangle(cornerRadius: 6))
             }
 
             if let subs = subscribers {
                 if subs.isEmpty {
-                    Text(
-                        "No subscribers yet. Anyone with the channel id can open the subscribe screen and register their X25519 public key."
-                    )
+                    Text("No subscribers yet.")
                     .font(.caption)
-                    .foregroundStyle(Theme.textSecondary)
+                    .foregroundStyle(Color.lakkoTextMuted)
                 } else {
-                    ForEach(subs, id: \.self) { pk in
-                        subscriberRow(pk)
+                    ForEach(Array(subs.enumerated()), id: \.element) { index, pk in
+                        subscriberRow(pk, ordinal: index + 1)
                     }
                 }
             } else {
                 Text("Loading subscribers…")
                     .font(.caption)
-                    .foregroundStyle(Theme.textSecondary)
+                    .foregroundStyle(Color.lakkoTextMuted)
             }
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.surface)
+        .background(Color.lakkoSurface)
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .task {
             await refresh()
@@ -807,20 +746,20 @@ struct SubscribersPanelView: View {
         .onDisappear { pollTask?.cancel() }
     }
 
-    private func subscriberRow(_ pk: String) -> some View {
+    /// A subscriber is known only by its key, which is not a name; the row
+    /// says "Subscriber N" rather than showing the key.
+    private func subscriberRow(_ pk: String, ordinal: Int) -> some View {
         HStack(alignment: .center, spacing: 10) {
-            Text(pk)
-                .font(.caption2.monospaced())
-                .foregroundStyle(Theme.textSecondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
+            Text("Subscriber \(ordinal)")
+                .font(.caption)
+                .foregroundStyle(Color.lakkoText)
 
             if let st = statusByPk[pk] {
                 let (label, color): (String, Color) = {
                     switch st {
-                    case .delivered: return ("delivered", Theme.accent)
-                    case .auto:      return ("auto-delivered", Theme.accent)
-                    case .failed:    return ("failed", Theme.destructive)
+                    case .delivered: return ("has access", Color.lakkoSuccess)
+                    case .auto:      return ("has access", Color.lakkoSuccess)
+                    case .failed:    return ("failed", Color.lakkoDanger)
                     }
                 }()
                 Text(label)
@@ -833,17 +772,17 @@ struct SubscribersPanelView: View {
             Button {
                 Task { await deliverTo(pk) }
             } label: {
-                Text(busyPk == pk ? "Sealing…" : "Deliver seed")
+                Text(busyPk == pk ? "Granting…" : "Grant access")
                     .font(.caption2)
             }
             .buttonStyle(.borderedProminent)
-            .tint(Theme.accent)
+            .tint(Color.lakkoAccent)
             .controlSize(.mini)
             .disabled(busyPk == pk)
         }
         .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.background)
+        .background(Color.lakkoBackground)
         .clipShape(RoundedRectangle(cornerRadius: 6))
     }
 
@@ -989,11 +928,10 @@ struct ChannelSubscribeScreen: View {
 
     var body: some View {
         ZStack {
-            Theme.background.ignoresSafeArea()
+            Color.lakkoBackground.ignoresSafeArea()
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     metaSection
-                    keypairSection
                     statusSection
                     postsSection
                 }
@@ -1006,30 +944,16 @@ struct ChannelSubscribeScreen: View {
         .onDisappear { pollTask?.cancel() }
     }
 
+    /// The channel's local name when this device already tracks it; nothing
+    /// otherwise (the id is not something a reader acts on).
+    @ViewBuilder
     private var metaSection: some View {
-        Text(channelId)
-            .font(.caption.monospaced())
-            .foregroundStyle(Theme.textSecondary)
-    }
-
-    private var keypairSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if let kp = state.subscriberKeysByChannel[channelId] {
-                Text("Your subscriber public key (registered on this channel):")
-                    .font(.caption)
-                    .foregroundStyle(Theme.textSecondary)
-                Text(ChannelsComposer.bytesToHex(kp.publicKey))
-                    .font(.caption2.monospaced())
-                    .foregroundStyle(Theme.textPrimary)
-                    .textSelection(.enabled)
-                    .lineLimit(2)
-                    .truncationMode(.middle)
-            }
+        if let name = state.channels.first(where: { $0.id == channelId })?.localName,
+           !name.isEmpty {
+            Text(name)
+                .font(.headline)
+                .foregroundStyle(Color.lakkoText)
         }
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.surface)
-        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
     @ViewBuilder
@@ -1037,23 +961,20 @@ struct ChannelSubscribeScreen: View {
         let (text, color): (String, Color) = {
             switch bootstrap {
             case .idle, .registering:
-                return ("Registering your key on the channel…", Theme.textSecondary)
+                return ("Subscribing…", Color.lakkoTextMuted)
             case .polling:
-                return (
-                    "Registered. Waiting for the publisher to fan out a seed envelope… (auto-refreshes every 3 s)",
-                    Theme.textSecondary
-                )
+                return ("Subscribed. Waiting for the publisher to grant access…", Color.lakkoTextMuted)
             case .active:
-                return ("Seed envelope opened. You can read posts on this channel.", Theme.accent)
+                return ("You can read posts on this channel.", Color.lakkoSuccess)
             case .errorState:
-                return (bootstrapError ?? "Unknown error.", Theme.destructive)
+                return (bootstrapError ?? "Unknown error.", Color.lakkoDanger)
             }
         }()
         Text(text)
             .font(.footnote)
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Theme.surface)
+            .background(Color.lakkoSurface)
             .foregroundStyle(color)
             .clipShape(RoundedRectangle(cornerRadius: 8))
     }
@@ -1062,7 +983,7 @@ struct ChannelSubscribeScreen: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Posts")
                 .font(.headline)
-                .foregroundStyle(Theme.textPrimary)
+                .foregroundStyle(Color.lakkoText)
 
             if bootstrap == .active && !posts.isEmpty {
                 ForEach(posts, id: \.cursor) { p in
@@ -1073,48 +994,38 @@ struct ChannelSubscribeScreen: View {
                     bootstrap == .active
                         ? "No posts yet on this channel."
                         : (bootstrap == .polling
-                            ? "Waiting for the publisher to deliver your seed."
-                            : "Bootstrapping the subscribe flow…")
+                            ? "Waiting for the publisher to grant access."
+                            : "Subscribing…")
                 )
-                .foregroundStyle(Theme.textSecondary)
+                .foregroundStyle(Color.lakkoTextMuted)
             }
         }
     }
 
     private func postRow(_ post: PostView) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text("cursor \(post.cursor)")
-                Spacer()
-                Text(isoTimestamp(ms: post.serverTsMs))
-            }
-            .font(.caption.monospaced())
-            .foregroundStyle(Theme.textSecondary)
+            Text(isoTimestamp(ms: post.serverTsMs))
+                .font(.caption)
+                .foregroundStyle(Color.lakkoTextMuted)
 
             switch decodedByCursor[post.cursor] {
             case .text(let text):
                 Text(text)
-                    .foregroundStyle(Theme.textPrimary)
+                    .foregroundStyle(Color.lakkoText)
             case .olderKeyWindow:
-                Text("[message from an older key window — no longer available]")
-                    .font(.footnote)
-                    .italic()
-                    .foregroundStyle(Theme.textSecondary)
+                unavailablePost("This post was published before your access began.")
             case .unreadable:
-                Text("[unreadable — wrong seed or tampered ciphertext]")
-                    .font(.footnote)
-                    .italic()
-                    .foregroundStyle(Theme.textSecondary)
+                unavailablePost("This post could not be verified on this device.")
             case .none:
                 Text("Decoding…")
                     .font(.footnote)
                     .italic()
-                    .foregroundStyle(Theme.textSecondary)
+                    .foregroundStyle(Color.lakkoTextMuted)
             }
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.surface)
+        .background(Color.lakkoSurface)
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
@@ -1388,10 +1299,10 @@ struct CoPublishersPanelView: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Co-publishers")
                 .font(.headline)
-                .foregroundStyle(Theme.textPrimary)
+                .foregroundStyle(Color.lakkoText)
             Text("Invite another device or person to publish to this channel.")
                 .font(.caption)
-                .foregroundStyle(Theme.textSecondary)
+                .foregroundStyle(Color.lakkoTextMuted)
 
             Button {
                 Task { await createLink() }
@@ -1403,19 +1314,19 @@ struct CoPublishersPanelView: View {
             if let link {
                 Text(link)
                     .font(.caption.monospaced())
-                    .foregroundStyle(Theme.textSecondary)
+                    .foregroundStyle(Color.lakkoTextMuted)
                     .textSelection(.enabled)
             }
 
             if !pending.isEmpty {
                 Text("Requests (\(pending.count))")
                     .font(.subheadline)
-                    .foregroundStyle(Theme.textPrimary)
-                ForEach(pending, id: \.self) { ref in
+                    .foregroundStyle(Color.lakkoText)
+                ForEach(Array(pending.enumerated()), id: \.element) { index, ref in
                     HStack {
-                        Text(Self.shortHex(ref))
-                            .font(.caption.monospaced())
-                            .foregroundStyle(Theme.textSecondary)
+                        Text("Request \(index + 1)")
+                            .font(.caption)
+                            .foregroundStyle(Color.lakkoText)
                         Spacer()
                         Button("Approve") { Task { await approve(ref) } }
                             .disabled(busy)
@@ -1434,7 +1345,7 @@ struct CoPublishersPanelView: View {
             }
         }
         .padding()
-        .background(Theme.surface)
+        .background(Color.lakkoSurface)
         .clipShape(RoundedRectangle(cornerRadius: 12))
         .task { await onAppearLoad() }
         .onDisappear { teardown() }
@@ -1522,9 +1433,6 @@ struct CoPublishersPanelView: View {
         }
     }
 
-    private static func shortHex(_ data: Data) -> String {
-        data.prefix(8).map { String(format: "%02x", $0) }.joined() + "…"
-    }
 }
 
 // ============================================================================
@@ -1555,36 +1463,36 @@ struct JoinCoPublisherScreen: View {
 
     var body: some View {
         ZStack {
-            Theme.background.ignoresSafeArea()
+            Color.lakkoBackground.ignoresSafeArea()
             Form {
                 Section {
                     TextField("Paste a /g/ co-publisher link", text: $link, axis: .vertical)
                         .lineLimit(2...4)
-                        .listRowBackground(Theme.surface)
-                        .foregroundStyle(Theme.textPrimary)
+                        .listRowBackground(Color.lakkoSurface)
+                        .foregroundStyle(Color.lakkoText)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
                     TextField("Local name (optional)", text: $localName)
-                        .listRowBackground(Theme.surface)
-                        .foregroundStyle(Theme.textPrimary)
+                        .listRowBackground(Color.lakkoSurface)
+                        .foregroundStyle(Color.lakkoText)
                 } footer: {
                     Text(
                         "The channel owner shares a co-publisher link. After they approve your request, this device can publish to the channel."
                     )
-                    .foregroundStyle(Theme.textSecondary)
+                    .foregroundStyle(Color.lakkoTextMuted)
                 }
                 if let status {
                     Section {
                         Text(status)
-                            .foregroundStyle(Theme.textSecondary)
-                            .listRowBackground(Theme.surface)
+                            .foregroundStyle(Color.lakkoTextMuted)
+                            .listRowBackground(Color.lakkoSurface)
                     }
                 }
                 if let errorMessage {
                     Section {
                         Text(errorMessage)
                             .foregroundStyle(.white)
-                            .listRowBackground(Theme.destructive)
+                            .listRowBackground(Color.lakkoDanger)
                     }
                 }
             }
@@ -1691,28 +1599,28 @@ struct RotationPanelView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Key rotation")
+            Text("Access refresh")
                 .font(.headline)
-                .foregroundStyle(Theme.textPrimary)
+                .foregroundStyle(Color.lakkoText)
             Text(
-                "Rotates the channel content key on a schedule (every 24 h "
-                    + "or 1000 posts) and reseals it to every subscriber — "
-                    + "backward secrecy for past keys."
+                "Refreshes every subscriber's access on a schedule (every 24 h "
+                    + "or 1000 posts), so someone who leaves cannot read what "
+                    + "comes after."
             )
             .font(.caption)
-            .foregroundStyle(Theme.textSecondary)
+            .foregroundStyle(Color.lakkoTextMuted)
 
             Text(model.status)
-                .font(.caption.monospaced())
-                .foregroundStyle(Theme.textSecondary)
+                .font(.caption)
+                .foregroundStyle(Color.lakkoTextMuted)
 
             Button {
                 Task { await model.rotateNow() }
             } label: {
-                Text(model.busy ? "Rotating…" : "Rotate now")
+                Text(model.busy ? "Refreshing…" : "Refresh now")
             }
             .buttonStyle(.borderedProminent)
-            .tint(Theme.accent)
+            .tint(Color.lakkoAccent)
             .controlSize(.small)
             .disabled(model.busy || !model.ready)
 
@@ -1724,7 +1632,7 @@ struct RotationPanelView: View {
         }
         .padding()
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.surface)
+        .background(Color.lakkoSurface)
         .clipShape(RoundedRectangle(cornerRadius: 12))
         .task {
             await model.load(
@@ -1745,7 +1653,7 @@ struct RotationPanelView: View {
 @MainActor
 final class RotationPanelModel: ObservableObject {
     /// Human-readable last-rotated / cadence line.
-    @Published var status: String = "Loading rotation state…"
+    @Published var status: String = "Loading…"
     /// Surfaced when opening the group or a manual rotation fails.
     @Published var error: String?
     /// `true` while a manual "Rotate now" is in flight.
@@ -1885,11 +1793,11 @@ final class RotationPanelModel: ObservableObject {
         guard let state = ChannelRotationStateStore.load(channelId: channelIdHex),
             state.lastRotationMs > 0
         else {
-            status = "Not rotated yet · \(cadence)"
+            status = "Not refreshed yet · \(cadence)"
             return
         }
         let ago = Self.relativeAgo(sinceMs: state.lastRotationMs)
-        status = "Last rotated \(ago) · \(state.postsSinceRotation) posts since · \(cadence)"
+        status = "Last refreshed \(ago) · \(state.postsSinceRotation) posts since · \(cadence)"
     }
 
     private static func relativeAgo(sinceMs: UInt64) -> String {
@@ -1946,5 +1854,23 @@ enum ChannelRotationStateStore {
         let seeded = channelRotationStateAfterRotation(nowMs: nowMs)
         save(channelId: channelId, state: seeded)
         return seeded
+    }
+}
+
+// ============================================================================
+// Shared: an unreadable post (UX spec section 5.4)
+// ============================================================================
+
+/// "Not available" plus one plain-language reason. Never the key material,
+/// the epoch, or the failure class the decrypt path reported.
+@ViewBuilder
+func unavailablePost(_ reason: String) -> some View {
+    VStack(alignment: .leading, spacing: 2) {
+        Text("Not available")
+            .font(.footnote)
+            .foregroundStyle(Color.lakkoText)
+        Text(reason)
+            .font(.caption)
+            .foregroundStyle(Color.lakkoTextMuted)
     }
 }

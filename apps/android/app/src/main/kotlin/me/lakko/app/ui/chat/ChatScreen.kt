@@ -37,7 +37,25 @@ import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.Call
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.DoneAll
+import androidx.compose.material.icons.filled.Group
+import androidx.compose.material.icons.filled.Mood
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.TopAppBar
+import me.lakko.app.ui.components.LakkoAvatar
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
@@ -119,11 +137,15 @@ import uniffi.lakko_ffi_uniffi.AttachmentRef
  * into one Application-message. Send button is disabled when
  * the draft is blank or a send is in flight.
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 public fun ChatScreen(
     viewModel: ChatViewModel,
     onNavigateBack: () -> Unit,
     modifier: Modifier = Modifier,
+    /** The group's title (local name or member-derived) for a group chat;
+     *  a 1x1 chat names the other person itself. Never a hex id. */
+    groupTitle: String? = null,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
@@ -207,9 +229,8 @@ public fun ChatScreen(
             // drops it instead of hitting CannotDecryptOwnMessage. Best-effort —
             // a re-publish failure leaves the entry un-acked for the next open.
             viewModel.sweepPendingCommitsOnOpen()
-            // First tick: manual-style refresh so the spinner
-            // blips briefly while the immediate fetch resolves.
-            viewModel.onRefreshClicked()
+            // First tick: one immediate fetch.
+            viewModel.pollNow()
             // Subsequent ticks: continuous long-poll. Cancels when
             // the composable leaves composition (back navigation,
             // logout). Errors back off via [POLL_RETRY_BACKOFF_MS]
@@ -353,12 +374,26 @@ public fun ChatScreen(
         }
     }
 
-    Box(modifier = modifier.fillMaxSize()) {
-    Column(modifier = Modifier.fillMaxSize()) {
+    val headerTitle = peerName ?: groupTitle ?: "Group"
+    val headerSubtitle = when {
+        !isGroupChat && !state.typingText.isNullOrEmpty() && !membershipEnded -> state.typingText
+        isGroupChat -> {
+            val n = otherMembers.size + 1
+            "$n members"
+        }
+        else -> null
+    }
+    Scaffold(
+        modifier = modifier.fillMaxSize(),
+        // Edge-to-edge: the top bar takes the status bar, the composer sits
+        // above the navigation bar and the keyboard.
+        contentWindowInsets = WindowInsets.safeDrawing,
+        topBar = {
         Header(
-            title = peerName ?: "Group ${shortHex(state.groupIdHex)}",
-            titleIsKey = peerName == null,
-            refreshing = state.refreshing,
+            title = headerTitle,
+            subtitle = headerSubtitle,
+            isGroup = isGroupChat,
+            avatarSeed = state.groupIdHex,
             // ADR-0045 UX §6.2.8 item 4 / §6.2.11 — the call buttons are GONE
             // once this device's membership has ended, not merely failing. The
             // per-call SFrame seed comes from `exportSecret("lakko/call/v1", …)`
@@ -368,7 +403,6 @@ public fun ChatScreen(
             // them are the same rendering decision.
             callActive = callOccupant != null || membershipEnded,
             onNavigateBack = onNavigateBack,
-            onRefresh = viewModel::onRefreshClicked,
             // A live group call on this chat is JOINED rather than
             // duplicated; otherwise a group chat (>2 MLS members) starts a
             // multi-party SFU call and a 1x1 chat the P2P CallSession. The
@@ -385,6 +419,10 @@ public fun ChatScreen(
             },
             onShowMembers = viewModel::toggleMembersPanel,
         )
+        },
+    ) { scaffoldPadding ->
+    Box(modifier = Modifier.fillMaxSize().padding(scaffoldPadding)) {
+    Column(modifier = Modifier.fillMaxSize()) {
 
         // The ongoing-group-call banner: a live call on this chat that this
         // device is not in. Hidden once this device's membership has ended —
@@ -606,6 +644,7 @@ public fun ChatScreen(
     // held record button keeps its gesture.
     VideoNoteOverlay(recorder)
     }
+    }
 
     picker?.let { request ->
         EmojiPickerSheet(
@@ -669,60 +708,75 @@ public fun ChatScreen(
 // Header
 // =============================================================================
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun Header(
     /** ADR-0048 UX §5 — the other person's resolved name in a 1x1 chat, the
-     *  group label otherwise. */
+     *  group's title otherwise. Never an id. */
     title: String,
-    /** `true` when [title] is an id rather than a name (render monospaced). */
-    titleIsKey: Boolean,
-    refreshing: Boolean,
+    /** "@username" / "N members" / "typing..." — `null` for nothing. */
+    subtitle: String?,
+    isGroup: Boolean,
+    avatarSeed: String,
     callActive: Boolean,
     onNavigateBack: () -> Unit,
-    onRefresh: () -> Unit,
     onStartCall: () -> Unit,
     onStartVideoCall: () -> Unit,
     onShowMembers: () -> Unit,
 ) {
-    Column {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(start = 4.dp, end = 12.dp, top = 4.dp, bottom = 4.dp),
-        ) {
-            TextButton(onClick = onNavigateBack) { Text("← Back") }
-            Spacer(Modifier.width(4.dp))
-            Text(
-                text = title,
-                style = MaterialTheme.typography.titleMedium,
-                fontFamily = if (titleIsKey) FontFamily.Monospace else FontFamily.Default,
-                maxLines = 1,
-                modifier = Modifier.weight(1f),
-            )
-            // Phase 3a10 — call buttons. Hidden when a call
-            // is already active (the overlay carries the
-            // Accept / Decline / Hang up affordances). Audio
-            // call + video call (publishes the local camera).
+    var menuOpen by remember { mutableStateOf(false) }
+    TopAppBar(
+        navigationIcon = {
+            IconButton(onClick = onNavigateBack) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+            }
+        },
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                LakkoAvatar(name = title, seed = avatarSeed, size = 32.dp, group = isGroup)
+                Spacer(Modifier.width(10.dp))
+                Column {
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.titleMedium,
+                        maxLines = 1,
+                    )
+                    if (subtitle != null) {
+                        Text(
+                            text = subtitle,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                        )
+                    }
+                }
+            }
+        },
+        actions = {
+            // Phase 3a10 — call buttons. Hidden when a call is already active
+            // (the overlay carries the Accept / Decline / Hang up affordances).
             if (!callActive) {
-                TextButton(onClick = onStartCall) { Text("📞 Call") }
-                TextButton(onClick = onStartVideoCall) { Text("🎥 Video") }
+                IconButton(onClick = onStartCall) {
+                    Icon(Icons.Filled.Call, contentDescription = "Call")
+                }
+                IconButton(onClick = onStartVideoCall) {
+                    Icon(Icons.Filled.Videocam, contentDescription = "Video call")
+                }
             }
-            // A4 — members sheet: roster + add / remove.
-            TextButton(onClick = onShowMembers) { Text("Members") }
-            if (refreshing) {
-                CircularProgressIndicator(
-                    modifier = Modifier
-                        .height(20.dp)
-                        .width(20.dp),
-                    strokeWidth = 2.dp,
+            IconButton(onClick = { menuOpen = true }) {
+                Icon(Icons.Filled.MoreVert, contentDescription = "More")
+            }
+            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                // A4 — members sheet: roster + add / remove (+ Leave / Delete
+                // inside it).
+                DropdownMenuItem(
+                    text = { Text(if (isGroup) "Members" else "Details") },
+                    leadingIcon = { Icon(Icons.Filled.Group, contentDescription = null) },
+                    onClick = { menuOpen = false; onShowMembers() },
                 )
-            } else {
-                TextButton(onClick = onRefresh) { Text("Refresh") }
             }
-        }
-        HorizontalDivider()
-    }
+        },
+    )
 }
 
 // =============================================================================
@@ -1100,21 +1154,14 @@ private fun Bubble(
         // check for "Sent", a filled double check for "Read"
         // (every other member's watermark has reached this id).
         if (isOwn && readState != OwnReadState.None) {
-            val (glyph, label) = when (readState) {
-                OwnReadState.Read -> "✓✓" to "Read"
-                OwnReadState.Sent -> "✓" to "Sent"
-                OwnReadState.None -> "" to ""
-            }
-            val tint = if (readState == OwnReadState.Read) {
-                MaterialTheme.colorScheme.primary
-            } else {
-                MaterialTheme.colorScheme.onSurfaceVariant
-            }
-            Text(
-                text = "$glyph $label",
-                style = MaterialTheme.typography.labelSmall,
-                color = tint,
-                modifier = Modifier.padding(end = 4.dp),
+            val read = readState == OwnReadState.Read
+            Icon(
+                imageVector = if (read) Icons.Filled.DoneAll else Icons.Filled.Check,
+                contentDescription = if (read) "Read" else "Sent",
+                tint = if (read) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier
+                    .padding(end = 4.dp)
+                    .height(14.dp),
             )
         }
     }
@@ -1312,8 +1359,8 @@ private fun ThreadMissingHint() {
             .padding(horizontal = 12.dp, vertical = 8.dp),
     ) {
         Text(
-            text = "This conversation hasn't been hydrated on this device yet. " +
-                "Tap Refresh — a peer's commit will rebuild it.",
+            text = "This conversation is not ready on this device yet. " +
+                "It will appear once the other members are online.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -1429,19 +1476,18 @@ private fun Composer(
                 IconButton(
                     onClick = onOpenPicker,
                     enabled = !sending,
-                    modifier = Modifier.semantics { contentDescription = "Emoji and GIFs" },
                 ) {
-                    Text("\uD83D\uDE42")
+                    Icon(Icons.Filled.Mood, contentDescription = "Emoji and GIFs")
                 }
                 // 1.19c4 — Attach button. Drives the OS-level
                 // ACTION_OPEN_DOCUMENT picker via the launcher
                 // wired in [ChatScreen]; the contract surfaces both
                 // photos and arbitrary files behind a single tap.
-                TextButton(
+                IconButton(
                     onClick = onAttachClicked,
                     enabled = !sending && !uploading,
                 ) {
-                    Text("\uD83D\uDCCE")
+                    Icon(Icons.Filled.AttachFile, contentDescription = "Attach")
                 }
                 OutlinedTextField(
                     value = field,
@@ -1478,7 +1524,7 @@ private fun Composer(
                             color = MaterialTheme.colorScheme.onPrimary,
                         )
                     } else {
-                        Text("Send")
+                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
                     }
                 }
             } else if (recState !is me.lakko.app.media.RecState.Preview) {
@@ -1650,12 +1696,6 @@ private fun PendingAttachmentsTray(
  *  parallel constant in `ContactsScreen`. */
 private const val POLL_RETRY_BACKOFF_MS: Long = 5_000L
 
-/** Short hex preview — same format as
- *  [me.lakko.app.ui.contacts.ContactsScreen]'s `shortHex`. */
-private fun shortHex(hex: String): String {
-    if (hex.length <= 12) return hex
-    return "${hex.substring(0, 6)}…${hex.substring(hex.length - 4)}"
-}
 
 // =============================================================================
 // 1.19c4 — picker / share helpers

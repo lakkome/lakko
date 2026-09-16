@@ -7,6 +7,38 @@ import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Campaign
+import androidx.compose.material.icons.filled.ChatBubble
+import androidx.compose.material.icons.filled.Groups
+import androidx.compose.material.icons.filled.People
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.outlined.Campaign
+import androidx.compose.material.icons.outlined.ChatBubbleOutline
+import androidx.compose.material.icons.outlined.Groups
+import androidx.compose.material.icons.outlined.People
+import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material3.Icon
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.Scaffold
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.navigation.NavGraph.Companion.findStartDestination
+import androidx.navigation.NavHostController
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.currentBackStackEntryAsState
+import androidx.navigation.compose.rememberNavController
+import me.lakko.app.ui.theme.LakkoTheme
+import me.lakko.app.ui.theme.ThemePreference
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
@@ -58,7 +90,10 @@ import me.lakko.app.ui.contacts.InviteLandingScreen
 import me.lakko.app.ui.contacts.InviteLandingViewModel
 import me.lakko.app.transport.AntiCensorshipManager
 import me.lakko.app.ui.devices.DevicesScreen
-import me.lakko.app.ui.home.HomeScreen
+import me.lakko.app.ui.settings.SettingsScreen
+import me.lakko.app.ui.chat.ConversationKind
+import me.lakko.app.ui.chat.NewChatScreen
+import me.lakko.app.ui.chat.NewGroupScreen
 import me.lakko.app.ui.transport.AntiCensorshipSettingsScreen
 import me.lakko.app.ui.updates.UpdateAvailableBanner
 import me.lakko.app.updates.ReleaseUpdateChecker
@@ -71,8 +106,8 @@ import me.lakko.app.updates.UpdateBannerDecision
  * contacts-or-chats-or-chat** flow:
  *
  *   * `Anon` → [LoginScreen] / [SignupScreen] / [RecoverScreen].
- *   * `Session` → [HomeScreen] / [ContactsScreen] /
- *     [ChatListScreen] / [ChatScreen] (per groupIdHex).
+ *   * `Session` → the tabbed shell (Chats / Groups / Channels / Contacts /
+ *     Settings) with [ChatScreen] pushed per groupIdHex.
  *
  * Three repositories live at the Activity scope:
  *   * [AuthRepository] — auth state + identity secrets.
@@ -116,6 +151,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Client redesign Phase A — edge-to-edge with transparent system bars;
+        // every screen pads by its own Scaffold / safe-drawing insets.
+        enableEdgeToEdge()
+        ThemePreference.init(applicationContext)
 
         // G3-sframe-native N-5 — runtime probe for the public
         // org.webrtc.RtpSender.setFrameEncryptor /
@@ -196,7 +235,25 @@ class MainActivity : ComponentActivity() {
         handleWakeIntent(intent)
 
         setContent {
-            MaterialTheme {
+            LakkoTheme {
+                // System-bar icon contrast follows the resolved scheme (the user
+                // may pin Dark while the OS is light), not the OS setting.
+                val dark = me.lakko.app.ui.theme.isLakkoDark()
+                LaunchedEffect(dark) {
+                    val transparent = android.graphics.Color.TRANSPARENT
+                    enableEdgeToEdge(
+                        statusBarStyle = if (dark) {
+                            androidx.activity.SystemBarStyle.dark(transparent)
+                        } else {
+                            androidx.activity.SystemBarStyle.light(transparent, transparent)
+                        },
+                        navigationBarStyle = if (dark) {
+                            androidx.activity.SystemBarStyle.dark(transparent)
+                        } else {
+                            androidx.activity.SystemBarStyle.light(transparent, transparent)
+                        },
+                    )
+                }
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background,
@@ -382,26 +439,30 @@ private fun AppRoot(
     }
 
     when (val current = state) {
-        AuthState.Loading -> LoadingScreen()
-        is AuthState.Anon -> AnonRoot(
-            repository = authRepository,
-            cachedUsername = current.cachedUsername,
-        )
+        AuthState.Loading -> InsetRoot { LoadingScreen() }
+        is AuthState.Anon -> InsetRoot {
+            AnonRoot(
+                repository = authRepository,
+                cachedUsername = current.cachedUsername,
+            )
+        }
         // ADR-0017 fresh-device fail-safe: auth succeeded but no
         // cached AccountIdentity (phrase) seed on this device — prompt
         // for the recovery phrase (HARD-BLOCK verified) before opening
         // a full session. NEVER derive the identity from the export key
         // or mint fresh here.
-        is AuthState.NeedsRecoveryPhrase -> RestoreIdentityRoot(
-            repository = authRepository,
-            account = current.account,
-        )
+        is AuthState.NeedsRecoveryPhrase -> InsetRoot {
+            RestoreIdentityRoot(
+                repository = authRepository,
+                account = current.account,
+            )
+        }
         // ADR-0017 lost-everything fallback: the user minted a brand-new
         // identity (already published, no proof); show the new recovery
         // phrase for them to save before the session lands.
-        is AuthState.SaveFreshPhrase -> SaveFreshPhraseRoot(
-            repository = authRepository,
-        )
+        is AuthState.SaveFreshPhrase -> InsetRoot {
+            SaveFreshPhraseRoot(repository = authRepository)
+        }
         is AuthState.Session -> {
             // ADR-0017 defence-in-depth — surface the identity-changed
             // security alert above the session content.
@@ -412,31 +473,36 @@ private fun AppRoot(
             // verified manifest resolves to an actionable update.
             val updateDecision by releaseChecker.decision.collectAsState()
             val context = androidx.compose.ui.platform.LocalContext.current
-            androidx.compose.foundation.layout.Column {
-                if (identityAlert != null) {
-                    me.lakko.app.ui.auth.IdentitySecurityBanner(
-                        onDismiss = { authRepository.dismissIdentityAlert() },
-                    )
-                }
-                (updateDecision as? UpdateBannerDecision.Shown)?.let { shown ->
-                    UpdateAvailableBanner(
-                        showUpdateButton = shown.showUpdateButton,
-                        onUpdate = { releaseChecker.openStore(context) },
-                        onDismiss = { releaseChecker.dismiss() },
-                    )
-                }
-                SessionRoot(
-                    authRepository = authRepository,
-                    contactsRepository = contactsRepository,
-                    chatRepository = chatRepository,
-                    callHost = callHost,
-                    deviceGroupSync = deviceGroupSync,
-                    inviteIntake = inviteIntake,
-                    pushIntake = pushIntake,
-                    antiCensorship = antiCensorship,
-                    account = current.account,
-                )
-            }
+            val shownUpdate = updateDecision as? UpdateBannerDecision.Shown
+            SessionRoot(
+                authRepository = authRepository,
+                contactsRepository = contactsRepository,
+                chatRepository = chatRepository,
+                callHost = callHost,
+                deviceGroupSync = deviceGroupSync,
+                inviteIntake = inviteIntake,
+                pushIntake = pushIntake,
+                antiCensorship = antiCensorship,
+                account = current.account,
+                banners = if (identityAlert == null && shownUpdate == null) {
+                    null
+                } else {
+                    {
+                        if (identityAlert != null) {
+                            me.lakko.app.ui.auth.IdentitySecurityBanner(
+                                onDismiss = { authRepository.dismissIdentityAlert() },
+                            )
+                        }
+                        shownUpdate?.let { shown ->
+                            UpdateAvailableBanner(
+                                showUpdateButton = shown.showUpdateButton,
+                                onUpdate = { releaseChecker.openStore(context) },
+                                onDismiss = { releaseChecker.dismiss() },
+                            )
+                        }
+                    }
+                },
+            )
         }
     }
 
@@ -544,11 +610,17 @@ private fun SaveFreshPhraseRoot(
 }
 
 /**
- * Session-state subgraph. Adds ChatRepository bootstrap +
- * a four-way [SessionDestination] router (Home / Contacts /
- * Chats / Chat(groupIdHex)). Compose Navigation lands later
- * (deferred 1.15d7); the local destination state + a
- * `String?`-shaped Chat argument is plenty for four screens.
+ * Session-state shell — docs/ux/client-redesign.md section 3.
+ *
+ * One `NavHost` with five tab-level start destinations (Chats, Groups,
+ * Channels, Contacts, Settings) behind a Material 3 `NavigationBar`, plus the
+ * pushed destinations (a chat, the settings screens, the new chat / new group
+ * pickers, the `/i/` and `/g/` landings). System back and predictive back are
+ * the navigation controller's. The app opens on Chats; there is no home screen.
+ *
+ * Also owns the app-level receive loops (every group long-polled while the app
+ * is in the foreground, whatever screen is showing) and the ChatRepository
+ * bootstrap.
  */
 @Composable
 private fun SessionRoot(
@@ -561,6 +633,8 @@ private fun SessionRoot(
     pushIntake: PushIntake,
     antiCensorship: AntiCensorshipManager,
     account: SessionAccount,
+    /** The security / update banners, drawn above the tab content. */
+    banners: (@Composable () -> Unit)?,
 ) {
     // Drive ChatRepository.bootstrap whenever a fresh
     // identity-secrets value lands. The first non-null emission
@@ -596,19 +670,7 @@ private fun SessionRoot(
         deviceGroupSync.bootstrap(secrets)
     }
 
-    // Auto-clear chat in-memory state when we leave the
-    // Session entirely (e.g. via process death after logout).
-    // The explicit logout / forgetDevice handlers below cover
-    // the user-initiated paths; this DisposableEffect catches
-    // the natural composition exit.
-    DisposableEffect(Unit) {
-        onDispose { /* keep state — the next SessionRoot re-mount
-                       will bootstrap again from identitySecrets */ }
-    }
-
-    var destination: SessionDestination by remember {
-        mutableStateOf(SessionDestination.Home)
-    }
+    val navController = rememberNavController()
 
     // The app-level receive loop: every group long-polled while the app is in
     // the foreground, WHATEVER screen is showing. Call signaling (the 1x1 call
@@ -714,282 +776,344 @@ private fun SessionRoot(
             }
     }
 
-    // Observe pending invite slugs (1.15e11). When a deep
-    // link arrives — either at cold start (MainActivity's
-    // onCreate published it before SessionRoot mounted) or
-    // during a warm session (onNewIntent published mid-
-    // session) — route to InviteLanding(slug) and consume()
-    // the slot so a subsequent slug for a different invite
-    // can land cleanly.
+    // A tapped `https://lakko.me/i/<slug>` invite link (cold start: published
+    // before this composable mounted; warm: via onNewIntent) pushes the
+    // landing over the current tab, then the slot is consumed so a later slug
+    // lands cleanly.
     val pendingInviteSlug by inviteIntake.pendingInviteSlug.collectAsStateWithLifecycle()
     LaunchedEffect(pendingInviteSlug) {
         val slug = pendingInviteSlug ?: return@LaunchedEffect
-        destination = SessionDestination.InviteLanding(slug)
+        navController.navigate(Routes.invite(slug)) { launchSingleTop = true }
         inviteIntake.consume()
     }
 
-    // ADR-0028 (G-3) — a tapped `/g/<slug>` group join-ticket link routes to
-    // the group-join landing, mirroring the invite-landing flow above.
+    // ADR-0028 (G-3) — a tapped `/g/<slug>` group join-ticket link pushes the
+    // group-join landing the same way.
     val pendingGroupJoinSlug by inviteIntake.pendingGroupJoinSlug.collectAsStateWithLifecycle()
     LaunchedEffect(pendingGroupJoinSlug) {
         val slug = pendingGroupJoinSlug ?: return@LaunchedEffect
-        destination = SessionDestination.GroupJoinLanding(slug)
+        navController.navigate(Routes.groupJoin(slug)) { launchSingleTop = true }
         inviteIntake.consumeGroupJoin()
     }
 
-    // Observe pending push wakes (Phase 1.20d2). A notification
-    // tap delivers a group-pseudonym hex to MainActivity, which
-    // publishes here via `pushIntake`. We route to the matching
-    // chat thread when the group is known locally; otherwise we
-    // fall back to the chat list (a stale wake — the group
-    // record was wiped after the push was minted, or this
-    // device joined the conversation under a different account).
-    //
-    // Chat-state freshness matters: we read
-    // `chatRepository.state.threads` snapshot at the moment the
-    // wake lands. A "known" group whose record was just wiped
-    // by `forgetDevice()` still races; the fallback to the chat
-    // list catches that case cleanly (the user lands on a list
-    // that no longer shows the thread, which matches the
-    // "you've left this conversation" mental model).
+    // A notification tap (Phase 1.20d2) opens the matching chat when the group
+    // is known locally; a stale wake lands on the list its kind belongs to.
     val pendingWake by pushIntake.pendingWake.collectAsStateWithLifecycle()
     val chatState by chatRepository.state.collectAsStateWithLifecycle()
     LaunchedEffect(pendingWake, chatState.bootstrapped) {
         val wake = pendingWake ?: return@LaunchedEffect
-        // Wait for ChatRepository.bootstrap to finish populating
-        // the threads list before deciding whether the wake's
-        // group is locally known. The bootstrap LaunchedEffect
-        // above fires on the first identity-secrets emission;
-        // until it completes, `chatState.threads` may be empty.
         if (!chatState.bootstrapped) return@LaunchedEffect
         val knownThread = chatState.threads.firstOrNull {
             it.groupIdHex.equals(wake.groupHex, ignoreCase = true)
         }
-        destination = if (knownThread != null) {
-            SessionDestination.Chat(knownThread.groupIdHex)
+        if (knownThread != null) {
+            navController.navigate(Routes.chat(knownThread.groupIdHex)) { launchSingleTop = true }
         } else {
-            // Stale wake — group is gone or never was. The chat
-            // list is the safe landing pad; the user can scan
-            // their thread inventory from there.
-            SessionDestination.Chats
+            navController.navigateToTab(Routes.CHATS)
         }
         pushIntake.consume()
     }
 
-    androidx.compose.foundation.layout.Box(modifier = Modifier.fillMaxSize()) {
-    when (val current = destination) {
-        SessionDestination.Home -> HomeScreen(
-            account = account,
-            onOpenContacts = { destination = SessionDestination.Contacts },
-            onOpenChats = { destination = SessionDestination.Chats },
-            onOpenChannels = { destination = SessionDestination.Channels },
-            onOpenPasskeys = { destination = SessionDestination.Passkeys },
-            onOpenDevices = { destination = SessionDestination.Devices },
-            onOpenAntiCensorship = { destination = SessionDestination.AntiCensorship },
-            onOpenProfile = { destination = SessionDestination.Profile },
-            onLogout = {
-                me.lakko.app.calls.AppCallHost.reset()
-                contactsRepository.clear()
-                chatRepository.clear()
-                authRepository.logout()
-            },
-            onForgetDevice = {
-                me.lakko.app.calls.AppCallHost.reset()
-                contactsRepository.clear()
-                // Note: chat.forgetDevice() BEFORE
-                // auth.forgetDevice() — see the file-level
-                // docstring for the ordering rationale.
-                chatRepository.forgetDevice()
-                authRepository.forgetDevice()
-            },
-        )
-
-        SessionDestination.Contacts -> {
-            val contactsVm: ContactsViewModel = viewModel(
-                factory = singletonViewModelFactory {
-                    ContactsViewModel(
-                        repo = contactsRepository,
-                        chatRepo = chatRepository,
-                    )
-                },
-            )
-            ContactsScreen(
-                viewModel = contactsVm,
-                onNavigateBack = { destination = SessionDestination.Home },
-                onOpenChat = { groupIdHex ->
-                    destination = SessionDestination.Chat(groupIdHex)
-                },
-                // ADR-0032 — "Start call" on a created call link opens the same
-                // `/c/` landing a tapped link does; AppRoot presents it over the
-                // session, and this account is recognised as the owner there.
-                onStartCallLink = { slug -> inviteIntake.publishCallJoin(slug) },
-            )
-        }
-
-        SessionDestination.Chats -> ChatListScreen(
-            repository = chatRepository,
-            onNavigateBack = { destination = SessionDestination.Home },
-            onOpenThread = { groupIdHex ->
-                destination = SessionDestination.Chat(groupIdHex)
-            },
-            // Phase 2a3e2c-Android — surfaces pin / mute /
-            // archive indicators + swipe / icon-tap toggles
-            // backed by the cross-device sync store.
-            deviceGroupSync = deviceGroupSync,
-        )
-
-        is SessionDestination.Chat -> {
-            val groupIdHex = current.groupIdHex
-            // Key the ChatViewModel by groupIdHex so navigating
-            // to a different thread rebuilds the VM with the
-            // right per-thread state binding.
-            val chatVm: ChatViewModel = viewModel(
-                key = "chat-$groupIdHex",
-                factory = singletonViewModelFactory {
-                    ChatViewModel(
-                        repo = chatRepository,
-                        groupIdHex = groupIdHex,
-                        // SFU group-call admission mints a JWT from the
-                        // account session bearer. The AuthRepository owns
-                        // it; thread it in as a closure so the VM has no
-                        // auth-layer dependency. `null` when signed out →
-                        // startGroupCall refuses.
-                        sessionTokenProvider = {
-                            authRepository.identitySecrets.value?.sessionToken
-                        },
-                        // A4 — resolve @username -> (accountId, signaturePubkey)
-                        // through the G-4-verified contacts path for add-member.
-                        resolveRecipient = { username ->
-                            contactsRepository.resolveVerifiedRecipient(username)
-                        },
-                        callHost = callHost,
-                        groupCallHost = me.lakko.app.calls.AppCallHost.group,
-                        callOccupant = me.lakko.app.calls.AppCallHost.occupant,
-                        endCurrentCall = { me.lakko.app.calls.AppCallHost.endCurrentCall() },
-                    )
-                },
-            )
-            // Phase 2a3e2b-Android — wire cross-device sync
-            // into this VM's composer on every navigation.
-            // Idempotent on the same `(vm, sync)` pair so the
-            // re-runs from Compose recomposition cost nothing.
-            LaunchedEffect(chatVm) {
-                chatVm.attachSync(deviceGroupSync)
-            }
-            ChatScreen(
-                viewModel = chatVm,
-                // Back from a 1×1 chat goes to the chat list,
-                // not Home — standard chat-app navigation
-                // shape.
-                onNavigateBack = { destination = SessionDestination.Chats },
-            )
-        }
-
-        SessionDestination.Channels -> {
-            // Phase 4 (ADR-0010) — broadcast channels. Threads the
-            // AccountIdentity (phrase) seed (ADR-0017) from the live
-            // IdentitySecrets so a publisher can rebuild the MLS
-            // PublisherGroup. In a live Session the secrets are always
-            // present (bootstrap ran on entry); the null guard is purely
-            // defensive and recomposes into Channels once they land.
-            val secrets = identitySecrets
-            if (secrets != null) {
-                ChannelsRootScreen(
-                    accountIdentitySeed = secrets.accountIdentitySeed,
-                    sessionToken = secrets.sessionToken,
-                    onBack = { destination = SessionDestination.Home },
-                )
-            } else {
-                LoadingScreen()
-            }
-        }
-
-        SessionDestination.Passkeys -> {
-            val passkeysVm: me.lakko.app.webauthn.PasskeysViewModel = viewModel(
-                factory = singletonViewModelFactory {
-                    me.lakko.app.webauthn.PasskeysViewModel(repo = authRepository)
-                },
-            )
-            me.lakko.app.webauthn.PasskeysScreen(
-                viewModel = passkeysVm,
-                onBack = { destination = SessionDestination.Home },
-            )
-        }
-
-        SessionDestination.Devices -> DevicesScreen(
-            authRepository = authRepository,
-            onBack = { destination = SessionDestination.Home },
-            chatRepository = chatRepository,
-        )
-
-        SessionDestination.AntiCensorship -> AntiCensorshipSettingsScreen(
-            manager = antiCensorship,
-            onBack = { destination = SessionDestination.Home },
-        )
-
-        SessionDestination.Profile -> {
-            // ADR-0048 UX §4 — Settings -> Profile. Keyed on the raw account id
-            // from the live session secrets; a save persists the own profile and
-            // republishes it into every group.
-            val secrets = identitySecrets
-            if (secrets != null) {
-                val ctx = chatRepository.context
-                val accountId = secrets.accountId
-                me.lakko.app.ui.profile.ProfileSettingsScreen(
-                    current = remember(accountId) {
-                        me.lakko.app.profile.OwnProfileStore.load(ctx, accountId)
-                    },
-                    username = account.username.takeIf { it.isNotBlank() },
-                    onSaved = { updated ->
-                        me.lakko.app.profile.OwnProfileStore.save(ctx, accountId, updated)
-                        chatRepository.publishOwnProfileToAllGroups()
-                    },
-                    onBack = { destination = SessionDestination.Home },
-                )
-            } else {
-                LoadingScreen()
-            }
-        }
-
-        is SessionDestination.InviteLanding -> {
-            val inviteSlug = current.slug
-            // Key the VM by slug so re-tapping a different
-            // invite URL (already-consumed-and-published-
-            // again via onNewIntent) builds a fresh VM with
-            // the right slug binding + auto-runs the Accept
-            // flow against the new slug.
-            val inviteVm: InviteLandingViewModel = viewModel(
-                key = "invite-$inviteSlug",
-                factory = singletonViewModelFactory {
-                    InviteLandingViewModel(contactsRepository, inviteSlug)
-                },
-            )
-            InviteLandingScreen(
-                viewModel = inviteVm,
-                onDone = { destination = SessionDestination.Home },
-                onOpenChat = { groupIdHex ->
-                    destination = SessionDestination.Chat(groupIdHex)
-                },
-            )
-        }
-
-        is SessionDestination.GroupJoinLanding -> {
-            // ADR-0028 (G-3) — request to join the group the `/g/<slug>` link
-            // points at + poll for the admin's approval. Keyed by slug so a
-            // re-tapped link rebuilds a fresh VM.
-            val groupJoinSlug = current.slug
-            val groupJoinVm: me.lakko.app.ui.chat.JoinGroupLandingViewModel = viewModel(
-                key = "group-join-$groupJoinSlug",
-                factory = singletonViewModelFactory {
-                    me.lakko.app.ui.chat.JoinGroupLandingViewModel(chatRepository, groupJoinSlug)
-                },
-            )
-            me.lakko.app.ui.chat.JoinGroupLandingScreen(
-                viewModel = groupJoinVm,
-                onDone = { destination = SessionDestination.Chats },
-            )
-        }
+    val appContext = LocalContext.current.applicationContext
+    val profileDirectory = remember(chatRepository) {
+        me.lakko.app.profile.ProfileDirectory.get(chatRepository.context)
     }
+    val backStackEntry by navController.currentBackStackEntryAsState()
+    val currentRoute = backStackEntry?.destination?.route
+    val showTabs = currentRoute in Routes.TOP_LEVEL
+
+    val logout = {
+        me.lakko.app.calls.AppCallHost.reset()
+        contactsRepository.clear()
+        chatRepository.clear()
+        authRepository.logout()
+    }
+    val forgetDevice = {
+        me.lakko.app.calls.AppCallHost.reset()
+        contactsRepository.clear()
+        // chat.forgetDevice() BEFORE auth.forgetDevice() — see the file-level
+        // docstring for the ordering rationale.
+        chatRepository.forgetDevice()
+        authRepository.forgetDevice()
+    }
+
+    Scaffold(
+        // Each screen pads by its own Scaffold; the shell contributes only the
+        // tab bar (whose height is consumed below so a screen's Scaffold does
+        // not add the navigation-bar inset a second time).
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
+        bottomBar = {
+            if (showTabs) {
+                NavigationBar {
+                    for (tab in Tabs) {
+                        val selected = currentRoute == tab.route
+                        NavigationBarItem(
+                            selected = selected,
+                            onClick = { navController.navigateToTab(tab.route) },
+                            icon = {
+                                Icon(
+                                    imageVector = if (selected) tab.selectedIcon else tab.icon,
+                                    contentDescription = tab.label,
+                                )
+                            },
+                            label = { Text(tab.label) },
+                        )
+                    }
+                }
+            }
+        },
+    ) { padding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .consumeWindowInsets(padding),
+        ) {
+            if (banners != null) {
+                Column(modifier = Modifier.windowInsetsPadding(WindowInsets.statusBars)) {
+                    banners()
+                }
+            }
+            NavHost(
+                navController = navController,
+                startDestination = Routes.CHATS,
+                modifier = if (banners != null) {
+                    Modifier.consumeWindowInsets(WindowInsets.statusBars)
+                } else {
+                    Modifier
+                },
+            ) {
+                composable(Routes.CHATS) {
+                    ChatListScreen(
+                        repository = chatRepository,
+                        kind = ConversationKind.Chat,
+                        onOpenThread = { hex -> navController.navigate(Routes.chat(hex)) },
+                        onCompose = { navController.navigate(Routes.NEW_CHAT) },
+                        deviceGroupSync = deviceGroupSync,
+                    )
+                }
+                composable(Routes.GROUPS) {
+                    ChatListScreen(
+                        repository = chatRepository,
+                        kind = ConversationKind.Group,
+                        onOpenThread = { hex -> navController.navigate(Routes.chat(hex)) },
+                        onCompose = { navController.navigate(Routes.NEW_GROUP) },
+                        deviceGroupSync = deviceGroupSync,
+                    )
+                }
+                composable(Routes.CHANNELS) {
+                    // Phase 4 (ADR-0010) — broadcast channels. Threads the
+                    // AccountIdentity (phrase) seed (ADR-0017) from the live
+                    // IdentitySecrets so a publisher can rebuild its group.
+                    val secrets = identitySecrets
+                    if (secrets != null) {
+                        ChannelsRootScreen(
+                            accountIdentitySeed = secrets.accountIdentitySeed,
+                            sessionToken = secrets.sessionToken,
+                        )
+                    } else {
+                        LoadingScreen()
+                    }
+                }
+                composable(Routes.CONTACTS) {
+                    val contactsVm: ContactsViewModel = viewModel(
+                        factory = singletonViewModelFactory {
+                            ContactsViewModel(
+                                repo = contactsRepository,
+                                chatRepo = chatRepository,
+                            )
+                        },
+                    )
+                    ContactsScreen(
+                        viewModel = contactsVm,
+                        onOpenChat = { hex -> navController.navigate(Routes.chat(hex)) },
+                        // ADR-0032 — "Start call" on a created call link opens the
+                        // same `/c/` landing a tapped link does; AppRoot presents it
+                        // over the session.
+                        onStartCallLink = { slug -> inviteIntake.publishCallJoin(slug) },
+                    )
+                }
+                composable(Routes.SETTINGS) {
+                    val secrets = identitySecrets
+                    val ownProfile = remember(secrets?.accountId) {
+                        secrets?.let { me.lakko.app.profile.OwnProfileStore.load(chatRepository.context, it.accountId) }
+                    }
+                    SettingsScreen(
+                        displayName = ownProfile?.displayName,
+                        username = account.username.takeIf { it.isNotBlank() },
+                        onOpenProfile = { navController.navigate(Routes.PROFILE) },
+                        onOpenPasskeys = { navController.navigate(Routes.PASSKEYS) },
+                        onOpenDevices = { navController.navigate(Routes.DEVICES) },
+                        onOpenAntiCensorship = { navController.navigate(Routes.ANTI_CENSORSHIP) },
+                        onLogout = logout,
+                        onForgetDevice = forgetDevice,
+                    )
+                }
+
+                composable(Routes.NEW_CHAT) {
+                    NewChatScreen(
+                        contactsRepository = contactsRepository,
+                        onBack = { navController.popBackStack() },
+                        onOpenChat = { hex ->
+                            navController.navigate(Routes.chat(hex)) {
+                                popUpTo(Routes.NEW_CHAT) { inclusive = true }
+                            }
+                        },
+                        onOpenContacts = { navController.navigateToTab(Routes.CONTACTS) },
+                    )
+                }
+                composable(Routes.NEW_GROUP) {
+                    NewGroupScreen(
+                        contactsRepository = contactsRepository,
+                        chatRepository = chatRepository,
+                        onBack = { navController.popBackStack() },
+                        onCreated = { hex ->
+                            navController.navigate(Routes.chat(hex)) {
+                                popUpTo(Routes.NEW_GROUP) { inclusive = true }
+                            }
+                        },
+                        onOpenContacts = { navController.navigateToTab(Routes.CONTACTS) },
+                    )
+                }
+
+                composable(Routes.CHAT) { entry ->
+                    val groupIdHex = entry.arguments?.getString("groupIdHex") ?: return@composable
+                    // Key the ChatViewModel by groupIdHex so navigating
+                    // to a different thread rebuilds the VM with the
+                    // right per-thread state binding.
+                    val chatVm: ChatViewModel = viewModel(
+                        key = "chat-$groupIdHex",
+                        factory = singletonViewModelFactory {
+                            ChatViewModel(
+                                repo = chatRepository,
+                                groupIdHex = groupIdHex,
+                                // SFU group-call admission mints a JWT from the
+                                // account session bearer. The AuthRepository owns
+                                // it; thread it in as a closure so the VM has no
+                                // auth-layer dependency. `null` when signed out →
+                                // startGroupCall refuses.
+                                sessionTokenProvider = {
+                                    authRepository.identitySecrets.value?.sessionToken
+                                },
+                                // A4 — resolve @username -> (accountId, signaturePubkey)
+                                // through the G-4-verified contacts path for add-member.
+                                resolveRecipient = { username ->
+                                    contactsRepository.resolveVerifiedRecipient(username)
+                                },
+                                callHost = callHost,
+                                groupCallHost = me.lakko.app.calls.AppCallHost.group,
+                                callOccupant = me.lakko.app.calls.AppCallHost.occupant,
+                                endCurrentCall = { me.lakko.app.calls.AppCallHost.endCurrentCall() },
+                            )
+                        },
+                    )
+                    // Phase 2a3e2b-Android — wire cross-device sync
+                    // into this VM's composer on every navigation.
+                    LaunchedEffect(chatVm) {
+                        chatVm.attachSync(deviceGroupSync)
+                    }
+                    // The group's title (local name, else member-derived), re-read
+                    // when names or the roster change. A 1x1 names its peer itself.
+                    val nameVersion by profileDirectory.version.collectAsStateWithLifecycle()
+                    val membersVersion by chatVm.members.collectAsStateWithLifecycle()
+                    val groupTitle = remember(groupIdHex, nameVersion, membersVersion, chatState) {
+                        me.lakko.app.ui.chat.conversationTitle(
+                            appContext, chatRepository, profileDirectory, groupIdHex,
+                        )
+                    }
+                    ChatScreen(
+                        viewModel = chatVm,
+                        // Back returns to wherever the chat was opened from.
+                        onNavigateBack = { navController.popBackStack() },
+                        groupTitle = groupTitle,
+                    )
+                }
+
+                composable(Routes.PROFILE) {
+                    // ADR-0048 UX §4 — Settings -> Profile. Keyed on the raw account
+                    // id from the live session secrets; a save persists the own
+                    // profile and republishes it into every group.
+                    val secrets = identitySecrets
+                    if (secrets != null) {
+                        val ctx = chatRepository.context
+                        val accountId = secrets.accountId
+                        me.lakko.app.ui.profile.ProfileSettingsScreen(
+                            current = remember(accountId) {
+                                me.lakko.app.profile.OwnProfileStore.load(ctx, accountId)
+                            },
+                            username = account.username.takeIf { it.isNotBlank() },
+                            onSaved = { updated ->
+                                me.lakko.app.profile.OwnProfileStore.save(ctx, accountId, updated)
+                                chatRepository.publishOwnProfileToAllGroups()
+                            },
+                            onBack = { navController.popBackStack() },
+                        )
+                    } else {
+                        LoadingScreen()
+                    }
+                }
+                composable(Routes.PASSKEYS) {
+                    val passkeysVm: me.lakko.app.webauthn.PasskeysViewModel = viewModel(
+                        factory = singletonViewModelFactory {
+                            me.lakko.app.webauthn.PasskeysViewModel(repo = authRepository)
+                        },
+                    )
+                    me.lakko.app.webauthn.PasskeysScreen(
+                        viewModel = passkeysVm,
+                        onBack = { navController.popBackStack() },
+                    )
+                }
+                composable(Routes.DEVICES) {
+                    DevicesScreen(
+                        authRepository = authRepository,
+                        onBack = { navController.popBackStack() },
+                        chatRepository = chatRepository,
+                    )
+                }
+                composable(Routes.ANTI_CENSORSHIP) {
+                    AntiCensorshipSettingsScreen(
+                        manager = antiCensorship,
+                        onBack = { navController.popBackStack() },
+                    )
+                }
+
+                composable(Routes.INVITE) { entry ->
+                    val inviteSlug = entry.arguments?.getString("slug") ?: return@composable
+                    // Keyed by slug so re-tapping a different invite URL builds a
+                    // fresh VM with the right slug binding.
+                    val inviteVm: InviteLandingViewModel = viewModel(
+                        key = "invite-$inviteSlug",
+                        factory = singletonViewModelFactory {
+                            InviteLandingViewModel(contactsRepository, inviteSlug)
+                        },
+                    )
+                    InviteLandingScreen(
+                        viewModel = inviteVm,
+                        onDone = { navController.popBackStack() },
+                        onOpenChat = { hex ->
+                            navController.navigate(Routes.chat(hex)) {
+                                popUpTo(Routes.INVITE) { inclusive = true }
+                            }
+                        },
+                    )
+                }
+                composable(Routes.GROUP_JOIN) { entry ->
+                    // ADR-0028 (G-3) — request to join the group the `/g/<slug>`
+                    // link points at + poll for the admin's approval.
+                    val groupJoinSlug = entry.arguments?.getString("slug") ?: return@composable
+                    val groupJoinVm: me.lakko.app.ui.chat.JoinGroupLandingViewModel = viewModel(
+                        key = "group-join-$groupJoinSlug",
+                        factory = singletonViewModelFactory {
+                            me.lakko.app.ui.chat.JoinGroupLandingViewModel(chatRepository, groupJoinSlug)
+                        },
+                    )
+                    me.lakko.app.ui.chat.JoinGroupLandingScreen(
+                        viewModel = groupJoinVm,
+                        onDone = { navController.popBackStack() },
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -1002,35 +1126,64 @@ private const val APP_POLL_RETRY_BACKOFF_MS: Long = 5_000L
 /** App-level receive loop: a pass that returned sooner than this waits out the rest. */
 private const val APP_POLL_MIN_ITERATION_MS: Long = 1_000L
 
-/**
- * Five Session-state destinations. Compose Navigation lands in
- * a later sprint — this sealed hierarchy holds the place. The
- * [Chat] + [InviteLanding] variants carry id args so their
- * ViewModels know which thread / invite to project.
- */
-private sealed interface SessionDestination {
-    data object Home : SessionDestination
-    data object Contacts : SessionDestination
-    data object Chats : SessionDestination
+/** Navigation routes of the session shell. */
+private object Routes {
+    const val CHATS = "chats"
+    const val GROUPS = "groups"
+    const val CHANNELS = "channels"
+    const val CONTACTS = "contacts"
+    const val SETTINGS = "settings"
+    val TOP_LEVEL: Set<String> = setOf(CHATS, GROUPS, CHANNELS, CONTACTS, SETTINGS)
 
-    /** Phase 4 (ADR-0010) — broadcast channels surface. */
-    data object Channels : SessionDestination
-    data class Chat(val groupIdHex: String) : SessionDestination
-    data class InviteLanding(val slug: String) : SessionDestination
+    const val CHAT = "chat/{groupIdHex}"
+    fun chat(groupIdHex: String): String = "chat/$groupIdHex"
+    const val NEW_CHAT = "new_chat"
+    const val NEW_GROUP = "new_group"
+    const val PROFILE = "settings/profile"
+    const val PASSKEYS = "settings/passkeys"
+    const val DEVICES = "settings/devices"
+    const val ANTI_CENSORSHIP = "settings/anti_censorship"
+    const val INVITE = "invite/{slug}"
+    fun invite(slug: String): String = "invite/${android.net.Uri.encode(slug)}"
+    const val GROUP_JOIN = "group_join/{slug}"
+    fun groupJoin(slug: String): String = "group_join/${android.net.Uri.encode(slug)}"
+}
 
-    /** ADR-0028 (G-3) — group join-ticket landing for a tapped `/g/<slug>`
-     *  link. Carries the slug so the VM knows which group to request to join. */
-    data class GroupJoinLanding(val slug: String) : SessionDestination
-    /** 2a2e — passkey management surface. */
-    data object Passkeys : SessionDestination
-    /** 2a3b4 — DeviceGroup pairing surface. */
-    data object Devices : SessionDestination
+private data class TabSpec(
+    val route: String,
+    val label: String,
+    val icon: ImageVector,
+    val selectedIcon: ImageVector,
+)
 
-    /** ADR-0026 — anti-censorship arming surface. */
-    data object AntiCensorship : SessionDestination
+/** The five primary destinations, in the order every client shows them. */
+private val Tabs: List<TabSpec> = listOf(
+    TabSpec(Routes.CHATS, "Chats", Icons.Outlined.ChatBubbleOutline, Icons.Filled.ChatBubble),
+    TabSpec(Routes.GROUPS, "Groups", Icons.Outlined.Groups, Icons.Filled.Groups),
+    TabSpec(Routes.CHANNELS, "Channels", Icons.Outlined.Campaign, Icons.Filled.Campaign),
+    TabSpec(Routes.CONTACTS, "Contacts", Icons.Outlined.People, Icons.Filled.People),
+    TabSpec(Routes.SETTINGS, "Settings", Icons.Outlined.Settings, Icons.Filled.Settings),
+)
 
-    /** ADR-0048 — Settings -> Profile (own profile name). */
-    data object Profile : SessionDestination
+/** Standard tab switch: one back-stack per tab, state saved and restored. */
+private fun NavHostController.navigateToTab(route: String) {
+    navigate(route) {
+        popUpTo(graph.findStartDestination().id) { saveState = true }
+        launchSingleTop = true
+        restoreState = true
+    }
+}
+
+/** Safe-drawing insets for the roots outside the tabbed shell (auth, recovery). */
+@Composable
+private fun InsetRoot(content: @Composable () -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .windowInsetsPadding(WindowInsets.safeDrawing),
+    ) {
+        content()
+    }
 }
 
 /**

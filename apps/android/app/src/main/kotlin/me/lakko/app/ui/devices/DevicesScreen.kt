@@ -18,6 +18,10 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -41,7 +45,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -114,7 +117,9 @@ public fun DevicesScreen(
             TopAppBar(
                 title = { Text("Devices") },
                 navigationIcon = {
-                    TextButton(onClick = onBack) { Text("Back") }
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
                 },
             )
         },
@@ -127,9 +132,8 @@ public fun DevicesScreen(
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             Text(
-                "Link a second device to this account. The pairing is " +
-                    "end-to-end-encrypted: the server sees only the rendezvous " +
-                    "pseudonym and opaque MLS bytes.",
+                "Use Lakko on more than one device. Linking is end-to-end " +
+                    "encrypted; Lakko's servers cannot read it.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -246,9 +250,8 @@ private fun PairTab(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text(
-            "Show this QR code to your already-linked device. It scans the " +
-                "code, runs the MLS handshake, and your new device joins " +
-                "the DeviceGroup.",
+            "Show this QR code to a device that is already signed in. " +
+                "Scanning it links this device to your account.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -313,7 +316,7 @@ private fun PairTab(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 CircularProgressIndicator()
-                Text("Preparing pairing material…")
+                Text("Preparing...")
             }
 
             is PairUi.Waiting -> Column(
@@ -348,12 +351,12 @@ private fun PairTab(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 CircularProgressIndicator()
-                Text("Joining the device group…")
+                Text("Linking...")
             }
 
             PairUi.Done -> Text(
-                "Linked. This device is now part of your DeviceGroup.",
-                color = Color(0xFF1B5E20), // material green 900
+                "Linked. This device is now part of your account.",
+                color = MaterialTheme.colorScheme.primary,
                 style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.SemiBold,
             )
@@ -604,7 +607,7 @@ private fun ScanTab(
             ScanUi.Done -> Text(
                 "Device added. The other device should land on its success " +
                     "screen any moment now.",
-                color = Color(0xFF1B5E20),
+                color = MaterialTheme.colorScheme.primary,
                 style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.SemiBold,
             )
@@ -682,10 +685,8 @@ private fun DevicesListTab(
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         Text(
-            "These are the devices currently linked to your account. " +
-                "Removing a device revokes its access via an MLS commit " +
-                "broadcast on the DeviceGroup journal — the revoked " +
-                "device can no longer decrypt any subsequent traffic.",
+            "The devices linked to your account. A removed device loses " +
+                "access to your messages.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -700,7 +701,7 @@ private fun DevicesListTab(
             }
 
             is DevicesListUi.Ready -> {
-                s.devices.forEach { device ->
+                s.devices.forEachIndexed { index, device ->
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -708,18 +709,13 @@ private fun DevicesListTab(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
+                            // No device name or platform is recorded yet, so
+                            // the label is neutral: "Device N" by order added.
                             Text(
-                                "#${device.leafIndex} ${hexPrefix(device.signaturePublicKey, 8)}",
+                                if (device.isSelf) "This device" else "Device ${index + 1}",
                                 style = MaterialTheme.typography.bodyMedium,
                                 fontWeight = FontWeight.Medium,
                             )
-                            if (device.isSelf) {
-                                Text(
-                                    "this device",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            }
                         }
                         if (device.isSelf) {
                             Text(
@@ -796,13 +792,6 @@ private fun DevicesListTab(
                             }
                         }
                     }
-                }
-                OutlinedButton(
-                    onClick = { refresh() },
-                    enabled = removingLeaf == null,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text("Refresh")
                 }
             }
 
@@ -987,7 +976,7 @@ private fun TotpEnrollTab(sessionToken: String) {
             TotpUi.Done -> Text(
                 "Authenticator enabled. A 6-digit code can now recover " +
                     "access to this account.",
-                color = Color(0xFF1B5E20),
+                color = MaterialTheme.colorScheme.primary,
                 style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.SemiBold,
             )
@@ -1264,7 +1253,7 @@ private fun ContactEnrollTab(sessionToken: String) {
             ContactUi.Done -> Text(
                 "Recovery contact enabled. A one-time code can now " +
                     "recover access to this account.",
-                color = Color(0xFF1B5E20),
+                color = MaterialTheme.colorScheme.primary,
                 style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.SemiBold,
             )

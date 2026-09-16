@@ -2,23 +2,23 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * The Chats destination: the chat list pane on the left, the open chat (or
- * the empty hint) on the right. Wraps `/` and `/chat/:id` so the list stays
- * mounted while the user moves between conversations. On a narrow screen one
- * pane shows at a time: the list, or the open chat.
+ * The Chats destination: the list of one-to-one conversations on the left,
+ * the open chat (or the empty hint) on the right. Wraps `/` and `/chat/:id`
+ * so the list stays mounted while the user moves between conversations. On a
+ * narrow screen one pane shows at a time: the list, or the open chat.
+ *
+ * `GroupsLayout` is the same shell over the group conversations.
  */
 import type { JSX } from "solid-js";
-import { useLocation, useParams, type RouteSectionProps } from "@solidjs/router";
-import { paths } from "./paths";
+import { useParams, type RouteSectionProps } from "@solidjs/router";
 import { ChatList } from "../chat/ChatList";
 
 export default function ChatsLayout(props: RouteSectionProps): JSX.Element {
   const params = useParams<{ id?: string }>();
-  const location = useLocation();
-  const open = (): boolean => params.id !== undefined || location.pathname === paths.newGroup;
+  const open = (): boolean => params.id !== undefined;
   return (
     <div class="lk-split" data-open={open() ? "true" : "false"}>
-      <ChatList activeGroupIdB64={params.id ?? null} />
+      <ChatList kind="chat" activeGroupIdB64={params.id ?? null} />
       <div class="lk-main">{props.children}</div>
     </div>
   );

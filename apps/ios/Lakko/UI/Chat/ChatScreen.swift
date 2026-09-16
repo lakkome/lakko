@@ -21,6 +21,9 @@ import UniformTypeIdentifiers
 public struct ChatScreen: View {
 
     @ObservedObject public var viewModel: ChatViewModel
+    /// Leave this screen (pop it). Navigation back is the system back button
+    /// and edge swipe; this is only for the case the chat was deleted from
+    /// the members sheet, when there is nothing left to show.
     public var onBack: () -> Void
 
     /// Phase 2a3e2b-iOS — cross-device sync runtime. Attached
@@ -181,29 +184,12 @@ public struct ChatScreen: View {
         .navigationTitle(headline)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .navigationBarLeading) {
-                Button(action: onBack) {
-                    Label("Back", systemImage: "chevron.backward")
-                }
-            }
-            ToolbarItem(placement: .navigationBarTrailing) {
-                Button(action: viewModel.onRefreshClicked) {
-                    if viewModel.refreshing {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                }
-                .disabled(viewModel.refreshing)
-            }
-            // A4 — Members sheet: roster + add / remove. Available on
-            // any chat (a 1×1 becomes a group by adding the first member).
-            ToolbarItem(placement: .navigationBarTrailing) {
-                Button {
-                    viewModel.toggleMembersPanel()
-                } label: {
-                    Image(systemName: "person.2.fill")
-                }
+            // UX spec section 5.2: system back, avatar + name in the middle,
+            // then call, video call and an overflow menu. At most two trailing
+            // items plus the menu (section 4).
+            ToolbarItem(placement: .principal) {
+                ChatTitleView(title: headline, subtitle: subtitle, identity: viewModel.groupIdHex,
+                              isGroup: viewModel.isGroupChat)
             }
             // Phase 3a9 — audio Call button. Hidden when a call
             // overlay is up (the overlay carries the
@@ -225,7 +211,7 @@ public struct ChatScreen: View {
                     // + SFrame) and a 1×1 chat stays P2P.
                     viewModel.onCallButton(video: false)
                 } label: {
-                    Image(systemName: "phone.fill")
+                    Image(systemName: "phone")
                 }
                 .accessibilityLabel(callButtonLabel(video: false))
                 .disabled(viewModel.chatCallAction == .unavailable)
@@ -239,11 +225,26 @@ public struct ChatScreen: View {
                 Button {
                     viewModel.onCallButton(video: true)
                 } label: {
-                    Image(systemName: "video.fill")
+                    Image(systemName: "video")
                 }
                 .accessibilityLabel(callButtonLabel(video: true))
                 .disabled(viewModel.chatCallAction == .unavailable)
             }
+            }
+            // A4 — the Members sheet (roster + add / remove) lives in the
+            // overflow. Available on any chat (a 1×1 becomes a group by adding
+            // the first member).
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Menu {
+                    Button {
+                        viewModel.toggleMembersPanel()
+                    } label: {
+                        Label(viewModel.isGroupChat ? "Group info" : "Members", systemImage: "person.2")
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+                .accessibilityLabel("More")
             }
         }
         .sheet(isPresented: $viewModel.membersPanelOpen) {
@@ -396,13 +397,17 @@ public struct ChatScreen: View {
     /// modifier auto-closes on selection. iOS 17+.
     @State private var photoPickerOpenRequested: Bool = false
 
+    /// ADR-0048 — a 1x1 chat is titled with the other person's resolved
+    /// name (rename, profile name, verified username). A group is titled from
+    /// its members ("Anna, Ivan, Maria +2"), never from the group id (UX spec
+    /// section 5.1).
     private var headline: String {
-        // ADR-0048 — a 1x1 chat is titled with the other person's resolved
-        // name (rename, profile name, verified username, fingerprint). A group
-        // keeps its group label, unchanged.
-        if let peer = viewModel.oneToOnePeerName { return peer }
-        let prefix = viewModel.groupIdHex.prefix(16)
-        return "Chat • \(prefix)"
+        viewModel.conversationTitle
+    }
+
+    /// "@username" in a 1x1 chat, "N members" in a group (UX spec section 5.2).
+    private var subtitle: String? {
+        viewModel.conversationSubtitle
     }
 
     @ViewBuilder
@@ -529,18 +534,12 @@ public struct ChatScreen: View {
                     .font(.body)
                     .foregroundStyle(.secondary)
             } else {
-                Text("Bootstrap pending")
+                Text("Loading...")
                     .font(.body)
                     .foregroundStyle(.secondary)
-                Text(
-                    "The session is still rebuilding MLS state. " +
-                    "If you just signed in, give it a moment; if it " +
-                    "persists, the snapshot may be missing on this " +
-                    "device — sending a message will surface a " +
-                    "diagnostic error."
-                )
-                .font(.footnote)
-                .foregroundStyle(.secondary)
+                Text("This conversation is still being set up on this device.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -1295,29 +1294,24 @@ private struct MessageRow: View {
         .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 
-    /// ADR-0024 — the "Sent" / "Read" receipt label under an own
-    /// outgoing bubble. `nil` read state renders nothing (incoming,
-    /// system, or pre-ack rows). "Sent" is a single check; "Read" is a
-    /// filled double check, both with a tiny caption.
+    /// ADR-0024 — the delivery glyph under an own outgoing bubble (UX spec
+    /// section 5.2): one check sent, a filled check read. No word. `nil` read
+    /// state renders nothing (incoming, system, or pre-ack rows).
     @ViewBuilder
     private var readReceiptCheck: some View {
         switch readState {
         case .none:
             EmptyView()
         case .sent:
-            HStack(spacing: 3) {
-                Image(systemName: "checkmark")
-                Text("Sent")
-            }
-            .font(.caption2)
-            .foregroundStyle(.secondary)
+            Image(systemName: "checkmark")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("Sent")
         case .read:
-            HStack(spacing: 3) {
-                Image(systemName: "checkmark.circle.fill")
-                Text("Read")
-            }
-            .font(.caption2)
-            .foregroundStyle(Color.accentColor)
+            Image(systemName: "checkmark.circle.fill")
+                .font(.caption2)
+                .foregroundStyle(Color.lakkoAccent)
+                .accessibilityLabel("Read")
         }
     }
 }
@@ -1678,16 +1672,16 @@ private struct MembersSheet: View {
                                     // rename or profile name when known, else the
                                     // fingerprint without `@`.
                                     Text(viewModel.personName(signatureKeyB64: base64Encode(ref))
-                                        ?? Self.shortFingerprint(ref))
+                                        ?? "Someone")
                                         .font(.footnote)
                                     // ADR-0028 OQ2 — which member's link this
                                     // request arrived on + whether they are still
                                     // in the roster (advisory).
                                     if let attr = viewModel.joinAttributions[ref] {
                                         Text(
-                                            "via \(String(attr.issuerFingerprint.prefix(11)))"
-                                                + (attr.issuerInRoster
-                                                    ? " · member" : " · not a current member")
+                                            attr.issuerInRoster
+                                                ? "via a member's invite link"
+                                                : "via the link of someone who is no longer a member"
                                         )
                                         .font(.caption2)
                                         .foregroundColor(attr.issuerInRoster ? .secondary : .red)
@@ -2078,12 +2072,6 @@ private struct MembersSheet: View {
         return "\(n) member" + (n == 1 ? "" : "s")
     }
 
-    /// ADR-0027 (G-3) — a short hex fingerprint of a joiner's signature key for
-    /// the pending-request row (the full key has no human name yet — the joiner
-    /// is a non-member). Mirrors the roster's fingerprint posture.
-    private static func shortFingerprint(_ data: Data) -> String {
-        data.prefix(8).map { String(format: "%02x", $0) }.joined()
-    }
 }
 
 /// ADR-0045 UX §6.1.4 / §6.1.5 — the ownership-transfer step.
@@ -2222,5 +2210,33 @@ private struct TransferOwnershipStep: View {
                     .disabled(viewModel.membershipBusy)
             }
         }
+    }
+}
+
+/// The chat header's principal item (UX spec section 5.2): a small avatar,
+/// the name, and one muted line under it.
+private struct ChatTitleView: View {
+    let title: String
+    let subtitle: String?
+    /// Hashed for the avatar tint only; never shown.
+    let identity: String
+    let isGroup: Bool
+
+    var body: some View {
+        HStack(spacing: 8) {
+            InitialsAvatar(name: title, identity: identity, size: 32, isGroup: isGroup)
+            VStack(alignment: .leading, spacing: 0) {
+                Text(title)
+                    .font(.headline)
+                    .lineLimit(1)
+                if let subtitle {
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(Color.lakkoTextMuted)
+                        .lineLimit(1)
+                }
+            }
+        }
+        .accessibilityElement(children: .combine)
     }
 }

@@ -35,19 +35,26 @@ export const paths = {
   recover: "/recover",
   /** Authenticated home / inbox. */
   home: "/",
+  /** Group conversations — the second primary destination. */
+  groups: "/groups",
   /** New group: name it, pick the first members from your contacts. */
-  newGroup: "/new-group",
+  newGroup: "/groups/new",
   /** Contact list and add-contact entry point. */
   contacts: "/contacts",
-  /** Settings — Profile · Security · Appearance · Data · Account. */
+  /** Settings — Profile · Security · Appearance · Media · Account. */
   settings: "/settings",
-  /** Settings sub-sections; `settings` itself lands on Profile. */
-  settingsSection(section: "profile" | "security" | "appearance" | "data" | "account"): string {
+  /** Settings sub-sections; `settings` itself lands on Profile. `recovery`
+   *  is reached from Security (authenticator, email or phone), not from the
+   *  section list. */
+  settingsSection(
+    section: "profile" | "security" | "appearance" | "media" | "account" | "recovery",
+  ): string {
     return `/settings/${section}`;
   },
   /** The viewer's own profile name (ADR-0048) — the first Settings section. */
   profile: "/settings/profile",
-  /** Calls — recent calls, create a call link, join with a link. */
+  /** The former Calls destination. Redirects to Contacts, where "Create call
+   *  link" now lives in the add menu. */
   calls: "/calls",
   /**
    * Developer probe — runs the "Hello core" round-trip from 1.16a.
@@ -67,6 +74,14 @@ export const paths = {
    */
   chat(groupIdB64Url: string): string {
     return `/chat/${groupIdB64Url}`;
+  },
+  /**
+   * The same conversation opened from the Groups list. Both URLs render the
+   * one chat view; the prefix decides which list pane stays beside it and
+   * where Back returns to.
+   */
+  groupChat(groupIdB64Url: string): string {
+    return `/groups/${groupIdB64Url}`;
   },
   /**
    * Build an invite-link URL for a capability slug
@@ -138,6 +153,13 @@ export const paths = {
  * sync with `paths.chat(...)`. Used in the route table.
  */
 export const chatRoutePattern = "/chat/:id" as const;
+
+/**
+ * The matchable pattern for a conversation opened from the Groups list —
+ * must stay in sync with `paths.groupChat(...)`. Relative to the Groups
+ * layout (`paths.groups`).
+ */
+export const groupChatRoutePattern = "/:id" as const;
 
 /**
  * The matchable pattern for the dynamic invite-link route — must

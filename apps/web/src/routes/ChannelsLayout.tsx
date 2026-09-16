@@ -77,7 +77,7 @@ export default function ChannelsLayout(props: RouteSectionProps): JSX.Element {
           <Icon name="search" size={18} />
           <input
             type="text"
-            placeholder="Find @handle or channel id"
+            placeholder="Find a channel by @handle"
             aria-label="Find a channel"
             autocapitalize="none"
             autocomplete="off"
@@ -117,7 +117,11 @@ export default function ChannelsLayout(props: RouteSectionProps): JSX.Element {
                   <div class="lk-row-body">
                     <span class="lk-row-title">{c.localName || "Unnamed channel"}</span>
                     <span class="lk-row-sub">
-                      {c.localDescription !== "" ? c.localDescription : `${c.id.slice(0, 8)}…`}
+                      {c.localDescription !== ""
+                        ? c.localDescription
+                        : channelsState.keysByChannel().get(c.id) !== undefined
+                          ? "Your channel"
+                          : "Subscribed"}
                     </span>
                   </div>
                 </A>

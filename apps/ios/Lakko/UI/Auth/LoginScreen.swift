@@ -43,14 +43,9 @@ public struct LoginScreen: View {
                     .font(.largeTitle)
                     .fontWeight(.semibold)
 
-                Text(
-                    "OPAQUE-PAKE login. Wrong username and wrong password " +
-                    "produce the same error — by design (the server cannot " +
-                    "tell us which one you got wrong without leaking " +
-                    "whether the account exists)."
-                )
-                .font(.body)
-                .foregroundStyle(.secondary)
+                Text("Your password never leaves this device.")
+                    .font(.body)
+                    .foregroundStyle(.secondary)
 
                 TextField("Username", text: $viewModel.username)
                     .textFieldStyle(.roundedBorder)
@@ -127,7 +122,7 @@ public struct LoginScreen: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                     Button(action: onNavigateToRecover) {
-                        Text("Recover with your 24-word phrase")
+                        Text("Recover your account")
                             .font(.footnote)
                     }
                     Spacer()

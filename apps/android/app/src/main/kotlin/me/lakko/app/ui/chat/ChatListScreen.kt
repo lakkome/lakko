@@ -3,195 +3,221 @@
 
 package me.lakko.app.ui.chat
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Archive
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.GroupAdd
+import androidx.compose.material.icons.filled.NotificationsOff
+import androidx.compose.material.icons.filled.PushPin
+import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import kotlinx.coroutines.launch
-import me.lakko.app.devices.sync.DeviceGroupSyncRepository
-import me.lakko.app.devices.sync.FlagsState
-import me.lakko.app.devices.sync.ReadCursorState
 import kotlinx.coroutines.launch
 import me.lakko.app.chat.ChatRepository
 import me.lakko.app.chat.ChatThread
 import me.lakko.app.chat.Direction
+import me.lakko.app.devices.sync.DeviceGroupSyncRepository
+import me.lakko.app.devices.sync.FlagsState
+import me.lakko.app.devices.sync.ReadCursorState
+import me.lakko.app.ui.components.LakkoAvatar
 
 /**
- * Chat list screen — vertical list of every conversation
- * thread `ChatRepository` knows about. Mirror of `apps/web`'s
- * (eventual) ChatList route; for 1.15f4b the surface is
- * minimal:
+ * The conversation list — used twice, as the Chats tab and the Groups tab
+ * (docs/ux/client-redesign.md section 5.1), filtered by [ConversationKind].
  *
- *   * Top: back button + title + manual refresh (`pollAllGroups`).
- *   * Body: `LazyColumn` of [ChatThread]s as Cards. Each card
- *     shows the short hex of the group id + the last message
- *     preview + tap → [onOpenThread].
- *   * Empty state: gentle hint that contacts → Accept will
- *     create a thread.
- *
- * No continuous polling — `LaunchedEffect(Unit)` fires one
- * refresh on first arrival, then the user taps Refresh. Same
- * posture as 1.15e6's [me.lakko.app.ui.contacts.ContactsScreen].
- *
- * The screen consumes the repository directly rather than via a
- * dedicated ViewModel because the surface is purely a read-only
- * projection — no composer, no per-thread mutable state. The
- * 1×1 [ChatScreen] does have a ChatViewModel for its composer
- * + send-busy flags.
+ * Receiving is automatic (the app-level long poll in `MainActivity`), so there
+ * is no Refresh button; pull-to-refresh runs the same poll once. Row actions
+ * (pin / mute / archive) live behind a long-press menu, never as permanent
+ * buttons in the row. The full row redesign is Phase B.
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 public fun ChatListScreen(
     repository: ChatRepository,
-    onNavigateBack: () -> Unit,
+    kind: ConversationKind,
     onOpenThread: (groupIdHex: String) -> Unit,
+    /** New chat (Chats) or New group (Groups). */
+    onCompose: () -> Unit,
     modifier: Modifier = Modifier,
     deviceGroupSync: DeviceGroupSyncRepository? = null,
 ) {
     val state by repository.state.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
     // ADR-0048 UX §5 — a two-member chat is listed under the other person's
-    // resolved name (`Name · @username` when verified); a group keeps its label.
+    // resolved name; a group under its local name or its members' names.
     val directory = remember(repository) { me.lakko.app.profile.ProfileDirectory.get(repository.context) }
     val nameVersion by directory.version.collectAsStateWithLifecycle()
-    // Phase 2a3e2c-Android — cross-device flags. Nullable
-    // `deviceGroupSync` keeps the screen mountable in tests /
-    // older callers that haven't wired the sync runtime yet.
     val flagsState = deviceGroupSync?.flags?.collectAsStateWithLifecycle()
     val flagsMap: Map<String, FlagsState> = flagsState?.value ?: emptyMap()
-    // Phase 2a3e2c-followup — per-thread read cursor map for
-    // the unread-badge counter.
     val readCursorState = deviceGroupSync?.readCursors?.collectAsStateWithLifecycle()
     val readCursorMap: Map<String, ReadCursorState> =
         readCursorState?.value ?: emptyMap()
+    var refreshing by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
-        // An immediate refresh so the list is fresh when the user lands. The
-        // continuous long poll across every group is NOT here any more: it runs
-        // app-wide from `MainActivity`'s session root while the app is in the
-        // foreground, whatever screen is showing, because call signaling and
-        // the unread counts must arrive for chats that are not open on screens
-        // that are not this one. A second loop here would only lose the
-        // per-group in-flight race to it.
+        // One immediate poll so the list is fresh on arrival; the continuous
+        // long poll across every group runs app-wide from `MainActivity`.
         repository.pollAllGroups()
     }
 
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .padding(16.dp),
-    ) {
-        Header(
-            onNavigateBack = onNavigateBack,
-            onRefresh = { scope.launch { repository.pollAllGroups() } },
-        )
-        // ADR-0050 / docs/ux/second-device.md section 2: one label while this
-        // device is still being admitted to the account's chats. Chats appear
-        // as they arrive; the label goes when nothing is pending. Never a
-        // counter, never a per-chat row. Re-read on every repository emission.
-        val synchronizing = remember(state) { repository.isSynchronizing() }
-        if (synchronizing) {
-            Text(
-                "Synchronizing...",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        Spacer(Modifier.height(8.dp))
+    val isChats = kind == ConversationKind.Chat
+    val visible = remember(state, kind, nameVersion) {
+        state.threads.filter { conversationKind(context, repository, it.groupIdHex) == kind }
+    }
+    val synchronizing = remember(state) { repository.isSynchronizing() }
 
-        if (state.threads.isEmpty()) {
-            EmptyPanel()
-        } else {
-            // Phase 2a3e2c — pinned threads to the top,
-            // archived to the bottom, otherwise stable on the
-            // repository order.
-            val sorted = state.threads.sortedWith(
-                compareByDescending<ChatThread> { thread ->
-                    flagsMap[thread.groupIdHex]?.pinned == true
-                }.thenBy { thread ->
-                    flagsMap[thread.groupIdHex]?.archived == true
+    Scaffold(
+        modifier = modifier,
+        topBar = {
+            TopAppBar(
+                title = { Text(if (isChats) "Chats" else "Groups") },
+                actions = {
+                    IconButton(onClick = onCompose) {
+                        Icon(
+                            imageVector = if (isChats) Icons.Filled.Edit else Icons.Filled.GroupAdd,
+                            contentDescription = if (isChats) "New chat" else "New group",
+                        )
+                    }
                 },
             )
-            LazyColumn(
-                modifier = Modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                items(items = sorted, key = { it.groupIdHex }) { thread ->
-                    val unread = unreadCount(
-                        thread = thread,
-                        cursor = readCursorMap[thread.groupIdHex],
+        },
+    ) { padding ->
+        PullToRefreshBox(
+            isRefreshing = refreshing,
+            onRefresh = {
+                scope.launch {
+                    refreshing = true
+                    try {
+                        repository.pollAllGroups()
+                    } catch (_: Throwable) {
+                        // The next automatic pass reports through the row state.
+                    } finally {
+                        refreshing = false
+                    }
+                }
+            },
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding),
+        ) {
+            Column(modifier = Modifier.fillMaxSize()) {
+                // ADR-0050 / docs/ux/second-device.md section 2: one label while
+                // this device is still being admitted to the account's chats.
+                if (synchronizing) {
+                    Text(
+                        "Synchronizing...",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
                     )
-                    val peerKey = repository.oneToOnePeerKey(thread.groupIdHex)
-                    ThreadRow(
-                        thread = thread,
-                        title = nameVersion.let { peerKey?.let { directory.resolve(it).listLabel } },
-                        flags = flagsMap[thread.groupIdHex],
-                        unread = unread,
-                        onClick = { onOpenThread(thread.groupIdHex) },
-                        onToggleFlag = { field ->
-                            val sync = deviceGroupSync ?: return@ThreadRow
-                            val groupId = hexToBytes(thread.groupIdHex)
-                                ?: return@ThreadRow
-                            val cur = flagsMap[thread.groupIdHex]
-                            var pinned = cur?.pinned ?: false
-                            var muted = cur?.muted ?: false
-                            var archived = cur?.archived ?: false
-                            val unreadOverride =
-                                cur?.unreadOverride ?: false
-                            when (field) {
-                                FlagField.Pin -> pinned = !pinned
-                                FlagField.Mute -> muted = !muted
-                                FlagField.Archive -> archived = !archived
-                            }
-                            scope.launch {
-                                try {
-                                    sync.setFlags(
-                                        groupId = groupId,
-                                        pinned = pinned,
-                                        muted = muted,
-                                        archived = archived,
-                                        unreadOverride = unreadOverride,
-                                    )
-                                } catch (cause: Throwable) {
-                                    android.util.Log.w(
-                                        "ChatListScreen",
-                                        "setFlags failed",
-                                        cause,
-                                    )
-                                }
-                            }
+                }
+                if (visible.isEmpty()) {
+                    EmptyPanel(isChats = isChats, onCompose = onCompose)
+                } else {
+                    val sorted = visible.sortedWith(
+                        compareByDescending<ChatThread> { thread ->
+                            flagsMap[thread.groupIdHex]?.pinned == true
+                        }.thenBy { thread ->
+                            flagsMap[thread.groupIdHex]?.archived == true
                         },
                     )
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(vertical = 4.dp),
+                    ) {
+                        items(items = sorted, key = { it.groupIdHex }) { thread ->
+                            val unread = unreadCount(
+                                thread = thread,
+                                cursor = readCursorMap[thread.groupIdHex],
+                            )
+                            val title = remember(thread.groupIdHex, nameVersion, state) {
+                                conversationTitle(context, repository, directory, thread.groupIdHex)
+                            }
+                            ThreadRow(
+                                thread = thread,
+                                title = title,
+                                isGroup = !isChats,
+                                flags = flagsMap[thread.groupIdHex],
+                                unread = unread,
+                                onClick = { onOpenThread(thread.groupIdHex) },
+                                onToggleFlag = { field ->
+                                    val sync = deviceGroupSync ?: return@ThreadRow
+                                    val groupId = hexToBytes(thread.groupIdHex)
+                                        ?: return@ThreadRow
+                                    val cur = flagsMap[thread.groupIdHex]
+                                    var pinned = cur?.pinned ?: false
+                                    var muted = cur?.muted ?: false
+                                    var archived = cur?.archived ?: false
+                                    val unreadOverride =
+                                        cur?.unreadOverride ?: false
+                                    when (field) {
+                                        FlagField.Pin -> pinned = !pinned
+                                        FlagField.Mute -> muted = !muted
+                                        FlagField.Archive -> archived = !archived
+                                    }
+                                    scope.launch {
+                                        try {
+                                            sync.setFlags(
+                                                groupId = groupId,
+                                                pinned = pinned,
+                                                muted = muted,
+                                                archived = archived,
+                                                unreadOverride = unreadOverride,
+                                            )
+                                        } catch (cause: Throwable) {
+                                            android.util.Log.w(
+                                                "ChatListScreen",
+                                                "setFlags failed",
+                                                cause,
+                                            )
+                                        }
+                                    }
+                                },
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -247,32 +273,12 @@ private fun hexToBytes(hex: String): ByteArray? {
     return out
 }
 
-@Composable
-private fun Header(
-    onNavigateBack: () -> Unit,
-    onRefresh: () -> Unit,
-) {
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        TextButton(onClick = onNavigateBack) { Text("← Back") }
-        Spacer(Modifier.width(8.dp))
-        Text(
-            text = "Chats",
-            style = MaterialTheme.typography.titleLarge,
-            modifier = Modifier.weight(1f),
-        )
-        TextButton(onClick = onRefresh) { Text("Refresh") }
-    }
-    HorizontalDivider()
-}
-
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ThreadRow(
     thread: ChatThread,
-    /** ADR-0048 — the other person's resolved name for a 1x1 chat, else `null`. */
-    title: String?,
+    title: String,
+    isGroup: Boolean,
     flags: FlagsState?,
     unread: Int,
     onClick: () -> Unit,
@@ -282,208 +288,145 @@ private fun ThreadRow(
     val archived = flags?.archived == true
     val pinned = flags?.pinned == true
     val muted = flags?.muted == true
-    Card(
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant,
-        ),
-        shape = RoundedCornerShape(8.dp),
-        modifier = Modifier
-            .fillMaxWidth()
-            .alpha(if (archived) 0.6f else 1f)
-            .clickable(onClick = onClick),
-    ) {
-        Column(modifier = Modifier.padding(12.dp)) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        if (pinned) {
-                            Text("📌 ", style = MaterialTheme.typography.titleSmall)
-                        }
-                        Text(
-                            text = title ?: "Group ${shortHex(thread.groupIdHex)}",
-                            style = MaterialTheme.typography.titleSmall,
-                            fontFamily = if (title == null) FontFamily.Monospace else FontFamily.Default,
-                            maxLines = 1,
+    var menuOpen by remember { mutableStateOf(false) }
+    Box {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .fillMaxWidth()
+                .alpha(if (archived) 0.6f else 1f)
+                .combinedClickable(onClick = onClick, onLongClick = { menuOpen = true })
+                .padding(horizontal = 16.dp, vertical = 10.dp),
+        ) {
+            LakkoAvatar(name = title, seed = thread.groupIdHex, size = 40.dp, group = isGroup)
+            Spacer(Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = if (unread > 0 && !thread.membershipEnded) FontWeight.SemiBold else FontWeight.Medium,
+                        maxLines = 1,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                    if (muted) {
+                        Spacer(Modifier.width(4.dp))
+                        Icon(
+                            Icons.Filled.NotificationsOff,
+                            contentDescription = "Muted",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(14.dp),
                         )
-                        if (muted) {
-                            Text(
-                                " 🔇",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        if (archived) {
-                            Text(
-                                " 📦",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
                     }
-                }
-                // Phase 2a3e2c-followup — unread badge.
-                // Muted rows render a hollow ring; everyone
-                // else gets the accent fill.
-                //
-                // ADR-0045 UX §6.2.4 / §6.2.11 — the row goes QUIET once this
-                // device's membership has ended. An unread badge asserts a
-                // conversation that can still move, and this one cannot:
-                // nothing new will ever decrypt, so whatever count is standing
-                // is frozen at the moment of the eviction and would sit there
-                // for good.
-                if (unread > 0 && !thread.membershipEnded) {
-                    val label = if (unread > 99) "99+" else unread.toString()
-                    androidx.compose.foundation.layout.Box(
-                        contentAlignment = Alignment.Center,
-                        modifier = Modifier
-                            .padding(end = 4.dp)
-                            .clip(RoundedCornerShape(percent = 50))
-                            .background(
-                                if (muted) MaterialTheme.colorScheme.surface
-                                else MaterialTheme.colorScheme.primary,
-                            )
-                            .padding(horizontal = 6.dp, vertical = 2.dp),
-                    ) {
-                        Text(
-                            text = label,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = if (muted) MaterialTheme.colorScheme.onSurfaceVariant
-                            else MaterialTheme.colorScheme.onPrimary,
+                    if (pinned) {
+                        Spacer(Modifier.width(4.dp))
+                        Icon(
+                            Icons.Filled.PushPin,
+                            contentDescription = "Pinned",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(14.dp),
+                        )
+                    }
+                    if (archived) {
+                        Spacer(Modifier.width(4.dp))
+                        Icon(
+                            Icons.Filled.Archive,
+                            contentDescription = "Archived",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(14.dp),
                         )
                     }
                 }
-                IconButton(onClick = { onToggleFlag(FlagField.Pin) }) {
-                    Text(
-                        if (pinned) "📌" else "📍",
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
+                Spacer(Modifier.height(2.dp))
+                // ADR-0045 UX §6.2.4 — the chat STAYS in the list and gains one
+                // muted line in the preview slot once this device's membership
+                // has ended; flags are deliberately untouched.
+                val endedLine = me.lakko.app.chat.chatListLine(
+                    me.lakko.app.chat.membershipState(
+                        isActive = !thread.membershipEnded,
+                        leaveRequestedAtMs = null,
+                    ),
+                )
+                val preview = when {
+                    endedLine != null -> endedLine
+                    lastMessage == null -> "No messages yet"
+                    else -> {
+                        val prefix = when (lastMessage.direction) {
+                            Direction.Outgoing -> "You: "
+                            Direction.Incoming -> ""
+                            Direction.System -> ""
+                        }
+                        "$prefix${lastMessage.text}"
+                    }
                 }
-                IconButton(onClick = { onToggleFlag(FlagField.Mute) }) {
+                Text(
+                    text = preview,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                )
+            }
+            // ADR-0045 UX §6.2.4 / §6.2.11 — no badge once the membership has
+            // ended; the count would be frozen for good.
+            if (unread > 0 && !thread.membershipEnded) {
+                Spacer(Modifier.width(8.dp))
+                val label = if (unread > 99) "99+" else unread.toString()
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(percent = 50))
+                        .background(
+                            if (muted) MaterialTheme.colorScheme.surfaceVariant
+                            else MaterialTheme.colorScheme.primary,
+                        )
+                        .padding(horizontal = 7.dp, vertical = 2.dp),
+                ) {
                     Text(
-                        if (muted) "🔇" else "🔈",
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
-                }
-                IconButton(onClick = { onToggleFlag(FlagField.Archive) }) {
-                    Text(
-                        if (archived) "📤" else "📦",
-                        style = MaterialTheme.typography.bodyMedium,
+                        text = label,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (muted) MaterialTheme.colorScheme.onSurfaceVariant
+                        else MaterialTheme.colorScheme.onPrimary,
                     )
                 }
             }
-            Spacer(Modifier.height(4.dp))
-            // ADR-0045 UX §6.2.4 — the chat STAYS in the list and gains one
-            // muted line, in the same slot the last-message preview already
-            // uses.
-            //
-            // It stays because removing it would delete a transcript the user
-            // still has, with no warning, as a side effect of something
-            // somebody else did — the single worst thing in this design's
-            // reach. The row keeps its position, its label and its flags:
-            // `pinned` / `muted` / `archived` are deliberately untouched,
-            // because auto-archiving would be the client silently reorganising
-            // the user's list on their behalf, and archive is a decision, not a
-            // consequence.
-            //
-            // The line replaces the preview rather than sitting above it: the
-            // preview is the "what is happening here" slot, and the honest
-            // answer is now this. The transcript itself is one tap away and
-            // fully intact.
-            val endedLine = me.lakko.app.chat.chatListLine(
-                me.lakko.app.chat.membershipState(
-                    // Already folded by the repository, where the live handle
-                    // is: a torn read there answers "still a member".
-                    isActive = !thread.membershipEnded,
-                    // Not consulted — `chatListLine` returns the same string
-                    // either way. The left / removed distinction belongs in the
-                    // transcript's terminal row, where the durable record is
-                    // read; the list is a glance surface.
-                    leaveRequestedAtMs = null,
-                ),
+        }
+        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+            DropdownMenuItem(
+                text = { Text(if (pinned) "Unpin" else "Pin") },
+                leadingIcon = { Icon(Icons.Filled.PushPin, contentDescription = null) },
+                onClick = { menuOpen = false; onToggleFlag(FlagField.Pin) },
             )
-            if (endedLine != null) {
-                Text(
-                    text = endedLine,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            } else if (lastMessage == null) {
-                Text(
-                    text = "No messages yet.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            } else {
-                val prefix = when (lastMessage.direction) {
-                    Direction.Outgoing -> "you: "
-                    Direction.Incoming -> ""
-                    Direction.System -> ""
-                }
-                Text(
-                    text = "$prefix${lastMessage.text}",
-                    style = MaterialTheme.typography.bodyMedium,
-                    maxLines = 2,
-                )
-            }
-            Spacer(Modifier.height(4.dp))
-            Text(
-                text = "${thread.messages.size} message" +
-                    if (thread.messages.size == 1) "" else "s",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            DropdownMenuItem(
+                text = { Text(if (muted) "Unmute" else "Mute") },
+                leadingIcon = { Icon(Icons.Filled.NotificationsOff, contentDescription = null) },
+                onClick = { menuOpen = false; onToggleFlag(FlagField.Mute) },
+            )
+            DropdownMenuItem(
+                text = { Text(if (archived) "Unarchive" else "Archive") },
+                leadingIcon = { Icon(Icons.Filled.Archive, contentDescription = null) },
+                onClick = { menuOpen = false; onToggleFlag(FlagField.Archive) },
             )
         }
     }
 }
 
 @Composable
-private fun EmptyPanel() {
+private fun EmptyPanel(isChats: Boolean, onCompose: () -> Unit) {
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .padding(top = 32.dp),
-        contentAlignment = Alignment.TopCenter,
+            .padding(24.dp),
+        contentAlignment = Alignment.Center,
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text(
-                text = "No chats yet",
+                text = if (isChats) "No chats yet" else "No groups yet",
                 style = MaterialTheme.typography.titleMedium,
             )
-            Spacer(Modifier.height(4.dp))
-            Text(
-                text = "Open Contacts and Accept an incoming request to start " +
-                    "a 1×1 chat. Outgoing requests turn into chats when the " +
-                    "recipient accepts (the next time their app polls the " +
-                    "stranger inbox).",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            Spacer(Modifier.height(12.dp))
+            Button(onClick = onCompose) {
+                Text(if (isChats) "Start a chat" else "Create a group")
+            }
         }
     }
-}
-
-
-/** Show the first six + last four hex chars of a long string —
- *  same preview format as
- *  [me.lakko.app.ui.contacts.ContactsScreen]'s `shortHex`. */
-private fun shortHex(hex: String): String {
-    if (hex.length <= 12) return hex
-    return "${hex.substring(0, 6)}…${hex.substring(hex.length - 4)}"
-}
-
-/** Sentinel for an empty refreshing spinner — unused today but
- *  kept here so 1.15f4c's per-thread refresh indicator has a
- *  consistent style entry point. */
-@Suppress("unused")
-@Composable
-private fun TinySpinner() {
-    CircularProgressIndicator(
-        modifier = Modifier
-            .height(14.dp)
-            .width(14.dp),
-        strokeWidth = 2.dp,
-    )
 }

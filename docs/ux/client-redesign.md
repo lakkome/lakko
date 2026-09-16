@@ -14,6 +14,17 @@ what they do.
 Order of work agreed with the maintainer: redesign, then stabilisation, then a
 verified readiness table, then the next feature arc.
 
+Progress: Phase A (section 8) landed on all three clients on 2026-09-16 and
+was checked by screenshots on the iOS simulator, the Android emulator and
+the web test stack. Known leftovers from that pass, all unbuilt: the iOS
+accent still renders as the system blue (the asset catalog colour is not
+applied to the tab and bubble tint); the iOS tab bar stays visible inside a
+chat; no client persists a conversation kind, so a group created with two
+people lists under Chats until a third person joins; the shared display-name
+resolver still falls back to a key fingerprint for a person without a name;
+Android has no app icon and iOS has an empty icon set; the web row actions
+have no touch path.
+
 ## 1. What is wrong today
 
 Findings from a code inventory of the three clients (2026-09-16).
@@ -83,21 +94,29 @@ Timeline
 
 ## 3. Navigation model
 
-Four primary destinations, in this order, on every client:
+Five primary destinations, in this order, on every client:
 
 | Destination | Contents |
 |---|---|
-| Chats | Chat list, new chat, new group, the chat screen |
-| Contacts | Contact list, requests, add by username, invite links, QR, contact detail |
+| Chats | One-to-one conversations: the list, new chat, the chat screen |
+| Groups | Group conversations: the list, new group, the group chat screen, group info |
 | Channels | Channel list, channel view, create, subscribe |
+| Contacts | Contact list, requests, add by username, invite links, QR, contact detail |
 | Settings | Profile, security (passkeys, devices, recovery), appearance, media, network, account |
+
+Chats and Groups are two lists over the same conversation store, split by
+kind: a conversation with two people is a chat, anything else is a group
+(people are counted by account, not by device leaf, so a two-person chat
+where one person has three devices stays a chat). A group created through
+the new-group flow is a group even while it still has two people.
 
 - iOS: bottom `TabView`; each tab is its own `NavigationStack`.
 - Android: Material 3 `NavigationBar`; one `NavHost` per tab or a single host
   with tab-level start destinations. Predictive back enabled.
-- Web: the existing left rail on wide screens, bottom tab bar below 720 px.
-  The rail's "Calls" destination is removed; call links move to the
-  Contacts "+" menu ("Create call link") and to the chat header.
+- Web: the existing left rail on wide screens, bottom tab bar below 720 px,
+  with the same five destinations. The rail's "Calls" destination is
+  removed; call links move to the Contacts "+" menu ("Create call link")
+  and to the chat header.
 - The app opens on Chats. There is no home screen.
 - Devices, passkeys, recovery factors and anti-censorship are rows inside
   Settings, never primary destinations.
@@ -161,10 +180,15 @@ Platform-specific layout hygiene, all required:
 
 ## 5. Screens
 
-### 5.1 Chat list
+### 5.1 Chats list and Groups list
 
-- Top bar: title "Chats", a search field (inline on Android and iOS, in the
-  pane head on web), a compose action with a menu: New chat, New group.
+One list component, used twice. Everything below applies to both; the
+differences are the title, the compose action and the row title rule.
+
+- Top bar: title "Chats" or "Groups", a search field (inline on Android and
+  iOS, in the pane head on web), a compose action: New chat (opens the
+  contact picker) on Chats, New group (the docs/ux/new-group.md flow) on
+  Groups.
 - Row: avatar, name (bold when unread), time of the last message on the
   right, last message preview on the second line (sender name prefix in
   groups, "Photo", "Voice message", "GIF" for media), an unread count badge,
@@ -173,11 +197,15 @@ Platform-specific layout hygiene, all required:
 - Row actions: swipe on natives (pin, mute, archive), hover actions and a
   context menu on web. Never three permanent buttons in the row.
 - States: loading skeleton on first open; empty state with an illustration
-  glyph, "No chats yet" and a "Start a chat" button; the single
-  "Synchronizing..." label while the device is still being admitted to the
-  account's chats (docs/ux/second-device.md section 2).
-- Group names: a group without a name is titled from its members ("Anna,
-  Ivan, Maria" and "+2" beyond three), never from a hex id.
+  glyph, "No chats yet" and "Start a chat" on Chats, "No groups yet" and
+  "Create a group" on Groups; the single "Synchronizing..." label on both
+  lists while the device is still being admitted to the account's
+  conversations (docs/ux/second-device.md section 2).
+- Row title: the contact's name on Chats; the group name on Groups, and a
+  group without a name is titled from its members ("Anna, Ivan, Maria" and
+  "+2" beyond three), never from a hex id.
+- A new conversation appears in the list its kind belongs to; a chat never
+  moves between the two lists on its own.
 
 ### 5.2 Chat
 
@@ -287,6 +315,9 @@ Platform-specific layout hygiene, all required:
   envelope (ADR-0048), the contact rename, or the username; the group title
   derived from member names when the group has none.
 - Delivery state per own message (sent, read) as today.
+- A conversation kind (chat or group) per conversation, derived from the
+  people count and the new-group flag, so the two lists split without a
+  server change.
 - Device rows with a human label (platform and model, or a user-set name)
   and an added date; the leaf index and key stay internal.
 - Nothing new from the server.
@@ -302,8 +333,8 @@ Phase A, foundations, all three clients in parallel:
 - insets and scrolling hygiene; copy pass removing protocol terms and raw
   ids.
 
-Phase B: chat list and chat screen (rows, timeline with time, grouping,
-delivery glyphs, header, composer).
+Phase B: the Chats and Groups lists and the chat screen (rows, timeline
+with time, grouping, delivery glyphs, header, composer).
 
 Phase C: contacts and settings (including the devices screen).
 

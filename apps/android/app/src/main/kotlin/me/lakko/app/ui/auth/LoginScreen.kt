@@ -67,9 +67,7 @@ public fun LoginScreen(
         )
         Spacer(Modifier.height(8.dp))
         Text(
-            text = "OPAQUE-PAKE login. Wrong username and wrong password produce " +
-                "the same error — by design (the server cannot tell us which one " +
-                "you got wrong without leaking whether the account exists).",
+            text = "Your password never leaves this device.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

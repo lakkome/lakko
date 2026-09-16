@@ -2050,7 +2050,6 @@ public class ChatViewModel(
             draft = composer.draft,
             sending = composer.sending,
             sendError = composer.sendError,
-            refreshing = composer.refreshing,
             pendingAttachments = composer.pendingAttachments,
             uploading = composer.uploading,
             uploadStage = composer.uploadStage,
@@ -2482,15 +2481,11 @@ public class ChatViewModel(
         return bytes
     }
 
-    public fun onRefreshClicked() {
-        composer.update { it.copy(refreshing = true) }
-        viewModelScope.launch {
-            try {
-                repo.pollGroup(groupIdHex)
-            } finally {
-                composer.update { it.copy(refreshing = false) }
-            }
-        }
+    /** One immediate (non-waiting) poll of this group — the first tick of the
+     *  screen's receive loop. Receiving is otherwise automatic; there is no
+     *  Refresh button. */
+    public fun pollNow() {
+        viewModelScope.launch { repo.pollGroup(groupIdHex) }
     }
 
     /**
@@ -2513,8 +2508,6 @@ public class ChatViewModel(
      * One long-poll tick for the per-thread continuous-polling
      * loop the composable drives via
      * `LaunchedEffect(Unit) { while (isActive) { pollOnce(...) } }`.
-     * Silent — does NOT flip the `refreshing` flag (the spinner
-     * would otherwise stay on for the full long-poll window).
      */
     /** `true` when this call fetched and applied a batch; see [ChatRepository.pollGroup]. */
     public suspend fun pollOnceLongPoll(waitSecs: Int = DEFAULT_LONG_POLL_SECS): Boolean =
@@ -2596,7 +2589,6 @@ public class ChatViewModel(
         val draft: String = "",
         val sending: Boolean = false,
         val sendError: String? = null,
-        val refreshing: Boolean = false,
         /** Phase 1.19c4 — attachments staged in the composer.
          *  The user picks a file / photo; each call to
          *  [ChatViewModel.onAttachmentPicked] encrypts +
@@ -2634,7 +2626,6 @@ public data class ChatScreenUiState(
     val draft: String,
     val sending: Boolean,
     val sendError: String?,
-    val refreshing: Boolean,
     /** 1.19c4 — staged attachments below the text composer. */
     val pendingAttachments: List<AttachmentRef> = emptyList(),
     /** 1.19c4 — `true` while a picked item is being encrypted

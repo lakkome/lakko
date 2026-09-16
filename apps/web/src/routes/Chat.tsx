@@ -51,6 +51,8 @@ import { useBackgroundReceive } from "../chat/BackgroundReceiveContext";
 import { eventToPersistedMessage, mergeForegroundSlot } from "../chat/background-log";
 import { memberKeysOf, peerName } from "../chat/peer-name";
 import { ownPersonKeyB64, peopleCountOf, personKeyOf } from "../chat/person-key";
+import { groupTitle } from "../chat/group-title";
+import { memberListLabelOf, memberNameOf } from "../profile/member-label";
 import { groupCallsFor } from "../calls/group-call-store";
 import { chatCallAffordance, type ChatCallAffordance } from "../calls/group-call-host";
 import {
@@ -370,7 +372,12 @@ function rowMessageId(row: TimelineRow): number | undefined {
   return undefined;
 }
 
-export default function Chat(): JSX.Element {
+/**
+ * `/chat/:id` (from the Chats list) and `/groups/:id` (from the Groups list)
+ * both render this; `backTo` is the list the conversation was opened from, so
+ * Back returns there (docs/ux/client-redesign.md section 3).
+ */
+export default function Chat(props: { backTo?: string }): JSX.Element {
   const auth = useAuth();
   const chats = useChats();
   const params = useParams<{ id: string }>();
@@ -432,7 +439,7 @@ export default function Chat(): JSX.Element {
             <ChatView
               entry={entry() as ActiveGroup}
               requireIdentity={requireIdentity}
-              onLeave={() => navigate(paths.home)}
+              onLeave={() => navigate(props.backTo ?? paths.home)}
             />
           )}
         </Show>
@@ -654,22 +661,33 @@ function ChatView(props: {
     const peers = memberKeysOf(props.entry.group).filter((k) => k !== ownB64);
     return peers.length === 1 ? (peers[0] ?? null) : null;
   };
-  /** Under the name: the person's username in a 1x1, the size of a group. */
+  /** Under the name (docs/ux section 5.2): "typing..." while a typing
+   *  indicator is live, else the person's username in a 1x1, else the size of
+   *  the group in people. */
   const headerSub = (): string => {
+    const typing = typingIndicator();
+    if (typing !== null && !membershipEnded()) return typing;
     const peer = peerKeyB64();
     if (peer !== null) return profiles.resolve(peer).username ?? "";
     const n = memberCount();
-    return `${n} member${n === 1 ? "" : "s"}`;
+    return `${n} ${n === 1 ? "person" : "people"}`;
   };
 
   const resolvePeerName = (): string => {
+    const ownKeyB64 = ownPersonKeyB64(chats.identity());
+    const memberKeysB64 = memberKeysOf(props.entry.group);
+    // An unnamed group is titled from its members, never from an id.
+    const others = memberKeysB64.filter((k) => k !== ownKeyB64);
     return peerName({
-      ownKeyB64: ownPersonKeyB64(chats.identity()),
-      memberKeysB64: memberKeysOf(props.entry.group),
+      ownKeyB64,
+      memberKeysB64,
       resolveName: (k) => profiles.resolve(k).name,
       linkedContactName: loadAccepted().find((c) => c.groupIdB64 === props.entry.groupIdB64)
         ?.displayName,
-      label: props.entry.label,
+      label: groupTitle(
+        props.entry.label,
+        others.map((k) => memberNameOf(profiles.resolve(k))),
+      ),
     });
   };
 
@@ -881,6 +899,8 @@ function ChatView(props: {
   // tracks signal reads, not WASM-side property accesses.
   const [membersOpen, setMembersOpen] = createSignal(false);
   const [membersVersion, setMembersVersion] = createSignal(0);
+  // The header's overflow menu (Members, Add member).
+  const [headerMenuOpen, setHeaderMenuOpen] = createSignal(false);
   // ADR-0027 / §7.1 — an external-join request arrived while the quarantine
   // was full, so the core did not keep it. It is in no list and can be
   // approved by nobody; the only honest thing left is to say it happened.
@@ -904,8 +924,11 @@ function ChatView(props: {
   // display resolver (local rename → profile name → verified username →
   // fingerprint without `@`). `name` for one-string surfaces (typing, authors,
   // reactions), `listLabel` (`Name · @username`) for roster rows.
-  const memberName = (keyB64: string): string => profiles.resolve(keyB64).name;
-  const memberListLabel = (keyB64: string): string => profiles.resolve(keyB64).listLabel;
+  // A person the device cannot name is "Member", never a key fingerprint
+  // (docs/ux/client-redesign.md section 6).
+  const memberName = (keyB64: string): string => memberNameOf(profiles.resolve(keyB64));
+  const memberListLabel = (keyB64: string): string =>
+    memberListLabelOf(profiles.resolve(keyB64));
   // ADR-0050 — one row per PERSON: `sigPubkey` is the member's account key
   // (what roles, names and authorship key on), `leafIndex` its first leaf,
   // `deviceCount` how many leaves the person holds. Removing the row removes
@@ -2145,7 +2168,7 @@ function ChatView(props: {
    *  rows have left the pending set, so they no longer have a
    *  {@link PendingRequest} to carry it. */
   function labelForSignatureKey(keyB64: string | undefined): string {
-    if (keyB64 === undefined) return "(unknown)";
+    if (keyB64 === undefined) return "Member";
     return memberListLabel(keyB64);
   }
 
@@ -4078,7 +4101,7 @@ function ChatView(props: {
       afterMemberAdded(result.outcome, base64Encode(result.recipientSignaturePubkey));
       setNotice(
         result.outcome.kind === "committed"
-          ? `${memberName(base64Encode(result.recipientSignaturePubkey))} added (commit #${result.outcome.commitMessageId}).`
+          ? `${memberName(base64Encode(result.recipientSignaturePubkey))} added.`
           : `${memberName(base64Encode(result.recipientSignaturePubkey))} requested. They join when an owner or an admin applies the change.`,
       );
       setAddMemberInput("");
@@ -4219,7 +4242,7 @@ function ChatView(props: {
         setMembersVersion(membersVersion() + 1);
         setNotice(
           swept?.kind === "committed"
-            ? `Member at leaf #${leafIndex} removed (commit #${swept.commitMessageId}).`
+            ? "Member removed."
             : "Removal requested. It applies when an owner or an admin applies the change.",
         );
         void refresh();
@@ -4259,7 +4282,7 @@ function ChatView(props: {
       setMembersVersion(membersVersion() + 1);
       setNotice(
         result.kind === "committed"
-          ? `Member at leaf #${leafIndex} removed (commit #${result.commitMessageId}).`
+          ? "Member removed."
           : "Removal requested.",
       );
       void refresh();
@@ -4899,57 +4922,65 @@ function ChatView(props: {
               <Icon name="video" size={20} />
             </button>
           </Show>
-          {/* ADR-0022 — only owner/admin (or an open/legacy group) sees the
-              add affordance; a plain member's add would be refused by peers. */}
-          <Show when={canManageMembers()}>
+          {/* Everything that is not a call lives in the overflow menu
+              (docs/ux section 5.2). Receiving is automatic, so there is no
+              Refresh: the receive loop below polls while the chat is open. */}
+          <div class="lk-menu-anchor">
             <button
               type="button"
               class="lk-icon-button"
-              title="Add member"
-              aria-label="Add member"
-              aria-pressed={addMemberOpen()}
-              onClick={() => {
-                setAddMemberOpen(!addMemberOpen());
-                setNotice(null);
-                setError(null);
-              }}
+              title="More"
+              aria-label="More"
+              aria-haspopup="menu"
+              aria-expanded={headerMenuOpen()}
+              onClick={() => setHeaderMenuOpen(!headerMenuOpen())}
               disabled={busy()}
             >
-              <Icon name="plus" size={20} />
+              <Icon name="more" size={20} />
             </button>
-          </Show>
-          <button
-            type="button"
-            class="lk-icon-button"
-            title="Members"
-            aria-label="Members"
-            aria-pressed={membersOpen()}
-            onClick={() => {
-              setMembersOpen(!membersOpen());
-              setNotice(null);
-              setError(null);
-              // Bump version so the panel reads fresh data
-              // when it opens (covers the case where new
-              // commits arrived between the last refresh and
-              // this click).
-              setMembersVersion(membersVersion() + 1);
-            }}
-            disabled={busy()}
-          >
-            <Icon name="contacts" size={20} />
-          </button>
-          <button
-            type="button"
-            class="lk-icon-button"
-            title={busy() ? "Refreshing…" : "Refresh"}
-            aria-label="Refresh"
-            onClick={() => {
-              void refresh();
-            }}
-            disabled={busy()}
-          >
-            <Icon name="refresh" size={20} />
-          </button>
+            <Show when={headerMenuOpen()}>
+              <div class="lk-menu-backdrop" onClick={() => setHeaderMenuOpen(false)} />
+              <div class="lk-menu" role="menu">
+                <button
+                  type="button"
+                  role="menuitem"
+                  aria-pressed={membersOpen()}
+                  onClick={() => {
+                    setHeaderMenuOpen(false);
+                    setMembersOpen(!membersOpen());
+                    setNotice(null);
+                    setError(null);
+                    // Bump version so the panel reads fresh data when it
+                    // opens (covers the case where new commits arrived
+                    // between the last poll and this click).
+                    setMembersVersion(membersVersion() + 1);
+                  }}
+                >
+                  <Icon name="contacts" size={18} />
+                  {membersOpen() ? "Hide members" : "Members"}
+                </button>
+                {/* ADR-0022 — only owner/admin (or an open/legacy group) sees
+                    the add affordance; a plain member's add would be refused
+                    by peers. */}
+                <Show when={canManageMembers()}>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    aria-pressed={addMemberOpen()}
+                    onClick={() => {
+                      setHeaderMenuOpen(false);
+                      setAddMemberOpen(!addMemberOpen());
+                      setNotice(null);
+                      setError(null);
+                    }}
+                  >
+                    <Icon name="plus" size={18} />
+                    Add member
+                  </button>
+                </Show>
+              </div>
+            </Show>
+          </div>
         </div>
       </header>
 
@@ -5231,65 +5262,14 @@ function ChatView(props: {
               >
                 Create invite link
               </button>
-              <Show when={inviteLink() !== null}>
-                <div
-                  style={{
-                    display: "flex",
-                    gap: "0.3rem",
-                    "align-items": "center",
-                  }}
-                >
-                  <input
-                    type="text"
-                    readonly
-                    value={inviteLink() ?? ""}
-                    style={{
-                      flex: "1",
-                      "font-size": "0.75rem",
-                      "font-family": "monospace",
-                      padding: "0.25rem 0.4rem",
-                      "border-radius": "var(--radius-sm)",
-                      border: "1px solid var(--surface-border)",
-                      background: "var(--surface)",
-                      color: "var(--surface-fg)",
-                      "min-width": "0",
-                    }}
+              <Show when={inviteLink()}>
+                {(l) => (
+                  <ShareLinkRow
+                    url={l()}
+                    onRevoke={() => void onRevokeInviteLink()}
+                    busy={busy()}
                   />
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const l = inviteLink();
-                      if (l) void navigator.clipboard?.writeText(l);
-                    }}
-                    style={{
-                      "font-size": "0.75rem",
-                      padding: "0.25rem 0.5rem",
-                      "border-radius": "var(--radius-sm)",
-                      border: "1px solid var(--accent)",
-                      background: "var(--accent)",
-                      color: "var(--accent-fg)",
-                      cursor: "pointer",
-                    }}
-                  >
-                    Copy
-                  </button>
-                  <button
-                    type="button"
-                    disabled={busy()}
-                    onClick={() => void onRevokeInviteLink()}
-                    style={{
-                      "font-size": "0.75rem",
-                      padding: "0.25rem 0.5rem",
-                      "border-radius": "var(--radius-sm)",
-                      border: "1px solid var(--surface-border)",
-                      background: "transparent",
-                      color: "var(--danger, #c0392b)",
-                      cursor: "pointer",
-                    }}
-                  >
-                    Revoke
-                  </button>
-                </div>
+                )}
               </Show>
             </div>
           </Show>
@@ -5385,17 +5365,7 @@ function ChatView(props: {
                           overflow: "hidden",
                         }}
                       >
-                        <span
-                          title={hexOf(ref)}
-                          style={{
-                            "font-family": "monospace",
-                            "font-size": "0.78rem",
-                            color: "var(--surface-fg)",
-                            overflow: "hidden",
-                            "text-overflow": "ellipsis",
-                            "white-space": "nowrap",
-                          }}
-                        >
+                        <span class="lk-ellipsis" style={{ "font-size": "0.85rem" }}>
                           {memberListLabel(base64Encode(ref))}
                         </span>
                         {(() => {
@@ -5408,7 +5378,7 @@ function ChatView(props: {
                                   color: "var(--surface-muted)",
                                 }}
                               >
-                                invite source unknown
+                                Invite link not known
                               </span>
                             );
                           }
@@ -5515,15 +5485,7 @@ function ChatView(props: {
                         gap: "0.1rem",
                       }}
                     >
-                      <span
-                        style={{
-                          "font-family": "monospace",
-                          "font-size": "0.78rem",
-                          color: "var(--surface-fg)",
-                        }}
-                      >
-                        {labelForAddRequest(req)}
-                      </span>
+                      <span style={{ "font-size": "0.85rem" }}>{labelForAddRequest(req)}</span>
                       <span
                         style={{
                           "font-size": "0.7rem",
@@ -5606,13 +5568,7 @@ function ChatView(props: {
                       <span
                         style={{ display: "flex", "flex-direction": "column", gap: "0.1rem" }}
                       >
-                        <span
-                          style={{
-                            "font-family": "monospace",
-                            "font-size": "0.78rem",
-                            color: "var(--surface-fg)",
-                          }}
-                        >
+                        <span style={{ "font-size": "0.85rem" }}>
                           {labelForSignatureKey(item.addSignatureKeyB64)}
                         </span>
                         <span
@@ -5715,9 +5671,10 @@ function ChatView(props: {
                         gap: "0.1rem",
                       }}
                     >
-                      <code style={{ "font-size": "0.85rem" }}>
-                        #{m.leafIndex} · {label()}
-                      </code>
+                      <span class="lk-row-title">{label()}</span>
+                      <Show when={m.deviceCount > 1}>
+                        <span class="lk-row-sub">{m.deviceCount} devices</span>
+                      </Show>
                       <Show when={annotation() !== null}>
                         <span
                           aria-hidden="true"
@@ -5740,7 +5697,7 @@ function ChatView(props: {
                             color: "var(--surface-muted)",
                           }}
                         >
-                          (you)
+                          You
                         </span>
                       }
                     >
@@ -6198,7 +6155,7 @@ function ChatView(props: {
                 composer below can no longer accept. The terminal row that
                 follows carries the whole of what there is to say. */}
             <Show when={!membershipEnded()}>
-              No messages yet. Send the first one below.
+              No messages yet. Say hi.
             </Show>
           </p>
         }
@@ -6428,17 +6385,10 @@ function ChatView(props: {
           signal can arrive (nothing decrypts any more), so what would render
           is whatever was in flight at the moment of the eviction: a live
           indicator over a conversation that has stopped. */}
+      {/* The typing indicator is the header's second line (docs/ux 5.2); the
+          screen-reader announcement stays here so it is still read out. */}
       <Show when={typingIndicator() !== null && !membershipEnded()}>
-        <div
-          style={{
-            "font-size": "0.8rem",
-            "font-style": "italic",
-            color: "var(--surface-muted)",
-            padding: "0.15rem 0.25rem",
-            "min-height": "1.1rem",
-          }}
-          aria-live="polite"
-        >
+        <div class="lakko-visually-hidden" aria-live="polite">
           {typingIndicator()}
         </div>
       </Show>
@@ -7236,53 +7186,44 @@ function ChatBubbleBody(props: {
       >
         <div
           class="lakko-msg-actions"
-          style={{
-            position: "absolute",
-            top: "-0.6rem",
-            [isIncoming ? "right" : "left"]: "0.4rem",
-            display: "flex",
-            gap: "0.2rem",
-            padding: "0.1rem",
-            "border-radius": "var(--radius-sm)",
-            background: "var(--surface-bg)",
-            border: "1px solid var(--surface-border)",
-            "box-shadow": "0 1px 3px rgba(0,0,0,0.18)",
-          }}
+          role="group"
+          aria-label="Message actions"
+          style={{ [isIncoming ? "right" : "left"]: "0.4rem" }}
         >
           <button
             type="button"
             title="React"
+            aria-label="React"
             onClick={() =>
               pickerOpen()
                 ? props.onCloseReactPicker()
                 : props.onOpenReactPicker(props.messageId as number)
             }
-            style={bubbleMiniBtnStyle}
           >
-            🙂
+            <Icon name="smile" size={16} />
           </button>
           <Show when={props.isOwn}>
             <button
               type="button"
               title="Edit"
+              aria-label="Edit"
               onClick={() =>
                 props.onStartEdit(props.messageId as number, displayText())
               }
-              style={bubbleMiniBtnStyle}
             >
-              ✎
+              <Icon name="pencil" size={16} />
             </button>
             <button
               type="button"
               title="Delete"
+              aria-label="Delete"
               onClick={() => {
                 if (props.messageId !== undefined) {
                   void props.onDeleteMessage(props.messageId);
                 }
               }}
-              style={bubbleMiniBtnStyle}
             >
-              🗑
+              <Icon name="trash" size={16} />
             </button>
           </Show>
         </div>
@@ -7385,15 +7326,6 @@ const bubbleActionBtnStyle = {
 } as const;
 
 /** Shared style for the tiny hover-strip action buttons. */
-const bubbleMiniBtnStyle = {
-  border: "none",
-  background: "transparent",
-  "font-size": "0.85rem",
-  cursor: "pointer",
-  padding: "0.1rem 0.25rem",
-  "line-height": 1,
-} as const;
-
 /**
  * Render the attachment-chip strip below a bubble's text body.
  * Each chip shows `name · size` plus action buttons:
@@ -7550,17 +7482,72 @@ function AttachmentChips(props: {
   );
 }
 
+/**
+ * A shareable link as one row: the URL, Copy, Share where the platform has a
+ * share sheet, and Revoke (docs/ux section 5.3 — never a raw textarea).
+ */
+function ShareLinkRow(props: {
+  url: string;
+  busy: boolean;
+  onRevoke: () => void;
+}): JSX.Element {
+  const [copied, setCopied] = createSignal(false);
+  const canShare = (): boolean =>
+    typeof navigator !== "undefined" && typeof navigator.share === "function";
+  async function copy(): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(props.url);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2000);
+    } catch {
+      /* the button is the only feedback surface; a failed copy leaves it as is */
+    }
+  }
+  return (
+    <div class="lk-link-row" role="group" aria-label="Invite link">
+      <span class="lk-link-text" title={props.url}>
+        {props.url.replace(/^https?:\/\//, "")}
+      </span>
+      <button
+        type="button"
+        class="lk-icon-button"
+        title={copied() ? "Copied" : "Copy link"}
+        aria-label={copied() ? "Copied" : "Copy link"}
+        onClick={() => void copy()}
+      >
+        <Icon name={copied() ? "check" : "copy"} size={16} />
+      </button>
+      <Show when={canShare()}>
+        <button
+          type="button"
+          class="lk-icon-button"
+          title="Share"
+          aria-label="Share"
+          onClick={() => void navigator.share({ url: props.url }).catch(() => undefined)}
+        >
+          <Icon name="share" size={16} />
+        </button>
+      </Show>
+      <button
+        type="button"
+        class="ghost small"
+        style={{ color: "var(--danger)" }}
+        disabled={props.busy}
+        onClick={props.onRevoke}
+      >
+        Revoke
+      </button>
+    </div>
+  );
+}
+
 function GroupNotFound(): JSX.Element {
   return (
     <section style={panelStyle()}>
-      <h1 style={{ "margin-top": 0 }}>Group not found</h1>
+      <h1 style={{ "margin-top": 0 }}>Conversation not found</h1>
+      <p>This link does not match a conversation on this device.</p>
       <p>
-        Either the URL is wrong, or this group's MLS state was dropped
-        on the most recent page reload — Phase-1 doesn't persist
-        in-memory MLS groups (tracked as ROADMAP 1.16e6).
-      </p>
-      <p>
-        <A href={paths.contacts}>Back to Contacts</A>
+        <A href={paths.home}>Back to Chats</A>
       </p>
     </section>
   );

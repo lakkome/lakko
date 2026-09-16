@@ -30,9 +30,11 @@ import {
   createResource,
   createSignal,
   For,
+  Match,
   onCleanup,
   onMount,
   Show,
+  Switch,
   type Component,
   type JSX,
 } from "solid-js";
@@ -114,23 +116,9 @@ type PublisherGroupHandle = Awaited<ReturnType<typeof openPublisherGroup>>;
 /** wasm-bindgen rotation policy — `{ intervalMs: bigint, maxPosts: number }`. */
 type ChannelRotationPolicy = ReturnType<Wasm["channelRotationPolicyDefault"]>;
 
-// ============================================================================
-// Theme tokens — the design-system variables from `styles.css`, so the
-// channels surface follows the light / dark theme with the rest of the app.
-// (This used to be a hardcoded dark palette copied from Call.tsx.)
-// ============================================================================
-
-const COLOURS = {
-  background: "var(--surface-bg)",
-  surface: "var(--surface-elevated)",
-  surfaceHover: "var(--surface-hover)",
-  border: "var(--surface-border)",
-  textPrimary: "var(--surface-fg)",
-  textSecondary: "var(--surface-muted)",
-  accentBlue: "var(--accent)",
-  accentFg: "var(--accent-fg)",
-  destructive: "var(--danger)",
-} as const;
+// Styling is the `lk-` class vocabulary in `styles.css` (tokens, light and
+// dark); this file carries no colour literal and no local palette
+// (docs/ux/client-redesign.md section 4).
 
 // ============================================================================
 // Per-post decode result (ADR-0031 decrypt-by-epoch)
@@ -156,54 +144,39 @@ function toPostDecode(res: DecodedPostResult): PostDecode {
   return res.hadSeed ? { kind: "unreadable" } : { kind: "older-key" };
 }
 
-/** Italic secondary-colour placeholder bubble (unreadable / older-key). */
+/** Muted placeholder line (unreadable / older-key). */
 function placeholderBubble(text: string): JSX.Element {
-  return (
-    <div
-      style={{
-        "font-size": "13px",
-        color: COLOURS.textSecondary,
-        "font-style": "italic",
-      }}
-    >
-      {text}
-    </div>
-  );
+  return <div class="lk-post-placeholder">{text}</div>;
 }
 
-/** Primary-colour plaintext bubble. */
+/** Plaintext post body. */
 function textBubble(text: string): JSX.Element {
-  return (
-    <div
-      style={{
-        "font-size": "15px",
-        "line-height": "22px",
-        color: COLOURS.textPrimary,
-        "white-space": "pre-wrap",
-        "word-break": "break-word",
-      }}
-    >
-      {text}
-    </div>
-  );
+  return <div class="lk-post-text">{text}</div>;
 }
 
 /** Render one post body from its decode outcome. `undefined` means the
- *  decode has not completed yet ("Decoding…"). */
+ *  decode has not completed yet. An unreadable post says "Not available" with
+ *  a one-line reason (docs/ux section 5.4), never why in protocol terms. */
 function renderPostBody(decoded: PostDecode | undefined): JSX.Element {
   if (decoded === undefined) {
-    return placeholderBubble("Decoding…");
+    return placeholderBubble("Loading...");
   }
   if (decoded.kind === "text") {
     return textBubble(decoded.text);
   }
   if (decoded.kind === "older-key") {
-    return placeholderBubble(
-      "message from an older key window — no longer available",
-    );
+    return placeholderBubble("Not available. This post is older than what this device can read.");
   }
-  return placeholderBubble(
-    "[unreadable — wrong seed, tampered ciphertext, or a different signing key]",
+  return placeholderBubble("Not available. This post could not be opened on this device.");
+}
+
+/** One post card: the body and its time. */
+function PostCard(props: { readonly post: ChannelPostView; readonly decoded: PostDecode | undefined }): JSX.Element {
+  return (
+    <li class="lk-post">
+      {renderPostBody(props.decoded)}
+      <div class="lk-post-time">{new Date(props.post.serverTsMs).toLocaleString()}</div>
+    </li>
   );
 }
 
@@ -243,9 +216,7 @@ const NewChannel: Component = () => {
     }
     const secrets = auth.identitySecrets();
     if (secrets === null) {
-      setError(
-        "Identity not in memory — refresh the page and sign in again to create a channel.",
-      );
+      setError("Sign in again to create a channel.");
       return;
     }
     setBusy(true);
@@ -265,10 +236,10 @@ const NewChannel: Component = () => {
         } catch (err) {
           if (err instanceof DiscoveryHttpError && err.status === 409) {
             setError(
-              `The handle @${wantedHandle.replace(/^@/, "")} is already taken — pick another (or leave it blank).`,
+              `@${wantedHandle.replace(/^@/, "")} is already taken. Pick another, or leave it blank.`,
             );
           } else {
-            setError(`Could not register the handle: ${String(err)}`);
+            setError(`Could not claim the handle: ${String(err)}`);
           }
           setBusy(false);
           return;
@@ -308,7 +279,7 @@ const NewChannel: Component = () => {
       } else if (apiError.is(err)) {
         setError(channelErrorText(err));
       } else {
-        setError(`Could not reach the server: ${String(err)}`);
+        setError(`Could not reach Lakko: ${String(err)}`);
       }
       setBusy(false);
     }
@@ -328,12 +299,12 @@ const NewChannel: Component = () => {
     if (link.length === 0) return;
     const secrets = auth.identitySecrets();
     if (secrets === null) {
-      setCoError("Not signed in.");
+      setCoError("Sign in again to join a channel.");
       return;
     }
     setCoBusy(true);
     setCoError(null);
-    setCoStatus("Requesting…");
+    setCoStatus("Sending your request...");
     try {
       const wasm = await loadWasm();
       const identity = wasm.Identity.fromSeed(secrets.accountIdentitySeed);
@@ -344,14 +315,14 @@ const NewChannel: Component = () => {
           identity,
           link,
         );
-        setCoStatus("Waiting for the channel owner to approve…");
+        setCoStatus("Waiting for the channel owner to approve...");
         let keys: Awaited<ReturnType<typeof pollForCoPublishWelcome>> = null;
         for (let i = 0; i < 60 && keys === null; ++i) {
           keys = await pollForCoPublishWelcome(ds, identity, groupId, joinerKey, channelIdHex);
           if (keys === null) await new Promise((r) => setTimeout(r, 3000));
         }
         if (keys === null) {
-          setCoError("Timed out waiting for approval — try again once the owner has approved.");
+          setCoError("No approval yet. Try again once the owner has approved.");
           return;
         }
         channelsActions.addChannel({
@@ -369,7 +340,7 @@ const NewChannel: Component = () => {
       setCoError(
         err instanceof LegacyChannelError
           ? err.message
-          : `Co-publish failed: ${String(err)}`,
+          : `Could not join: ${String(err)}`,
       );
     } finally {
       setCoBusy(false);
@@ -378,32 +349,20 @@ const NewChannel: Component = () => {
   }
 
   return (
-    <div
-      style={{
-        padding: "24px 32px",
-        "max-width": "560px",
-        color: COLOURS.textPrimary,
-      }}
-    >
+    <div class="lk-page-pane narrow lk-stack">
       <div class="lk-page-head">
         <h1>New channel</h1>
-        <p>The name and description stay on this device; only ciphertext reaches the server.</p>
+        <p>The name and description stay on this device; only encrypted posts reach the server.</p>
       </div>
       <form
+        class="lk-card"
         onSubmit={(e): void => {
           e.preventDefault();
           void onCreate();
         }}
-        style={{
-          display: "flex",
-          "flex-direction": "column",
-          gap: "14px",
-        }}
       >
-        <label style={{ display: "flex", "flex-direction": "column", gap: "6px" }}>
-          <span style={{ "font-size": "13px", color: COLOURS.textSecondary }}>
-            Name
-          </span>
+        <label>
+          Name
           <input
             type="text"
             required
@@ -411,43 +370,20 @@ const NewChannel: Component = () => {
             onInput={(e): void => {
               setName(e.currentTarget.value);
             }}
-            style={{
-              padding: "9px 12px",
-              "background-color": COLOURS.surface,
-              color: COLOURS.textPrimary,
-              border: `1px solid ${COLOURS.border}`,
-              "border-radius": "8px",
-              "font-size": "14px",
-            }}
           />
         </label>
-        <label style={{ display: "flex", "flex-direction": "column", gap: "6px" }}>
-          <span style={{ "font-size": "13px", color: COLOURS.textSecondary }}>
-            Description (optional)
-          </span>
+        <label>
+          Description (optional)
           <textarea
             rows={3}
             value={description()}
             onInput={(e): void => {
               setDescription(e.currentTarget.value);
             }}
-            style={{
-              padding: "9px 12px",
-              "background-color": COLOURS.surface,
-              color: COLOURS.textPrimary,
-              border: `1px solid ${COLOURS.border}`,
-              "border-radius": "8px",
-              "font-size": "14px",
-              "font-family": "inherit",
-              resize: "vertical",
-            }}
           />
         </label>
-        <label style={{ display: "flex", "flex-direction": "column", gap: "6px" }}>
-          <span style={{ "font-size": "13px", color: COLOURS.textSecondary }}>
-            Public @handle (optional). Others can find and subscribe to the
-            channel by it.
-          </span>
+        <label>
+          Public @handle (optional)
           <input
             type="text"
             value={handle()}
@@ -458,131 +394,61 @@ const NewChannel: Component = () => {
             onInput={(e): void => {
               setHandle(e.currentTarget.value);
             }}
-            style={{
-              padding: "9px 12px",
-              "background-color": COLOURS.surface,
-              color: COLOURS.textPrimary,
-              border: `1px solid ${COLOURS.border}`,
-              "border-radius": "8px",
-              "font-size": "14px",
-            }}
           />
+          <span class="lk-meta lk-block lk-mt-4">
+            Others can find and subscribe to the channel by it.
+          </span>
         </label>
         <Show when={error() !== null}>
-          <div
-            style={{
-              padding: "10px 12px",
-              "background-color": COLOURS.destructive,
-              color: COLOURS.accentFg,
-              "border-radius": "8px",
-              "font-size": "13px",
-            }}
-          >
+          <div class="lk-alert danger" role="alert">
             {error()}
           </div>
         </Show>
-        <div style={{ display: "flex", gap: "10px", "justify-content": "flex-end" }}>
-          <button
-            type="button"
-            onClick={(): void => navigate(paths.channels)}
-            disabled={busy()}
-            style={{
-              padding: "9px 16px",
-              "background-color": "transparent",
-              color: COLOURS.textPrimary,
-              border: `1px solid ${COLOURS.border}`,
-              "border-radius": "8px",
-              cursor: busy() ? "wait" : "pointer",
-            }}
-          >
+        <div class="lk-actions lk-row-end">
+          <button type="button" class="ghost" onClick={(): void => navigate(paths.channels)} disabled={busy()}>
             Cancel
           </button>
-          <button
-            type="submit"
-            disabled={busy()}
-            style={{
-              padding: "9px 16px",
-              "background-color": COLOURS.accentBlue,
-              color: COLOURS.accentFg,
-              border: "none",
-              "border-radius": "8px",
-              cursor: busy() ? "wait" : "pointer",
-              "font-weight": "500",
-            }}
-          >
-            {busy() ? "Creating…" : "Create"}
+          <button type="submit" class="primary" disabled={busy()}>
+            {busy() ? "Creating..." : "Create"}
           </button>
         </div>
       </form>
 
-      <div
-        style={{
-          "margin-top": "28px",
-          "padding-top": "20px",
-          "border-top": `1px solid ${COLOURS.border}`,
-          display: "flex",
-          "flex-direction": "column",
-          gap: "10px",
-        }}
-      >
-        <h2 style={{ margin: 0, "font-size": "16px" }}>Join as co-publisher</h2>
-        <span style={{ "font-size": "13px", color: COLOURS.textSecondary }}>
-          Paste a co-publisher link a channel owner shared. You'll request to
-          join; once they approve, this device can publish to the channel.
-        </span>
+      <section class="lk-card">
+        <h2>Join as a co-publisher</h2>
+        <p class="lk-card-desc">
+          Paste a co-publisher link a channel owner shared. Once they approve, this device can
+          post to the channel.
+        </p>
         <input
           type="text"
-          placeholder="https://…/g/…"
+          placeholder="https://lakko.me/g/..."
+          aria-label="Co-publisher link"
           value={coLink()}
           onInput={(e): void => {
             setCoLink(e.currentTarget.value);
           }}
-          style={{
-            padding: "9px 12px",
-            "background-color": COLOURS.surface,
-            color: COLOURS.textPrimary,
-            border: `1px solid ${COLOURS.border}`,
-            "border-radius": "8px",
-            "font-size": "13px",
-            "font-family": "monospace",
-          }}
         />
         <Show when={coStatus() !== null}>
-          <div style={{ "font-size": "13px", color: COLOURS.textSecondary }}>
+          <div class="lk-meta" role="status">
             {coStatus()}
           </div>
         </Show>
         <Show when={coError() !== null}>
-          <div
-            style={{
-              padding: "10px 12px",
-              "background-color": COLOURS.destructive,
-              color: COLOURS.accentFg,
-              "border-radius": "8px",
-              "font-size": "13px",
-            }}
-          >
+          <div class="lk-alert danger" role="alert">
             {coError()}
           </div>
         </Show>
-        <button
-          type="button"
-          disabled={coBusy() || coLink().trim().length === 0}
-          onClick={(): void => void onJoinAsCoPublisher()}
-          style={{
-            "align-self": "flex-start",
-            padding: "9px 16px",
-            "background-color": "transparent",
-            color: COLOURS.textPrimary,
-            border: `1px solid ${COLOURS.border}`,
-            "border-radius": "8px",
-            cursor: coBusy() ? "wait" : "pointer",
-            "font-size": "14px",
-          }}
-        >
-          {coBusy() ? "Requesting…" : "Request to co-publish"}
-        </button>
-      </div>
+        <div class="lk-actions">
+          <button
+            type="button"
+            disabled={coBusy() || coLink().trim().length === 0}
+            onClick={(): void => void onJoinAsCoPublisher()}
+          >
+            {coBusy() ? "Requesting..." : "Request to join"}
+          </button>
+        </div>
+      </section>
     </div>
   );
 };
@@ -630,7 +496,7 @@ const ChannelView: Component = () => {
   const channelMeta = (): { localName: string; localDescription: string } => {
     const h = channelsState.channels().find((c) => c.id === params.id);
     return {
-      localName: h?.localName ?? "(unknown channel)",
+      localName: h?.localName ?? "Channel",
       localDescription: h?.localDescription ?? "",
     };
   };
@@ -639,14 +505,12 @@ const ChannelView: Component = () => {
     if (publishBusy()) return;
     const text = composeText().trim();
     if (text.length === 0) {
-      setPublishError("Type something before publishing.");
+      setPublishError("Write something first.");
       return;
     }
     const keys = channelsState.keysByChannel().get(params.id);
     if (keys === undefined) {
-      setPublishError(
-        "This channel has no local publisher keys — you cannot publish to it from this device.",
-      );
+      setPublishError("This device cannot post to this channel.");
       return;
     }
     setPublishBusy(true);
@@ -668,7 +532,7 @@ const ChannelView: Component = () => {
       if (apiError.is(err)) {
         setPublishError(channelErrorText(err));
       } else {
-        setPublishError(`Compose / network error: ${String(err)}`);
+        setPublishError(`Could not publish: ${String(err)}`);
       }
     } finally {
       setPublishBusy(false);
@@ -711,44 +575,32 @@ const ChannelView: Component = () => {
   });
 
   return (
-    <div
-      style={{
-        padding: "24px 32px",
-        "max-width": "720px",
-        color: COLOURS.textPrimary,
-      }}
-    >
+    <div class="lk-page-pane wide lk-stack">
       <button
         type="button"
-        class="ghost small lk-narrow-only"
-        style={{ "margin-bottom": "12px" }}
+        class="ghost small lk-narrow-only lk-self-start"
         onClick={(): void => navigate(paths.channels)}
       >
         <Icon name="back" size={16} />
         Channels
       </button>
-      <div class="lk-page-head" style={{ "flex-direction": "row", "align-items": "center", gap: "12px" }}>
+      <div class="lk-page-head row">
         <Avatar label={channelMeta().localName || "?"} id={params.id} size="lg" />
-        <div style={{ "min-width": 0 }}>
-          <h1 style={{ "font-size": "22px", "line-height": "28px" }}>{channelMeta().localName}</h1>
-          <p style={{ "font-size": "13px" }}>
-            <Show when={channelMeta().localDescription !== ""} fallback={<code>{params.id}</code>}>
-              {channelMeta().localDescription}
-            </Show>
-            {" · key epoch "}
-            {data()?.epoch ?? "…"}
-          </p>
+        <div>
+          <h1 class="lk-ellipsis">{channelMeta().localName}</h1>
+          <Show when={channelMeta().localDescription !== ""}>
+            <p>{channelMeta().localDescription}</p>
+          </Show>
         </div>
       </div>
 
       <Show
         when={channelsState.keysByChannel().get(params.id) !== undefined}
         fallback={
-          <section class="lk-card" style={{ "margin-bottom": "20px" }}>
+          <section class="lk-card">
             <h2>Read-only on this device</h2>
             <p class="lk-card-desc">
-              This device holds no publishing keys for the channel. To read
-              its posts,{" "}
+              This device cannot post to the channel. To read its posts,{" "}
               <a href={paths.channelSubscribe(params.id)}>subscribe</a>.
             </p>
           </section>
@@ -760,64 +612,28 @@ const ChannelView: Component = () => {
             void onPublish();
           }}
           class="lk-card"
-          style={{ "margin-bottom": "20px" }}
         >
           <textarea
             rows={3}
-            placeholder="Write a post…"
+            placeholder="Write a post..."
+            aria-label="New post"
             value={composeText()}
             onInput={(e): void => {
               setComposeText(e.currentTarget.value);
             }}
             disabled={publishBusy()}
-            style={{
-              width: "100%",
-              padding: "10px 12px",
-              "background-color": COLOURS.surface,
-              color: COLOURS.textPrimary,
-              border: `1px solid ${COLOURS.border}`,
-              "border-radius": "8px",
-              "font-size": "14px",
-              "font-family": "inherit",
-              resize: "vertical",
-              "box-sizing": "border-box",
-            }}
           />
-          <div
-            style={{
-              display: "flex",
-              "justify-content": "flex-end",
-            }}
-          >
+          <div class="lk-actions lk-row-end">
             <button
               type="submit"
+              class="primary"
               disabled={publishBusy() || composeText().trim().length === 0}
-              style={{
-                "background-color": COLOURS.accentBlue,
-                color: COLOURS.accentFg,
-                border: "none",
-                "border-radius": "8px",
-                padding: "9px 16px",
-                "font-size": "14px",
-                "font-weight": "500",
-                cursor: publishBusy() ? "wait" : "pointer",
-                opacity: composeText().trim().length === 0 ? "0.6" : "1",
-              }}
             >
-              {publishBusy() ? "Publishing…" : "Publish"}
+              {publishBusy() ? "Publishing..." : "Publish"}
             </button>
           </div>
           <Show when={publishError() !== null}>
-            <div
-              style={{
-                "margin-top": "10px",
-                padding: "10px 12px",
-                "background-color": COLOURS.destructive,
-                color: COLOURS.accentFg,
-                "border-radius": "8px",
-                "font-size": "13px",
-              }}
-            >
+            <div class="lk-alert danger" role="alert">
               {publishError()}
             </div>
           </Show>
@@ -827,46 +643,20 @@ const ChannelView: Component = () => {
         <PublisherToolsPanel channelIdHex={params.id} />
       </Show>
 
-      <h2 style={{ margin: "0 0 12px 0" }}>Posts</h2>
+      <h2 class="lk-m0">Posts</h2>
       <Show
         when={data() !== undefined && data()!.posts.length > 0}
         fallback={
-          <p style={{ color: COLOURS.textSecondary, "line-height": "1.6" }}>
-            <Show
-              when={data.loading}
-              fallback={"No posts yet. Publish the first one above."}
-            >
-              Loading…
+          <p class="lk-muted">
+            <Show when={data.loading} fallback={"No posts yet."}>
+              Loading...
             </Show>
           </p>
         }
       >
-        <ul style={{ "list-style": "none", padding: "0", margin: "0" }}>
+        <ul class="lk-list">
           <For each={data()!.posts}>
-            {(p): JSX.Element => (
-              <li
-                style={{
-                  padding: "14px 16px",
-                  "background-color": COLOURS.surface,
-                  border: `1px solid ${COLOURS.border}`,
-                  "border-radius": "12px",
-                  "margin-bottom": "10px",
-                  "max-width": "640px",
-                }}
-              >
-                {renderPostBody(decodedByCursor().get(p.cursor))}
-                <div
-                  style={{
-                    "font-size": "12px",
-                    color: COLOURS.textSecondary,
-                    "margin-top": "8px",
-                    "text-align": "right",
-                  }}
-                >
-                  {new Date(p.serverTsMs).toLocaleString()}
-                </div>
-              </li>
-            )}
+            {(p): JSX.Element => <PostCard post={p} decoded={decodedByCursor().get(p.cursor)} />}
           </For>
         </ul>
       </Show>
@@ -910,9 +700,7 @@ const PublisherToolsPanel: Component<{ readonly channelIdHex: string }> = (
   onMount(() => {
     const secrets = auth.identitySecrets();
     if (secrets === null) {
-      setOpenError(
-        "Log in to manage this channel's key rotation and co-publishers.",
-      );
+      setOpenError("Sign in again to manage this channel.");
       return;
     }
     void (async (): Promise<void> => {
@@ -926,7 +714,7 @@ const PublisherToolsPanel: Component<{ readonly channelIdHex: string }> = (
         setOpenError(
           channelErrorMessage(
             err,
-            (e) => `Could not open the channel group: ${String(e)}`,
+            (e) => `Could not open the channel's settings: ${String(e)}`,
           ),
         );
       }
@@ -954,16 +742,7 @@ const PublisherToolsPanel: Component<{ readonly channelIdHex: string }> = (
       when={group() !== null && identity() !== null}
       fallback={
         <Show when={openError() !== null}>
-          <div
-            style={{
-              "margin-bottom": "20px",
-              padding: "10px 12px",
-              "background-color": COLOURS.surface,
-              color: COLOURS.textSecondary,
-              "border-radius": "8px",
-              "font-size": "13px",
-            }}
-          >
+          <div class="lk-alert info" role="status">
             {openError()}
           </div>
         </Show>
@@ -1020,7 +799,7 @@ const RotationPanel: Component<{
   readonly publisherGroup: PublisherGroupHandle;
   readonly identity: WasmIdentity;
 }> = (props) => {
-  const [status, setStatus] = createSignal("Loading rotation state…");
+  const [status, setStatus] = createSignal("Loading...");
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
 
@@ -1056,16 +835,12 @@ const RotationPanel: Component<{
   }
 
   function refreshStatus(): void {
-    const cadence = "auto every 24 h or 1000 posts";
     const state = loadRotationState(props.channelIdHex);
     if (state === null || state.lastRotationMs <= 0n) {
-      setStatus(`Not rotated yet · ${cadence}`);
+      setStatus("Not refreshed yet.");
       return;
     }
-    setStatus(
-      `Last rotated ${relativeAgo(state.lastRotationMs)} · ` +
-        `${state.postsSinceRotation} posts since · ${cadence}`,
-    );
+    setStatus(`Last refreshed ${relativeAgo(state.lastRotationMs)}.`);
   }
 
   /** Force a rotation regardless of the schedule (e.g. after suspecting a
@@ -1086,7 +861,7 @@ const RotationPanel: Component<{
       );
       refreshStatus();
     } catch (err) {
-      setError(`Rotate failed: ${String(err)}`);
+      setError(`Could not refresh the key: ${String(err)}`);
     } finally {
       setBusy(false);
     }
@@ -1104,7 +879,7 @@ const RotationPanel: Component<{
         policy: defaultPolicy,
         loadState: (): Promise<ChannelRotationState> => loadOrSeedState(),
         onError: (err: unknown): void => {
-          setError(`Rotation check failed: ${String(err)}`);
+          setError(`Could not check the key: ${String(err)}`);
         },
       });
     })();
@@ -1116,61 +891,34 @@ const RotationPanel: Component<{
   });
 
   return (
-    <section class="lk-card" style={{ "margin-bottom": "20px" }}>
-      <h2>Key rotation</h2>
-      <p
-        style={{
-          margin: "0 0 8px 0",
-          "font-size": "12px",
-          color: COLOURS.textSecondary,
-          "line-height": "1.6",
-        }}
-      >
-        Rotates the channel content key on a schedule (every 24 h or 1000
-        posts) and reseals it to every subscriber — backward secrecy for past
-        keys.
+    <section class="lk-card">
+      <h2>Encryption key</h2>
+      <p class="lk-card-desc">
+        Lakko refreshes the channel's key on its own. Refresh it now if you think a
+        subscriber's device was compromised.
       </p>
-      <div
-        style={{
-          "font-size": "12px",
-          color: COLOURS.textSecondary,
-          "font-family": "monospace",
-          "margin-bottom": "10px",
-        }}
-      >
-        {status()}
-      </div>
-      <button
-        type="button"
-        disabled={busy()}
-        onClick={(): void => {
-          void onRotateNow();
-        }}
-        style={{
-          "background-color": COLOURS.accentBlue,
-          color: COLOURS.accentFg,
-          border: "none",
-          "border-radius": "6px",
-          padding: "6px 12px",
-          "font-size": "13px",
-          "font-weight": "500",
-          cursor: busy() ? "wait" : "pointer",
-          opacity: busy() ? "0.6" : "1",
-        }}
-      >
-        {busy() ? "Rotating…" : "Rotate now"}
-      </button>
-      <Show when={error() !== null}>
-        <div
-          style={{
-            "margin-top": "8px",
-            padding: "8px 10px",
-            "background-color": COLOURS.destructive,
-            color: COLOURS.accentFg,
-            "border-radius": "6px",
-            "font-size": "12px",
+      <div class="lk-card-row">
+        <span class="lk-card-row-icon">
+          <Icon name="key" size={18} />
+        </span>
+        <div class="lk-card-row-body">
+          <span class="lk-card-row-sub" role="status">
+            {status()}
+          </span>
+        </div>
+        <button
+          type="button"
+          class="small lk-card-row-action"
+          disabled={busy()}
+          onClick={(): void => {
+            void onRotateNow();
           }}
         >
+          {busy() ? "Refreshing..." : "Refresh now"}
+        </button>
+      </div>
+      <Show when={error() !== null}>
+        <div class="lk-alert danger" role="alert">
           {error()}
         </div>
       </Show>
@@ -1224,7 +972,7 @@ const CoPublishersPanel: Component<{
       await pollCoPublisherJournal(ds, props.identity, props.publisherGroup);
       setPending(pendingCoPublishers(props.publisherGroup));
     } catch (err) {
-      setError(`Co-publisher poll failed: ${String(err)}`);
+      setError(`Could not check for requests: ${String(err)}`);
     }
   }
 
@@ -1240,7 +988,7 @@ const CoPublishersPanel: Component<{
         ),
       );
     } catch (err) {
-      setError(`Create link failed: ${String(err)}`);
+      setError(`Could not create the link: ${String(err)}`);
     } finally {
       setBusy(false);
     }
@@ -1263,7 +1011,7 @@ const CoPublishersPanel: Component<{
       // refusals as the chat one (`noSuchJoinRequest` when another owner got
       // there first, `joinerAlreadyAMember` when the joiner already landed),
       // so it reads from the same table rather than dumping the core's prose.
-      setError(coPublisherRefusal(err) ?? `Approve failed: ${String(err)}`);
+      setError(coPublisherRefusal(err) ?? `Could not approve: ${String(err)}`);
     } finally {
       setBusy(false);
     }
@@ -1286,7 +1034,7 @@ const CoPublishersPanel: Component<{
       rejectCoPublisher(props.publisherGroup, ref);
       setPending(pendingCoPublishers(props.publisherGroup));
     } catch (err) {
-      setError(coPublisherRefusal(err) ?? `Reject failed: ${String(err)}`);
+      setError(coPublisherRefusal(err) ?? `Could not reject: ${String(err)}`);
     }
   }
 
@@ -1301,135 +1049,86 @@ const CoPublishersPanel: Component<{
     clearInterval(handle);
   });
 
+  const [copied, setCopied] = createSignal(false);
+  async function copyLink(): Promise<void> {
+    const l = link();
+    if (l === null) return;
+    try {
+      await navigator.clipboard.writeText(l);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2000);
+    } catch {
+      /* the button is the only feedback surface */
+    }
+  }
+  const canShare = (): boolean =>
+    typeof navigator !== "undefined" && typeof navigator.share === "function";
+
   return (
-    <section class="lk-card" style={{ "margin-bottom": "20px" }}>
+    <section class="lk-card">
       <h2>Co-publishers</h2>
-      <button
-        type="button"
-        disabled={busy()}
-        onClick={() => void onCreateLink()}
-        style={{
-          "font-size": "0.78rem",
-          padding: "0.25rem 0.5rem",
-          "border-radius": "var(--radius-sm)",
-          border: "1px solid var(--surface-border)",
-          background: "var(--surface-bg)",
-          color: "var(--surface-fg)",
-          cursor: "pointer",
-        }}
+      <p class="lk-card-desc">
+        People who can post to this channel. Share a link; approve them when they ask.
+      </p>
+      <Show
+        when={link()}
+        fallback={
+          <div class="lk-actions">
+            <button type="button" disabled={busy()} onClick={() => void onCreateLink()}>
+              <Icon name="link" size={18} />
+              Create co-publisher link
+            </button>
+          </div>
+        }
       >
-        Create co-publisher link
-      </button>
-      <Show when={link() !== null}>
-        <div
-          style={{
-            display: "flex",
-            gap: "0.3rem",
-            "align-items": "center",
-            "margin-top": "0.4rem",
-          }}
-        >
-          <input
-            type="text"
-            readonly
-            value={link() ?? ""}
-            style={{
-              flex: "1",
-              "font-size": "0.72rem",
-              "font-family": "monospace",
-              padding: "0.2rem 0.35rem",
-              "border-radius": "var(--radius-sm)",
-              border: "1px solid var(--surface-border)",
-              background: "var(--surface)",
-              color: "var(--surface-fg)",
-              "min-width": "0",
-            }}
-          />
-          <button
-            type="button"
-            onClick={() => {
-              const l = link();
-              if (l) void navigator.clipboard?.writeText(l);
-            }}
-            style={{
-              "font-size": "0.72rem",
-              padding: "0.2rem 0.45rem",
-              "border-radius": "var(--radius-sm)",
-              border: "1px solid var(--accent)",
-              background: "var(--accent)",
-              color: "var(--accent-fg)",
-              cursor: "pointer",
-            }}
-          >
-            Copy
-          </button>
-        </div>
+        {(l) => (
+          <div class="lk-link-row" role="group" aria-label="Co-publisher link">
+            <span class="lk-link-text" title={l()}>
+              {l().replace(/^https?:\/\//, "")}
+            </span>
+            <button
+              type="button"
+              class="lk-icon-button"
+              title={copied() ? "Copied" : "Copy link"}
+              aria-label={copied() ? "Copied" : "Copy link"}
+              onClick={() => void copyLink()}
+            >
+              <Icon name={copied() ? "check" : "copy"} size={16} />
+            </button>
+            <Show when={canShare()}>
+              <button
+                type="button"
+                class="lk-icon-button"
+                title="Share"
+                aria-label="Share"
+                onClick={() => void navigator.share({ url: l() }).catch(() => undefined)}
+              >
+                <Icon name="share" size={16} />
+              </button>
+            </Show>
+          </div>
+        )}
       </Show>
       <Show when={pending().length > 0}>
-        <ul
-          style={{
-            "list-style": "none",
-            padding: 0,
-            margin: "0.4rem 0 0 0",
-            display: "flex",
-            "flex-direction": "column",
-            gap: "0.3rem",
-          }}
-        >
+        <div class="lk-section-label lk-flush">
+          Requests ({pending().length})
+        </div>
+        <ul class="lk-list bordered">
           <For each={pending()}>
-            {(ref) => (
-              <li
-                style={{
-                  display: "flex",
-                  "align-items": "center",
-                  "justify-content": "space-between",
-                  gap: "0.5rem",
-                }}
-              >
-                <span
-                  title={hexOf(ref)}
-                  style={{
-                    "font-family": "monospace",
-                    "font-size": "0.75rem",
-                    color: "var(--surface-fg)",
-                    overflow: "hidden",
-                    "text-overflow": "ellipsis",
-                    "white-space": "nowrap",
-                  }}
-                >
-                  {hexOf(ref).slice(0, 16)}…
-                </span>
-                <span style={{ display: "flex", gap: "0.3rem" }}>
+            {(ref, i) => (
+              <li>
+                <Avatar label={`Request ${i() + 1}`} id={hexOf(ref)} size="sm" />
+                <span class="lk-fill">Someone asked to co-publish</span>
+                <span class="lk-actions lk-nowrap">
                   <button
                     type="button"
+                    class="primary small"
                     disabled={busy()}
                     onClick={() => void onApprove(ref)}
-                    style={{
-                      "font-size": "0.75rem",
-                      padding: "0.2rem 0.45rem",
-                      "border-radius": "var(--radius-sm)",
-                      border: "1px solid var(--accent)",
-                      background: "var(--accent)",
-                      color: "var(--accent-fg)",
-                      cursor: "pointer",
-                    }}
                   >
                     Approve
                   </button>
-                  <button
-                    type="button"
-                    disabled={busy()}
-                    onClick={() => onReject(ref)}
-                    style={{
-                      "font-size": "0.75rem",
-                      padding: "0.2rem 0.45rem",
-                      "border-radius": "var(--radius-sm)",
-                      border: "1px solid var(--surface-border)",
-                      background: "transparent",
-                      color: "var(--surface-fg)",
-                      cursor: "pointer",
-                    }}
-                  >
+                  <button type="button" class="small" disabled={busy()} onClick={() => onReject(ref)}>
                     Reject
                   </button>
                 </span>
@@ -1439,15 +1138,9 @@ const CoPublishersPanel: Component<{
         </ul>
       </Show>
       <Show when={error() !== null}>
-        <p
-          style={{
-            "font-size": "0.72rem",
-            color: "var(--danger, #c0392b)",
-            margin: "0.4rem 0 0 0",
-          }}
-        >
+        <div class="lk-alert danger" role="alert">
           {error()}
-        </p>
+        </div>
       </Show>
     </section>
   );
@@ -1485,7 +1178,7 @@ const SubscribersPanel: Component<{ readonly channelIdHex: string }> = (
       const list = await listSubscribers(props.channelIdHex);
       setSubs(list.subscribers);
     } catch (err) {
-      setError(`List failed: ${String(err)}`);
+      setError(`Could not load subscribers: ${String(err)}`);
     }
   }
 
@@ -1505,7 +1198,7 @@ const SubscribersPanel: Component<{ readonly channelIdHex: string }> = (
     if (trigger === "manual" && busyPk() !== null) return;
     const keys = channelsState.keysByChannel().get(props.channelIdHex);
     if (keys === undefined) {
-      setError("No publisher keys on this device.");
+      setError("This device cannot post to this channel.");
       return;
     }
     if (trigger === "manual") {
@@ -1541,9 +1234,9 @@ const SubscribersPanel: Component<{ readonly channelIdHex: string }> = (
     } catch (err) {
       if (trigger === "manual") {
         if (apiError.is(err)) {
-          setError(`Could not deliver the key: ${channelErrorText(err)}`);
+          setError(`Could not send the key: ${channelErrorText(err)}`);
         } else {
-          setError(`Deliver failed: ${String(err)}`);
+          setError(`Could not send the key: ${String(err)}`);
         }
       }
       setStatusByPk((m) => new Map(m).set(pubkeyHex, "failed"));
@@ -1588,154 +1281,58 @@ const SubscribersPanel: Component<{ readonly channelIdHex: string }> = (
   });
 
   return (
-    <section class="lk-card" style={{ "margin-bottom": "20px" }}>
-      <div
-        style={{
-          display: "flex",
-          "justify-content": "space-between",
-          "align-items": "center",
-          "margin-bottom": "8px",
-        }}
-      >
-        <h2 style={{ margin: "0" }}>
-          Subscribers{" "}
-          <span style={{ color: COLOURS.textSecondary, "font-weight": "400" }}>
-            ({subs()?.length ?? "…"})
-          </span>
-        </h2>
-        <button
-          type="button"
-          onClick={(): void => {
-            void refresh();
-          }}
-          style={{
-            background: "transparent",
-            color: COLOURS.textSecondary,
-            border: `1px solid ${COLOURS.border}`,
-            "border-radius": "6px",
-            padding: "4px 10px",
-            "font-size": "12px",
-            cursor: "pointer",
-          }}
-        >
-          Refresh
-        </button>
-      </div>
+    <section class="lk-card">
+      <h2>
+        Subscribers{" "}
+        <span class="lk-meta lk-regular">
+          ({subs()?.length ?? "..."})
+        </span>
+      </h2>
+      <p class="lk-card-desc">
+        Each new subscriber receives the channel's key from this device automatically.
+      </p>
       <Show when={error() !== null}>
-        <div
-          style={{
-            padding: "8px 10px",
-            "background-color": COLOURS.destructive,
-            color: COLOURS.accentFg,
-            "border-radius": "6px",
-            "font-size": "12px",
-            "margin-bottom": "8px",
-          }}
-        >
+        <div class="lk-alert danger" role="alert">
           {error()}
         </div>
       </Show>
       <Show
         when={subs() !== null && subs()!.length > 0}
         fallback={
-          <div
-            style={{
-              color: COLOURS.textSecondary,
-              "font-size": "12px",
-              "line-height": "1.6",
-            }}
-          >
-            <Show
-              when={subs() === null}
-              fallback="No subscribers yet. Anyone with the channel id can open the subscribe page and register their X25519 public key."
-            >
-              Loading subscribers…
+          <p class="lk-muted lk-m0">
+            <Show when={subs() === null} fallback="No subscribers yet. Share the channel's handle so people can subscribe.">
+              Loading...
             </Show>
-          </div>
+          </p>
         }
       >
-        <ul style={{ "list-style": "none", padding: "0", margin: "0" }}>
+        <ul class="lk-list bordered" aria-label="Subscribers">
           <For each={subs()!}>
-            {(pk): JSX.Element => {
+            {(pk, i): JSX.Element => {
               const status = (): "delivered" | "auto" | "failed" | undefined =>
                 statusByPk().get(pk);
               return (
-                <li
-                  style={{
-                    display: "flex",
-                    "align-items": "center",
-                    "justify-content": "space-between",
-                    padding: "8px 10px",
-                    "background-color": COLOURS.background,
-                    "border-radius": "6px",
-                    "margin-bottom": "6px",
-                    "font-family": "monospace",
-                    "font-size": "11px",
-                    gap: "10px",
-                  }}
-                >
-                  <span
-                    style={{
-                      color: COLOURS.textSecondary,
-                      "word-break": "break-all",
-                      flex: "1",
-                    }}
-                  >
-                    {pk}
-                  </span>
-                  <Show when={status() === "delivered"}>
-                    <span
-                      style={{
-                        color: COLOURS.accentBlue,
-                        "font-family": "inherit",
-                        "font-size": "11px",
-                      }}
-                    >
-                      delivered
-                    </span>
-                  </Show>
-                  <Show when={status() === "auto"}>
-                    <span
-                      style={{
-                        color: COLOURS.accentBlue,
-                        "font-family": "inherit",
-                        "font-size": "11px",
-                      }}
-                      title="Auto-delivered by the 5 s polling loop"
-                    >
-                      auto-delivered
-                    </span>
-                  </Show>
-                  <Show when={status() === "failed"}>
-                    <span
-                      style={{
-                        color: COLOURS.destructive,
-                        "font-family": "inherit",
-                        "font-size": "11px",
-                      }}
-                    >
-                      failed
-                    </span>
-                  </Show>
-                  <button
-                    type="button"
-                    onClick={(): void => {
-                      void deliverTo(pk);
-                    }}
-                    disabled={busyPk() === pk}
-                    style={{
-                      "background-color": COLOURS.accentBlue,
-                      color: COLOURS.accentFg,
-                      border: "none",
-                      "border-radius": "6px",
-                      padding: "4px 10px",
-                      "font-size": "11px",
-                      "font-family": "inherit",
-                      cursor: busyPk() === pk ? "wait" : "pointer",
-                    }}
-                  >
-                    {busyPk() === pk ? "Sealing…" : "Deliver seed"}
-                  </button>
+                <li>
+                  <Avatar label={`Subscriber ${i() + 1}`} id={pk} size="sm" />
+                  <span class="lk-fill">Subscriber {i() + 1}</span>
+                  <Switch fallback={<span class="lk-status-tag">Sending key...</span>}>
+                    <Match when={status() === "delivered" || status() === "auto"}>
+                      <span class="lk-status-tag ok">Has the key</span>
+                    </Match>
+                    <Match when={status() === "failed"}>
+                      <span class="lk-status-tag bad">Could not send the key</span>
+                      <button
+                        type="button"
+                        class="small"
+                        disabled={busyPk() === pk}
+                        onClick={(): void => {
+                          void deliverTo(pk);
+                        }}
+                      >
+                        {busyPk() === pk ? "Sending..." : "Retry"}
+                      </button>
+                    </Match>
+                  </Switch>
                 </li>
               );
             }}
@@ -1945,143 +1542,60 @@ const ChannelSubscribe: Component = () => {
     });
   });
 
-  const myKeypair = (): { readonly public: Uint8Array } | undefined =>
-    channelsState.subscriberKeysByChannel().get(params.id);
+  const channelName = (): string =>
+    channelsState.channels().find((c) => c.id === params.id)?.localName ?? "Channel";
 
   return (
-    <div
-      style={{
-        padding: "24px 32px",
-        "max-width": "720px",
-        color: COLOURS.textPrimary,
-      }}
-    >
+    <div class="lk-page-pane wide lk-stack">
       <button
         type="button"
-        class="ghost small lk-narrow-only"
-        style={{ "margin-bottom": "12px" }}
+        class="ghost small lk-narrow-only lk-self-start"
         onClick={(): void => navigate(paths.channels)}
       >
         <Icon name="back" size={16} />
         Channels
       </button>
-      <h1 style={{ margin: "0 0 4px 0", "font-size": "22px" }}>Subscribe</h1>
-      <div
-        style={{
-          "font-size": "12px",
-          color: COLOURS.textSecondary,
-          "font-family": "monospace",
-          "margin-bottom": "16px",
-        }}
-      >
-        {params.id}
+      <div class="lk-page-head row">
+        <Avatar label={channelName()} id={params.id} size="lg" />
+        <div>
+          <h1 class="lk-ellipsis">{channelName()}</h1>
+          <p>Subscribed on this device</p>
+        </div>
       </div>
 
-      <div
-        style={{
-          padding: "12px",
-          "background-color": COLOURS.surface,
-          "border-radius": "8px",
-          "margin-bottom": "16px",
-          "font-size": "13px",
-          "line-height": "1.6",
-          color: COLOURS.textSecondary,
-        }}
-      >
-        <Show when={myKeypair() !== undefined}>
-          <div style={{ "margin-bottom": "6px" }}>
-            Your subscriber public key (registered on this channel):
+      <Switch>
+        <Match when={bootstrap() === "idle" || bootstrap() === "registering"}>
+          <div class="lk-alert info" role="status">
+            Subscribing...
           </div>
-          <div
-            style={{
-              "font-family": "monospace",
-              "font-size": "11px",
-              color: COLOURS.textPrimary,
-              "word-break": "break-all",
-            }}
-          >
-            {bytesToHex(myKeypair()!.public)}
+        </Match>
+        <Match when={bootstrap() === "polling"}>
+          <div class="lk-alert info" role="status">
+            Subscribed. Posts appear once the publisher lets this device in; that usually
+            takes a moment.
           </div>
-        </Show>
-      </div>
+        </Match>
+        <Match when={bootstrap() === "error"}>
+          <div class="lk-alert danger" role="alert">
+            {bootstrapError() ?? "Could not subscribe. Try again later."}
+          </div>
+        </Match>
+      </Switch>
 
-      <div
-        style={{
-          padding: "12px",
-          "background-color": COLOURS.surface,
-          "border-radius": "8px",
-          "margin-bottom": "20px",
-          "font-size": "13px",
-          "line-height": "1.6",
-        }}
-      >
-        <Show when={bootstrap() === "idle" || bootstrap() === "registering"}>
-          <span style={{ color: COLOURS.textSecondary }}>
-            Registering your key on the channel…
-          </span>
-        </Show>
-        <Show when={bootstrap() === "polling"}>
-          <span style={{ color: COLOURS.textSecondary }}>
-            Registered. Waiting for the publisher to fan out a seed envelope…
-            (auto-refreshes every 3 s)
-          </span>
-        </Show>
-        <Show when={bootstrap() === "active"}>
-          <span style={{ color: COLOURS.accentBlue }}>
-            Seed envelope opened. You can read posts on this channel.
-          </span>
-        </Show>
-        <Show when={bootstrap() === "error"}>
-          <span style={{ color: COLOURS.destructive }}>
-            {bootstrapError() ?? "Unknown error."}
-          </span>
-        </Show>
-      </div>
-
-      <h2 style={{ margin: "0 0 12px 0" }}>Posts</h2>
+      <h2 class="lk-m0">Posts</h2>
       <Show
         when={bootstrap() === "active" && posts().length > 0}
         fallback={
-          <p style={{ color: COLOURS.textSecondary, "line-height": "1.6" }}>
-            <Show
-              when={bootstrap() === "active"}
-              fallback={
-                bootstrap() === "polling"
-                  ? "Waiting for the publisher to deliver your seed."
-                  : "Bootstrapping the subscribe flow…"
-              }
-            >
-              No posts yet on this channel.
+          <p class="lk-muted">
+            <Show when={bootstrap() === "active"} fallback={bootstrap() === "error" ? "" : "Loading..."}>
+              No posts yet.
             </Show>
           </p>
         }
       >
-        <ul style={{ "list-style": "none", padding: "0", margin: "0" }}>
+        <ul class="lk-list">
           <For each={posts()}>
-            {(p): JSX.Element => (
-              <li
-                style={{
-                  padding: "14px 16px",
-                  "background-color": COLOURS.surface,
-                  border: `1px solid ${COLOURS.border}`,
-                  "border-radius": "12px",
-                  "margin-bottom": "10px",
-                  "max-width": "640px",
-                }}
-              >
-                {renderPostBody(decodedByCursor().get(p.cursor))}
-                <div
-                  style={{
-                    "font-size": "12px",
-                    color: COLOURS.textSecondary,
-                    "margin-top": "8px",
-                    "text-align": "right",
-                  }}
-                >
-                  {new Date(p.serverTsMs).toLocaleString()}
-                </div>
-              </li>
-            )}
+            {(p): JSX.Element => <PostCard post={p} decoded={decodedByCursor().get(p.cursor)} />}
           </For>
         </ul>
       </Show>

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * `/new-group` — name a group and pick its first members from your contacts
+ * `/groups/new` — name a group and pick its first members from your contacts
  * (UX spec `docs/ux/new-group.md`). Creates the group with the first pick and
  * hands the rest to the chat view, which adds them through its own add path.
  */
@@ -95,7 +95,7 @@ export default function NewGroup(): JSX.Element {
           })),
         });
       }
-      navigate(paths.chat(base64UrlEncodeNoPad(result.group.groupId)), { replace: true });
+      navigate(paths.groupChat(base64UrlEncodeNoPad(result.group.groupId)), { replace: true });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setBusy(false);
@@ -109,10 +109,10 @@ export default function NewGroup(): JSX.Element {
           type="button"
           class="ghost small lk-narrow-only"
           style={{ "align-self": "flex-start" }}
-          onClick={() => navigate(paths.home)}
+          onClick={() => navigate(paths.groups)}
         >
           <Icon name="back" size={16} />
-          Chats
+          Groups
         </button>
         <div class="lk-page-head">
           <h1>New group</h1>
@@ -180,7 +180,7 @@ export default function NewGroup(): JSX.Element {
           <button type="submit" class="primary" disabled={busy() || picked().size === 0}>
             {busy() ? "Creating…" : "Create group"}
           </button>
-          <button type="button" class="ghost" disabled={busy()} onClick={() => navigate(paths.home)}>
+          <button type="button" class="ghost" disabled={busy()} onClick={() => navigate(paths.groups)}>
             Cancel
           </button>
         </div>

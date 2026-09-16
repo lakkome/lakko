@@ -44,7 +44,6 @@ public final class ChatViewModel: ObservableObject {
 
     @Published public private(set) var sending: Bool = false
     @Published public private(set) var sendError: String?
-    @Published public private(set) var refreshing: Bool = false
     /// `true` while one or more picked items are being
     /// encrypted + uploaded. The composer disables Send and the
     /// picker buttons until it flips back.
@@ -1100,10 +1099,32 @@ public final class ChatViewModel: ObservableObject {
     }
 
     /// ADR-0048 — the resolved name of the other person in a 1x1 chat, or `nil`
-    /// for a group (whose header keeps its group label) or an unreadable roster.
+    /// for a group or an unreadable roster.
     var oneToOnePeerName: String? {
         repository.oneToOnePeerSignatureKey(groupIdHex: groupIdHex)
             .map { ProfileDirectory.shared.resolve(signatureKey: $0).name }
+    }
+
+    /// The header title (UX spec section 5.2): the other person's name in a
+    /// 1x1 chat, the members' names in a group. Never the group id.
+    var conversationTitle: String {
+        if let peer = oneToOnePeerName { return peer }
+        return ConversationTitle.groupTitle(
+            otherMemberNames: ChatListViewModel.otherMemberNames(
+                repository: repository, groupIdHex: groupIdHex))
+    }
+
+    /// The header's second line: "@username" in a 1x1 chat when the other
+    /// person's username is verified, "N members" in a group, else nothing.
+    var conversationSubtitle: String? {
+        if let peer = repository.oneToOnePeerSignatureKey(groupIdHex: groupIdHex) {
+            let resolved = ProfileDirectory.shared.resolve(signatureKey: peer)
+            guard let username = resolved.verifiedUsername, resolved.source != .verifiedUsername
+            else { return nil }
+            return "@\(username)"
+        }
+        guard let count = repository.memberCount(groupIdHex: groupIdHex) else { return nil }
+        return ConversationTitle.memberCountLabel(count)
     }
 
     /// Resolve the typed `@username` (G-4-verified) and add it to this group:
@@ -2382,22 +2403,9 @@ public final class ChatViewModel: ObservableObject {
         pendingAttachments.remove(at: index)
     }
 
-    public func onRefreshClicked() {
-        refreshing = true
-        Task {
-            defer { refreshing = false }
-            do {
-                try await repository.pollGroup(groupIdHex: groupIdHex)
-            } catch {
-                // best-effort
-            }
-        }
-    }
-
     /// One long-poll tick — used by ``ChatScreen``'s
     /// `.task { … }` modifier in a `while !Task.isCancelled` loop.
-    /// Silent (does NOT flip `refreshing`) so the spinner doesn't
-    /// stay on for the full 30s long-poll window.
+    /// Silent — no spinner for the full 30s long-poll window.
     /// ADR-0045 UX §6.2.8 item 1 — should the screen's poll loop keep going?
     ///
     /// The repository's own gate is what stops the fetch, but on iOS that is

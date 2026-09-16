@@ -45,26 +45,136 @@ public struct RecoverScreen: View {
         self.onNavigateToSignup = onNavigateToSignup
     }
 
-    public var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                Text("Recover account")
-                    .font(.largeTitle)
-                    .fontWeight(.semibold)
+    /// UX spec section 5.6: the methods are a list of rows, each pushing its
+    /// form. `nil` shows the list; a method shows that method's form.
+    @State private var chosen: RecoverViewModel.Mode?
 
-                // ADR-0017: recover now works on a FRESH device — when
-                // no account is cached we resolve the account_id via
-                // `DiscoveryClient.lookup(username)`, so the form
-                // renders a username field instead of the old
-                // "no cached account" dead-end stub.
-                RecoverForm(
-                    viewModel: viewModel,
-                    cachedUsername: viewModel.cachedUsername,
-                    onNavigateToLogin: onNavigateToLogin,
-                    onNavigateToSignup: onNavigateToSignup
-                )
+    public var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text("Recover account")
+                        .font(.largeTitle)
+                        .fontWeight(.semibold)
+                    Text("Choose how to prove this account is yours.")
+                        .font(.body)
+                        .foregroundStyle(.secondary)
+
+                    VStack(spacing: 0) {
+                        ForEach(RecoverViewModel.Mode.allCases, id: \.self) { mode in
+                            Button {
+                                viewModel.mode = mode
+                                chosen = mode
+                            } label: {
+                                HStack(spacing: 12) {
+                                    Image(systemName: mode.systemImage)
+                                        .frame(width: 28)
+                                        .foregroundStyle(Color.lakkoAccent)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(mode.title)
+                                            .foregroundStyle(Color.lakkoText)
+                                        Text(mode.detail)
+                                            .font(.footnote)
+                                            .foregroundStyle(Color.lakkoTextMuted)
+                                    }
+                                    Spacer()
+                                    Image(systemName: "chevron.right")
+                                        .font(.footnote.weight(.semibold))
+                                        .foregroundStyle(Color.lakkoTextMuted)
+                                }
+                                .padding(.vertical, 12)
+                                .padding(.horizontal, 16)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(viewModel.busy)
+                            if mode != RecoverViewModel.Mode.allCases.last {
+                                Divider().padding(.leading, 56)
+                            }
+                        }
+                    }
+                    .background(Color.lakkoSurface)
+                    .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.card))
+
+                    HStack(spacing: 4) {
+                        Spacer()
+                        Text("Remembered your password?")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                        Button(action: onNavigateToLogin) {
+                            Text("Log in")
+                                .font(.footnote)
+                        }
+                        Spacer()
+                    }
+
+                    HStack(spacing: 4) {
+                        Spacer()
+                        Text("No account yet?")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                        Button(action: onNavigateToSignup) {
+                            Text("Create one")
+                                .font(.footnote)
+                        }
+                        Spacer()
+                    }
+                }
+                .padding(24)
             }
-            .padding(24)
+            .navigationDestination(item: $chosen) { mode in
+                ScrollView {
+                    // ADR-0017: recover now works on a FRESH device — when
+                    // no account is cached we resolve the account_id via
+                    // `DiscoveryClient.lookup(username)`, so the form
+                    // renders a username field instead of the old
+                    // "no cached account" dead-end stub.
+                    RecoverForm(
+                        viewModel: viewModel,
+                        cachedUsername: viewModel.cachedUsername,
+                        onNavigateToLogin: onNavigateToLogin,
+                        onNavigateToSignup: onNavigateToSignup
+                    )
+                    .padding(24)
+                }
+                .navigationTitle(mode.title)
+                .navigationBarTitleDisplayMode(.inline)
+            }
+        }
+    }
+}
+
+extension RecoverViewModel.Mode {
+    /// Row order on the method list (UX spec section 5.6).
+    static let allCases: [RecoverViewModel.Mode] = [.phrase, .anotherDevice, .shares, .totp, .contact]
+
+    var title: String {
+        switch self {
+        case .phrase: return "Recovery phrase"
+        case .anotherDevice: return "Another device"
+        case .shares: return "Recovery shares"
+        case .totp: return "Authenticator app"
+        case .contact: return "Email or phone"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .phrase: return "Your 24 words. Restores everything."
+        case .anotherDevice: return "Approve from a device that is still signed in."
+        case .shares: return "Three of the five shares you gave to trusted people."
+        case .totp: return "A code from your authenticator app. Gets you back in."
+        case .contact: return "A one-time code sent to you. Gets you back in."
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .phrase: return "key"
+        case .anotherDevice: return "iphone.gen3.radiowaves.left.and.right"
+        case .shares: return "person.2"
+        case .totp: return "lock.rotation"
+        case .contact: return "envelope"
         }
     }
 }
@@ -84,17 +194,6 @@ private struct RecoverForm: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text(
-                "Choose how to prove this account is yours. Your 24-word " +
-                "phrase or another signed-in device restores your full " +
-                "identity — your contacts keep trusting you. An authenticator " +
-                "or email/SMS code restores access only; if this device " +
-                "doesn't already hold your identity, you'll then save a new " +
-                "recovery phrase."
-            )
-            .font(.body)
-            .foregroundStyle(.secondary)
-
             if viewModel.mode != .anotherDevice {
                 if let cachedUsername {
                     Text("Account on this device: @\(cachedUsername)")
@@ -113,21 +212,8 @@ private struct RecoverForm: View {
                 }
             }
 
-            // 1.21c2 — mode toggle: phrase | shares. Picker renders
-            // as a segmented control which matches the iOS native
-            // pattern for a small-mode form switch. ADR-0018 adds the
-            // "Device" segment: restore via an already-linked device
-            // (no password, no phrase typing).
-            Picker("Recovery mode", selection: $viewModel.mode) {
-                Text("Phrase").tag(RecoverViewModel.Mode.phrase)
-                Text("Shares").tag(RecoverViewModel.Mode.shares)
-                Text("Device").tag(RecoverViewModel.Mode.anotherDevice)
-                Text("Code").tag(RecoverViewModel.Mode.totp)
-                Text("Email/SMS").tag(RecoverViewModel.Mode.contact)
-            }
-            .pickerStyle(.segmented)
-            .disabled(viewModel.busy)
-
+            // The method was chosen on the list one level up; `viewModel.mode`
+            // already carries it.
             if viewModel.mode == .anotherDevice {
                 anotherDeviceSection
             } else if viewModel.mode == .totp {
@@ -182,29 +268,6 @@ private struct RecoverForm: View {
                 .disabled(viewModel.busy)
             }
 
-            HStack(spacing: 4) {
-                Spacer()
-                Text("Remembered your password?")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                Button(action: onNavigateToLogin) {
-                    Text("Log in")
-                        .font(.footnote)
-                }
-                Spacer()
-            }
-
-            HStack(spacing: 4) {
-                Spacer()
-                Text("No account yet?")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                Button(action: onNavigateToSignup) {
-                    Text("Create one")
-                        .font(.footnote)
-                }
-                Spacer()
-            }
         }
     }
 
@@ -251,10 +314,9 @@ private struct RecoverForm: View {
     @ViewBuilder
     private var contactSection: some View {
         Text(
-            "Recover access with a one-time code sent to a phone or email " +
-            "you enrolled earlier (under Devices). This restores access to " +
-            "your account; your secure identity is then restored from your " +
-            "recovery phrase or another signed-in device."
+            "A one-time code goes to the email or phone number you set up "
+                + "under Settings > Recovery. It gets you back in; your messages "
+                + "and contacts then come back from your recovery phrase or another device."
         )
         .font(.footnote)
         .foregroundStyle(.secondary)

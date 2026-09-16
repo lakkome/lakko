@@ -4,55 +4,19 @@
 import Foundation
 import SwiftUI
 
-/// `DevicesScreen` — multi-device management surface
-/// (Phase 2a3b3-ui).
+/// Settings > Devices (UX spec section 5.5): the list of this account's
+/// devices with Remove, and one "Add a device" button that pushes
+/// ``AddDeviceScreen``. Pushed onto the Settings tab's stack; the system back
+/// button returns to Settings.
 ///
-/// Mirror of `apps/web/src/routes/Devices.tsx`. One screen,
-/// two flows picked via a `Picker`:
-///
-///   1. **Pair this device** — joining side. Generates an
-///      ephemeral DeviceIdentity-derived KeyPackage +
-///      rendezvous pseudonym via
-///      ``PairingOrchestrator/prepareJoinFlow``, renders the
-///      pairing QR with ``QrImageView``, long-polls the DS
-///      mailbox for the Welcome, runs `accept` on receipt.
-///   2. **Add a device** — scanner side. Opens the camera via
-///      ``QrScannerView``, decodes the first QR, base64url-
-///      decodes the text payload, drives
-///      ``PairingOrchestrator/runScanFlow``.
-///
-/// Both flows pull `accountIdBytes` + `accountIdB64` from the
-/// injected ``AuthRepository``; the screen renders an
-/// "auth required" stub when the session isn't ready.
+/// Mirror of `apps/web/src/routes/Devices.tsx`. The recovery factors that used
+/// to share this screen's segmented control (authenticator, email or phone)
+/// live under Settings > Recovery (``RecoveryFactorsScreen``).
 public struct DevicesScreen: View {
 
     @ObservedObject public var authRepository: AuthRepository
-    public var onBack: () -> Void
-
-    @State private var tab: Tab = .list
-
-    private enum Tab: String, CaseIterable, Identifiable {
-        case list
-        case pair
-        case scan
-        case totp
-        case contact
-        var id: String { rawValue }
-        var label: String {
-            switch self {
-            case .list: return "Your devices"
-            case .pair: return "Pair this device"
-            case .scan: return "Add a device"
-            case .totp: return "Authenticator"
-            case .contact: return "Email/SMS"
-            }
-        }
-    }
-
-    /// ADR-0050 section 2.8 — called with a device's 32-byte key once the
-    /// scan flow added it to the DeviceGroup; the composition root admits it
-    /// to every chat.
-    public var onDeviceAdded: (Data) -> Void
+    /// Push the pairing flow (show QR / scan QR).
+    public var onAddDevice: () -> Void
     /// ADR-0050 section 2.10 — called with a device's 32-byte key once it was
     /// removed from the DeviceGroup; the composition root retires it from
     /// every chat.
@@ -60,100 +24,178 @@ public struct DevicesScreen: View {
 
     public init(
         authRepository: AuthRepository,
-        onBack: @escaping () -> Void,
-        onDeviceAdded: @escaping (Data) -> Void = { _ in },
+        onAddDevice: @escaping () -> Void = {},
         onDeviceRemoved: @escaping (Data) -> Void = { _ in }
     ) {
         self.authRepository = authRepository
-        self.onBack = onBack
-        self.onDeviceAdded = onDeviceAdded
+        self.onAddDevice = onAddDevice
         self.onDeviceRemoved = onDeviceRemoved
     }
 
     public var body: some View {
-        let session = currentSession()
-        NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    Text(
-                        "Link a second device to this account. The pairing " +
-                        "is end-to-end-encrypted: the server sees only the " +
-                        "rendezvous pseudonym and opaque MLS bytes."
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                if let session = DeviceSession.current(authRepository) {
+                    DevicesListView(
+                        accountIdBytes: session.accountIdBytes,
+                        accountIdB64: session.accountIdB64,
+                        sessionToken: session.sessionToken,
+                        onDeviceRemoved: onDeviceRemoved
                     )
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-
-                    if let session = session {
-                        Picker("", selection: $tab) {
-                            ForEach(Tab.allCases) { t in
-                                Text(t.label).tag(t)
-                            }
-                        }
-                        .pickerStyle(.segmented)
-
-                        switch tab {
-                        case .list:
-                            DevicesListView(
-                                accountIdBytes: session.accountIdBytes,
-                                accountIdB64: session.accountIdB64,
-                                sessionToken: session.sessionToken,
-                                onDeviceRemoved: onDeviceRemoved
-                            )
-                        case .pair:
-                            PairView(
-                                accountIdBytes: session.accountIdBytes,
-                                accountIdB64: session.accountIdB64
-                            )
-                        case .scan:
-                            ScanView(
-                                accountIdBytes: session.accountIdBytes,
-                                accountIdB64: session.accountIdB64,
-                                accountIdentitySeed: session.accountIdentitySeed,
-                                sessionToken: session.sessionToken,
-                                onDeviceAdded: onDeviceAdded
-                            )
-                        case .totp:
-                            TotpEnrollView(sessionToken: session.sessionToken)
-                        case .contact:
-                            ContactEnrollView(sessionToken: session.sessionToken)
-                        }
-                    } else {
-                        Text("Sign in first to manage devices.")
-                            .foregroundStyle(.red)
+                    Button(action: onAddDevice) {
+                        Label("Add a device", systemImage: "plus")
+                            .frame(maxWidth: .infinity)
                     }
-                }
-                .padding(20)
-            }
-            .navigationTitle("Devices")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarLeading) {
-                    Button("Back", action: onBack)
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                } else {
+                    Text("Sign in first to manage devices.")
+                        .foregroundStyle(.red)
                 }
             }
+            .padding(16)
         }
+        .navigationTitle("Devices")
+        .navigationBarTitleDisplayMode(.inline)
     }
+}
 
-    private func currentSession()
-        -> (
-            accountIdBytes: Data,
-            accountIdB64: String,
-            sessionToken: String,
-            accountIdentitySeed: Data
-        )?
-    {
+/// The session values every device flow needs, or `nil` when the session is
+/// not ready.
+struct DeviceSession {
+    let accountIdBytes: Data
+    let accountIdB64: String
+    let sessionToken: String
+    let accountIdentitySeed: Data
+
+    @MainActor
+    static func current(_ authRepository: AuthRepository) -> DeviceSession? {
         guard
             let secrets = authRepository.identitySecrets,
             case .session(let account) = authRepository.state
         else {
             return nil
         }
-        return (
-            secrets.accountId,
-            account.accountIdB64,
-            secrets.sessionToken,
-            secrets.accountIdentitySeed
+        return DeviceSession(
+            accountIdBytes: secrets.accountId,
+            accountIdB64: account.accountIdB64,
+            sessionToken: secrets.sessionToken,
+            accountIdentitySeed: secrets.accountIdentitySeed
         )
+    }
+}
+
+// MARK: - Add a device (pairing flow)
+
+/// Settings > Devices > Add a device: this device either shows its pairing
+/// code (it is the new device) or scans the other device's code (it is the
+/// already-linked one). Two flows, one segmented switch.
+///
+///   1. **Show code** — joining side. Generates the pairing material via
+///      ``PairingOrchestrator/prepareJoinFlow``, renders the QR with
+///      ``QrImageView``, waits for the other device, runs `accept` on receipt.
+///   2. **Scan code** — scanner side. Opens the camera via ``QrScannerView``,
+///      decodes the first QR, drives ``PairingOrchestrator/runScanFlow``.
+struct AddDeviceScreen: View {
+    @ObservedObject var authRepository: AuthRepository
+    /// ADR-0050 section 2.8 — called with a device's 32-byte key once the
+    /// scan flow added it to the DeviceGroup; the composition root admits it
+    /// to every chat.
+    var onDeviceAdded: (Data) -> Void = { _ in }
+
+    private enum Side: String, CaseIterable, Identifiable {
+        case show
+        case scan
+        var id: String { rawValue }
+        var label: String {
+            switch self {
+            case .show: return "This is the new device"
+            case .scan: return "Scan the new device"
+            }
+        }
+    }
+
+    @State private var side: Side = .scan
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Linking is end-to-end encrypted between your two devices.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                if let session = DeviceSession.current(authRepository) {
+                    Picker("", selection: $side) {
+                        ForEach(Side.allCases) { s in
+                            Text(s.label).tag(s)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+
+                    switch side {
+                    case .show:
+                        PairView(
+                            accountIdBytes: session.accountIdBytes,
+                            accountIdB64: session.accountIdB64
+                        )
+                    case .scan:
+                        ScanView(
+                            accountIdBytes: session.accountIdBytes,
+                            accountIdB64: session.accountIdB64,
+                            accountIdentitySeed: session.accountIdentitySeed,
+                            sessionToken: session.sessionToken,
+                            onDeviceAdded: onDeviceAdded
+                        )
+                    }
+                } else {
+                    Text("Sign in first to add a device.")
+                        .foregroundStyle(.red)
+                }
+            }
+            .padding(16)
+        }
+        .navigationTitle("Add a device")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+// MARK: - Recovery factors
+
+/// Settings > Recovery: the authenticator app and the email or phone number
+/// that can restore ACCESS to the account (ADR-0018 factors (c) and (d)).
+struct RecoveryFactorsScreen: View {
+    @ObservedObject var authRepository: AuthRepository
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                Text(
+                    "Your recovery phrase or another signed-in device restores "
+                        + "everything. These extra methods get you back into the "
+                        + "account if you lose your password."
+                )
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                if let session = DeviceSession.current(authRepository) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Label("Authenticator app", systemImage: "lock.rotation")
+                            .font(.headline)
+                        TotpEnrollView(sessionToken: session.sessionToken)
+                    }
+                    Divider()
+                    VStack(alignment: .leading, spacing: 12) {
+                        Label("Email or phone", systemImage: "envelope")
+                            .font(.headline)
+                        ContactEnrollView(sessionToken: session.sessionToken)
+                    }
+                } else {
+                    Text("Sign in first to manage recovery.")
+                        .foregroundStyle(.red)
+                }
+            }
+            .padding(16)
+        }
+        .navigationTitle("Recovery")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }
 
@@ -179,11 +221,7 @@ private struct PairView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(
-                "Show this QR code to your already-linked device. " +
-                "It scans the code, runs the MLS handshake, and your " +
-                "new device joins the DeviceGroup."
-            )
+            Text("Show this code to a device that is already signed in to your account, and scan it there.")
             .font(.footnote)
             .foregroundStyle(.secondary)
 
@@ -215,7 +253,7 @@ private struct PairView: View {
 
             case .done:
                 Label(
-                    "Linked. This device is now part of your DeviceGroup.",
+                    "Linked. This device is now part of your account.",
                     systemImage: "checkmark.circle.fill"
                 )
                 .foregroundStyle(.green)
@@ -472,35 +510,28 @@ private struct DevicesListView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(
-                "These are the devices currently linked to your " +
-                "account. Removing a device revokes its access " +
-                "via an MLS commit broadcast on the DeviceGroup " +
-                "journal — the revoked device can no longer " +
-                "decrypt any subsequent traffic on this account."
-            )
+            Text("Removing a device signs it out of your account; it can no longer read anything sent afterwards.")
             .font(.footnote)
             .foregroundStyle(.secondary)
 
             switch state {
             case .loading:
-                ProgressView("Loading devices…")
+                ProgressView("Loading...")
             case .ready(let devices):
-                ForEach(devices) { device in
-                    HStack {
+                // A device has no human label yet (no platform, model or
+                // user-set name reaches the client), so the row says
+                // "This device" / "Device N" rather than showing its key.
+                ForEach(Array(devices.enumerated()), id: \.element.id) { index, device in
+                    HStack(spacing: 12) {
+                        Image(systemName: device.isSelf ? "iphone" : "laptopcomputer.and.iphone")
+                            .foregroundStyle(Color.lakkoTextMuted)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("#\(device.leafIndex) \(hexPrefix(device.signaturePublicKey, n: 8))")
-                                .font(.system(.footnote, design: .monospaced))
-                            if device.isSelf {
-                                Text("this device")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
+                            Text(device.isSelf ? "This device" : "Device \(index + 1)")
+                                .font(.body)
                         }
                         Spacer()
                         if device.isSelf {
-                            Text("—")
-                                .foregroundStyle(.secondary)
+                            EmptyView()
                         } else {
                             Button(role: .destructive) {
                                 Task { await remove(leafIndex: device.leafIndex) }
@@ -519,11 +550,6 @@ private struct DevicesListView: View {
                     .padding(.vertical, 4)
                     Divider()
                 }
-                Button(action: { refresh() }) {
-                    Text("Refresh").frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-                .disabled(removingLeaf != nil)
 
             case .error(let message):
                 VStack(alignment: .leading, spacing: 8) {
@@ -614,10 +640,6 @@ private struct DevicesListView: View {
         return []
     }
 
-    private func hexPrefix(_ data: Data, n: Int) -> String {
-        let take = min(n, data.count)
-        return data.prefix(take).map { String(format: "%02x", $0) }.joined()
-    }
 }
 
 // ---- Authenticator (TOTP) enrollment — ADR-0018 factor (c) -------
@@ -653,10 +675,9 @@ private struct TotpEnrollView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(
-                "Add an authenticator app (TOTP) as a recovery factor. " +
-                "If you lose this device, a 6-digit code recovers ACCESS " +
-                "to your account; your identity then restores from the " +
-                "recovery phrase or another device."
+                "If you lose this device, a 6-digit code from your authenticator "
+                    + "app gets you back into the account. Your contacts and "
+                    + "messages then come back from your recovery phrase or another device."
             )
             .font(.footnote)
             .foregroundStyle(.secondary)
@@ -839,10 +860,9 @@ private struct ContactEnrollView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(
-                "Enroll a phone number or email as a recovery factor. If " +
-                "you lose this device, a one-time code sent there restores " +
-                "ACCESS to your account; your identity then restores from " +
-                "the recovery phrase or another device."
+                "If you lose this device, a one-time code sent to this email or "
+                    + "phone number gets you back into the account. Your contacts and "
+                    + "messages then come back from your recovery phrase or another device."
             )
             .font(.footnote)
             .foregroundStyle(.secondary)

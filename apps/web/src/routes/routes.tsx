@@ -13,7 +13,7 @@
  *      `<RequireAnonymous>` so a signed-in user gets bounced home
  *      instead of landing on a login form they cannot use.
  *
- *   2. **Protected** (`/`, `/chat/:id`, `/contacts`, `/channels`, `/calls`,
+ *   2. **Protected** (`/`, `/chat/:id`, `/groups`, `/contacts`, `/channels`,
  *      `/settings`, `/devices`, `/dev`) — wrapped in `<RequireSession>` and rendered inside the
  *      `<AppShell>` layout. The wrapper short-circuits to `/login`
  *      when the user is anonymous.
@@ -31,10 +31,10 @@ import Recover from "./Recover";
 import Signup from "./Signup";
 import Home from "./Home";
 import ChatsLayout from "./ChatsLayout";
+import GroupsLayout, { GroupsIndex } from "./GroupsLayout";
 import NewGroup from "./NewGroup";
 import Contacts from "./Contacts";
 import Settings from "./Settings";
-import Calls from "./Calls";
 import Call from "./Call";
 import { ChannelSubscribe, ChannelView, NewChannel } from "./Channels";
 import ChannelsLayout, { ChannelsIndex } from "./ChannelsLayout";
@@ -49,6 +49,7 @@ import {
   callJoinRoutePattern,
   callRoutePattern,
   chatRoutePattern,
+  groupChatRoutePattern,
   groupJoinRoutePattern,
   inviteRoutePattern,
   paths,
@@ -119,12 +120,23 @@ export const routes: RouteDefinition[] = [
         component: ChatsLayout,
         children: [
           { path: paths.home, component: Home },
-          { path: paths.newGroup, component: NewGroup },
-          { path: chatRoutePattern, component: Chat },
+          { path: chatRoutePattern, component: () => <Chat backTo={paths.home} /> },
+        ],
+      },
+      // Groups: the same chat view, beside the group list; Back returns to it.
+      {
+        path: paths.groups,
+        component: GroupsLayout,
+        children: [
+          { path: "/", component: GroupsIndex },
+          // `/new` MUST precede `/:id` so the id pattern does not swallow it.
+          { path: "/new", component: NewGroup },
+          { path: groupChatRoutePattern, component: () => <Chat backTo={paths.groups} /> },
         ],
       },
       { path: paths.contacts, component: Contacts },
-      { path: paths.calls, component: Calls },
+      // The former Calls destination: call links live in the Contacts add menu.
+      { path: paths.calls, component: () => <Navigate href={paths.contacts} /> },
       { path: "/settings/:section?", component: Settings },
       // The old profile URL lands on its Settings section.
       { path: "/profile", component: () => <Navigate href={paths.settingsSection("profile")} /> },

@@ -2,10 +2,11 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * The chat list: one row per joined group, the newest message as a preview,
- * an unread badge, and pin / mute / archive on hover. Moved here from the
- * Contacts route, where it lived as "Active MLS groups" while there was no
- * home to put it on; the logic is unchanged.
+ * The conversation list, used twice (docs/ux/client-redesign.md section 5.1):
+ * once as Chats (two people) and once as Groups (everyone else), split by
+ * `chat/conversation-kind.ts` over the one store. One row per conversation,
+ * the newest message as a preview, an unread badge, pin / mute / archive as
+ * hover actions and a right-click menu.
  *
  * Labels come from the one profile resolver (ADR-0048 §5); flags from the
  * cross-device sync runtime; unread + preview from the persisted message log,
@@ -26,6 +27,9 @@ import { base64UrlEncodeNoPad } from "../auth/account-id";
 import { getDeviceKey } from "../auth/key-store";
 import { restoredKind } from "../auth/restore-marker";
 import { ownPersonKeyB64, peopleCountOf, personKeysOf } from "./person-key";
+import { belongsToList, type ConversationKind } from "./conversation-kind";
+import { groupTitle } from "./group-title";
+import { memberNameOf } from "../profile/member-label";
 import { useChats, type ActiveGroup } from "./ChatContext";
 import { chatListLine, membershipState, readIsActive } from "./membership-ended";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
@@ -45,13 +49,38 @@ import { paths } from "../routes/paths";
 import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
 
-export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Element {
+type Flag = "pinned" | "muted" | "archived";
+
+const COPY: Record<
+  ConversationKind,
+  { title: string; compose: string; emptyTitle: string; emptyAction: string; aria: string }
+> = {
+  chat: {
+    title: "Chats",
+    compose: "New chat",
+    emptyTitle: "No chats yet",
+    emptyAction: "Start a chat",
+    aria: "Chats",
+  },
+  group: {
+    title: "Groups",
+    compose: "New group",
+    emptyTitle: "No groups yet",
+    emptyAction: "Create a group",
+    aria: "Groups",
+  },
+};
+
+export function ChatList(props: {
+  kind: ConversationKind;
+  activeGroupIdB64: string | null;
+}): JSX.Element {
   const chats = useChats();
   const profiles = useProfiles();
   const sync = useDeviceGroupSync();
   const auth = useAuth();
   const navigate = useNavigate();
-  const [menuOpen, setMenuOpen] = createSignal(false);
+  const copy = (): (typeof COPY)[ConversationKind] => COPY[props.kind];
 
   // Accepted contacts name a chat linked to one; a rename propagates here.
   const [accepted, setAccepted] = createSignal<AcceptedContact[]>(loadAccepted());
@@ -60,9 +89,6 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
     onCleanup(unsubscribe);
   });
 
-  /** Best label for a chat row (ADR-0048 §5). A 1x1 chat is the other person,
-   *  through the one resolver, read live from the MLS roster so it works
-   *  however the chat was created. A group keeps its own label. */
   /** The other member's key in a 1x1 chat, else `null`. */
   const peerKeyOf = (g: ActiveGroup): string | null => {
     const ownB64 = ownPersonKeyB64(chats.identity());
@@ -72,6 +98,9 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
     return memberB64s.length === 2 && peers.length === 1 ? (peers[0] ?? null) : null;
   };
 
+  /** Best label for a row (ADR-0048 §5). A 1x1 chat is the other person,
+   *  through the one resolver, read live from the roster so it works however
+   *  the chat was created. A group keeps its own label. */
   const chatLabel = (g: ActiveGroup): string => {
     accepted();
     const ownB64 = ownPersonKeyB64(chats.identity());
@@ -87,7 +116,11 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
     if (byMember !== undefined && byMember.displayName.length > 0 && memberB64s.length <= 2) {
       return byMember.displayName;
     }
-    return g.label;
+    // An unnamed group is titled from its members, never from an id.
+    return groupTitle(
+      g.label,
+      peers.map((k) => memberNameOf(profiles.resolve(k))),
+    );
   };
 
   // Unread badge + last-message preview, from the persisted message log.
@@ -135,10 +168,11 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
     return summarizeGroupSlot(logSlots()[hex], syncedReadUpTo);
   }
 
-  /** Pinned first, archived last, otherwise creation order. */
+  /** This list's half of the store: pinned first, archived last, otherwise
+   *  creation order. */
   const sortedGroups = (): readonly ActiveGroup[] => {
     const flagsMap = sync.flags();
-    const items = [...chats.groups()];
+    const items = chats.groups().filter((g) => belongsToList(peopleCountOf(g.group), props.kind));
     items.sort((a, b) => {
       const fa = flagsMap[syncGroupIdHex(a.group.groupId)];
       const fb = flagsMap[syncGroupIdHex(b.group.groupId)];
@@ -176,10 +210,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
       }),
     );
 
-  async function toggleFlag(
-    g: ActiveGroup,
-    field: "pinned" | "muted" | "archived",
-  ): Promise<void> {
+  async function toggleFlag(g: ActiveGroup, field: Flag): Promise<void> {
     const groupId = g.group.groupId;
     const key = syncGroupIdHex(groupId);
     const cur = sync.flags()[key];
@@ -198,10 +229,21 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
     }
   }
 
+  // The right-click menu: one open at a time, anchored where the pointer was.
+  const [menu, setMenu] = createSignal<{ g: ActiveGroup; x: number; y: number } | null>(null);
+
+  const compose = (): void => {
+    navigate(props.kind === "chat" ? paths.contacts : paths.newGroup);
+  };
+  const hrefOf = (g: ActiveGroup): string => {
+    const slug = base64UrlEncodeNoPad(g.group.groupId);
+    return props.kind === "chat" ? paths.chat(slug) : paths.groupChat(slug);
+  };
+
   return (
-    <aside class="lk-pane" aria-label="Chats">
+    <aside class="lk-pane" aria-label={copy().aria}>
       <div class="lk-pane-head">
-        <h1>Chats</h1>
+        <h1>{copy().title}</h1>
         {/* ADR-0050 / docs/ux/second-device.md section 2: one label while a
             device that landed through a recovery route is still being admitted
             to the account's chats. Chats appear as they arrive; the label goes
@@ -211,56 +253,24 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
             Synchronizing...
           </span>
         </Show>
-        <div class="lk-menu-anchor">
-          <button
-            type="button"
-            class="lk-icon-button accent"
-            title="New chat"
-            aria-label="New chat"
-            aria-haspopup="menu"
-            aria-expanded={menuOpen()}
-            onClick={() => setMenuOpen(!menuOpen())}
-          >
-            <Icon name="compose" size={18} />
-          </button>
-          <Show when={menuOpen()}>
-            <div class="lk-menu-backdrop" onClick={() => setMenuOpen(false)} />
-            <div class="lk-menu" role="menu">
-              <button
-                type="button"
-                role="menuitem"
-                onClick={() => {
-                  setMenuOpen(false);
-                  navigate(paths.contacts);
-                }}
-              >
-                <Icon name="chat" size={18} />
-                New chat
-              </button>
-              <button
-                type="button"
-                role="menuitem"
-                onClick={() => {
-                  setMenuOpen(false);
-                  navigate(paths.newGroup);
-                }}
-              >
-                <Icon name="contacts" size={18} />
-                New group
-              </button>
-            </div>
-          </Show>
-        </div>
+        <button
+          type="button"
+          class="lk-icon-button accent"
+          title={copy().compose}
+          aria-label={copy().compose}
+          onClick={compose}
+        >
+          <Icon name={props.kind === "chat" ? "compose" : "plus"} size={18} />
+        </button>
       </div>
       <Show
-        when={chats.groups().length > 0}
+        when={sortedGroups().length > 0}
         fallback={
           <div class="lk-empty">
-            <Icon name="chat" size={40} strokeWidth={1.4} />
-            <strong>No conversations yet</strong>
-            <span>Start a chat with a contact, or share your invite link.</span>
-            <button type="button" class="primary" onClick={() => navigate(paths.contacts)}>
-              New chat
+            <Icon name={props.kind === "chat" ? "chat" : "groups"} size={40} strokeWidth={1.4} />
+            <strong>{copy().emptyTitle}</strong>
+            <button type="button" class="primary" onClick={compose}>
+              {copy().emptyAction}
             </button>
           </div>
         }
@@ -269,7 +279,6 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
           <For each={sortedGroups()}>
             {(g) => {
               const key = syncGroupIdHex(g.group.groupId);
-              const href = paths.chat(base64UrlEncodeNoPad(g.group.groupId));
               const flags = (): { pinned: boolean; muted: boolean; archived: boolean } => {
                 const f = sync.flags()[key];
                 return {
@@ -291,19 +300,23 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                 const peer = peerKeyOf(g);
                 if (peer !== null) return profiles.resolve(peer).username ?? "";
                 const n = peopleCountOf(g.group);
-                return `${n} member${n === 1 ? "" : "s"}`;
+                return `${n} ${n === 1 ? "person" : "people"}`;
               };
               return (
                 <A
-                  href={href}
+                  href={hrefOf(g)}
                   class="lk-row"
                   classList={{
                     selected: props.activeGroupIdB64 === g.groupIdB64,
                     ended: endedLine(g) !== null,
+                    archived: flags().archived,
                   }}
                   activeClass=""
                   inactiveClass=""
-                  style={{ opacity: flags().archived ? "0.6" : undefined }}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    setMenu({ g, x: e.clientX, y: e.clientY });
+                  }}
                 >
                   <Avatar label={label()} id={g.groupIdB64} size="md" />
                   <div class="lk-row-body">
@@ -312,9 +325,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                         <Show when={flags().pinned}>
                           <Icon name="pin" size={14} title="Pinned" />
                         </Show>
-                        <span style={{ overflow: "hidden", "text-overflow": "ellipsis" }}>
-                          {label()}
-                        </span>
+                        <span class="lk-ellipsis">{label()}</span>
                         <Show when={flags().muted}>
                           <Icon name="bellOff" size={14} title="Muted" />
                         </Show>
@@ -333,10 +344,11 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                       <span class="lk-row-sub" data-testid="chat-preview">
                         {sub()}
                       </span>
-                      <span class="lk-row-actions">
+                      <span class="lk-row-actions" role="group" aria-label="Conversation actions">
                         <button
                           type="button"
                           title={flags().pinned ? "Unpin" : "Pin"}
+                          aria-label={flags().pinned ? "Unpin" : "Pin"}
                           aria-pressed={flags().pinned}
                           onClick={(e) => {
                             e.preventDefault();
@@ -348,6 +360,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                         <button
                           type="button"
                           title={flags().muted ? "Unmute" : "Mute"}
+                          aria-label={flags().muted ? "Unmute" : "Mute"}
                           aria-pressed={flags().muted}
                           onClick={(e) => {
                             e.preventDefault();
@@ -359,6 +372,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                         <button
                           type="button"
                           title={flags().archived ? "Unarchive" : "Archive"}
+                          aria-label={flags().archived ? "Unarchive" : "Archive"}
                           aria-pressed={flags().archived}
                           onClick={(e) => {
                             e.preventDefault();
@@ -375,6 +389,54 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
             }}
           </For>
         </div>
+      </Show>
+      <Show when={menu()}>
+        {(m) => {
+          const f = (): { pinned: boolean; muted: boolean; archived: boolean } => {
+            const cur = sync.flags()[syncGroupIdHex(m().g.group.groupId)];
+            return {
+              pinned: cur?.pinned === true,
+              muted: cur?.muted === true,
+              archived: cur?.archived === true,
+            };
+          };
+          const act = (field: Flag): void => {
+            const g = m().g;
+            setMenu(null);
+            void toggleFlag(g, field);
+          };
+          return (
+            <>
+              <div
+                class="lk-menu-backdrop"
+                onClick={() => setMenu(null)}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  setMenu(null);
+                }}
+              />
+              <div
+                class="lk-menu lk-menu-floating"
+                role="menu"
+                aria-label={chatLabel(m().g)}
+                style={{ left: `${m().x}px`, top: `${m().y}px` }}
+              >
+                <button type="button" role="menuitem" onClick={() => act("pinned")}>
+                  <Icon name="pin" size={18} />
+                  {f().pinned ? "Unpin" : "Pin"}
+                </button>
+                <button type="button" role="menuitem" onClick={() => act("muted")}>
+                  <Icon name="bellOff" size={18} />
+                  {f().muted ? "Unmute" : "Mute"}
+                </button>
+                <button type="button" role="menuitem" onClick={() => act("archived")}>
+                  <Icon name="archive" size={18} />
+                  {f().archived ? "Unarchive" : "Archive"}
+                </button>
+              </div>
+            </>
+          );
+        }}
       </Show>
     </aside>
   );

@@ -13,6 +13,13 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -55,6 +62,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
  *   * [Failed] — error message + `Retry` primary + `Done`
  *     outlined
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 public fun InviteLandingScreen(
     viewModel: InviteLandingViewModel,
@@ -64,18 +72,27 @@ public fun InviteLandingScreen(
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
 
+    Scaffold(
+        modifier = modifier,
+        topBar = {
+            TopAppBar(
+                title = { Text("Invite") },
+                navigationIcon = {
+                    IconButton(onClick = onDone) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                },
+            )
+        },
+    ) { padding ->
     Column(
-        modifier = modifier
+        modifier = Modifier
             .fillMaxSize()
+            .padding(padding)
             .padding(24.dp),
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Text(
-            text = "Lakko invite",
-            style = MaterialTheme.typography.titleLarge,
-        )
-        Spacer(Modifier.height(16.dp))
 
         when (val s = state) {
             InviteLandingState.Loading -> LoadingPanel()
@@ -127,6 +144,7 @@ public fun InviteLandingScreen(
             )
         }
     }
+    }
 }
 
 @Composable
@@ -155,18 +173,10 @@ private fun AcceptedPanel(
         text = "Connected.",
         style = MaterialTheme.typography.titleMedium,
     )
-    Spacer(Modifier.height(8.dp))
-    Text(
-        text = "Account id (base64): ${shortAccountId(state.recipientAccountId)}",
-        style = MaterialTheme.typography.bodySmall,
-        fontFamily = FontFamily.Monospace,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
     if (state.groupIdHex == null) {
         Spacer(Modifier.height(8.dp))
         Text(
-            text = "MLS chat session not built yet — Open Contacts to retry " +
-                "the handshake.",
+            text = "The chat is not ready yet. Open Contacts to try again.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -286,11 +296,3 @@ private fun FailedPanel(
     }
 }
 
-/** base64 the 16-byte UUIDv7, then truncate to a short
- *  human-readable preview (the full 22-char b64 is ugly and
- *  not actionable for the user — we just want to show "this
- *  is who you connected to" for confidence). */
-private fun shortAccountId(bytes: ByteArray): String {
-    val b64 = me.lakko.app.auth.base64Encode(bytes)
-    return if (b64.length <= 12) b64 else "${b64.substring(0, 8)}…"
-}

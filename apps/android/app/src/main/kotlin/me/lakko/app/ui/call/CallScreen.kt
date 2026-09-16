@@ -95,6 +95,12 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import androidx.compose.ui.platform.LocalContext
 import me.lakko.app.calls.CallSession
+import me.lakko.app.ui.theme.LakkoDark
+import me.lakko.app.ui.theme.LakkoTheme
+import androidx.compose.material.icons.filled.FrontHand
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.windowInsetsPadding
 import me.lakko.app.calls.CallSoundController
 import me.lakko.app.calls.CallUiState
 import me.lakko.app.calls.LocalVideoPreviewView
@@ -120,27 +126,15 @@ import org.webrtc.RendererCommon
  * `SurfaceView` / `TextureView`-backed video surfaces in.
  */
 
-// ============================================================
-// Theme tokens (dark) — matches web Call.tsx + iOS CallScreen.
-// ============================================================
-
-private object CallTheme {
-    val background = Color(0xFF0F0F0F)
-    val surface = Color(0xFF1A1A1A)
-    val border = Color(0xFF2A2A2A)
-    val textPrimary = Color(0xFFFAFAFA)
-    val textSecondary = Color(0xFFA1A1AA)
-    val accentBlue = Color(0xFF3B82F6)
-    val endCallRed = Color(0xFFDC2626)
-    val mutedRed = Color(0xFFEF4444)
-    val qualityGreen = Color(0xFF10B981)
-    val qualityYellow = Color(0xFFFBBF24)
-}
+// Calls are dark by design (docs/ux/client-redesign.md section 4): the
+// colours are the dark half of the one Lakko token set, read straight from
+// `LakkoDark`; the screen is wrapped in `LakkoTheme(dark = true)` so every
+// Material component inside follows.
 
 private fun CallUiState.QualityTier.colour(): Color = when (this) {
-    CallUiState.QualityTier.Excellent -> CallTheme.qualityGreen
-    CallUiState.QualityTier.Good, CallUiState.QualityTier.Fair -> CallTheme.qualityYellow
-    CallUiState.QualityTier.Poor, CallUiState.QualityTier.Bad -> CallTheme.mutedRed
+    CallUiState.QualityTier.Excellent -> LakkoDark.success
+    CallUiState.QualityTier.Good, CallUiState.QualityTier.Fair -> LakkoDark.warning
+    CallUiState.QualityTier.Poor, CallUiState.QualityTier.Bad -> LakkoDark.danger
 }
 
 // ============================================================
@@ -253,6 +247,13 @@ public fun CallScreen(
         lastRemoteIds = remoteIds
     }
 
+    LakkoTheme(dark = true) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(LakkoDark.background)
+            .windowInsetsPadding(WindowInsets.safeDrawing),
+    ) {
     when (phase) {
         is CallUiState.CallPhase.Prejoin ->
             PrejoinScreen(
@@ -302,6 +303,8 @@ public fun CallScreen(
             },
         )
     }
+    }
+    }
 }
 
 // ============================================================
@@ -327,20 +330,20 @@ private fun PrejoinScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(CallTheme.background)
+            .background(LakkoDark.background)
             .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(20.dp, Alignment.CenterVertically),
     ) {
         Text(
             "Join Call",
-            color = CallTheme.textPrimary,
+            color = LakkoDark.text,
             fontSize = 24.sp,
             fontWeight = FontWeight.SemiBold,
         )
         Text(
             "Set up your camera and microphone",
-            color = CallTheme.textSecondary,
+            color = LakkoDark.textMuted,
             fontSize = 14.sp,
         )
 
@@ -349,8 +352,8 @@ private fun PrejoinScreen(
                 .widthIn(max = 480.dp)
                 .fillMaxWidth()
                 .aspectRatio(16f / 9f)
-                .background(CallTheme.surface, RoundedCornerShape(12.dp))
-                .border(1.dp, CallTheme.border, RoundedCornerShape(12.dp)),
+                .background(LakkoDark.surface, RoundedCornerShape(12.dp))
+                .border(1.dp, LakkoDark.border, RoundedCornerShape(12.dp)),
         ) {
             if (camOn) {
                 val eglContext = remember { WebRtcPeerConnection.sharedEglContext() }
@@ -370,9 +373,9 @@ private fun PrejoinScreen(
                             .background(
                                 Brush.linearGradient(
                                     colors = listOf(
-                                        Color(0xFF1F2937),
-                                        Color(0xFF111827),
-                                        Color(0xFF0B0F19),
+                                        LakkoDark.sunken,
+                                        LakkoDark.surface,
+                                        LakkoDark.background,
                                     ),
                                 ),
                                 RoundedCornerShape(12.dp),
@@ -381,7 +384,7 @@ private fun PrejoinScreen(
                     ) {
                         Text(
                             "(camera preview)",
-                            color = CallTheme.textSecondary,
+                            color = LakkoDark.textMuted,
                             fontSize = 13.sp,
                         )
                     }
@@ -394,7 +397,7 @@ private fun PrejoinScreen(
                     Icon(
                         Icons.Filled.VideocamOff,
                         contentDescription = null,
-                        tint = CallTheme.textSecondary,
+                        tint = LakkoDark.textMuted,
                         modifier = Modifier.size(48.dp),
                     )
                 }
@@ -434,7 +437,7 @@ private fun PrejoinScreen(
                     onValueChange = { displayName = it },
                     singleLine = true,
                     textStyle = TextStyle(
-                        color = CallTheme.textPrimary,
+                        color = LakkoDark.text,
                         fontSize = 15.sp,
                     ),
                     keyboardOptions = KeyboardOptions(
@@ -448,13 +451,13 @@ private fun PrejoinScreen(
                                     Color.White.copy(alpha = 0.08f),
                                     RoundedCornerShape(8.dp),
                                 )
-                                .border(1.dp, CallTheme.border, RoundedCornerShape(8.dp))
+                                .border(1.dp, LakkoDark.border, RoundedCornerShape(8.dp))
                                 .padding(horizontal = 12.dp, vertical = 8.dp),
                         ) {
                             if (displayName.isEmpty()) {
                                 Text(
                                     "Your name",
-                                    color = CallTheme.textSecondary,
+                                    color = LakkoDark.textMuted,
                                     fontSize = 15.sp,
                                 )
                             }
@@ -482,13 +485,13 @@ private fun PrejoinScreen(
                 }
             },
             modifier = Modifier
-                .background(CallTheme.accentBlue, RoundedCornerShape(10.dp))
+                .background(LakkoDark.accent, RoundedCornerShape(10.dp))
                 .padding(horizontal = 32.dp, vertical = 6.dp)
                 .shadow(4.dp, RoundedCornerShape(10.dp)),
         ) {
             Text(
                 "Join",
-                color = CallTheme.textPrimary,
+                color = LakkoDark.text,
                 fontWeight = FontWeight.SemiBold,
                 fontSize = 16.sp,
             )
@@ -503,7 +506,7 @@ private fun PrejoinScreen(
             ) {
                 Text(
                     "Cancel",
-                    color = CallTheme.textSecondary,
+                    color = LakkoDark.textMuted,
                     fontSize = 14.sp,
                 )
             }
@@ -523,11 +526,11 @@ private fun PreviewToggleButton(
         modifier = Modifier
             .size(36.dp)
             .background(
-                if (active) Color.Black.copy(alpha = 0.55f) else CallTheme.mutedRed,
+                if (active) Color.Black.copy(alpha = 0.55f) else LakkoDark.danger,
                 CircleShape,
             ),
     ) {
-        Icon(icon, contentDescription = description, tint = CallTheme.textPrimary)
+        Icon(icon, contentDescription = description, tint = LakkoDark.text)
     }
 }
 
@@ -555,14 +558,14 @@ private fun InCallView(
         }
     }
 
-    Box(modifier = Modifier.fillMaxSize().background(CallTheme.background)) {
+    Box(modifier = Modifier.fillMaxSize().background(LakkoDark.background)) {
         Column(modifier = Modifier.fillMaxSize()) {
             // Header bar: E2EE pill + quality indicator.
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(CallTheme.surface)
-                    .border(1.dp, CallTheme.border)
+                    .background(LakkoDark.surface)
+                    .border(1.dp, LakkoDark.border)
                     .padding(horizontal = 14.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -628,15 +631,15 @@ private fun InCallView(
                         Box(
                             modifier = Modifier
                                 .background(
-                                    CallTheme.surface.copy(alpha = 0.9f),
+                                    LakkoDark.surface.copy(alpha = 0.9f),
                                     RoundedCornerShape(12.dp),
                                 )
-                                .border(1.dp, CallTheme.border, RoundedCornerShape(12.dp))
+                                .border(1.dp, LakkoDark.border, RoundedCornerShape(12.dp))
                                 .padding(horizontal = 24.dp, vertical = 16.dp),
                         ) {
                             Text(
                                 "Waiting for participant…",
-                                color = CallTheme.textPrimary,
+                                color = LakkoDark.text,
                                 fontSize = 14.sp,
                             )
                         }
@@ -674,19 +677,19 @@ private fun InCallView(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(CallTheme.background.copy(alpha = 0.85f)),
+                    .background(LakkoDark.background.copy(alpha = 0.85f)),
                 contentAlignment = Alignment.Center,
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(
                         "Call ended",
-                        color = CallTheme.textPrimary,
+                        color = LakkoDark.text,
                         fontSize = 32.sp,
                         fontWeight = FontWeight.SemiBold,
                     )
                     Text(
                         "Returning to your chats…",
-                        color = CallTheme.textSecondary,
+                        color = LakkoDark.textMuted,
                         fontSize = 14.sp,
                     )
                 }
@@ -720,7 +723,7 @@ private fun SettingsSheet(state: CallUiState) {
     ModalBottomSheet(
         onDismissRequest = { state.setSettingsOpen(false) },
         sheetState = sheetState,
-        containerColor = CallTheme.surface,
+        containerColor = LakkoDark.surface,
     ) {
         Column(
             modifier = Modifier
@@ -731,7 +734,7 @@ private fun SettingsSheet(state: CallUiState) {
         ) {
             Text(
                 "Settings",
-                color = CallTheme.textPrimary,
+                color = LakkoDark.text,
                 fontSize = 18.sp,
                 fontWeight = FontWeight.SemiBold,
             )
@@ -762,7 +765,7 @@ private fun SettingsSheet(state: CallUiState) {
                 onPick = { state.setSelectedAudioOutput(it) },
             )
 
-            Divider(color = CallTheme.border, modifier = Modifier.padding(vertical = 4.dp))
+            Divider(color = LakkoDark.border, modifier = Modifier.padding(vertical = 4.dp))
 
             DeviceSectionLabel("Audio processing")
             SettingsToggleRow(
@@ -803,7 +806,7 @@ private fun SettingsSheet(state: CallUiState) {
 private fun DeviceSectionLabel(text: String) {
     Text(
         text,
-        color = CallTheme.textSecondary,
+        color = LakkoDark.textMuted,
         fontSize = 12.sp,
         fontWeight = FontWeight.SemiBold,
         modifier = Modifier.padding(top = 8.dp),
@@ -822,27 +825,27 @@ private fun DevicePickerRow(
         ?: "System default"
 
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text(label, color = CallTheme.textPrimary, fontSize = 13.sp)
+        Text(label, color = LakkoDark.text, fontSize = 13.sp)
         Box {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(CallTheme.background, RoundedCornerShape(8.dp))
-                    .border(1.dp, CallTheme.border, RoundedCornerShape(8.dp))
+                    .background(LakkoDark.background, RoundedCornerShape(8.dp))
+                    .border(1.dp, LakkoDark.border, RoundedCornerShape(8.dp))
                     .clickable { expanded = true }
                     .padding(horizontal = 10.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
                     selectedLabel,
-                    color = CallTheme.textPrimary,
+                    color = LakkoDark.text,
                     fontSize = 14.sp,
                     modifier = Modifier.weight(1f),
                 )
                 Icon(
                     Icons.Filled.ArrowDropDown,
                     contentDescription = null,
-                    tint = CallTheme.textSecondary,
+                    tint = LakkoDark.textMuted,
                 )
             }
             DropdownMenu(
@@ -871,7 +874,7 @@ private fun DevicePickerRow(
             Text(
                 "No devices reported yet. They appear here once you grant " +
                     "microphone or camera permission.",
-                color = CallTheme.textSecondary,
+                color = LakkoDark.textMuted,
                 fontSize = 11.sp,
             )
         }
@@ -893,9 +896,9 @@ private fun SettingsToggleRow(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(modifier = Modifier.weight(1f)) {
-            Text(label, color = CallTheme.textPrimary, fontSize = 14.sp)
+            Text(label, color = LakkoDark.text, fontSize = 14.sp)
             if (description != null) {
-                Text(description, color = CallTheme.textSecondary, fontSize = 11.sp)
+                Text(description, color = LakkoDark.textMuted, fontSize = 11.sp)
             }
         }
         Switch(checked = checked, onCheckedChange = onChange)
@@ -930,7 +933,7 @@ private fun ChatToggleButton(state: CallUiState) {
                 modifier = Modifier
                     .align(Alignment.TopEnd)
                     .offset(x = 2.dp, y = (-2).dp)
-                    .background(CallTheme.endCallRed, CircleShape)
+                    .background(LakkoDark.danger, CircleShape)
                     .padding(horizontal = 5.dp, vertical = 1.dp)
                     .widthIn(min = 18.dp),
                 contentAlignment = Alignment.Center,
@@ -972,7 +975,7 @@ private fun ChatSheet(state: CallUiState) {
     ModalBottomSheet(
         onDismissRequest = { state.setChatOpen(false) },
         sheetState = sheetState,
-        containerColor = CallTheme.surface,
+        containerColor = LakkoDark.surface,
     ) {
         Column(
             modifier = Modifier
@@ -984,7 +987,7 @@ private fun ChatSheet(state: CallUiState) {
         ) {
             Text(
                 "Chat",
-                color = CallTheme.textPrimary,
+                color = LakkoDark.text,
                 fontSize = 18.sp,
                 fontWeight = FontWeight.SemiBold,
             )
@@ -997,9 +1000,8 @@ private fun ChatSheet(state: CallUiState) {
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
-                        "No messages yet. Anything you send is end-to-end encrypted " +
-                            "inside this call's MLS group — the server cannot read it.",
-                        color = CallTheme.textSecondary,
+                        "No messages yet. Messages here are end-to-end encrypted.",
+                        color = LakkoDark.textMuted,
                         fontSize = 13.sp,
                         textAlign = TextAlign.Center,
                     )
@@ -1050,7 +1052,7 @@ private fun ChatMessageRow(msg: CallUiState.ChatMessage) {
     if (msg.kind == CallUiState.ChatMessage.Kind.System) {
         Text(
             msg.text,
-            color = CallTheme.textSecondary,
+            color = LakkoDark.textMuted,
             fontSize = 12.sp,
             fontStyle = FontStyle.Italic,
             textAlign = TextAlign.Center,
@@ -1064,19 +1066,19 @@ private fun ChatMessageRow(msg: CallUiState.ChatMessage) {
             ) {
                 Text(
                     msg.senderName,
-                    color = CallTheme.accentBlue,
+                    color = LakkoDark.accent,
                     fontSize = 12.sp,
                     fontWeight = FontWeight.SemiBold,
                 )
                 Text(
                     formatChatTimestamp(msg.tsMs),
-                    color = CallTheme.textSecondary,
+                    color = LakkoDark.textMuted,
                     fontSize = 12.sp,
                 )
             }
             Text(
                 msg.text,
-                color = CallTheme.textPrimary,
+                color = LakkoDark.text,
                 fontSize = 14.sp,
             )
         }
@@ -1101,11 +1103,11 @@ private fun E2eePill(state: CallUiState.E2eeState) {
     // active but no comparable number" stays visually distinct from
     // "active + number present" (matches the web pill's gate).
     val verified = state.active && state.shortFingerprint != null
-    val activeColour = if (verified) CallTheme.qualityGreen else CallTheme.qualityYellow
+    val activeColour = if (verified) LakkoDark.success else LakkoDark.warning
     Row(
         modifier = Modifier
-            .background(CallTheme.surface, RoundedCornerShape(50))
-            .border(1.dp, CallTheme.border, RoundedCornerShape(50))
+            .background(LakkoDark.surface, RoundedCornerShape(50))
+            .border(1.dp, LakkoDark.border, RoundedCornerShape(50))
             .padding(horizontal = 8.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -1152,8 +1154,8 @@ private fun QualityIndicator(state: CallUiState) {
                 modifier = Modifier
                     .widthIn(min = 180.dp)
                     .wrapContentSize(align = Alignment.TopEnd)
-                    .background(CallTheme.surface, RoundedCornerShape(8.dp))
-                    .border(1.dp, CallTheme.border, RoundedCornerShape(8.dp))
+                    .background(LakkoDark.surface, RoundedCornerShape(8.dp))
+                    .border(1.dp, LakkoDark.border, RoundedCornerShape(8.dp))
                     .padding(10.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
@@ -1163,7 +1165,7 @@ private fun QualityIndicator(state: CallUiState) {
                 ) {
                     Text(
                         tier.name,
-                        color = CallTheme.textPrimary,
+                        color = LakkoDark.text,
                         fontSize = 12.sp,
                         fontWeight = FontWeight.SemiBold,
                     )
@@ -1174,22 +1176,22 @@ private fun QualityIndicator(state: CallUiState) {
                             CallUiState.ConnectionDetail.ConnectionType.Unknown -> "—"
                         },
                         color = when (detail.connectionType) {
-                            CallUiState.ConnectionDetail.ConnectionType.Direct -> CallTheme.qualityGreen
-                            CallUiState.ConnectionDetail.ConnectionType.Relay -> CallTheme.qualityYellow
-                            CallUiState.ConnectionDetail.ConnectionType.Unknown -> CallTheme.textSecondary
+                            CallUiState.ConnectionDetail.ConnectionType.Direct -> LakkoDark.success
+                            CallUiState.ConnectionDetail.ConnectionType.Relay -> LakkoDark.warning
+                            CallUiState.ConnectionDetail.ConnectionType.Unknown -> LakkoDark.textMuted
                         },
                         fontSize = 12.sp,
                     )
                 }
-                Divider(color = CallTheme.border)
+                Divider(color = LakkoDark.border)
                 Text(
                     "RTT: ${detail.rttMs?.toString()?.plus(" ms") ?: "—"}",
-                    color = CallTheme.textPrimary,
+                    color = LakkoDark.text,
                     fontSize = 11.sp,
                 )
                 Text(
                     "↓ ${formatBps(detail.downBps)}   ↑ ${formatBps(detail.upBps)}",
-                    color = CallTheme.textPrimary,
+                    color = LakkoDark.text,
                     fontSize = 11.sp,
                 )
             }
@@ -1238,10 +1240,10 @@ private fun ParticipantTile(
         modifier = Modifier
             .fillMaxWidth()
             .aspectRatio(if (large) 16f / 9f else 4f / 3f)
-            .background(CallTheme.surface, RoundedCornerShape(12.dp))
+            .background(LakkoDark.surface, RoundedCornerShape(12.dp))
             .border(
                 width = if (participant.speaking) 2.dp else 1.dp,
-                color = if (participant.speaking) CallTheme.accentBlue else CallTheme.border,
+                color = if (participant.speaking) LakkoDark.accent else LakkoDark.border,
                 shape = RoundedCornerShape(12.dp),
             )
             .clickable(enabled = !participant.isLocal) {
@@ -1288,9 +1290,9 @@ private fun ParticipantTile(
                         .background(
                             Brush.linearGradient(
                                 colors = listOf(
-                                    Color(0xFF1F2937),
-                                    Color(0xFF111827),
-                                    Color(0xFF0B0F19),
+                                    LakkoDark.sunken,
+                                    LakkoDark.surface,
+                                    LakkoDark.background,
                                 ),
                             ),
                             RoundedCornerShape(12.dp),
@@ -1299,7 +1301,7 @@ private fun ParticipantTile(
                 ) {
                     Text(
                         "(video)",
-                        color = CallTheme.textSecondary.copy(alpha = 0.6f),
+                        color = LakkoDark.textMuted.copy(alpha = 0.6f),
                         fontSize = 12.sp,
                     )
                 }
@@ -1308,12 +1310,12 @@ private fun ParticipantTile(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(Color(0xFF27272A), RoundedCornerShape(12.dp)),
+                    .background(LakkoDark.sunken, RoundedCornerShape(12.dp)),
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
                     text = participant.displayName.firstOrNull()?.uppercase() ?: "?",
-                    color = CallTheme.textPrimary,
+                    color = LakkoDark.text,
                     fontSize = if (large) 80.sp else 40.sp,
                     fontWeight = FontWeight.SemiBold,
                 )
@@ -1337,12 +1339,12 @@ private fun ParticipantTile(
                 ) {
                     CircularProgressIndicator(
                         modifier = Modifier.size(14.dp),
-                        color = CallTheme.textPrimary,
+                        color = LakkoDark.text,
                         strokeWidth = 2.dp,
                     )
                     Text(
                         "Starting camera…",
-                        color = CallTheme.textPrimary,
+                        color = LakkoDark.text,
                         fontSize = 12.sp,
                     )
                 }
@@ -1361,7 +1363,7 @@ private fun ParticipantTile(
                 Icon(
                     Icons.Filled.MicOff,
                     contentDescription = "Muted",
-                    tint = CallTheme.mutedRed,
+                    tint = LakkoDark.danger,
                     modifier = Modifier.size(if (large) 32.dp else 20.dp),
                 )
             }
@@ -1376,7 +1378,7 @@ private fun ParticipantTile(
                     .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(6.dp))
                     .padding(horizontal = 6.dp, vertical = 2.dp),
             ) {
-                Text("Sharing", color = CallTheme.textPrimary, fontSize = 10.sp)
+                Text("Sharing", color = LakkoDark.text, fontSize = 10.sp)
             }
         }
 
@@ -1389,7 +1391,12 @@ private fun ParticipantTile(
                     .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(6.dp))
                     .padding(4.dp),
             ) {
-                Text("✋", fontSize = 14.sp)
+                Icon(
+                    Icons.Filled.FrontHand,
+                    contentDescription = "Hand raised",
+                    tint = LakkoDark.text,
+                    modifier = Modifier.size(14.dp),
+                )
             }
         }
 
@@ -1407,7 +1414,7 @@ private fun ParticipantTile(
                 Icon(
                     Icons.Filled.MicOff,
                     contentDescription = "Muted",
-                    tint = CallTheme.mutedRed,
+                    tint = LakkoDark.danger,
                     modifier = Modifier.size(12.dp),
                 )
             }
@@ -1419,7 +1426,7 @@ private fun ParticipantTile(
                 } else {
                     "Unknown"
                 },
-                color = CallTheme.textPrimary,
+                color = LakkoDark.text,
                 fontSize = 12.sp,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -1434,7 +1441,7 @@ private fun ParticipantTile(
                 Icon(
                     Icons.Filled.PushPin,
                     contentDescription = "Pinned",
-                    tint = CallTheme.accentBlue,
+                    tint = LakkoDark.accent,
                     modifier = Modifier.size(12.dp),
                 )
             }
@@ -1463,8 +1470,8 @@ private fun ControlsBar(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .background(CallTheme.surface)
-            .border(1.dp, CallTheme.border)
+            .background(LakkoDark.surface)
+            .border(1.dp, LakkoDark.border)
             .padding(horizontal = 16.dp, vertical = 14.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterHorizontally),
         verticalAlignment = Alignment.CenterVertically,
@@ -1543,9 +1550,9 @@ private fun CircleButton(
     enabled: Boolean = true,
 ) {
     val bg = when {
-        destructive -> CallTheme.endCallRed
-        active -> CallTheme.accentBlue
-        else -> CallTheme.surface
+        destructive -> LakkoDark.danger
+        active -> LakkoDark.accent
+        else -> LakkoDark.surface
     }
     IconButton(
         onClick = onClick,
@@ -1558,11 +1565,11 @@ private fun CircleButton(
         if (busy) {
             CircularProgressIndicator(
                 modifier = Modifier.size(20.dp),
-                color = CallTheme.textPrimary,
+                color = LakkoDark.text,
                 strokeWidth = 2.dp,
             )
         } else {
-            Icon(icon, contentDescription = description, tint = CallTheme.textPrimary)
+            Icon(icon, contentDescription = description, tint = LakkoDark.text)
         }
     }
 }
@@ -1575,8 +1582,8 @@ private fun ParticipantListDrawer(state: CallUiState) {
         modifier = Modifier
             .fillMaxHeight()
             .width(320.dp)
-            .background(CallTheme.surface)
-            .border(1.dp, CallTheme.border),
+            .background(LakkoDark.surface)
+            .border(1.dp, LakkoDark.border),
     ) {
         Row(
             modifier = Modifier.fillMaxWidth().padding(16.dp),
@@ -1584,7 +1591,7 @@ private fun ParticipantListDrawer(state: CallUiState) {
         ) {
             Text(
                 "Participants (${participants.size})",
-                color = CallTheme.textPrimary,
+                color = LakkoDark.text,
                 fontSize = 16.sp,
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.weight(1f),
@@ -1593,11 +1600,11 @@ private fun ParticipantListDrawer(state: CallUiState) {
                 Icon(
                     Icons.Filled.Close,
                     contentDescription = "Close participant list",
-                    tint = CallTheme.textSecondary,
+                    tint = LakkoDark.textMuted,
                 )
             }
         }
-        Divider(color = CallTheme.border)
+        Divider(color = LakkoDark.border)
         LazyColumn(modifier = Modifier.fillMaxSize()) {
             items(participants, key = { it.id }) { p ->
                 Row(
@@ -1615,15 +1622,22 @@ private fun ParticipantListDrawer(state: CallUiState) {
                     Text(
                         text = if (p.displayName.isNotEmpty()) p.displayName
                                else if (p.isLocal) "You" else "Unknown",
-                        color = CallTheme.textPrimary,
+                        color = LakkoDark.text,
                         modifier = Modifier.weight(1f),
                     )
-                    if (p.handRaised) Text("✋")
+                    if (p.handRaised) {
+                        Icon(
+                            Icons.Filled.FrontHand,
+                            contentDescription = "Hand raised",
+                            tint = LakkoDark.text,
+                            modifier = Modifier.size(16.dp),
+                        )
+                    }
                     if (!p.micOn) {
                         Icon(
                             Icons.Filled.MicOff,
                             contentDescription = "Muted",
-                            tint = CallTheme.mutedRed,
+                            tint = LakkoDark.danger,
                             modifier = Modifier.size(14.dp),
                         )
                     }
@@ -1631,12 +1645,12 @@ private fun ParticipantListDrawer(state: CallUiState) {
                         Icon(
                             Icons.Filled.ScreenShare,
                             contentDescription = "Sharing screen",
-                            tint = CallTheme.textPrimary,
+                            tint = LakkoDark.text,
                             modifier = Modifier.size(14.dp),
                         )
                     }
                 }
-                Divider(color = CallTheme.border)
+                Divider(color = LakkoDark.border)
             }
         }
     }
@@ -1647,10 +1661,10 @@ private fun PhaseBanner(phase: CallUiState.CallPhase, modifier: Modifier = Modif
     val info: Pair<String, Color>? = when (phase) {
         is CallUiState.CallPhase.Prejoin -> null
         is CallUiState.CallPhase.Connected -> null
-        is CallUiState.CallPhase.Connecting -> "Connecting…" to CallTheme.accentBlue
+        is CallUiState.CallPhase.Connecting -> "Connecting…" to LakkoDark.accent
         is CallUiState.CallPhase.Reconnecting ->
-            "Reconnecting — ${phase.reason}" to CallTheme.qualityYellow
-        is CallUiState.CallPhase.Ended -> "Call ended" to CallTheme.endCallRed
+            "Reconnecting — ${phase.reason}" to LakkoDark.warning
+        is CallUiState.CallPhase.Ended -> "Call ended" to LakkoDark.danger
     }
     info?.let { (text, colour) ->
         Box(

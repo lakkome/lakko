@@ -90,10 +90,12 @@ targets:
       - path: ../shared/sframe-bridge/sframe-bridge.h
         type: file
         buildPhase: headers
-    # Asset catalog: omitted for the smoke build (1.14c). The
-    # default Xcode-emitted launcher icon shows for `me.lakko.dev`
-    # debug installs. The real branding lands when 1.14d's
-    # signup screen has a place to surface it.
+    # Asset catalog: `Lakko/Assets.xcassets` (picked up by the `Lakko`
+    # source path above) carries `AccentColor` plus the light + dark colour
+    # sets of the UX-spec token table (docs/ux/client-redesign.md section 4),
+    # read through `Lakko/UI/Theme/LakkoTheme.swift`. No app icon set yet:
+    # the default launcher icon still shows for `me.lakko.dev` debug
+    # installs until the brand tile is added.
     info:
       path: Lakko/Info.plist
       properties:
@@ -322,6 +324,10 @@ targets:
         # apps/ios/Lakko/Lakko-Bridging-Header.h and currently
         # imports only Calls/SFrameAttach.h.
         SWIFT_OBJC_BRIDGING_HEADER: Lakko/Lakko-Bridging-Header.h
+        # The global tint comes from the asset catalog's `AccentColor` set
+        # (dark indigo in light mode, light indigo in dark mode), so
+        # `Color.accentColor` and every tinted control follow the brand.
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         # G3-sframe-native N-4 — the SFrame bridge depends on the
         # `apps/shared/sframe-bridge/sframe-bridge.{h,cc}` C++17
         # source plus the cbindgen-generated header from

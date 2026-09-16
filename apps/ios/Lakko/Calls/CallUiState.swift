@@ -35,9 +35,9 @@ public final class CallUiState: ObservableObject {
         /// Three-colour bucket. `green / yellow / red`.
         public var colour: Color {
             switch self {
-            case .excellent: return Color(red: 0.06, green: 0.72, blue: 0.51) // #10B981
-            case .good, .fair: return Color(red: 0.98, green: 0.75, blue: 0.14) // #FBBF24
-            case .poor, .bad: return Color(red: 0.94, green: 0.27, blue: 0.27) // #EF4444
+            case .excellent: return .lakkoSuccess
+            case .good, .fair: return .lakkoWarning
+            case .poor, .bad: return .lakkoDanger
             }
         }
     }

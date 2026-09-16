@@ -40,21 +40,23 @@ public struct InviteLandingScreen: View {
     }
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Spacer()
-            content
-            Spacer()
-            Button(action: {
-                viewModel.dismiss()
-                onDone()
-            }) {
-                Text("Done")
-                    .frame(maxWidth: .infinity)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                content
+                Button(action: {
+                    viewModel.dismiss()
+                    onDone()
+                }) {
+                    Text("Done")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
+            .padding(24)
         }
-        .padding(24)
+        .navigationTitle("Invite")
+        .navigationBarTitleDisplayMode(.inline)
         .task {
             await viewModel.run()
         }
@@ -70,12 +72,9 @@ public struct InviteLandingScreen: View {
                 Text("Verifying invite…")
                     .font(.title3)
                     .fontWeight(.semibold)
-                Text(
-                    "Decoding the capability, checking the signature, " +
-                    "and bumping the consume counter atomically."
-                )
-                .font(.footnote)
-                .foregroundStyle(.secondary)
+                Text("Checking the link.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
 
         case .done(let result):
@@ -113,11 +112,9 @@ public struct InviteLandingScreen: View {
                     .lineLimit(nil)
                     .fixedSize(horizontal: false, vertical: true)
                 Text(
-                    "Verify out-of-band that this matches what the " +
-                    "inviter shared (Signal, in person, phone). A " +
-                    "mismatch means the link was substituted by " +
-                    "someone else — remove the contact and ask for " +
-                    "a fresh link."
+                    "Compare this with the number the inviter shows you " +
+                    "in person or over a call. If it differs, remove the " +
+                    "contact and ask for a fresh link."
                 )
                 .font(.footnote)
                 .foregroundStyle(.secondary)
@@ -145,13 +142,12 @@ public struct InviteLandingScreen: View {
         switch result {
         case .accepted:
             return
-                "Sent a contact request to the inviter. They'll see it " +
-                "in their inbox; once they accept on their side, your " +
-                "1×1 chat lands here. Chat surface arrives in 1.14f."
+                "Your contact request is on its way. Once they accept, " +
+                "the chat appears under Chats."
         case .alreadyAccepted:
             return
-                "You've already accepted this invite from this device. " +
-                "Open the contacts list to find the existing thread."
+                "You already accepted this invite on this device. " +
+                "Find the person under Contacts."
         case .expired:
             return
                 "This invite link is past its expiry. Ask the inviter " +
@@ -166,8 +162,7 @@ public struct InviteLandingScreen: View {
                 "by the inviter or never existed."
         case .malformedSlug:
             return
-                "The invite URL is malformed. Double-check that you " +
-                "tapped the full link, including the part after `/i/`."
+                "This link is incomplete. Ask for it to be sent again."
         case .requiresReauth:
             return
                 "You need an active session to accept an invite. Log in " +

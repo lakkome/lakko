@@ -82,14 +82,9 @@ private struct SignupForm: View {
                     .font(.largeTitle)
                     .fontWeight(.semibold)
 
-                Text(
-                    "OPAQUE-PAKE registration. The password never leaves your " +
-                    "device — the server only sees an OPRF-blinded envelope. " +
-                    "After signup you will be shown a 24-word recovery phrase " +
-                    "once; write it down before continuing."
-                )
-                .font(.body)
-                .foregroundStyle(.secondary)
+                Text("Your password never leaves this device.")
+                    .font(.body)
+                    .foregroundStyle(.secondary)
 
                 TextField("Username", text: $viewModel.username)
                     .textFieldStyle(.roundedBorder)

@@ -2726,8 +2726,8 @@ public final class ChatRepository: ObservableObject {
     /// Android's `runSplitPoll` additionally claims a per-group in-flight flag
     /// and returns `SKIPPED_IN_FLIGHT` to the loser. iOS has never had one and
     /// deliberately still does not: the two poll sources here are a 30 s long
-    /// poll (`ChatViewModel.pollOnceLongPoll`) and the user's manual refresh
-    /// (`onRefreshClicked`), so a guard would make pressing Refresh a silent
+    /// poll (`ChatViewModel.pollOnceLongPoll`) and the list's pull-to-refresh
+    /// (`ChatListViewModel.pollNow`), so a guard would make the pull a silent
     /// no-op for up to 30 s. It is only an optimisation — it saves a redundant
     /// fetch, it does not provide correctness. Correctness comes from the
     /// cursor-moved guard in ``applyFetchedBatch(groupIdHex:after:raw:)``: two

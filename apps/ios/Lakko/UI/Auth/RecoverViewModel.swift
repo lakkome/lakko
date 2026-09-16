@@ -41,7 +41,7 @@ public final class RecoverViewModel: ObservableObject {
     /// one-time code sent to a previously-enrolled phone or email. Like
     /// `totp`, it grants ACCESS only; identity restore then runs the
     /// ADR-0017 state machine.
-    public enum Mode: Equatable { case phrase, shares, anotherDevice, totp, contact }
+    public enum Mode: Hashable { case phrase, shares, anotherDevice, totp, contact }
 
     @Published public var mode: Mode = .phrase {
         didSet {

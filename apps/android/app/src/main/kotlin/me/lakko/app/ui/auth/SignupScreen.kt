@@ -132,10 +132,8 @@ private fun SignupForm(
         )
         Spacer(Modifier.height(8.dp))
         Text(
-            text = "OPAQUE-PAKE registration. The password never leaves your " +
-                "device — the server only sees an OPRF-blinded envelope. After " +
-                "signup you will be shown a 24-word recovery phrase once; write " +
-                "it down before continuing.",
+            text = "Your password never leaves this device. You will get a " +
+                "24-word recovery phrase next; write it down before continuing.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

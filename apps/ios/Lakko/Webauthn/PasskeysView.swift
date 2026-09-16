@@ -15,26 +15,20 @@ import SwiftUI
 ///   3. A single-line status banner that flips between success
 ///      and error toasts.
 ///
-/// Reachable from ``HomeScreen`` via the "Manage passkeys"
-/// navigation row. Wraps itself in a `NavigationStack` for
-/// titled-screen affordances.
+/// Reachable from Settings > Passkeys; pushed onto the Settings stack, so
+/// the system back button returns there.
 public struct PasskeysView: View {
 
     @StateObject private var viewModel: PasskeysViewModel
-    public var onBack: () -> Void
     /// A3 — drives the delete-account confirmation dialog.
     @State private var confirmingDelete = false
 
-    public init(
-        viewModel: @autoclosure @escaping () -> PasskeysViewModel,
-        onBack: @escaping () -> Void
-    ) {
+    public init(viewModel: @autoclosure @escaping () -> PasskeysViewModel) {
         self._viewModel = StateObject(wrappedValue: viewModel())
-        self.onBack = onBack
     }
 
     public var body: some View {
-        NavigationStack {
+        ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 Text(
                     "Sign in with Face ID, Touch ID, or a hardware key. The "
@@ -72,6 +66,7 @@ public struct PasskeysView: View {
                         }
                     }
                     .listStyle(.plain)
+                    .scrollDisabled(true)
                     .frame(minHeight: 100, maxHeight: 280)
                 }
 
@@ -165,17 +160,11 @@ public struct PasskeysView: View {
                     Button("Cancel", role: .cancel) {}
                 }
 
-                Spacer()
             }
-            .padding(20)
-            .navigationTitle("Passkeys")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarLeading) {
-                    Button("Back", action: onBack)
-                }
-            }
+            .padding(16)
         }
+        .navigationTitle("Passkeys")
+        .navigationBarTitleDisplayMode(.inline)
         .task {
             await viewModel.refresh()
         }

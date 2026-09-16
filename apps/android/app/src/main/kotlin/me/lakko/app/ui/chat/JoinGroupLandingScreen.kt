@@ -9,6 +9,13 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -151,6 +158,7 @@ public class JoinGroupLandingViewModel(
 }
 
 /** The landing view for a tapped `/g/<slug>` group join-ticket link. */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 public fun JoinGroupLandingScreen(
     viewModel: JoinGroupLandingViewModel,
@@ -159,15 +167,26 @@ public fun JoinGroupLandingScreen(
     val state by viewModel.state.collectAsStateWithLifecycle()
     val requesting by viewModel.requesting.collectAsStateWithLifecycle()
     LaunchedEffect(Unit) { viewModel.start() }
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Join group") },
+                navigationIcon = {
+                    IconButton(onClick = onDone) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                },
+            )
+        },
+    ) { padding ->
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .padding(padding)
             .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
-        Text("Join group", style = MaterialTheme.typography.titleLarge)
-        Spacer(Modifier.height(16.dp))
         when (val s = state) {
             is JoinGroupLandingViewModel.State.Requesting -> {
                 CircularProgressIndicator()
@@ -191,7 +210,7 @@ public fun JoinGroupLandingScreen(
                 ) { Text(me.lakko.app.chat.JOIN_REQUEST_AGAIN) }
             }
             is JoinGroupLandingViewModel.State.Joined -> {
-                Text("Joined! You can find the group in your chats.")
+                Text("You joined the group. Find it under Groups.")
                 Spacer(Modifier.height(12.dp))
                 Button(onClick = onDone) { Text("Done") }
             }
@@ -201,5 +220,6 @@ public fun JoinGroupLandingScreen(
                 Button(onClick = onDone) { Text("Close") }
             }
         }
+    }
     }
 }

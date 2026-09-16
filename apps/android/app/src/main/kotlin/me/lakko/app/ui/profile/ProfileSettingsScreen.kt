@@ -8,9 +8,18 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -40,6 +49,7 @@ import me.lakko.app.profile.ownProfilePreview
  * The name rule is the core's (`normalizeDisplayName`, via [checkDisplayName]),
  * applied as the user types; a name the rule refuses cannot be saved.
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 public fun ProfileSettingsScreen(
     /** The stored own profile, or `null` when none exists yet. */
@@ -56,14 +66,27 @@ public fun ProfileSettingsScreen(
     val check = checkDisplayName(nameInput)
     val error = (check as? DisplayNameCheck.Invalid)?.problem?.copy
 
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Profile") },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                },
+            )
+        },
+    ) { padding ->
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(24.dp),
+            .padding(padding)
+            .imePadding()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Text("Profile", style = MaterialTheme.typography.headlineSmall)
-
         OutlinedTextField(
             value = nameInput,
             onValueChange = {
@@ -89,7 +112,7 @@ public fun ProfileSettingsScreen(
         )
 
         Text(
-            text = "Username: " + (username?.let { "@$it" } ?: "none (guest account)"),
+            text = username?.let { "@$it" } ?: "No username yet",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -116,9 +139,6 @@ public fun ProfileSettingsScreen(
         }
 
         confirmation?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
-
-        OutlinedButton(onClick = onBack, modifier = Modifier.fillMaxWidth()) {
-            Text("Back")
-        }
+    }
     }
 }
