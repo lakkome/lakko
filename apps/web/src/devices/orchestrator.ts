@@ -60,6 +60,18 @@ import {
   pollForRecoveryPayload,
   publishRecoveryPayload,
 } from "./recovery-payload";
+import {
+  STATE_EXPORTER_KEY_LENGTH,
+  STATE_EXPORTER_LABEL,
+  applyStateBundle,
+  buildStateBundle,
+  decodeStateBundle,
+  encodeStateBundle,
+  pollForStateBundle,
+  publishStateBundle,
+  type StateBundleV1,
+} from "./state-bundle";
+import { loadMlsSnapshot } from "../chat/mls-store";
 
 // ---- Joining side ------------------------------------------------
 
@@ -239,6 +251,26 @@ export async function prepareJoinFlow(args: {
             console.warn("history bundle apply failed", err);
           }
         })();
+        // ADR-0050 section 2.9 — the state bundle (contacts, pins, known
+        // group ids), best-effort like the history bundle.
+        const stateTask = (async (): Promise<void> => {
+          try {
+            const bundle = await receiveStateBundle(
+              liveGroup,
+              liveIdentity,
+              rendezvous,
+              opts.welcomeCursor,
+            );
+            if (bundle !== null) {
+              const applied = applyStateBundle(bundle);
+              // eslint-disable-next-line no-console
+              console.info(`state bundle: ${applied.contacts} contacts, ${applied.pins} pins`);
+            }
+          } catch (err) {
+            // eslint-disable-next-line no-console
+            console.warn("state bundle apply failed", err);
+          }
+        })();
         const recoveryTask =
           opts.recovery === true
             ? runJoinerRecovery({
@@ -249,7 +281,7 @@ export async function prepareJoinFlow(args: {
                 accountIdBytes: args.accountIdBytes,
               })
             : Promise.resolve<JoinRecoveryOutcome | null>(null);
-        const [, recovered] = await Promise.all([historyTask, recoveryTask]);
+        const [, , recovered] = await Promise.all([historyTask, stateTask, recoveryTask]);
         recovery = recovered;
       }
       return { recovery };
@@ -265,6 +297,32 @@ export async function prepareJoinFlow(args: {
       }
     },
   };
+}
+
+/** Joiner side of the ADR-0050 state bundle: poll the tagged row, open it
+ *  under the per-pairing exporter key, decode. `null` when the scanner sent
+ *  none within the window or the bytes did not decode. */
+async function receiveStateBundle(
+  group: WasmDeviceGroup,
+  identity: WasmIdentity,
+  rendezvous: Uint8Array,
+  welcomeCursor: number,
+): Promise<StateBundleV1 | null> {
+  const outcome = await pollForStateBundle(rendezvous, welcomeCursor);
+  if (outcome.kind !== "received") return null;
+  const wasm = await loadWasm();
+  let key: Uint8Array | null = null;
+  try {
+    key = group.exportSecret(
+      identity,
+      STATE_EXPORTER_LABEL,
+      rendezvous,
+      STATE_EXPORTER_KEY_LENGTH,
+    );
+    return decodeStateBundle(wasm.openWithKey(key, outcome.sealed));
+  } finally {
+    key?.fill(0);
+  }
 }
 
 // ---- Joiner-side recovery (ADR-0018 factor (a)) -------------------
@@ -416,6 +474,13 @@ export async function prepareAnonymousJoinFlow(args: {
   );
 
   let group: WasmDeviceGroup | null = null;
+  // ADR-0050 — fetched at accept, when the DeviceGroup handle that derives
+  // the exporter keys is alive; applied at `persistTo`, when the device key
+  // that wraps the message log exists. Before this the history bundle the
+  // scanner published was never read on this route, and a confirmed device
+  // opened every chat empty.
+  let pendingHistory: { secret: Uint8Array; sealedBytes: Uint8Array } | null = null;
+  let pendingState: StateBundleV1 | null = null;
 
   return {
     qrPayload,
@@ -435,16 +500,48 @@ export async function prepareAnonymousJoinFlow(args: {
         identity,
         args.accountIdBytes,
       );
-      // No persistence yet (no device key) and no history catch-up
-      // (the message log is wrapped under the device key too); the
-      // recovery row is the whole point of this flow.
-      const recovery = await runJoinerRecovery({
-        group,
-        identity,
-        rendezvous,
-        welcomeCursor: opts.welcomeCursor,
-        accountIdBytes: args.accountIdBytes,
-      });
+      const liveGroup = group;
+      const liveIdentity = identity;
+      const historyTask = (async (): Promise<void> => {
+        try {
+          const sealed = await pollForHistoryBundle(rendezvous, opts.welcomeCursor);
+          if (sealed.kind === "received") {
+            pendingHistory = {
+              secret: liveGroup.historyBundleSecret(liveIdentity),
+              sealedBytes: sealed.sealedBytes,
+            };
+          }
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("history bundle fetch failed", err);
+        }
+      })();
+      const stateTask = (async (): Promise<void> => {
+        try {
+          pendingState = await receiveStateBundle(
+            liveGroup,
+            liveIdentity,
+            rendezvous,
+            opts.welcomeCursor,
+          );
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("state bundle fetch failed", err);
+        }
+      })();
+      // The recovery row is what lands the session; the two bundles ride
+      // alongside and are applied once there is a device key to write under.
+      const [recovery] = await Promise.all([
+        runJoinerRecovery({
+          group,
+          identity,
+          rendezvous,
+          welcomeCursor: opts.welcomeCursor,
+          accountIdBytes: args.accountIdBytes,
+        }),
+        historyTask,
+        stateTask,
+      ]);
       return { recovery };
     },
     async persistTo(deviceKey): Promise<void> {
@@ -463,6 +560,31 @@ export async function prepareAnonymousJoinFlow(args: {
       );
       deviceIdentitySeed.fill(0);
       deviceIdentitySeed = null;
+      if (pendingHistory !== null) {
+        const history = pendingHistory;
+        pendingHistory = null;
+        try {
+          const applied = await applyHistoryBundleToLog({
+            accountIdB64: args.accountIdB64,
+            deviceKey,
+            secret: history.secret,
+            sealedBytes: history.sealedBytes,
+          });
+          // eslint-disable-next-line no-console
+          console.info(`history catch-up: applied ${applied} rows`);
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("history bundle apply failed", err);
+        } finally {
+          history.secret.fill(0);
+        }
+      }
+      if (pendingState !== null) {
+        const applied = applyStateBundle(pendingState);
+        pendingState = null;
+        // eslint-disable-next-line no-console
+        console.info(`state bundle: ${applied.contacts} contacts, ${applied.pins} pins`);
+      }
     },
     dispose(): void {
       if (group !== null) {
@@ -657,6 +779,32 @@ export async function runScanFlow(args: {
         key?.fill(0);
         payload?.fill(0);
         args.recovery.accountIdentitySeed.fill(0);
+      }
+    }
+
+    // ADR-0050 section 2.9 — the state bundle: contacts, pins and the ids
+    // of every group this device holds, sealed under the per-pairing
+    // exporter like the recovery row. Best-effort; a failure leaves the new
+    // device with the chats it is admitted to and no contact names.
+    {
+      let key: Uint8Array | null = null;
+      try {
+        const wasm = await loadWasm();
+        const snapshot = await loadMlsSnapshot(args.accountIdB64, args.deviceKey);
+        const bundle = buildStateBundle(snapshot?.knownGroupIds ?? []);
+        key = ensured.group.exportSecret(
+          ensured.identity,
+          STATE_EXPORTER_LABEL,
+          decoded.rendezvousPseudonym,
+          STATE_EXPORTER_KEY_LENGTH,
+        );
+        const sealed = wasm.sealWithKey(key, encodeStateBundle(bundle));
+        await publishStateBundle(decoded.rendezvousPseudonym, sealed);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("state bundle publish failed", err);
+      } finally {
+        key?.fill(0);
       }
     }
 

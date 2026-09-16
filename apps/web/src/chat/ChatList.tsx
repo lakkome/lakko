@@ -33,6 +33,7 @@ import { groupIdHex as syncGroupIdHex } from "../devices/sync/state";
 import { loadMessageLog, type PersistedGroup } from "./message-log-store";
 import { summarizeGroupSlot, type ChatListSummary } from "./background-log";
 import { subscribeMessageLogChanged } from "./message-log-events";
+import { pendingKnownGroups } from "../devices/state-bundle";
 import {
   loadAccepted,
   peerContactByMemberPubkeys,
@@ -156,7 +157,13 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
    *  the phrase, another device, a passkey) holds the identity and is admitted
    *  to the account's chats by its other devices or its contacts. Until the
    *  first chat arrives there is exactly one thing to say. */
-  const synchronizing = (): boolean => restoredKind() !== null && chats.groups().length === 0;
+  const synchronizing = (): boolean => {
+    const joined = chats.groups().map((g) => g.groupIdB64);
+    // Groups the pairing bundle named that this device has not joined yet
+    // (ADR-0050 section 2.9); the stored list clears itself once all are in.
+    if (pendingKnownGroups(joined) > 0) return true;
+    return restoredKind() !== null && joined.length === 0;
+  };
 
   /** ADR-0045 UX §6.2.4: the row's one muted line once the membership is
    *  over, or `null` while the reader is still a member. The chat stays in

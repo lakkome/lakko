@@ -128,6 +128,7 @@ import {
   MAX_ATTACHMENT_BYTES,
 } from "../chat/attachments";
 import { useChats, type ActiveGroup } from "../chat/ChatContext";
+import { recordRemovedDevices } from "../chat/device-readmission";
 import { useProfiles } from "../profile/ProfileContext";
 import { membersGrew } from "../profile/membership-growth";
 import { createUsernameCheck } from "../profile/username-field";
@@ -1397,6 +1398,9 @@ function ChatView(props: {
     const s = auth.state();
     if (s.kind === "session") {
       const after = memberSignatureKeys(props.entry.group);
+      // ADR-0050 — a leaf this sweep removed is never re-admitted by this
+      // client's scheduled check.
+      recordRemovedDevices(s.account.accountId, props.entry.groupIdB64, before, after);
       // ADR-0045 UX §6.2.8 item 3 — captured synchronously alongside the
       // post-sweep roster, so the eviction and the shrink it caused are judged
       // on the same commit. A sweep can carry our own removal: an admin can
@@ -2984,6 +2988,12 @@ function ChatView(props: {
           // Snapshot the post-poll roster synchronously, before the awaited
           // role read lets another poll advance the group.
           const currentMemberKeys = memberSignatureKeys(props.entry.group);
+          recordRemovedDevices(
+            s.account.accountId,
+            props.entry.groupIdB64,
+            membersBeforePoll,
+            currentMemberKeys,
+          );
           // ADR-0045 UX §6.2.8 item 3 — and this is the site the finding was
           // about. Snapshotted here, in the same synchronous region as the
           // roster, because `membershipRotationDecision` would otherwise see a

@@ -773,11 +773,12 @@ deployed environment.
 S1 core, S2 FFI, S3 discovery and S4 web are built; verified live on `test.lakko.me`
 with three web clients: a device added through the ADR-0049 confirmation prompt was
 admitted to the account's existing 1x1 chat by the confirming device and received the
-messages sent after it joined. Still open under this gap: the natives (S5), the
-scheduled re-admission arm for a device restored with no other device online, the
-pairing history bundle landing under the joined chat (did not show in the live run),
-StateBundle v2 (contacts and channel subscriptions), and the removal fan-out unverified
-live. The text below is the entry as minted that morning.
+messages sent after it joined. Still open under this gap: the natives (S5), incremental
+contact sync between devices (the DeviceGroup sync kinds), channel subscriptions
+following the device (blocked on the channel list surviving a reload at all), and the
+removal fan-out unverified live. Closed later the same day: the scheduled re-admission
+arm, the state bundle (contacts, pins, known groups) and the history bundle on the
+confirmation route. The text below is the entry as minted that morning.
 
 **Symptom.** Sign in on a second device by any route (QR pairing, the ADR-0049
 confirmation prompt, the three-word vault, the full phrase, a passkey): the chat list

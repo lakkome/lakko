@@ -361,11 +361,27 @@ group); the ADR-0045 sweep at the tail of every **background** poll, so a
 proposal in a chat nobody has open lands without that chat being opened; the
 removal fan-out (`retireDevice`: the one leaf per chat, then the directory
 row); the resolver at the client sites; people rather than leaves in every
-count and 1x1 test; the single "Synchronizing..." label. Not built on web: the
-re-admission arm of 2.4 on a schedule (a device restored with no other device
-alive is admitted only when a contact next adds it by hand), StateBundle v2 and
-the DeviceGroup sync kinds 14-17 (contacts and channel subscriptions still
-travel by backup only), a `forgetDevice` that retires its own leaves.
+count and 1x1 test; the single "Synchronizing..." label. Built later the same
+day: the **re-admission arm of 2.4 on a schedule**
+(`chat/device-readmission.ts`, run at the tail of every background poll, at
+most once per ten minutes per chat: the device lists of this account and of
+every accepted contact in the chat are compared with the roster; a listed
+device with no leaf gets a self-service Add, and — for this account only — a
+leaf whose directory row is gone gets a Remove, which is how `forgetDevice`
+retires itself: it deletes its own directory row before the wipe; a leaf
+this client saw removed is remembered per chat and never re-admitted, while a
+removal that happened before this client joined is invisible to it — the
+arm's known limit); the **state bundle** of 2.9 as one more tagged row on the
+pairing rendezvous (`devices/state-bundle.ts`: accepted contacts with their
+renames, the per-contact pins and rotation markers, the ids of every group the
+old device holds — the last drives the "Synchronizing..." label as "known
+groups not yet joined"); and the **history bundle on the confirmation route**,
+which `prepareAnonymousJoinFlow` had skipped outright ("no device key"): both
+bundles are now fetched at accept and applied at `persistTo`. Not built on
+web: the DeviceGroup sync kinds 14-17 (a contact accepted after the pairing
+reaches the other device only through a backup), and channel subscriptions in
+the bundle (the channel list does not survive a reload on any device yet, so
+there is nothing durable to carry).
 
 Live on `test.lakko.me`, 2026-09-15 evening, two accounts, three web
 clients: a device added through the ADR-0049 confirmation prompt showed

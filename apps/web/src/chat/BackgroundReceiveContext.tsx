@@ -91,7 +91,18 @@ import {
   MESSAGE_LOG_VERSION,
   updateMessageLog,
 } from "./message-log-store";
+import {
+  clearReadmissionSlots,
+  planReadmission,
+  recordRemovedDevices,
+  removedDevices,
+  takeReadmissionSlot,
+  type AccountDevices,
+  type RosterLeafKeys,
+} from "./device-readmission";
 import { markOwnPublished } from "./own-published";
+import { ownPersonKeyB64, personKeyOf, type RosterLeaf } from "./person-key";
+import { loadAccepted } from "../contacts/local-store";
 import { proposalKey, recordObservation } from "./pending-requests";
 import { ReceiveCoordinator } from "./receive-coordinator";
 import type { SweepOutcome } from "./sweep";
@@ -147,6 +158,15 @@ export const ADMIT_DEVICE_WAIT_MS = 180_000;
 export const ADMIT_DEVICE_POLL_MS = 3_000;
 
 const BackgroundReceiveContext = createContext<BackgroundReceiveApi>();
+
+function hexToBytes(hex: string): Uint8Array | null {
+  if (hex.length % 2 !== 0 || !/^[0-9a-f]*$/i.test(hex)) return null;
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i += 1) {
+    out[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  }
+  return out;
+}
 
 function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
   if (a.length !== b.length) return false;
@@ -304,7 +324,116 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
       // eslint-disable-next-line no-console
       console.warn("background receive: tail sweep failed", err);
     });
+    // ADR-0050 section 2.4 — the scheduled re-admission check, bounded per
+    // chat; see `device-readmission.ts`.
+    void readmitFor(entry).catch((err: unknown) => {
+      // eslint-disable-next-line no-console
+      console.warn("ADR-0050 re-admission check failed", err);
+    });
     return { yieldedRows: result.outcome === "applied" && end > start };
+  }
+
+  /**
+   * ADR-0050 section 2.4 — re-check the device lists of the accounts in
+   * `entry` against its roster: propose an Add for a listed device with no
+   * leaf (a restored phone, a pairing whose fan-out was cut short), and — for
+   * this account only — a Remove for a leaf whose directory row is gone
+   * (`forgetDevice`). Accounts are resolved to directory ids through this
+   * device's own account and its accepted contacts; a member that is neither
+   * is left as is. Each chat is checked at most once per
+   * `READMISSION_INTERVAL_MS`.
+   */
+  async function readmitFor(entry: ActiveGroup): Promise<void> {
+    const secrets = auth.identitySecrets();
+    if (secrets === null) return;
+    if (readIsActive(entry.group) === false) return;
+    if (!takeReadmissionSlot(entry.groupIdB64, Date.now())) return;
+    const s = auth.state();
+    if (s.kind !== "session") return;
+    const account = s.account.accountId;
+    const own = ownPersonKeyB64(chats.identity());
+    if (own === null) return;
+    let leaves: RosterLeaf[];
+    try {
+      leaves = entry.group.members() as unknown as RosterLeaf[];
+    } catch {
+      return;
+    }
+    const roster: RosterLeafKeys[] = leaves.map((m) => ({
+      leafKeyB64: base64Encode(m.signaturePublicKey),
+      personKeyB64: base64Encode(personKeyOf(m)),
+    }));
+    const people = new Set(roster.map((l) => l.personKeyB64));
+    // The accounts we can look up: ours, and every accepted contact in the
+    // chat whose account id was captured at accept.
+    const lookups: { personKeyB64: string; accountId: Uint8Array }[] = [
+      { personKeyB64: own, accountId: secrets.accountId },
+    ];
+    for (const c of loadAccepted()) {
+      if (c.accountIdHex === undefined || !people.has(c.signaturePubkeyB64)) continue;
+      const id = hexToBytes(c.accountIdHex);
+      if (id !== null) lookups.push({ personKeyB64: c.signaturePubkeyB64, accountId: id });
+    }
+    const accounts: AccountDevices[] = [];
+    for (const l of lookups) {
+      try {
+        const list = await discovery.fetchKeyPackages(l.accountId);
+        accounts.push({
+          personKeyB64: l.personKeyB64,
+          devices:
+            list === null
+              ? []
+              : list.map((d) => ({ deviceKeyB64: base64Encode(d.deviceId), keyPackage: d.keyPackage })),
+        });
+      } catch {
+        accounts.push({ personKeyB64: l.personKeyB64, devices: null });
+      }
+    }
+    const plan = planReadmission({
+      roster,
+      ownPersonKeyB64: own,
+      accounts,
+      removed: removedDevices(account, entry.groupIdB64),
+    });
+    if (plan.admit.length === 0 && plan.retire.length === 0) return;
+    let proposed = 0;
+    for (const d of plan.admit) {
+      try {
+        const outcome = await contacts.admitDeviceToGroup(secrets, entry.group, d.keyPackage);
+        if (outcome === null) continue;
+        proposed += 1;
+        if (outcome.kind === "proposed") {
+          markOwnPublished(entry.groupIdB64, outcome.proposalMessageId);
+        }
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("ADR-0050 re-admission: add not proposed", err);
+      }
+    }
+    for (const leafKeyB64 of plan.retire) {
+      try {
+        const outcome = await contacts.retireDeviceFromGroup(
+          secrets,
+          entry.group,
+          base64Decode(leafKeyB64),
+        );
+        if (outcome === null) continue;
+        proposed += 1;
+        if (outcome.kind === "proposed") {
+          markOwnPublished(entry.groupIdB64, outcome.proposalMessageId);
+        }
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("ADR-0050 re-admission: retire not proposed", err);
+      }
+    }
+    if (proposed > 0) {
+      // eslint-disable-next-line no-console
+      console.info(
+        `ADR-0050 re-admission: ${plan.admit.length} to admit, ${plan.retire.length} to retire in ${entry.groupIdB64}`,
+      );
+      await sweepGroup(entry);
+    }
   }
 
   /** ADR-0045 S4b — the chat view's `actingCommitterNow`, for a group whose
@@ -549,6 +678,9 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     // an owner / admin device still owes the push-routing rotation, exactly as
     // the chat view's poll would have done.
     if (plan.sawCommit) {
+      // ADR-0050 — remember the leaves that left, so the scheduled re-admission
+      // never puts back a device an admin removed.
+      recordRemovedDevices(account, groupIdB64, membersBefore, memberSignatureKeys(entry.group));
       void rotateIfShrank(account, entry, membersBefore);
     }
 
@@ -669,6 +801,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     logCursors = null;
     backoff.clear();
     coordinator.reset();
+    clearReadmissionSlots();
   }
 
   createEffect(() => {

@@ -127,6 +127,7 @@ import { clearLeaveRequestedForAccount } from "../chat/membership-ended";
 // ADR-0045 S4b — the same hygiene for the committer-beacon observation
 // store: a stale beacon carried across a recover / forgetDevice would let
 // this device defer to a candidate it has no current evidence about.
+import { clearRemovedDevicesForAccount } from "../chat/device-readmission";
 import { clearBeaconObservationsForAccount } from "../chat/committer-beacon";
 import { deleteMessageLog } from "../chat/message-log-store";
 import { deleteProfileRow } from "../profile/profile-idb";
@@ -3124,6 +3125,25 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     async forgetDevice() {
       clearRestored();
       const cached = loadPersisted();
+      // ADR-0050 section 2.10 — take this device's KeyPackage out of the
+      // directory BEFORE the wipe, while the bearer token still exists: the
+      // account's other devices retire this device's leaves from every chat
+      // when their scheduled check sees the row gone (`device-readmission.ts`),
+      // and nobody proposes a Welcome to a device that no longer exists.
+      {
+        const own = chats.identity()?.signaturePublicKey;
+        const secrets = identitySecrets();
+        if (own !== undefined && secrets !== null) {
+          discovery.setSessionToken(secrets.sessionToken);
+          try {
+            await discovery.deleteKeyPackage(own);
+          } catch (err) {
+            // eslint-disable-next-line no-console
+            console.warn("forgetDevice: directory KeyPackage not deleted", err);
+          }
+        }
+      }
+      if (cached !== null) clearRemovedDevicesForAccount(cached.accountIdB64);
       // The device-key-wrapped phrase cache is wiped below, so an owed phrase
       // can no longer be shown on this device; drop the marker and the copy.
       setSignupPhrase(null);

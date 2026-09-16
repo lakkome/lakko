@@ -24,6 +24,7 @@
  */
 import { DsClient, DsHttpError, DsNetworkError } from "../ds/client";
 import { isRecoveryPayloadRow } from "./recovery-payload";
+import { isStateRow } from "./state-bundle";
 
 /** Soft cap on how long [`pollForWelcome`] waits before
  *  returning a `null` outcome to give the UI a chance to
@@ -254,7 +255,7 @@ export async function pollForHistoryBundle(
       // a tagged recovery-payload row (after the Welcome, in either
       // FIFO order relative to the bundle). It is NOT the history
       // bundle — skip it and keep polling.
-      if (isRecoveryPayloadRow(first.payload)) {
+      if (isRecoveryPayloadRow(first.payload) || isStateRow(first.payload)) {
         cursor = first.id;
         continue;
       }
