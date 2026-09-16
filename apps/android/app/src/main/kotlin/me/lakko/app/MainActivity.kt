@@ -652,6 +652,30 @@ private fun SessionRoot(
         }
     }
 
+    // ADR-0050 section 2.7 — this DEVICE's mailbox, where Welcomes sealed to
+    // this device's own KeyPackages arrive (a contact's new chat, the pairing
+    // fan-out, a re-admission). Long-polled while the app is in the foreground,
+    // whatever screen is showing; the account mailbox stays with the contacts
+    // screen as before.
+    LaunchedEffect(lifecycleOwner, chatRepository) {
+        lifecycleOwner.lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
+            while (true) {
+                val startedAt = android.os.SystemClock.elapsedRealtime()
+                try {
+                    chatRepository.pollDeviceMailbox(waitSecs = APP_LONG_POLL_SECS)
+                } catch (cancel: kotlinx.coroutines.CancellationException) {
+                    throw cancel
+                } catch (_: Throwable) {
+                    kotlinx.coroutines.delay(APP_POLL_RETRY_BACKOFF_MS)
+                }
+                val elapsed = android.os.SystemClock.elapsedRealtime() - startedAt
+                if (elapsed < APP_POLL_MIN_ITERATION_MS) {
+                    kotlinx.coroutines.delay(APP_POLL_MIN_ITERATION_MS - elapsed)
+                }
+            }
+        }
+    }
+
     // The call lane: the group of a hosted group call keeps being long-polled
     // while the app is in the background, so a commit that lands during the
     // call is applied — and the call key rotated (G-18 / ADR-0029) — even with
@@ -895,6 +919,7 @@ private fun SessionRoot(
         SessionDestination.Devices -> DevicesScreen(
             authRepository = authRepository,
             onBack = { destination = SessionDestination.Home },
+            chatRepository = chatRepository,
         )
 
         SessionDestination.AntiCensorship -> AntiCensorshipSettingsScreen(

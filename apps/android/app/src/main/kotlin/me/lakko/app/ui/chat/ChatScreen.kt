@@ -223,7 +223,11 @@ public fun ChatScreen(
                 // top so a membership that ends mid-window exits on the next pass.
                 if (viewModel.membershipEnded.value) break
                 try {
-                    viewModel.pollOnceLongPoll()
+                    // A poll that found another poll of this group in flight
+                    // returns at once without fetching. Looping straight back
+                    // into it spun this loop — on the main dispatcher — for the
+                    // other poll's whole long-poll window; wait it out instead.
+                    if (!viewModel.pollOnceLongPoll()) delay(POLL_RETRY_BACKOFF_MS)
                 } catch (cancel: kotlinx.coroutines.CancellationException) {
                     throw cancel
                 } catch (_: Throwable) {

@@ -479,7 +479,7 @@ public final class ChatClient {
         resolveSender: (UInt32) -> MemberIdentity?
     ) -> IncomingChatEvent {
         switch processed {
-        case .application(let data, let senderLeaf):
+        case .application(let data, let senderLeaf, _):
             // Phase 3a8/9 — sniff for call-signaling proto
             // bytes before running the chat-envelope parser.
             // Cheap unambiguous discriminator: the proto's

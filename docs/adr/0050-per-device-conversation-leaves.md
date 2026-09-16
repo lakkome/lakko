@@ -351,7 +351,19 @@ correctly).
 
 ## 5. Sprints
 
-Status 2026-09-15: **S0 to S4 built** on web; S5 and S6 open. Web S4 built:
+Status 2026-09-16: **S0 to S4 built** on web; **S5 built on iOS and Android**
+(build and unit tests only, not yet exercised on a device or across devices);
+S6 open. S5, per platform, mirrors the web items below with these differences:
+neither native client has the ADR-0049 confirmation prompt, so the pairing
+fan-out hooks the QR scan path only; iOS has no background receive over all
+chats, so the re-admission check runs at the tail of the open chat's poll;
+Android's re-admission never retires this device's own leaf (its first poll can
+precede its own KeyPackage upload); the iOS NSE and the Android background
+decrypt rebuild the throwaway identity from the device seed. Known native
+gaps: Android committer-beacon observations and call-link dedup still key on
+the leaf; iOS pending-request row labels compare device keys with person keys;
+iOS shows "Synchronizing..." only for bundle-named groups, not for a recovered
+device with zero chats. Status before S5: Web S4 built:
 per-device KeyPackage publisher; device mailbox poll; group create / add-contact
 add all devices (a founder in ONE commit, 2.6); the pairing and confirmation
 fan-out (`BackgroundReceiveApi.admitDevice`: wait for the new device's

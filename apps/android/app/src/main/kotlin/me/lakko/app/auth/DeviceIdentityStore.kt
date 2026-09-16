@@ -51,6 +51,7 @@ public object DeviceIdentityStore {
 
     private const val PREFS_NAME = "lakko-device-identity"
     private const val KEY_PREFIX = "device-identity-v1:"
+    private const val BINDING_PREFIX = "device-binding-v1:"
 
     /** Fixed seed length pinned by `Identity.fromSeed`'s
      *  32-byte Ed25519 seed contract. */
@@ -112,7 +113,34 @@ public object DeviceIdentityStore {
         context: Context,
         accountIdB64: String,
     ) {
-        openPrefs(context).edit().remove(KEY_PREFIX + accountIdB64).apply()
+        openPrefs(context)
+            .edit()
+            .remove(KEY_PREFIX + accountIdB64)
+            .remove(BINDING_PREFIX + accountIdB64)
+            .apply()
+    }
+
+    /**
+     * ADR-0050 — the persisted device binding wire bytes (public: the account
+     * key's signature over this device's key), kept so `issued_at` stays stable
+     * across restarts. `null` until the device is first bound.
+     */
+    public fun getDeviceBinding(context: Context, accountIdB64: String): ByteArray? {
+        val encoded = openPrefs(context).getString(BINDING_PREFIX + accountIdB64, null)
+            ?: return null
+        return try {
+            Base64.decode(encoded, Base64.NO_WRAP)
+        } catch (_: IllegalArgumentException) {
+            null
+        }
+    }
+
+    /** Persist the ADR-0050 device binding beside the seed. */
+    public fun putDeviceBinding(context: Context, accountIdB64: String, binding: ByteArray) {
+        openPrefs(context)
+            .edit()
+            .putString(BINDING_PREFIX + accountIdB64, Base64.encodeToString(binding, Base64.NO_WRAP))
+            .apply()
     }
 
     /**

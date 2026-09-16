@@ -231,20 +231,25 @@ public struct IdentityFetchResponse: Codable, Equatable {
 public struct KeyPackageUploadRequest: Codable, Equatable {
     public let pow: PowProofPayload
     public let accountId: String
+    /// ADR-0050 — base64 of the device leaf's 32-byte Ed25519 signature key.
+    /// Discovery keeps one KeyPackage row per `(account_id, device_id)`.
+    public let deviceId: String
     /// base64(TLS-encoded MLS KeyPackage). Server caps decoded size
     /// at 2048 bytes — mirrors `MAX_KEYPACKAGE_BYTES` in the Rust
     /// handler.
     public let keypackage: String
 
-    public init(pow: PowProofPayload, accountId: String, keypackage: String) {
+    public init(pow: PowProofPayload, accountId: String, deviceId: String, keypackage: String) {
         self.pow = pow
         self.accountId = accountId
+        self.deviceId = deviceId
         self.keypackage = keypackage
     }
 
     enum CodingKeys: String, CodingKey {
         case pow
         case accountId = "account_id"
+        case deviceId = "device_id"
         case keypackage
     }
 }
@@ -258,14 +263,33 @@ public struct KeyPackageUploadResponse: Codable, Equatable {
     }
 }
 
-/// Response body of `GET /discovery/keypackage/{accountId_b64url}`.
-/// 404 surfaces as `nil` in
-/// ``DiscoveryClient/keypackageFetch(accountId:)``.
-public struct KeyPackageFetchResponse: Codable, Equatable {
+/// One device's entry in ``KeyPackageFetchResponse`` (ADR-0050).
+public struct DeviceKeyPackagePayload: Codable, Equatable {
+    /// base64 of the device leaf's 32-byte signature key.
+    public let deviceId: String
+    /// base64(TLS-encoded MLS KeyPackage).
     public let keypackage: String
 
-    public init(keypackage: String) {
+    public init(deviceId: String, keypackage: String) {
+        self.deviceId = deviceId
         self.keypackage = keypackage
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case deviceId = "device_id"
+        case keypackage
+    }
+}
+
+/// Response body of `GET /discovery/keypackage/{accountId_b64url}`: every
+/// device of the account with a published KeyPackage, oldest first
+/// (ADR-0050). 404 surfaces as `nil` in
+/// ``DiscoveryClient/keypackageFetch(accountId:)``.
+public struct KeyPackageFetchResponse: Codable, Equatable {
+    public let keypackages: [DeviceKeyPackagePayload]
+
+    public init(keypackages: [DeviceKeyPackagePayload]) {
+        self.keypackages = keypackages
     }
 }
 

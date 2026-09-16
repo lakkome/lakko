@@ -347,7 +347,7 @@ final class ProfileNamesTests: XCTestCase {
         ChatClient.toEvent(
             messageId: 9,
             createdAt: "2026-09-13T00:00:00Z",
-            processed: .application(data: plaintext, senderLeaf: senderLeaf),
+            processed: .application(data: plaintext, senderLeaf: senderLeaf, senderAccount: nil),
             resolveSender: { "member-\($0)" }
         )
     }

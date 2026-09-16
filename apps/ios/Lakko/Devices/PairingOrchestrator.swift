@@ -153,6 +153,19 @@ public enum PairingOrchestrator {
                 }
             }
 
+            // ADR-0050 section 2.9 — the state bundle (contacts, pins, known
+            // group ids), best-effort like the history bundle.
+            if let cursor = welcomeCursor,
+               let bundle = await StateBundle.receive(
+                   group: joined,
+                   identity: identity,
+                   rendezvousPseudonym: rendezvous,
+                   afterCursor: cursor
+               ) {
+                let applied = StateBundle.apply(bundle)
+                NSLog("state bundle: %d contacts, %d pins", applied.contacts, applied.pins)
+            }
+
             // ADR-0018 factor (a) — opt-in recovery payload.
             if recovery, let cursor = welcomeCursor {
                 return await runJoinerRecovery(
@@ -273,6 +286,11 @@ public enum PairingOrchestrator {
         /// the add. Best-effort estimate today — full
         /// `devices()` accessor lands alongside 2a3c.
         public let memberCount: Int
+        /// ADR-0050 section 2.8 — the added device's 32-byte signature key:
+        /// its DeviceGroup leaf, its conversation leaf and its discovery
+        /// `device_id` are one key. The caller hands it to
+        /// ``ChatRepository/admitDevice(deviceKey:)``.
+        public let newDeviceKey: Data
     }
 
     /// ADR-0018 factor (a) — inputs for the best-effort recovery
@@ -451,6 +469,24 @@ public enum PairingOrchestrator {
             payload.resetBytes(in: 0..<payload.count)
         }
 
-        return ScanResult(memberCount: ensured.bootstrapped ? 2 : 0)
+        // ADR-0050 section 2.9 — the state bundle: contacts, pins and the ids
+        // of every group this device holds, sealed under the per-pairing
+        // exporter like the recovery row. Best-effort; a failure leaves the new
+        // device with the chats it is admitted to and no contact names.
+        do {
+            try await StateBundle.publish(
+                bundle: StateBundle.build(accountIdB64: accountIdB64),
+                group: ensured.group,
+                identity: ensured.identity,
+                rendezvousPseudonym: decoded.rendezvousPseudonym
+            )
+        } catch {
+            NSLog("state bundle publish failed: %@", error.localizedDescription)
+        }
+
+        return ScanResult(
+            memberCount: ensured.bootstrapped ? 2 : 0,
+            newDeviceKey: try keyPackageSignatureKey(keyPackage: decoded.keyPackage)
+        )
     }
 }

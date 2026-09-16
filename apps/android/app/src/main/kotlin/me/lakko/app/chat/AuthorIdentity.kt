@@ -106,8 +106,61 @@ internal fun resolveMemberIdentity(
 ): MemberIdentity? {
     if (leafIndex == null) return null
     val hit = roster.firstOrNull { it.leafIndex == leafIndex } ?: return null
-    return outboxB64(hit.signaturePublicKey)
+    // ADR-0050 — the author is the PERSON: the account key every device of the
+    // account resolves to, so one person is one author across their devices.
+    return outboxB64(personKeyOf(hit))
 }
+
+/**
+ * ADR-0050 — the key that names a PERSON in a roster: the leaf's resolved
+ * account key, else (a leaf whose credential did not resolve) its own leaf key
+ * so it still renders.
+ */
+internal fun personKeyOf(member: GroupMember): ByteArray =
+    if (member.accountKey.size == ACCOUNT_KEY_LEN) member.accountKey else member.signaturePublicKey
+
+/** The distinct PEOPLE in [roster], base64 account keys in first-leaf order. */
+internal fun personKeysOf(roster: List<GroupMember>): List<MemberIdentity> {
+    val out = LinkedHashSet<MemberIdentity>()
+    for (m in roster) out += outboxB64(personKeyOf(m))
+    return out.toList()
+}
+
+/** ADR-0050 — how many PEOPLE [group] holds; what decides a 1x1 (two people,
+ *  whatever their device count). A torn roster reads as 0. */
+internal fun peopleCountOf(group: Group): Int = personKeysOf(rosterOf(group)).size
+
+/** This device's person key: the account key its identity is bound to. */
+internal fun ownPersonKeyOf(identity: uniffi.lakko_ffi_uniffi.Identity): MemberIdentity =
+    outboxB64(identity.accountPublicKey() ?: identity.signaturePublicKey())
+
+/** The leaf that holds [signatureKey] in [group], or `null` (a torn read too). */
+internal fun leafIndexOfSignatureKey(group: Group, signatureKey: ByteArray): UInt? =
+    try {
+        group.members().firstOrNull { it.signaturePublicKey.contentEquals(signatureKey) }?.leafIndex
+    } catch (cause: Throwable) {
+        null
+    }
+
+/**
+ * ADR-0050 — every leaf of the account [leafIndex] belongs to, the named leaf
+ * first. Removing a member removes the PERSON. Falls back to `[leafIndex]` when
+ * the roster cannot be read or the leaf is not in it (the core then refuses).
+ */
+internal fun leavesOfSameAccount(group: Group, leafIndex: UInt): List<UInt> {
+    val roster = try {
+        group.members()
+    } catch (cause: Throwable) {
+        return listOf(leafIndex)
+    }
+    val named = roster.firstOrNull { it.leafIndex == leafIndex } ?: return listOf(leafIndex)
+    val person = personKeyOf(named)
+    return listOf(leafIndex) + roster
+        .filter { it.leafIndex != leafIndex && personKeyOf(it).contentEquals(person) }
+        .map { it.leafIndex }
+}
+
+private const val ACCOUNT_KEY_LEN: Int = 32
 
 /**
  * The group's roster as the identity resolver reads it.

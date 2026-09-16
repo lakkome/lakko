@@ -1067,6 +1067,11 @@ public class AuthRepository(
                     // parsed-contact count for now and the merge
                     // layer lands alongside the Android contact-
                     // persistence sub-sprint.
+                    // ADR-0050 — a recovered device holds the identity and is
+                    // admitted to the account's chats by its other devices or its
+                    // contacts; the chat list says "Synchronizing..." until the
+                    // first chat arrives.
+                    me.lakko.app.devices.StateBundle.markRestored(applicationContext)
                     val restoredSnapshot = restoreFromServerBackupBestEffort(
                         sessionToken = result.sessionToken,
                         accountId = accountIdBytes,

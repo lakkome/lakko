@@ -1267,9 +1267,11 @@ public final class PushGroupRouting {
 
         guard let senderLeaf else { return (authority, nil) }
         do {
+            // ADR-0050 — authority is the PERSON's: the role table names
+            // account keys, so the sender leaf resolves to its account key.
             let key = try group.members()
-                .first { $0.leafIndex == senderLeaf }?
-                .signaturePublicKey
+                .first { $0.leafIndex == senderLeaf }
+                .map { PersonKey.of($0) }
             return (authority, key)
         } catch {
             return (.unreadable, nil)

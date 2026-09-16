@@ -213,6 +213,15 @@ internal const val NO_SUCH_JOIN_REQUEST: String = "That join request is no longe
 internal const val JOINER_ALREADY_A_MEMBER: String = "That person has already joined this group."
 
 /** §6 row 6's second half — singular, for the one pending role change. */
+/** ADR-0050 — the per-account device cap (`MAX_LEAVES_PER_ACCOUNT`). The one
+ *  per-device refusal a user is shown (docs/ux/second-device.md section 5). */
+internal const val DEVICE_LIMIT_REACHED: String = "Up to 8 devices per account. Remove one first."
+
+/** ADR-0050 — a device whose binding the group refuses: a client bug, given the
+ *  same plain sentence as web rather than a screen. */
+internal const val DEVICE_BINDING_INVALID: String =
+    "Something is wrong with this device's key. Remove it from Devices and add it again."
+
 internal const val RETRY_WHEN_IT_LANDS: String = "Wait for it to land, then try again."
 
 /**
@@ -311,6 +320,8 @@ private fun refusalCopy(reason: FfiRefusalReason): RefusalCopy = when (reason) {
     FfiRefusalReason.JOINER_ALREADY_A_MEMBER -> RefusalCopy(JOINER_ALREADY_A_MEMBER)
     FfiRefusalReason.ROLE_CHANGE_PENDING -> RefusalCopy(ROLE_CHANGE_PENDING, RETRY_WHEN_IT_LANDS)
     FfiRefusalReason.PENDING_SET_FULL -> RefusalCopy(PENDING_SET_FULL, RETRY_WHEN_THEY_LAND)
+    FfiRefusalReason.DEVICE_LIMIT_REACHED -> RefusalCopy(DEVICE_LIMIT_REACHED)
+    FfiRefusalReason.DEVICE_BINDING_INVALID -> RefusalCopy(DEVICE_BINDING_INVALID)
 
     // The recorded collapses. Listed individually rather than as an `else` so
     // that adding a reason to the core forces a decision here.
@@ -418,6 +429,10 @@ internal fun membershipRefusalReason(error: Throwable): FfiRefusalReason? {
                 is FfiException.MembershipPendingSetFull -> FfiRefusalReason.PENDING_SET_FULL
                 is FfiException.MembershipNoSuchJoinRequest ->
                     FfiRefusalReason.NO_SUCH_JOIN_REQUEST
+                is FfiException.MembershipDeviceBindingInvalid ->
+                    FfiRefusalReason.DEVICE_BINDING_INVALID
+                is FfiException.MembershipDeviceLimitReached ->
+                    FfiRefusalReason.DEVICE_LIMIT_REACHED
                 is FfiException.MembershipJoinerAlreadyAMember ->
                     FfiRefusalReason.JOINER_ALREADY_A_MEMBER
                 is FfiException.SweepAlreadyStaged -> FfiRefusalReason.SWEEP_ALREADY_STAGED

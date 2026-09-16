@@ -124,6 +124,9 @@ public object PairingOrchestrator {
                 accountId = accountIdBytes,
             )
             group = joined
+            // ADR-0050 — a device joining by pairing is admitted to the
+            // account's chats by the scanning device; say so until they land.
+            StateBundle.markRestored(context)
             DeviceGroupLifecycle.persistSnapshot(
                 context = context,
                 identity = identity,
@@ -156,6 +159,37 @@ public object PairingOrchestrator {
                         "history bundle apply failed",
                         cause,
                     )
+                }
+            }
+
+            // ADR-0050 section 2.9 — the state bundle (contacts, pins, known
+            // group ids), best-effort like the history bundle.
+            if (welcomeCursor != null) {
+                var key: ByteArray? = null
+                try {
+                    val sealed = StateBundle.poll(rendezvous, welcomeCursor)
+                    if (sealed != null) {
+                        key = joined.exportSecret(
+                            identity,
+                            StateBundle.EXPORTER_LABEL,
+                            rendezvous,
+                            StateBundle.EXPORTER_KEY_LENGTH.toUInt(),
+                        )
+                        val bundle = StateBundle.decode(openWithKey(key, sealed))
+                        if (bundle != null) {
+                            val (contacts, pins) = StateBundle.apply(context, bundle)
+                            android.util.Log.i(
+                                "PairingOrchestrator",
+                                "state bundle: $contacts contacts, $pins pins",
+                            )
+                        }
+                    }
+                } catch (cause: kotlinx.coroutines.CancellationException) {
+                    throw cause
+                } catch (cause: Throwable) {
+                    android.util.Log.w("PairingOrchestrator", "state bundle apply failed", cause)
+                } finally {
+                    key?.fill(0)
                 }
             }
 
@@ -311,6 +345,11 @@ public object PairingOrchestrator {
          *  the add. Best-effort estimate today — full
          *  `devices()` accessor lands alongside 2a3c. */
         val memberCount: Int,
+        /** ADR-0050 section 2.8 — the added device's 32-byte signature key:
+         *  its DeviceGroup leaf, its conversation leaf and its discovery
+         *  `device_id` are one key. The caller hands it to
+         *  `ChatRepository.admitDevice`, which admits the device to every chat. */
+        val newDeviceKey: ByteArray,
     )
 
     /**
@@ -485,7 +524,36 @@ public object PairingOrchestrator {
                 }
             }
 
-            return ScanResult(memberCount = if (ensured.bootstrapped) 2 else 0)
+            // ADR-0050 section 2.9 — the state bundle: contacts, pins and the
+            // ids of every group this device holds, sealed under the per-pairing
+            // exporter like the recovery row. Best-effort; a failure leaves the
+            // new device with the chats it is admitted to and no contact names.
+            run {
+                var key: ByteArray? = null
+                try {
+                    val known = me.lakko.app.chat.KnownGroupsStore(context).load(accountIdB64)
+                    val bundle = StateBundle.build(context, known)
+                    key = ensured.group.exportSecret(
+                        ensured.identity,
+                        StateBundle.EXPORTER_LABEL,
+                        decoded.rendezvousPseudonym,
+                        StateBundle.EXPORTER_KEY_LENGTH.toUInt(),
+                    )
+                    val sealed = sealWithKey(key, StateBundle.encode(bundle))
+                    StateBundle.publish(decoded.rendezvousPseudonym, sealed)
+                } catch (cause: kotlinx.coroutines.CancellationException) {
+                    throw cause
+                } catch (cause: Throwable) {
+                    android.util.Log.w("PairingOrchestrator", "state bundle publish failed", cause)
+                } finally {
+                    key?.fill(0)
+                }
+            }
+
+            return ScanResult(
+                memberCount = if (ensured.bootstrapped) 2 else 0,
+                newDeviceKey = uniffi.lakko_ffi_uniffi.keyPackageSignatureKey(decoded.keyPackage),
+            )
         } finally {
             recovery?.accountIdentitySeed?.fill(0)
             try {

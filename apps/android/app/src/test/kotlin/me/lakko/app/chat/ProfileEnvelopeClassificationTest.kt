@@ -63,7 +63,7 @@ class ProfileEnvelopeClassificationTest {
     ): IncomingChatEvent = toEvent(
         messageId = 7L,
         createdAt = "2026-09-13T00:00:00Z",
-        processed = ProcessedMessage.Application(payload, senderLeaf),
+        processed = ProcessedMessage.Application(payload, senderLeaf, null),
         resolveSender = resolveSender,
         isCommitterBeacon = { false },
         parseBody = ::lossyParseBody,

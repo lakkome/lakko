@@ -388,7 +388,7 @@ final class GroupCallRecordTests: XCTestCase {
             let event = ChatClient.toEvent(
                 messageId: 1,
                 createdAt: "2027-01-15T08:00:00Z",
-                processed: .application(data: bytes, senderLeaf: 1),
+                processed: .application(data: bytes, senderLeaf: 1, senderAccount: nil),
                 resolveSender: { "member-\($0)" }
             )
             guard case .callSignaling = event else {

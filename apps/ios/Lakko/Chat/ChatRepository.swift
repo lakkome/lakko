@@ -66,6 +66,8 @@ public final class ChatRepository: ObservableObject {
     private let dsClient: DsClient
     private let discovery: DiscoveryClient
     private let snapshotStore: IdentitySnapshotStore
+    /// ADR-0050 — which leaf identity the on-disk snapshot belongs to.
+    private let snapshotLeafKeyStore: SnapshotLeafKeyStore
     private let knownGroupsStore: KnownGroupsStore
     /// Phase 2a3f1 — persistent plaintext-message log.
     /// Survives app launches; mutated on every append /
@@ -124,7 +126,17 @@ public final class ChatRepository: ObservableObject {
 
     /// The canonical ``Identity`` for the current session. `nil`
     /// until ``bootstrap(secrets:)`` populates it.
+    ///
+    /// ADR-0050 — this is the DEVICE identity: a per-install random seed bound
+    /// to the account key by a signed binding carried in its leaf credential.
+    /// Every conversation group and every KeyPackage uses it, so a person's
+    /// devices are distinct MLS leaves that all resolve to one account.
     private var canonicalIdentity: Identity?
+
+    /// ADR-0050 — the phrase-seeded ACCOUNT identity, kept beside the device
+    /// identity for what is about the PERSON rather than a leaf: group invite
+    /// capabilities (issuer key) and their revocation.
+    private var accountIdentity: Identity?
 
     /// Account id (base64) of the session that bootstrapped this
     /// repository.
@@ -152,7 +164,8 @@ public final class ChatRepository: ObservableObject {
                 return KeyPackageUpload(
                     accountId: accountId,
                     sessionToken: token,
-                    keyPackage: try identity.createKeyPackage()
+                    keyPackage: try identity.createKeyPackage(),
+                    deviceId: identity.signaturePublicKey()
                 )
             },
             persist: { [weak self] in
@@ -167,6 +180,7 @@ public final class ChatRepository: ObservableObject {
                 try await DiscoveryClient(sessionToken: upload.sessionToken)
                     .uploadKeyPackage(
                         accountId: upload.accountId,
+                        deviceId: upload.deviceId,
                         keyPackageBytes: upload.keyPackage
                     )
             }
@@ -258,6 +272,7 @@ public final class ChatRepository: ObservableObject {
         dsClient: DsClient = DsClient(),
         discovery: DiscoveryClient = DiscoveryClient(),
         snapshotStore: IdentitySnapshotStore = IdentitySnapshotStore(),
+        snapshotLeafKeyStore: SnapshotLeafKeyStore = SnapshotLeafKeyStore(),
         knownGroupsStore: KnownGroupsStore = KnownGroupsStore(),
         messageLogStore: MessageLogStore = MessageLogStore(),
         commitOutbox: CommitOutboxStore = CommitOutboxStore(),
@@ -272,6 +287,7 @@ public final class ChatRepository: ObservableObject {
         self.dsClient = dsClient
         self.discovery = discovery
         self.snapshotStore = snapshotStore
+        self.snapshotLeafKeyStore = snapshotLeafKeyStore
         self.knownGroupsStore = knownGroupsStore
         self.messageLogStore = messageLogStore
         self.commitOutbox = commitOutbox
@@ -320,12 +336,12 @@ public final class ChatRepository: ObservableObject {
         if currentAccountIdB64 != nil {
             wipeInMemoryState()
         }
-        let identity: Identity
+        let account: Identity
         do {
-            // ADR-0017: the canonical AccountIdentity is seeded from the
+            // ADR-0017: the AccountIdentity is seeded from the
             // phrase-derived seed, NOT the OPAQUE export key — so a
             // routine recover / password change preserves the identity.
-            identity = try Identity.fromSeed(seed: secrets.accountIdentitySeed)
+            account = try Identity.fromSeed(seed: secrets.accountIdentitySeed)
         } catch {
             // Identity construction is deterministic + can't fail
             // unless the seed bytes are malformed (UniFFI
@@ -333,9 +349,31 @@ public final class ChatRepository: ObservableObject {
             // state stays empty + the next login retries.
             return
         }
+        // ADR-0050 — the chats run on the DEVICE identity.
+        let device = deviceIdentityInstaller(newAccountIdB64, account)
+        let identity = device ?? account
 
         let restored: Bool
         do {
+            let ownLeafB64 = base64Encode(identity.signaturePublicKey())
+            let recorded = snapshotLeafKeyStore.load(accountIdB64: newAccountIdB64)
+            // A recorded leaf key that differs is always another identity's
+            // snapshot. An ABSENT record is one written before ADR-0050, i.e.
+            // under the account identity: foreign to a device identity, and
+            // exactly right for the account-identity fallback.
+            let foreign = recorded.map { $0 != ownLeafB64 } ?? (device != nil)
+            if foreign, snapshotStore.getSnapshot(accountIdB64: newAccountIdB64) != nil {
+                // ADR-0050 — a snapshot taken under another leaf identity (every
+                // pre-ADR-0050 snapshot was taken under the ACCOUNT identity)
+                // must not be restored: `restoreStorage` replaces the whole
+                // provider with groups signed by a key this identity does not
+                // hold. Drop it (no production data to migrate), so neither this
+                // process nor the notification extension restores it again.
+                NSLog("ChatRepository: snapshot belongs to another leaf identity; starting empty")
+                snapshotStore.deleteSnapshot(accountIdB64: newAccountIdB64)
+                knownGroupsStore.clear(accountIdB64: newAccountIdB64)
+            }
+            snapshotLeafKeyStore.save(accountIdB64: newAccountIdB64, leafKeyB64: ownLeafB64)
             if let blob = snapshotStore.getSnapshot(accountIdB64: newAccountIdB64) {
                 try identity.restoreStorage(snapshot: blob)
                 restored = true
@@ -347,6 +385,7 @@ public final class ChatRepository: ObservableObject {
         }
 
         canonicalIdentity = identity
+        accountIdentity = account
         currentAccountIdB64 = newAccountIdB64
 
         // Eagerly rebuild `Group` handles for every previously-
@@ -407,6 +446,7 @@ public final class ChatRepository: ObservableObject {
         wipeInMemoryState()
         currentAccountIdB64 = nil
         canonicalIdentity = nil
+        accountIdentity = nil
         state = ChatRepositoryState()
     }
 
@@ -417,7 +457,9 @@ public final class ChatRepository: ObservableObject {
         clear()
         if let accountIdB64 = accountIdB64 {
             snapshotStore.deleteSnapshot(accountIdB64: accountIdB64)
+            snapshotLeafKeyStore.clear(accountIdB64: accountIdB64)
             knownGroupsStore.clear(accountIdB64: accountIdB64)
+            DeviceReadmissionMemory.clearForAccount(accountIdB64: accountIdB64)
             // ADR-0040 (G-35) — drop any pending-commit outbox entries for the
             // account alongside the snapshot they were paired with, so a wiped
             // device leaves no stale commit to be swept later.
@@ -455,6 +497,7 @@ public final class ChatRepository: ObservableObject {
     }
 
     private func wipeInMemoryState() {
+        accountIdentity = nil
         groups.removeAll()
         groupCalls.removeAll()
         unreadCounts.removeAll()
@@ -475,6 +518,50 @@ public final class ChatRepository: ObservableObject {
         // Queued sections re-read `canonicalIdentity` / `groups` (now empty)
         // and fail their own guards, and the tail-guarded release in
         // ``withCommitLock(groupIdHex:_:)`` drains the map on its own.
+    }
+
+    /// ADR-0050 — how ``bootstrap(secrets:)`` obtains the device identity.
+    /// Production is ``installDeviceIdentity(accountIdB64:account:)``; a test
+    /// that seeds a snapshot under the account identity sets a closure that
+    /// returns `nil`, which keeps the chats on the account identity.
+    var deviceIdentityInstaller: @MainActor (_ accountIdB64: String, _ account: Identity) -> Identity? = {
+        ChatRepository.installDeviceIdentity(accountIdB64: $0, account: $1)
+    }
+
+    /// ADR-0050 — build this device's bound DEVICE identity: the per-install
+    /// seed from ``DeviceIdentityStore`` plus the persisted binding, or a fresh
+    /// binding minted by the account key when none is stored (or the stored
+    /// one no longer verifies, e.g. after a fresh-identity mint). `nil` when
+    /// the device seed cannot be read or written, in which case the caller
+    /// falls back to the account identity for the chats (the pre-ADR-0050
+    /// behaviour).
+    static func installDeviceIdentity(accountIdB64: String, account: Identity) -> Identity? {
+        do {
+            let seed = try DeviceIdentityStore.ensureDeviceIdentitySeed(accountIdB64: accountIdB64)
+            if let stored = DeviceIdentityStore.getDeviceBinding(accountIdB64: accountIdB64) {
+                do {
+                    let bound = try Identity.fromSeedWithBinding(seed: seed, binding: stored)
+                    if bound.accountPublicKey() == account.signaturePublicKey() {
+                        return bound
+                    }
+                    NSLog("ChatRepository: stored device binding names another account key; re-minting")
+                } catch {
+                    NSLog("ChatRepository: stored device binding rejected; re-minting")
+                }
+            }
+            let bound = try Identity.fromSeedBound(
+                seed: seed,
+                accountSeed: account.ed25519Seed(),
+                issuedAtUnixSecs: UInt64(max(0, Date().timeIntervalSince1970))
+            )
+            if let binding = bound.deviceBinding() {
+                try DeviceIdentityStore.putDeviceBinding(accountIdB64: accountIdB64, binding: binding)
+            }
+            return bound
+        } catch {
+            NSLog("ChatRepository: device identity install failed; chats fall back to the account identity: \(error)")
+            return nil
+        }
     }
 
     // MARK: - Group operations
@@ -507,52 +594,65 @@ public final class ChatRepository: ObservableObject {
                 "ChatRepository not bootstrapped — call bootstrap() first"
             )
         }
-        guard let keyPackageBytes = try await discovery.fetchKeyPackage(
+        // ADR-0050 — a person is added as ALL of their devices, each its own
+        // leaf; the recipient's device binding inside each leaf is what the
+        // core verifies.
+        _ = recipientSignaturePubkey
+        guard let recipientDevices = try await discovery.fetchKeyPackages(
             accountId: recipientAccountId
-        ) else {
+        ), !recipientDevices.isEmpty else {
             throw ChatError.argument(
                 "recipient has no KeyPackage uploaded yet"
             )
         }
+        // ...and this account's OTHER devices join from the first epoch too.
+        let devices = recipientDevices + (await ownOtherDevices(identity: identity))
 
         let group: Group
         let addResult: AddMember
         do {
             group = try Group.create(identity: identity)
-            addResult = try group.addMemberFromWire(
+            // ONE commit for every device (ADR-0050 2.6): we are the only
+            // member, so the commit fans out to nobody and is dropped; the ONE
+            // Welcome carries every added leaf's secrets and goes,
+            // byte-identical, to each leaf's own mailbox. One commit per device
+            // would strand every device but the last at a Welcome epoch we then
+            // advanced past with nobody to tell.
+            addResult = try group.addMembersFromWire(
                 identity: identity,
-                keyPackage: keyPackageBytes
+                keyPackages: devices.map { $0.keyPackage }
             )
         } catch {
             throw ChatError.wrapped(
-                "addMemberFromWire failed",
+                "addMembersFromWire failed",
                 underlying: error
             )
         }
 
         let welcomeEnvelope = wrapEnvelope(kind: .welcome, body: addResult.welcome)
-        let recipientPseudonym: Data
-        do {
-            recipientPseudonym = try IdentityPseudonym
-                .fromIdentity(pubkey: recipientSignaturePubkey)
-                .asBytes()
-        } catch {
-            throw ChatError.wrapped(
-                "IdentityPseudonym derivation failed",
-                underlying: error
-            )
-        }
-
-        do {
-            _ = try await dsClient.publishMailbox(
-                pseudonym: recipientPseudonym,
-                payload: welcomeEnvelope
-            )
-        } catch {
-            throw ChatError.wrapped(
-                "DS publishMailbox (Welcome) failed",
-                underlying: error
-            )
+        for device in devices {
+            let devicePseudonym: Data
+            do {
+                devicePseudonym = try IdentityPseudonym
+                    .fromIdentity(pubkey: keyPackageSignatureKey(keyPackage: device.keyPackage))
+                    .asBytes()
+            } catch {
+                throw ChatError.wrapped(
+                    "IdentityPseudonym derivation failed",
+                    underlying: error
+                )
+            }
+            do {
+                _ = try await dsClient.publishMailbox(
+                    pseudonym: devicePseudonym,
+                    payload: welcomeEnvelope
+                )
+            } catch {
+                throw ChatError.wrapped(
+                    "DS publishMailbox (Welcome) failed",
+                    underlying: error
+                )
+            }
         }
 
         let groupId = try group.groupId()
@@ -820,7 +920,10 @@ public final class ChatRepository: ObservableObject {
     /// chat through the 1×1 P2P path.
     public func memberCount(groupIdHex: String) -> Int? {
         guard let record = groups[groupIdHex] else { return nil }
-        return (try? record.group.memberCount()).map { Int($0) }
+        // ADR-0050 — PEOPLE, not leaves: a 1x1 between two people with three
+        // devices each is still a 1x1.
+        guard let roster = try? record.group.members() else { return nil }
+        return PersonKey.people(roster).count
     }
 
     /// Current MLS epoch of the live group for `groupIdHex`, or `nil` when there
@@ -972,7 +1075,12 @@ public final class ChatRepository: ObservableObject {
     /// against the accepted-contacts list to render a name, else a fingerprint.
     public func members(groupIdHex: String) -> [GroupMember]? {
         guard let record = groups[groupIdHex] else { return nil }
-        return try? record.group.members()
+        // ADR-0050 — one row per PERSON: `signaturePublicKey` is the member's
+        // account key (what roles, names and authorship key on), `leafIndex`
+        // this device's own leaf for its own person, else the person's first
+        // leaf. Removing the row removes every leaf of the person.
+        guard let roster = try? record.group.members() else { return nil }
+        return PersonKey.collapse(roster, ownLeafIndex: try? record.group.ownLeafIndex())
     }
 
     /// ADR-0048 — the other member's signature key in a two-member chat, or
@@ -980,9 +1088,12 @@ public final class ChatRepository: ObservableObject {
     /// What the chat list and a 1x1 header name the conversation by.
     public func oneToOnePeerSignatureKey(groupIdHex: String) -> Data? {
         guard let record = groups[groupIdHex],
-              let roster = try? record.group.members(), roster.count == 2,
+              let leaves = try? record.group.members(),
               let own = try? record.group.ownLeafIndex()
         else { return nil }
+        // ADR-0050 — two PEOPLE, whatever their device count.
+        let roster = PersonKey.collapse(leaves, ownLeafIndex: own)
+        guard roster.count == 2 else { return nil }
         return roster.first { $0.leafIndex != own }?.signaturePublicKey
     }
 
@@ -1255,12 +1366,34 @@ public final class ChatRepository: ObservableObject {
         // taken before the lock: it is a third-party network round-trip, and
         // holding a group's commit chain across it would stall unrelated
         // membership work on that group for its whole duration.
-        guard let keyPackageBytes = try await discovery.fetchKeyPackage(
+        // ADR-0050 — every device of the person.
+        guard let devices = try await discovery.fetchKeyPackages(
             accountId: recipientAccountId
-        ) else {
+        ), !devices.isEmpty else {
             throw ChatError.argument("recipient has no KeyPackage uploaded yet")
         }
+        _ = recipientSignaturePubkey
 
+        // ADR-0050 — one proposal / one commit per device of the person. The
+        // outcome reported is the last device's; every earlier one either
+        // landed or threw.
+        var outcome: MembershipOutcome?
+        for device in devices {
+            outcome = try await addOneDeviceToGroup(
+                groupIdHex: groupIdHex, keyPackageBytes: device.keyPackage)
+        }
+        guard let outcome else {
+            throw ChatError.argument("recipient has no KeyPackage uploaded yet")
+        }
+        return outcome
+    }
+
+    /// One device's Add: a proposal on a role-table group, a direct commit
+    /// otherwise. Serialized on the group's commit chain.
+    private func addOneDeviceToGroup(
+        groupIdHex: String,
+        keyPackageBytes: Data
+    ) async throws -> MembershipOutcome {
         // ADR-0040 (G-35) — serialize the whole eager-merge-through-publish
         // region against every other membership commit on this group.
         return try await withCommitLock(groupIdHex: groupIdHex) { [self] in
@@ -1284,7 +1417,6 @@ public final class ChatRepository: ObservableObject {
             return .committed(
                 commitMessageId: try await addMemberToGroupLocked(
                     groupIdHex: groupIdHex,
-                    recipientSignaturePubkey: recipientSignaturePubkey,
                     keyPackageBytes: keyPackageBytes
                 ),
                 welcomeMessageId: nil
@@ -1298,7 +1430,6 @@ public final class ChatRepository: ObservableObject {
     /// replaced or evicted the record while this section was queued.
     private func addMemberToGroupLocked(
         groupIdHex: String,
-        recipientSignaturePubkey: Data,
         keyPackageBytes: Data
     ) async throws -> Int64 {
         guard let identity = canonicalIdentity else {
@@ -1341,8 +1472,10 @@ public final class ChatRepository: ObservableObject {
             // member's stranger inbox, addressed by their pubkey pseudonym.
             welcomeEnvelope = wrapEnvelope(kind: .welcome, body: addResult.welcome)
             do {
+                // ADR-0050 — the Welcome is sealed to THIS leaf's KeyPackage,
+                // so it is addressed to the leaf's own mailbox.
                 recipientPseudonym = try IdentityPseudonym
-                    .fromIdentity(pubkey: recipientSignaturePubkey)
+                    .fromIdentity(pubkey: keyPackageSignatureKey(keyPackage: keyPackageBytes))
                     .asBytes()
             } catch {
                 throw ChatError.wrapped("IdentityPseudonym derivation failed", underlying: error)
@@ -1424,6 +1557,40 @@ public final class ChatRepository: ObservableObject {
     /// removal commit to the group journal (own-marked for echo suppression).
     /// Returns the commit's DS message id.
     public func removeMemberFromGroup(
+        groupIdHex: String,
+        leafIndex: UInt32
+    ) async throws -> MembershipOutcome {
+        // ADR-0050 — removing a member removes the PERSON: every leaf of the
+        // account the named leaf belongs to (leaving, naming one's own leaf,
+        // leaves from every device at once). Leaves are named by signature key
+        // and re-resolved to an index per step, since a commit between steps
+        // may renumber.
+        guard let record = groups[groupIdHex] else {
+            throw ChatError.argument("no live Group handle for \(groupIdHex)")
+        }
+        let roster = (try? record.group.members()) ?? []
+        let leafKeys = PersonKey.leavesOfSamePerson(roster, leafIndex: leafIndex)
+            .compactMap { leaf in roster.first(where: { $0.leafIndex == leaf })?.signaturePublicKey }
+        if leafKeys.count <= 1 {
+            return try await removeOneLeafFromGroup(groupIdHex: groupIdHex, leafIndex: leafIndex)
+        }
+        var outcome: MembershipOutcome?
+        for key in leafKeys {
+            guard let current = groups[groupIdHex],
+                  let leaf = (try? current.group.members())?
+                    .first(where: { $0.signaturePublicKey == key })?.leafIndex
+            else { continue }
+            outcome = try await removeOneLeafFromGroup(groupIdHex: groupIdHex, leafIndex: leaf)
+        }
+        guard let outcome else {
+            throw ChatError.argument("member is no longer in \(groupIdHex)")
+        }
+        return outcome
+    }
+
+    /// Remove ONE leaf: a proposal on a role-table group, a direct commit
+    /// (followed by the ADR-0043 rotation) otherwise.
+    private func removeOneLeafFromGroup(
         groupIdHex: String,
         leafIndex: UInt32
     ) async throws -> MembershipOutcome {
@@ -1611,7 +1778,8 @@ public final class ChatRepository: ObservableObject {
     ) async -> [(joinerSignatureKey: Data, issuerFingerprint: String, issuerInRoster: Bool)] {
         guard let record = groups[groupIdHex] else { return [] }
         guard let groupId = try? record.group.groupId() else { return [] }
-        let rosterKeys = Set((try? record.group.members())?.map { $0.signaturePublicKey } ?? [])
+        // ADR-0050 — the capability issuer is an ACCOUNT key.
+        let rosterKeys = Set(PersonKey.people((try? record.group.members()) ?? []))
         guard let raw = try? await dsClient.fetchGroup(groupId: groupId, after: 0, waitSecs: 0)
         else { return [] }
         var out: [(Data, String, Bool)] = []
@@ -1759,7 +1927,7 @@ public final class ChatRepository: ObservableObject {
     /// authorizes nobody; the admin gate is the security boundary. `0` = never
     /// expires.
     public func createGroupInviteLink(groupIdHex: String) async throws -> String {
-        guard let identity = canonicalIdentity else {
+        guard let identity = accountIdentity else {
             throw ChatError.argument("ChatRepository not bootstrapped — call bootstrap() first")
         }
         guard let record = groups[groupIdHex] else {
@@ -1796,7 +1964,7 @@ public final class ChatRepository: ObservableObject {
     /// revocable; an inline link has no ledger row. Returns `true` when a ledger
     /// row was revoked, `false` for an inline / malformed link (nothing to do).
     public func revokeGroupInviteLink(link: String) async throws -> Bool {
-        guard let identity = canonicalIdentity else {
+        guard let identity = accountIdentity else {
             throw ChatError.argument("ChatRepository not bootstrapped — call bootstrap() first")
         }
         guard let range = link.range(of: "/g/", options: .backwards) else { return false }
@@ -2650,6 +2818,11 @@ public final class ChatRepository: ObservableObject {
         // itself). A sweep failure is not a poll failure, so it never throws
         // out of here.
         await sweepIfCommitter(groupIdHex: groupIdHex)
+        // ADR-0050 section 2.4 — the scheduled re-admission check, bounded per
+        // chat. Not awaited by the poll: it reads the directory.
+        Task { @MainActor [weak self] in
+            await self?.readmitDevicesIfDue(groupIdHex: groupIdHex)
+        }
     }
 
     /// G-38 — the locked half of ``pollGroup(groupIdHex:waitSecs:)``.
@@ -2693,6 +2866,7 @@ public final class ChatRepository: ObservableObject {
         // Hoisting it out to where the fetch now runs would race the shrink diff
         // against any commit landing in the fetch window.
         let membersBeforePoll = PushGroupRouting.memberSignatureKeys(group: record.group)
+        let leafKeysBeforePoll = Self.leafKeysB64(group: record.group)
         let result = chatClient.applyFetchedMessages(
             identity: identity,
             group: record.group,
@@ -2702,6 +2876,7 @@ public final class ChatRepository: ObservableObject {
         noteAppliedForUnread(result.events, groupIdHex: groupIdHex)
         record.consumeEvents(
             result.events,
+            ownAuthorKey: AuthorIdentity.own(group: record.group),
             callSignalingSink: { [weak self] messageId, payload, createdAt, senderLeaf in
                 self?.routeCallSignaling(
                     groupIdHex: groupIdHex, messageId: messageId, payload: payload,
@@ -2770,6 +2945,13 @@ public final class ChatRepository: ObservableObject {
         // Fire-and-forget, same non-nesting argument as the sink above.
         rotatePushRoutingSecretIfMembershipShrank(
             groupIdHex: groupIdHex, previousMemberKeys: membersBeforePoll)
+        // ADR-0050 — remember the leaves that left, so the scheduled
+        // re-admission never puts back a device someone removed.
+        if let accountIdB64 = currentAccountIdB64 {
+            DeviceReadmissionMemory.recordRemoved(
+                accountIdB64: accountIdB64, groupIdHex: groupIdHex,
+                before: leafKeysBeforePoll, after: Self.leafKeysB64(group: record.group))
+        }
         // ADR-0048 §2 — and did someone else's Add land? Same before/after
         // roster comparison, other direction. Only schedules.
         noteProfileGrowthIfMembershipGrew(
@@ -2948,6 +3130,269 @@ public final class ChatRepository: ObservableObject {
                 continue
             }
         }
+    }
+
+    // MARK: - ADR-0050 device fan-outs
+
+    /// How long ``admitDevice(deviceKey:)`` waits for the new device's
+    /// KeyPackage to appear in the directory, and how often it looks. The fresh
+    /// device publishes it after it has landed a session, which includes a
+    /// proof-of-work solve.
+    static let admitDeviceWaitMs: Int64 = 180_000
+    static let admitDevicePollMs: UInt64 = 3_000
+
+    /// What a device fan-out did across the chats.
+    public struct DeviceFanOut: Equatable {
+        /// A proposal was published or a commit landed.
+        public var offered = 0
+        /// Nothing to do: already admitted / not present, or the membership ended.
+        public var skipped = 0
+        /// The chat threw; logged, the rest continued.
+        public var failed = 0
+    }
+
+    /// Base64 leaf signature keys of `group`'s roster, or `nil` on a torn read.
+    nonisolated static func leafKeysB64(group: Group) -> [String]? {
+        guard let roster = try? group.members() else { return nil }
+        return roster.map { base64Encode($0.signaturePublicKey) }
+    }
+
+    /// This account's OTHER devices' KeyPackages, so a group this device
+    /// creates includes the person's other devices from the first epoch.
+    /// Best-effort: a directory failure yields an empty list, and the
+    /// re-admission arm adds the missing devices later.
+    private func ownOtherDevices(identity: Identity) async -> [DeviceKeyPackage] {
+        guard let accountId = currentAccountId else { return [] }
+        let ownKey = identity.signaturePublicKey()
+        do {
+            let list = try await discovery.fetchKeyPackages(accountId: accountId) ?? []
+            return list.filter { $0.deviceId != ownKey }
+        } catch {
+            NSLog("ADR-0050: own devices lookup failed; adding this device only: \(error)")
+            return []
+        }
+    }
+
+    /// ADR-0050 section 2.8 / 2.4 — admit ONE device (by its published
+    /// KeyPackage) to a group this device is in. Self-service on the core side:
+    /// a member may add a leaf of its own account or of an account already in
+    /// the group. `nil` when a leaf with that key is already in the roster.
+    func admitDeviceToGroup(groupIdHex: String, keyPackage: Data) async throws -> MembershipOutcome? {
+        let deviceKey = try keyPackageSignatureKey(keyPackage: keyPackage)
+        return try await withCommitLock(groupIdHex: groupIdHex) { [self] in
+            // Checked under the lock: a poll may have applied the very commit
+            // that admitted this device while we waited.
+            guard let record = groups[groupIdHex] else { return nil }
+            if (try? record.group.members())?.contains(where: { $0.signaturePublicKey == deviceKey }) ?? false {
+                return nil
+            }
+            if usesProposalPath(groupIdHex: groupIdHex) {
+                return try await proposeAddMemberLocked(
+                    groupIdHex: groupIdHex, keyPackageBytes: keyPackage)
+            }
+            return .committed(
+                commitMessageId: try await addMemberToGroupLocked(
+                    groupIdHex: groupIdHex, keyPackageBytes: keyPackage),
+                welcomeMessageId: nil)
+        }
+    }
+
+    /// ADR-0050 section 2.10 — retire ONE device's leaf from a group, the
+    /// account's other devices untouched (unlike ``removeMemberFromGroup``,
+    /// which removes the person). `nil` when no leaf holds that key.
+    func retireDeviceFromGroup(groupIdHex: String, deviceKey: Data) async throws -> MembershipOutcome? {
+        guard let record = groups[groupIdHex],
+              let leaf = (try? record.group.members())?
+                .first(where: { $0.signaturePublicKey == deviceKey })?.leafIndex
+        else { return nil }
+        return try await removeOneLeafFromGroup(groupIdHex: groupIdHex, leafIndex: leaf)
+    }
+
+    /// Poll the directory until `deviceKey`'s KeyPackage is there, bounded.
+    private func awaitDeviceKeyPackage(accountId: Data, deviceKey: Data) async throws -> Data {
+        let deadline = Self.nowMs() + Self.admitDeviceWaitMs
+        while true {
+            if let hit = (try? await discovery.fetchKeyPackages(accountId: accountId))?
+                .first(where: { $0.deviceId == deviceKey }) {
+                return hit.keyPackage
+            }
+            if Self.nowMs() >= deadline {
+                throw ChatError.argument(
+                    "the new device has not published a KeyPackage yet; it will be admitted to your chats later")
+            }
+            try await Task.sleep(nanoseconds: Self.admitDevicePollMs * 1_000_000)
+        }
+    }
+
+    /// ADR-0050 section 2.8 — admit a device this device just added to the
+    /// DeviceGroup (QR pairing) to EVERY chat this device is in: wait, bounded,
+    /// for its conversation KeyPackage, then per chat a self-service Add
+    /// proposal (swept here when this device is the acting committer) or a
+    /// direct commit on a table-less group. A device whose KeyPackage never
+    /// appears within the wait is admitted later by the re-admission arm.
+    @discardableResult
+    public func admitDevice(deviceKey: Data) async throws -> DeviceFanOut {
+        guard let accountId = currentAccountId else {
+            throw ChatError.argument("admitDevice: no session")
+        }
+        let keyPackage = try await awaitDeviceKeyPackage(accountId: accountId, deviceKey: deviceKey)
+        var tally = DeviceFanOut()
+        for groupIdHex in Array(groups.keys).sorted() {
+            if membershipEnded(membershipStateNow(groupIdHex: groupIdHex)) {
+                tally.skipped += 1
+                continue
+            }
+            do {
+                guard let outcome = try await admitDeviceToGroup(
+                    groupIdHex: groupIdHex, keyPackage: keyPackage) else {
+                    tally.skipped += 1
+                    continue
+                }
+                tally.offered += 1
+                if case .proposed = outcome {
+                    await sweepIfCommitter(groupIdHex: groupIdHex)
+                }
+            } catch {
+                tally.failed += 1
+                NSLog("ADR-0050 admit device: chat \(groupIdHex) skipped: \(error)")
+            }
+        }
+        return tally
+    }
+
+    /// ADR-0050 section 2.10 — retire a device just removed from the
+    /// DeviceGroup from EVERY chat this device is in (its one leaf per chat),
+    /// then delete its directory KeyPackage.
+    @discardableResult
+    public func retireDevice(deviceKey: Data) async -> DeviceFanOut {
+        var tally = DeviceFanOut()
+        for groupIdHex in Array(groups.keys).sorted() {
+            if membershipEnded(membershipStateNow(groupIdHex: groupIdHex)) {
+                tally.skipped += 1
+                continue
+            }
+            do {
+                guard let outcome = try await retireDeviceFromGroup(
+                    groupIdHex: groupIdHex, deviceKey: deviceKey) else {
+                    tally.skipped += 1
+                    continue
+                }
+                tally.offered += 1
+                if case .proposed = outcome {
+                    await sweepIfCommitter(groupIdHex: groupIdHex)
+                }
+            } catch {
+                tally.failed += 1
+                NSLog("ADR-0050 retire device: chat \(groupIdHex) skipped: \(error)")
+            }
+        }
+        // The directory row last: a peer that fetched it meanwhile only
+        // produced a Welcome nobody will open.
+        await deleteDirectoryKeyPackage(deviceKey: deviceKey)
+        return tally
+    }
+
+    /// ADR-0050 section 2.10 — delete one device's directory KeyPackage with
+    /// this session's bearer token. Best-effort; logged on failure.
+    public func deleteDirectoryKeyPackage(deviceKey: Data) async {
+        guard let token = currentSessionToken, !token.isEmpty else { return }
+        do {
+            try await DiscoveryClient(sessionToken: token).deleteKeyPackage(deviceId: deviceKey)
+        } catch {
+            NSLog("ADR-0050: directory KeyPackage not deleted: \(error)")
+        }
+    }
+
+    /// ADR-0050 — this device's own conversation leaf key, or `nil` before
+    /// bootstrap. `forgetDevice` deletes its directory row by it.
+    public var ownDeviceLeafKey: Data? {
+        canonicalIdentity?.signaturePublicKey()
+    }
+
+    /// ADR-0050 section 2.4 — the accounts, other than this one, the
+    /// re-admission check can look up: `(personKey, accountId)` for every
+    /// accepted contact whose account id is known. Wired by the composition
+    /// root from the contacts store.
+    var readmissionContactsProvider: @MainActor () -> [(personKey: Data, accountId: Data)] = { [] }
+
+    /// ADR-0050 section 2.4 — re-check the device lists of the accounts in
+    /// `groupIdHex` against its roster: propose an Add for a listed device with
+    /// no leaf, and — for this account only — a Remove for a leaf whose
+    /// directory row is gone. Each chat is checked at most once per
+    /// ``DeviceReadmission/intervalMs``. Runs at the tail of the foreground
+    /// poll.
+    func readmitDevicesIfDue(groupIdHex: String) async {
+        guard let accountIdB64 = currentAccountIdB64,
+              let accountId = currentAccountId,
+              let record = groups[groupIdHex],
+              !membershipEnded(membershipStateNow(groupIdHex: groupIdHex)),
+              let ownPerson = AuthorIdentity.own(group: record.group),
+              DeviceReadmissionMemory.takeSlot(groupIdHex: groupIdHex, nowMs: Self.nowMs()),
+              let leaves = try? record.group.members()
+        else { return }
+        let roster = leaves.map {
+            DeviceReadmission.RosterLeafKeys(
+                leafKeyB64: base64Encode($0.signaturePublicKey),
+                personKeyB64: base64Encode(PersonKey.of($0)))
+        }
+        let people = Set(roster.map { $0.personKeyB64 })
+        var lookups: [(String, Data)] = [(ownPerson, accountId)]
+        for contact in readmissionContactsProvider() {
+            let personB64 = base64Encode(contact.personKey)
+            if people.contains(personB64), personB64 != ownPerson {
+                lookups.append((personB64, contact.accountId))
+            }
+        }
+        var accounts: [DeviceReadmission.AccountDevices] = []
+        for (personB64, id) in lookups {
+            do {
+                let list = try await discovery.fetchKeyPackages(accountId: id) ?? []
+                accounts.append(DeviceReadmission.AccountDevices(
+                    personKeyB64: personB64,
+                    devices: list.map {
+                        DeviceReadmission.DirectoryDevice(
+                            deviceKeyB64: base64Encode($0.deviceId), keyPackage: $0.keyPackage)
+                    }))
+            } catch {
+                accounts.append(DeviceReadmission.AccountDevices(personKeyB64: personB64, devices: nil))
+            }
+        }
+        let plan = DeviceReadmission.plan(
+            roster: roster,
+            ownPersonKeyB64: ownPerson,
+            accounts: accounts,
+            removed: DeviceReadmissionMemory.removed(accountIdB64: accountIdB64, groupIdHex: groupIdHex))
+        guard !plan.admit.isEmpty || !plan.retire.isEmpty else { return }
+        var proposed = 0
+        for device in plan.admit {
+            do {
+                if try await admitDeviceToGroup(groupIdHex: groupIdHex, keyPackage: device.keyPackage) != nil {
+                    proposed += 1
+                }
+            } catch {
+                NSLog("ADR-0050 re-admission: add not proposed: \(error)")
+            }
+        }
+        for leafKeyB64 in plan.retire {
+            guard let key = base64Decode(leafKeyB64) else { continue }
+            do {
+                if try await retireDeviceFromGroup(groupIdHex: groupIdHex, deviceKey: key) != nil {
+                    proposed += 1
+                }
+            } catch {
+                NSLog("ADR-0050 re-admission: retire not proposed: \(error)")
+            }
+        }
+        if proposed > 0 {
+            NSLog("ADR-0050 re-admission: \(plan.admit.count) to admit, \(plan.retire.count) to retire in \(groupIdHex)")
+            await sweepIfCommitter(groupIdHex: groupIdHex)
+        }
+    }
+
+    /// ADR-0050 section 2.9 — the hex ids of every group this device holds,
+    /// for the pairing state bundle.
+    public var knownGroupIdHexes: [String] {
+        Array(groups.keys).sorted()
     }
 
     // MARK: - KeyPackage publication
@@ -3223,6 +3668,7 @@ public final class ChatRepository: ObservableObject {
         }
         guard let record = groups[groupIdHex] else { return .notCommitter(rank: nil) }
         let before = PushGroupRouting.memberSignatureKeys(group: record.group)
+        let leafKeysBefore = Self.leafKeysB64(group: record.group)
         let outcome: SweepOutcome
         do {
             outcome = try await withCommitLock(groupIdHex: groupIdHex) { [self] in
@@ -3238,6 +3684,11 @@ public final class ChatRepository: ObservableObject {
             return .unresolved
         }
         guard case .committed(_, _, let addedCount) = outcome else { return outcome }
+        if let accountIdB64 = currentAccountIdB64, let current = groups[groupIdHex] {
+            DeviceReadmissionMemory.recordRemoved(
+                accountIdB64: accountIdB64, groupIdHex: groupIdHex,
+                before: leafKeysBefore, after: Self.leafKeysB64(group: current.group))
+        }
 
         state = state.with(threads: buildThreadList())
         // ADR-0043 — the swept commit may have removed somebody, who still holds
@@ -3338,6 +3789,7 @@ public final class ChatRepository: ObservableObject {
                     self.noteAppliedForUnread([event], groupIdHex: groupIdHex)
                     record.consumeEvents(
                         [event],
+                        ownAuthorKey: AuthorIdentity.own(group: record.group),
                         callSignalingSink: { [weak self] messageId, payload, createdAt, senderLeaf in
                             self?.routeCallSignaling(
                                 groupIdHex: groupIdHex, messageId: messageId, payload: payload,
@@ -4639,6 +5091,7 @@ private final class GroupRecord {
     /// Events must arrive in journal order; the op fold assumes it.
     func consumeEvents(
         _ events: [IncomingChatEvent],
+        ownAuthorKey: MemberIdentity? = nil,
         callSignalingSink: ((Int64, Data, String, UInt32?) -> Void)? = nil,
         chatStatusSink: ((ChatStatusEvent) -> Void)? = nil,
         pushRoutingSecretSink: ((Data, UInt64, UInt32?) -> Void)? = nil,
@@ -4649,10 +5102,14 @@ private final class GroupRecord {
         for event in events {
             switch event {
             case .application(let messageId, let text, let attachments, let senderKey, let createdAt):
+                // ADR-0050 — a message from this PERSON's other device
+                // arrives as an incoming row (another leaf sealed it) but is
+                // ours: same side, no sender name.
+                let fromOwnDevice = senderKey != nil && senderKey == ownAuthorKey
                 messages.append(
                     ChatMessage(
                         messageId: messageId,
-                        direction: .incoming,
+                        direction: fromOwnDevice ? .outgoing : .incoming,
                         text: text,
                         attachments: attachments,
                         createdAt: createdAt,

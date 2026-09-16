@@ -115,6 +115,18 @@ public fun ChatListScreen(
             onNavigateBack = onNavigateBack,
             onRefresh = { scope.launch { repository.pollAllGroups() } },
         )
+        // ADR-0050 / docs/ux/second-device.md section 2: one label while this
+        // device is still being admitted to the account's chats. Chats appear
+        // as they arrive; the label goes when nothing is pending. Never a
+        // counter, never a per-chat row. Re-read on every repository emission.
+        val synchronizing = remember(state) { repository.isSynchronizing() }
+        if (synchronizing) {
+            Text(
+                "Synchronizing...",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
         Spacer(Modifier.height(8.dp))
 
         if (state.threads.isEmpty()) {

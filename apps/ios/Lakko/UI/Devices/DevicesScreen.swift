@@ -49,9 +49,25 @@ public struct DevicesScreen: View {
         }
     }
 
-    public init(authRepository: AuthRepository, onBack: @escaping () -> Void) {
+    /// ADR-0050 section 2.8 — called with a device's 32-byte key once the
+    /// scan flow added it to the DeviceGroup; the composition root admits it
+    /// to every chat.
+    public var onDeviceAdded: (Data) -> Void
+    /// ADR-0050 section 2.10 — called with a device's 32-byte key once it was
+    /// removed from the DeviceGroup; the composition root retires it from
+    /// every chat.
+    public var onDeviceRemoved: (Data) -> Void
+
+    public init(
+        authRepository: AuthRepository,
+        onBack: @escaping () -> Void,
+        onDeviceAdded: @escaping (Data) -> Void = { _ in },
+        onDeviceRemoved: @escaping (Data) -> Void = { _ in }
+    ) {
         self.authRepository = authRepository
         self.onBack = onBack
+        self.onDeviceAdded = onDeviceAdded
+        self.onDeviceRemoved = onDeviceRemoved
     }
 
     public var body: some View {
@@ -80,7 +96,8 @@ public struct DevicesScreen: View {
                             DevicesListView(
                                 accountIdBytes: session.accountIdBytes,
                                 accountIdB64: session.accountIdB64,
-                                sessionToken: session.sessionToken
+                                sessionToken: session.sessionToken,
+                                onDeviceRemoved: onDeviceRemoved
                             )
                         case .pair:
                             PairView(
@@ -92,7 +109,8 @@ public struct DevicesScreen: View {
                                 accountIdBytes: session.accountIdBytes,
                                 accountIdB64: session.accountIdB64,
                                 accountIdentitySeed: session.accountIdentitySeed,
-                                sessionToken: session.sessionToken
+                                sessionToken: session.sessionToken,
+                                onDeviceAdded: onDeviceAdded
                             )
                         case .totp:
                             TotpEnrollView(sessionToken: session.sessionToken)
@@ -278,6 +296,8 @@ private struct ScanView: View {
     let accountIdentitySeed: Data
     /// Bearer token for the `/device/authorize/start` grant mint.
     let sessionToken: String
+    /// ADR-0050 section 2.8 — the admission fan-out over every chat.
+    let onDeviceAdded: (Data) -> Void
 
     @State private var state: ScanState = .idle
 
@@ -400,12 +420,16 @@ private struct ScanView: View {
                         )
                     }
                 )
-                _ = try await PairingOrchestrator.runScanFlow(
+                let scanned = try await PairingOrchestrator.runScanFlow(
                     scannedBytes: bytes,
                     accountIdBytes: accountIdBytes,
                     accountIdB64: accountIdB64,
                     recovery: recovery
                 )
+                // ADR-0050 section 2.8 — admit the new device to every chat.
+                // Not awaited here: it waits for the device to land and
+                // publish its KeyPackage, which is minutes.
+                onDeviceAdded(scanned.newDeviceKey)
                 state = .done
             } catch {
                 state = .error(error.localizedDescription)
@@ -434,6 +458,8 @@ private struct DevicesListView: View {
     /// account has a passkey, so the token is enough to drive the
     /// authed `/auth/action/start` probe.
     let sessionToken: String
+    /// ADR-0050 section 2.10 — the removal fan-out over every chat.
+    let onDeviceRemoved: (Data) -> Void
 
     @State private var state: ListState = .loading
     @State private var removingLeaf: UInt32?
@@ -540,6 +566,8 @@ private struct DevicesListView: View {
             // G-13 (ADR-0015): the ceremony yields an attestation bound to the
             // removed leaf; carry it with the Remove commit so peers verify it.
             var attestation: Data?
+            let removedKey = currentDevices().first(where: { $0.leafIndex == leafIndex })?
+                .signaturePublicKey
             if let target = currentDevices().first(where: { $0.leafIndex == leafIndex }) {
                 let wc = WebauthnClient()
                 wc.setSessionToken(sessionToken)
@@ -568,6 +596,9 @@ private struct DevicesListView: View {
                 leafIndex: leafIndex,
                 attestation: attestation
             )
+            // ADR-0050 section 2.10 — the device is out of the DeviceGroup;
+            // now out of every chat and out of the directory.
+            if let removedKey { onDeviceRemoved(removedKey) }
             refresh()
         } catch {
             state = .error(error.localizedDescription)

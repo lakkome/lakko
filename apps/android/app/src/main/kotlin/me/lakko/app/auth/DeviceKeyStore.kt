@@ -8,6 +8,7 @@ import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.security.keystore.StrongBoxUnavailableException
+import java.security.ProviderException
 import java.io.File
 import java.security.KeyStore
 import javax.crypto.Cipher
@@ -266,7 +267,17 @@ public object DeviceKeyStore {
                 // unwrap operation against a TEE-backed key is
                 // identical from the app's point of view; the
                 // only delta is the hardware-isolation boundary.
+            } catch (_: ProviderException) {
+                // Newer keystore2 builds report a missing StrongBox
+                // as `ProviderException("Failed to generate key")`
+                // (HARDWARE_TYPE_UNAVAILABLE) rather than the typed
+                // exception, observed on an API 35 emulator. Same
+                // fallback.
             }
+            // `setIsStrongBoxBacked(true)` above MUTATED the builder, so
+            // the TEE retry must clear the flag explicitly or it fails
+            // exactly like the StrongBox attempt did.
+            builder.setIsStrongBoxBacked(false)
         }
         kg.init(builder.build())
         return kg.generateKey()

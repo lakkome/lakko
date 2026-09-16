@@ -185,6 +185,13 @@ public let noSuchJoinRequestMessage = "That join request is no longer waiting."
 public let joinerAlreadyAMemberMessage = "That person has already joined this group."
 
 /// §6 row 6's second half — singular, for the one pending role change.
+/// ADR-0050 — the per-account device cap (`MAX_LEAVES_PER_ACCOUNT`).
+public let deviceLimitReachedMessage = "Up to 8 devices per account. Remove one first."
+/// ADR-0050 — a device whose binding the group refuses (docs/ux/second-device.md
+/// section 5: a client bug, one plain sentence rather than a screen).
+public let deviceBindingInvalidMessage =
+    "Something is wrong with this device's key. Remove it from Devices and add it again."
+
 public let retryWhenItLandsMessage = "Wait for it to land, then try again."
 
 /// ``pendingSetFullMessage``'s second half — plural, for a queue of them. Two
@@ -230,6 +237,8 @@ public let allMembershipRefusalReasons: [FfiRefusalReason] = [
     .proposalsPending,
     .pendingSetFull,
     .sweepAlreadyStaged,
+    .deviceBindingInvalid,
+    .deviceLimitReached,
 ]
 
 /// The reasons that deliberately share §6's fail-closed row.
@@ -304,6 +313,8 @@ private func refusalCopy(_ reason: FfiRefusalReason) -> RefusalCopy {
         return RefusalCopy(roleChangePendingMessage, invitation: retryWhenItLandsMessage)
     case .pendingSetFull:
         return RefusalCopy(pendingSetFullMessage, invitation: retryWhenTheyLandMessage)
+    case .deviceLimitReached: return RefusalCopy(deviceLimitReachedMessage)
+    case .deviceBindingInvalid: return RefusalCopy(deviceBindingInvalidMessage)
 
     // The recorded collapses. Listed individually rather than as a `default`
     // so that adding a reason to the core forces a decision here.
@@ -393,6 +404,8 @@ public func membershipRefusalReason(of error: Error) -> FfiRefusalReason? {
             case .MembershipNoSuchJoinRequest: return .noSuchJoinRequest
             case .MembershipJoinerAlreadyAMember: return .joinerAlreadyAMember
             case .SweepAlreadyStaged: return .sweepAlreadyStaged
+            case .MembershipDeviceBindingInvalid: return .deviceBindingInvalid
+            case .MembershipDeviceLimitReached: return .deviceLimitReached
 
             // Everything that is NOT a membership refusal. Enumerated rather
             // than defaulted, so a new `FfiError` variant has to be classified

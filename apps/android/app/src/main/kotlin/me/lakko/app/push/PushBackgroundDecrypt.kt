@@ -6,7 +6,6 @@ package me.lakko.app.push
 import android.app.ActivityManager
 import android.content.Context
 import android.os.Process
-import me.lakko.app.auth.AccountIdentitySeedStore
 import me.lakko.app.chat.IdentitySnapshotStore
 import me.lakko.app.chat.KnownGroupsStore
 import me.lakko.app.chat.MessageLogStore
@@ -106,16 +105,37 @@ internal fun buildBackgroundDecryptDeps(
             return ResolvedPushAccount(accountIdB64 = accountIdB64, groupIdBytes = groupIdBytes)
         }
 
+        // ADR-0050 — the MLS snapshot is written under this device's
+        // conversation identity (the per-install DEVICE seed, bound to the
+        // account), not the account identity, so the throwaway identity is
+        // rebuilt from the device seed. Read-only: nothing here mints or
+        // persists a binding (decrypt needs only the leaf key).
         override fun loadIdentitySeed(accountIdB64: String): ByteArray? =
             try {
-                AccountIdentitySeedStore.getAccountIdentitySeed(appContext, accountIdB64)
+                me.lakko.app.auth.DeviceIdentityStore.getDeviceIdentitySeed(appContext, accountIdB64)
             } catch (_: Throwable) {
                 null
             }
 
         override fun loadSnapshot(accountIdB64: String): ByteArray? =
             try {
-                IdentitySnapshotStore.getSnapshot(appContext, accountIdB64)
+                // A snapshot taken under another leaf identity would restore
+                // groups this identity cannot open; treat it as absent.
+                val recorded = IdentitySnapshotStore.getSnapshotLeafKey(appContext, accountIdB64)
+                val ownLeaf = me.lakko.app.auth.DeviceIdentityStore
+                    .getDeviceIdentitySeed(appContext, accountIdB64)
+                    ?.let { seed ->
+                        try {
+                            Identity.fromSeed(seed).use { it.signaturePublicKey() }
+                        } finally {
+                            seed.fill(0)
+                        }
+                    }
+                if (recorded == null || ownLeaf == null || !recorded.contentEquals(ownLeaf)) {
+                    null
+                } else {
+                    IdentitySnapshotStore.getSnapshot(appContext, accountIdB64)
+                }
             } catch (_: Throwable) {
                 null
             }

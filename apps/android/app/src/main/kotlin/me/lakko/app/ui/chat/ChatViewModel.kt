@@ -2516,9 +2516,9 @@ public class ChatViewModel(
      * Silent — does NOT flip the `refreshing` flag (the spinner
      * would otherwise stay on for the full long-poll window).
      */
-    public suspend fun pollOnceLongPoll(waitSecs: Int = DEFAULT_LONG_POLL_SECS) {
+    /** `true` when this call fetched and applied a batch; see [ChatRepository.pollGroup]. */
+    public suspend fun pollOnceLongPoll(waitSecs: Int = DEFAULT_LONG_POLL_SECS): Boolean =
         repo.pollGroup(groupIdHex, waitSecs = waitSecs)
-    }
 
     /**
      * ADR-0045 UX §6.2.8 item 4 — may this screen offer a call?

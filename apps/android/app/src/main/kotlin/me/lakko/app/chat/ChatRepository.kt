@@ -73,6 +73,16 @@ private const val POLL_ALL_CONCURRENCY: Int = 3
  *  group on this device has ended, so there is nothing to hold open). */
 private const val MILLIS_PER_SECOND: Long = 1_000L
 
+/** ADR-0050 section 2.8 — how long [ChatRepository.admitDevice] waits for the
+ *  new device's KeyPackage to appear in the directory, and how often it looks.
+ *  The fresh device publishes it after it has landed a session, which includes
+ *  a proof-of-work solve. */
+private const val ADMIT_DEVICE_WAIT_MS: Long = 180_000L
+private const val ADMIT_DEVICE_POLL_MS: Long = 3_000L
+
+/** SharedPreferences file holding the ADR-0050 device-mailbox cursor. */
+private const val DEVICE_MAILBOX_PREFS: String = "lakko-device-mailbox"
+
 /**
  * In-memory + on-disk state holder for the user's MLS chats.
  *
@@ -166,6 +176,15 @@ public class ChatRepository(
         CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private val canonicalIdentity = AtomicReference<Identity?>(null)
+
+    /**
+     * ADR-0050 — the ACCOUNT identity (phrase-seeded), kept beside the DEVICE
+     * identity [canonicalIdentity] for what is about the person rather than a
+     * leaf: invite capabilities and their revocation. Every group, every
+     * KeyPackage and the MLS snapshot use [canonicalIdentity], which since
+     * ADR-0050 is this device's bound leaf identity.
+     */
+    private val accountIdentity = AtomicReference<Identity?>(null)
 
     /**
      * Account id (base64) of the session that bootstrapped this
@@ -358,17 +377,19 @@ public class ChatRepository(
                             "refusing to overwrite it for a KeyPackage"
                     }
                     val blob = session.identity.snapshotStorage()
-                    snapshotStore.putSnapshot(
-                        applicationContext,
-                        session.account.accountIdB64,
-                        blob,
-                    )
+                    writeSnapshot(session.identity, session.account.accountIdB64, blob)
                 }
 
                 override suspend fun upload(session: KeyPackageSession, keyPackage: ByteArray) {
                     keyPackageDiscoveryFactory().use { client ->
                         client.setSessionToken(session.account.sessionToken)
-                        client.uploadKeyPackage(session.account.accountId, keyPackage)
+                        // ADR-0050: the directory row is keyed by this device's
+                        // leaf key.
+                        client.uploadKeyPackage(
+                            session.account.accountId,
+                            keyPackage,
+                            session.identity.signaturePublicKey(),
+                        )
                     }
                 }
             },
@@ -412,15 +433,37 @@ public class ChatRepository(
             // attaching the new Identity.
             wipeInMemoryState()
         }
-        // ADR-0017: the canonical AccountIdentity is seeded from the
-        // stable BIP39 phrase seed, NOT the password export key.
-        val identity = Identity.fromSeed(secrets.accountIdentitySeed)
+        // ADR-0017: the AccountIdentity is seeded from the stable BIP39
+        // phrase seed, NOT the password export key.
+        val account = Identity.fromSeed(secrets.accountIdentitySeed)
+        // ADR-0050: every conversation leaf is this device's identity, bound to
+        // the account key. A missing device seed falls back to a second unbound
+        // instance of the account identity (the pre-ADR-0050 behaviour).
+        val identity = me.lakko.app.auth.SessionIdentities.deviceIdentity(
+            applicationContext,
+            newAccountIdB64,
+            account,
+        ) ?: Identity.fromSeed(secrets.accountIdentitySeed)
         // Restore the snapshot — best-effort. The Identity is
         // valid even if the restore fails (we just lose the
         // prior MLS state, peers re-bootstrap).
         val restoreResult = runCatching {
             val blob = snapshotStore.getSnapshot(applicationContext, newAccountIdB64)
-            if (blob != null) {
+            // ADR-0050 — a snapshot taken under another leaf identity (every
+            // pre-ADR-0050 snapshot, a snapshot restored from another device's
+            // backup) must not be restored: `restoreStorage` replaces the whole
+            // provider with groups signed by a key this identity does not hold.
+            // Start empty; the next persist overwrites it under the right key.
+            val recordedLeaf = snapshotStore.getSnapshotLeafKey(applicationContext, newAccountIdB64)
+            if (blob != null &&
+                (recordedLeaf == null || !recordedLeaf.contentEquals(identity.signaturePublicKey()))
+            ) {
+                android.util.Log.w(
+                    "ChatRepository",
+                    "MLS snapshot belongs to another leaf identity; starting empty",
+                )
+                false
+            } else if (blob != null) {
                 identity.restoreStorage(blob)
                 true
             } else {
@@ -438,6 +481,7 @@ public class ChatRepository(
         snapshotUnreadable.set(restoreResult.isFailure)
 
         canonicalIdentity.set(identity)
+        accountIdentity.getAndSet(account)?.close()
         currentAccountIdB64.set(newAccountIdB64)
 
         // Eagerly rebuild `Group` handles for every previously-
@@ -580,46 +624,58 @@ public class ChatRepository(
                 "ChatRepository not bootstrapped — call bootstrap() first",
             )
 
-        val keyPackageBytes = discovery.fetchKeyPackage(recipientAccountId)
-            ?: throw ChatError(
+        // ADR-0050 — every device KeyPackage of the recipient: a person is
+        // added as all of their devices, each its own leaf.
+        val recipientDevices = discovery.fetchKeyPackages(recipientAccountId)
+        if (recipientDevices.isNullOrEmpty()) {
+            throw ChatError(
                 "recipient has no KeyPackage uploaded yet",
-                IllegalStateException("fetchKeyPackage returned null"),
+                IllegalStateException("fetchKeyPackages returned no device"),
             )
+        }
+        val devices = recipientDevices + ownOtherDevices(identity)
 
         // G-37 — the group does not exist yet, so NO other operation can be
         // targeting it and there is no per-group lock to take until its id
         // exists. Only the shared provider needs guarding here.
         val created = providerLock.withLock {
             val group = Group.create(identity)
+            // ADR-0050 section 2.6 — every device of the recipient AND this
+            // account's other devices in ONE commit. The founder is the only
+            // member, so the commit fans out to nobody and is dropped; the ONE
+            // Welcome carries every added leaf's secrets and goes, byte-identical,
+            // to each leaf's own mailbox. One commit per device would strand
+            // every device but the last at a Welcome epoch nobody could reach.
             val addResult = try {
-                group.addMemberFromWire(identity, keyPackageBytes)
+                group.addMembersFromWire(identity, devices.map { it.keyPackage })
             } catch (e: FfiException) {
-                throw ChatError("addMemberFromWire failed", e)
+                group.close()
+                throw ChatError("addMembersFromWire failed", e)
             }
-            // commit dropped — group is one-of-one before the
-            // add, no broadcast needed.
-
             val welcomeEnvelope = wrapEnvelope(KIND_WELCOME, addResult.welcome)
-            val recipientPseudonym =
+            val pseudonyms = devices.map { device ->
+                val leafKey = uniffi.lakko_ffi_uniffi.keyPackageSignatureKey(device.keyPackage)
                 uniffi.lakko_ffi_uniffi.IdentityPseudonym
-                    .fromIdentity(recipientSignaturePubkey)
+                    .fromIdentity(leafKey)
                     .use { it.asBytes() }
+            }
             CreatedGroup(
                 group = group,
                 groupId = group.groupId(),
-                recipientPseudonym = recipientPseudonym,
+                recipientPseudonyms = pseudonyms,
                 welcomeEnvelope = welcomeEnvelope,
             )
         }
 
-        // G-37 — the DS mailbox publish runs OUTSIDE the provider lock. Its
-        // position relative to the registration + persist below is unchanged: a
+        // G-37 — the DS mailbox publishes run OUTSIDE the provider lock. A
         // publish failure still throws before the group is registered or
         // persisted, exactly as when one mutex covered the whole block.
-        try {
-            dsClient.publishMailbox(created.recipientPseudonym, created.welcomeEnvelope)
-        } catch (e: Throwable) {
-            throw ChatError("DS publishMailbox (Welcome) failed", e)
+        for (pseudonym in created.recipientPseudonyms) {
+            try {
+                dsClient.publishMailbox(pseudonym, created.welcomeEnvelope)
+            } catch (e: Throwable) {
+                throw ChatError("DS publishMailbox (Welcome) failed", e)
+            }
         }
 
         val groupIdHex = DsClient.pseudonymHex(created.groupId)
@@ -668,9 +724,30 @@ public class ChatRepository(
     private class CreatedGroup(
         val group: Group,
         val groupId: ByteArray,
-        val recipientPseudonym: ByteArray,
+        val recipientPseudonyms: List<ByteArray>,
         val welcomeEnvelope: ByteArray,
     )
+
+    /**
+     * ADR-0050 — this account's OTHER devices' KeyPackages, so a group this
+     * device creates includes the person's other devices from the first epoch.
+     * Best-effort: without a session or on a directory failure it is empty, and
+     * the re-admission arm adds the missing devices later.
+     */
+    private suspend fun ownOtherDevices(identity: Identity): List<me.lakko.app.discovery.DeviceKeyPackage> {
+        val account = keyPackageAccount.get() ?: return emptyList()
+        val ownKey = identity.signaturePublicKey()
+        return try {
+            discovery.fetchKeyPackages(account.accountId)
+                .orEmpty()
+                .filterNot { it.deviceId.contentEquals(ownKey) }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            android.util.Log.w("ChatRepository", "own devices lookup failed; adding this device only", e)
+            emptyList()
+        }
+    }
 
     /**
      * Join an MLS group from a `Welcome` blob (received via
@@ -1039,7 +1116,10 @@ public class ChatRepository(
     public fun memberCount(groupIdHex: String): Int? {
         val record = groups[groupIdHex] ?: return null
         return try {
-            record.group.memberCount().toInt()
+            // ADR-0050 — PEOPLE, not leaves: a 1x1 between two people with
+            // three devices each is still a 1x1.
+            val people = personKeysOf(record.group.members()).size
+            people
         } catch (cause: Throwable) {
             android.util.Log.w("ChatRepository", "memberCount failed for $groupIdHex", cause)
             null
@@ -1056,11 +1136,41 @@ public class ChatRepository(
     public fun members(groupIdHex: String): List<GroupMember>? {
         val record = groups[groupIdHex] ?: return null
         return try {
-            record.group.members()
+            peopleRows(record.group)
         } catch (cause: Throwable) {
             android.util.Log.w("ChatRepository", "members failed for $groupIdHex", cause)
             null
         }
+    }
+
+    /**
+     * ADR-0050 — the roster collapsed to one row per PERSON: `signaturePublicKey`
+     * and `accountKey` are the person's account key (what roles, names and
+     * authorship key on), `leafIndex` is this device's own leaf for this
+     * account's row and the person's first leaf otherwise. Removing a row
+     * removes every leaf of the person ([removeMemberFromGroup] fans out).
+     */
+    private fun peopleRows(group: Group): List<GroupMember> {
+        val leaves = group.members()
+        val ownLeaf = try {
+            group.ownLeafIndex()
+        } catch (_: Throwable) {
+            null
+        }
+        val ownPerson = leaves.firstOrNull { it.leafIndex == ownLeaf }?.let { personKeyOf(it) }
+        val rows = LinkedHashMap<String, GroupMember>()
+        for (leaf in leaves) {
+            val person = personKeyOf(leaf)
+            val key = outboxB64(person)
+            if (rows.containsKey(key)) continue
+            val isOwn = ownPerson != null && person.contentEquals(ownPerson)
+            rows[key] = GroupMember(
+                leafIndex = if (isOwn && ownLeaf != null) ownLeaf else leaf.leafIndex,
+                signaturePublicKey = person,
+                accountKey = person,
+            )
+        }
+        return rows.values.toList()
     }
 
     /**
@@ -1417,22 +1527,88 @@ public class ChatRepository(
             ?: throw IllegalStateException(
                 "ChatRepository not bootstrapped — call bootstrap() first",
             )
-        val keyPackageBytes = discovery.fetchKeyPackage(recipientAccountId)
-            ?: throw ChatError(
+        // ADR-0050 — a person is added as ALL of their devices, each its own
+        // leaf: one proposal (or, in a table-less group, one direct commit) per
+        // device KeyPackage. The outcome reported is the last device's; every
+        // earlier one either landed or threw.
+        val devices = discovery.fetchKeyPackages(recipientAccountId)
+        if (devices.isNullOrEmpty()) {
+            throw ChatError(
                 "recipient has no KeyPackage uploaded yet",
-                IllegalStateException("fetchKeyPackage returned null"),
+                IllegalStateException("fetchKeyPackages returned no device"),
             )
+        }
+        var outcome: MembershipOutcome? = null
+        for (device in devices) {
+            outcome = addKeyPackageToGroup(groupIdHex, identity, device.keyPackage, skipIfPresent = false)
+                ?: outcome
+        }
+        outcome = outcome ?: throw ChatError(
+            "every device of the recipient is already in the group",
+            IllegalStateException("no add performed"),
+        )
+        // ADR-0042 — re-broadcast the CURRENT push-routing secret so the
+        // newly-added member learns it on their next poll (no-op if this
+        // device holds no secret; idempotent for existing members). Runs
+        // AFTER the add commit so the new member is already in the group.
+        // Fire-and-forget. A SUCCESS flags the secret distributed, so this
+        // path also heals a mint whose own broadcast failed. A FAILURE flags
+        // the row PENDING, so the launch / chat-open sweep re-broadcasts it
+        // until one lands. Without that rewind a group whose mint DID land
+        // was already flagged distributed, so nothing ever re-sent and the
+        // newly-added member never learned the secret at all — they defer
+        // forever (never a fallback to the leaky group_id). Only the OWNER's
+        // sweep acts on the pending flag; an ADMIN may also reach this path
+        // (ADR-0022 lets an admin add members) and its mark is inert.
+        // ADR-0045 — only when the ADD actually LANDED. On the proposal path
+        // nobody has been added yet, so there is no new member to teach the
+        // secret to; the redistribute is driven by whichever device sweeps the
+        // proposal (see [sweepIfCommitter]).
+        if (outcome is MembershipOutcome.Committed) {
+            redistributePushRoutingBestEffort(groupIdHex)
+            // ADR-0048 §2 — the add landed, so the newcomer needs this
+            // device's profile. The direct path has no before/after roster
+            // diff of its own; a Committed add IS growth.
+            profileRepublish.onGrowth(groupIdHex)
+        }
+        return outcome
+    }
+
+    /**
+     * ADR-0050 — add ONE device (by its published KeyPackage) to a live group:
+     * a proposal in a role-table group (ADR-0045), a direct commit with its
+     * Welcome sent to the device's own mailbox otherwise. With [skipIfPresent]
+     * the call resolves `null` when a leaf with that signature key is already
+     * in the roster (the device fan-outs); otherwise the core refuses a
+     * duplicate.
+     */
+    private suspend fun addKeyPackageToGroup(
+        groupIdHex: String,
+        identity: Identity,
+        keyPackageBytes: ByteArray,
+        skipIfPresent: Boolean,
+    ): MembershipOutcome? {
+        val deviceKey = try {
+            uniffi.lakko_ffi_uniffi.keyPackageSignatureKey(keyPackageBytes)
+        } catch (e: FfiException) {
+            throw ChatError("keyPackageSignatureKey failed", e)
+        }
         // G-37 — per-group lock spans the WHOLE op (create-commit, durable
         // record, both publishes), so two membership commits on the SAME group
         // still serialise exactly as before: A is on the wire before B is even
         // created. The provider lock covers only the provider-touching prefix.
-        val outcome = groupLock(groupIdHex).withLock {
+        return groupLock(groupIdHex).withLock {
             val publishStep = providerLock.withLock {
                 val record = groups[groupIdHex]
                     ?: throw ChatError(
                         "no live Group handle for $groupIdHex",
                         IllegalStateException("missing group record"),
                     )
+                // Re-checked under the lock: a poll may have applied the very
+                // commit that admitted this device while we waited.
+                if (skipIfPresent && leafIndexOfSignatureKey(record.group, deviceKey) != null) {
+                    return@withLock suspend { null as MembershipOutcome? }
+                }
                 // ADR-0045 obligation 5 — a group carrying an ADR-0022 role
                 // table routes membership through PROPOSALS. The direct path
                 // below stays byte-for-byte for a group with NO role table,
@@ -1461,9 +1637,9 @@ public class ChatRepository(
                         } catch (e: Throwable) {
                             throw ChatError("DS publishGroup (add-member proposal) failed", e)
                         }
-                        noteOwnRequestBestEffort(groupIdHex, "add:" + outboxB64(recipientSignaturePubkey))
+                        noteOwnRequestBestEffort(groupIdHex, "add:" + outboxB64(deviceKey))
                         publishThreadList()
-                        MembershipOutcome.Proposed(publish.id) as MembershipOutcome
+                        MembershipOutcome.Proposed(publish.id) as MembershipOutcome?
                     }
                 }
                 // 1. create-commit — eager-merges epoch N -> N+1 in the in-memory provider.
@@ -1493,9 +1669,11 @@ public class ChatRepository(
                     reset = { resetGroupToDurableSnapshotOrThrow(groupIdHex) },
                 ) {
                     val welcomeEnvelope = wrapEnvelope(KIND_WELCOME, addResult.welcome)
+                    // ADR-0050: the Welcome is sealed to THIS leaf's KeyPackage,
+                    // so it goes to the leaf's own mailbox, never the account's.
                     val recipientPseudonym =
                         uniffi.lakko_ffi_uniffi.IdentityPseudonym
-                            .fromIdentity(recipientSignaturePubkey)
+                            .fromIdentity(deviceKey)
                             .use { it.asBytes() }
                     val entry = PendingCommitEntry(
                         id = newOutboxEntryId(),
@@ -1539,36 +1717,11 @@ public class ChatRepository(
                     // 4. both artifacts on the wire -> ack (best-effort).
                     ackCommitBestEffort(entry.id, commitPublish.id, welcomePublish.id)
                     publishThreadList()
-                    MembershipOutcome.Committed(commitPublish.id, welcomePublish.id) as MembershipOutcome
+                    MembershipOutcome.Committed(commitPublish.id, welcomePublish.id) as MembershipOutcome?
                 }
             }
             publishStep()
         }
-        // ADR-0042 — re-broadcast the CURRENT push-routing secret so the
-        // newly-added member learns it on their next poll (no-op if this
-        // device holds no secret; idempotent for existing members). Runs
-        // AFTER the add commit so the new member is already in the group.
-        // Fire-and-forget. A SUCCESS flags the secret distributed, so this
-        // path also heals a mint whose own broadcast failed. A FAILURE flags
-        // the row PENDING, so the launch / chat-open sweep re-broadcasts it
-        // until one lands. Without that rewind a group whose mint DID land
-        // was already flagged distributed, so nothing ever re-sent and the
-        // newly-added member never learned the secret at all — they defer
-        // forever (never a fallback to the leaky group_id). Only the OWNER's
-        // sweep acts on the pending flag; an ADMIN may also reach this path
-        // (ADR-0022 lets an admin add members) and its mark is inert.
-        // ADR-0045 — only when the ADD actually LANDED. On the proposal path
-        // nobody has been added yet, so there is no new member to teach the
-        // secret to; the redistribute is driven by whichever device sweeps the
-        // proposal (see [sweepIfCommitter]).
-        if (outcome is MembershipOutcome.Committed) {
-            redistributePushRoutingBestEffort(groupIdHex)
-            // ADR-0048 §2 — the add landed, so the newcomer needs this
-            // device's profile. The direct path has no before/after roster
-            // diff of its own; a Committed add IS growth.
-            profileRepublish.onGrowth(groupIdHex)
-        }
-        return outcome
     }
 
     /**
@@ -1647,8 +1800,37 @@ public class ChatRepository(
                 android.util.Log.w("ChatRepository", "push routing: rotation failed", cause)
             },
             publishRemove = {
-                publishRemoveCommit(groupIdHex, identity, leafIndex).also {
-                    removalLanded = it is MembershipOutcome.Committed
+                // ADR-0050 — removing a member removes the PERSON: every leaf of
+                // the account the named leaf belongs to (leaving removes every
+                // own device). Leaves are re-resolved by key before each step
+                // because a direct commit renumbers the tree.
+                val targets = groups[groupIdHex]?.let { record ->
+                    providerLock.withLock {
+                        val leaves = leavesOfSameAccount(record.group, leafIndex)
+                        val roster = rosterOf(record.group)
+                        leaves.mapNotNull { leaf ->
+                            roster.firstOrNull { it.leafIndex == leaf }?.signaturePublicKey
+                        }
+                    }
+                }.orEmpty()
+                if (targets.size <= 1) {
+                    publishRemoveCommit(groupIdHex, identity, leafIndex).also {
+                        removalLanded = it is MembershipOutcome.Committed
+                    }
+                } else {
+                    var last: MembershipOutcome? = null
+                    for (key in targets) {
+                        val leaf = groups[groupIdHex]?.let { record ->
+                            providerLock.withLock { leafIndexOfSignatureKey(record.group, key) }
+                        } ?: continue
+                        last = publishRemoveCommit(groupIdHex, identity, leaf).also {
+                            if (it is MembershipOutcome.Committed) removalLanded = true
+                        }
+                    }
+                    last ?: throw ChatError(
+                        "no leaf of that member is in the group any more",
+                        IllegalStateException("remove targets vanished"),
+                    )
                 }
             },
         )
@@ -1831,7 +2013,9 @@ public class ChatRepository(
             return emptyList()
         }
         val rosterKeys = try {
-            record.group.members().map { it.signaturePublicKey }
+            // ADR-0050: an invite issuer signs with the account key, so the
+            // roster check matches both leaf and person keys.
+            record.group.members().flatMap { listOf(it.signaturePublicKey, personKeyOf(it)) }
         } catch (e: Throwable) {
             emptyList()
         }
@@ -1985,7 +2169,8 @@ public class ChatRepository(
      * the admin gate is the security boundary. `0` = never expires.
      */
     public suspend fun createGroupInviteLink(groupIdHex: String): String {
-        val identity = canonicalIdentity.get()
+        // ADR-0050: an invite capability is the person's, signed by the account key.
+        val identity = accountIdentity.get() ?: canonicalIdentity.get()
             ?: throw IllegalStateException(
                 "ChatRepository not bootstrapped — call bootstrap() first",
             )
@@ -2028,7 +2213,7 @@ public class ChatRepository(
      * row was revoked, `false` for an inline / malformed link (nothing to do).
      */
     public suspend fun revokeGroupInviteLink(link: String): Boolean {
-        val identity = canonicalIdentity.get()
+        val identity = accountIdentity.get() ?: canonicalIdentity.get()
             ?: throw IllegalStateException(
                 "ChatRepository not bootstrapped — call bootstrap() first",
             )
@@ -2961,7 +3146,9 @@ public class ChatRepository(
     private fun signatureKeyForLeaf(group: Group, leafIndex: UInt?): ByteArray? {
         if (leafIndex == null) return null
         return try {
-            group.members().firstOrNull { it.leafIndex == leafIndex }?.signaturePublicKey
+            // ADR-0050 — authority is the PERSON's: the role table names
+            // account keys, so the sender leaf resolves to its account key.
+            group.members().firstOrNull { it.leafIndex == leafIndex }?.let { personKeyOf(it) }
         } catch (cause: Throwable) {
             android.util.Log.w("ChatRepository", "push routing: roster read failed", cause)
             null
@@ -3251,9 +3438,17 @@ public class ChatRepository(
      *   holds the connection — 1.15e7's continuous-polling
      *   `LaunchedEffect` passes `30`.
      */
-    public suspend fun pollGroup(groupIdHex: String, waitSecs: Int = 0) {
-        val identity = canonicalIdentity.get() ?: return
-        val record = groups[groupIdHex] ?: return
+    /**
+     * Returns `true` when this call fetched and applied a batch itself. `false`
+     * means another poll of the same group was in flight (or moved the cursor
+     * first), so nothing was fetched here: a caller looping on this must WAIT
+     * before calling again, or the loop spins on the in-flight latch for the
+     * whole 30 s window of the other poll — on the chat screen that is the main
+     * thread, and it showed up as an ANR on opening a chat.
+     */
+    public suspend fun pollGroup(groupIdHex: String, waitSecs: Int = 0): Boolean {
+        val identity = canonicalIdentity.get() ?: return false
+        val record = groups[groupIdHex] ?: return false
 
         // ADR-0045 UX §6.2.8 item 1 — the poll must STOP for a group this
         // device is no longer in, and stopping is not an optimisation.
@@ -3276,7 +3471,7 @@ public class ChatRepository(
         // The cursor is deliberately left where the last applied row put it
         // (§6.2.13): it costs nothing, and whether a rejoin wants it reset is
         // the rejoin path's question, not this one's.
-        if (readIsActive { record.group.isActive() } == false) return
+        if (readIsActive { record.group.isActive() } == false) return false
 
         // G-37 — the DS long poll (30 s on the live chat screen) used to be
         // awaited INSIDE the single repository-wide mutex. An open chat screen
@@ -3294,7 +3489,7 @@ public class ChatRepository(
         // guards the shared OpenMLS provider (against every OTHER group's MLS
         // work). Deliberately NOT held across the fetch, so a 30 s long poll
         // still blocks neither.
-        runSplitPoll(
+        val outcome = runSplitPoll(
             inFlight = record.pollInFlight,
             lock = groupLock(groupIdHex),
             providerLock = providerLock,
@@ -3444,6 +3639,17 @@ public class ChatRepository(
             // cannot read earlier epochs, so republish this device's profile
             // (throttled + jittered per group). Same key-set diff as the shrink
             // above, so a remove-and-add in one batch is still growth.
+            // ADR-0050 — remember the leaves that left, so the scheduled
+            // re-admission never puts back a device an admin removed.
+            currentAccountIdB64.get()?.let { account ->
+                DeviceReadmission.recordRemoved(
+                    applicationContext,
+                    account,
+                    groupIdHex,
+                    membersBeforePoll,
+                    membersAfterPoll,
+                )
+            }
             republishProfileIfGrown(
                 groupIdHex = groupIdHex,
                 previousMemberKeys = membersBeforePoll,
@@ -3452,6 +3658,11 @@ public class ChatRepository(
             )
             publishThreadList()
         }
+        // Nothing was fetched or applied by THIS call: the poll that was in
+        // flight (or that moved the cursor) runs its own tail. Re-running the
+        // sweep prelude and the re-admission check here would only burn the
+        // provider lock and FFI reads on a result that cannot have changed.
+        if (outcome != SplitPollOutcome.APPLIED) return false
         // ADR-0045 — the committer sweep runs at the TAIL of every poll, AFTER
         // [runSplitPoll] has released the per-group lock: the sweep takes that
         // same lock itself and holds it across its own two DS round-trips, and
@@ -3464,6 +3675,341 @@ public class ChatRepository(
         // role table, and for a candidate with nothing pending, so the common
         // case costs one short provider region.
         sweepIfCommitter(groupIdHex)
+        // ADR-0050 section 2.4 — the scheduled re-admission check, at most once
+        // per [DeviceReadmission.INTERVAL_MS] per chat. Best-effort: a failure
+        // is not a poll failure.
+        try {
+            readmitIfDue(groupIdHex)
+        } catch (cause: kotlinx.coroutines.CancellationException) {
+            throw cause
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "ADR-0050 re-admission check failed", cause)
+        }
+        return true
+    }
+
+    // -----------------------------------------------------------------
+    // ADR-0050 — per-device conversation leaves: the device mailbox, the
+    // pairing / removal fan-outs and the scheduled re-admission.
+    // -----------------------------------------------------------------
+
+    /**
+     * ADR-0050 section 2.7 — poll this DEVICE's mailbox: the pseudonym of the
+     * device leaf key, where Welcomes sealed to this device's KeyPackages
+     * arrive. Only Welcome envelopes are acted on; anything else advances the
+     * cursor. The cursor is persisted per account (its own DS queue).
+     */
+    public suspend fun pollDeviceMailbox(waitSecs: Int = 0): Unit = deviceMailboxLock.withLock {
+        pollDeviceMailboxLocked(waitSecs)
+    }
+
+    /** One device-mailbox poller at a time: two over one cursor would join the
+     *  same Welcome twice. */
+    private val deviceMailboxLock = Mutex()
+
+    private suspend fun pollDeviceMailboxLocked(waitSecs: Int) {
+        val identity = canonicalIdentity.get() ?: return
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        val prefs = applicationContext.getSharedPreferences(DEVICE_MAILBOX_PREFS, Context.MODE_PRIVATE)
+        val cursorKey = "cursor.v1:$accountIdB64"
+        val after = prefs.getLong(cursorKey, 0L)
+        val pseudonym = uniffi.lakko_ffi_uniffi.IdentityPseudonym
+            .fromIdentity(identity.signaturePublicKey())
+            .use { it.asBytes() }
+        val raw = dsClient.fetchMailbox(pseudonym, after = after, waitSecs = waitSecs)
+        // A session change during the long poll: this batch belongs to the
+        // previous identity's mailbox.
+        if (canonicalIdentity.get() !== identity) return
+        var cursor = after
+        for (message in raw.messages) {
+            val env = me.lakko.app.contacts.parseEnvelope(message.payload)
+            if (env is me.lakko.app.contacts.ParsedEnvelope.Welcome) {
+                try {
+                    joinGroupFromWelcome(env.body)
+                } catch (cause: kotlinx.coroutines.CancellationException) {
+                    throw cause
+                } catch (cause: Throwable) {
+                    android.util.Log.w("ChatRepository", "device mailbox: joining from a Welcome failed", cause)
+                }
+            }
+            cursor = message.id
+        }
+        if (cursor != after) prefs.edit().putLong(cursorKey, cursor).apply()
+    }
+
+    /** The hex ids of the groups this device holds a handle for. */
+    public fun joinedGroupIdsHex(): Set<String> = synchronized(groups) { groups.keys.toSet() }
+
+    /**
+     * ADR-0050 / docs/ux/second-device.md section 2 — whether the chat list
+     * shows the single "Synchronizing..." label: groups the pairing bundle
+     * named that this device has not joined yet, or a device that landed
+     * through a recovery route and holds no chat yet.
+     */
+    public fun isSynchronizing(): Boolean {
+        val joined = joinedGroupIdsHex()
+        val bundle = me.lakko.app.devices.StateBundle
+        if (bundle.pendingKnownGroups(applicationContext, joined) > 0) return true
+        return bundle.restoredAwaitingChats(applicationContext, joined.size)
+    }
+
+    /** What a device fan-out did, per chat. */
+    public data class DeviceFanOut(val offered: Int, val skipped: Int, val failed: Int)
+
+    /**
+     * ADR-0050 section 2.8 — admit a device this device just added to the
+     * DeviceGroup (QR pairing) to EVERY chat this device is in. Waits, bounded,
+     * for the new device's conversation KeyPackage to appear in the directory
+     * (it publishes it once it has landed a session), then per chat a
+     * self-service Add proposal swept here when this device is the acting
+     * committer, or a direct commit on a table-less group.
+     *
+     * @throws ChatError when the KeyPackage never appeared within the wait (the
+     *   device is then admitted by a later re-admission check).
+     */
+    public suspend fun admitDevice(deviceKey: ByteArray): DeviceFanOut {
+        val identity = canonicalIdentity.get()
+            ?: throw IllegalStateException("ChatRepository not bootstrapped — call bootstrap() first")
+        val account = keyPackageAccount.get()
+            ?: throw IllegalStateException("admitDevice: no session")
+        val found = awaitDeviceKeyPackage(account.accountId, deviceKey)
+        return fanOut { groupIdHex ->
+            addKeyPackageToGroup(groupIdHex, identity, found, skipIfPresent = true)
+        }
+    }
+
+    /** Poll the directory until [deviceKey]'s KeyPackage is listed, bounded by
+     *  [ADMIT_DEVICE_WAIT_MS]. */
+    private suspend fun awaitDeviceKeyPackage(accountId: ByteArray, deviceKey: ByteArray): ByteArray {
+        val deadline = System.currentTimeMillis() + ADMIT_DEVICE_WAIT_MS
+        while (true) {
+            val hit = try {
+                discovery.fetchKeyPackages(accountId)
+                    ?.firstOrNull { it.deviceId.contentEquals(deviceKey) }
+                    ?.keyPackage
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (cause: Throwable) {
+                null
+            }
+            if (hit != null) return hit
+            if (System.currentTimeMillis() >= deadline) {
+                throw ChatError(
+                    "the new device has not published a KeyPackage yet; it will be admitted to your chats later",
+                    IllegalStateException("device KeyPackage absent"),
+                )
+            }
+            delay(ADMIT_DEVICE_POLL_MS)
+        }
+    }
+
+    /**
+     * ADR-0050 section 2.10 — retire a device just removed from the DeviceGroup
+     * from EVERY chat this device is in (its one leaf per chat, the account's
+     * other devices untouched), then delete its directory KeyPackage.
+     */
+    public suspend fun retireDevice(deviceKey: ByteArray): DeviceFanOut {
+        val identity = canonicalIdentity.get()
+            ?: throw IllegalStateException("ChatRepository not bootstrapped — call bootstrap() first")
+        val account = keyPackageAccount.get()
+        val result = fanOut { groupIdHex -> retireLeafFromGroup(groupIdHex, identity, deviceKey) }
+        // The directory row last: a peer that fetched it meanwhile only produced
+        // a Welcome nobody will open.
+        if (account != null) {
+            try {
+                keyPackageDiscoveryFactory().use { client ->
+                    client.setSessionToken(account.sessionToken)
+                    client.deleteKeyPackage(deviceKey)
+                }
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (cause: Throwable) {
+                android.util.Log.w("ChatRepository", "ADR-0050 retire device: directory KeyPackage not deleted", cause)
+            }
+        }
+        return result
+    }
+
+    /** Fire-and-forget [admitDevice] on a process-lifetime scope: the wait for
+     *  the new device's KeyPackage outlives the pairing screen. */
+    public fun requestAdmitDevice(deviceKey: ByteArray) {
+        val key = deviceKey.copyOf()
+        keyPackageScope.launch {
+            try {
+                val result = admitDevice(key)
+                android.util.Log.i("ChatRepository", "ADR-0050 admit device: $result")
+            } catch (cause: Throwable) {
+                android.util.Log.w("ChatRepository", "ADR-0050 admit device: fan-out failed", cause)
+            }
+        }
+    }
+
+    /** Fire-and-forget [retireDevice] on a process-lifetime scope. */
+    public fun requestRetireDevice(deviceKey: ByteArray) {
+        val key = deviceKey.copyOf()
+        keyPackageScope.launch {
+            try {
+                val result = retireDevice(key)
+                android.util.Log.i("ChatRepository", "ADR-0050 retire device: $result")
+            } catch (cause: Throwable) {
+                android.util.Log.w("ChatRepository", "ADR-0050 retire device: fan-out failed", cause)
+            }
+        }
+    }
+
+    /** Run [step] over every active group; a proposal is swept at once. */
+    private suspend fun fanOut(step: suspend (String) -> MembershipOutcome?): DeviceFanOut {
+        var offered = 0
+        var skipped = 0
+        var failed = 0
+        for (groupIdHex in joinedGroupIdsHex()) {
+            if (isGroupActive(groupIdHex) == false) {
+                skipped += 1
+                continue
+            }
+            try {
+                val outcome = step(groupIdHex)
+                if (outcome == null) {
+                    skipped += 1
+                    continue
+                }
+                offered += 1
+                if (outcome is MembershipOutcome.Proposed) sweepIfCommitter(groupIdHex)
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (cause: Throwable) {
+                failed += 1
+                android.util.Log.w("ChatRepository", "ADR-0050 device fan-out: chat skipped $groupIdHex", cause)
+            }
+        }
+        return DeviceFanOut(offered, skipped, failed)
+    }
+
+    /**
+     * ADR-0050 — retire ONE leaf (by its signature key) from [groupIdHex]. Unlike
+     * [removeMemberFromGroup], which removes the PERSON, the account's other
+     * devices stay. `null` when no leaf holds that key. A direct commit on a
+     * table-less group is followed by the ADR-0043 rotation like any removal.
+     */
+    private suspend fun retireLeafFromGroup(
+        groupIdHex: String,
+        identity: Identity,
+        leafKey: ByteArray,
+    ): MembershipOutcome? {
+        val record = groups[groupIdHex] ?: return null
+        val leaf = providerLock.withLock { leafIndexOfSignatureKey(record.group, leafKey) } ?: return null
+        var removalLanded = false
+        val step = rotationStepOrNull(groupIdHex)
+        return GroupPushRouting.publishRemoveThenRotate(
+            scope = pushScope,
+            rotate = if (step == null) {
+                null
+            } else {
+                suspend {
+                    if (removalLanded) step() else GroupPushRouting.RotationOutcome.SKIP_NO_SHRINK
+                }
+            },
+            onRotationError = { cause ->
+                android.util.Log.w("ChatRepository", "push routing: rotation failed", cause)
+            },
+            publishRemove = {
+                publishRemoveCommit(groupIdHex, identity, leaf).also {
+                    removalLanded = it is MembershipOutcome.Committed
+                }
+            },
+        )
+    }
+
+    /**
+     * ADR-0050 section 2.4 — re-check the device lists of the accounts in
+     * [groupIdHex] against its roster: propose an Add for a listed device with
+     * no leaf, and — for this account only — a Remove for a leaf whose
+     * directory row is gone (`forgetDevice`). Accounts resolve to directory ids
+     * through this device's own account and its accepted contacts; a member
+     * that is neither is left as is.
+     */
+    private suspend fun readmitIfDue(groupIdHex: String) {
+        val identity = canonicalIdentity.get() ?: return
+        val account = keyPackageAccount.get() ?: return
+        val record = groups[groupIdHex] ?: return
+        if (isGroupActive(groupIdHex) == false) return
+        if (!DeviceReadmission.takeSlot(groupIdHex, System.currentTimeMillis())) return
+        val snapshot = providerLock.withLock {
+            val leaves = try {
+                record.group.members()
+            } catch (_: Throwable) {
+                null
+            }
+            leaves?.let { it to ownIdentity(record.group) }
+        } ?: return
+        val (leaves, ownPerson) = snapshot
+        if (ownPerson == null) return
+        val roster = leaves.map {
+            DeviceReadmission.RosterLeaf(
+                leafKey = DsClient.pseudonymHex(it.signaturePublicKey),
+                personKey = outboxB64(personKeyOf(it)),
+            )
+        }
+        val people = roster.map { it.personKey }.toSet()
+        val lookups = mutableListOf(ownPerson to account.accountId)
+        for (c in me.lakko.app.contacts.AcceptedContactsStore.load(applicationContext)) {
+            val id = c.request.fromAccountId ?: continue
+            val person = outboxB64(c.request.fromPubkey)
+            if (person in people && person != ownPerson) lookups += person to id
+        }
+        val accounts = lookups.map { (person, id) ->
+            val devices = try {
+                discovery.fetchKeyPackages(id).orEmpty().map {
+                    DeviceReadmission.DirectoryDevice(DsClient.pseudonymHex(it.deviceId), it.keyPackage)
+                }
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (_: Throwable) {
+                null
+            }
+            DeviceReadmission.AccountDevices(person, devices)
+        }
+        val plan = DeviceReadmission.plan(
+            roster = roster,
+            ownPersonKey = ownPerson,
+            accounts = accounts,
+            removed = DeviceReadmission.removed(applicationContext, account.accountIdB64, groupIdHex),
+        )
+        if (plan.admit.isEmpty() && plan.retire.isEmpty()) return
+        var proposed = 0
+        for (d in plan.admit) {
+            try {
+                if (addKeyPackageToGroup(groupIdHex, identity, d.keyPackage, skipIfPresent = true) != null) {
+                    proposed += 1
+                }
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (cause: Throwable) {
+                android.util.Log.w("ChatRepository", "ADR-0050 re-admission: add not proposed", cause)
+            }
+        }
+        val ownLeafHex = DsClient.pseudonymHex(identity.signaturePublicKey())
+        for (leafHex in plan.retire) {
+            // Never this device's own leaf: its directory row can be missing only
+            // because its own KeyPackage upload has not landed yet (session start
+            // races the first poll), and retiring it would evict this device.
+            if (leafHex == ownLeafHex) continue
+            val key = hexToBytes(leafHex) ?: continue
+            try {
+                if (retireLeafFromGroup(groupIdHex, identity, key) != null) proposed += 1
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (cause: Throwable) {
+                android.util.Log.w("ChatRepository", "ADR-0050 re-admission: retire not proposed", cause)
+            }
+        }
+        if (proposed > 0) {
+            android.util.Log.i(
+                "ChatRepository",
+                "ADR-0050 re-admission: ${plan.admit.size} to admit, ${plan.retire.size} to retire in $groupIdHex",
+            )
+            sweepIfCommitter(groupIdHex)
+        }
     }
 
     /**
@@ -3523,12 +4069,14 @@ public class ChatRepository(
      * full-wipe path. Called from `AuthRepository.logout`.
      */
     public fun clear() {
+        DeviceReadmission.clearSlots()
         wipeInMemoryState()
         localUnread.clear()
         keyPackageAccount.set(null)
         snapshotUnreadable.set(false)
         currentAccountIdB64.set(null)
         canonicalIdentity.set(null)
+        accountIdentity.getAndSet(null)?.close()
         mutableState.value = ChatRepositoryState()
     }
 
@@ -3540,6 +4088,33 @@ public class ChatRepository(
     public fun forgetDevice() {
         val accountIdB64 = currentAccountIdB64.get()
         val rawAccountId = keyPackageAccount.get()?.accountId
+        // ADR-0050 section 2.10 — take this device's KeyPackage out of the
+        // directory, with the values captured before the wipe below: the
+        // account's other devices retire this device's leaves from every chat
+        // when their scheduled check sees the row gone, and nobody proposes a
+        // Welcome to a device that no longer exists. Launched (this entry point
+        // is not suspending); it uses only the captured key and token.
+        val ownLeafKey = try {
+            canonicalIdentity.get()?.signaturePublicKey()
+        } catch (_: Throwable) {
+            null
+        }
+        val token = keyPackageAccount.get()?.sessionToken
+        if (ownLeafKey != null && token != null) {
+            keyPackageScope.launch {
+                try {
+                    keyPackageDiscoveryFactory().use { client ->
+                        client.setSessionToken(token)
+                        client.deleteKeyPackage(ownLeafKey)
+                    }
+                } catch (cause: Throwable) {
+                    android.util.Log.w("ChatRepository", "forgetDevice: directory KeyPackage not deleted", cause)
+                }
+            }
+        }
+        if (accountIdB64 != null) {
+            DeviceReadmission.clearForAccount(applicationContext, accountIdB64)
+        }
         clear()
         // ADR-0048 — the names learned on this device and this account's own
         // profile go with the device.
@@ -3650,6 +4225,7 @@ public class ChatRepository(
         dsClient.close()
         discovery.close()
         canonicalIdentity.getAndSet(null)?.close()
+        accountIdentity.getAndSet(null)?.close()
         synchronized(groups) {
             for (rec in groups.values) rec.group.close()
             groups.clear()
@@ -3724,7 +4300,7 @@ public class ChatRepository(
         val accountIdB64 = currentAccountIdB64.get() ?: return
         try {
             val blob = identity.snapshotStorage()
-            snapshotStore.putSnapshot(applicationContext, accountIdB64, blob)
+            writeSnapshot(identity, accountIdB64, blob)
             snapshotUnreadable.set(false)
         } catch (_: Throwable) {
             // Best-effort. 1.15d7 will plumb a `tracing`-
@@ -3788,8 +4364,14 @@ public class ChatRepository(
                 "cannot persist MLS snapshot — no account id",
             )
         val blob = identity.snapshotStorage()
-        snapshotStore.putSnapshot(applicationContext, accountIdB64, blob)
+        writeSnapshot(identity, accountIdB64, blob)
         snapshotUnreadable.set(false)
+    }
+
+    /** Write [blob] and record the leaf key it was taken under (ADR-0050). */
+    private fun writeSnapshot(identity: Identity, accountIdB64: String, blob: ByteArray) {
+        snapshotStore.putSnapshot(applicationContext, accountIdB64, blob)
+        snapshotStore.putSnapshotLeafKey(applicationContext, accountIdB64, identity.signaturePublicKey())
     }
 
     // -----------------------------------------------------------------
@@ -5529,12 +6111,20 @@ private class GroupRecord(
         membershipProposalSink: ((ProposalRecord, String) -> Unit)? = null,
         profileSink: ((MemberIdentity?, uniffi.lakko_ffi_uniffi.FfiProfile) -> Unit)? = null,
     ) {
+        // ADR-0050 — a message this PERSON sent from another device arrives as an
+        // incoming row (another leaf sealed it) but is ours: it renders on our
+        // side, exactly as if this device had sent it.
+        val ownPersonKey by lazy { ownIdentity(group) }
         for (event in events) {
             when (event) {
                 is IncomingChatEvent.Application -> messages.add(
                     ChatMessage(
                         messageId = event.messageId,
-                        direction = Direction.Incoming,
+                        direction = if (event.senderKey != null && event.senderKey == ownPersonKey) {
+                            Direction.Outgoing
+                        } else {
+                            Direction.Incoming
+                        },
                         text = event.text,
                         attachments = event.attachments,
                         createdAt = event.createdAt,

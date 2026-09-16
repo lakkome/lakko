@@ -94,7 +94,16 @@ public final class ContactsRepository: ObservableObject {
         if !persisted.isEmpty {
             state = state.with(accepted: persisted)
         }
+        // ADR-0050 section 2.9 — contacts carried by a pairing state bundle.
+        stateBundleObserver = NotificationCenter.default.addObserver(
+            forName: .lakkoStateBundleApplied, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let contacts = note.object as? [AcceptedContact], !contacts.isEmpty else { return }
+            Task { @MainActor in self?.mergeBundledContacts(contacts) }
+        }
     }
+
+    private var stateBundleObserver: NSObjectProtocol?
 
     // MARK: - Send
 
@@ -196,6 +205,10 @@ public final class ContactsRepository: ObservableObject {
         // never appears. Remember the failure so this poll's final state can
         // say so.
         var welcomeJoinFailure: String?
+        // ADR-0050 — this DEVICE's mailbox (Welcomes sealed to this device's
+        // KeyPackages), long-polled alongside the account mailbox.
+        async let deviceWelcomes = pollDeviceMailboxWelcomes(
+            accountIdB64: base64Encode(secrets.accountId), waitSecs: waitSecs)
         do {
             let client = clientFactory()
             let identity = try Identity.fromSeed(seed: secrets.accountIdentitySeed)
@@ -255,6 +268,15 @@ public final class ContactsRepository: ObservableObject {
                     continue
                 }
             }
+            for welcomeBytes in await deviceWelcomes {
+                guard let chatRepository else { break }
+                do {
+                    _ = try await chatRepository.joinGroupFromWelcome(welcomeBytes: welcomeBytes)
+                } catch {
+                    NSLog("contacts device mailbox: joining a chat from a Welcome failed: \(error)")
+                    welcomeJoinFailure = Self.welcomeJoinFailureMessage
+                }
+            }
             // Keep a join failure visible across the background long-poll
             // loop (whose next quiet poll would otherwise clear it within
             // seconds); a manual refresh is the user acknowledging it.
@@ -279,6 +301,50 @@ public final class ContactsRepository: ObservableObject {
                     ?? String(describing: error)
             )
         }
+    }
+
+    /// ADR-0050 — poll this DEVICE's mailbox (the pseudonym of the device
+    /// leaf key) and return the Welcome bodies found there, oldest first. Only
+    /// Welcomes are read from a device mailbox; the cursor advances past
+    /// everything and is persisted per account, since a Welcome consumed once
+    /// cannot be opened again. Any failure yields no Welcomes (the next poll
+    /// retries from the same cursor).
+    private func pollDeviceMailboxWelcomes(accountIdB64: String, waitSecs: Int) async -> [Data] {
+        guard let deviceKey = chatRepository?.ownDeviceLeafKey else { return [] }
+        let cursorKey = "me.lakko.contacts.device-mailbox-cursor.v1." + accountIdB64
+        let after = Int64(UserDefaults.standard.integer(forKey: cursorKey))
+        do {
+            let result = try await clientFactory().pollStrangerInbox(
+                mySignaturePubkey: deviceKey,
+                // No contact request is addressed to a device mailbox, so no
+                // real X25519 secret is needed; a request found here fails to
+                // open and is dropped.
+                myX25519Secret: Data(count: 32),
+                after: after,
+                waitSecs: waitSecs
+            )
+            if result.cursor > after {
+                UserDefaults.standard.set(Int(result.cursor), forKey: cursorKey)
+            }
+            return result.events.compactMap { event in
+                if case .welcome(_, let welcomeBytes, _) = event { return welcomeBytes }
+                return nil
+            }
+        } catch {
+            return []
+        }
+    }
+
+    /// ADR-0050 section 2.9 — merge the contacts carried by a pairing state
+    /// bundle: contacts not already present (by signature key) are appended.
+    /// Returns how many were added.
+    @discardableResult
+    public func mergeBundledContacts(_ contacts: [AcceptedContact]) -> Int {
+        let have = Set(state.accepted.map { $0.request.fromPubkey })
+        let fresh = contacts.filter { !have.contains($0.request.fromPubkey) }
+        guard !fresh.isEmpty else { return 0 }
+        state = state.with(accepted: state.accepted + fresh)
+        return fresh.count
     }
 
     // MARK: - Accept / decline (local-state mutations)

@@ -415,6 +415,23 @@ struct AppRoot: View {
 /// 1.14e9 adds InviteLanding; 1.14f adds Chats + per-Chat. The
 /// pattern mirrors Android's `SessionRoot` from 1.15d6 + the
 /// `SessionDestination` sealed hierarchy.
+/// Keeps one `ChatViewModel` per open chat alive across `SessionRoot` body
+/// re-evaluations. Not `@Published`: swapping the model is never a reason to
+/// re-render on its own, the destination change that opens a chat already is.
+@MainActor
+private final class ChatViewModelHolder: ObservableObject {
+    private var current: (groupIdHex: String, viewModel: ChatViewModel)?
+
+    func viewModel(for groupIdHex: String, make: () -> ChatViewModel) -> ChatViewModel {
+        if let current, current.groupIdHex == groupIdHex {
+            return current.viewModel
+        }
+        let made = make()
+        current = (groupIdHex, made)
+        return made
+    }
+}
+
 private struct SessionRoot: View {
     let account: SessionAccount
     let authRepository: AuthRepository
@@ -428,6 +445,11 @@ private struct SessionRoot: View {
 
     @StateObject private var contactsVM: ContactsViewModel
     @StateObject private var chatListVM: ChatListViewModel
+    /// The open chat's view model, held OUTSIDE `body`. `SessionRoot` re-renders
+    /// on every publish of the observed repositories (a draft broadcast, a read
+    /// cursor, the sync poll), and a `ChatViewModel` built inline in `body`
+    /// was replaced on each of them, taking the composer's draft with it.
+    @StateObject private var chatVMHolder = ChatViewModelHolder()
 
     @State private var destination: SessionDestination = .home
 
@@ -455,6 +477,16 @@ private struct SessionRoot: View {
         // body re-evaluations (same `chatRepository` reference
         // each time).
         contactsRepository.chatRepository = chatRepository
+        // ADR-0050 section 2.4 — the accounts the re-admission check can look
+        // up: every accepted contact whose account id is known.
+        chatRepository.readmissionContactsProvider = { [weak contactsRepository] in
+            (contactsRepository?.state.accepted ?? []).compactMap { contact in
+                guard let accountId = contact.request.fromAccountId, accountId.count == 16 else {
+                    return nil
+                }
+                return (personKey: contact.request.fromPubkey, accountId: accountId)
+            }
+        }
         self._contactsVM = StateObject(
             wrappedValue: ContactsViewModel(
                 repository: contactsRepository,
@@ -525,7 +557,20 @@ private struct SessionRoot: View {
                         onOpenAntiCensorship: { destination = .antiCensorship },
                         onOpenProfile: { destination = .profile },
                         onLogout: authRepository.logout,
-                        onForgetDevice: authRepository.forgetDevice
+                        onForgetDevice: {
+                            // ADR-0050 section 2.10 — take this device's
+                            // KeyPackage out of the directory BEFORE the wipe,
+                            // while the bearer token still exists: the
+                            // account's other devices retire this device's
+                            // leaves when their scheduled check sees the row
+                            // gone.
+                            Task { @MainActor in
+                                if let own = chatRepository.ownDeviceLeafKey {
+                                    await chatRepository.deleteDirectoryKeyPackage(deviceKey: own)
+                                }
+                                authRepository.forgetDevice()
+                            }
+                        }
                     )
                 case .contacts:
                     ContactsScreen(
@@ -571,19 +616,21 @@ private struct SessionRoot: View {
                 case .chat(let groupIdHex):
                     NavigationStack {
                         ChatScreen(
-                            viewModel: ChatViewModel(
-                                repository: chatRepository,
-                                groupIdHex: groupIdHex,
-                                callHost: callHost,
-                                groupCallHost: groupCallHost,
-                                sessionTokenProvider: {
-                                    authRepository.identitySecrets?.sessionToken
-                                },
-                                resolveRecipient: { username in
-                                    try await contactsRepository
-                                        .resolveVerifiedRecipient(username: username)
-                                }
-                            ),
+                            viewModel: chatVMHolder.viewModel(for: groupIdHex) {
+                                ChatViewModel(
+                                    repository: chatRepository,
+                                    groupIdHex: groupIdHex,
+                                    callHost: callHost,
+                                    groupCallHost: groupCallHost,
+                                    sessionTokenProvider: {
+                                        authRepository.identitySecrets?.sessionToken
+                                    },
+                                    resolveRecipient: { username in
+                                        try await contactsRepository
+                                            .resolveVerifiedRecipient(username: username)
+                                    }
+                                )
+                            },
                             onBack: { destination = .chats }
                         )
                     }
@@ -597,7 +644,27 @@ private struct SessionRoot: View {
                 case .devices:
                     DevicesScreen(
                         authRepository: authRepository,
-                        onBack: { destination = .home }
+                        onBack: { destination = .home },
+                        onDeviceAdded: { deviceKey in
+                            // ADR-0050 section 2.8 — admit the new device to
+                            // every chat once its KeyPackage is published.
+                            Task { @MainActor in
+                                do {
+                                    let tally = try await chatRepository.admitDevice(deviceKey: deviceKey)
+                                    NSLog("ADR-0050 admit device: offered %d, skipped %d, failed %d",
+                                          tally.offered, tally.skipped, tally.failed)
+                                } catch {
+                                    NSLog("ADR-0050 admit device: fan-out failed: \(error)")
+                                }
+                            }
+                        },
+                        onDeviceRemoved: { deviceKey in
+                            // ADR-0050 section 2.10 — retire the removed device
+                            // from every chat, then from the directory.
+                            Task { @MainActor in
+                                await chatRepository.retireDevice(deviceKey: deviceKey)
+                            }
+                        }
                     )
                 case .profile:
                     // ADR-0048 — Settings -> Profile. A saved name is

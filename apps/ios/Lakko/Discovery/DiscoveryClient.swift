@@ -427,29 +427,25 @@ public final class DiscoveryClient {
         return Self.hexEncode(channelBytes)
     }
 
-    /// Upload (or replace) the user's MLS KeyPackage. Drives one
-    /// PoW solve + `POST /discovery/keypackage`.
+    /// Upload (or replace) THIS device's MLS KeyPackage. Drives one PoW solve
+    /// + `POST /discovery/keypackage`.
     ///
-    /// Unlike the identity bundle, KeyPackages are **not**
-    /// deterministic — `Identity.createKeyPackage()` generates
-    /// fresh randomness on every call (RFC 9420 forward-secrecy
-    /// property). Calling this on every login refreshes the
-    /// `init_key` on the server, so a fresh sender starting a new
-    /// 1×1 group gets bytes the recipient hasn't already used.
-    ///
-    /// The Phase-1 directory only stores ONE KeyPackage per account
-    /// at a time (consume-on-use is post-1.14 work), so a sender
-    /// racing two sessions can in theory seed two groups with the
-    /// same `init_key`. Documented MVP trade-off matching the
-    /// Android + web sides.
+    /// ADR-0050 — discovery keeps one row per `(account_id, device_id)`, where
+    /// `deviceId` is the device leaf's 32-byte signature key, and caps distinct
+    /// devices per account at 8 (409 beyond). The published package is a
+    /// last-resort package, so one fetch opens a Welcome per group.
     public func uploadKeyPackage(
         accountId: Data,
+        deviceId: Data,
         keyPackageBytes: Data
     ) async throws {
         guard accountId.count == Self.accountIdLength else {
             throw DiscoveryClientError.argument(
                 "accountId must be \(Self.accountIdLength) bytes"
             )
+        }
+        guard deviceId.count == 32 else {
+            throw DiscoveryClientError.argument("deviceId must be 32 bytes")
         }
         guard !keyPackageBytes.isEmpty else {
             throw DiscoveryClientError.argument("keyPackageBytes must be non-empty")
@@ -471,6 +467,7 @@ public final class DiscoveryClient {
             KeyPackageUploadRequest(
                 pow: pow,
                 accountId: base64Encode(accountId),
+                deviceId: base64Encode(deviceId),
                 keypackage: base64Encode(keyPackageBytes)
             )
         )
@@ -483,18 +480,60 @@ public final class DiscoveryClient {
         }
     }
 
-    /// Resolve `accountId → KeyPackage bytes` (TLS-encoded MLS).
-    /// Returns `nil` when the recipient hasn't published one yet.
-    ///
-    /// Convenience wrapper around
-    /// ``keypackageFetch(accountId:)`` that decodes the base64 wire
-    /// field to a `Data` so the caller can hand it straight to
-    /// `Group.addMemberFromWire(...)`.
-    public func fetchKeyPackage(accountId: Data) async throws -> Data? {
+    /// Resolve `accountId` to every device's KeyPackage (TLS-encoded MLS),
+    /// oldest device first (ADR-0050). Returns `nil` when the account has
+    /// published none. A caller adding the account adds ALL of them; the
+    /// device binding inside each leaf is what the core verifies. Entries
+    /// whose base64 does not decode are dropped.
+    public func fetchKeyPackages(accountId: Data) async throws -> [DeviceKeyPackage]? {
         guard let raw = try await keypackageFetch(accountId: accountId) else {
             return nil
         }
-        return base64Decode(raw.keypackage)
+        return raw.keypackages.compactMap { entry in
+            guard let deviceId = base64Decode(entry.deviceId), deviceId.count == 32,
+                  let keyPackage = base64Decode(entry.keypackage), !keyPackage.isEmpty
+            else { return nil }
+            return DeviceKeyPackage(deviceId: deviceId, keyPackage: keyPackage)
+        }
+    }
+
+    /// `DELETE /discovery/keypackage/device/{device_id_b64url}` — remove one
+    /// of the authenticated account's device KeyPackages (ADR-0050 device
+    /// removal). Bearer-auth; idempotent (204).
+    public func deleteKeyPackage(deviceId: Data) async throws {
+        guard deviceId.count == 32 else {
+            throw DiscoveryClientError.argument("deviceId must be 32 bytes")
+        }
+        let endpoint = "/discovery/keypackage/device/\(base64UrlEncodeNoPad(deviceId))"
+        let url = try buildURL(endpoint: endpoint)
+        var request = URLRequest(url: url)
+        request.httpMethod = "DELETE"
+        attachAuthorizationHeader(to: &request)
+        let raw: (Data, URLResponse)
+        do {
+            raw = try await AntiCensorshipTransport.perform(
+                request, session: session, config: antiCensorship)
+        } catch {
+            throw DiscoveryClientError.network(
+                endpoint: "\(endpoint) (DELETE)",
+                underlying: error
+            )
+        }
+        guard let httpResponse = raw.1 as? HTTPURLResponse else {
+            throw DiscoveryClientError.http(
+                status: 0,
+                endpoint: "\(endpoint) (DELETE)",
+                body: "non-HTTP response"
+            )
+        }
+        if (200..<300).contains(httpResponse.statusCode) {
+            return
+        }
+        throw DiscoveryClientError.http(
+            status: httpResponse.statusCode,
+            endpoint: "\(endpoint) (DELETE)",
+            body: Self.truncate(String(data: raw.0, encoding: .utf8) ?? "<binary>")
+        )
     }
 
     /// Upload (or replace) the identity bundle for `accountId`.
@@ -2038,5 +2077,18 @@ extension DiscoveryClientError: LocalizedError {
         case .network(let endpoint, let underlying):
             return "discovery \(endpoint) network error: \(underlying)"
         }
+    }
+}
+
+/// One device of an account, as the directory serves it (ADR-0050).
+public struct DeviceKeyPackage: Equatable {
+    /// The device leaf's 32-byte Ed25519 signature key.
+    public let deviceId: Data
+    /// TLS-encoded MLS KeyPackage bytes.
+    public let keyPackage: Data
+
+    public init(deviceId: Data, keyPackage: Data) {
+        self.deviceId = deviceId
+        self.keyPackage = keyPackage
     }
 }

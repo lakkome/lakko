@@ -706,9 +706,13 @@ public class DiscoveryClient(
     public suspend fun uploadKeyPackage(
         accountId: ByteArray,
         keyPackageBytes: ByteArray,
+        deviceId: ByteArray,
     ) {
         if (accountId.size != ACCOUNT_ID_LEN) {
             throw DiscoveryClientArgError("accountId must be $ACCOUNT_ID_LEN bytes")
+        }
+        if (deviceId.size != DEVICE_ID_LEN) {
+            throw DiscoveryClientArgError("deviceId must be $DEVICE_ID_LEN bytes")
         }
         if (keyPackageBytes.isEmpty()) {
             throw DiscoveryClientArgError("keyPackageBytes must be non-empty")
@@ -730,6 +734,7 @@ public class DiscoveryClient(
             KeyPackageUploadRequest(
                 pow = pow,
                 account_id = base64Encode(accountId),
+                device_id = base64Encode(deviceId),
                 keypackage = base64Encode(keyPackageBytes),
             ),
         )
@@ -743,17 +748,47 @@ public class DiscoveryClient(
     }
 
     /**
-     * Resolve `accountId → KeyPackage bytes` (TLS-encoded MLS).
-     * Returns `null` when the recipient hasn't published one
-     * yet.
-     *
-     * Convenience wrapper around [keypackageFetch] that decodes
-     * the base64 wire field to a [ByteArray] so the caller can
-     * hand it straight to `Group.addMemberFromWire(...)`.
+     * Resolve `accountId` to every device's KeyPackage bytes (TLS-encoded
+     * MLS), oldest device first (ADR-0050). Returns `null` when the account
+     * has published none. A caller adding the account adds ALL of them; the
+     * device binding inside each leaf is what the core verifies.
      */
-    public suspend fun fetchKeyPackage(accountId: ByteArray): ByteArray? {
+    public suspend fun fetchKeyPackages(accountId: ByteArray): List<DeviceKeyPackage>? {
         val raw = keypackageFetch(accountId) ?: return null
-        return base64Decode(raw.keypackage)
+        return raw.keypackages.map {
+            DeviceKeyPackage(
+                deviceId = base64Decode(it.device_id),
+                keyPackage = base64Decode(it.keypackage),
+            )
+        }
+    }
+
+    /**
+     * `DELETE /discovery/keypackage/device/{device_id_b64url}` — remove one of
+     * the authenticated account's device KeyPackages (ADR-0050 device removal).
+     * Bearer-auth; idempotent (204).
+     */
+    public suspend fun deleteKeyPackage(deviceId: ByteArray) {
+        if (deviceId.size != DEVICE_ID_LEN) {
+            throw DiscoveryClientArgError("deviceId must be $DEVICE_ID_LEN bytes")
+        }
+        val endpoint = "/discovery/keypackage/device/${base64UrlEncodeNoPad(deviceId)}"
+        val url = "$baseUrl$endpoint"
+        val response: HttpResponse = try {
+            client.delete(url) {
+                sessionToken?.let {
+                    header(io.ktor.http.HttpHeaders.Authorization, "Bearer $it")
+                }
+            }
+        } catch (cause: Throwable) {
+            throw DiscoveryNetworkError("$endpoint (DELETE)", cause)
+        }
+        if (response.status.isSuccess()) return
+        throw DiscoveryHttpError(
+            status = response.status.value,
+            endpoint = "$endpoint (DELETE)",
+            body = response.safeReadBody(),
+        )
     }
 
     /**
@@ -1613,6 +1648,7 @@ public class DiscoveryClient(
 
         /** Raw 16-byte UUIDv7. */
         private const val ACCOUNT_ID_LEN: Int = 16
+        private const val DEVICE_ID_LEN: Int = 32
 
         /** Raw 16-byte channel_id pseudonym (G4-5, ADR-0010). */
         private const val CHANNEL_ID_LEN: Int = 16
@@ -1682,6 +1718,14 @@ private suspend fun HttpResponse.safeReadBody(): String {
 // =============================================================================
 
 /** Result of [DiscoveryClient.registerUsername]. */
+/** One device of an account as the directory serves it (ADR-0050). */
+public class DeviceKeyPackage(
+    /** The device leaf's 32-byte Ed25519 signature key. */
+    public val deviceId: ByteArray,
+    /** TLS-encoded MLS KeyPackage bytes. */
+    public val keyPackage: ByteArray,
+)
+
 public data class RegisterResult(
     /** The canonical form actually claimed (after NFKC + lowercase
      *  + trim + leading-`@` strip). Surface to the UI so the user

@@ -98,8 +98,12 @@ public enum AuthorIdentity {
     /// roster, which resolves every leaf to `nil`.
     public static func roster(of group: Group) -> [RosterEntry] {
         guard let members = try? group.members() else { return [] }
+        // ADR-0050 — a leaf names a DEVICE; the author is the PERSON, so each
+        // leaf resolves to its account key (else its own key when the
+        // credential did not resolve). One person is one author across all
+        // of their devices.
         return members.map {
-            RosterEntry(leafIndex: $0.leafIndex, signaturePublicKey: $0.signaturePublicKey)
+            RosterEntry(leafIndex: $0.leafIndex, signaturePublicKey: PersonKey.of($0))
         }
     }
 

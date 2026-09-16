@@ -773,7 +773,7 @@ deployed environment.
 S1 core, S2 FFI, S3 discovery and S4 web are built; verified live on `test.lakko.me`
 with three web clients: a device added through the ADR-0049 confirmation prompt was
 admitted to the account's existing 1x1 chat by the confirming device and received the
-messages sent after it joined. Still open under this gap: the natives (S5), incremental
+messages sent after it joined. S5 (iOS + Android) built 2026-09-16, build and unit tests only. Still open under this gap: a live native and cross-platform run, the ADR-0049 confirmation prompt on the natives, incremental
 contact sync between devices (the DeviceGroup sync kinds), channel subscriptions
 following the device (blocked on the channel list surviving a reload at all), and the
 removal fan-out unverified live. Closed later the same day: the scheduled re-admission

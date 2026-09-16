@@ -73,7 +73,7 @@ final class ChatServiceEnvelopeTests: XCTestCase {
         ChatClient.toEvent(
             messageId: messageId,
             createdAt: "2026-08-24T00:00:00Z",
-            processed: .application(data: plaintext, senderLeaf: senderLeaf),
+            processed: .application(data: plaintext, senderLeaf: senderLeaf, senderAccount: nil),
             // ADR-0023 — the receive loop resolves the sender leaf to a
             // signature key against the epoch's roster. Nothing here is about
             // WHO sent the envelope, only about which arm classifies it, so

@@ -72,9 +72,18 @@ struct NseRealDecryptDeps: NsePushDecryptDeps {
     }
 
     func loadIdentitySeed(accountIdB64: String) -> Data? {
+        // ADR-0050 — the app's MLS snapshot is taken under this device's
+        // DEVICE identity (the conversation leaf), so that seed rebuilds the
+        // identity that restores it. The account seed is the fallback for an
+        // app that could not install a device identity and ran its chats on the
+        // account identity. The slim FFI has no bound constructor; the binding
+        // only shapes credentials this read-only process never mints.
         // A genuine Keychain fault is swallowed to `nil` — the NSE degrades
         // to the generic banner, never crashes.
-        (try? AccountIdentitySeedStore.getAccountIdentitySeed(accountIdB64: accountIdB64)) ?? nil
+        if let device = (try? DeviceIdentityStore.getDeviceIdentitySeed(accountIdB64: accountIdB64)) ?? nil {
+            return device
+        }
+        return (try? AccountIdentitySeedStore.getAccountIdentitySeed(accountIdB64: accountIdB64)) ?? nil
     }
 
     func loadSnapshot(accountIdB64: String) -> Data? {
@@ -173,7 +182,7 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
         // Only Application messages carry a user-visible preview. A Commit /
         // Proposal / ExternalJoinProposal advances state (in the THROWAWAY
         // provider only) but has no body to show.
-        guard case let .application(data, _) = processed else { return nil }
+        guard case let .application(data, _, _) = processed else { return nil }
         // SERVICE-ENVELOPE FILTER — the background half of the gate the
         // foreground `ChatClient.toEvent` has always run, in the same order.
         // Call-signaling proto bytes, ADR-0042/0044 push-routing-secret

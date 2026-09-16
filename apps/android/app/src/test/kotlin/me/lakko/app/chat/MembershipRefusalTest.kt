@@ -75,7 +75,8 @@ class MembershipRefusalTest {
         // `FfiRefusalReason.entries` is the CORE's own enumeration, not a list
         // this file keeps, so a reason added to `lakko-mls` and regenerated
         // arrives here automatically.
-        assertEquals(18, FfiRefusalReason.entries.size)
+        // 20 since ADR-0050 appended DEVICE_BINDING_INVALID and DEVICE_LIMIT_REACHED.
+        assertEquals(20, FfiRefusalReason.entries.size)
 
         for (reason in FfiRefusalReason.entries) {
             assertTrue("$reason rendered an empty sentence", say(reason).isNotEmpty())
@@ -98,6 +99,14 @@ class MembershipRefusalTest {
     }
 
     // ---- The copy ---------------------------------------------------------
+
+    @Test
+    fun `the device cap reads the ADR-0050 sentence`() {
+        assertEquals(
+            "Up to 8 devices per account. Remove one first.",
+            say(FfiRefusalReason.DEVICE_LIMIT_REACHED),
+        )
+    }
 
     @Test
     fun `it states the spec-approved rows verbatim`() {
@@ -298,6 +307,10 @@ class MembershipRefusalTest {
             FfiException.MembershipJoinerAlreadyAMember("x") to
                 FfiRefusalReason.JOINER_ALREADY_A_MEMBER,
             FfiException.SweepAlreadyStaged("x") to FfiRefusalReason.SWEEP_ALREADY_STAGED,
+            FfiException.MembershipDeviceBindingInvalid("x") to
+                FfiRefusalReason.DEVICE_BINDING_INVALID,
+            FfiException.MembershipDeviceLimitReached("x") to
+                FfiRefusalReason.DEVICE_LIMIT_REACHED,
         )
         assertEquals(FfiRefusalReason.entries.size, pairs.size)
         assertEquals(FfiRefusalReason.entries.toSet(), pairs.map { it.second }.toSet())

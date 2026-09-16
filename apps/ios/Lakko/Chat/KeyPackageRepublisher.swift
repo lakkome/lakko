@@ -8,6 +8,9 @@ struct KeyPackageUpload: Equatable {
     let accountId: Data
     let sessionToken: String
     let keyPackage: Data
+    /// ADR-0050 — the device leaf's 32-byte signature key; discovery keys the
+    /// row on `(account_id, device_id)`.
+    var deviceId: Data = Data()
 }
 
 /// Publishes this device's MLS KeyPackage to discovery, from the long-lived

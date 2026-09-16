@@ -185,8 +185,9 @@ public interface PushDecryptDeps {
      *  no account on this device knows the group (a stray wake). */
     public fun resolveAccount(groupHex: String): ResolvedPushAccount?
 
-    /** The 64-byte AccountIdentity (BIP39) seed for `accountIdB64`, or
-     *  `null`. */
+    /** The seed the snapshot's identity is rebuilt from for `accountIdB64`,
+     *  or `null`. Since ADR-0050 this is the per-device conversation seed
+     *  (the snapshot is written under the device identity). */
     public fun loadIdentitySeed(accountIdB64: String): ByteArray?
 
     /** The last-persisted MLS provider snapshot for `accountIdB64`, or

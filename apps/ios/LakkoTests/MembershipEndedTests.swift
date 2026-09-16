@@ -707,6 +707,9 @@ final class MembershipEndedTests: XCTestCase {
                 defaults: try XCTUnwrap(UserDefaults(suiteName: "ended-o-\(suffix)"))),
             leaveRequestStore: LeaveRequestStore(
                 defaults: try XCTUnwrap(UserDefaults(suiteName: "ended-l-\(suffix)"))))
+        // Phase 1 fixture: the chats run on the account identity the snapshot
+        // was taken under (ADR-0050 device identities are exercised elsewhere).
+        repo.deviceIdentityInstaller = { _, _ in nil }
         repo.bootstrap(
             secrets: IdentitySecrets(
                 accountId: accountIdBytes,
@@ -868,6 +871,9 @@ final class MembershipEndedTests: XCTestCase {
                 defaults: try XCTUnwrap(UserDefaults(suiteName: "live-o-\(suffix)"))),
             leaveRequestStore: LeaveRequestStore(
                 defaults: try XCTUnwrap(UserDefaults(suiteName: "live-l-\(suffix)"))))
+        // Phase 1 fixture: the chats run on the account identity the snapshot
+        // was taken under (ADR-0050 device identities are exercised elsewhere).
+        repo.deviceIdentityInstaller = { _, _ in nil }
         repo.bootstrap(
             secrets: IdentitySecrets(
                 accountId: accountIdBytes,

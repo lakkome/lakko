@@ -65,7 +65,15 @@ private struct SelectionTrackingField: View {
             .disabled(disabled)
             .onChange(of: selection) { _, new in
                 guard let new, case .selection(let range) = new.indices else { return }
-                caret.utf16Range = range.lowerBound.utf16Offset(in: text)..<range.upperBound.utf16Offset(in: text)
+                // SwiftUI can report a selection whose indices belong to an
+                // earlier value of `text` (the chat screen opening with a
+                // restored draft, a draft cleared after send), and
+                // `utf16Offset(in:)` traps on an index past the end. Clamp to
+                // the current text instead of trusting the index.
+                let end = text.endIndex
+                let lower = min(range.lowerBound, end)
+                let upper = min(max(range.upperBound, lower), end)
+                caret.utf16Range = lower.utf16Offset(in: text)..<upper.utf16Offset(in: text)
             }
             .onChange(of: text) { _, new in
                 // An edit the selection did not report (an insert from the

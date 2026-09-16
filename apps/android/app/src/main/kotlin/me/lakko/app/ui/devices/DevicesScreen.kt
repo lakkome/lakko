@@ -98,6 +98,10 @@ import me.lakko.app.webauthn.actionHashForRemoveDevice
 public fun DevicesScreen(
     authRepository: AuthRepository,
     onBack: () -> Unit,
+    /** ADR-0050 — the chat side of a pairing (admit the new device to every
+     *  chat) and of a removal (retire its leaf from every chat). `null` in
+     *  previews / tests. */
+    chatRepository: me.lakko.app.chat.ChatRepository? = null,
 ) {
     val authState by authRepository.state.collectAsStateWithLifecycle()
     val identitySecrets by authRepository.identitySecrets.collectAsStateWithLifecycle()
@@ -173,6 +177,7 @@ public fun DevicesScreen(
                     accountIdBytes = secrets.accountId,
                     accountIdB64 = account.accountIdB64,
                     sessionToken = secrets.sessionToken,
+                    chatRepository = chatRepository,
                 )
                 1 -> PairTab(
                     accountIdBytes = secrets.accountId,
@@ -183,6 +188,7 @@ public fun DevicesScreen(
                     accountIdB64 = account.accountIdB64,
                     accountIdentitySeed = secrets.accountIdentitySeed,
                     sessionToken = secrets.sessionToken,
+                    chatRepository = chatRepository,
                 )
                 3 -> TotpEnrollTab(
                     sessionToken = secrets.sessionToken,
@@ -402,6 +408,7 @@ private fun ScanTab(
     accountIdB64: String,
     accountIdentitySeed: ByteArray,
     sessionToken: String,
+    chatRepository: me.lakko.app.chat.ChatRepository?,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -549,7 +556,7 @@ private fun ScanTab(
                                     // the Welcome (best-effort inside
                                     // runScanFlow; the copy is consumed
                                     // + zeroized there).
-                                    PairingOrchestrator.runScanFlow(
+                                    val scanned = PairingOrchestrator.runScanFlow(
                                         context = context,
                                         scannedBytes = s.scannedBytes,
                                         accountIdBytes = accountIdBytes,
@@ -566,6 +573,11 @@ private fun ScanTab(
                                             },
                                         ),
                                     )
+                                    // ADR-0050 section 2.8 — admit the new
+                                    // device to every chat. Not awaited: it
+                                    // waits for the device to land and publish
+                                    // its KeyPackage.
+                                    chatRepository?.requestAdmitDevice(scanned.newDeviceKey)
                                     state = ScanUi.Done
                                 } catch (cause: Throwable) {
                                     state = ScanUi.Error(
@@ -642,6 +654,7 @@ private fun DevicesListTab(
     accountIdBytes: ByteArray,
     accountIdB64: String,
     sessionToken: String?,
+    chatRepository: me.lakko.app.chat.ChatRepository?,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -762,6 +775,9 @@ private fun DevicesListTab(
                                                 leafIndex = leaf,
                                                 attestation = attestation,
                                             )
+                                            // ADR-0050 section 2.10 — out of every
+                                            // chat and out of the directory.
+                                            chatRepository?.requestRetireDevice(signaturePublicKey)
                                             removingLeaf = null
                                             refresh()
                                         } catch (cause: Throwable) {

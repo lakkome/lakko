@@ -169,7 +169,7 @@ class ChatServiceEnvelopeTest {
         toEvent(
             messageId = messageId,
             createdAt = "2026-08-24T00:00:00Z",
-            processed = ProcessedMessage.Application(payload, senderLeaf),
+            processed = ProcessedMessage.Application(payload, senderLeaf, null),
             // This suite is about ENVELOPE CLASSIFICATION, not attribution: a
             // resolver that names nobody keeps every event here unattributed,
             // which is what a control frame looks like and changes no verdict

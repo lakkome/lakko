@@ -331,6 +331,9 @@ final class CommitOutboxCommitPathAbortTests: XCTestCase {
             pendingRequestStore: PendingRequestStore(
                 defaults: UserDefaults(suiteName: "cop-\(UUID().uuidString)")!)
         )
+        // Phase 1 fixture: the chats run on the account identity the snapshot
+        // was taken under (ADR-0050 device identities are exercised elsewhere).
+        repo.deviceIdentityInstaller = { _, _ in nil }
         repo.bootstrap(
             secrets: IdentitySecrets(
                 accountId: accountIdBytes,

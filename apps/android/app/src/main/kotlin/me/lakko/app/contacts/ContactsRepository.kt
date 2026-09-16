@@ -129,6 +129,29 @@ public class ContactsRepository(
 
     public val state: StateFlow<ContactsState> = mutableState.asStateFlow()
 
+    init {
+        // ADR-0050 section 2.9 — a pairing state bundle's contacts land in the
+        // live accepted list (and from there the store), never beside it: a
+        // store-only write would be overwritten by the next [persistAccepted].
+        if (appContext != null) {
+            me.lakko.app.devices.StateBundle.contactsSink = { incoming -> mergeAccepted(incoming) }
+        }
+    }
+
+    /** Add the [incoming] contacts not already accepted (by signature key) and
+     *  persist. Returns how many were added. */
+    public fun mergeAccepted(incoming: List<AcceptedContact>): Int {
+        var added = 0
+        mutableState.update { state ->
+            val known = state.accepted.map { it.request.fromPubkey.toList() }.toHashSet()
+            val fresh = incoming.filter { known.add(it.request.fromPubkey.toList()) }
+            added = fresh.size
+            if (fresh.isEmpty()) state else state.copy(accepted = state.accepted + fresh)
+        }
+        if (added > 0) persistAccepted()
+        return added
+    }
+
     /** Persist the current accepted list (best-effort; no-op in tests
      *  where no Context was supplied). Called after every accept. */
     private fun persistAccepted() {

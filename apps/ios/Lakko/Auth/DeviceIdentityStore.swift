@@ -50,6 +50,17 @@ import Security
 ///   * `kSecAttrAccount = accountIdB64`
 ///   * `kSecAttrAccessible = AfterFirstUnlockThisDeviceOnly`
 ///   * `kSecValueData = <32 raw seed bytes>`
+///
+/// ## ADR-0050 — the device identity is the conversation leaf
+///
+/// Since ADR-0050 this seed is the leaf of every conversation group this
+/// device is in, not only of the DeviceGroup, so the MLS snapshot the
+/// notification service extension restores (ADR-0041) was written under it.
+/// The seed therefore lives in the shared Keychain access group, exactly as
+/// ``AccountIdentitySeedStore`` does (prefer the shared group, fall back to
+/// the app-private item on write and on read). The account-key binding over
+/// this device's key (public bytes) is kept beside it so its `issued_at`
+/// stays stable across launches.
 public enum DeviceIdentityStore {
 
     /// Service tag — versioned so a future rotation (e.g. a
@@ -57,16 +68,19 @@ public enum DeviceIdentityStore {
     /// v1 without collision.
     public static let serviceTag: String = "me.lakko.device-identity.v1"
 
+    /// ADR-0050 — service tag of the persisted device binding (public).
+    public static let bindingServiceTag: String = "me.lakko.device-binding.v1"
+
     /// Fixed seed length — pinned by `Identity.fromSeed`'s
     /// 32-byte Ed25519 seed contract.
     public static let seedLength: Int = 32
 
     /// Persist `seed` for `accountIdB64`. Existing record (if
-    /// any) is overwritten — same delete-then-add pattern
-    /// ``DeviceKeyStore.putDeviceKey`` uses.
+    /// any) is overwritten. Prefers the shared access group; falls back to
+    /// the app-private item so the seed is never left unpersisted.
     ///
     /// - Throws: ``DeviceIdentityStoreError`` on a wrong-length
-    ///   input or a non-success `OSStatus` from `SecItem…`.
+    ///   input or a non-success `OSStatus` from the fallback `SecItemAdd`.
     public static func putDeviceIdentitySeed(
         accountIdB64: String,
         seed: Data
@@ -76,65 +90,29 @@ public enum DeviceIdentityStore {
                 "DeviceIdentity seed must be \(seedLength) bytes (got \(seed.count))"
             )
         }
-
-        deleteIgnoringMissing(accountIdB64: accountIdB64)
-
-        let addQuery: [CFString: Any] = [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: serviceTag,
-            kSecAttrAccount: accountIdB64,
-            kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
-            kSecValueData: seed
-        ]
-        let status = SecItemAdd(addQuery as CFDictionary, nil)
-        if status != errSecSuccess {
-            throw DeviceIdentityStoreError.keychain(
-                status: status,
-                operation: "SecItemAdd"
-            )
-        }
+        try putItem(service: serviceTag, accountIdB64: accountIdB64, value: seed)
     }
 
     /// Read the cached DeviceIdentity seed for `accountIdB64`.
-    /// Returns `nil` when absent.
+    /// Returns `nil` when absent. Prefers the shared access group, falls
+    /// back to the app-private item.
     public static func getDeviceIdentitySeed(
         accountIdB64: String
     ) throws -> Data? {
-        let query: [CFString: Any] = [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: serviceTag,
-            kSecAttrAccount: accountIdB64,
-            kSecReturnData: true,
-            kSecMatchLimit: kSecMatchLimitOne
-        ]
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-        switch status {
-        case errSecSuccess:
-            guard let data = item as? Data else {
-                throw DeviceIdentityStoreError.keychain(
-                    status: status,
-                    operation: "SecItemCopyMatching: unexpected payload type"
-                )
-            }
-            guard data.count == seedLength else {
-                throw DeviceIdentityStoreError.argument(
-                    "stored DeviceIdentity seed length \(data.count) != \(seedLength)"
-                )
-            }
-            return data
-        case errSecItemNotFound:
+        guard let data = try getItem(service: serviceTag, accountIdB64: accountIdB64) else {
             return nil
-        default:
-            throw DeviceIdentityStoreError.keychain(
-                status: status,
-                operation: "SecItemCopyMatching"
+        }
+        guard data.count == seedLength else {
+            throw DeviceIdentityStoreError.argument(
+                "stored DeviceIdentity seed length \(data.count) != \(seedLength)"
             )
         }
+        return data
     }
 
-    /// Erase the cached DeviceIdentity seed for `accountIdB64`.
-    /// No-op when absent. Called from ``forgetDevice``.
+    /// Erase the cached DeviceIdentity seed (and its binding) for
+    /// `accountIdB64` from both locations. No-op when absent. Called from
+    /// ``forgetDevice``.
     ///
     /// Note: deleting the seed alone does NOT remove the
     /// device's leaf from the user's DeviceGroup — the other
@@ -142,7 +120,10 @@ public enum DeviceIdentityStore {
     /// past the gone leaf. That is the separate revoke flow in
     /// ``DeviceRemoval/removeDeviceAt`` (2a3c).
     public static func deleteDeviceIdentitySeed(accountIdB64: String) {
-        deleteIgnoringMissing(accountIdB64: accountIdB64)
+        for group in [SharedStorage.keychainAccessGroup, nil] as [String?] {
+            deleteItem(service: serviceTag, accountIdB64: accountIdB64, accessGroup: group)
+            deleteItem(service: bindingServiceTag, accountIdB64: accountIdB64, accessGroup: group)
+        }
     }
 
     /// Convenience: read the cached seed if present, otherwise
@@ -151,6 +132,8 @@ public enum DeviceIdentityStore {
     public static func ensureDeviceIdentitySeed(
         accountIdB64: String
     ) throws -> Data {
+        copyToSharedIfMissing(service: serviceTag, accountIdB64: accountIdB64)
+        copyToSharedIfMissing(service: bindingServiceTag, accountIdB64: accountIdB64)
         if let existing = try? getDeviceIdentitySeed(accountIdB64: accountIdB64) {
             return existing
         }
@@ -174,12 +157,120 @@ public enum DeviceIdentityStore {
         return bytes
     }
 
-    private static func deleteIgnoringMissing(accountIdB64: String) {
-        let query: [CFString: Any] = [
+    // MARK: - ADR-0050 device binding
+
+    /// Read the persisted device binding wire bytes, or `nil` when this
+    /// device has not been bound yet (or on a Keychain fault).
+    public static func getDeviceBinding(accountIdB64: String) -> Data? {
+        (try? getItem(service: bindingServiceTag, accountIdB64: accountIdB64)) ?? nil
+    }
+
+    /// Persist the device binding wire bytes beside the seed. Public bytes
+    /// (the account key's signature over this device's key).
+    public static func putDeviceBinding(accountIdB64: String, binding: Data) throws {
+        guard !binding.isEmpty else {
+            throw DeviceIdentityStoreError.argument("device binding must be non-empty")
+        }
+        try putItem(service: bindingServiceTag, accountIdB64: accountIdB64, value: binding)
+    }
+
+    // MARK: - Access-group-scoped Keychain primitives
+
+    private static func putItem(service: String, accountIdB64: String, value: Data) throws {
+        if addItem(service: service, accountIdB64: accountIdB64, value: value,
+                   accessGroup: SharedStorage.keychainAccessGroup) == errSecSuccess {
+            return
+        }
+        let status = addItem(service: service, accountIdB64: accountIdB64, value: value,
+                             accessGroup: nil)
+        if status != errSecSuccess {
+            throw DeviceIdentityStoreError.keychain(status: status, operation: "SecItemAdd")
+        }
+    }
+
+    private static func getItem(service: String, accountIdB64: String) throws -> Data? {
+        if let shared = (try? readItem(service: service, accountIdB64: accountIdB64,
+                                       accessGroup: SharedStorage.keychainAccessGroup)) ?? nil {
+            return shared
+        }
+        return try readItem(service: service, accountIdB64: accountIdB64, accessGroup: nil)
+    }
+
+    /// Copy an app-private item into the shared access group when only the
+    /// app-private one exists (a seed written before it moved), never deleting
+    /// the old item. Called from the app's ``ensureDeviceIdentitySeed``
+    /// only, so the extension process never writes to the Keychain.
+    private static func copyToSharedIfMissing(service: String, accountIdB64: String) {
+        let shared = (try? readItem(service: service, accountIdB64: accountIdB64,
+                                    accessGroup: SharedStorage.keychainAccessGroup)) ?? nil
+        guard shared == nil,
+              let old = (try? readItem(service: service, accountIdB64: accountIdB64,
+                                       accessGroup: nil)) ?? nil
+        else { return }
+        _ = addItem(service: service, accountIdB64: accountIdB64, value: old,
+                    accessGroup: SharedStorage.keychainAccessGroup)
+    }
+
+    private static func readItem(
+        service: String,
+        accountIdB64: String,
+        accessGroup: String?
+    ) throws -> Data? {
+        var query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
-            kSecAttrService: serviceTag,
+            kSecAttrService: service,
+            kSecAttrAccount: accountIdB64,
+            kSecReturnData: true,
+            kSecMatchLimit: kSecMatchLimitOne
+        ]
+        if let accessGroup { query[kSecAttrAccessGroup] = accessGroup }
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        switch status {
+        case errSecSuccess:
+            guard let data = item as? Data else {
+                throw DeviceIdentityStoreError.keychain(
+                    status: status,
+                    operation: "SecItemCopyMatching: unexpected payload type"
+                )
+            }
+            return data
+        case errSecItemNotFound, errSecMissingEntitlement:
+            return nil
+        default:
+            throw DeviceIdentityStoreError.keychain(
+                status: status,
+                operation: "SecItemCopyMatching"
+            )
+        }
+    }
+
+    @discardableResult
+    private static func addItem(
+        service: String,
+        accountIdB64: String,
+        value: Data,
+        accessGroup: String?
+    ) -> OSStatus {
+        deleteItem(service: service, accountIdB64: accountIdB64, accessGroup: accessGroup)
+        var query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: service,
+            kSecAttrAccount: accountIdB64,
+            kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+            kSecValueData: value
+        ]
+        if let accessGroup { query[kSecAttrAccessGroup] = accessGroup }
+        return SecItemAdd(query as CFDictionary, nil)
+    }
+
+    private static func deleteItem(service: String, accountIdB64: String, accessGroup: String?) {
+        var query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: service,
             kSecAttrAccount: accountIdB64
         ]
+        if let accessGroup { query[kSecAttrAccessGroup] = accessGroup }
         _ = SecItemDelete(query as CFDictionary)
     }
 }

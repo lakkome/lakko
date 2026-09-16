@@ -189,6 +189,42 @@ public object IdentitySnapshotStore {
      */
     public fun deleteSnapshot(context: Context, accountIdB64: String) {
         envelopeFile(context, accountIdB64).delete()
+        leafKeyFile(context, accountIdB64).delete()
+    }
+
+    /**
+     * ADR-0050 — record the leaf signature key of the identity the snapshot on
+     * disk was taken under. Public bytes, so a plaintext sidecar. A snapshot
+     * taken under another leaf identity (a pre-ADR-0050 account-key snapshot, a
+     * snapshot restored from another device's backup) must not be restored into
+     * this device's identity: `restoreStorage` replaces the whole provider with
+     * groups signed by a key this identity does not hold.
+     *
+     * Called after [putSnapshot] by every writer that owns the live identity;
+     * a snapshot written without it reads as "another identity".
+     */
+    public fun putSnapshotLeafKey(context: Context, accountIdB64: String, leafKey: ByteArray) {
+        val encoded = android.util.Base64.encodeToString(leafKey, android.util.Base64.NO_WRAP)
+        val file = leafKeyFile(context, accountIdB64)
+        if (file.exists() && runCatching { file.readText() }.getOrNull() == encoded) return
+        file.writeText(encoded)
+    }
+
+    /** The leaf key [putSnapshotLeafKey] recorded, or `null` when none was
+     *  (or the sidecar is unreadable). */
+    public fun getSnapshotLeafKey(context: Context, accountIdB64: String): ByteArray? {
+        val file = leafKeyFile(context, accountIdB64)
+        if (!file.exists()) return null
+        return try {
+            android.util.Base64.decode(file.readText().trim(), android.util.Base64.NO_WRAP)
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    private fun leafKeyFile(context: Context, accountIdB64: String): File {
+        val envelope = envelopeFile(context, accountIdB64)
+        return File(envelope.parentFile, envelope.nameWithoutExtension + ".leaf")
     }
 
     // -----------------------------------------------------------------

@@ -49,6 +49,18 @@ public struct ChatListScreen: View {
                             Label("Home", systemImage: "chevron.backward")
                         }
                     }
+                    // ADR-0050 / docs/ux/second-device.md section 2: one label
+                    // while this device is still being admitted to the chats a
+                    // pairing named. Chats appear as they arrive; never a
+                    // counter, never a per-chat row.
+                    if viewModel.synchronizing {
+                        ToolbarItem(placement: .navigationBarTrailing) {
+                            Text("Synchronizing...")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                                .accessibilityAddTraits(.updatesFrequently)
+                        }
+                    }
                 }
         }
     }
@@ -377,6 +389,12 @@ public final class ChatListViewModel: ObservableObject {
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
+    }
+
+    /// ADR-0050 section 2.9 — whether groups the pairing bundle named are not
+    /// yet all joined here. Drives the single "Synchronizing..." label.
+    var synchronizing: Bool {
+        StateBundle.pendingKnownGroups(joinedGroupIdHexes: threads.map { $0.groupIdHex }) > 0
     }
 
     /// ADR-0048 — the other person's resolved name for a 1x1 chat.

@@ -47,8 +47,8 @@ final class MembershipRefusalTests: XCTestCase {
         // step with the enum — nothing in Swift checks that, and every
         // property test over the set is vacuous for a case that is missing.
         // So it is checked by asking each entry to find itself, and by count.
-        XCTAssertEqual(allMembershipRefusalReasons.count, 18)
-        XCTAssertEqual(Set(allMembershipRefusalReasons).count, 18)
+        XCTAssertEqual(allMembershipRefusalReasons.count, 20)
+        XCTAssertEqual(Set(allMembershipRefusalReasons).count, 20)
 
         for reason in allMembershipRefusalReasons {
             let refusal = membershipRefusal(reason: reason, retryMaySucceed: real)
@@ -219,6 +219,8 @@ final class MembershipRefusalTests: XCTestCase {
             (.MembershipNoSuchJoinRequest(message: "x"), .noSuchJoinRequest),
             (.MembershipJoinerAlreadyAMember(message: "x"), .joinerAlreadyAMember),
             (.SweepAlreadyStaged(message: "x"), .sweepAlreadyStaged),
+            (.MembershipDeviceBindingInvalid(message: "x"), .deviceBindingInvalid),
+            (.MembershipDeviceLimitReached(message: "x"), .deviceLimitReached),
         ]
         XCTAssertEqual(pairs.count, allMembershipRefusalReasons.count)
         XCTAssertEqual(Set(pairs.map(\.1)), Set(allMembershipRefusalReasons))

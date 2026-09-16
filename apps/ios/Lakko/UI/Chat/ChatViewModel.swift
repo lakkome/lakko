@@ -1665,6 +1665,10 @@ public final class ChatViewModel: ObservableObject {
     ///     broadcast a `ReadCursor` payload pointing at the
     ///     highest message-id (Phase 2a3e2c).
     public func attachSync(_ sync: DeviceGroupSyncRepository) {
+        // The view model now outlives one appearance of its screen (see
+        // `ChatViewModelHolder`), so `onAppear` reaches here again on every
+        // return to the chat; the subscriptions below must not stack.
+        if deviceGroupSync === sync, groupIdBytes != nil { return }
         deviceGroupSync = sync
         // Resolve groupIdBytes lazily — the ChatRepository
         // exposes the per-thread record's groupId; we hex-

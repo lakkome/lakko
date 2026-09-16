@@ -419,6 +419,11 @@ targets:
       - path: Lakko/Auth/AccountIdentitySeedStore.swift
         type: file
         buildPhase: sources
+      # ADR-0050 — the device seed the app's MLS snapshot is taken under
+      # (Foundation + Security only). The NSE only ever reads it.
+      - path: Lakko/Auth/DeviceIdentityStore.swift
+        type: file
+        buildPhase: sources
       - path: Lakko/Chat/IdentitySnapshotStore.swift
         type: file
         buildPhase: sources

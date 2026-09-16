@@ -408,6 +408,7 @@ class DiscoveryClientTest {
                 KeyPackageUploadRequest(
                     pow = me.lakko.app.auth.PowProofPayload("S", "N", "X"),
                     account_id = "ACC_B64",
+                    device_id = "DEV_B64",
                     keypackage = "KP_B64",
                 ),
             )
@@ -415,6 +416,7 @@ class DiscoveryClientTest {
         }
         val body = captured[0].body!!
         assertEquals("ACC_B64", body["account_id"]!!.jsonPrimitive.content)
+        assertEquals("DEV_B64", body["device_id"]!!.jsonPrimitive.content)
         assertEquals("KP_B64", body["keypackage"]!!.jsonPrimitive.content)
     }
 
@@ -423,13 +425,16 @@ class DiscoveryClientTest {
         val captured = mutableListOf<CapturedRequest>()
         client(
             responses = listOf(
-                HttpStatusCode.OK to """{"keypackage":"KP_BYTES_B64"}""",
+                HttpStatusCode.OK to
+                    """{"keypackages":[{"device_id":"DEV_B64","keypackage":"KP_BYTES_B64"}]}""",
             ),
             captured = captured,
         ).use { client ->
             val resp = client.keypackageFetch(ByteArray(16))
             assertNotNull(resp)
-            assertEquals("KP_BYTES_B64", resp!!.keypackage)
+            assertEquals(1, resp!!.keypackages.size)
+            assertEquals("DEV_B64", resp.keypackages[0].device_id)
+            assertEquals("KP_BYTES_B64", resp.keypackages[0].keypackage)
         }
         assertEquals(HttpMethod.Get, captured[0].method)
         // Path is base64url-no-pad — same shape as identityFetch.
@@ -473,6 +478,7 @@ class DiscoveryClientTest {
                     client.uploadKeyPackage(
                         accountId = ByteArray(8),
                         keyPackageBytes = ByteArray(32),
+                        deviceId = ByteArray(32),
                     )
                 }
             }
@@ -488,6 +494,7 @@ class DiscoveryClientTest {
                     client.uploadKeyPackage(
                         accountId = ByteArray(16),
                         keyPackageBytes = ByteArray(0),
+                        deviceId = ByteArray(32),
                     )
                 }
             }
@@ -503,11 +510,41 @@ class DiscoveryClientTest {
                     client.uploadKeyPackage(
                         accountId = ByteArray(16),
                         keyPackageBytes = ByteArray(2049), // 1 over the 2048 ceiling
+                        deviceId = ByteArray(32),
                     )
                 }
             }
         }
         assertTrue(err.message!!.contains("2048"))
+    }
+
+    @Test
+    fun `uploadKeyPackage rejects wrong-length deviceId before network`() {
+        val engine = MockEngine { error("must not reach the network") }
+        assertThrows(DiscoveryClientArgError::class.java) {
+            runTest {
+                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine).use { client ->
+                    client.uploadKeyPackage(
+                        accountId = ByteArray(16),
+                        keyPackageBytes = ByteArray(32),
+                        deviceId = ByteArray(16),
+                    )
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `deleteKeyPackage sends DELETE to the device path`() = runTest {
+        val captured = mutableListOf<CapturedRequest>()
+        client(
+            responses = listOf(HttpStatusCode.NoContent to ""),
+            captured = captured,
+        ).use { client ->
+            client.deleteKeyPackage(ByteArray(32))
+        }
+        assertEquals(HttpMethod.Delete, captured[0].method)
+        assertTrue(captured[0].url.contains("/discovery/keypackage/device/"))
     }
 
     // ===================================================================

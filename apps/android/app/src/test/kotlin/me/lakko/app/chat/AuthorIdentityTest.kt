@@ -98,17 +98,34 @@ class AuthorIdentityTest {
 
     /** Epoch N: Alice at leaf 0, Bob at leaf 2. */
     private val rosterBefore = listOf(
-        GroupMember(leafIndex = 0u, signaturePublicKey = aliceKey),
-        GroupMember(leafIndex = REUSED_LEAF, signaturePublicKey = bobKey),
+        GroupMember(leafIndex = 0u, signaturePublicKey = aliceKey, accountKey = aliceKey),
+        GroupMember(leafIndex = REUSED_LEAF, signaturePublicKey = bobKey, accountKey = bobKey),
     )
 
     /** Epoch N+1, after ONE commit removing Bob and adding Dave. OpenMLS hands
      *  the vacated leaf to the next Add, so Dave is at leaf 2 — the index Bob
      *  held. This is the whole hazard. */
     private val rosterAfter = listOf(
-        GroupMember(leafIndex = 0u, signaturePublicKey = aliceKey),
-        GroupMember(leafIndex = REUSED_LEAF, signaturePublicKey = daveKey),
+        GroupMember(leafIndex = 0u, signaturePublicKey = aliceKey, accountKey = aliceKey),
+        GroupMember(leafIndex = REUSED_LEAF, signaturePublicKey = daveKey, accountKey = daveKey),
     )
+
+    /** ADR-0050 — Alice's two devices are two leaves bound to one account. */
+    @Test
+    fun `two devices of one account resolve to one author`() {
+        val phone = key(0x01)
+        val laptop = key(0x02)
+        val roster = listOf(
+            GroupMember(leafIndex = 0u, signaturePublicKey = phone, accountKey = aliceKey),
+            GroupMember(leafIndex = 1u, signaturePublicKey = laptop, accountKey = aliceKey),
+            GroupMember(leafIndex = 2u, signaturePublicKey = bobKey, accountKey = ByteArray(0)),
+        )
+        assertEquals(resolveMemberIdentity(roster, 0u), resolveMemberIdentity(roster, 1u))
+        assertEquals(outboxB64(aliceKey), resolveMemberIdentity(roster, 1u))
+        // An unresolved credential falls back to the leaf key.
+        assertEquals(outboxB64(bobKey), resolveMemberIdentity(roster, 2u))
+        assertEquals(listOf(outboxB64(aliceKey), outboxB64(bobKey)), personKeysOf(roster))
+    }
 
     private val alice = resolveMemberIdentity(rosterBefore, 0u)!!
     private val bob = resolveMemberIdentity(rosterBefore, REUSED_LEAF)!!
@@ -153,7 +170,7 @@ class AuthorIdentityTest {
     ): IncomingChatEvent = toEvent(
         messageId = messageId,
         createdAt = createdAt,
-        processed = ProcessedMessage.Application(ByteArray(0), senderLeaf),
+        processed = ProcessedMessage.Application(ByteArray(0), senderLeaf, null),
         resolveSender = { leaf -> resolveMemberIdentity(roster, leaf) },
         isCommitterBeacon = { false },
         parseBody = { parsed },

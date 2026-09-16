@@ -202,11 +202,13 @@ data class IdentityFetchResponse(
 // /discovery/keypackage   (services/discovery/src/keypackage.rs — 1.16e1)
 // ----------------------------------------------------------------------------
 
-/** Body of `POST /discovery/keypackage`. */
+/** Body of `POST /discovery/keypackage` (ADR-0050: one row per device). */
 @Serializable
 data class KeyPackageUploadRequest(
     val pow: PowProofPayload,
     val account_id: String,
+    /** base64 of the device leaf's 32-byte Ed25519 signature key. */
+    val device_id: String,
     /** base64(TLS-encoded MLS KeyPackage). Server caps decoded
      *  size at 2048 bytes — mirrors `MAX_KEYPACKAGE_BYTES` in
      *  the Rust handler. */
@@ -219,11 +221,21 @@ data class KeyPackageUploadResponse(
     val ok: Boolean,
 )
 
-/** Response body of `GET /discovery/keypackage/{accountId_b64url}`.
- *  404 surfaces as `null` in [DiscoveryClient.keypackageFetch]. */
+/** One device's entry in [KeyPackageFetchResponse] (ADR-0050). */
+@Serializable
+data class DeviceKeyPackagePayload(
+    /** base64 of the device leaf's 32-byte signature key. */
+    val device_id: String,
+    /** base64(TLS-encoded MLS KeyPackage). */
+    val keypackage: String,
+)
+
+/** Response body of `GET /discovery/keypackage/{accountId_b64url}`: every
+ *  device of the account with a published KeyPackage, oldest first
+ *  (ADR-0050). 404 surfaces as `null` in [DiscoveryClient.keypackageFetch]. */
 @Serializable
 data class KeyPackageFetchResponse(
-    val keypackage: String,
+    val keypackages: List<DeviceKeyPackagePayload>,
 )
 
 // ----------------------------------------------------------------------------
