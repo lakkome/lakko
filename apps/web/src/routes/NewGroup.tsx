@@ -13,6 +13,7 @@ import { useAuth } from "../auth/AuthContext";
 import { base64Decode, base64UrlEncodeNoPad } from "../auth/account-id";
 import { useChats } from "../chat/ChatContext";
 import { accountIdBytesFromHex, setPendingGroupSetup } from "../chat/pending-group-setup";
+import { recordConversationKind } from "../chat/conversation-kind-store";
 import { ContactsClient } from "../contacts/client";
 import { loadAccepted, subscribeAcceptedChanged, type AcceptedContact } from "../contacts/local-store";
 import { useProfiles } from "../profile/ProfileContext";
@@ -84,7 +85,12 @@ export default function NewGroup(): JSX.Element {
       });
       profiles.groupJoined(active.groupIdB64);
       const s = auth.state();
-      if (s.kind === "session") await chats.persistSnapshot(s.account.accountId);
+      if (s.kind === "session") {
+        // docs/ux/client-redesign.md section 3 — a group created here is a
+        // group even while it still has two people.
+        recordConversationKind(s.account.accountId, active.groupIdB64, "group");
+        await chats.persistSnapshot(s.account.accountId);
+      }
       if (rest.length > 0) {
         setPendingGroupSetup({
           groupIdB64: active.groupIdB64,

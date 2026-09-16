@@ -44,10 +44,24 @@ struct ComposerTextField: View {
             SelectionTrackingField(text: $text, caret: caret, disabled: disabled)
         } else {
             TextField("Message", text: $text, axis: .vertical)
-                .textFieldStyle(.roundedBorder)
-                .lineLimit(1...4)
+                .lineLimit(1...5)
                 .disabled(disabled)
+                .composerFieldChrome()
         }
+    }
+}
+
+extension View {
+    /// UX spec section 5.2 — the field grows to five lines on the sunken
+    /// surface with a pill shape; the placeholder is "Message".
+    func composerFieldChrome() -> some View {
+        self
+            .textFieldStyle(.plain)
+            .font(.body)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 9)
+            .background(Color.lakkoSurfaceSunken)
+            .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
     }
 }
 
@@ -60,9 +74,9 @@ private struct SelectionTrackingField: View {
 
     var body: some View {
         TextField("Message", text: $text, selection: $selection, axis: .vertical)
-            .textFieldStyle(.roundedBorder)
-            .lineLimit(1...4)
+            .lineLimit(1...5)
             .disabled(disabled)
+            .composerFieldChrome()
             .onChange(of: selection) { _, new in
                 guard let new, case .selection(let range) = new.indices else { return }
                 // SwiftUI can report a selection whose indices belong to an

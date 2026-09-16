@@ -422,7 +422,13 @@ public class ContactsViewModel(
                 chatRepo.startGroupWith(
                     recipientAccountId = pending.fromAccountId,
                     recipientSignaturePubkey = pending.fromPubkey,
-                )
+                ).also { hex ->
+                    // docs/ux/client-redesign.md section 3 — a 1x1 created from a
+                    // contact accept lists under Chats, whatever its roster does.
+                    me.lakko.app.chat.ConversationKindStore.set(
+                        chatRepo.context, hex, me.lakko.app.chat.ConversationKind.Chat,
+                    )
+                }
             } catch (_: Throwable) {
                 // chat handshake failed — fall back to the
                 // local-marker path. The UI surfaces the

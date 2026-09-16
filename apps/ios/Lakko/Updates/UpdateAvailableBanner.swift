@@ -55,10 +55,10 @@ struct UpdateAvailableBanner: View {
                 .accessibilityLabel("Dismiss")
         }
         .padding(12)
-        .background(Color.accentColor.opacity(0.12))
+        .background(Color.lakkoAccentSoft)
         .overlay(
             RoundedRectangle(cornerRadius: 8)
-                .stroke(Color.accentColor.opacity(0.5), lineWidth: 1)
+                .stroke(Color.lakkoAccent.opacity(0.5), lineWidth: 1)
         )
         .padding(8)
         // Expose the row as one informational element so VoiceOver reads the

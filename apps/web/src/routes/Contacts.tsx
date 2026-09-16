@@ -75,6 +75,7 @@ import {
 import { useMailbox } from "../contacts/MailboxContext";
 import { computeSafetyNumber } from "../contacts/safety";
 import { useProfiles } from "../profile/ProfileContext";
+import { recordConversationKind } from "../chat/conversation-kind-store";
 import { createUsernameCheck } from "../profile/username-field";
 import { mayLookUp, usernameReason, type UsernameCheck } from "../profile/rules";
 
@@ -204,6 +205,12 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
         group: result.group,
       });
       profiles.groupJoined(active.groupIdB64);
+      // docs/ux/client-redesign.md section 3 — a conversation started from
+      // a contact is a chat, filed under Chats until a third person joins.
+      {
+        const s = auth.state();
+        if (s.kind === "session") recordConversationKind(s.account.accountId, active.groupIdB64, "chat");
+      }
       setSendNotice(`Chat started with @${result.recipientUsername}.`);
       setSearchInput("");
       setIntroInput("");
@@ -286,6 +293,12 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
       });
       // ADR-0048 §2 — founding a group is joining it.
       profiles.groupJoined(active.groupIdB64);
+      // docs/ux/client-redesign.md section 3 — an accepted contact's
+      // conversation is a chat.
+      {
+        const s = auth.state();
+        if (s.kind === "session") recordConversationKind(s.account.accountId, active.groupIdB64, "chat");
+      }
       // ADR-0021 follow-up: link the just-created 1×1 chat back to this
       // contact (by its base64 group id) so the in-call roster + chat
       // label resolve to the user-chosen displayName. Re-upsert by the

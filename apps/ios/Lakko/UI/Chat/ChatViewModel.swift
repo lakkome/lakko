@@ -542,6 +542,39 @@ public final class ChatViewModel: ObservableObject {
         (repository.memberCount(groupIdHex: groupIdHex) ?? 0) > 2
     }
 
+    /// UX spec section 5.1 — the list this conversation belongs to, from the
+    /// persisted kind (``ConversationKindDecision``). This is the
+    /// PRESENTATION notion: it decides sender names in bubbles, the "N
+    /// members" subtitle and the members-sheet title. Call routing keeps
+    /// ``isGroupChat`` (the live people count), because a two-person group
+    /// made through the new-group flow is still a 1x1 call.
+    var conversationKind: ConversationKind {
+        let account = repository.accountIdB64
+        let stored = account.flatMap {
+            repository.conversationKindStore.load(accountIdB64: $0, groupIdHex: groupIdHex)
+        }
+        let verdict = ConversationKindDecision.resolve(
+            stored: stored, peopleCount: repository.memberCount(groupIdHex: groupIdHex))
+        if let persist = verdict.persist, let account {
+            repository.conversationKindStore.record(
+                accountIdB64: account, groupIdHex: groupIdHex, kind: persist)
+        }
+        return verdict.kind
+    }
+
+    /// `true` when the conversation is presented as a group.
+    var presentsAsGroup: Bool { conversationKind == .group }
+
+    /// UX spec section 5.1 — record that this conversation is a group: the
+    /// new-group path calls it when the picker lands, and the first add to a
+    /// 1x1 calls it. One-way; a group never becomes a chat again.
+    func markConversationAsGroup() {
+        guard let account = repository.accountIdB64 else { return }
+        repository.conversationKindStore.record(
+            accountIdB64: account, groupIdHex: groupIdHex, kind: .group)
+        objectWillChange.send()
+    }
+
     /// The banner / toolbar decision at `nowMs`: is there a live group call on
     /// this chat that this device is not in?
     func groupCallAffordance(nowMs: Int64 = ChatRepository.nowMs()) -> GroupCallAffordance {
@@ -1108,7 +1141,7 @@ public final class ChatViewModel: ObservableObject {
     /// The header title (UX spec section 5.2): the other person's name in a
     /// 1x1 chat, the members' names in a group. Never the group id.
     var conversationTitle: String {
-        if let peer = oneToOnePeerName { return peer }
+        if !presentsAsGroup, let peer = oneToOnePeerName { return peer }
         return ConversationTitle.groupTitle(
             otherMemberNames: ChatListViewModel.otherMemberNames(
                 repository: repository, groupIdHex: groupIdHex))
@@ -1117,7 +1150,7 @@ public final class ChatViewModel: ObservableObject {
     /// The header's second line: "@username" in a 1x1 chat when the other
     /// person's username is verified, "N members" in a group, else nothing.
     var conversationSubtitle: String? {
-        if let peer = repository.oneToOnePeerSignatureKey(groupIdHex: groupIdHex) {
+        if !presentsAsGroup, let peer = repository.oneToOnePeerSignatureKey(groupIdHex: groupIdHex) {
             let resolved = ProfileDirectory.shared.resolve(signatureKey: peer)
             guard let username = resolved.verifiedUsername, resolved.source != .verifiedUsername
             else { return nil }
@@ -1164,6 +1197,9 @@ public final class ChatViewModel: ObservableObject {
                     )
                 }
                 addMemberInput = ""
+                // UX spec section 5.1 — adding someone to a 1x1 makes it a
+                // group, even while the add is still a pending request.
+                markConversationAsGroup()
                 // ADR-0045 — `proposed` is not a quieter `committed`: nobody has
                 // been added yet. `refreshMembers` re-reads the roster (which is
                 // unchanged) AND the pending set (which now holds the request),

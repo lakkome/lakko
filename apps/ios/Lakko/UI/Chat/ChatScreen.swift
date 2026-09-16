@@ -140,28 +140,10 @@ public struct ChatScreen: View {
                 }
             }
             messagesList
-            // ADR-0024 — typing indicator, just above the input bar.
-            // Auto-hides when nobody is typing (the VM nils the text).
-            //
-            // ADR-0045 UX §6.2.11 — and never on a dead group. No new typing
-            // signal can arrive (nothing decrypts any more), so what would
-            // render is whatever was in flight at the moment of the eviction:
-            // a live indicator over a conversation that has stopped.
-            if let typing = viewModel.typingIndicatorText, !viewModel.membershipHasEnded {
-                HStack(spacing: 6) {
-                    Text(typing)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 4)
-                .transition(.opacity)
-            }
             Divider()
             composer
         }
-        .animation(.easeInOut(duration: 0.15), value: viewModel.typingIndicatorText)
+        .background(Color.lakkoBackground)
         .onAppear {
             // Phase 2a3e2b — wire the cross-device sync hook
             // on first mount. Idempotent: subsequent calls
@@ -188,8 +170,15 @@ public struct ChatScreen: View {
             // then call, video call and an overflow menu. At most two trailing
             // items plus the menu (section 4).
             ToolbarItem(placement: .principal) {
-                ChatTitleView(title: headline, subtitle: subtitle, identity: viewModel.groupIdHex,
-                              isGroup: viewModel.isGroupChat)
+                // Tapping the title opens the members / group info sheet.
+                Button {
+                    viewModel.toggleMembersPanel()
+                } label: {
+                    ChatTitleView(title: headline, subtitle: subtitle, identity: viewModel.groupIdHex,
+                                  isGroup: viewModel.presentsAsGroup)
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint(viewModel.presentsAsGroup ? "Opens group info" : "Opens members")
             }
             // Phase 3a9 — audio Call button. Hidden when a call
             // overlay is up (the overlay carries the
@@ -239,7 +228,7 @@ public struct ChatScreen: View {
                     Button {
                         viewModel.toggleMembersPanel()
                     } label: {
-                        Label(viewModel.isGroupChat ? "Group info" : "Members", systemImage: "person.2")
+                        Label(viewModel.presentsAsGroup ? "Group info" : "Members", systemImage: "person.2")
                     }
                 } label: {
                     Image(systemName: "ellipsis.circle")
@@ -405,116 +394,149 @@ public struct ChatScreen: View {
         viewModel.conversationTitle
     }
 
-    /// "@username" in a 1x1 chat, "N members" in a group (UX spec section 5.2).
+    /// "@username" in a 1x1 chat, "N members" in a group, and "typing..."
+    /// while a typing indicator is live (UX spec section 5.2).
+    ///
+    /// ADR-0024 — the indicator auto-hides when nobody is typing (the VM nils
+    /// the text). ADR-0045 UX §6.2.11 — and never on a dead group: no new
+    /// typing signal can arrive, so what would render is whatever was in
+    /// flight at the moment of the eviction.
     private var subtitle: String? {
-        viewModel.conversationSubtitle
+        if let typing = viewModel.typingIndicatorText, !viewModel.membershipHasEnded {
+            return typing
+        }
+        return viewModel.conversationSubtitle
+    }
+
+    /// The rows the timeline draws: every message except the bookkeeping
+    /// system rows, laid out into days and runs (UX spec section 5.2).
+    private var timelineEntries: [ChatTimeline.Entry] {
+        ChatTimeline.layout(
+            messages: viewModel.messages.filter { !ChatTimeline.isHiddenSystemRow($0) },
+            nowMs: ChatRepository.nowMs(),
+            calendar: .current,
+            locale: .current,
+            parseMs: ChatRepository.parseDsTimestampMs)
+    }
+
+    /// The last row the timeline draws, for the scroll-to-bottom.
+    private var lastDrawnMessageId: Int64? {
+        viewModel.messages.last(where: { !ChatTimeline.isHiddenSystemRow($0) })?.messageId
     }
 
     @ViewBuilder
     private var messagesList: some View {
-        ScrollViewReader { scrollProxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 8) {
-                    if viewModel.messages.isEmpty {
-                        emptyHint
-                    } else {
-                        ForEach(viewModel.messages) { message in
-                            MessageRow(
-                                message: message,
-                                ownIdentity: viewModel.ownIdentity,
-                                // ADR-0048 — who wrote an incoming group
-                                // message, resolved from the identity stored
-                                // at receipt (C-68). A 1x1 needs no label.
-                                authorName: viewModel.isGroupChat && message.direction == .incoming
-                                    ? message.authorKeyB64.flatMap { viewModel.personName(signatureKeyB64: $0) }
-                                    : nil,
-                                reactorNames: { emoji in
-                                    message.reactions
-                                        .filter { $0.emoji == emoji }
-                                        .compactMap { viewModel.personName(signatureKeyB64: $0.reactor) }
-                                },
-                                // ADR-0045 UX §6.2.5 — the same predicate the
-                                // composer is gated on, a few lines below.
-                                actionsAvailable: viewModel.messageActionsAvailable,
-                                // ADR-0024 — "Sent" / "Read" check on
-                                // our own messages, derived from the
-                                // other members' read watermarks.
-                                readState: viewModel.readState(of: message),
-                                onPreview: openAttachmentPreview,
-                                onEdit: { viewModel.beginEdit(message) },
-                                onDelete: { viewModel.deleteMessage(message) },
-                                onReact: { emoji in
-                                    viewModel.react(to: message, emoji: emoji)
-                                },
-                                // ADR-0047 §4 — the reaction bar's `+`.
-                                onMoreReactions: {
-                                    picker = PickerRequest(mode: .reaction, message: message)
+        GeometryReader { geometry in
+            ScrollViewReader { scrollProxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        if viewModel.messages.isEmpty {
+                            emptyHint
+                        } else {
+                            let entries = timelineEntries
+                            ForEach(entries, id: \.message.messageId) { entry in
+                                if let dateLabel = entry.dateLabel {
+                                    DateSeparator(label: dateLabel)
                                 }
-                            )
-                            .id(message.messageId)
+                                MessageRow(
+                                    message: entry.message,
+                                    ownIdentity: viewModel.ownIdentity,
+                                    // ADR-0048 — who wrote an incoming group
+                                    // message, resolved from the identity stored
+                                    // at receipt (C-68). A 1x1 needs no label;
+                                    // a run shows it once.
+                                    authorName: viewModel.presentsAsGroup
+                                        && entry.message.direction == .incoming
+                                        ? entry.message.authorKeyB64.flatMap {
+                                            viewModel.personName(signatureKeyB64: $0)
+                                        }
+                                        : nil,
+                                    showsSenderColumn: viewModel.presentsAsGroup
+                                        && entry.message.direction == .incoming,
+                                    startsRun: entry.startsRun,
+                                    timeLabel: entry.timeLabel,
+                                    // UX spec section 5.2 — about 78 percent of
+                                    // the timeline width.
+                                    maxBubbleWidth: geometry.size.width * 0.78,
+                                    reactorNames: { emoji in
+                                        entry.message.reactions
+                                            .filter { $0.emoji == emoji }
+                                            .compactMap { viewModel.personName(signatureKeyB64: $0.reactor) }
+                                    },
+                                    // ADR-0045 UX §6.2.5 — the same predicate the
+                                    // composer is gated on.
+                                    actionsAvailable: viewModel.messageActionsAvailable,
+                                    // ADR-0024 — "Sent" / "Read" glyph on our own
+                                    // messages, derived from the other members'
+                                    // read watermarks.
+                                    readState: viewModel.readState(of: entry.message),
+                                    onPreview: openAttachmentPreview,
+                                    onEdit: { viewModel.beginEdit(entry.message) },
+                                    onDelete: { viewModel.deleteMessage(entry.message) },
+                                    onReact: { emoji in
+                                        viewModel.react(to: entry.message, emoji: emoji)
+                                    },
+                                    // ADR-0047 §4 — the reaction bar's `+`.
+                                    onMoreReactions: {
+                                        picker = PickerRequest(mode: .reaction, message: entry.message)
+                                    }
+                                )
+                                // Tighter inside a run, a clear gap between runs.
+                                .padding(.top, entry.startsRun ? 10 : 2)
+                                .id(entry.message.messageId)
+                            }
+                        }
+                        // ADR-0047 — outgoing media still uploading (or failed):
+                        // shown in the timeline immediately with a determinate
+                        // ring, or `Not sent · Retry`. Nothing has reached the
+                        // other side until the row is replaced by the sent message.
+                        ForEach(media.pendingSends) { pending in
+                            PendingMediaRow(pending: pending) {
+                                media.retry(sendId: pending.id)
+                            }
+                            .padding(.top, 10)
+                            .id("pending-\(pending.id)")
+                        }
+                        // ADR-0045 UX §6.2.5 — the terminal row.
+                        //
+                        // It goes in the TIMELINE, not in a banner: it is an
+                        // outcome that happened at a definite point in the
+                        // transcript. A row marks WHERE the history stops,
+                        // survives scrollback and needs no dismissal state. It
+                        // renders after the list because it is not a
+                        // `ChatMessage` (nothing produced it on the wire) and
+                        // the state is terminal. Carried by TEXT, never by hue
+                        // or an icon, and never announced over what the reader
+                        // is doing.
+                        if let row = viewModel.terminalRowCopy {
+                            VStack(spacing: 4) {
+                                Text(row.headline)
+                                Text(row.consequence)
+                            }
+                            .font(.footnote)
+                            .foregroundStyle(Color.lakkoTextMuted)
+                            .multilineTextAlignment(.center)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                            .padding(.top, 12)
+                            .accessibilityElement(children: .combine)
                         }
                     }
-                    // ADR-0047 — outgoing media still uploading (or failed):
-                    // shown in the timeline immediately with a determinate
-                    // ring, or `Not sent · Retry`. Nothing has reached the
-                    // other side until the row is replaced by the sent message.
-                    ForEach(media.pendingSends) { pending in
-                        PendingMediaRow(pending: pending) {
-                            media.retry(sendId: pending.id)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                }
+                .onChange(of: viewModel.messages.count) { _, _ in
+                    // Scroll to the latest message whenever the list grows.
+                    if let last = lastDrawnMessageId {
+                        withAnimation {
+                            scrollProxy.scrollTo(last, anchor: .bottom)
                         }
-                        .id("pending-\(pending.id)")
-                    }
-                    // ADR-0045 UX §6.2.5 — the terminal row.
-                    //
-                    // It goes in the TIMELINE, not in a banner, and §10 already
-                    // says why: "only outcomes belong in the timeline" — and
-                    // this is an outcome, one that happened at a definite point
-                    // in the transcript. A row marks WHERE the history stops,
-                    // survives scrollback and needs no dismissal state.
-                    //
-                    // It renders after the list rather than inside it because
-                    // it is not a `ChatMessage`: nothing produced it on the
-                    // wire (the removing commit returns the same content-less
-                    // `Commit` as any other), and the state is terminal, so
-                    // "after everything" is the only place it can be.
-                    //
-                    // Carried by TEXT, never by hue or an icon, and never
-                    // announced over what the reader is doing: it arrives
-                    // unbidden, possibly mid-sentence, and interrupting someone
-                    // to tell them they have been removed from a group is the
-                    // wrong register for a fact they cannot act on. SwiftUI's
-                    // only announcement API speaks over the reader, so the
-                    // honest treatment is a grouped element they reach in
-                    // order — the same choice the new-owner notice made.
-                    if let row = viewModel.terminalRowCopy {
-                        VStack(spacing: 4) {
-                            Text(row.headline)
-                            Text(row.consequence)
-                        }
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                        .padding(.top, 8)
-                        .accessibilityElement(children: .combine)
                     }
                 }
-                .padding(16)
-            }
-            .onChange(of: viewModel.messages.count) { _, _ in
-                // Scroll to the latest message whenever the list
-                // grows. Mirror of the Android `rememberLazyListState`
-                // + `LaunchedEffect(messages.size)` shape.
-                if let last = viewModel.messages.last {
+                .onChange(of: media.pendingSends.count) { old, new in
+                    guard new > old, let last = media.pendingSends.last else { return }
                     withAnimation {
-                        scrollProxy.scrollTo(last.messageId, anchor: .bottom)
+                        scrollProxy.scrollTo("pending-\(last.id)", anchor: .bottom)
                     }
-                }
-            }
-            .onChange(of: media.pendingSends.count) { old, new in
-                guard new > old, let last = media.pendingSends.last else { return }
-                withAnimation {
-                    scrollProxy.scrollTo("pending-\(last.id)", anchor: .bottom)
                 }
             }
         }
@@ -530,9 +552,11 @@ public struct ChatScreen: View {
             if viewModel.membershipHasEnded {
                 EmptyView()
             } else if viewModel.threadKnown {
-                Text("Say hi 👋")
+                Text("No messages yet. Say hi.")
                     .font(.body)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.lakkoTextMuted)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.top, 40)
             } else {
                 Text("Loading...")
                     .font(.body)
@@ -678,7 +702,7 @@ public struct ChatScreen: View {
             if let err = viewModel.sendError {
                 Text(err)
                     .font(.footnote)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(Color.lakkoDanger)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             // 1.19c3 — pending-attachments tray. Renders only
@@ -702,23 +726,16 @@ public struct ChatScreen: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .transition(.opacity)
             }
-            HStack(spacing: 8) {
+            // UX spec section 5.2: attach, the growing field, the emoji / GIF
+            // picker, then a trailing button that is the microphone with an
+            // empty draft and the send arrow otherwise.
+            HStack(alignment: .bottom, spacing: 4) {
                 if showsRecordingBar {
                     // ADR-0047 §2 — the recording bar stands in for the text
                     // field (and its buttons) while a take is live.
                     RecordingBar(media: media)
                         .frame(maxWidth: .infinity, minHeight: 44)
                 } else {
-                    // ADR-0047 §4 — the smiley opens the picker on Emoji.
-                    Button {
-                        picker = PickerRequest(mode: .compose, message: nil)
-                    } label: {
-                        Image(systemName: "face.smiling")
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.large)
-                    .disabled(viewModel.sending)
-                    .accessibilityLabel("Emoji and GIFs")
                     // Attach button — opens the Photo / File
                     // confirmationDialog wired at the body level.
                     Button {
@@ -726,22 +743,52 @@ public struct ChatScreen: View {
                     } label: {
                         if viewModel.uploading {
                             ProgressView().controlSize(.small)
+                                .frame(width: 40, height: 40)
                         } else {
-                            Image(systemName: "paperclip")
+                            composerIcon("paperclip")
                         }
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.large)
+                    .buttonStyle(.plain)
                     .disabled(viewModel.uploading || viewModel.sending)
                     .accessibilityLabel("Attach")
                     ComposerTextField(text: $viewModel.draft, caret: caret, disabled: viewModel.sending)
+                    // ADR-0047 §4 — the smiley opens the picker on Emoji.
+                    Button {
+                        picker = PickerRequest(mode: .compose, message: nil)
+                    } label: {
+                        composerIcon("face.smiling")
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(viewModel.sending)
+                    .accessibilityLabel("Emoji and GIFs")
                 }
                 composerTrailingButton
             }
         }
         .animation(.easeInOut(duration: 0.15), value: media.hint)
-        .padding(12)
-        .background(Color(.systemBackground))
+        .padding(.horizontal, 8)
+        .padding(.vertical, 8)
+        .background(Color.lakkoSurface)
+    }
+
+    /// A composer icon button's face: 40 pt square, muted.
+    private func composerIcon(_ systemName: String) -> some View {
+        Image(systemName: systemName)
+            .font(.system(size: 22))
+            .foregroundStyle(Color.lakkoTextMuted)
+            .frame(width: 40, height: 40)
+            .contentShape(Rectangle())
+    }
+
+    /// The trailing button's send face: a 40 pt accent circle.
+    private func sendFace<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        ZStack {
+            Circle().fill(Color.lakkoAccent)
+            content()
+                .foregroundStyle(Color.lakkoAccentForeground)
+        }
+        .frame(width: 40, height: 40)
+        .padding(2)
     }
 
     /// ADR-0047 — the recording bar replaces the text field once a take is
@@ -761,33 +808,38 @@ public struct ChatScreen: View {
         switch media.recState {
         case .locked:
             Button { media.stopLocked() } label: {
-                Image(systemName: "stop.fill")
+                ZStack {
+                    Circle().fill(Color.lakkoDanger)
+                    Image(systemName: "stop.fill")
+                        .foregroundStyle(Color.white)
+                }
+                .frame(width: 40, height: 40)
+                .padding(2)
             }
-            .buttonStyle(.borderedProminent)
-            .tint(.red)
-            .controlSize(.large)
+            .buttonStyle(.plain)
             .accessibilityLabel("Stop recording")
         case .finalizing:
             ProgressView()
                 .frame(width: 44, height: 44)
         case .preview:
             Button { media.sendPreview() } label: {
-                Image(systemName: "paperplane.fill")
+                sendFace { Image(systemName: "paperplane.fill") }
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
+            .buttonStyle(.plain)
             .accessibilityLabel("Send recording")
         case .idle, .requesting, .recording:
             if composerHasContent, !media.recState.isCapturing {
                 Button(action: viewModel.onSendClicked) {
-                    if viewModel.sending {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Image(systemName: "paperplane.fill")
+                    sendFace {
+                        if viewModel.sending {
+                            ProgressView().controlSize(.small)
+                                .tint(Color.lakkoAccentForeground)
+                        } else {
+                            Image(systemName: "paperplane.fill")
+                        }
                     }
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
+                .buttonStyle(.plain)
                 .disabled(viewModel.sending || viewModel.uploading)
                 .accessibilityLabel("Send")
             } else {
@@ -988,6 +1040,25 @@ private struct AttachmentPayload {
 
 // MARK: - Message row
 
+/// A centred capsule opening a day: "Today", "Yesterday", "16 September".
+private struct DateSeparator: View {
+    let label: String
+
+    var body: some View {
+        Text(label)
+            .font(.caption)
+            .fontWeight(.medium)
+            .foregroundStyle(Color.lakkoTextMuted)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
+            .background(Color.lakkoSurfaceSunken)
+            .clipShape(Capsule())
+            .frame(maxWidth: .infinity, alignment: .center)
+            .padding(.vertical, 8)
+            .accessibilityAddTraits(.isHeader)
+    }
+}
+
 private struct MessageRow: View {
     let message: ChatMessage
     /// ADR-0023 — the local member's IDENTITY (their signature key),
@@ -995,9 +1066,17 @@ private struct MessageRow: View {
     /// their MLS leaf: a leaf is reassigned to the next member added.
     let ownIdentity: MemberIdentity?
     /// ADR-0048 — the resolved name of an incoming message's author in a group,
-    /// shown above the bubble. `nil` for a 1x1, an outgoing row, or an author
-    /// the receive path could not attribute.
+    /// drawn above the first bubble of a run. `nil` for a 1x1, an outgoing
+    /// row, or an author the receive path could not attribute.
     var authorName: String? = nil
+    /// Whether the row reserves the avatar column (incoming rows in a group).
+    var showsSenderColumn: Bool = false
+    /// Whether this message opens a run (name + avatar are drawn on it).
+    var startsRun: Bool = true
+    /// The bubble-corner time, `nil` when the server time is unknown.
+    var timeLabel: String? = nil
+    /// The widest a bubble may grow (about 78 percent of the timeline).
+    var maxBubbleWidth: CGFloat = .infinity
     /// ADR-0048 — the resolved names of who reacted with an emoji.
     var reactorNames: (String) -> [String] = { _ in [] }
     /// ADR-0045 UX §6.2.5 — whether Edit / Delete / React are offered at all.
@@ -1007,8 +1086,8 @@ private struct MessageRow: View {
     /// renderer of what `MembershipEnded.swift` decided.
     let actionsAvailable: Bool
     /// ADR-0024 — read state for our OWN outgoing messages
-    /// ("Sent" / "Read"). `nil` for incoming / system rows and
-    /// pre-ack outgoing rows (no check rendered).
+    /// (sent / read). `nil` for incoming / system rows and
+    /// pre-ack outgoing rows (no glyph rendered).
     let readState: OwnMessageReadState?
     /// 1.19c3 — bubble taps on attachment chips call into the
     /// screen's preview / share helpers. `onPreview` opens the
@@ -1024,6 +1103,8 @@ private struct MessageRow: View {
 
     /// ADR-0023 — emoji palette for the quick reaction picker.
     private static let reactionPalette = ["👍", "❤️", "😂", "😮", "😢", "🙏"]
+
+    private static let avatarSize: CGFloat = 28
 
     /// ADR-0047 §3 — a message that is exactly one video note renders as the
     /// circle itself, with no bubble chrome.
@@ -1052,56 +1133,69 @@ private struct MessageRow: View {
             && !message.deleted
     }
 
+    private var isOutgoing: Bool { message.direction == .outgoing }
+
     var body: some View {
         switch message.direction {
         case .outgoing:
-            HStack {
-                Spacer(minLength: 48)
+            HStack(alignment: .bottom, spacing: 0) {
+                Spacer(minLength: 0)
                 bubbleColumn(alignment: .trailing) {
                     if isBareVideoNote {
-                        bareVideoNote
-                            .contextMenu { menuItems }
+                        VStack(alignment: .trailing, spacing: 2) {
+                            bareVideoNote
+                            metaRow
+                        }
+                        .contextMenu { menuItems }
                     } else {
                         bubble
-                            .background(Color.accentColor.opacity(0.9))
-                            .foregroundStyle(.white)
-                            .clipShape(RoundedRectangle(cornerRadius: 16))
-                            .contextMenu { menuItems }
                     }
-                    // ADR-0024 — "Sent" / "Read" receipt under our own
-                    // bubble. Hidden on a deleted tombstone.
-                    if !message.deleted { readReceiptCheck }
                 }
+                .frame(maxWidth: maxBubbleWidth, alignment: .trailing)
             }
         case .incoming:
-            HStack {
-                bubbleColumn(alignment: .leading) {
-                    if let authorName {
-                        Text(authorName)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                    if isBareVideoNote {
-                        bareVideoNote
-                            .contextMenu { menuItems }
+            HStack(alignment: .top, spacing: 8) {
+                if showsSenderColumn {
+                    // The avatar once per run; the rows after it keep the column.
+                    if startsRun {
+                        InitialsAvatar(
+                            name: authorName ?? "",
+                            identity: message.authorKeyB64,
+                            size: Self.avatarSize)
                     } else {
-                        bubble
-                            .background(Color(.secondarySystemBackground))
-                            .clipShape(RoundedRectangle(cornerRadius: 16))
-                            .contextMenu { menuItems }
+                        Color.clear.frame(width: Self.avatarSize, height: 1)
                     }
                 }
-                Spacer(minLength: 48)
+                bubbleColumn(alignment: .leading) {
+                    if startsRun, let authorName {
+                        Text(authorName)
+                            .font(.caption)
+                            .fontWeight(.medium)
+                            .foregroundStyle(Color.lakkoAccent)
+                            .lineLimit(1)
+                            .padding(.leading, 4)
+                    }
+                    if isBareVideoNote {
+                        VStack(alignment: .leading, spacing: 2) {
+                            bareVideoNote
+                            metaRow
+                        }
+                        .contextMenu { menuItems }
+                    } else {
+                        bubble
+                    }
+                }
+                .frame(maxWidth: maxBubbleWidth, alignment: .leading)
+                Spacer(minLength: 0)
             }
         case .system:
-            HStack {
-                Spacer()
-                Text(message.text)
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-                Spacer()
-            }
+            // Small and centred (UX spec section 5.2).
+            Text(message.text)
+                .font(.caption)
+                .foregroundStyle(Color.lakkoTextMuted)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.vertical, 4)
         }
     }
 
@@ -1147,32 +1241,59 @@ private struct MessageRow: View {
         }
     }
 
+    /// The bubble: radius 18, incoming on the sunken surface, outgoing on the
+    /// accent; the time (and the delivery glyph on own messages) sits in the
+    /// lower trailing corner, beside the last line of text.
     @ViewBuilder
     private var bubble: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if message.deleted {
-                // Muted tombstone — no original text / attachments.
-                Label("message deleted", systemImage: "trash")
-                    .font(.body.italic())
-                    .foregroundStyle(.secondary)
-            } else {
-                if !message.text.isEmpty {
-                    Text(message.text)
-                        .font(.body)
-                        .textSelection(.enabled)
-                }
-                if !message.attachments.isEmpty {
-                    attachmentChips
-                }
-                if message.edited {
-                    Text("(edited)")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+        HStack(alignment: .bottom, spacing: 8) {
+            VStack(alignment: .leading, spacing: 6) {
+                if message.deleted {
+                    // Muted tombstone — no original text / attachments.
+                    Label("Message deleted", systemImage: "trash")
+                        .font(.body.italic())
+                        .opacity(0.7)
+                } else {
+                    if !message.text.isEmpty {
+                        Text(message.text)
+                            .font(.body)
+                            .textSelection(.enabled)
+                    }
+                    if !message.attachments.isEmpty {
+                        attachmentChips
+                    }
                 }
             }
+            metaRow
         }
         .padding(.vertical, 8)
         .padding(.horizontal, 12)
+        .background(isOutgoing ? Color.lakkoAccent : Color.lakkoSurfaceSunken)
+        .foregroundStyle(isOutgoing ? Color.lakkoAccentForeground : Color.lakkoText)
+        .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.bubble, style: .continuous))
+        .contextMenu { menuItems }
+    }
+
+    /// "(edited)", the time, and — on own messages — the delivery glyph.
+    @ViewBuilder
+    private var metaRow: some View {
+        HStack(spacing: 3) {
+            if message.edited, !message.deleted {
+                Text("edited")
+                    .font(.caption2)
+            }
+            if let timeLabel {
+                Text(timeLabel)
+                    .font(.caption2)
+                    .monospacedDigit()
+            }
+            if isOutgoing, !message.deleted {
+                deliveryGlyph
+            }
+        }
+        .foregroundStyle(isOutgoing ? Color.lakkoAccentForeground : Color.lakkoTextMuted)
+        .opacity(isOutgoing ? 0.85 : 1)
+        .padding(.bottom, 1)
     }
 
     @ViewBuilder
@@ -1272,46 +1393,41 @@ private struct MessageRow: View {
             if tally.count > 1 {
                 Text("\(tally.count)")
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.lakkoTextMuted)
             }
         }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 2)
-        .background(
-            tally.reactedByMe
-                ? Color.accentColor.opacity(0.18)
-                : Color(.secondarySystemBackground)
-        )
+        .padding(.horizontal, 7)
+        .padding(.vertical, 3)
+        .background(tally.reactedByMe ? Color.lakkoAccentSoft : Color.lakkoSurfaceSunken)
         .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(
-                    tally.reactedByMe
-                        ? Color.accentColor.opacity(0.6)
-                        : Color.clear,
-                    lineWidth: 1
-                )
+            Capsule()
+                .stroke(tally.reactedByMe ? Color.lakkoAccent : Color.clear, lineWidth: 1)
         )
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .clipShape(Capsule())
     }
 
-    /// ADR-0024 — the delivery glyph under an own outgoing bubble (UX spec
-    /// section 5.2): one check sent, a filled check read. No word. `nil` read
-    /// state renders nothing (incoming, system, or pre-ack rows).
+    /// ADR-0024 — the delivery glyph in an own bubble's corner (UX spec
+    /// section 5.2): one check sent, two checks read. No word; the colour is
+    /// the bubble's foreground token. `nil` read state renders nothing
+    /// (pre-ack rows).
     @ViewBuilder
-    private var readReceiptCheck: some View {
+    private var deliveryGlyph: some View {
         switch readState {
         case .none:
             EmptyView()
         case .sent:
             Image(systemName: "checkmark")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
+                .font(.system(size: 10, weight: .semibold))
                 .accessibilityLabel("Sent")
         case .read:
-            Image(systemName: "checkmark.circle.fill")
-                .font(.caption2)
-                .foregroundStyle(Color.lakkoAccent)
-                .accessibilityLabel("Read")
+            ZStack(alignment: .leading) {
+                Image(systemName: "checkmark")
+                Image(systemName: "checkmark")
+                    .offset(x: 4)
+            }
+            .font(.system(size: 10, weight: .semibold))
+            .padding(.trailing, 4)
+            .accessibilityLabel("Read")
         }
     }
 }
@@ -1350,9 +1466,9 @@ private struct PendingMediaRow: View {
                 )
                 .padding(.vertical, 8)
                 .padding(.horizontal, 12)
-                .background(Color.accentColor.opacity(pending.failed ? 0.55 : 0.9))
-                .foregroundStyle(.white)
-                .clipShape(RoundedRectangle(cornerRadius: 16))
+                .background(Color.lakkoAccent.opacity(pending.failed ? 0.55 : 1))
+                .foregroundStyle(Color.lakkoAccentForeground)
+                .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.bubble, style: .continuous))
             }
         }
     }

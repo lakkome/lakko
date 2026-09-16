@@ -130,6 +130,7 @@ import { clearLeaveRequestedForAccount } from "../chat/membership-ended";
 import { clearRemovedDevicesForAccount } from "../chat/device-readmission";
 import { clearBeaconObservationsForAccount } from "../chat/committer-beacon";
 import { deleteMessageLog } from "../chat/message-log-store";
+import { clearConversationKinds } from "../chat/conversation-kind-store";
 import { deleteProfileRow } from "../profile/profile-idb";
 import { clearOwnProfile } from "../profile/own-profile";
 import { rehydrateMlsState } from "../chat/rehydrate";
@@ -3201,6 +3202,8 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         } catch {
           // best-effort
         }
+        // The per-conversation chat / group split goes with the account.
+        clearConversationKinds(cached.accountIdB64);
         // ADR-0048 — drop the encrypted received-profile row and this
         // device's own profile name for the account. Same leave-nothing-behind
         // contract as the message log.

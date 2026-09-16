@@ -29,10 +29,10 @@ struct RecordButton: View {
         }()
         ZStack {
             Circle()
-                .fill(recording ? Color.red : Color.accentColor.opacity(media.callActive ? 0.35 : 1))
+                .fill(recording ? Color.lakkoDanger : Color.lakkoAccent.opacity(media.callActive ? 0.35 : 1))
                 .frame(width: recording ? 56 : 40, height: recording ? 56 : 40)
             Image(systemName: isVideo ? "video.fill" : "mic.fill")
-                .foregroundStyle(.white)
+                .foregroundStyle(Color.lakkoAccentForeground)
         }
         .frame(width: 44, height: 44)
         .overlay(alignment: .top) {
@@ -183,7 +183,7 @@ struct RecordingBar: View {
         WaveformBars(
             waveform: take.waveform,
             progress: active.map { $0.durationMs > 0 ? Double($0.positionMs) / Double($0.durationMs) : 0 } ?? 0,
-            tint: .accentColor
+            tint: Color.lakkoAccent
         )
         .frame(height: 24)
         .accessibilityHidden(true)

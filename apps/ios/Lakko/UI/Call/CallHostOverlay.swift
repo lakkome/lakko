@@ -213,7 +213,7 @@ private struct LinkCallNoticeBanner: View {
                     Button("Open", action: onOpen)
                         .buttonStyle(.borderedProminent)
                         .tint(.white)
-                        .foregroundStyle(.blue)
+                        .foregroundStyle(Color.lakkoAccent)
                 }
                 Spacer()
                 if notice.actions.contains(.cancel) {
@@ -231,7 +231,7 @@ private struct LinkCallNoticeBanner: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.blue)
+        .background(Color.lakkoAccent)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Call from a link")
     }

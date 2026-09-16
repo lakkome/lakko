@@ -6,20 +6,18 @@ package me.lakko.app.ui.chat
 import android.content.Context
 import android.content.SharedPreferences
 import me.lakko.app.chat.ChatRepository
+import me.lakko.app.chat.ConversationKindStore
 import me.lakko.app.profile.ProfileDirectory
 
 /**
  * Chats vs Groups — docs/ux/client-redesign.md section 3.
  *
- * Two lists over the same conversation store, split by kind. A conversation
- * with two PEOPLE is a chat (people are counted by account, never by device
- * leaf — [ChatRepository.memberCount] already does that); anything else is a
- * group. A group created through the new-group flow is a group even while it
- * still has two people, which is what [GroupPresentationStore] remembers.
- *
- * Presentation only: nothing here touches the repository or the MLS state.
+ * The kind itself (and its persistence) lives in
+ * [me.lakko.app.chat.ConversationKind] / [ConversationKindStore]; this alias
+ * keeps the UI-side name the screens already use. Presentation only: nothing
+ * here touches the repository or the MLS state.
  */
-public enum class ConversationKind { Chat, Group }
+public typealias ConversationKind = me.lakko.app.chat.ConversationKind
 
 /**
  * Local, per-device presentation facts about groups this device created or
@@ -39,6 +37,9 @@ public object GroupPresentationStore {
         val set = p.getStringSet(KEY_CREATED, emptySet()).orEmpty().toMutableSet()
         set += groupIdHex.lowercase()
         p.edit().putStringSet(KEY_CREATED, set).apply()
+        // The persisted kind is what both lists read; the flag above is kept
+        // for the title rule and for entries written before the kind existed.
+        ConversationKindStore.set(context, groupIdHex, ConversationKind.Group)
     }
 
     public fun wasCreatedAsGroup(context: Context, groupIdHex: String): Boolean =
@@ -58,18 +59,28 @@ public object GroupPresentationStore {
     public const val MAX_NAME_CHARS: Int = 64
 }
 
-/** Which list a conversation belongs to. */
+/**
+ * Which list a conversation belongs to: the persisted kind, derived once from
+ * the people count at first sight and flipped chat -> group when a third
+ * person is observed ([me.lakko.app.chat.decideConversationKind]).
+ */
 public fun conversationKind(
     context: Context,
     repository: ChatRepository,
     groupIdHex: String,
 ): ConversationKind {
-    if (GroupPresentationStore.wasCreatedAsGroup(context, groupIdHex)) return ConversationKind.Group
-    // A thread whose handle cannot be read yet defaults to a chat: the
-    // overwhelmingly common origin of a new conversation is a contact accept.
-    val people = repository.memberCount(groupIdHex) ?: 2
-    return if (people <= 2) ConversationKind.Chat else ConversationKind.Group
+    if (GroupPresentationStore.wasCreatedAsGroup(context, groupIdHex)) {
+        return ConversationKindStore.set(context, groupIdHex, ConversationKind.Group)
+    }
+    return ConversationKindStore.resolve(context, groupIdHex, repository.memberCount(groupIdHex))
 }
+
+/** `true` when the conversation is presented as a group (persisted kind). */
+public fun isGroupConversation(
+    context: Context,
+    repository: ChatRepository,
+    groupIdHex: String,
+): Boolean = conversationKind(context, repository, groupIdHex) == ConversationKind.Group
 
 /**
  * The title of a conversation, never a hex id: the other person's name for a
@@ -83,8 +94,7 @@ public fun conversationTitle(
     groupIdHex: String,
 ): String {
     repository.oneToOnePeerKey(groupIdHex)?.let { key ->
-        val people = repository.memberCount(groupIdHex) ?: 2
-        if (people <= 2 && !GroupPresentationStore.wasCreatedAsGroup(context, groupIdHex)) {
+        if (!isGroupConversation(context, repository, groupIdHex)) {
             return directory.resolve(key).primary
         }
     }

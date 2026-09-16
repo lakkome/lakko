@@ -86,7 +86,7 @@ struct VoiceBubble: View {
     @EnvironmentObject private var media: ChatMediaController
     @EnvironmentObject private var live: MediaLiveState
 
-    private var tint: Color { incoming ? .primary : .white }
+    private var tint: Color { incoming ? Color.lakkoText : Color.lakkoAccentForeground }
     private var isPending: Bool { upload != nil }
     private var active: ChatMediaController.VoicePlayback? {
         live.voice?.key == mediaKey ? live.voice : nil
@@ -113,7 +113,7 @@ struct VoiceBubble: View {
                             .foregroundStyle(tint.opacity(0.8))
                         if incoming, !media.isPlayed(mediaKey) {
                             Circle()
-                                .fill(Color.accentColor)
+                                .fill(Color.lakkoAccent)
                                 .frame(width: 6, height: 6)
                                 .accessibilityLabel("Not played")
                         }
@@ -144,10 +144,10 @@ struct VoiceBubble: View {
             ZStack {
                 Circle().fill(tint)
                 if media.loadingKeys.contains(mediaKey) {
-                    ProgressView().tint(incoming ? Color(.systemBackground) : .accentColor)
+                    ProgressView().tint(incoming ? Color.lakkoSurfaceSunken : Color.lakkoAccent)
                 } else {
                     Image(systemName: active?.playing == true ? "pause.fill" : "play.fill")
-                        .foregroundStyle(incoming ? Color(.systemBackground) : Color.accentColor)
+                        .foregroundStyle(incoming ? Color.lakkoSurfaceSunken : Color.lakkoAccent)
                 }
                 if case .uploading(let fraction) = upload {
                     ProgressRing(fraction: fraction, lineWidth: 3, color: tint)
@@ -375,10 +375,10 @@ struct VideoNoteBubble: View {
                             .padding(16)
                     }
                     if model.mode == .sound {
-                        ProgressRing(fraction: model.progress, lineWidth: 4, color: .accentColor)
+                        ProgressRing(fraction: model.progress, lineWidth: 4, color: Color.lakkoAccent)
                     }
                     if case .uploading(let fraction) = upload {
-                        ProgressRing(fraction: fraction, lineWidth: 4, color: .accentColor)
+                        ProgressRing(fraction: fraction, lineWidth: 4, color: Color.lakkoAccent)
                     }
                 }
                 .frame(width: Self.diameter, height: Self.diameter)
@@ -392,7 +392,7 @@ struct VideoNoteBubble: View {
                         .foregroundStyle(.secondary)
                 }
                 if incoming, !media.isPlayed(mediaKey) {
-                    Circle().fill(Color.accentColor).frame(width: 6, height: 6)
+                    Circle().fill(Color.lakkoAccent).frame(width: 6, height: 6)
                 }
             }
             if upload == .failed {

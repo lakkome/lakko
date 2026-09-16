@@ -69,6 +69,10 @@ public final class ChatRepository: ObservableObject {
     /// ADR-0050 — which leaf identity the on-disk snapshot belongs to.
     private let snapshotLeafKeyStore: SnapshotLeafKeyStore
     private let knownGroupsStore: KnownGroupsStore
+    /// UX spec section 5.1 — which list (Chats / Groups) each conversation
+    /// belongs to. The repository records `chat` for a 1x1 it founds; the
+    /// lists and the new-group path record the rest.
+    public let conversationKindStore: ConversationKindStore
     /// Phase 2a3f1 — persistent plaintext-message log.
     /// Survives app launches; mutated on every append /
     /// poll / send.
@@ -281,8 +285,10 @@ public final class ChatRepository: ObservableObject {
         pendingRequestStore: PendingRequestStore = PendingRequestStore(),
         unappliedRequestStore: UnappliedRequestStore = UnappliedRequestStore(),
         lastObservedOwnerStore: LastObservedOwnerStore = LastObservedOwnerStore(),
-        leaveRequestStore: LeaveRequestStore = LeaveRequestStore()
+        leaveRequestStore: LeaveRequestStore = LeaveRequestStore(),
+        conversationKindStore: ConversationKindStore = ConversationKindStore()
     ) {
+        self.conversationKindStore = conversationKindStore
         self.chatClient = chatClient
         self.dsClient = dsClient
         self.discovery = discovery
@@ -459,6 +465,7 @@ public final class ChatRepository: ObservableObject {
             snapshotStore.deleteSnapshot(accountIdB64: accountIdB64)
             snapshotLeafKeyStore.clear(accountIdB64: accountIdB64)
             knownGroupsStore.clear(accountIdB64: accountIdB64)
+            conversationKindStore.clear(accountIdB64: accountIdB64)
             DeviceReadmissionMemory.clearForAccount(accountIdB64: accountIdB64)
             // ADR-0040 (G-35) — drop any pending-commit outbox entries for the
             // account alongside the snapshot they were paired with, so a wiped
@@ -659,6 +666,11 @@ public final class ChatRepository: ObservableObject {
         let groupIdHex = DsClient.pseudonymHex(groupId)
         groups[groupIdHex] = GroupRecord(group: group, groupId: groupId)
         persistKnownGroupBestEffort(groupIdHex: groupIdHex)
+        // UX spec section 5.1 — founded with one other person: a chat. The
+        // new-group path and the first add promote it to a group.
+        if let accountIdB64 = currentAccountIdB64 {
+            conversationKindStore.record(accountIdB64: accountIdB64, groupIdHex: groupIdHex, kind: .chat)
+        }
         persistSnapshotBestEffort()
         state = state.with(threads: buildThreadList())
         // ADR-0042 — subscribe under `push_gid` (defers until this device

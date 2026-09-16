@@ -33,6 +33,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -67,6 +68,9 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.FilledIconButton
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -86,12 +90,12 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.TextRange
@@ -99,6 +103,10 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
+import android.text.format.DateFormat
+import java.time.ZoneId
+import java.util.Locale
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.foundation.background
@@ -186,7 +194,23 @@ public fun ChatScreen(
     val peerName = remember(state.groupIdHex, state.messages.size, nameVersion, otherMembers) {
         viewModel.oneToOnePeerName()
     }
-    val isGroupChat = otherMembers.size > 1
+    // UX section 3 — the persisted kind decides the header shape: a group made
+    // through the new-group flow is a group even while it still has two people.
+    val conversationKind = remember(state.groupIdHex, otherMembers) { viewModel.conversationKind() }
+    val isGroupChat = conversationKind == ConversationKind.Group || otherMembers.size > 1
+    // UX 5.2 — the second header line of a 1x1 chat is the verified @username.
+    val peerUsername = remember(state.groupIdHex, nameVersion, otherMembers) {
+        viewModel.oneToOnePeerUsername()
+    }
+    // UX 5.2 — the timeline's clock: DS `created_at` rendered in the device's
+    // 12/24-hour format; date separators relative to now.
+    val zone = remember { ZoneId.systemDefault() }
+    val locale = remember { Locale.getDefault() }
+    val use24h = remember(context) { DateFormat.is24HourFormat(context) }
+    val timeline = remember(state.messages, zone, use24h) {
+        buildTimeline(state.messages, System.currentTimeMillis(), zone, use24h, locale)
+    }
+    val maxBubbleWidth: Dp = (LocalConfiguration.current.screenWidthDp * 0.78f).dp
 
     // 1.19c4 — system-picker launchers. `ACTION_OPEN_DOCUMENT`
     // surfaces both files and photos through the same code path
@@ -364,23 +388,27 @@ public fun ChatScreen(
     var pendingEmojiInsert by remember { mutableStateOf<Pair<Long, String>?>(null) }
     var emojiInsertSeq by remember { mutableStateOf(0L) }
 
-    LaunchedEffect(state.messages.size, pendingMedia.size) {
+    LaunchedEffect(timeline.size, pendingMedia.size) {
         // Auto-scroll to the latest row on every new message
         // (Outgoing send + Incoming poll both bump the count, and so does an
         // outgoing media bubble entering the timeline).
-        val total = state.messages.size + pendingMedia.size
+        val total = timeline.size + pendingMedia.size
         if (total > 0) {
             listState.animateScrollToItem(total - 1)
         }
     }
 
-    val headerTitle = peerName ?: groupTitle ?: "Group"
+    val headerTitle = if (isGroupChat) {
+        groupTitle ?: peerName ?: "Group"
+    } else {
+        peerName ?: groupTitle ?: "Group"
+    }
+    // UX 5.2 — "typing..." while a typing indicator is live (ADR-0024; never on
+    // a dead group), else "@username" in a 1x1, else "N members" in a group.
     val headerSubtitle = when {
-        !isGroupChat && !state.typingText.isNullOrEmpty() && !membershipEnded -> state.typingText
-        isGroupChat -> {
-            val n = otherMembers.size + 1
-            "$n members"
-        }
+        !state.typingText.isNullOrEmpty() && !membershipEnded -> state.typingText
+        isGroupChat -> "${otherMembers.size + 1} members"
+        peerUsername != null -> "@$peerUsername"
         else -> null
     }
     Scaffold(
@@ -504,14 +532,25 @@ public fun ChatScreen(
                 LazyColumn(
                     state = listState,
                     modifier = Modifier.fillMaxSize(),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
                     contentPadding = androidx.compose.foundation.layout.PaddingValues(
                         vertical = 8.dp,
                     ),
                 ) {
-                    items(items = state.messages, key = { it.messageId }) { msg ->
+                    items(items = timeline, key = { it.key }) { item ->
+                        if (item is TimelineItem.DateSeparator) {
+                            DateSeparatorPill(item.label)
+                            return@items
+                        }
+                        val row = item as TimelineItem.Row
+                        val msg = row.message
                         MessageRow(
                             msg = msg,
+                            // UX 5.2 — a run's first row gets the wide gap, the
+                            // name and the avatar; the rest sit tight under it.
+                            firstInRun = row.firstInRun,
+                            time = row.time,
+                            isGroup = isGroupChat,
+                            maxBubbleWidth = maxBubbleWidth,
                             mediaHub = mediaHub,
                             onOpenReactionPicker = {
                                 picker = PickerRequest(PickerMode.REACTION, msg.messageId)
@@ -601,15 +640,8 @@ public fun ChatScreen(
             TerminalMembershipRow(row)
         }
 
-        // ADR-0024 — typing indicator just above the input bar.
-        // Auto-hides when `typingText` is null (nobody typing /
-        // auto-expired).
-        //
-        // ADR-0045 UX §6.2.11 — and never on a dead group. No new typing signal
-        // can arrive (nothing decrypts any more), so what would render is
-        // whatever was in flight at the moment of the eviction: a live
-        // indicator over a conversation that has stopped.
-        TypingIndicator(text = if (membershipEnded) null else state.typingText)
+        // ADR-0024 — the typing indicator lives in the header's second line
+        // (UX 5.2), not above the input bar; see `headerSubtitle`.
 
         when (val slot = me.lakko.app.chat.composerState(membership, state.draft)) {
             me.lakko.app.chat.ComposerSlot.Composer -> Composer(
@@ -732,7 +764,11 @@ private fun Header(
             }
         },
         title = {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            // UX 5.2 — tapping the title opens Members (group) / Details (1x1).
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.clickable(onClick = onShowMembers),
+            ) {
                 LakkoAvatar(name = title, seed = avatarSeed, size = 32.dp, group = isGroup)
                 Spacer(Modifier.width(10.dp))
                 Column {
@@ -740,6 +776,7 @@ private fun Header(
                         text = title,
                         style = MaterialTheme.typography.titleMedium,
                         maxLines = 1,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                     )
                     if (subtitle != null) {
                         Text(
@@ -747,6 +784,7 @@ private fun Header(
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
+                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                         )
                     }
                 }
@@ -830,6 +868,14 @@ private fun GroupCallBanner(
 @Composable
 private fun MessageRow(
     msg: ChatMessage,
+    /** UX 5.2 — first row of a run: wide gap above, sender name + avatar in groups. */
+    firstInRun: Boolean,
+    /** UX 5.2 — the corner time ("14:05") from the DS row, or `null` for none. */
+    time: String?,
+    /** `true` in a group: incoming rows get the avatar gutter. */
+    isGroup: Boolean,
+    /** About 78 percent of the screen. */
+    maxBubbleWidth: Dp,
     /** ADR-0047 — the chat's media runtime, for voice / video-note / GIF bubbles. */
     mediaHub: me.lakko.app.media.ChatMediaHub,
     /** ADR-0047 — the reaction bar's `+`: the picker in reaction mode. */
@@ -855,13 +901,18 @@ private fun MessageRow(
     onDelete: () -> Unit,
     onReact: (String) -> Unit,
 ) {
+    val gapAbove = if (firstInRun) 8.dp else 2.dp
     when (msg.direction) {
         Direction.Outgoing -> Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = gapAbove),
             horizontalArrangement = Arrangement.End,
         ) {
             Bubble(
                 msg = msg,
+                time = time,
+                maxBubbleWidth = maxBubbleWidth,
                 mediaHub = mediaHub,
                 onOpenReactionPicker = onOpenReactionPicker,
                 ownIdentity = ownIdentity,
@@ -874,8 +925,9 @@ private fun MessageRow(
                     others = otherMembers,
                     readUpToByMember = readUpToByMember,
                 ),
-                background = MaterialTheme.colorScheme.primaryContainer,
-                contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                // UX section 4 — outgoing on the accent.
+                background = MaterialTheme.colorScheme.primary,
+                contentColor = MaterialTheme.colorScheme.onPrimary,
                 onPreview = onPreview,
                 onSave = onSave,
                 onEdit = onEdit,
@@ -884,49 +936,79 @@ private fun MessageRow(
             )
         }
 
-        Direction.Incoming -> Column(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalAlignment = Alignment.Start,
+        Direction.Incoming -> Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = gapAbove),
+            verticalAlignment = Alignment.Bottom,
         ) {
-            if (authorName != null) {
-                Text(
-                    text = authorName,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    modifier = Modifier.padding(start = 4.dp, bottom = 2.dp),
+            if (isGroup) {
+                // UX 5.2 — the avatar once per run, in a fixed gutter so the
+                // bubbles of one run line up.
+                if (firstInRun) {
+                    LakkoAvatar(
+                        name = authorName ?: "?",
+                        seed = msg.authorKey ?: msg.messageId.toString(),
+                        size = 28.dp,
+                        modifier = Modifier.padding(bottom = 2.dp),
+                    )
+                } else {
+                    Spacer(Modifier.width(28.dp))
+                }
+                Spacer(Modifier.width(8.dp))
+            }
+            Column(horizontalAlignment = Alignment.Start) {
+                if (authorName != null && firstInRun) {
+                    Text(
+                        text = authorName,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        maxLines = 1,
+                        modifier = Modifier.padding(start = 4.dp, bottom = 2.dp),
+                    )
+                }
+                Bubble(
+                    msg = msg,
+                    time = time,
+                    maxBubbleWidth = maxBubbleWidth,
+                    mediaHub = mediaHub,
+                    onOpenReactionPicker = onOpenReactionPicker,
+                    ownIdentity = ownIdentity,
+                    actionsAvailable = actionsAvailable,
+                    isOwn = false,
+                    // Incoming bubbles never show our read state.
+                    readState = OwnReadState.None,
+                    // UX section 4 — incoming on the sunken surface.
+                    background = MaterialTheme.colorScheme.surfaceVariant,
+                    contentColor = MaterialTheme.colorScheme.onSurface,
+                    onPreview = onPreview,
+                    onSave = onSave,
+                    onEdit = onEdit,
+                    onDelete = onDelete,
+                    onReact = onReact,
                 )
             }
-            Bubble(
-                msg = msg,
-                mediaHub = mediaHub,
-                onOpenReactionPicker = onOpenReactionPicker,
-                ownIdentity = ownIdentity,
-                actionsAvailable = actionsAvailable,
-                isOwn = false,
-                // Incoming bubbles never show our read state.
-                readState = OwnReadState.None,
-                background = MaterialTheme.colorScheme.surfaceVariant,
-                contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                onPreview = onPreview,
-                onSave = onSave,
-                onEdit = onEdit,
-                onDelete = onDelete,
-                onReact = onReact,
-            )
         }
 
+        // System rows stay centred and small (UX 5.2), in a quiet pill.
         Direction.System -> Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 8.dp),
             horizontalArrangement = Arrangement.Center,
         ) {
-            Text(
-                text = msg.text,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                fontFamily = FontFamily.Monospace,
-                modifier = Modifier.padding(vertical = 4.dp),
-            )
+            Surface(
+                shape = RoundedCornerShape(percent = 50),
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+            ) {
+                Text(
+                    text = msg.text,
+                    style = MaterialTheme.typography.labelMedium,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                )
+            }
         }
     }
 }
@@ -938,28 +1020,35 @@ private data class PickerRequest(val mode: PickerMode, val messageId: Long?)
 private val REACTION_EMOJIS: List<String> =
     listOf("👍", "❤️", "😂", "😮", "😢", "🙏")
 
-/**
- * ADR-0024 — the typing-indicator line just above the input bar.
- * Renders nothing when [text] is `null` (nobody typing / the
- * indicator auto-expired). The text itself ("<name> is typing…" /
- * "typing…" / "Several people are typing…") is resolved in the
- * ViewModel.
- */
+/** UX 5.2 — the centred day pill between two days of the timeline. */
 @Composable
-private fun TypingIndicator(text: String?) {
-    if (text == null) return
-    Text(
-        text = text,
-        style = MaterialTheme.typography.labelMedium,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
-        modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
-    )
+private fun DateSeparatorPill(label: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 12.dp, bottom = 4.dp),
+        horizontalArrangement = Arrangement.Center,
+    ) {
+        Surface(
+            shape = RoundedCornerShape(percent = 50),
+            color = MaterialTheme.colorScheme.surfaceVariant,
+            contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+        ) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+            )
+        }
+    }
 }
 
 @Composable
 private fun Bubble(
     msg: ChatMessage,
+    /** UX 5.2 — the corner time, or `null` when the row carries no usable time. */
+    time: String?,
+    maxBubbleWidth: Dp,
     mediaHub: me.lakko.app.media.ChatMediaHub,
     onOpenReactionPicker: () -> Unit,
     /** ADR-0023 — our own signature key, for the own-reaction highlight. */
@@ -1004,11 +1093,12 @@ private fun Bubble(
             }
         Box {
             Surface(
-                shape = RoundedCornerShape(12.dp),
+                // UX section 4 — radius 18 for bubbles.
+                shape = RoundedCornerShape(18.dp),
                 color = if (chromeless) Color.Transparent else background,
                 contentColor = contentColor,
                 modifier = Modifier
-                    .widthIn(max = 280.dp)
+                    .widthIn(max = maxBubbleWidth)
                     .then(
                         // ADR-0045 UX §6.2.5 — no long press once the
                         // membership has ended: the menu it opens offers
@@ -1028,7 +1118,7 @@ private fun Bubble(
             ) {
                 Column(
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
                     if (msg.deleted) {
                         // ADR-0023 — muted tombstone, no text / attachments.
@@ -1063,14 +1153,17 @@ private fun Bubble(
                                 }
                             }
                         }
-                        // ADR-0023 — subtle "(edited)" marker.
-                        if (msg.edited) {
-                            Text(
-                                text = "(edited)",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = contentColor.copy(alpha = 0.6f),
-                            )
-                        }
+                    }
+                    // UX 5.2 — the time in the lower corner, with the edited
+                    // marker before it and, on own bubbles, the delivery glyph
+                    // after it. Chromeless media carries the same line below.
+                    if (!chromeless) {
+                        BubbleMeta(
+                            edited = msg.edited && !msg.deleted,
+                            time = time,
+                            readState = if (isOwn) readState else OwnReadState.None,
+                            contentColor = contentColor,
+                        )
                     }
                 }
             }
@@ -1150,18 +1243,63 @@ private fun Bubble(
             )
         }
 
-        // ADR-0024 — read-state line under an OWN bubble: a single
-        // check for "Sent", a filled double check for "Read"
-        // (every other member's watermark has reached this id).
-        if (isOwn && readState != OwnReadState.None) {
+        // A chromeless (video note) bubble has no surface to carry the meta
+        // line, so it sits under the circle.
+        if (chromeless) {
+            BubbleMeta(
+                edited = msg.edited,
+                time = time,
+                readState = if (isOwn) readState else OwnReadState.None,
+                contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 4.dp),
+            )
+        }
+    }
+}
+
+/**
+ * UX 5.2 — the bubble's corner line: "(edited)", the time, and for an own
+ * message the delivery glyph (ADR-0024): one check = sent, two checks = read
+ * (every other member's watermark has reached this id). Colours come from the
+ * bubble's content colour so the glyph reads on the accent and on the sunken
+ * surface alike; no text.
+ */
+@Composable
+private fun BubbleMeta(
+    edited: Boolean,
+    time: String?,
+    readState: OwnReadState,
+    contentColor: Color,
+    modifier: Modifier = Modifier,
+) {
+    if (!edited && time == null && readState == OwnReadState.None) return
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        modifier = modifier.fillMaxWidth(),
+    ) {
+        Spacer(Modifier.weight(1f))
+        if (edited) {
+            Text(
+                text = "edited",
+                style = MaterialTheme.typography.labelSmall,
+                color = contentColor.copy(alpha = 0.7f),
+            )
+        }
+        if (time != null) {
+            Text(
+                text = time,
+                style = MaterialTheme.typography.labelSmall,
+                color = contentColor.copy(alpha = 0.7f),
+            )
+        }
+        if (readState != OwnReadState.None) {
             val read = readState == OwnReadState.Read
             Icon(
                 imageVector = if (read) Icons.Filled.DoneAll else Icons.Filled.Check,
                 contentDescription = if (read) "Read" else "Sent",
-                tint = if (read) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier
-                    .padding(end = 4.dp)
-                    .height(14.dp),
+                tint = if (read) contentColor else contentColor.copy(alpha = 0.7f),
+                modifier = Modifier.height(14.dp),
             )
         }
     }
@@ -1464,7 +1602,7 @@ private fun Composer(
             verticalAlignment = Alignment.Bottom,
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(12.dp),
+                .padding(horizontal = 8.dp, vertical = 8.dp),
         ) {
             if (recording) {
                 // §2 flow 2 — the recording bar replaces the text field. The
@@ -1472,13 +1610,6 @@ private fun Composer(
                 // pointer keeps its gesture.
                 RecordingBar(recorder, Modifier.weight(1f).heightIn(min = 48.dp))
             } else {
-                // UX spec §4 — the smiley opens the picker on the Emoji tab.
-                IconButton(
-                    onClick = onOpenPicker,
-                    enabled = !sending,
-                ) {
-                    Icon(Icons.Filled.Mood, contentDescription = "Emoji and GIFs")
-                }
                 // 1.19c4 — Attach button. Drives the OS-level
                 // ACTION_OPEN_DOCUMENT picker via the launcher
                 // wired in [ChatScreen]; the contract surfaces both
@@ -1489,15 +1620,29 @@ private fun Composer(
                 ) {
                     Icon(Icons.Filled.AttachFile, contentDescription = "Attach")
                 }
+                // UX 5.2 — a pill field on the sunken surface that grows to
+                // five lines and then scrolls; the IME resizes the screen
+                // (adjustResize + the Scaffold's safe-drawing insets).
                 OutlinedTextField(
                     value = field,
                     onValueChange = { next ->
                         field = next
                         if (next.text != draft) onDraftChange(next.text)
                     },
-                    placeholder = { Text("Type a message\u2026") },
+                    placeholder = { Text("Message") },
                     singleLine = false,
+                    maxLines = 5,
                     enabled = !sending,
+                    shape = RoundedCornerShape(24.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+                        unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+                        disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+                        focusedBorderColor = Color.Transparent,
+                        unfocusedBorderColor = Color.Transparent,
+                        disabledBorderColor = Color.Transparent,
+                    ),
+                    textStyle = MaterialTheme.typography.bodyLarge,
                     keyboardOptions = KeyboardOptions(
                         capitalization = KeyboardCapitalization.Sentences,
                     ),
@@ -1507,13 +1652,28 @@ private fun Composer(
                         // blur clears any outstanding typing signal.
                         .onFocusChanged { onFocusChanged(it.isFocused) },
                 )
+                // UX spec §4 — the smiley opens the picker on the Emoji tab
+                // (UX 5.2: attach, field, emoji or GIF, trailing button).
+                IconButton(
+                    onClick = onOpenPicker,
+                    enabled = !sending,
+                ) {
+                    Icon(Icons.Filled.Mood, contentDescription = "Emoji and GIFs")
+                }
             }
-            Spacer(Modifier.width(8.dp))
+            Spacer(Modifier.width(4.dp))
             if (showSend && !recording) {
-                Button(
+                // UX 5.2 — the trailing button is the send arrow once there is
+                // a draft or an attachment; the mic otherwise (below).
+                FilledIconButton(
                     onClick = onSendClicked,
                     enabled = !sending && !uploading
                         && (draft.isNotBlank() || pendingAttachments.isNotEmpty()),
+                    colors = IconButtonDefaults.filledIconButtonColors(
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        contentColor = MaterialTheme.colorScheme.onPrimary,
+                    ),
+                    modifier = Modifier.height(48.dp).width(48.dp),
                 ) {
                     if (sending) {
                         CircularProgressIndicator(

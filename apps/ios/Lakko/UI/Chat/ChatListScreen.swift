@@ -44,12 +44,16 @@ public struct ChatListScreen: View {
         self.onCompose = onCompose
     }
 
+    /// UX spec section 5.1 — the search field filters by name and preview.
+    @State private var searchText: String = ""
+
     private var title: String { kind == .chat ? "Chats" : "Groups" }
 
     public var body: some View {
         content
             .navigationTitle(title)
             .navigationBarTitleDisplayMode(.large)
+            .searchable(text: $searchText, prompt: "Search")
             // Receiving is automatic; the pull gesture runs the same poll
             // once more, on demand (UX spec section 2, principle 3).
             .refreshable { await viewModel.pollNow(kind: kind) }
@@ -75,37 +79,78 @@ public struct ChatListScreen: View {
             }
     }
 
-    /// This list's threads with the active flags applied:
-    ///   * pinned → top of the list
-    ///   * archived → bottom
-    ///   * otherwise stable on the underlying repository order
-    private var sortedThreads: [ChatThread] {
+    /// One row's rendered data, computed once per body pass so the sort, the
+    /// search filter and the row read the same strings.
+    private struct RowData: Identifiable {
+        let thread: ChatThread
+        let title: String
+        let preview: String
+        let lastMessageMs: Int64?
+        var id: String { thread.groupIdHex }
+    }
+
+    /// This list's rows with the active flags applied (UX spec section 5.1):
+    ///   * pinned first
+    ///   * archived last
+    ///   * otherwise by the time of the last message, newest first
+    /// and the search text applied to name and preview.
+    private var sortedRows: [RowData] {
         let flagsMap = deviceGroupSync.flags
-        return viewModel.threads(of: kind).sorted { lhs, rhs in
-            let lf = flagsMap[lhs.groupIdHex]
-            let rf = flagsMap[rhs.groupIdHex]
+        let isGroup = kind == .group
+        let rows = viewModel.threads(of: kind).map { thread in
+            RowData(
+                thread: thread,
+                title: viewModel.title(groupIdHex: thread.groupIdHex),
+                preview: viewModel.preview(thread: thread, isGroup: isGroup),
+                lastMessageMs: viewModel.lastMessageMs(thread: thread))
+        }
+        .filter { ChatListFormatting.matches(query: searchText, title: $0.title, preview: $0.preview) }
+        return rows.sorted { lhs, rhs in
+            let lf = flagsMap[lhs.thread.groupIdHex]
+            let rf = flagsMap[rhs.thread.groupIdHex]
             let lpinned = lf?.pinned == true
             let rpinned = rf?.pinned == true
             if lpinned != rpinned { return lpinned }
             let larchived = lf?.archived == true
             let rarchived = rf?.archived == true
             if larchived != rarchived { return !larchived }
-            return false
+            switch (lhs.lastMessageMs, rhs.lastMessageMs) {
+            case let (l?, r?) where l != r: return l > r
+            case (_?, nil): return true
+            case (nil, _?): return false
+            default: return lhs.thread.groupIdHex < rhs.thread.groupIdHex
+            }
         }
     }
 
     @ViewBuilder
     private var content: some View {
-        let threads = sortedThreads
-        if threads.isEmpty {
+        let rows = sortedRows
+        if rows.isEmpty {
             // Inside a scroll view so the pull gesture works on the empty list too.
-            ScrollView { emptyState }
+            ScrollView {
+                if searchText.trimmingCharacters(in: .whitespaces).isEmpty {
+                    emptyState
+                } else {
+                    Text("No results")
+                        .foregroundStyle(Color.lakkoTextMuted)
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 80)
+                }
+            }
         } else {
-            List(threads, id: \.groupIdHex) { thread in
+            List(rows) { row in
+                let thread = row.thread
                 Button(action: { onOpenChat(thread.groupIdHex) }) {
                     ThreadRow(
                         thread: thread,
-                        title: viewModel.title(groupIdHex: thread.groupIdHex),
+                        title: row.title,
+                        preview: row.preview,
+                        timeLabel: row.lastMessageMs.map {
+                            ChatListFormatting.lastMessageTime(
+                                ms: $0, nowMs: ChatRepository.nowMs(),
+                                calendar: .current, locale: .current)
+                        },
                         isGroup: kind == .group,
                         flags: deviceGroupSync.flags[thread.groupIdHex],
                         unread: UnreadCounting.displayed(
@@ -118,6 +163,8 @@ public struct ChatListScreen: View {
                     )
                 }
                 .buttonStyle(.plain)
+                .listRowSeparator(.hidden)
+                .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
                 .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                     swipeActions(thread: thread)
                 }
@@ -174,7 +221,7 @@ public struct ChatListScreen: View {
                 systemImage: pinned ? "pin.slash" : "pin"
             )
         }
-        .tint(.orange)
+        .tint(Color.lakkoAccent)
         Button {
             Task { await toggleFlag(thread: thread, field: .mute) }
         } label: {
@@ -192,7 +239,7 @@ public struct ChatListScreen: View {
                 systemImage: archived ? "tray.and.arrow.up" : "archivebox"
             )
         }
-        .tint(.indigo)
+        .tint(Color.lakkoTextMuted)
     }
 
     private enum FlagField {
@@ -262,6 +309,10 @@ private struct ThreadRow: View {
     /// The row title: the other person's name in a chat, the group's
     /// member-derived title in a group. Never a hex id.
     let title: String
+    /// The second line (``ChatListFormatting/preview``), already prefixed.
+    let preview: String
+    /// The last message's time, `nil` when the thread has no timed message.
+    let timeLabel: String?
     let isGroup: Bool
     /// Phase 2a3e2c-iOS — cross-device flags snapshot for this
     /// thread. `nil` until a `Flags` payload lands.
@@ -270,8 +321,12 @@ private struct ThreadRow: View {
     /// per-thread read cursor + the incoming/system row IDs.
     let unread: Int
 
+    /// The row goes quiet once this device's membership has ended (ADR-0045
+    /// UX §6.2.4 / §6.2.11): no badge, and the ended line in the preview slot.
+    private var showsUnread: Bool { unread > 0 && endedLine == nil }
+
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(alignment: .center, spacing: 12) {
             InitialsAvatar(
                 name: title,
                 // The group id is hashed for the tint only, never shown.
@@ -279,98 +334,98 @@ private struct ThreadRow: View {
                 size: 40,
                 isGroup: isGroup
             )
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 4) {
-                    if flags?.pinned == true {
-                        Image(systemName: "pin.fill")
-                            .font(.caption)
-                            .foregroundStyle(Color.lakkoTextMuted)
-                    }
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(title)
                         .font(.body)
+                        .fontWeight(showsUnread ? .semibold : .regular)
+                        .foregroundStyle(Color.lakkoText)
                         .lineLimit(1)
-                    if flags?.muted == true {
-                        Image(systemName: "bell.slash.fill")
+                    Spacer(minLength: 8)
+                    if let timeLabel {
+                        Text(timeLabel)
                             .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    if flags?.archived == true {
-                        Image(systemName: "archivebox.fill")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(showsUnread ? Color.lakkoAccent : Color.lakkoTextMuted)
+                            .lineLimit(1)
+                            .fixedSize()
                     }
                 }
-                // ADR-0045 UX §6.2.4 — the chat STAYS in the list and gains one
-                // muted line, in the slot the last-message preview already
-                // occupies (§5.2 uses the same slot for pending annotations).
-                //
-                // It stays because removing it would delete a transcript the
-                // user still has, with no warning, as a side effect of
-                // something somebody else did — the single worst thing in this
-                // design's reach. The row keeps its position, its label and its
-                // flags: `pinned` / `muted` / `archived` are deliberately
-                // untouched, because auto-archiving would be the client
-                // silently reorganising the user's list on their behalf, and
-                // archive is a decision, not a consequence.
-                Text(endedLine ?? lastMessagePreview)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-            Spacer()
-            // ADR-0045 UX §6.2.4 / §6.2.11 — the row goes QUIET. An unread
-            // badge asserts a conversation that can still move, and this one
-            // cannot: nothing new will ever decrypt, so whatever count is
-            // standing is frozen at the moment of the eviction and would sit
-            // there for good.
-            if unread > 0, endedLine == nil {
-                // Pill badge. Muted threads render a hollow
-                // ring instead of the filled accent fill so a
-                // muted-but-unread row still surfaces a hint
-                // without grabbing attention.
-                Text(unread > 99 ? "99+" : "\(unread)")
-                    .font(.caption2)
-                    .fontWeight(.semibold)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(
-                        flags?.muted == true
-                            ? Color.secondary.opacity(0.2)
-                            : Color.lakkoAccent
-                    )
-                    .foregroundStyle(
-                        flags?.muted == true ? Color.lakkoTextMuted : Color.lakkoAccentForeground
-                    )
-                    .clipShape(Capsule())
+                HStack(alignment: .center, spacing: 6) {
+                    // ADR-0045 UX §6.2.4 — the chat STAYS in the list and gains
+                    // one muted line, in the slot the last-message preview
+                    // already occupies. Removing it would delete a transcript
+                    // the user still has as a side effect of something somebody
+                    // else did; the flags are deliberately untouched too, since
+                    // auto-archiving would be the client reorganising the
+                    // user's list on their behalf.
+                    Text(endedLine ?? preview)
+                        .font(.subheadline)
+                        .foregroundStyle(Color.lakkoTextMuted)
+                        .lineLimit(1)
+                    Spacer(minLength: 8)
+                    trailingMarks
+                }
             }
         }
         .padding(.vertical, 4)
         .contentShape(Rectangle())
         .opacity(flags?.archived == true ? 0.6 : 1)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(accessibilityText)
+    }
+
+    /// Muted and pinned glyphs, then the unread capsule (UX spec section 5.1).
+    @ViewBuilder
+    private var trailingMarks: some View {
+        HStack(spacing: 6) {
+            if flags?.muted == true {
+                Image(systemName: "bell.slash.fill")
+                    .font(.caption2)
+                    .foregroundStyle(Color.lakkoTextMuted)
+            }
+            if flags?.pinned == true {
+                Image(systemName: "pin.fill")
+                    .font(.caption2)
+                    .foregroundStyle(Color.lakkoTextMuted)
+            }
+            if flags?.archived == true {
+                Image(systemName: "archivebox.fill")
+                    .font(.caption2)
+                    .foregroundStyle(Color.lakkoTextMuted)
+            }
+            if showsUnread {
+                // Accent capsule; a muted thread renders it grey so a
+                // muted-but-unread row still surfaces a hint without
+                // grabbing attention.
+                Text(unread > 99 ? "99+" : "\(unread)")
+                    .font(.caption2)
+                    .fontWeight(.semibold)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2)
+                    .background(flags?.muted == true ? Color.lakkoTextMuted : Color.lakkoAccent)
+                    .foregroundStyle(Color.lakkoAccentForeground)
+                    .clipShape(Capsule())
+            }
+        }
+    }
+
+    private var accessibilityText: String {
+        var parts = [title]
+        if let timeLabel { parts.append(timeLabel) }
+        parts.append(endedLine ?? preview)
+        if showsUnread { parts.append(unread == 1 ? "1 unread" : "\(unread) unread") }
+        if flags?.muted == true { parts.append("muted") }
+        if flags?.pinned == true { parts.append("pinned") }
+        return parts.joined(separator: ", ")
     }
 
     /// ADR-0045 UX §6.2.4 — the ended line, or `nil` while the reader is still
-    /// a member.
-    ///
-    /// The `left` / `removed` distinction deliberately does NOT reach this line
-    /// (§6.2.4 gives it one string): the list is a glance surface and the
-    /// distinction belongs in the transcript's terminal row, where the durable
-    /// record is read. Passing `nil` for the record here is therefore not a
-    /// shortcut — ``chatListLine(_:)`` returns the same string either way.
+    /// a member. The `left` / `removed` distinction deliberately does NOT
+    /// reach this line (§6.2.4 gives it one string): the list is a glance
+    /// surface and the distinction belongs in the transcript's terminal row.
     private var endedLine: String? {
         chatListLine(
             membershipState(isActive: !thread.membershipEnded, leaveRequestedAtMs: nil))
-    }
-
-    private var lastMessagePreview: String {
-        guard let last = thread.messages.last else {
-            return "No messages yet"
-        }
-        switch last.direction {
-        case .outgoing: return "You: \(last.text)"
-        case .incoming: return last.text
-        case .system: return last.text
-        }
     }
 }
 
@@ -418,8 +473,23 @@ public final class ChatListViewModel: ObservableObject {
         threads.filter { self.kind(of: $0.groupIdHex) == kind }
     }
 
+    /// The persisted kind wins; the people count is the first-sight fallback
+    /// and the one observation that can promote a chat to a group
+    /// (``ConversationKindDecision``). Whatever the decision says to persist
+    /// is written here, so a conversation first seen through a Welcome or a
+    /// restore is decided once and then stays put.
     func kind(of groupIdHex: String) -> ConversationKind {
-        ConversationKind.of(peopleCount: repository.memberCount(groupIdHex: groupIdHex))
+        let account = repository.accountIdB64
+        let stored = account.flatMap {
+            repository.conversationKindStore.load(accountIdB64: $0, groupIdHex: groupIdHex)
+        }
+        let verdict = ConversationKindDecision.resolve(
+            stored: stored, peopleCount: repository.memberCount(groupIdHex: groupIdHex))
+        if let persist = verdict.persist, let account {
+            repository.conversationKindStore.record(
+                accountIdB64: account, groupIdHex: groupIdHex, kind: persist)
+        }
+        return verdict.kind
     }
 
     /// The row title: the other person's resolved name (ADR-0048) for a chat,
@@ -443,6 +513,38 @@ public final class ChatListViewModel: ObservableObject {
                 let resolved = ProfileDirectory.shared.resolve(signatureKey: member.signaturePublicKey)
                 return resolved.source == .fingerprint ? nil : resolved.name
             }
+    }
+
+    /// UX spec section 5.1 — the second line of a row: the last message with
+    /// a sender prefix in a group ("Anna: ..."), "You: " for own messages,
+    /// and a one-word label for media. "No messages yet" for an empty thread.
+    /// Only messages the timeline draws count (a bookkeeping system row is
+    /// not a last message).
+    func preview(thread: ChatThread, isGroup: Bool) -> String {
+        guard let last = thread.messages.last(where: { !ChatTimeline.isHiddenSystemRow($0) }) else {
+            return "No messages yet"
+        }
+        let senderName = last.authorKeyB64.flatMap {
+            ProfileDirectory.shared.resolve(signatureKeyB64: $0)?.name
+        }
+        return ChatListFormatting.preview(
+            text: last.text,
+            attachmentLabels: last.attachments.map {
+                ChatListFormatting.mediaLabel(kind: $0.kind, mime: $0.mime)
+            },
+            direction: last.direction,
+            deleted: last.deleted,
+            isGroup: isGroup,
+            senderName: senderName)
+    }
+
+    /// The server time of the last drawn message, for the row's time and the
+    /// list order; `nil` when there is none or it does not parse.
+    func lastMessageMs(thread: ChatThread) -> Int64? {
+        guard let last = thread.messages.last(where: { !ChatTimeline.isHiddenSystemRow($0) }) else {
+            return nil
+        }
+        return ChatRepository.parseDsTimestampMs(last.createdAt)
     }
 
     /// The pull-to-refresh action: the same poll the app already runs, once,

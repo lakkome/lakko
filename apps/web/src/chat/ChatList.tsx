@@ -3,16 +3,22 @@
 
 /**
  * The conversation list, used twice (docs/ux/client-redesign.md section 5.1):
- * once as Chats (two people) and once as Groups (everyone else), split by
- * `chat/conversation-kind.ts` over the one store. One row per conversation,
- * the newest message as a preview, an unread badge, pin / mute / archive as
- * hover actions and a right-click menu.
+ * once as Chats (two people) and once as Groups (everyone else), split by the
+ * persisted conversation kind (`chat/conversation-kind-store.ts`) over the one
+ * store. One row per conversation: avatar, name (bold while unread), the time
+ * of the last message, its preview with a sender prefix in a group, then a
+ * muted icon, a pin icon and the unread badge. Pinned rows first, then by the
+ * last message time. Pin / mute / archive as hover actions, a right-click
+ * menu, and the same menu on a long press. A search field filters by name and
+ * preview.
  *
- * Labels come from the one profile resolver (ADR-0048 §5); flags from the
- * cross-device sync runtime; unread + preview from the persisted message log,
- * which the open chat and the background receive both write.
+ * Labels come from the one profile resolver (ADR-0048 section 5); flags from
+ * the cross-device sync runtime; unread, preview and time from the persisted
+ * message log, which the open chat and the background receive both write.
  */
 import {
+  createEffect,
+  createMemo,
   createSignal,
   For,
   onCleanup,
@@ -27,8 +33,15 @@ import { base64UrlEncodeNoPad } from "../auth/account-id";
 import { getDeviceKey } from "../auth/key-store";
 import { restoredKind } from "../auth/restore-marker";
 import { ownPersonKeyB64, peopleCountOf, personKeysOf } from "./person-key";
-import { belongsToList, type ConversationKind } from "./conversation-kind";
+import { decideConversationKind, type ConversationKind } from "./conversation-kind";
+import {
+  observeConversationKind,
+  persistedConversationKind,
+  subscribeConversationKindChanged,
+} from "./conversation-kind-store";
 import { groupTitle } from "./group-title";
+import { formatListTime } from "./list-time";
+import { previewLine, rowMatchesQuery } from "./list-preview";
 import { memberNameOf } from "../profile/member-label";
 import { useChats, type ActiveGroup } from "./ChatContext";
 import { chatListLine, membershipState, readIsActive } from "./membership-ended";
@@ -48,6 +61,7 @@ import { useProfiles } from "../profile/ProfileContext";
 import { paths } from "../routes/paths";
 import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
+import { createLongPress } from "../ui/long-press";
 
 type Flag = "pinned" | "muted" | "archived";
 
@@ -82,12 +96,39 @@ export function ChatList(props: {
   const navigate = useNavigate();
   const copy = (): (typeof COPY)[ConversationKind] => COPY[props.kind];
 
+  const accountId = (): string | null => {
+    const s = auth.state();
+    return s.kind === "session" ? s.account.accountId : null;
+  };
+
   // Accepted contacts name a chat linked to one; a rename propagates here.
   const [accepted, setAccepted] = createSignal<AcceptedContact[]>(loadAccepted());
   onMount(() => {
     const unsubscribe = subscribeAcceptedChanged(() => setAccepted(loadAccepted()));
     onCleanup(unsubscribe);
   });
+
+  // docs/ux section 3 — the persisted kind. The effect records every
+  // conversation's kind at first sight (a Welcome, a restore) and the one
+  // allowed flip, chat -> group; the memo below reads what is stored.
+  const [kindVersion, setKindVersion] = createSignal(0);
+  onMount(() => {
+    const unsubscribe = subscribeConversationKindChanged(() => setKindVersion((v) => v + 1));
+    onCleanup(unsubscribe);
+  });
+  createEffect(() => {
+    const account = accountId();
+    if (account === null) return;
+    for (const g of chats.groups()) {
+      observeConversationKind(account, g.groupIdB64, peopleCountOf(g.group));
+    }
+  });
+  const kindOf = (g: ActiveGroup): ConversationKind => {
+    kindVersion();
+    const account = accountId();
+    const persisted = account === null ? null : persistedConversationKind(account, g.groupIdB64);
+    return decideConversationKind(persisted, peopleCountOf(g.group));
+  };
 
   /** The other member's key in a 1x1 chat, else `null`. */
   const peerKeyOf = (g: ActiveGroup): string | null => {
@@ -98,22 +139,34 @@ export function ChatList(props: {
     return memberB64s.length === 2 && peers.length === 1 ? (peers[0] ?? null) : null;
   };
 
-  /** Best label for a row (ADR-0048 §5). A 1x1 chat is the other person,
-   *  through the one resolver, read live from the roster so it works however
-   *  the chat was created. A group keeps its own label. */
+  /** Best label for a row (ADR-0048 section 5). A 1x1 chat is the other
+   *  person, through the one resolver, read live from the roster so it works
+   *  however the chat was created. A group keeps its own label. */
   const chatLabel = (g: ActiveGroup): string => {
     accepted();
     const ownB64 = ownPersonKeyB64(chats.identity());
     // ADR-0050 — people, not leaves.
     const memberB64s = personKeysOf(g.group);
     const peers = memberB64s.filter((k) => k !== ownB64);
-    if (memberB64s.length === 2 && peers.length === 1 && peers[0] !== undefined) {
+    if (
+      kindOf(g) === "chat" &&
+      memberB64s.length === 2 &&
+      peers.length === 1 &&
+      peers[0] !== undefined
+    ) {
       return profiles.resolve(peers[0]).name;
     }
     const byId = accepted().find((c) => c.groupIdB64 === g.groupIdB64);
-    if (byId !== undefined && byId.displayName.length > 0) return byId.displayName;
+    if (byId !== undefined && byId.displayName.length > 0 && kindOf(g) === "chat") {
+      return byId.displayName;
+    }
     const byMember = peerContactByMemberPubkeys(memberB64s, ownB64, accepted());
-    if (byMember !== undefined && byMember.displayName.length > 0 && memberB64s.length <= 2) {
+    if (
+      byMember !== undefined &&
+      byMember.displayName.length > 0 &&
+      memberB64s.length <= 2 &&
+      kindOf(g) === "chat"
+    ) {
       return byMember.displayName;
     }
     // An unnamed group is titled from its members, never from an id.
@@ -123,8 +176,8 @@ export function ChatList(props: {
     );
   };
 
-  // Unread badge + last-message preview, from the persisted message log.
-  // Reloads live on every log write (another tab, the open chat, the
+  // Unread badge + last-message preview + time, from the persisted message
+  // log. Reloads live on every log write (another tab, the open chat, the
   // background receive), filtered to this account.
   const [logSlots, setLogSlots] = createSignal<{ readonly [groupIdHex: string]: PersistedGroup }>(
     {},
@@ -152,6 +205,13 @@ export function ChatList(props: {
     onCleanup(unsubscribe);
   });
 
+  // The row time relabels itself as the day turns ("14:05" becomes "Tue").
+  const [clock, setClock] = createSignal(new Date());
+  onMount(() => {
+    const t = setInterval(() => setClock(new Date()), 60_000);
+    onCleanup(() => clearInterval(t));
+  });
+
   /** Unread count + preview for one row: rows above the later of the
    *  cross-device read cursor and the newest row this device has shown. */
   function summaryFor(groupIdBytes: Uint8Array): ChatListSummary {
@@ -168,11 +228,56 @@ export function ChatList(props: {
     return summarizeGroupSlot(logSlots()[hex], syncedReadUpTo);
   }
 
+  /** The last message's time as a sort key: the DS stamp, else the moment
+   *  the conversation was created on this device. */
+  const lastActivityMs = (g: ActiveGroup): number => {
+    const at = summaryFor(g.group.groupId).lastAt;
+    if (at !== null) {
+      const t = new Date(at).getTime();
+      if (!Number.isNaN(t)) return t;
+    }
+    return g.createdAtMs;
+  };
+
+  /** ADR-0045 UX section 6.2.4: the row's one muted line once the membership
+   *  is over, or `null` while the reader is still a member. The chat stays in
+   *  the list; only the badge goes quiet. */
+  const endedLine = (g: ActiveGroup): string | null =>
+    chatListLine(
+      membershipState({
+        isActive: readIsActive(g.group),
+        leaveRequestedAtMs: undefined,
+      }),
+    );
+
+  /** The second line: the ended notice, else the last message with its
+   *  prefix, else the person's username (1x1) or the group's size. */
+  const subOf = (g: ActiveGroup): string => {
+    const ended = endedLine(g);
+    if (ended !== null) return ended;
+    const s = summaryFor(g.group.groupId);
+    const line = previewLine({
+      preview: s.preview,
+      isOwn: s.previewIsOwn,
+      senderName:
+        s.lastAuthorKeyB64 === null ? null : memberNameOf(profiles.resolve(s.lastAuthorKeyB64)),
+      isGroup: kindOf(g) === "group",
+    });
+    if (line.length > 0) return line;
+    // Nothing said yet: a 1x1 shows the person's username, a group its size.
+    // A member count on a 1x1 says nothing.
+    const peer = kindOf(g) === "chat" ? peerKeyOf(g) : null;
+    if (peer !== null) return profiles.resolve(peer).username ?? "";
+    const n = peopleCountOf(g.group);
+    return `${n} ${n === 1 ? "person" : "people"}`;
+  };
+
   /** This list's half of the store: pinned first, archived last, otherwise
-   *  creation order. */
-  const sortedGroups = (): readonly ActiveGroup[] => {
+   *  the newest conversation on top. */
+  const sortedGroups = createMemo((): readonly ActiveGroup[] => {
     const flagsMap = sync.flags();
-    const items = chats.groups().filter((g) => belongsToList(peopleCountOf(g.group), props.kind));
+    const items = chats.groups().filter((g) => kindOf(g) === props.kind);
+    const activity = new Map(items.map((g) => [g.groupIdB64, lastActivityMs(g)]));
     items.sort((a, b) => {
       const fa = flagsMap[syncGroupIdHex(a.group.groupId)];
       const fb = flagsMap[syncGroupIdHex(b.group.groupId)];
@@ -182,9 +287,17 @@ export function ChatList(props: {
       const aArchived = fa?.archived === true;
       const bArchived = fb?.archived === true;
       if (aArchived !== bArchived) return aArchived ? 1 : -1;
-      return 0;
+      return (activity.get(b.groupIdB64) ?? 0) - (activity.get(a.groupIdB64) ?? 0);
     });
     return items;
+  });
+
+  // The search field in the pane head filters by name and preview.
+  const [query, setQuery] = createSignal("");
+  const visibleGroups = (): readonly ActiveGroup[] => {
+    const q = query();
+    if (q.trim().length === 0) return sortedGroups();
+    return sortedGroups().filter((g) => rowMatchesQuery(q, chatLabel(g), subOf(g)));
   };
 
   /** ADR-0050 — a device that landed through a recovery route (three words,
@@ -198,17 +311,6 @@ export function ChatList(props: {
     if (pendingKnownGroups(joined) > 0) return true;
     return restoredKind() !== null && joined.length === 0;
   };
-
-  /** ADR-0045 UX §6.2.4: the row's one muted line once the membership is
-   *  over, or `null` while the reader is still a member. The chat stays in
-   *  the list; only the badge goes quiet. */
-  const endedLine = (g: ActiveGroup): string | null =>
-    chatListLine(
-      membershipState({
-        isActive: readIsActive(g.group),
-        leaveRequestedAtMs: undefined,
-      }),
-    );
 
   async function toggleFlag(g: ActiveGroup, field: Flag): Promise<void> {
     const groupId = g.group.groupId;
@@ -229,7 +331,8 @@ export function ChatList(props: {
     }
   }
 
-  // The right-click menu: one open at a time, anchored where the pointer was.
+  // The context menu: one open at a time, anchored where the pointer was.
+  // Opened by a right click or by a long press (the touch path).
   const [menu, setMenu] = createSignal<{ g: ActiveGroup; x: number; y: number } | null>(null);
 
   const compose = (): void => {
@@ -263,6 +366,18 @@ export function ChatList(props: {
           <Icon name={props.kind === "chat" ? "compose" : "plus"} size={18} />
         </button>
       </div>
+      <Show when={sortedGroups().length > 0}>
+        <label class="lk-search lk-pane-search">
+          <Icon name="search" size={16} />
+          <input
+            type="search"
+            placeholder="Search"
+            aria-label={`Search ${copy().title.toLowerCase()}`}
+            value={query()}
+            onInput={(e) => setQuery(e.currentTarget.value)}
+          />
+        </label>
+      </Show>
       <Show
         when={sortedGroups().length > 0}
         fallback={
@@ -276,7 +391,10 @@ export function ChatList(props: {
         }
       >
         <div class="lk-pane-body">
-          <For each={sortedGroups()}>
+          <Show when={visibleGroups().length === 0}>
+            <p class="lk-pane-nomatch">No results</p>
+          </Show>
+          <For each={visibleGroups()}>
             {(g) => {
               const key = syncGroupIdHex(g.group.groupId);
               const flags = (): { pinned: boolean; muted: boolean; archived: boolean } => {
@@ -290,18 +408,9 @@ export function ChatList(props: {
               const summary = (): ChatListSummary => summaryFor(g.group.groupId);
               const unread = (): number => (endedLine(g) === null ? summary().unread : 0);
               const label = (): string => chatLabel(g);
-              const sub = (): string => {
-                const ended = endedLine(g);
-                if (ended !== null) return ended;
-                const s = summary();
-                if (s.preview) return `${s.previewIsOwn ? "You: " : ""}${s.preview}`;
-                // Nothing said yet: a 1x1 shows the person's username, a
-                // group its size. A member count on a 1x1 says nothing.
-                const peer = peerKeyOf(g);
-                if (peer !== null) return profiles.resolve(peer).username ?? "";
-                const n = peopleCountOf(g.group);
-                return `${n} ${n === 1 ? "person" : "people"}`;
-              };
+              const sub = (): string => subOf(g);
+              const time = (): string => formatListTime(summary().lastAt, clock());
+              const press = createLongPress((x, y) => setMenu({ g, x, y }));
               return (
                 <A
                   href={hrefOf(g)}
@@ -317,32 +426,47 @@ export function ChatList(props: {
                     e.preventDefault();
                     setMenu({ g, x: e.clientX, y: e.clientY });
                   }}
+                  onPointerDown={press.onPointerDown}
+                  onPointerMove={press.onPointerMove}
+                  onPointerUp={press.onPointerUp}
+                  onPointerCancel={press.onPointerCancel}
+                  onPointerLeave={press.onPointerLeave}
+                  onClick={(e) => {
+                    press.swallowClick(e);
+                  }}
                 >
-                  <Avatar label={label()} id={g.groupIdB64} size="md" />
+                  <Avatar label={label()} id={g.groupIdB64} />
                   <div class="lk-row-body">
                     <div class="lk-row-line">
-                      <span class="lk-row-title">
-                        <Show when={flags().pinned}>
-                          <Icon name="pin" size={14} title="Pinned" />
-                        </Show>
+                      <span class="lk-row-title" classList={{ unread: unread() > 0 }}>
                         <span class="lk-ellipsis">{label()}</span>
-                        <Show when={flags().muted}>
-                          <Icon name="bellOff" size={14} title="Muted" />
-                        </Show>
                       </span>
-                      <Show when={unread() > 0}>
-                        <span
-                          class="lk-badge"
-                          classList={{ muted: flags().muted }}
-                          title={`${unread()} unread`}
-                        >
-                          {unread() >= 100 ? "99+" : unread()}
+                      <Show when={time().length > 0}>
+                        <span class="lk-row-time" classList={{ unread: unread() > 0 }}>
+                          {time()}
                         </span>
                       </Show>
                     </div>
                     <div class="lk-row-line">
                       <span class="lk-row-sub" data-testid="chat-preview">
                         {sub()}
+                      </span>
+                      <span class="lk-row-trail">
+                        <Show when={flags().muted}>
+                          <Icon name="bellOff" size={14} title="Muted" />
+                        </Show>
+                        <Show when={flags().pinned}>
+                          <Icon name="pin" size={14} title="Pinned" />
+                        </Show>
+                        <Show when={unread() > 0}>
+                          <span
+                            class="lk-badge"
+                            classList={{ muted: flags().muted }}
+                            title={`${unread()} unread`}
+                          >
+                            {unread() >= 100 ? "99+" : unread()}
+                          </span>
+                        </Show>
                       </span>
                       <span class="lk-row-actions" role="group" aria-label="Conversation actions">
                         <button

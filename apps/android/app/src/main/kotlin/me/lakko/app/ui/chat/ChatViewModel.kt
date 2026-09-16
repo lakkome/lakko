@@ -1270,6 +1270,22 @@ public class ChatViewModel(
         repo.oneToOnePeerKey(groupIdHex)?.let { profileNames.resolve(it).primary }
 
     /**
+     * UX 5.2 — the other person's VERIFIED username in a two-member chat (the
+     * header's second line), or `null` when there is none or this is a group.
+     */
+    public fun oneToOnePeerUsername(): String? =
+        repo.oneToOnePeerKey(groupIdHex)?.let { profileNames.resolve(it).verifiedUsername }
+
+    /**
+     * UX section 3 — the persisted conversation kind, derived once from the
+     * people count when this conversation has none yet.
+     */
+    public fun conversationKind(): me.lakko.app.chat.ConversationKind =
+        me.lakko.app.chat.ConversationKindStore.resolve(
+            repo.context, groupIdHex, repo.memberCount(groupIdHex),
+        )
+
+    /**
      * ADR-0045 / UX §5.2 — the identity treatment for a PROSPECTIVE member: a
      * matched contact's chosen name, else a short fingerprint of the signature
      * key the Add proposal carries.
@@ -1325,6 +1341,12 @@ public class ChatViewModel(
                         subjectAccountIdB64 = me.lakko.app.chat.outboxB64(accountId),
                     ),
                 ) { repo.addMemberToGroup(groupIdHex, accountId, signaturePubkey) }
+                // docs/ux/client-redesign.md section 3 — adding a person to a 1x1
+                // makes it a group for good (the add may be a proposal that is
+                // swept later, so the roster alone would not say so yet).
+                me.lakko.app.chat.ConversationKindStore.set(
+                    repo.context, groupIdHex, me.lakko.app.chat.ConversationKind.Group,
+                )
                 mutableAddMemberInput.value = ""
                 refreshMembers()
             } catch (e: Throwable) {

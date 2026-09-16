@@ -180,7 +180,7 @@ public struct CapturePreviewView: UIViewRepresentable {
 public struct ProgressRing: View {
     public let fraction: Double
     public var lineWidth: CGFloat = 4
-    public var color: Color = .accentColor
+    public var color: Color = Color.lakkoAccent
 
     public var body: some View {
         ZStack {

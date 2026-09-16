@@ -97,7 +97,7 @@ import {
 // rule lives in a plain module under `media/` (tested there); this file wires
 // them into the timeline and the composer.
 import { EmojiPicker } from "../media/EmojiPicker";
-import { MediaAttachment, type MediaUpload } from "../media/MediaBubbles";
+import type { MediaUpload } from "../media/MediaBubbles";
 import {
   RecordButton,
   RecorderNotices,
@@ -277,7 +277,6 @@ import {
   applyOp,
   editDeleteAuthorized,
   OWN_REACTION_SENTINEL,
-  REACTION_EMOJI,
   type MessageOpState,
 } from "../chat/message-ops";
 import {
@@ -305,72 +304,29 @@ import {
   type PendingGroupSetup,
 } from "../chat/pending-group-setup";
 import { Icon } from "../ui/icons";
-
-/** A timeline entry — verified incoming events PLUS optimistic
- *  outbound bubbles that haven't been confirmed yet.
- *
- *  Phase 1.19c2: outgoing bubbles now carry an optional
- *  `attachments` field so the optimistic UI can show the chips
- *  immediately after Send (the bytes are already uploaded to
- *  storage by the time the bubble renders). */
-type TimelineRow =
-  | { kind: "incoming"; event: IncomingChatEvent }
-  | {
-      kind: "outgoing";
-      /** Stable client-side id for `<For>` keying — distinct
-       *  from any DS-assigned id. */
-      tempId: number;
-      plaintext: string;
-      attachments: AttachmentRefBytes[];
-      /** ADR-0047 — `"failed"` is an outgoing media message whose upload or
-       *  publish failed: it stays in the timeline with `Not sent · Retry`
-       *  and nothing reached the other side. Never persisted. */
-      ack: "pending" | "sent" | "failed";
-      /** ADR-0047 — set on an outgoing media message: the key its local
-       *  bytes are filed under in the media hub until the upload lands. */
-      mediaLocalKey?: string;
-      /** Filled when ack flips to "sent". */
-      messageId?: number;
-      createdAt?: string;
-      /** ADR-0023 — the identity that authored this row: this
-       *  device's own signature key at send time, or the key the
-       *  message log persisted for a row restored on reload.
-       *
-       *  Stamped at send rather than read from `ownLeaf()` at gate
-       *  time because a leaf is a position, not a person: any leaf,
-       *  ours included, can be reassigned to a member added later.
-       *  `undefined` (unresolvable) fails the gate closed. */
-      authorKey?: MemberIdentity | undefined;
-    };
-
-/** Read the author IDENTITY a displayed row should be gated on:
- *  incoming application messages carry the author's signature key,
- *  resolved from the MLS sender leaf at receipt; outgoing rows carry
- *  the key stamped when we sent (or restored from the log).
- *  `undefined` ⇒ no author is known for this row (a control frame, a
- *  row stored before the identity was persisted) — its edit/delete
- *  gate fails closed.
- *
- *  Never a leaf index: OpenMLS hands a vacated leaf to the next
- *  member added, so a leaf read at gate time can name somebody who
- *  was not there when the message was written. */
-function rowAuthorIdentity(row: TimelineRow): MemberIdentity | undefined {
-  if (row.kind === "outgoing") return row.authorKey;
-  if (row.event.kind === "application") return row.event.senderKey;
-  return undefined;
-}
-
-/** The DS `messageId` of a displayed row, or `undefined` when
- *  it doesn't have one yet (an un-acked outgoing bubble). Every
- *  edit/delete/react affordance is gated on this being present
- *  (the op references its target by id). */
-function rowMessageId(row: TimelineRow): number | undefined {
-  if (row.kind === "outgoing") {
-    return row.ack === "sent" ? row.messageId : undefined;
-  }
-  if (row.event.kind === "application") return row.event.messageId;
-  return undefined;
-}
+// docs/ux/client-redesign.md section 5.2 — the row type and the bubble
+// renderer live under `chat/`; this file computes the layout (date
+// separators, sender runs) through `timeline-layout.ts` and renders the list.
+import {
+  rowAuthorIdentity,
+  rowCreatedAt,
+  rowMessageId,
+  type TimelineRow,
+} from "../chat/timeline-row";
+import { TimelineBubble } from "../chat/TimelineBubble";
+import {
+  layoutTimeline,
+  type TimelineItem,
+  type TimelineLayout,
+} from "../chat/timeline-layout";
+import {
+  forgetConversationKind,
+  observeConversationKind,
+  persistedConversationKind,
+  recordConversationKind,
+  subscribeConversationKindChanged,
+} from "../chat/conversation-kind-store";
+import { decideConversationKind, type ConversationKind } from "../chat/conversation-kind";
 
 /**
  * `/chat/:id` (from the Chats list) and `/groups/:id` (from the Groups list)
@@ -550,6 +506,30 @@ function ChatView(props: {
   });
 
   const [rows, setRows] = createSignal<TimelineRow[]>([]);
+  // docs/ux section 5.2 — date separators + sender runs, one layout record
+  // per row (`chat/timeline-layout.ts`). An outgoing row and an incoming row
+  // from this person's other device (ADR-0050) are both "self", so they run
+  // together on the right; every other incoming row runs by its sender key.
+  const timelineLayout = createMemo<TimelineLayout[]>(() => {
+    const own = ownPersonKeyB64(chats.identity()) ?? "self";
+    return layoutTimeline(
+      rows().map((row): TimelineItem => {
+        if (row.kind === "outgoing") {
+          return { createdAt: row.createdAt, senderKey: own, side: "outgoing" };
+        }
+        const ev = row.event;
+        if (ev.kind === "application") {
+          const fromSelf = ev.senderKey !== undefined && ev.senderKey === own;
+          return {
+            createdAt: ev.createdAt,
+            senderKey: fromSelf ? own : ev.senderKey,
+            side: fromSelf ? "outgoing" : "incoming",
+          };
+        }
+        return { createdAt: rowCreatedAt(row), senderKey: undefined, side: "system" };
+      }),
+    );
+  });
   // The journal cursor. The authority is the coordinator's per-group value,
   // shared with the background receive: a poll that ran for this group while
   // the view was not mounted has already moved it, and a view that started from
@@ -662,16 +642,27 @@ function ChatView(props: {
     return peers.length === 1 ? (peers[0] ?? null) : null;
   };
   /** Under the name (docs/ux section 5.2): "typing..." while a typing
-   *  indicator is live, else the person's username in a 1x1, else the size of
-   *  the group in people. */
+   *  indicator is live, else the person's "@username" in a 1x1, else the size
+   *  of the group in people. Which of the two follows the persisted kind, so
+   *  a two-person group says "2 people" like the list it is filed under. */
   const headerSub = (): string => {
     const typing = typingIndicator();
     if (typing !== null && !membershipEnded()) return typing;
-    const peer = peerKeyB64();
+    const peer = isGroupChat() ? null : peerKeyB64();
     if (peer !== null) return profiles.resolve(peer).username ?? "";
     const n = memberCount();
     return `${n} ${n === 1 ? "person" : "people"}`;
   };
+  /** Clicking the header title opens (or closes) the members panel. */
+  function toggleMembers(): void {
+    setHeaderMenuOpen(false);
+    setMembersOpen(!membersOpen());
+    setNotice(null);
+    setError(null);
+    // Bump version so the panel reads fresh data when it opens (covers the
+    // case where new commits arrived between the last poll and this click).
+    setMembersVersion(membersVersion() + 1);
+  }
 
   const resolvePeerName = (): string => {
     const ownKeyB64 = ownPersonKeyB64(chats.identity());
@@ -891,6 +882,32 @@ function ChatView(props: {
   const [memberCount, setMemberCount] = createSignal(
     peopleCountOf(props.entry.group),
   );
+  // docs/ux/client-redesign.md section 3 — the persisted conversation kind.
+  // A group created with two people is a group; a 1x1 becomes a group for
+  // good once a third person is observed; nothing else moves it. The effect
+  // records what the roster shows (first sight, or the one allowed flip) and
+  // the memo reads what is stored, so the header and the timeline agree with
+  // the list this conversation is filed under.
+  const [kindVersion, setKindVersion] = createSignal(0);
+  onMount(() => {
+    const unsubscribe = subscribeConversationKindChanged(() => setKindVersion((v) => v + 1));
+    onCleanup(unsubscribe);
+  });
+  createEffect(() => {
+    const n = memberCount();
+    const s = auth.state();
+    if (s.kind === "session") observeConversationKind(s.account.accountId, props.entry.groupIdB64, n);
+  });
+  const conversationKind = createMemo<ConversationKind>(() => {
+    kindVersion();
+    const s = auth.state();
+    const persisted =
+      s.kind === "session"
+        ? persistedConversationKind(s.account.accountId, props.entry.groupIdB64)
+        : null;
+    return decideConversationKind(persisted, memberCount());
+  });
+  const isGroupChat = (): boolean => conversationKind() === "group";
   // 1.18h — members panel state. `membersVersion` is a
   // monotonic counter bumped on every epoch advance (refresh
   // success, addMember success, removeMember success); the
@@ -2025,8 +2042,9 @@ function ChatView(props: {
           groupIdHexForLog(),
         );
       }
-      // Local bookkeeping for a group that no longer exists here. Both are
-      // best-effort by construction and neither can fail the delete.
+      // Local bookkeeping for a group that no longer exists here. All are
+      // best-effort by construction and none can fail the delete.
+      forgetConversationKind(accountIdB64, groupIdB64);
       pruneObservations(accountIdB64, groupIdB64, []);
       clearUnappliedForGroup(accountIdB64, groupIdB64);
       clearLeaveRequested(accountIdB64, groupIdB64);
@@ -2525,9 +2543,9 @@ function ChatView(props: {
     const oneOnOne = memberCount() <= 2;
     if (typers.length === 1) {
       const who = typers[0] as MemberIdentity;
-      return oneOnOne ? "typing…" : `${labelForIdentity(who)} is typing…`;
+      return oneOnOne ? "typing..." : `${labelForIdentity(who)} is typing...`;
     }
-    return "Several people are typing…";
+    return "Several people are typing...";
   });
 
   /** Look up the author IDENTITY of the displayed message with this
@@ -3854,8 +3872,18 @@ function ChatView(props: {
   // ADR-0047 — the composer's emoji / GIF picker, and the reaction picker.
   const [composerPickerOpen, setComposerPickerOpen] = createSignal(false);
   const [fullReactPickerId, setFullReactPickerId] = createSignal<number | null>(null);
-  let composerInput: HTMLInputElement | undefined;
+  let composerInput: HTMLTextAreaElement | undefined;
   let composerCaret: { start: number; end: number } | null = null;
+  /** docs/ux section 5.2 — the field grows with the draft up to five lines
+   *  (the CSS `max-height` is the cap; past it the field scrolls). Reset to
+   *  one line when the draft is cleared. */
+  function growComposer(): void {
+    const el = composerInput;
+    if (el === undefined) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }
+  createEffect(on(input, () => growComposer()));
   function rememberCaret(): void {
     if (composerInput === undefined) return;
     composerCaret = {
@@ -3877,9 +3905,9 @@ function ChatView(props: {
     setInput(next);
     const pos = start + emoji.length;
     composerCaret = { start: pos, end: pos };
-    const searchFocused =
-      globalThis.document?.activeElement instanceof HTMLInputElement &&
-      globalThis.document.activeElement !== composerInput;
+    // The picker's search box is an `<input>`; the composer is a textarea, so
+    // a focused input is never the composer.
+    const searchFocused = globalThis.document?.activeElement instanceof HTMLInputElement;
     if (composerInput !== undefined && !searchFocused) {
       composerInput.value = next;
       composerInput.focus();
@@ -3989,6 +4017,15 @@ function ChatView(props: {
     outcome: { kind: "committed"; commitMessageId: number } | { kind: "proposed"; proposalMessageId: number },
     recipientKeyB64: string,
   ): void {
+    // docs/ux section 3 — adding a person to a 1x1 makes it a group, filed
+    // under Groups from now on (never back), whether the add lands now (a
+    // legacy commit) or after a committer sweeps the proposal.
+    {
+      const s = auth.state();
+      if (s.kind === "session") {
+        recordConversationKind(s.account.accountId, props.entry.groupIdB64, "group");
+      }
+    }
     // Suppress the echo so the sender's next pollMessages
     // doesn't try to processIncoming on its own artifact at
     // an epoch we've already advanced past. ADR-0045: the artifact is a
@@ -4878,12 +4915,31 @@ function ChatView(props: {
         >
           <Icon name="back" size={20} />
         </button>
-        <Avatar label={resolvePeerName()} id={props.entry.groupIdB64} />
-        <div class="lk-chat-title">
-          {/* ADR-0021 follow-up: show the linked contact's user-chosen
-              name in the chat header (falls back to the chat label). */}
-          <h1>{resolvePeerName()}</h1>
-          <div class="lk-chat-sub">{headerSub()}</div>
+        {/* docs/ux section 5.2 — the avatar + title open the members panel. */}
+        <div
+          class="lk-chat-title"
+          role="button"
+          tabindex="0"
+          title={membersOpen() ? "Hide members" : "Members"}
+          aria-label={membersOpen() ? "Hide members" : "Members"}
+          aria-pressed={membersOpen()}
+          onClick={toggleMembers}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              toggleMembers();
+            }
+          }}
+        >
+          <Avatar label={resolvePeerName()} id={props.entry.groupIdB64} size="sm" />
+          <div class="lk-chat-title-text">
+            {/* ADR-0021 follow-up: show the linked contact's user-chosen
+                name in the chat header (falls back to the chat label). */}
+            <h1>{resolvePeerName()}</h1>
+            <div class="lk-chat-sub" classList={{ typing: typingIndicator() !== null && !membershipEnded() }}>
+              {headerSub()}
+            </div>
+          </div>
         </div>
         <div class="lk-chat-actions">
           {/* Phase 3a8 — call buttons. Visible whenever no call is active in
@@ -4945,16 +5001,7 @@ function ChatView(props: {
                   type="button"
                   role="menuitem"
                   aria-pressed={membersOpen()}
-                  onClick={() => {
-                    setHeaderMenuOpen(false);
-                    setMembersOpen(!membersOpen());
-                    setNotice(null);
-                    setError(null);
-                    // Bump version so the panel reads fresh data when it
-                    // opens (covers the case where new commits arrived
-                    // between the last poll and this click).
-                    setMembersVersion(membersVersion() + 1);
-                  }}
+                  onClick={toggleMembers}
                 >
                   <Icon name="contacts" size={18} />
                   {membersOpen() ? "Hide members" : "Members"}
@@ -6160,38 +6207,14 @@ function ChatView(props: {
           </p>
         }
       >
-        <ol
-          style={{
-            "list-style": "none",
-            padding: 0,
-            margin: 0,
-            display: "flex",
-            "flex-direction": "column",
-            gap: "0.4rem",
-          }}
-        >
+        <ol class="lk-timeline">
           <For each={rows()}>
             {(row, i) => {
-              const prev = (): TimelineRow | undefined => rows()[i() - 1];
-              const dayLabel = (): string | null => {
-                const cur = rowCreatedAt(row);
-                if (cur === undefined) return null;
-                const before = prev();
-                const prevAt = before === undefined ? undefined : rowCreatedAt(before);
-                return sameDay(prevAt, cur) ? null : dayLabelOf(cur);
-              };
-              // The sender is named once per run of consecutive messages from
-              // the same person, in a group only; a 1x1 has one other person.
-              const showSender = (): boolean => {
-                if (memberCount() <= 2 || row.kind !== "incoming") return false;
-                const before = prev();
-                if (before === undefined || before.kind !== "incoming") return true;
-                if (dayLabel() !== null) return true;
-                return rowSenderKey(before) !== rowSenderKey(row);
-              };
+              const place = (): TimelineLayout =>
+                timelineLayout()[i()] ?? { dayLabel: null, startsRun: true, endsRun: true };
               return (
               <>
-              <Show when={dayLabel()}>
+              <Show when={place().dayLabel}>
                 {(label) => (
                   <li class="lk-day-sep" aria-label={label()}>
                     <span>{label()}</span>
@@ -6200,7 +6223,9 @@ function ChatView(props: {
               </Show>
               <TimelineBubble
                 row={row}
-                showSender={showSender()}
+                isGroup={isGroupChat()}
+                startsRun={place().startsRun}
+                endsRun={place().endsRun}
                 onDownload={onDownloadAttachment}
                 onPreview={onPreviewAttachment}
                 onHidePreview={onHideAttachmentPreview}
@@ -6514,7 +6539,31 @@ function ChatView(props: {
             style={{ display: "none" }}
           />
         </label>
-        {/* ADR-0047 UX §4 — the smiley button left of the text field. */}
+        {/* docs/ux section 5.2 — attach, the field, the emoji / GIF button,
+            then the trailing microphone-or-send. The field is a textarea that
+            grows to five lines; Enter sends, Shift+Enter breaks the line. */}
+        <textarea
+          ref={composerInput}
+          class="lk-composer-input"
+          rows={1}
+          placeholder="Message"
+          autocomplete="off"
+          value={input()}
+          onInput={(e) => setInput(e.currentTarget.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+              e.preventDefault();
+              e.currentTarget.form?.requestSubmit();
+            }
+          }}
+          // ADR-0024 — leaving the composer is a typing-stop
+          // transition; emit one `typing:false` (best-effort).
+          onBlur={() => {
+            rememberCaret();
+            sendTypingStop();
+          }}
+        />
+        {/* ADR-0047 UX section 4 — the emoji / GIF button beside the field. */}
         <button
           type="button"
           class="lk-icon-button"
@@ -6531,22 +6580,6 @@ function ChatView(props: {
         >
           <Icon name="smile" size={20} />
         </button>
-        <input
-          ref={composerInput}
-          class="lk-composer-input"
-          type="text"
-          placeholder="Message"
-          autocomplete="off"
-          value={input()}
-          onInput={(e) => setInput(e.currentTarget.value)}
-          // ADR-0024 — leaving the composer is a typing-stop
-          // transition; emit one `typing:false` (best-effort).
-          onBlur={() => {
-            rememberCaret();
-            sendTypingStop();
-          }}
-          style={{ flex: 1 }}
-        />
         </Show>
         {/* UX spec §1 — Send while the field or tray has content, otherwise
             the record button (mic or camera). The record button stays mounted
@@ -6574,910 +6607,6 @@ function ChatView(props: {
         </Show>
       </form>
       </Show>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------
-// Subcomponents
-// ---------------------------------------------------------------
-
-/** `17:21` in the viewer's locale and zone; empty for an unparseable stamp. */
-function shortTime(iso: string | undefined): string {
-  if (iso === undefined) return "";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "";
-  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-}
-
-/** Today / Yesterday / a short local date, for the day separator. */
-function dayLabelOf(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "";
-  const now = new Date();
-  const startOf = (x: Date): number => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
-  const days = Math.round((startOf(now) - startOf(d)) / 86_400_000);
-  if (days === 0) return "Today";
-  if (days === 1) return "Yesterday";
-  return d.toLocaleDateString([], {
-    day: "numeric",
-    month: "short",
-    year: d.getFullYear() === now.getFullYear() ? undefined : "numeric",
-  });
-}
-
-function sameDay(a: string | undefined, b: string): boolean {
-  if (a === undefined) return false;
-  const x = new Date(a);
-  const y = new Date(b);
-  if (Number.isNaN(x.getTime()) || Number.isNaN(y.getTime())) return false;
-  return x.getFullYear() === y.getFullYear() && x.getMonth() === y.getMonth() && x.getDate() === y.getDate();
-}
-
-/** When a timeline row was created, for the day separator. */
-function rowCreatedAt(row: TimelineRow): string | undefined {
-  if (row.kind === "incoming") {
-    return (row.event as { createdAt?: string }).createdAt;
-  }
-  return row.createdAt;
-}
-
-/** The sender key of an incoming row, for sender runs. */
-function rowSenderKey(row: TimelineRow): string | undefined {
-  if (row.kind !== "incoming") return undefined;
-  return (row.event as { senderKey?: string }).senderKey;
-}
-
-function TimelineBubble(props: {
-  row: TimelineRow;
-  /** Name the sender above this bubble (a group, first of a run). */
-  showSender: boolean;
-  onDownload: (ref: AttachmentRefBytes) => void | Promise<void>;
-  onPreview: (ref: AttachmentRefBytes) => void | Promise<void>;
-  onHidePreview: (ref: AttachmentRefBytes) => void;
-  getCachedUrl: (ref: AttachmentRefBytes) => string | null;
-  /** ADR-0023 — our own signature key (for the own-reaction
-   *  highlight). Not our leaf: a leaf we compare against a stored
-   *  reactor would start matching a stranger after a renumber. */
-  ownIdentity: MemberIdentity | undefined;
-  /** Reactive overlay accessor for a given target messageId. */
-  opState: (messageId: number) => MessageOpState | undefined;
-  /** ADR-0024 — reactive read-state accessor: has this messageId
-   *  been read by EVERY other member? Drives the own-message
-   *  Sent → Read indicator. */
-  readByOthers: (messageId: number) => boolean;
-  /** ADR-0048 — the members whose read watermark covers this message, for the
-   *  `Read by …` label. */
-  readersOf: (messageId: number) => MemberIdentity[];
-  editingId: number | null;
-  editText: string;
-  setEditText: (v: string) => void;
-  onStartEdit: (messageId: number, current: string) => void;
-  onCancelEdit: () => void;
-  onSaveEdit: (messageId: number) => void | Promise<void>;
-  onDeleteMessage: (messageId: number) => void | Promise<void>;
-  reactPickerId: number | null;
-  onOpenReactPicker: (messageId: number) => void;
-  onCloseReactPicker: () => void;
-  onReact: (messageId: number, emoji: string) => void | Promise<void>;
-  /** ADR-0045 UX §6.2.5 — whether Edit / Delete / React are offered at all.
-   *  `false` once this device's membership has ended: all three compose an
-   *  application message, so all three are refused by the same core gate that
-   *  refuses Send. Threaded as a prop rather than read here so the two bubble
-   *  components stay pure renderers of what `membership-ended.ts` decided. */
-  actionsAvailable: boolean;
-  /** ADR-0047 — the media runtime, this row's upload state and its retry. */
-  hub: MediaHub;
-  mediaUpload: MediaUpload;
-  onRetryMedia: () => void;
-  /** ADR-0047 — the reaction bar's "+" opens the full picker for this id. */
-  fullReactPickerId: number | null;
-  onOpenFullReactPicker: (messageId: number) => void;
-  onCloseFullReactPicker: () => void;
-}): JSX.Element {
-  // ADR-0048 — the author label goes through the one display resolver.
-  const profiles = useProfiles();
-  // ADR-0050 — a message from this PERSON's other device arrives as an
-  // incoming row (another leaf sealed it) but is ours: same side, no sender
-  // name, exactly as if this device had sent it. The person key is the
-  // account key both leaves resolve to.
-  const chatsForOwn = useChats();
-  const fromOwnDevice = (senderKey: string | undefined): boolean =>
-    senderKey !== undefined && senderKey === ownPersonKeyB64(chatsForOwn.identity());
-  // System rows + call signaling never carry an op overlay.
-  if (props.row.kind === "incoming") {
-    const ev = props.row.event;
-    if (ev.kind === "system") {
-      return (
-        <li
-          style={{
-            "font-size": "0.8rem",
-            color: "var(--surface-muted)",
-            "font-style": "italic",
-            "text-align": "center",
-          }}
-        >
-          · {ev.systemKind} #{ev.messageId} ·
-        </li>
-      );
-    }
-    if (ev.kind === "callSignaling") {
-      // Phase 3a8 — call signaling rides the same MLS group
-      // as chat messages, but it isn't part of the visible
-      // timeline. The CallContext upstream already routed
-      // it into the state machine; nothing renders here.
-      return null;
-    }
-    if (ev.kind === "op") {
-      // ADR-0023 — ops are folded into the target message's
-      // overlay by the receive loop, never rendered as a
-      // standalone bubble. (Defensive: ops don't enter `rows()`,
-      // but keep the timeline render total.)
-      return null;
-    }
-    if (ev.kind === "externalJoinRequest") {
-      // ADR-0027 (G-3) — surfaced in the members panel, never a timeline
-      // bubble (the receive loop skips it before `rows()`). Defensive.
-      return null;
-    }
-    if (ev.kind === "pushRoutingSecret") {
-      // ADR-0042 — the receive loop consumes it (persist + subscribe) and
-      // never pushes it into `rows()`. Defensive.
-      return null;
-    }
-    if (ev.kind === "committerBeacon") {
-      // ADR-0045 — the receive loop consumes it and never pushes it into
-      // `rows()`. Defensive.
-      return null;
-    }
-    if (ev.kind === "profile") {
-      // ADR-0048 — filed in the profile store by the receive loop, never
-      // pushed into `rows()`. Defensive.
-      return null;
-    }
-    if (ev.kind === "membershipProposal") {
-      // ADR-0045 UX §10 — a request is not something that HAPPENED to the
-      // group; only outcomes belong in the timeline. The receive loop routes
-      // it to the members panel and never pushes it into `rows()`. Defensive.
-      return null;
-    }
-    // Incoming application message — never our own → Edit/Delete
-    // are not offered (the author-only gate would reject our op
-    // anyway); React is.
-    return (
-      <ChatBubbleBody
-        messageId={ev.messageId}
-        isOwn={false}
-        ack="sent"
-        originalText={ev.text}
-        attachments={ev.attachments}
-        time={shortTime(ev.createdAt)}
-        senderName={
-          props.showSender && !fromOwnDevice(ev.senderKey)
-            ? ev.senderKey !== undefined
-              ? profiles.resolve(ev.senderKey).name
-              : "Unknown sender"
-            : null
-        }
-        tone={fromOwnDevice(ev.senderKey) ? "outgoing" : "incoming"}
-        {...props}
-      />
-    );
-  }
-  // Outgoing — our own message. Edit/Delete offered once acked
-  // (a pending bubble has no messageId yet).
-  const r = props.row;
-  return (
-    <ChatBubbleBody
-      messageId={r.ack === "sent" ? r.messageId : undefined}
-      isOwn={true}
-      ack={r.ack}
-      originalText={r.plaintext}
-      attachments={r.attachments}
-      time={r.ack === "pending" ? "Sending…" : r.ack === "failed" ? "Not sent" : shortTime(r.createdAt)}
-      senderName={null}
-      tone="outgoing"
-      mediaLocalKey={r.mediaLocalKey}
-      {...props}
-    />
-  );
-}
-
-/**
- * ADR-0023 — the shared bubble body for both incoming + outgoing
- * messages, carrying the op overlay (edited text / deleted
- * tombstone / reaction chips) and the per-message action menu.
- *
- * Reactivity: `opState(messageId)` is read inside the render so a
- * later op fold (or a local own-op apply) re-renders just this
- * bubble. The action affordances are gated on `messageId !==
- * undefined` (an un-acked outgoing bubble has no DS id to
- * reference yet).
- */
-function ChatBubbleBody(props: {
-  messageId: number | undefined;
-  isOwn: boolean;
-  ack: "pending" | "sent" | "failed";
-  originalText: string;
-  attachments: AttachmentRefBytes[];
-  /** ADR-0047 — an outgoing media message's local key before upload. */
-  mediaLocalKey?: string | undefined;
-  /** The local short time (`17:21`), or the pending / failed word. */
-  time: string;
-  /** The sender's name above the bubble, or `null` (a 1x1, or a run). */
-  senderName: string | null;
-  tone: "incoming" | "outgoing";
-  onDownload: (ref: AttachmentRefBytes) => void | Promise<void>;
-  onPreview: (ref: AttachmentRefBytes) => void | Promise<void>;
-  onHidePreview: (ref: AttachmentRefBytes) => void;
-  getCachedUrl: (ref: AttachmentRefBytes) => string | null;
-  ownIdentity: MemberIdentity | undefined;
-  opState: (messageId: number) => MessageOpState | undefined;
-  readByOthers: (messageId: number) => boolean;
-  /** ADR-0048 — the members whose read watermark covers this message, for the
-   *  `Read by …` label. */
-  readersOf: (messageId: number) => MemberIdentity[];
-  editingId: number | null;
-  editText: string;
-  setEditText: (v: string) => void;
-  onStartEdit: (messageId: number, current: string) => void;
-  onCancelEdit: () => void;
-  onSaveEdit: (messageId: number) => void | Promise<void>;
-  onDeleteMessage: (messageId: number) => void | Promise<void>;
-  reactPickerId: number | null;
-  onOpenReactPicker: (messageId: number) => void;
-  onCloseReactPicker: () => void;
-  onReact: (messageId: number, emoji: string) => void | Promise<void>;
-  /** ADR-0045 UX §6.2.5 — whether Edit / Delete / React are offered at all.
-   *  `false` once this device's membership has ended: all three compose an
-   *  application message, so all three are refused by the same core gate that
-   *  refuses Send. Threaded as a prop rather than read here so the two bubble
-   *  components stay pure renderers of what `membership-ended.ts` decided. */
-  actionsAvailable: boolean;
-  /** ADR-0047 — the media runtime, this row's upload state and its retry. */
-  hub: MediaHub;
-  mediaUpload: MediaUpload;
-  onRetryMedia: () => void;
-  /** ADR-0047 — the reaction bar's "+" opens the full picker for this id. */
-  fullReactPickerId: number | null;
-  onOpenFullReactPicker: (messageId: number) => void;
-  onCloseFullReactPicker: () => void;
-}): JSX.Element {
-  // ADR-0048 — reactors and readers are named through the one display resolver.
-  const profiles = useProfiles();
-  const isIncoming = props.tone === "incoming";
-  // The live overlay for this message (reactive). `undefined`
-  // until an op lands.
-  const state = (): MessageOpState | undefined =>
-    props.messageId === undefined ? undefined : props.opState(props.messageId);
-  const isDeleted = (): boolean => state()?.deleted === true;
-  const editedText = (): string | undefined => state()?.editedText;
-  const displayText = (): string => editedText() ?? props.originalText;
-  const isEdited = (): boolean => editedText() !== undefined;
-  const isEditing = (): boolean =>
-    props.messageId !== undefined && props.editingId === props.messageId;
-  const pickerOpen = (): boolean =>
-    props.messageId !== undefined && props.reactPickerId === props.messageId;
-  // Reactions sorted for a stable chip order.
-  const reactionEntries = (): Array<{
-    emoji: string;
-    count: number;
-    mine: boolean;
-    reactedBy: string;
-  }> => {
-    const m = state()?.reactions;
-    if (m === undefined) return [];
-    const own = props.ownIdentity ?? OWN_REACTION_SENTINEL;
-    return [...m.entries()]
-      .map(([emoji, reactors]) => ({
-        emoji,
-        count: reactors.size,
-        mine: reactors.has(own),
-        // ADR-0048 UX §5 — "Reacted by …", names through the resolver.
-        reactedBy: [...reactors]
-          .map((r) =>
-            r === own ? "You" : r === OWN_REACTION_SENTINEL ? "A member" : profiles.resolve(r).name,
-          )
-          .join(", "),
-      }))
-      .filter((e) => e.count > 0)
-      .sort((a, b) => a.emoji.localeCompare(b.emoji));
-  };
-
-  // ADR-0047 — media attachments render as their own bubbles; anything the
-  // hub does not accept as media stays a file chip.
-  const mediaRefs = (): AttachmentRefBytes[] =>
-    props.attachments.filter((a) => props.hub.decision(a).bubble !== "file");
-  const fileRefs = (): AttachmentRefBytes[] =>
-    props.attachments.filter((a) => props.hub.decision(a).bubble === "file");
-  // UX spec §3 — a video note is a circle with no bubble chrome.
-  const chromeless = (): boolean =>
-    props.originalText.length === 0 &&
-    props.attachments.length === 1 &&
-    props.attachments[0] !== undefined &&
-    props.hub.decision(props.attachments[0]).bubble === "video_note";
-  const keyFor = (ref: AttachmentRefBytes): string =>
-    ref.blobId.length === 0 && props.mediaLocalKey !== undefined
-      ? props.mediaLocalKey
-      : mediaKey(ref.blobId);
-
-  const bubbleStyle = isIncoming
-    ? {
-        padding: "8px 12px",
-        background: "var(--surface-sunken)",
-        "border-radius": "18px 18px 18px 4px",
-        "align-self": "flex-start",
-        "max-width": "min(75%, 560px)",
-      }
-    : {
-        padding: "8px 12px",
-        background: "var(--accent)",
-        color: "var(--accent-fg)",
-        "border-radius": "18px 18px 4px 18px",
-        "align-self": "flex-end",
-        "max-width": "min(75%, 560px)",
-        // A pending media message keeps full opacity: its upload ring is the
-        // progress signal, and a dimmed video would read as disabled.
-        opacity: props.ack === "pending" && props.mediaLocalKey === undefined ? 0.7 : 1,
-      };
-  const metaColour = isIncoming || chromeless() ? "var(--surface-muted)" : undefined;
-
-  return (
-    <li
-      style={{
-        ...bubbleStyle,
-        ...(chromeless()
-          ? { background: "transparent", border: "none", padding: "0.25rem 0", color: "var(--surface-fg)" }
-          : {}),
-        position: "relative",
-      }}
-    >
-      <Show when={props.senderName}>{(n) => <div class="lk-sender">{n()}</div>}</Show>
-      <Show
-        when={!isDeleted()}
-        fallback={
-          <div
-            style={{
-              "font-style": "italic",
-              opacity: 0.7,
-              "white-space": "pre-wrap",
-            }}
-          >
-            message deleted
-          </div>
-        }
-      >
-        <Show
-          when={isEditing()}
-          fallback={
-            <>
-              <Show when={displayText().length > 0}>
-                <div style={{ "white-space": "pre-wrap" }}>
-                  {displayText()}
-                  <Show when={isEdited()}>
-                    <span
-                      style={{
-                        "font-size": "0.7rem",
-                        opacity: 0.6,
-                        "margin-left": "0.35rem",
-                      }}
-                    >
-                      (edited)
-                    </span>
-                  </Show>
-                </div>
-              </Show>
-              <Show when={mediaRefs().length > 0}>
-                <div style={{ display: "flex", "flex-direction": "column", gap: "0.35rem", "margin-top": displayText().length > 0 ? "0.4rem" : 0 }}>
-                  <For each={mediaRefs()}>
-                    {(ref) => (
-                      <MediaAttachment
-                        attachment={ref}
-                        hub={props.hub}
-                        mediaKey={keyFor(ref)}
-                        incoming={isIncoming}
-                        upload={props.mediaUpload}
-                        onRetry={props.onRetryMedia}
-                      />
-                    )}
-                  </For>
-                </div>
-              </Show>
-              <Show when={fileRefs().length > 0}>
-                <AttachmentChips
-                  hub={props.hub}
-                  attachments={fileRefs()}
-                  onDownload={props.onDownload}
-                  onPreview={props.onPreview}
-                  onHidePreview={props.onHidePreview}
-                  getCachedUrl={props.getCachedUrl}
-                  tone={props.tone}
-                />
-              </Show>
-            </>
-          }
-        >
-          {/* Inline edit composer — pre-filled with the current
-              text; Save publishes the edit op, Cancel discards. */}
-          <div style={{ display: "flex", "flex-direction": "column", gap: "0.35rem" }}>
-            <textarea
-              value={props.editText}
-              onInput={(e) => props.setEditText(e.currentTarget.value)}
-              rows={2}
-              style={{
-                width: "100%",
-                "box-sizing": "border-box",
-                "font-family": "inherit",
-                "font-size": "inherit",
-                padding: "0.3rem 0.4rem",
-                "border-radius": "var(--radius-sm)",
-                border: "1px solid var(--surface-border)",
-                color: "var(--surface-fg)",
-                background: "var(--surface-bg)",
-                resize: "vertical",
-              }}
-            />
-            <div style={{ display: "flex", gap: "0.4rem" }}>
-              <button
-                type="button"
-                onClick={() => {
-                  if (props.messageId !== undefined) {
-                    void props.onSaveEdit(props.messageId);
-                  }
-                }}
-                style={bubbleActionBtnStyle}
-              >
-                Save
-              </button>
-              <button
-                type="button"
-                onClick={() => props.onCancelEdit()}
-                style={bubbleActionBtnStyle}
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        </Show>
-      </Show>
-
-      {/* Reaction chips — rendered under the body (incl. on a
-          deleted message: a reaction can outlive the text). */}
-      <Show when={reactionEntries().length > 0}>
-        <div
-          style={{
-            display: "flex",
-            "flex-wrap": "wrap",
-            gap: "0.3rem",
-            "margin-top": "0.35rem",
-          }}
-        >
-          <For each={reactionEntries()}>
-            {(re) => {
-              // The chip carries BOTH a fact and an affordance, and §6.2.5
-              // separates them: the count is transcript — part of the history
-              // §6.2.6 keeps whole — while tapping it is the React op, which
-              // dies with Send. So once the membership has ended the chip
-              // renders as static text rather than as a button. It is not
-              // rendered disabled, for the same reason the composer is not:
-              // a greyed control on a group you will never be in again
-              // promises a future it does not have.
-              const chipStyle = {
-                display: "inline-flex",
-                "align-items": "center",
-                gap: "0.2rem",
-                padding: "0.05rem 0.4rem",
-                "font-size": "0.8rem",
-                "border-radius": "999px",
-                border: re.mine
-                  ? "1px solid var(--accent)"
-                  : "1px solid var(--surface-border)",
-                background: re.mine
-                  ? "var(--accent-soft, rgba(99,102,241,0.18))"
-                  : isIncoming
-                    ? "var(--surface-bg)"
-                    : "rgba(255,255,255,0.15)",
-                color: "inherit",
-              } as const;
-              // A FUNCTION, not a stored element: Solid's JSX creates the
-              // DOM node where it is evaluated, so a single shared node placed
-              // in both branches would be MOVED between them rather than
-              // duplicated. Each branch builds its own.
-              const chipBody = (): JSX.Element => (
-                <>
-                  <span>{re.emoji}</span>
-                  <span style={{ "font-size": "0.72rem", opacity: 0.85 }}>
-                    {re.count}
-                  </span>
-                </>
-              );
-              return (
-                <Show
-                  when={props.actionsAvailable}
-                  fallback={
-                    <span style={chipStyle} title={`Reacted by ${re.reactedBy}`}>
-                      {chipBody()}
-                    </span>
-                  }
-                >
-                  <button
-                    type="button"
-                    title={`${re.mine ? "Remove your reaction" : "React"} · Reacted by ${re.reactedBy}`}
-                    onClick={() => {
-                      if (props.messageId !== undefined) {
-                        void props.onReact(props.messageId, re.emoji);
-                      }
-                    }}
-                    style={{ ...chipStyle, cursor: "pointer" }}
-                  >
-                    {chipBody()}
-                  </button>
-                </Show>
-              );
-            }}
-          </For>
-        </div>
-      </Show>
-
-      <div
-        style={{
-          color: metaColour,
-          "font-size": "11px",
-          "margin-top": "2px",
-          display: "flex",
-          "align-items": "center",
-          "justify-content": "flex-end",
-          gap: "4px",
-          opacity: 0.85,
-        }}
-      >
-        <span>{props.time}</span>
-        {/* ADR-0024 — read state on our OWN acked messages. A single
-            check once published ("Sent"); a filled double check once
-            EVERY other member's read watermark covers this message
-            ("Read"). Gated on a present messageId. */}
-        <Show
-          when={
-            props.isOwn &&
-            props.ack === "sent" &&
-            props.messageId !== undefined
-          }
-        >
-          {(() => {
-            const read = (): boolean =>
-              props.messageId !== undefined &&
-              props.readByOthers(props.messageId);
-            // ADR-0048 UX §5 — read receipts name the readers.
-            const readers = (): string =>
-              props.messageId === undefined
-                ? ""
-                : props
-                    .readersOf(props.messageId)
-                    .map((r) => profiles.resolve(r).name)
-                    .join(", ");
-            return (
-              <span
-                title={read() && readers().length > 0 ? `Read by ${readers()}` : read() ? "Read" : "Sent"}
-                aria-label={read() ? "Read" : "Sent"}
-                style={{ display: "inline-flex", opacity: read() ? 1 : 0.7 }}
-              >
-                <Icon name={read() ? "dcheck" : "check"} size={14} />
-              </span>
-            );
-          })()}
-        </Show>
-      </div>
-
-      {/* Per-message action menu — gated on the message having a
-          DS messageId (the op references its target by id) and on
-          the membership still holding (ADR-0045 UX §6.2.5: Edit /
-          Delete / React each compose an application message, so
-          all three die with Send — the menu is WITHDRAWN, not
-          disabled). The hover-revealed strip carries React on any
-          message, plus Edit + Delete on our own. Inline-edit mode
-          hides it. */}
-      <Show
-        when={
-          props.actionsAvailable &&
-          props.messageId !== undefined &&
-          !isEditing() &&
-          !isDeleted()
-        }
-      >
-        <div
-          class="lakko-msg-actions"
-          role="group"
-          aria-label="Message actions"
-          style={{ [isIncoming ? "right" : "left"]: "0.4rem" }}
-        >
-          <button
-            type="button"
-            title="React"
-            aria-label="React"
-            onClick={() =>
-              pickerOpen()
-                ? props.onCloseReactPicker()
-                : props.onOpenReactPicker(props.messageId as number)
-            }
-          >
-            <Icon name="smile" size={16} />
-          </button>
-          <Show when={props.isOwn}>
-            <button
-              type="button"
-              title="Edit"
-              aria-label="Edit"
-              onClick={() =>
-                props.onStartEdit(props.messageId as number, displayText())
-              }
-            >
-              <Icon name="pencil" size={16} />
-            </button>
-            <button
-              type="button"
-              title="Delete"
-              aria-label="Delete"
-              onClick={() => {
-                if (props.messageId !== undefined) {
-                  void props.onDeleteMessage(props.messageId);
-                }
-              }}
-            >
-              <Icon name="trash" size={16} />
-            </button>
-          </Show>
-        </div>
-      </Show>
-
-      {/* Emoji picker popover. Gated on the same predicate as the strip that
-          opens it, so a picker left open when the eviction commit lands
-          mid-poll closes with it rather than floating over a dead group. */}
-      <Show when={props.actionsAvailable && pickerOpen()}>
-        <div
-          style={{
-            position: "absolute",
-            top: "1.2rem",
-            [isIncoming ? "right" : "left"]: "0.4rem",
-            "z-index": 5,
-            display: "flex",
-            gap: "0.15rem",
-            padding: "0.25rem",
-            "border-radius": "var(--radius-md)",
-            background: "var(--surface-bg)",
-            border: "1px solid var(--surface-border)",
-            "box-shadow": "0 2px 6px rgba(0,0,0,0.22)",
-          }}
-        >
-          <For each={REACTION_EMOJI}>
-            {(emoji) => (
-              <button
-                type="button"
-                onClick={() => {
-                  if (props.messageId !== undefined) {
-                    void props.onReact(props.messageId, emoji);
-                  }
-                }}
-                style={{
-                  border: "none",
-                  background: "transparent",
-                  "font-size": "1.1rem",
-                  cursor: "pointer",
-                  padding: "0.1rem 0.2rem",
-                  "line-height": 1,
-                }}
-              >
-                {emoji}
-              </button>
-            )}
-          </For>
-          {/* ADR-0047 — "+" opens the full picker in reaction mode. */}
-          <button
-            type="button"
-            aria-label="More reactions"
-            title="More reactions"
-            onClick={() => {
-              if (props.messageId !== undefined) props.onOpenFullReactPicker(props.messageId);
-            }}
-            style={{
-              border: "none",
-              background: "transparent",
-              "font-size": "1rem",
-              cursor: "pointer",
-              padding: "0.1rem 0.3rem",
-              "line-height": 1,
-              color: "var(--surface-fg)",
-            }}
-          >
-            +
-          </button>
-        </div>
-      </Show>
-      <Show
-        when={
-          props.actionsAvailable &&
-          props.messageId !== undefined &&
-          props.fullReactPickerId === props.messageId
-        }
-      >
-        <EmojiPicker
-          mode="reaction"
-          onEmoji={(emoji) => {
-            if (props.messageId !== undefined) void props.onReact(props.messageId, emoji);
-          }}
-          onClose={() => props.onCloseFullReactPicker()}
-          sessionToken={() => null}
-          align={isIncoming ? "left" : "right"}
-        />
-      </Show>
-    </li>
-  );
-}
-
-/** Shared style for the Save / Cancel buttons in the inline
- *  edit composer. */
-const bubbleActionBtnStyle = {
-  padding: "0.2rem 0.6rem",
-  "font-size": "0.78rem",
-  cursor: "pointer",
-  "border-radius": "var(--radius-sm)",
-  border: "1px solid var(--surface-border)",
-  background: "var(--surface-bg)",
-  color: "var(--surface-fg)",
-} as const;
-
-/** Shared style for the tiny hover-strip action buttons. */
-/**
- * Render the attachment-chip strip below a bubble's text body.
- * Each chip shows `name · size` plus action buttons:
- *
- *   * **Open** — inline-preview when the MIME is an allowlisted
- *     image type (`inlineMediaType`); fetches + decrypts the
- *     bytes lazily, caches the object URL.
- *   * **Save** — download + decrypt + trigger a save dialog.
- *
- * `tone` shifts the chip colour so they stay legible inside
- * both the incoming-grey and outgoing-accent bubble bodies.
- */
-function AttachmentChips(props: {
-  hub: MediaHub;
-  attachments: AttachmentRefBytes[];
-  onDownload: (ref: AttachmentRefBytes) => void | Promise<void>;
-  onPreview: (ref: AttachmentRefBytes) => void | Promise<void>;
-  onHidePreview: (ref: AttachmentRefBytes) => void;
-  /** Returns the cached object URL for an attachment, or `null`
-   *  if it hasn't been decrypted in this session. The bubble
-   *  renders an inline `<img>` whenever this is non-null. */
-  getCachedUrl: (ref: AttachmentRefBytes) => string | null;
-  tone: "incoming" | "outgoing";
-}): JSX.Element {
-  const chipBg = props.tone === "incoming" ? "var(--surface-bg)" : "rgba(255,255,255,0.15)";
-  const chipText = props.tone === "incoming" ? undefined : "inherit";
-  return (
-    <div
-      style={{
-        display: "flex",
-        "flex-direction": "column",
-        gap: "0.35rem",
-        "margin-top": "0.4rem",
-      }}
-    >
-      <For each={props.attachments}>
-        {(ref) => {
-          const cachedUrl = (): string | null => props.getCachedUrl(ref);
-          // ADR-0047 — inline only for an image type the core's allowlist
-          // accepts; never decided by the sender-chosen kind or name.
-          const previewable = props.hub.inlineType(ref.mime) === "image";
-          return (
-            <div style={{ display: "flex", "flex-direction": "column", gap: "0.25rem" }}>
-              <Show when={previewable && cachedUrl() !== null}>
-                {/* Inline image preview — renders the decrypted
-                    blob URL directly in the bubble. Polish 1.x:
-                    matches the Signal / Telegram pattern of
-                    showing the picture next to its filename,
-                    rather than blowing open a new tab. */}
-                <img
-                  src={cachedUrl() ?? ""}
-                  alt={ref.name ?? "image attachment"}
-                  style={{
-                    display: "block",
-                    "max-width": "100%",
-                    "max-height": "320px",
-                    width: "auto",
-                    height: "auto",
-                    "border-radius": "var(--radius-sm)",
-                    "object-fit": "contain",
-                  }}
-                />
-              </Show>
-              <span
-                style={{
-                  display: "inline-flex",
-                  "align-items": "center",
-                  gap: "0.35rem",
-                  padding: "0.25rem 0.5rem",
-                  background: chipBg,
-                  color: chipText,
-                  "border-radius": "var(--radius-sm)",
-                  "font-size": "0.8rem",
-                  "max-width": "100%",
-                }}
-              >
-                <span
-                  style={{
-                    "white-space": "nowrap",
-                    overflow: "hidden",
-                    "text-overflow": "ellipsis",
-                    "max-width": "20ch",
-                  }}
-                  title={ref.name ?? "(unnamed)"}
-                >
-                  {ref.name ?? "(unnamed)"}
-                </span>
-                <span style={{ opacity: 0.7 }}>
-                  · {formatAttachmentSize(ref.size)}
-                </span>
-                <Show when={previewable}>
-                  <Show
-                    when={cachedUrl() !== null}
-                    fallback={
-                      <button
-                        type="button"
-                        onClick={() => {
-                          void props.onPreview(ref);
-                        }}
-                        style={{
-                          border: "none",
-                          background: "transparent",
-                          color: "inherit",
-                          cursor: "pointer",
-                          "text-decoration": "underline",
-                          padding: 0,
-                          "font-size": "0.8rem",
-                        }}
-                      >
-                        Open
-                      </button>
-                    }
-                  >
-                    <button
-                      type="button"
-                      onClick={() => props.onHidePreview(ref)}
-                      style={{
-                        border: "none",
-                        background: "transparent",
-                        color: "inherit",
-                        cursor: "pointer",
-                        "text-decoration": "underline",
-                        padding: 0,
-                        "font-size": "0.8rem",
-                      }}
-                    >
-                      Hide
-                    </button>
-                  </Show>
-                </Show>
-                <button
-                  type="button"
-                  onClick={() => {
-                    void props.onDownload(ref);
-                  }}
-                  style={{
-                    border: "none",
-                    background: "transparent",
-                    color: "inherit",
-                    cursor: "pointer",
-                    "text-decoration": "underline",
-                    padding: 0,
-                    "font-size": "0.8rem",
-                  }}
-                >
-                  Save
-                </button>
-              </span>
-            </div>
-          );
-        }}
-      </For>
     </div>
   );
 }

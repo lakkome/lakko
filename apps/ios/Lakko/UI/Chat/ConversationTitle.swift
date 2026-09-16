@@ -8,10 +8,12 @@ import Foundation
 /// Two PEOPLE (counted by account, never by device leaf) make a chat;
 /// anything else is a group. A conversation whose roster cannot be read yet
 /// (`nil` people count, e.g. the group handle is still being restored) is
-/// listed under Chats until the roster says otherwise. The spec's other rule,
-/// "a group created through the new-group flow is a group even with two
-/// people", needs a flag the iOS repository does not record; the people
-/// count is the only signal available here.
+/// listed under Chats until the roster says otherwise. This is only the
+/// first-sight rule: the kind is persisted per conversation
+/// (``ConversationKindStore``) and ``ConversationKindDecision`` decides how
+/// the stored kind and the people count combine, which is what lets a group
+/// made through the new-group flow stay a group while it still has two
+/// people.
 public enum ConversationKind: Equatable {
     case chat
     case group

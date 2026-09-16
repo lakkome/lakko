@@ -544,7 +544,7 @@ a.lk-row.active {
 }
 .lk-row-title {
   font-size: 15px;
-  font-weight: 600;
+  font-weight: 500;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -553,7 +553,11 @@ a.lk-row.active {
   gap: 6px;
   min-width: 0;
 }
+.lk-row-title.unread {
+  font-weight: 700;
+}
 .lk-row-sub {
+  flex: 1;
   font-size: 13px;
   color: var(--surface-muted);
   white-space: nowrap;
@@ -573,14 +577,45 @@ a.lk-row.active {
   color: var(--accent);
   font-weight: 600;
 }
+/* Trailing on the second line: muted, pinned, the unread badge. Hidden
+   while the hover actions take their place. */
+.lk-row-trail {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  color: var(--surface-faint);
+}
 .lk-row-actions {
   display: none;
   gap: 2px;
   flex: 0 0 auto;
 }
-.lk-row:hover .lk-row-actions,
-.lk-row:focus-within .lk-row-actions {
-  display: flex;
+@media (hover: hover) {
+  .lk-row:hover .lk-row-actions,
+  .lk-row:focus-within .lk-row-actions {
+    display: flex;
+  }
+  .lk-row:hover .lk-row-trail,
+  .lk-row:focus-within .lk-row-trail {
+    display: none;
+  }
+}
+/* A long press opens the menu on touch; no callout, no text selection. */
+.lk-row {
+  -webkit-touch-callout: none;
+  user-select: none;
+}
+.lk-pane-search {
+  margin: 0 12px 6px;
+  flex: 0 0 auto;
+}
+.lk-pane-nomatch {
+  margin: 0;
+  padding: 24px 16px;
+  text-align: center;
+  color: var(--surface-muted);
+  font-size: 14px;
 }
 .lk-row .lk-row-actions button {
   width: 28px;
@@ -1160,7 +1195,27 @@ a.ghost.small.lk-wide-only {
   flex: 1;
   min-width: 0;
   display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 8px 4px 4px;
+  border-radius: 10px;
+  cursor: pointer;
+}
+.lk-chat-title:hover {
+  background: var(--surface-hover);
+}
+.lk-chat-title:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  outline-offset: 0;
+}
+.lk-chat-title-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
   flex-direction: column;
+}
+.lk-chat-sub.typing {
+  color: var(--accent);
 }
 .lk-chat-title h1 {
   font-size: 16px;
@@ -1191,7 +1246,7 @@ a.ghost.small.lk-wide-only {
 
 .lk-composer {
   display: flex;
-  align-items: center;
+  align-items: flex-end;
   gap: 6px;
   padding: 10px 16px 14px;
   border-top: 1px solid var(--surface-border);
@@ -1213,11 +1268,19 @@ a.ghost.small.lk-wide-only {
 }
 .lk-composer-input {
   flex: 1;
+  min-width: 0;
   min-height: 42px;
+  /* Five lines of 22px plus the vertical padding; past it the field scrolls. */
+  max-height: 130px;
+  height: 42px;
+  box-sizing: border-box;
+  resize: none;
+  overflow-y: auto;
+  line-height: 22px;
   border: none;
-  border-radius: var(--radius-pill);
+  border-radius: 21px;
   background: var(--surface-sunken);
-  padding: 0 16px;
+  padding: 10px 16px;
 }
 .lk-composer-input:focus-visible {
   outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
@@ -1460,8 +1523,8 @@ a.ghost.small.lk-wide-only {
   transition: opacity 0.12s ease-in-out;
   pointer-events: none;
 }
-li:hover > .lakko-msg-actions,
-li:focus-within > .lakko-msg-actions {
+.lk-bubble:hover > .lakko-msg-actions,
+.lk-bubble:focus-within > .lakko-msg-actions {
   opacity: 1;
   pointer-events: auto;
 }
@@ -2246,4 +2309,266 @@ a.ghost.small:hover {
 }
 .lk-section-label.lk-flush {
   padding: 4px 0 0;
+}
+
+/* ---------------------------------------------------- chat timeline rows */
+/* docs/ux/client-redesign.md section 5.2 — bubbles, runs, system rows. */
+.lk-timeline {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.lk-bubble-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
+.lk-bubble-row.outgoing {
+  justify-content: flex-end;
+}
+/* A run is tight inside and spaced from the next one. */
+.lk-bubble-row.run-start {
+  margin-top: 8px;
+}
+.lk-bubble-gutter {
+  flex: 0 0 28px;
+  width: 28px;
+  display: inline-flex;
+  align-items: flex-end;
+}
+.lk-bubble {
+  position: relative;
+  max-width: min(78%, 560px);
+  min-width: 0;
+  padding: 7px 12px 5px;
+  border-radius: var(--radius-lg);
+  overflow-wrap: anywhere;
+}
+.lk-bubble.incoming {
+  background: var(--surface-sunken);
+  color: var(--surface-fg);
+}
+.lk-bubble.outgoing {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+.lk-bubble.incoming.run-end {
+  border-bottom-left-radius: 4px;
+}
+.lk-bubble.outgoing.run-end {
+  border-bottom-right-radius: 4px;
+}
+.lk-bubble.chromeless {
+  background: transparent;
+  color: var(--surface-fg);
+  padding: 4px 0;
+}
+.lk-bubble.pending {
+  opacity: 0.7;
+}
+.lk-bubble-text {
+  white-space: pre-wrap;
+}
+.lk-bubble-edited {
+  font-size: 11px;
+  opacity: 0.6;
+  margin-left: 6px;
+}
+.lk-bubble-deleted {
+  font-style: italic;
+  opacity: 0.7;
+}
+.lk-bubble-media {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.lk-bubble-media.after-text {
+  margin-top: 6px;
+}
+.lk-bubble-meta {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  margin-top: 2px;
+  font-size: 11px;
+  line-height: 14px;
+  opacity: 0.8;
+}
+.lk-bubble.incoming .lk-bubble-meta,
+.lk-bubble.chromeless .lk-bubble-meta {
+  color: var(--surface-muted);
+}
+.lk-bubble-ack {
+  display: inline-flex;
+  opacity: 0.7;
+}
+.lk-bubble-ack.read {
+  opacity: 1;
+}
+.lk-system-row {
+  display: flex;
+  justify-content: center;
+  margin: 6px 0;
+  font-size: 12px;
+  color: var(--surface-muted);
+  text-align: center;
+}
+.lk-bubble-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: min(60vw, 320px);
+}
+.lk-bubble-edit textarea {
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--surface-border);
+  color: var(--surface-fg);
+  background: var(--surface-elevated);
+  resize: vertical;
+}
+.lk-bubble-edit-actions {
+  display: flex;
+  gap: 6px;
+}
+.lk-bubble-edit-actions button {
+  min-height: 0;
+  padding: 4px 10px;
+  font-size: 13px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--surface-border);
+  background: var(--surface-elevated);
+  color: var(--surface-fg);
+}
+/* Reactions as chips under the bubble. */
+.lk-reactions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+.lk-reaction {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-height: 0;
+  padding: 1px 8px;
+  font-size: 13px;
+  line-height: 20px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--surface-border);
+  background: var(--surface-elevated);
+  color: var(--surface-fg);
+}
+.lk-bubble.outgoing .lk-reaction {
+  border-color: transparent;
+  background: color-mix(in srgb, var(--accent-fg) 18%, transparent);
+  color: inherit;
+}
+.lk-reaction.mine {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--surface-fg);
+}
+.lk-reaction-count {
+  font-size: 12px;
+  opacity: 0.85;
+}
+button.lk-reaction {
+  cursor: pointer;
+}
+/* The quick reaction bar over a bubble. */
+.lk-react-bar {
+  position: absolute;
+  top: 1.2rem;
+  z-index: 5;
+  display: flex;
+  gap: 2px;
+  padding: 4px;
+  border-radius: var(--radius-md);
+  background: var(--surface-elevated);
+  border: 1px solid var(--surface-border);
+  box-shadow: var(--shadow-2);
+}
+.lk-react-bar button {
+  min-height: 0;
+  padding: 2px 4px;
+  border: none;
+  background: transparent;
+  font-size: 18px;
+  line-height: 1;
+  color: var(--surface-fg);
+  cursor: pointer;
+}
+.lk-react-bar button.more {
+  display: inline-flex;
+  align-items: center;
+  color: var(--surface-muted);
+}
+/* File chips under a bubble's text. */
+.lk-chips {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
+.lk-chip-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.lk-chip-image {
+  display: block;
+  max-width: 100%;
+  max-height: 320px;
+  width: auto;
+  height: auto;
+  border-radius: var(--radius-sm);
+  object-fit: contain;
+}
+.lk-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-elevated);
+  font-size: 13px;
+  max-width: 100%;
+}
+.lk-chip.outgoing {
+  background: color-mix(in srgb, var(--accent-fg) 15%, transparent);
+  color: inherit;
+}
+.lk-chip-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 20ch;
+}
+.lk-chip-size {
+  opacity: 0.7;
+}
+.lk-chip-action {
+  min-height: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: 13px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+/* Headers use the 32px avatar (design system: 40 rows, 32 headers). */
+.lk-chat-title .lk-avatar.sm {
+  width: 32px;
+  height: 32px;
+  font-size: 13px;
 }

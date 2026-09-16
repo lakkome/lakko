@@ -29,7 +29,8 @@
  */
 import { authorIdentityToPersisted } from "./author-identity";
 import type { IncomingChatEvent } from "./client";
-import type { PersistedAttachment, PersistedGroup, PersistedMessage } from "./message-log-store";
+import { attachmentsPreviewLabel } from "./list-preview";
+import type { PersistedGroup, PersistedMessage } from "./message-log-store";
 import { persistedFromAttachmentRef } from "./persisted-attachment";
 
 /** Numeric DS id of a persisted row, or `null` when it does not parse. */
@@ -132,6 +133,12 @@ export interface ChatListSummary {
   readonly preview: string | null;
   /** Whether the newest message is this device's own. */
   readonly previewIsOwn: boolean;
+  /** The newest message's DS `created_at`, for the row's time; `null` for an
+   *  empty slot. */
+  readonly lastAt: string | null;
+  /** The newest message's author key (base64) when it is someone else's and
+   *  the log recorded one, for the sender prefix in a group row; else `null`. */
+  readonly lastAuthorKeyB64: string | null;
 }
 
 /**
@@ -181,6 +188,11 @@ export function summarizeGroupSlot(
     unread,
     preview: last === undefined ? null : previewText(last),
     previewIsOwn: last?.direction === "outgoing",
+    lastAt: last?.createdAt ?? null,
+    lastAuthorKeyB64:
+      last !== undefined && last.direction === "incoming" && typeof last.authorKeyB64 === "string"
+        ? last.authorKeyB64
+        : null,
   };
 }
 
@@ -189,22 +201,8 @@ function previewText(m: PersistedMessage): string {
   if (text.length > 0) {
     return text.length > PREVIEW_MAX_CHARS ? `${text.slice(0, PREVIEW_MAX_CHARS - 1)}…` : text;
   }
-  return attachmentLabel(m.attachments);
-}
-
-function attachmentLabel(attachments: readonly PersistedAttachment[]): string {
-  const first = attachments[0];
-  if (first === undefined) return "";
-  const mime = first.mime ?? "";
-  const n = attachments.length;
-  const kind = mime.startsWith("image/")
-    ? "Photo"
-    : mime.startsWith("video/")
-      ? "Video"
-      : mime.startsWith("audio/")
-        ? "Voice message"
-        : "File";
-  return n > 1 ? `${kind} and ${n - 1} more` : kind;
+  // docs/ux/client-redesign.md section 5.1 — a media message shows its kind.
+  return attachmentsPreviewLabel(m.attachments);
 }
 
 /**

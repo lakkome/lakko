@@ -25,6 +25,22 @@ resolver still falls back to a key fingerprint for a person without a name;
 Android has no app icon and iOS has an empty icon set; the web row actions
 have no touch path.
 
+Phase B landed on all three the same day and was checked live: rows with
+avatar, time, preview and unread badge, search, swipe and long-press actions,
+date separators, message times, delivery glyphs, run grouping, the tab bar
+hidden inside an iOS chat, a persisted conversation kind on every client,
+and the iOS tint moved onto the tokens directly (the catalog accent only
+applies on a fresh install). A web-to-Android exchange and an iOS-to-Android
+exchange rendered correctly in the new timelines. Leftovers from this pass:
+a two-person group created by someone else lists under Chats on the joiner
+(the kind is local, not carried by the Welcome or the pairing bundle);
+Android swipe covers pin and archive only, mute stays in the long-press menu;
+no loading skeleton; a chat title can show a key fingerprint for the moment
+between the Welcome and the contact acknowledgement; the iOS composer still
+drops the first burst of typed characters on a freshly opened chat (a
+stabilisation item, not a design one); Enter-to-send on web was not verified
+by hand.
+
 ## 1. What is wrong today
 
 Findings from a code inventory of the three clients (2026-09-16).

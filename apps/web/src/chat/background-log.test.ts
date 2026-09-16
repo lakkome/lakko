@@ -123,6 +123,8 @@ describe("summarizeGroupSlot (the chat list row)", () => {
       unread: 0,
       preview: "Photo",
       previewIsOwn: true,
+      lastAt: photo.createdAt,
+      lastAuthorKeyB64: null,
     });
     const long = msg(2, "incoming", "x".repeat(200));
     const p = summarizeGroupSlot({ cursor: "2", messages: [long] }, null).preview ?? "";
@@ -134,6 +136,8 @@ describe("summarizeGroupSlot (the chat list row)", () => {
       unread: 0,
       preview: null,
       previewIsOwn: false,
+      lastAt: null,
+      lastAuthorKeyB64: null,
     });
   });
 });

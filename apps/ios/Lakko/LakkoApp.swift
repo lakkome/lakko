@@ -239,6 +239,10 @@ struct AppRoot: View {
     var body: some View {
         content
             .preferredColorScheme(appearance.colorScheme)
+            // Design system section 1 — the brand accent, applied at the root
+            // so the tab bar, buttons, toggles, pickers and links follow it
+            // regardless of the catalog's global accent.
+            .tint(Color.lakkoAccent)
             // ADR-0038 S4 — fetch + verify the signed release manifest at launch
             // (throttled to once per 24h internally), then publish the banner
             // decision. Dormant when no release key is pinned; fail-safe toward
@@ -694,6 +698,9 @@ private struct SessionRoot: View {
                 viewModel: chatViewModel(for: groupIdHex),
                 onBack: { pop(route, from: tab) }
             )
+            // UX spec section 5.2 — a pushed chat fills the screen; the tab
+            // bar returns with the list.
+            .toolbar(.hidden, for: .tabBar)
         case .newChat:
             ContactPickerScreen(
                 viewModel: contactsVM,
@@ -711,7 +718,11 @@ private struct SessionRoot: View {
                 title: "New group",
                 footer: "Pick the first member. Add the others from the members panel.",
                 onPick: { groupIdHex in
-                    chatViewModel(for: groupIdHex).membersPanelOpen = true
+                    let model = chatViewModel(for: groupIdHex)
+                    // UX spec section 5.1 — made through the new-group flow:
+                    // a group, even while it still has two people.
+                    model.markConversationAsGroup()
+                    model.membersPanelOpen = true
                     replaceTop(route, with: .chat(groupIdHex: groupIdHex), in: tab)
                 }
             )

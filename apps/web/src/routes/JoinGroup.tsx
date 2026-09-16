@@ -58,6 +58,7 @@ import {
 import { paths } from "./paths";
 import { PublicLayout } from "../ui/PublicLayout";
 import { joinGroupAuthLinks } from "./join-group-auth";
+import { recordConversationKind } from "../chat/conversation-kind-store";
 
 type JoinPhase = "idle" | "requesting" | "waiting" | "joined" | "error";
 
@@ -159,6 +160,12 @@ export default function JoinGroup() {
               // other way.
               const active = chats.add({ label: "Group", group });
               profiles.groupJoined(active.groupIdB64);
+              // docs/ux/client-redesign.md section 3 — a conversation joined
+              // through an invite link is a group whatever its size.
+              {
+                const s = auth.state();
+                if (s.kind === "session") recordConversationKind(s.account.accountId, active.groupIdB64, "group");
+              }
               setPhase("joined");
               navigate(paths.chat(base64UrlEncodeNoPad(group.groupId)));
             }
