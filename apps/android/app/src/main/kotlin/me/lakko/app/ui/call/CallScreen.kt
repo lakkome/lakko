@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -38,6 +39,9 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.SwitchDefaults
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Divider
 import androidx.compose.material3.DropdownMenu
@@ -79,7 +83,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.shadow
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -317,7 +320,6 @@ private fun PrejoinScreen(
     onPrejoinJoin: ((micOn: Boolean, camOn: Boolean) -> Unit)? = null,
     onPrejoinCancel: (() -> Unit)? = null,
 ) {
-    var displayName by remember { mutableStateOf("") }
     var camOn by remember { mutableStateOf(true) }
     var micOn by remember { mutableStateOf(true) }
     // G3-2-video-ui-screen — observe the live local track for
@@ -327,73 +329,59 @@ private fun PrejoinScreen(
     val localVideoTrack by state.localVideoTrack.collectAsState()
     val settings by state.settings.collectAsState()
 
+    // docs/ux/client-redesign.md 5.7 — the prejoin is one card on the dark
+    // ground: the preview, the two toggles, Join. The camera and microphone
+    // choices are carried into `dial`, so they drive the real tracks.
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(LakkoDark.background)
+            .verticalScroll(rememberScrollState())
             .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(20.dp, Alignment.CenterVertically),
     ) {
         Text(
-            "Join Call",
+            "Join call",
             color = LakkoDark.text,
-            fontSize = 24.sp,
+            fontSize = 22.sp,
             fontWeight = FontWeight.SemiBold,
         )
-        Text(
-            "Set up your camera and microphone",
-            color = LakkoDark.textMuted,
-            fontSize = 14.sp,
-        )
-
-        Box(
+        Column(
             modifier = Modifier
                 .widthIn(max = 480.dp)
                 .fillMaxWidth()
-                .aspectRatio(16f / 9f)
                 .background(LakkoDark.surface, RoundedCornerShape(12.dp))
-                .border(1.dp, LakkoDark.border, RoundedCornerShape(12.dp)),
+                .border(1.dp, LakkoDark.border, RoundedCornerShape(12.dp))
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            if (camOn) {
-                val eglContext = remember { WebRtcPeerConnection.sharedEglContext() }
-                val track = localVideoTrack
-                if (track != null && eglContext != null) {
-                    LocalVideoPreviewView(
-                        track = track,
-                        eglContext = eglContext,
-                        modifier = Modifier.fillMaxSize(),
-                        mirrored = settings.mirrorLocal,
-                        scalingType = RendererCommon.ScalingType.SCALE_ASPECT_FILL,
-                    )
-                } else {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(
-                                Brush.linearGradient(
-                                    colors = listOf(
-                                        LakkoDark.sunken,
-                                        LakkoDark.surface,
-                                        LakkoDark.background,
-                                    ),
-                                ),
-                                RoundedCornerShape(12.dp),
-                            ),
-                        contentAlignment = Alignment.Center,
-                    ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(16f / 9f)
+                    .background(LakkoDark.sunken, RoundedCornerShape(12.dp)),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (camOn) {
+                    val eglContext = remember { WebRtcPeerConnection.sharedEglContext() }
+                    val track = localVideoTrack
+                    if (track != null && eglContext != null) {
+                        LocalVideoPreviewView(
+                            track = track,
+                            eglContext = eglContext,
+                            modifier = Modifier.fillMaxSize(),
+                            mirrored = settings.mirrorLocal,
+                            scalingType = RendererCommon.ScalingType.SCALE_ASPECT_FILL,
+                        )
+                    } else {
                         Text(
-                            "(camera preview)",
+                            "Camera preview",
                             color = LakkoDark.textMuted,
                             fontSize = 13.sp,
                         )
                     }
-                }
-            } else {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center,
-                ) {
+                } else {
                     Icon(
                         Icons.Filled.VideocamOff,
                         contentDescription = null,
@@ -402,135 +390,91 @@ private fun PrejoinScreen(
                     )
                 }
             }
-
-            // Cam / mic toggle overlay in the top-right.
-            Row(
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(10.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                PreviewToggleButton(
-                    icon = if (camOn) Icons.Filled.Videocam else Icons.Filled.VideocamOff,
-                    active = camOn,
-                    description = if (camOn) "Turn off camera" else "Turn on camera",
-                    onClick = { camOn = !camOn },
-                )
-                PreviewToggleButton(
-                    icon = if (micOn) Icons.Filled.Mic else Icons.Filled.MicOff,
-                    active = micOn,
-                    description = if (micOn) "Mute microphone" else "Unmute microphone",
-                    onClick = { micOn = !micOn },
-                )
-            }
-
-            // Display-name input at the bottom.
-            Box(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth()
-                    .background(Color.Black.copy(alpha = 0.45f))
-                    .padding(12.dp),
-            ) {
-                BasicTextField(
-                    value = displayName,
-                    onValueChange = { displayName = it },
-                    singleLine = true,
-                    textStyle = TextStyle(
-                        color = LakkoDark.text,
-                        fontSize = 15.sp,
-                    ),
-                    keyboardOptions = KeyboardOptions(
-                        capitalization = KeyboardCapitalization.Words,
-                    ),
-                    decorationBox = { inner ->
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(
-                                    Color.White.copy(alpha = 0.08f),
-                                    RoundedCornerShape(8.dp),
-                                )
-                                .border(1.dp, LakkoDark.border, RoundedCornerShape(8.dp))
-                                .padding(horizontal = 12.dp, vertical = 8.dp),
-                        ) {
-                            if (displayName.isEmpty()) {
-                                Text(
-                                    "Your name",
-                                    color = LakkoDark.textMuted,
-                                    fontSize = 15.sp,
-                                )
-                            }
-                            inner()
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
-        }
-
-        IconButton(
-            onClick = {
-                // G3-2-prejoin-join — with a real session, Join dials
-                // it carrying the chosen mic / camera. Without one
-                // (mock design path) seed the mock state as before.
-                if (onPrejoinJoin != null) {
-                    onPrejoinJoin(micOn, camOn)
-                } else {
-                    state.seedMockState()
-                    state.setMic(micOn)
-                    state.setCamera(camOn)
-                    // displayName unused — production maps via contact name lookup.
-                    state.join()
-                }
-            },
-            modifier = Modifier
-                .background(LakkoDark.accent, RoundedCornerShape(10.dp))
-                .padding(horizontal = 32.dp, vertical = 6.dp)
-                .shadow(4.dp, RoundedCornerShape(10.dp)),
-        ) {
-            Text(
-                "Join",
-                color = LakkoDark.text,
-                fontWeight = FontWeight.SemiBold,
-                fontSize = 16.sp,
+            PrejoinToggleRow(
+                icon = if (camOn) Icons.Filled.Videocam else Icons.Filled.VideocamOff,
+                label = "Camera",
+                checked = camOn,
+                onCheckedChange = { camOn = it },
             )
+            PrejoinToggleRow(
+                icon = if (micOn) Icons.Filled.Mic else Icons.Filled.MicOff,
+                label = "Microphone",
+                checked = micOn,
+                onCheckedChange = { micOn = it },
+            )
+            Button(
+                onClick = {
+                    // G3-2-prejoin-join — with a real session, Join dials
+                    // it carrying the chosen mic / camera. Without one
+                    // (mock design path) seed the mock state as before.
+                    if (onPrejoinJoin != null) {
+                        onPrejoinJoin(micOn, camOn)
+                    } else {
+                        state.seedMockState()
+                        state.setMic(micOn)
+                        state.setCamera(camOn)
+                        state.join()
+                    }
+                },
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = LakkoDark.accent,
+                    contentColor = LakkoDark.accentFg,
+                ),
+                shape = RoundedCornerShape(8.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp),
+            ) {
+                Text("Join", fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+            }
         }
 
         // G3-2-prejoin-join — Cancel abandons a prepped-but-undialed
         // call (real session only); absent on the mock design path.
         if (onPrejoinCancel != null) {
-            IconButton(
-                onClick = onPrejoinCancel,
-                modifier = Modifier.padding(horizontal = 24.dp, vertical = 4.dp),
-            ) {
-                Text(
-                    "Cancel",
-                    color = LakkoDark.textMuted,
-                    fontSize = 14.sp,
-                )
+            TextButton(onClick = onPrejoinCancel) {
+                Text("Cancel", color = LakkoDark.textMuted, fontSize = 14.sp)
             }
         }
     }
 }
 
+/** One labelled toggle of the prejoin card: an icon, the label, a switch. */
 @Composable
-private fun PreviewToggleButton(
+private fun PrejoinToggleRow(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
-    active: Boolean,
-    description: String,
-    onClick: () -> Unit,
+    label: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
 ) {
-    IconButton(
-        onClick = onClick,
-        modifier = Modifier
-            .size(36.dp)
-            .background(
-                if (active) Color.Black.copy(alpha = 0.55f) else LakkoDark.danger,
-                CircleShape,
-            ),
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Icon(icon, contentDescription = description, tint = LakkoDark.text)
+        Icon(
+            icon,
+            contentDescription = null,
+            tint = if (checked) LakkoDark.text else LakkoDark.textMuted,
+            modifier = Modifier.size(22.dp),
+        )
+        Text(
+            label,
+            color = LakkoDark.text,
+            fontSize = 15.sp,
+            modifier = Modifier.weight(1f),
+        )
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            colors = SwitchDefaults.colors(
+                checkedThumbColor = LakkoDark.accentFg,
+                checkedTrackColor = LakkoDark.accent,
+                uncheckedThumbColor = LakkoDark.textMuted,
+                uncheckedTrackColor = LakkoDark.sunken,
+                uncheckedBorderColor = LakkoDark.border,
+            ),
+        )
     }
 }
 
@@ -638,7 +582,7 @@ private fun InCallView(
                                 .padding(horizontal = 24.dp, vertical = 16.dp),
                         ) {
                             Text(
-                                "Waiting for participant…",
+                                "Waiting for others to join...",
                                 color = LakkoDark.text,
                                 fontSize = 14.sp,
                             )
@@ -688,7 +632,7 @@ private fun InCallView(
                         fontWeight = FontWeight.SemiBold,
                     )
                     Text(
-                        "Returning to your chats…",
+                        "Returning to your chats...",
                         color = LakkoDark.textMuted,
                         fontSize = 14.sp,
                     )
@@ -940,7 +884,7 @@ private fun ChatToggleButton(state: CallUiState) {
             ) {
                 Text(
                     if (unread > 99) "99+" else unread.toString(),
-                    color = Color.White,
+                    color = LakkoDark.dangerFg,
                     fontSize = 10.sp,
                     fontWeight = FontWeight.Bold,
                 )
@@ -1230,7 +1174,7 @@ private fun ParticipantTile(
     val participants by state.participants.collectAsState()
     val settings by state.settings.collectAsState()
     val soleRemoteId = remember(participants) { state.soleRemoteParticipantId }
-    // ADR-0032 piece B2a — the local self-tile shows a "Starting camera…"
+    // ADR-0032 piece B2a — the local self-tile shows a "Starting camera..."
     // hint while the mid-call camera-on acquire is in flight.
     val videoPublishState by state.videoPublishState.collectAsState()
     val cameraStarting = participant.isLocal &&
@@ -1284,25 +1228,18 @@ private fun ParticipantTile(
                     scalingType = RendererCommon.ScalingType.SCALE_ASPECT_FILL,
                 )
             } else {
+                // Surfaces are flat (design system section 1): no gradient
+                // placeholder while the track has not arrived yet.
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .background(
-                            Brush.linearGradient(
-                                colors = listOf(
-                                    LakkoDark.sunken,
-                                    LakkoDark.surface,
-                                    LakkoDark.background,
-                                ),
-                            ),
-                            RoundedCornerShape(12.dp),
-                        ),
+                        .background(LakkoDark.sunken, RoundedCornerShape(12.dp)),
                     contentAlignment = Alignment.Center,
                 ) {
-                    Text(
-                        "(video)",
-                        color = LakkoDark.textMuted.copy(alpha = 0.6f),
-                        fontSize = 12.sp,
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(24.dp),
+                        color = LakkoDark.textMuted,
+                        strokeWidth = 2.dp,
                     )
                 }
             }
@@ -1323,13 +1260,13 @@ private fun ParticipantTile(
         }
 
         // ADR-0032 piece B2a — mid-call camera-on loading hint on the local
-        // self-tile only (a spinner + "Starting camera…" while the acquire +
+        // self-tile only (a spinner + "Starting camera..." while the acquire +
         // renegotiation are in flight). Clears on Live / Failed.
         if (cameraStarting) {
             Box(
                 modifier = Modifier
                     .align(Alignment.Center)
-                    .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(8.dp))
+                    .background(LakkoDark.background.copy(alpha = 0.55f), RoundedCornerShape(8.dp))
                     .padding(horizontal = 12.dp, vertical = 8.dp),
                 contentAlignment = Alignment.Center,
             ) {
@@ -1343,7 +1280,7 @@ private fun ParticipantTile(
                         strokeWidth = 2.dp,
                     )
                     Text(
-                        "Starting camera…",
+                        "Starting camera...",
                         color = LakkoDark.text,
                         fontSize = 12.sp,
                     )
@@ -1357,7 +1294,7 @@ private fun ParticipantTile(
                 modifier = Modifier
                     .align(Alignment.Center)
                     .size(if (large) 56.dp else 36.dp)
-                    .background(Color.Black.copy(alpha = 0.55f), CircleShape),
+                    .background(LakkoDark.background.copy(alpha = 0.55f), CircleShape),
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(
@@ -1375,7 +1312,7 @@ private fun ParticipantTile(
                 modifier = Modifier
                     .align(Alignment.TopStart)
                     .padding(8.dp)
-                    .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(6.dp))
+                    .background(LakkoDark.background.copy(alpha = 0.6f), RoundedCornerShape(6.dp))
                     .padding(horizontal = 6.dp, vertical = 2.dp),
             ) {
                 Text("Sharing", color = LakkoDark.text, fontSize = 10.sp)
@@ -1388,7 +1325,7 @@ private fun ParticipantTile(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
                     .padding(8.dp)
-                    .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(6.dp))
+                    .background(LakkoDark.background.copy(alpha = 0.6f), RoundedCornerShape(6.dp))
                     .padding(4.dp),
             ) {
                 Icon(
@@ -1405,7 +1342,7 @@ private fun ParticipantTile(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
-                .background(Color.Black.copy(alpha = 0.45f))
+                .background(LakkoDark.background.copy(alpha = 0.45f))
                 .padding(horizontal = 10.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -1449,6 +1386,7 @@ private fun ParticipantTile(
     }
 }
 
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 private fun ControlsBar(
     state: CallUiState,
@@ -1467,14 +1405,15 @@ private fun ControlsBar(
     val videoPublishState by state.videoPublishState.collectAsState()
     val cameraStarting = videoPublishState == CallUiState.VideoPublishState.Starting
 
-    Row(
+    // docs/ux/client-redesign.md 5.7 — a bottom row of 56 dp round buttons on
+    // the sunken dark surface; it wraps rather than clips on a narrow phone.
+    FlowRow(
         modifier = Modifier
             .fillMaxWidth()
-            .background(LakkoDark.surface)
-            .border(1.dp, LakkoDark.border)
-            .padding(horizontal = 16.dp, vertical = 14.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterHorizontally),
-        verticalAlignment = Alignment.CenterVertically,
+            .background(LakkoDark.sunken)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         CircleButton(
             icon = if (local?.micOn == true) Icons.Filled.Mic else Icons.Filled.MicOff,
@@ -1486,7 +1425,7 @@ private fun ControlsBar(
             icon = if (local?.camOn == true) Icons.Filled.Videocam else Icons.Filled.VideocamOff,
             active = local?.camOn == false,
             description = when {
-                cameraStarting -> "Starting camera…"
+                cameraStarting -> "Starting camera..."
                 local?.camOn == true -> "Stop camera"
                 else -> "Start camera"
             },
@@ -1554,22 +1493,26 @@ private fun CircleButton(
         active -> LakkoDark.accent
         else -> LakkoDark.surface
     }
+    val fg = when {
+        destructive -> LakkoDark.dangerFg
+        active -> LakkoDark.accentFg
+        else -> LakkoDark.text
+    }
     IconButton(
         onClick = onClick,
         enabled = enabled,
         modifier = Modifier
-            .size(52.dp)
-            .background(bg, CircleShape)
-            .shadow(4.dp, CircleShape),
+            .size(56.dp)
+            .background(bg, CircleShape),
     ) {
         if (busy) {
             CircularProgressIndicator(
                 modifier = Modifier.size(20.dp),
-                color = LakkoDark.text,
+                color = fg,
                 strokeWidth = 2.dp,
             )
         } else {
-            Icon(icon, contentDescription = description, tint = LakkoDark.text)
+            Icon(icon, contentDescription = description, tint = fg)
         }
     }
 }
@@ -1661,9 +1604,9 @@ private fun PhaseBanner(phase: CallUiState.CallPhase, modifier: Modifier = Modif
     val info: Pair<String, Color>? = when (phase) {
         is CallUiState.CallPhase.Prejoin -> null
         is CallUiState.CallPhase.Connected -> null
-        is CallUiState.CallPhase.Connecting -> "Connecting…" to LakkoDark.accent
+        is CallUiState.CallPhase.Connecting -> "Connecting..." to LakkoDark.accent
         is CallUiState.CallPhase.Reconnecting ->
-            "Reconnecting — ${phase.reason}" to LakkoDark.warning
+            "Reconnecting..." to LakkoDark.warning
         is CallUiState.CallPhase.Ended -> "Call ended" to LakkoDark.danger
     }
     info?.let { (text, colour) ->
@@ -1674,7 +1617,7 @@ private fun PhaseBanner(phase: CallUiState.CallPhase, modifier: Modifier = Modif
         ) {
             Text(
                 text,
-                color = Color.Black.copy(alpha = 0.9f),
+                color = LakkoDark.accentFg,
                 fontSize = 11.sp,
                 fontWeight = FontWeight.SemiBold,
             )

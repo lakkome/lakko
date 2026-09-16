@@ -127,6 +127,9 @@ export const paths = {
   channels: "/channels",
   /** New-channel form — Phase 4 G4-2. */
   channelNew: "/channels/new",
+  /** Join an existing channel as a co-publisher from an owner's link
+   *  (ADR-0028 OQ3); the second entry of the Channels compose menu. */
+  channelJoin: "/channels/join",
   /**
    * Channel view — Phase 4 G4-2. `channelIdHex` is the
    * 32-char lowercase hex form of the 16-byte channel

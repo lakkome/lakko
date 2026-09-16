@@ -3,7 +3,11 @@
 
 package me.lakko.app.ui.channels
 
+import android.text.format.DateFormat
+import android.util.Log
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -11,7 +15,9 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -20,103 +26,107 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.FilledIconButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.ui.platform.LocalContext
-import me.lakko.app.channels.ChannelKeyStore
-import me.lakko.app.channels.ChannelPublisherKeyStore
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import androidx.compose.foundation.text.selection.SelectionContainer
 import me.lakko.app.channels.ChannelDiscovery
 import me.lakko.app.channels.ChannelHandle
+import me.lakko.app.channels.ChannelKeyStore
+import me.lakko.app.channels.ChannelPublisherKeyStore
 import me.lakko.app.channels.ChannelPublisherKeys
-import me.lakko.app.channels.ChannelsApiException
 import me.lakko.app.channels.ChannelsClient
 import me.lakko.app.channels.ChannelsComposer
 import me.lakko.app.channels.ChannelsComposerException
 import me.lakko.app.channels.ChannelsUiState
+import me.lakko.app.channels.CoPublisher
 import me.lakko.app.channels.LegacyChannelException
 import me.lakko.app.channels.LegacyChannelV1
-import me.lakko.app.channels.CoPublisher
 import me.lakko.app.channels.PostView
 import me.lakko.app.channels.RotationCron
 import me.lakko.app.discovery.DiscoveryHttpError
 import me.lakko.app.ds.DsClient
+import me.lakko.app.ui.components.LakkoAvatar
+import me.lakko.app.ui.contacts.copyToClipboard
+import me.lakko.app.ui.contacts.launchShareIntent
 import uniffi.lakko_ffi_uniffi.ChannelRotationState
 import uniffi.lakko_ffi_uniffi.Identity
 import uniffi.lakko_ffi_uniffi.PublisherGroup
 import uniffi.lakko_ffi_uniffi.channelRotationPolicyDefault
 import uniffi.lakko_ffi_uniffi.channelRotationStateAfterRotation
-import java.text.SimpleDateFormat
-import java.util.Date
+import java.time.ZoneId
 import java.util.Locale
-import java.util.TimeZone
 
 /**
- * Channels Compose UI — Phase 4 G4-2 Android port of
- * `apps/web/src/routes/Channels.tsx` and
- * `apps/ios/Lakko/UI/Channels/ChannelsScreen.swift`.
+ * The Channels screens (docs/ux/client-redesign.md section 5.4): the list,
+ * the channel view, the subscribe route, the owner's Manage screen, New
+ * channel and Join as co-publisher. Each is a destination of the app's
+ * `NavHost` in `MainActivity` (Material back arrow, system and predictive
+ * back); the shared [ChannelsUiState] and [ChannelsClient] are created once
+ * by the session shell and threaded into every destination.
  *
- * Three nested screens — top-level entry takes a `route`
- * sealed class so a containing NavHost (or the simple
- * mutable-state version below) can render the right one.
- * Same palette + flow as the iOS / web sides.
+ * Every repository call — publish, subscribe, envelope fan-out, rotation,
+ * co-publisher approve with its reseal — is the audited path it was before
+ * this restyle; only the chrome and the copy changed.
  */
 
-
-private sealed class Route {
-    object List : Route()
-    object New : Route()
-    object JoinCoPublisher : Route()
-    data class Detail(val channelId: String) : Route()
-    data class Subscribe(val channelId: String) : Route()
-}
+private const val TAG = "ChannelsScreen"
 
 /**
  * Build the process-scoped [ChannelsUiState], persisting the subscriber
  * keypairs AND the publisher signing seeds into the hardware-backed Keystore
- * (G-29) rather than plaintext `SharedPreferences`. Reads `LocalContext`
- * (composable scope) before the non-composable `remember` block builds the
- * encrypted prefs.
+ * (G-29) rather than plaintext `SharedPreferences`.
  */
 @Composable
-private fun rememberChannelsUiState(): ChannelsUiState {
+public fun rememberChannelsUiState(): ChannelsUiState {
     val context = LocalContext.current
     return remember {
         ChannelsUiState(
@@ -126,379 +136,420 @@ private fun rememberChannelsUiState(): ChannelsUiState {
     }
 }
 
+// ============================================================================
+// Channels list
+// ============================================================================
+
+/**
+ * The Channels tab: the same list vocabulary as Chats — a search field, rows
+ * with an avatar, the name, the handle, the subscriber count when this device
+ * knows it and the newest post's time; a compose menu with New channel, Join
+ * as co-publisher and Find a channel.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-public fun ChannelsRootScreen(
-    /**
-     * 64-byte AccountIdentity (BIP39 phrase) seed for the active
-     * session (ADR-0017). [NewChannelScreen] rebuilds a transient
-     * `Identity` from it (`Identity.fromSeed(accountIdentitySeed)`)
-     * to drive the MLS PublisherGroup that produces the channel
-     * content-key seed (G-27). Per ADR-0017 the canonical
-     * AccountIdentity is seeded from the stable phrase seed, NOT the
-     * password-derived OPAQUE export key, so it survives a recover /
-     * password change.
-     *
-     * The host (`MainActivity` / a future Channels tab) supplies this
-     * from `AuthRepository`'s in-memory `IdentitySecrets` — same shape
-     * `ChatRepository` already uses.
-     */
-    accountIdentitySeed: ByteArray,
-    /** Phase 1.5b bearer token for the active session
-     *  (`IdentitySecrets.sessionToken`). Threaded into
-     *  [NewChannelScreen] so the optional `@handle` registration
-     *  (G4-5, ADR-0010) can drive the session-token-gated
-     *  `POST /discovery/channel/register`. */
-    sessionToken: String,
-    /** Back to the host (the app Home surface). Wired into the list
-     *  screen's top-bar back arrow, matching the Contacts / Devices
-     *  navigation idiom so the Channels entry is not a dead-end. */
-    onBack: (() -> Unit)? = null,
-    state: ChannelsUiState = rememberChannelsUiState(),
-    client: ChannelsClient = remember { ChannelsClient() },
+public fun ChannelsListScreen(
+    state: ChannelsUiState,
+    onCreate: () -> Unit,
+    onOpen: (channelId: String) -> Unit,
+    onJoin: () -> Unit,
+    /** A resolved channel id (from a handle or a pasted id) lands on its subscribe
+     *  route; the handle it was found by, when there was one, names it in the list. */
+    onFindSubscribe: (channelId: String, handle: String?) -> Unit,
 ) {
-    var route by remember { mutableStateOf<Route>(Route.List) }
-    // System back leaves a nested channel screen for the list.
-    androidx.activity.compose.BackHandler(enabled = route != Route.List) { route = Route.List }
-    when (val r = route) {
-        Route.List -> ChannelsListScreen(
-            state = state,
-            onCreate = { route = Route.New },
-            onOpen = { route = Route.Detail(it) },
-            onJoin = { route = Route.JoinCoPublisher },
-            // G4-5: a resolved `@handle` OR pasted hex id lands on the
-            // subscriber route for that channel id (mirrors the web
-            // `ChannelsList` find-and-navigate).
-            onFindSubscribe = { hex -> route = Route.Subscribe(hex) },
-            onBack = onBack,
+    val channels by state.channels.collectAsState()
+    val postsByChannel by state.postsByChannel.collectAsState()
+    val context = LocalContext.current
+    var query by rememberSaveable { mutableStateOf("") }
+    var menuOpen by remember { mutableStateOf(false) }
+    var findOpen by remember { mutableStateOf(false) }
+    val zone = remember { ZoneId.systemDefault() }
+    val locale = remember { Locale.getDefault() }
+    val use24h = remember(context) { DateFormat.is24HourFormat(context) }
+    val counts = SubscriberFanoutRegistry.subscriberCounts()
+
+    val rows = remember(channels, postsByChannel, counts) {
+        val now = System.currentTimeMillis()
+        channels.map { channel ->
+            channelRowModel(
+                channel = channel,
+                posts = postsByChannel[channel.id],
+                subscriberCount = counts[channel.id],
+                nowMs = now,
+                zone = zone,
+                use24h = use24h,
+                locale = locale,
+            )
+        }
+    }
+    val visible = remember(rows, query) { filterChannelRows(rows, query) }
+
+    if (findOpen) {
+        FindChannelDialog(
+            onDismiss = { findOpen = false },
+            onFound = { id, handle ->
+                findOpen = false
+                onFindSubscribe(id, handle)
+            },
         )
-        Route.New -> NewChannelScreen(
-            state = state,
-            client = client,
-            accountIdentitySeed = accountIdentitySeed,
-            sessionToken = sessionToken,
-            onClose = { route = Route.List },
-            onCreated = { id -> route = Route.Detail(id) },
-        )
-        Route.JoinCoPublisher -> JoinCoPublisherScreen(
-            state = state,
-            accountIdentitySeed = accountIdentitySeed,
-            onClose = { route = Route.List },
-            onJoined = { id -> route = Route.Detail(id) },
-        )
-        is Route.Detail -> ChannelDetailScreen(
-            channelId = r.channelId,
-            state = state,
-            client = client,
-            accountIdentitySeed = accountIdentitySeed,
-            onBack = { route = Route.List },
-            onSubscribe = { route = Route.Subscribe(r.channelId) },
-        )
-        is Route.Subscribe -> ChannelSubscribeScreen(
-            channelId = r.channelId,
-            state = state,
-            client = client,
-            onBack = { route = Route.List },
-        )
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Channels") },
+                actions = {
+                    Box {
+                        IconButton(onClick = { menuOpen = true }) {
+                            Icon(Icons.Filled.Add, contentDescription = "Add channel")
+                        }
+                        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                            DropdownMenuItem(
+                                text = { Text("New channel") },
+                                onClick = {
+                                    menuOpen = false
+                                    onCreate()
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Find a channel") },
+                                onClick = {
+                                    menuOpen = false
+                                    findOpen = true
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Join as co-publisher") },
+                                onClick = {
+                                    menuOpen = false
+                                    onJoin()
+                                },
+                            )
+                        }
+                    }
+                },
+            )
+        },
+    ) { padding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding),
+        ) {
+            ChannelSearchField(query = query, onQueryChange = { query = it })
+            when {
+                rows.isEmpty() -> ChannelsEmptyPanel(onCreate = onCreate, onFind = { findOpen = true })
+                visible.isEmpty() -> Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(24.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            "No matches",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Spacer(Modifier.height(12.dp))
+                        TextButton(onClick = { findOpen = true }) { Text("Find a channel") }
+                    }
+                }
+                else -> LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(vertical = 4.dp),
+                ) {
+                    items(items = visible, key = { it.id }) { row ->
+                        ChannelRow(row = row, onClick = { onOpen(row.id) })
+                    }
+                }
+            }
+        }
     }
 }
 
-// ============================================================================
-// ChannelsListScreen
-// ============================================================================
-
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ChannelsListScreen(
-    state: ChannelsUiState,
-    onCreate: () -> Unit,
-    onOpen: (String) -> Unit,
-    onJoin: () -> Unit,
-    /** G4-5: navigate to the subscriber route for a resolved 32-char
-     *  hex channel id (from a typed `@handle` or a pasted raw id). */
-    onFindSubscribe: (String) -> Unit,
-    onBack: (() -> Unit)?,
-) {
-    val channels by state.channels.collectAsState()
-    // G4-5: subscribe entry point. Accepts EITHER a typed `@handle`
-    // (OPRF-resolved to a channel id) OR a pasted 32-char hex channel
-    // id (used verbatim). Both land on the subscriber route.
-    var findInput by remember { mutableStateOf("") }
-    var findBusy by remember { mutableStateOf(false) }
-    var findError by remember { mutableStateOf<String?>(null) }
+private fun ChannelSearchField(query: String, onQueryChange: (String) -> Unit) {
+    OutlinedTextField(
+        value = query,
+        onValueChange = onQueryChange,
+        placeholder = { Text("Search channels") },
+        singleLine = true,
+        leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
+        trailingIcon = if (query.isNotEmpty()) {
+            {
+                IconButton(onClick = { onQueryChange("") }) {
+                    Icon(Icons.Filled.Clear, contentDescription = "Clear search")
+                }
+            }
+        } else {
+            null
+        },
+        shape = RoundedCornerShape(12.dp),
+        colors = OutlinedTextFieldDefaults.colors(
+            focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+            unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+            focusedBorderColor = Color.Transparent,
+            unfocusedBorderColor = Color.Transparent,
+        ),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 4.dp),
+    )
+}
+
+@Composable
+private fun ChannelRow(row: ChannelRowModel, onClick: () -> Unit) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+    ) {
+        LakkoAvatar(name = row.title, seed = row.id, size = 40.dp)
+        Spacer(Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = row.title,
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                if (row.time != null) {
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = row.time,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            val second = listOfNotNull(row.handle, row.subscriberLine).joinToString(" · ")
+            if (second.isNotEmpty()) {
+                Text(
+                    text = second,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ChannelsEmptyPanel(onCreate: () -> Unit, onFind: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text("No channels yet", style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.height(12.dp))
+            Button(onClick = onCreate) { Text("Create a channel") }
+            Spacer(Modifier.height(4.dp))
+            TextButton(onClick = onFind) { Text("Find a channel") }
+        }
+    }
+}
+
+/**
+ * Find a channel by its public handle (or a pasted channel id): resolves it
+ * and hands the channel id to the subscribe route.
+ */
+@Composable
+private fun FindChannelDialog(onDismiss: () -> Unit, onFound: (channelId: String, handle: String?) -> Unit) {
+    var input by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
 
-    fun runFind() {
-        if (findBusy) return
-        val raw = findInput.trim()
-        if (raw.isEmpty()) return
-        findBusy = true
-        findError = null
+    fun run() {
+        val raw = input.trim()
+        if (busy || raw.isEmpty()) return
+        busy = true
+        error = null
         scope.launch {
             try {
                 val idHex = ChannelDiscovery.resolveChannelIdOrHandle(raw)
                 if (idHex == null) {
                     val shown = if (raw.startsWith("@")) raw else "@$raw"
-                    findError = "No channel found for $shown."
-                    findBusy = false
-                    return@launch
+                    error = "No channel found for $shown."
+                } else {
+                    // A 32-char hex id was pasted verbatim: no handle to show.
+                    val handle = raw.removePrefix("@").takeIf { !it.equals(idHex, ignoreCase = true) }
+                    onFound(idHex, handle)
                 }
-                findBusy = false
-                onFindSubscribe(idHex)
             } catch (e: Throwable) {
-                findError = "Lookup failed: ${e.message}"
-                findBusy = false
+                Log.w(TAG, "channel lookup failed", e)
+                error = "Could not look up the channel. Try again."
+            } finally {
+                busy = false
             }
         }
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("Channels", color = MaterialTheme.colorScheme.onSurface) },
-                navigationIcon = {
-                    if (onBack != null) {
-                        IconButton(onClick = onBack) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = MaterialTheme.colorScheme.onSurface)
-                        }
-                    }
-                },
-                actions = {
-                    TextButton(onClick = onJoin) {
-                        Text("Join", color = MaterialTheme.colorScheme.primary)
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.background,
-                ),
-            )
-        },
-        floatingActionButton = {
-            FloatingActionButton(
-                onClick = onCreate,
-                containerColor = MaterialTheme.colorScheme.primary,
-            ) {
-                Icon(Icons.Default.Add, "New channel", tint = MaterialTheme.colorScheme.onPrimary)
-            }
-        },
-        containerColor = MaterialTheme.colorScheme.background,
-    ) { inner ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(inner),
-        ) {
-            // G4-5 subscribe entry: @handle OR pasted hex channel id.
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp)
-                    .padding(top = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
+    AlertDialog(
+        onDismissRequest = { if (!busy) onDismiss() },
+        title = { Text("Find a channel") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(
-                    value = findInput,
+                    value = input,
                     onValueChange = {
-                        findInput = it
-                        findError = null
+                        input = it
+                        error = null
                     },
-                    label = { Text("Find a channel — @handle or id") },
-                    enabled = !findBusy,
+                    label = { Text("Handle") },
+                    placeholder = { Text("@handle") },
                     singleLine = true,
+                    enabled = !busy,
+                    isError = error != null,
+                    supportingText = error?.let { msg -> { Text(msg) } },
                     modifier = Modifier.fillMaxWidth(),
                 )
-                findError?.let { msg ->
-                    Text(msg, color = MaterialTheme.colorScheme.error, fontSize = 13.sp)
-                }
-                Button(
-                    onClick = { runFind() },
-                    enabled = !findBusy && findInput.trim().isNotEmpty(),
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text(if (findBusy) "Finding…" else "Find & subscribe")
-                }
             }
-            Spacer(Modifier.height(8.dp))
-            if (channels.isEmpty()) {
-                Column(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth()
-                        .padding(24.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center,
-                ) {
-                    Text(
-                        "No channels yet.",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontSize = 16.sp,
-                    )
-                    Spacer(Modifier.height(6.dp))
-                    Text(
-                        "Tap + to create one, or find one above.",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontSize = 14.sp,
-                    )
-                }
-            } else {
-                LazyColumn(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth()
-                        .padding(horizontal = 12.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    items(channels, key = { it.id }) { channel ->
-                        ChannelRow(channel, onClick = { onOpen(channel.id) })
-                    }
-                }
+        },
+        confirmButton = {
+            TextButton(onClick = { run() }, enabled = !busy && input.trim().isNotEmpty()) {
+                Text(if (busy) "Finding..." else "Find")
             }
-        }
-    }
-}
-
-@Composable
-private fun ChannelRow(channel: ChannelHandle, onClick: () -> Unit) {
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 4.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        onClick = onClick,
-    ) {
-        Column(Modifier.padding(14.dp)) {
-            Text(
-                channel.localName.ifEmpty { "(unnamed)" },
-                color = MaterialTheme.colorScheme.onSurface,
-                fontWeight = FontWeight.SemiBold,
-            )
-            if (channel.localDescription.isNotEmpty()) {
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    channel.localDescription,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontSize = 13.sp,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-            Spacer(Modifier.height(6.dp))
-            Text(
-                "${channel.id.take(8)}…${channel.id.takeLast(8)}",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                fontSize = 12.sp,
-                fontFamily = FontFamily.Monospace,
-            )
-        }
-    }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = !busy) { Text("Cancel") }
+        },
+    )
 }
 
 // ============================================================================
-// NewChannelScreen
+// Screen chrome shared by the pushed destinations
 // ============================================================================
 
-/** G-27 / ADR-0017: needs the AccountIdentity (phrase) seed so
- *  [NewChannelScreen.create] can rebuild the PublisherGroup
- *  founding-member identity. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun NewChannelScreen(
+private fun ChannelTopBar(
+    title: String,
+    subtitle: String? = null,
+    onBack: () -> Unit,
+    actions: @Composable () -> Unit = {},
+) {
+    TopAppBar(
+        title = {
+            Column {
+                Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (subtitle != null) {
+                    Text(
+                        subtitle,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        },
+        navigationIcon = {
+            IconButton(onClick = onBack) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+            }
+        },
+        actions = { actions() },
+    )
+}
+
+/** A one-sentence error line under a form or a composer. */
+@Composable
+private fun ErrorLine(message: String, modifier: Modifier = Modifier) {
+    Text(
+        message,
+        color = MaterialTheme.colorScheme.error,
+        style = MaterialTheme.typography.bodySmall,
+        modifier = modifier,
+    )
+}
+
+// ============================================================================
+// New channel
+// ============================================================================
+
+/**
+ * Create a channel: a local name and description, an optional public handle.
+ * The handle is claimed first so a taken handle aborts before anything is
+ * created; the channel key seed comes from the account's publisher group
+ * (G-27 / ADR-0017), which is why the account identity seed is needed.
+ */
+@Composable
+public fun NewChannelScreen(
     state: ChannelsUiState,
     client: ChannelsClient,
     accountIdentitySeed: ByteArray,
     sessionToken: String,
-    onClose: () -> Unit,
-    onCreated: (String) -> Unit,
+    onBack: () -> Unit,
+    onCreated: (channelId: String) -> Unit,
 ) {
     var name by remember { mutableStateOf("") }
     var description by remember { mutableStateOf("") }
-    // G4-5: optional public `@handle` (OPRF-discoverable). Empty →
-    // discovery is skipped; the raw hex channel id still works.
     var handle by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("New channel", color = MaterialTheme.colorScheme.onSurface) },
-                navigationIcon = {
-                    IconButton(onClick = onClose) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = MaterialTheme.colorScheme.onSurface)
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.background,
-                ),
-            )
-        },
-        containerColor = MaterialTheme.colorScheme.background,
-    ) { inner ->
+
+    Scaffold(topBar = { ChannelTopBar(title = "New channel", onBack = onBack) }) { inner ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(inner)
+                .verticalScroll(rememberScrollState())
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             OutlinedTextField(
                 value = name,
                 onValueChange = { name = it },
-                label = { Text("Name (local only)") },
+                label = { Text("Name") },
                 enabled = !busy,
                 singleLine = true,
+                keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
                 modifier = Modifier.fillMaxWidth(),
             )
             OutlinedTextField(
                 value = description,
                 onValueChange = { description = it },
-                label = { Text("Description (optional, local only)") },
+                label = { Text("Description (optional)") },
                 enabled = !busy,
+                keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
                 modifier = Modifier.fillMaxWidth(),
-                keyboardOptions = KeyboardOptions.Default,
             )
             OutlinedTextField(
                 value = handle,
                 onValueChange = { handle = it },
-                label = { Text("@handle (optional, public)") },
+                label = { Text("Handle (optional)") },
+                placeholder = { Text("@handle") },
+                supportingText = { Text("A handle lets people find this channel by name.") },
                 enabled = !busy,
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
-            Text(
-                "A public handle lets others find this channel by @name. " +
-                    "Leave blank to share the channel id only.",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                fontSize = 12.sp,
-            )
-            error?.let { msg ->
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.error),
-                ) {
-                    Text(
-                        msg,
-                        color = Color.White,
-                        fontSize = 13.sp,
-                        modifier = Modifier.padding(12.dp),
-                    )
-                }
-            }
+            error?.let { ErrorLine(it) }
             Button(
                 onClick = {
                     if (busy || name.trim().isEmpty()) return@Button
                     busy = true
                     error = null
                     val id = ChannelsComposer.freshChannelIdHex()
-                    val wantedHandle = handle.trim()
+                    val wantedHandle = handle.trim().removePrefix("@")
                     scope.launch {
                         try {
-                            // G4-5: claim the optional `@handle` FIRST (before
-                            // the channel exists on the channels service) so a
-                            // first-come-first-served collision (409) aborts
-                            // cleanly without leaving a half-created channel. An
-                            // empty handle skips discovery entirely — the raw hex
-                            // channel id still works. The mapping is `@handle ->
-                            // channel_id`; the OPRF hash is all the server sees.
+                            // Claim the optional handle FIRST so a first-come
+                            // collision aborts cleanly without a half-created
+                            // channel. An empty handle skips discovery.
                             if (wantedHandle.isNotEmpty()) {
                                 try {
                                     ChannelDiscovery.registerChannelHandle(
@@ -507,35 +558,25 @@ private fun NewChannelScreen(
                                         sessionToken = sessionToken,
                                     )
                                 } catch (e: DiscoveryHttpError) {
+                                    Log.w(TAG, "handle registration failed: ${e.status}", e)
                                     error = if (e.status == 409) {
-                                        "The handle @${wantedHandle.removePrefix("@")} is " +
-                                            "already taken — pick another (or leave it blank)."
+                                        "@$wantedHandle is taken. Pick another or leave it blank."
                                     } else {
-                                        "Could not register the handle: ${e.message}"
+                                        "Could not claim the handle. Try again."
                                     }
                                     busy = false
                                     return@launch
                                 }
                             }
                             client.createChannel(id)
-                            // G-27 / ADR-0017: build a transient
-                            // `Identity` from the canonical
-                            // AccountIdentity (phrase) seed, hand it
-                            // to the composer so the channel
-                            // content-key seed comes from a real MLS
-                            // PublisherGroup exporter (instead of
-                            // `newChannelSeedForTest`).
-                            val identity =
-                                uniffi.lakko_ffi_uniffi.Identity.fromSeed(accountIdentitySeed)
+                            // G-27 / ADR-0017: the channel content-key seed
+                            // comes from a real MLS publisher group exporter.
+                            val identity = Identity.fromSeed(accountIdentitySeed)
                             val keys = try {
                                 ChannelsComposer.freshPublisherKeys(
                                     identity = identity,
                                     channelIdHex = id,
-                                    // G-29 — reuse the persisted per-channel
-                                    // signing seed if this device published to
-                                    // `id` before (null for a fresh id).
-                                    existingSigningSeed =
-                                        state.persistedPublisherSigningSeed(id),
+                                    existingSigningSeed = state.persistedPublisherSigningSeed(id),
                                 )
                             } finally {
                                 identity.close()
@@ -546,97 +587,235 @@ private fun NewChannelScreen(
                                     localName = name.trim(),
                                     localDescription = description.trim(),
                                     addedAtMs = System.currentTimeMillis().toULong(),
+                                    handle = wantedHandle,
                                 ),
                             )
                             state.setKeys(id, keys)
                             onCreated(id)
                         } catch (e: LegacyChannelException) {
                             error = e.message
-                        } catch (e: ChannelsApiException) {
-                            error = "Server rejected: ${e.code} — ${e.detail}"
-                        } catch (e: ChannelsComposerException) {
-                            error = "Composer: ${e.message}"
                         } catch (e: Throwable) {
-                            error = "Network error: ${e.message}"
+                            Log.w(TAG, "create channel failed", e)
+                            error = "Could not create the channel. Try again."
                         } finally {
                             busy = false
                         }
                     }
                 },
                 enabled = !busy && name.trim().isNotEmpty(),
-                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text(if (busy) "Creating…" else "Create")
+                Text(if (busy) "Creating..." else "Create")
             }
         }
     }
 }
 
 // ============================================================================
-// ChannelDetailScreen
+// Channel view
 // ============================================================================
 
-@OptIn(ExperimentalMaterial3Api::class)
+/**
+ * Per-post render state. `null` means "still decoding"; the two non-readable
+ * cases render "Not available" with their own one-line reason and are never
+ * force-decrypted (invariant #4).
+ */
+internal sealed interface PostRender {
+    data class Plain(val value: String) : PostRender
+    object Unreadable : PostRender
+    object OlderKeyWindow : PostRender
+}
+
+/**
+ * The channel: posts as cards, newest at the bottom like a chat. An owner
+ * gets the publish composer and a Manage action; a subscriber reads through
+ * its own key; anyone else gets a Subscribe button.
+ */
 @Composable
-private fun ChannelDetailScreen(
+public fun ChannelDetailScreen(
     channelId: String,
     state: ChannelsUiState,
     client: ChannelsClient,
-    accountIdentitySeed: ByteArray,
     onBack: () -> Unit,
     onSubscribe: () -> Unit,
+    onManage: () -> Unit,
 ) {
     val channels by state.channels.collectAsState()
+    val keysByChannel by state.keysByChannel.collectAsState()
+    val subscriberKeysByChannel by state.subscriberKeysByChannel.collectAsState()
+    val channel = channels.firstOrNull { it.id == channelId }
+    val keys = keysByChannel[channelId]
+    val isSubscriber = subscriberKeysByChannel.containsKey(channelId)
+    val title = channel?.let { channelTitle(it) } ?: "Channel"
+    val subtitle = channel?.let { channelHandleLabel(it.handle) }
+
+    Scaffold(
+        topBar = {
+            ChannelTopBar(
+                title = title,
+                subtitle = subtitle,
+                onBack = onBack,
+                actions = {
+                    if (keys != null) {
+                        IconButton(onClick = onManage) {
+                            Icon(Icons.Filled.Tune, contentDescription = "Manage channel")
+                        }
+                    }
+                },
+            )
+        },
+    ) { inner ->
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(inner),
+        ) {
+            when {
+                keys != null -> OwnerChannelView(
+                    channelId = channelId,
+                    description = channel?.localDescription.orEmpty(),
+                    state = state,
+                    client = client,
+                    keys = keys,
+                )
+                isSubscriber -> SubscriberChannelView(
+                    channelId = channelId,
+                    description = channel?.localDescription.orEmpty(),
+                    state = state,
+                    client = client,
+                )
+                else -> Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center,
+                ) {
+                    channel?.localDescription?.takeIf { it.isNotEmpty() }?.let {
+                        Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(Modifier.height(12.dp))
+                    }
+                    Text("Subscribe to read this channel.", style = MaterialTheme.typography.bodyMedium)
+                    Spacer(Modifier.height(12.dp))
+                    Button(onClick = onSubscribe) { Text("Subscribe") }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * The subscribe route for a channel found by handle or id: registers this
+ * device's reader key, waits for the channel owner's key, then shows the
+ * posts — the same view the channel screen shows a subscriber afterwards.
+ */
+@Composable
+public fun ChannelSubscribeScreen(
+    channelId: String,
+    state: ChannelsUiState,
+    client: ChannelsClient,
+    /** The handle the channel was found by, if any: its list name until it has a better one. */
+    handle: String?,
+    onBack: () -> Unit,
+) {
+    val channels by state.channels.collectAsState()
+    val channel = channels.firstOrNull { it.id == channelId }
+    // A channel this device subscribes to belongs in its list, else there is
+    // no way back to it after leaving this screen.
+    LaunchedEffect(channelId) {
+        if (state.channels.value.none { it.id == channelId }) {
+            val bare = handle?.trim()?.removePrefix("@").orEmpty()
+            state.addChannel(
+                ChannelHandle(
+                    id = channelId,
+                    localName = bare,
+                    localDescription = "",
+                    addedAtMs = System.currentTimeMillis().toULong(),
+                    handle = bare,
+                ),
+            )
+        }
+    }
+    Scaffold(
+        topBar = {
+            ChannelTopBar(
+                title = channel?.let { channelTitle(it) } ?: "Channel",
+                subtitle = channel?.let { channelHandleLabel(it.handle) },
+                onBack = onBack,
+            )
+        },
+    ) { inner ->
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(inner),
+        ) {
+            SubscriberChannelView(
+                channelId = channelId,
+                description = channel?.localDescription.orEmpty(),
+                state = state,
+                client = client,
+            )
+        }
+    }
+}
+
+/** The owner's view: the post list, the publish composer, the headless key fan-out. */
+@Composable
+private fun OwnerChannelView(
+    channelId: String,
+    description: String,
+    state: ChannelsUiState,
+    client: ChannelsClient,
+    keys: ChannelPublisherKeys,
+) {
     val postsByChannel by state.postsByChannel.collectAsState()
     val epochByChannel by state.epochByChannel.collectAsState()
-    val keysByChannel by state.keysByChannel.collectAsState()
-    val channel = channels.firstOrNull { it.id == channelId }
     val posts = postsByChannel[channelId] ?: emptyList()
     val epoch = epochByChannel[channelId] ?: 0u
-    val keys = keysByChannel[channelId]
 
     var composeText by remember { mutableStateOf("") }
     var publishBusy by remember { mutableStateOf(false) }
     var publishError by remember { mutableStateOf<String?>(null) }
+    var loadError by remember { mutableStateOf<String?>(null) }
     var loading by remember { mutableStateOf(true) }
     val decodedByCursor = remember { mutableStateMapOf<ULong, PostRender>() }
     val scope = rememberCoroutineScope()
 
+    // New subscribers receive the channel key from this device while the
+    // channel is open (or its Manage screen is): the same 5 s fan-out as before.
+    SubscriberFanoutEffect(channelId = channelId, state = state, client = client)
+
     suspend fun refresh() {
         loading = true
+        loadError = null
         try {
             val fetched = client.fetchPosts(channelId, 0u)
             val ep = client.fetchEpoch(channelId)
             state.setPosts(channelId, fetched.posts)
             state.setEpoch(channelId, ep)
-            // Decode every post we now have keys for. The
-            // publisher holds the current-epoch content seed
-            // (`keys.seed` from the PublisherGroup exporter), so
-            // a post it published under an earlier epoch shows
-            // as unreadable here — the subscriber-side
-            // epoch->seed map (ADR-0031) is what recovers older
-            // windows; the publisher does not retain old seeds.
+            // The publisher holds the current content seed only; a post it
+            // published under an earlier key shows as not available here
+            // (the subscriber-side key map, ADR-0031, is what recovers older
+            // windows; the publisher does not retain old seeds).
+            val currentSeed = state.keysByChannel.value[channelId]?.seed ?: keys.seed
             decodedByCursor.clear()
-            keys?.let { k ->
-                for (p in fetched.posts) {
-                    decodedByCursor[p.cursor] = try {
-                        PostRender.Plain(
-                            ChannelsComposer.verifyAndDecrypt(
-                                seed = k.seed,
-                                channelIdHex = channelId,
-                                postWireB64Url = p.payloadB64,
-                            ).toString(Charsets.UTF_8)
-                        )
-                    } catch (_: Throwable) {
-                        PostRender.Unreadable
-                    }
+            for (p in fetched.posts) {
+                decodedByCursor[p.cursor] = try {
+                    PostRender.Plain(
+                        ChannelsComposer.verifyAndDecrypt(
+                            seed = currentSeed,
+                            channelIdHex = channelId,
+                            postWireB64Url = p.payloadB64,
+                        ).toString(Charsets.UTF_8),
+                    )
+                } catch (_: Throwable) {
+                    PostRender.Unreadable
                 }
             }
-        } catch (e: ChannelsApiException) {
-            publishError = "Fetch failed: ${e.code} — ${e.detail}"
         } catch (e: Throwable) {
-            publishError = "Network error: ${e.message}"
+            Log.w(TAG, "fetch posts failed", e)
+            loadError = "Could not load posts."
         } finally {
             loading = false
         }
@@ -644,567 +823,270 @@ private fun ChannelDetailScreen(
 
     LaunchedEffect(channelId) { refresh() }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = {
-                    Text(
-                        channel?.localName?.ifEmpty { "(channel)" } ?: "(channel)",
-                        color = MaterialTheme.colorScheme.onSurface,
-                    )
-                },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = MaterialTheme.colorScheme.onSurface)
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.background,
-                ),
-            )
-        },
-        containerColor = MaterialTheme.colorScheme.background,
-    ) { inner ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(inner)
-                .padding(horizontal = 16.dp)
-                .verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
-        ) {
-            channel?.localDescription?.takeIf { it.isNotEmpty() }?.let {
-                Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp)
-            }
-
-            if (keys != null) {
-                // Shared publisher-group handle for this channel. Rotation
-                // AND co-publisher management both mutate the SAME MLS group
-                // — `rotate()` advances the epoch DURABLY (persisted), so two
-                // live handles would diverge after a rotation. The Rust handle
-                // is Mutex-guarded, so the rotation heartbeat and the
-                // co-publisher poll loop share it safely (serialised). Opened
-                // once per channel; left to the UniFFI cleaner on dispose, the
-                // same posture the rest of this screen uses for MLS handles.
-                var pubIdentity by remember(channelId) { mutableStateOf<Identity?>(null) }
-                var pubGroup by remember(channelId) { mutableStateOf<PublisherGroup?>(null) }
-                var pubOpenError by remember(channelId) { mutableStateOf<String?>(null) }
-                LaunchedEffect(channelId) {
+    Column(modifier = Modifier.fillMaxSize()) {
+        PostList(
+            posts = posts,
+            renderOf = { decodedByCursor[it.cursor] },
+            loading = loading,
+            description = description,
+            emptyLine = "No posts yet. Write the first one below.",
+            modifier = Modifier.weight(1f),
+        )
+        PublishComposer(
+            text = composeText,
+            onTextChange = { composeText = it },
+            busy = publishBusy,
+            error = publishError ?: loadError,
+            onRetry = if (loadError != null) ({ scope.launch { refresh() } }) else null,
+            onPublish = {
+                val text = composeText.trim()
+                if (publishBusy || text.isEmpty()) return@PublishComposer
+                publishBusy = true
+                publishError = null
+                scope.launch {
                     try {
-                        val id = Identity.fromSeed(accountIdentitySeed)
-                        val pg = CoPublisher.openPublisherGroup(id, channelId)
-                        pubIdentity = id
-                        pubGroup = pg
+                        val current = state.keysByChannel.value[channelId] ?: keys
+                        val counter = state.nextCounter(channelId)
+                        val wire = ChannelsComposer.compose(
+                            keys = current,
+                            channelIdHex = channelId,
+                            epochId = epoch,
+                            messageCounter = counter,
+                            plaintext = text.toByteArray(Charsets.UTF_8),
+                        )
+                        client.publishPost(channelId, wire)
+                        composeText = ""
+                        refresh()
                     } catch (e: Throwable) {
-                        pubOpenError = LegacyChannelV1.describe(e) {
-                            "Could not open the channel group: ${it.message}"
-                        }
+                        Log.w(TAG, "publish failed", e)
+                        publishError = "Could not publish. Retry."
+                    } finally {
+                        publishBusy = false
                     }
                 }
-
-                ComposerSection(
-                    composeText = composeText,
-                    onComposeChange = { composeText = it },
-                    busy = publishBusy,
-                    error = publishError,
-                    onPublish = {
-                        val text = composeText.trim()
-                        if (publishBusy || text.isEmpty()) return@ComposerSection
-                        publishBusy = true
-                        publishError = null
-                        scope.launch {
-                            try {
-                                val counter = state.nextCounter(channelId)
-                                val wire = ChannelsComposer.compose(
-                                    keys = keys,
-                                    channelIdHex = channelId,
-                                    epochId = epoch,
-                                    messageCounter = counter,
-                                    plaintext = text.toByteArray(Charsets.UTF_8),
-                                )
-                                client.publishPost(channelId, wire)
-                                composeText = ""
-                                refresh()
-                            } catch (e: ChannelsApiException) {
-                                publishError = "Server rejected: ${e.code} — ${e.detail}"
-                            } catch (e: ChannelsComposerException) {
-                                publishError = "Compose error: ${e.message}"
-                            } catch (e: Throwable) {
-                                publishError = "Error: ${e.message}"
-                            } finally {
-                                publishBusy = false
-                            }
-                        }
-                    },
-                )
-                SubscribersPanel(
-                    channelId = channelId,
-                    state = state,
-                    client = client,
-                )
-                RotationSection(
-                    channelIdHex = channelId,
-                    client = client,
-                    identity = pubIdentity,
-                    publisherGroup = pubGroup,
-                    openError = pubOpenError,
-                )
-                CoPublishersPanel(
-                    channelId = channelId,
-                    client = client,
-                    identity = pubIdentity,
-                    publisherGroup = pubGroup,
-                    openError = pubOpenError,
-                )
-            } else {
-                SubscriberPlaceholderSection(onOpenSubscribe = onSubscribe)
-            }
-
-            Text(
-                "Posts",
-                color = MaterialTheme.colorScheme.onSurface,
-                fontWeight = FontWeight.SemiBold,
-                fontSize = 16.sp,
-            )
-            if (posts.isEmpty()) {
-                Text(
-                    if (loading) "Loading…" else "No posts yet. Publish the first one above.",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            } else {
-                for (post in posts) {
-                    PostRow(post, render = decodedByCursor[post.cursor])
-                }
-            }
-            Spacer(Modifier.height(16.dp))
-        }
+            },
+        )
     }
 }
 
+/**
+ * The publish composer, in the chat composer's shape: a hairline, a pill
+ * field on the sunken surface and a filled send button.
+ */
 @Composable
-private fun ComposerSection(
-    composeText: String,
-    onComposeChange: (String) -> Unit,
+private fun PublishComposer(
+    text: String,
+    onTextChange: (String) -> Unit,
     busy: Boolean,
     error: String?,
+    onRetry: (() -> Unit)?,
     onPublish: () -> Unit,
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        OutlinedTextField(
-            value = composeText,
-            onValueChange = onComposeChange,
-            label = { Text("Write a post…") },
-            enabled = !busy,
-            modifier = Modifier.fillMaxWidth(),
-        )
-        Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
-            Button(
-                onClick = onPublish,
-                enabled = !busy && composeText.trim().isNotEmpty(),
-                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+    Column(modifier = Modifier.imePadding()) {
+        HorizontalDivider()
+        if (error != null) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(horizontal = 16.dp),
             ) {
-                Text(if (busy) "Publishing…" else "Publish")
+                ErrorLine(error, modifier = Modifier.weight(1f))
+                if (onRetry != null) {
+                    TextButton(onClick = onRetry) { Text("Retry") }
+                }
             }
         }
-        error?.let { msg ->
-            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.error)) {
-                Text(
-                    msg,
-                    color = Color.White,
-                    fontSize = 13.sp,
-                    modifier = Modifier.padding(12.dp),
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun SubscriberPlaceholderSection(onOpenSubscribe: () -> Unit) {
-    Card(
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        shape = RoundedCornerShape(8.dp),
-    ) {
-        Column(Modifier.padding(12.dp)) {
-            Text(
-                "No local publisher keys for this channel — you cannot publish to it from this device.",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                fontSize = 13.sp,
+        Row(
+            verticalAlignment = Alignment.Bottom,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp, vertical = 6.dp),
+        ) {
+            OutlinedTextField(
+                value = text,
+                onValueChange = onTextChange,
+                placeholder = { Text("Write a post") },
+                singleLine = false,
+                maxLines = 5,
+                enabled = !busy,
+                shape = RoundedCornerShape(24.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+                    unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+                    disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+                    focusedBorderColor = Color.Transparent,
+                    unfocusedBorderColor = Color.Transparent,
+                    disabledBorderColor = Color.Transparent,
+                ),
+                textStyle = MaterialTheme.typography.bodyLarge,
+                keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
+                modifier = Modifier.weight(1f),
             )
-            Spacer(Modifier.height(8.dp))
-            TextButton(
-                onClick = onOpenSubscribe,
-                contentPadding = PaddingValues(0.dp),
+            Spacer(Modifier.width(8.dp))
+            FilledIconButton(
+                onClick = onPublish,
+                enabled = !busy && text.isNotBlank(),
+                colors = IconButtonDefaults.filledIconButtonColors(
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary,
+                ),
+                modifier = Modifier
+                    .size(48.dp)
+                    .semantics { contentDescription = "Publish" },
             ) {
-                Text(
-                    "Read as a subscriber →",
-                    color = MaterialTheme.colorScheme.primary,
-                    fontSize = 13.sp,
-                )
+                if (busy) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.onPrimary,
+                    )
+                } else {
+                    Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null)
+                }
             }
         }
     }
 }
 
 /**
- * Per-post render state (ADR-0031). `null` means "still
- * decoding"; the three variants distinguish a decoded post
- * from the two non-readable cases the UI must show
- * differently.
+ * The posts, newest at the bottom (a reversed lazy list over the newest-first
+ * order starts scrolled to the bottom like a chat). The channel description
+ * heads the list when there is one.
  */
-private sealed interface PostRender {
-    /** Verified + decrypted text. */
-    data class Plain(val value: String) : PostRender
-    /** Seed present but verify / AEAD-open failed. */
-    object Unreadable : PostRender
-    /** ADR-0031 — the post's epoch seed is not in the
-     *  retained window (older than N rotations, or a gap),
-     *  so it can no longer be read. Never force-decrypted
-     *  with a wrong-epoch seed (invariant #4). */
-    object OlderKeyWindow : PostRender
+@Composable
+private fun PostList(
+    posts: List<PostView>,
+    renderOf: (PostView) -> PostRender?,
+    loading: Boolean,
+    description: String,
+    emptyLine: String,
+    modifier: Modifier = Modifier,
+    statusLine: (@Composable () -> Unit)? = null,
+) {
+    val context = LocalContext.current
+    val zone = remember { ZoneId.systemDefault() }
+    val locale = remember { Locale.getDefault() }
+    val use24h = remember(context) { DateFormat.is24HourFormat(context) }
+    val ordered = remember(posts) { posts.sortedByDescending { it.serverTsMs } }
+    val now = System.currentTimeMillis()
+
+    if (ordered.isEmpty()) {
+        Column(
+            modifier = modifier
+                .fillMaxWidth()
+                .padding(24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+        ) {
+            if (description.isNotEmpty()) {
+                Text(description, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.height(12.dp))
+            }
+            if (statusLine != null) {
+                statusLine()
+            } else if (loading) {
+                CircularProgressIndicator()
+            } else {
+                Text(emptyLine, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        return
+    }
+    LazyColumn(
+        modifier = modifier.fillMaxWidth(),
+        reverseLayout = true,
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        items(items = ordered, key = { it.cursor.toLong() }) { post ->
+            PostCard(
+                time = formatPostTime(post.serverTsMs.toLong(), now, zone, use24h, locale),
+                render = renderOf(post),
+            )
+        }
+        if (statusLine != null) {
+            item("status") { statusLine() }
+        }
+        if (description.isNotEmpty()) {
+            item("description") {
+                Text(
+                    description,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(bottom = 8.dp),
+                )
+            }
+        }
+    }
 }
 
 @Composable
-private fun PostRow(post: PostView, render: PostRender?) {
+private fun PostCard(time: String, render: PostRender?) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        shape = RoundedCornerShape(8.dp),
+        shape = MaterialTheme.shapes.medium,
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
     ) {
-        Column(Modifier.padding(12.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-            ) {
-                Text(
-                    isoTimestamp(post.serverTsMs.toLong()),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontSize = 12.sp,
-                )
-            }
-            Spacer(Modifier.height(6.dp))
+        Column(Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
             when (render) {
                 null -> Text(
-                    "Decoding…",
+                    "Loading...",
+                    style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontStyle = FontStyle.Italic,
-                    fontSize = 13.sp,
                 )
-                PostRender.Unreadable -> Text(
-                    "Not available. This post could not be opened on this device.",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontStyle = FontStyle.Italic,
-                    fontSize = 13.sp,
-                )
-                PostRender.OlderKeyWindow -> Text(
-                    "Not available. This post is older than the keys this device holds.",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontStyle = FontStyle.Italic,
-                    fontSize = 13.sp,
-                )
-                is PostRender.Plain -> Text(
-                    render.value,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    fontSize = 14.sp,
-                )
-            }
-        }
-    }
-}
-
-private fun isoTimestamp(ms: Long): String {
-    val fmt = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US)
-    fmt.timeZone = TimeZone.getTimeZone("UTC")
-    return fmt.format(Date(ms))
-}
-
-// ============================================================================
-// SubscribersPanel — publisher-side fan-out widget
-// (embedded inside ChannelDetailScreen when the user holds
-//  publisher keys for this channel)
-// ============================================================================
-
-/** Auto-fanout poll cadence — every 5 s the publisher
- *  panel re-fetches the subscriber list, diffs against
- *  the already-delivered set, and auto-seals an envelope
- *  for each new pubkey. Same cadence the subscribe-screen
- *  poll uses on the receive side. */
-private const val SUBSCRIBERS_POLL_INTERVAL_MS: Long = 5_000L
-
-@Composable
-private fun SubscribersPanel(
-    channelId: String,
-    state: ChannelsUiState,
-    client: ChannelsClient,
-) {
-    val keysByChannel by state.keysByChannel.collectAsState()
-    val epochByChannel by state.epochByChannel.collectAsState()
-    val keys = keysByChannel[channelId]
-    val epoch = epochByChannel[channelId] ?: 0u
-
-    var subscribers by remember { mutableStateOf<List<String>?>(null) }
-    var busyPk by remember { mutableStateOf<String?>(null) }
-    var error by remember { mutableStateOf<String?>(null) }
-    // statusByPk values: "delivered" (manual), "auto"
-    // (polling loop), "failed". UI badges differentiate
-    // delivered vs. auto-delivered visually.
-    val statusByPk = remember { mutableStateMapOf<String, String>() }
-    val scope = rememberCoroutineScope()
-
-    suspend fun refresh() {
-        try {
-            subscribers = client.listSubscribers(channelId)
-        } catch (e: ChannelsApiException) {
-            error = "List failed: ${e.code} — ${e.detail}"
-        } catch (e: Throwable) {
-            error = "List failed: ${e.message}"
-        }
-    }
-
-    suspend fun deliverTo(pubkeyHex: String, trigger: String) {
-        // Manual delivery is one-at-a-time; the auto
-        // path ignores busyPk so a slow manual click does
-        // not stall progress on other subscribers.
-        if (trigger == "manual" && busyPk != null) return
-        if (keys == null) {
-            if (trigger == "manual") {
-                error = "No publisher keys on this device."
-            }
-            return
-        }
-        if (trigger == "manual") {
-            busyPk = pubkeyHex
-            error = null
-        }
-        try {
-            val parsed = hexToBytesOrNull(pubkeyHex)
-            if (parsed == null) {
-                if (trigger == "manual") error = "This subscriber entry is not valid."
-                statusByPk[pubkeyHex] = "failed"
-                return
-            }
-            val wire = ChannelsComposer.sealSubscriberSeedEnvelope(
-                subscriberPub = parsed,
-                channelIdHex = channelId,
-                epochId = epoch,
-                seed = keys.seed,
-            )
-            // ADR-0031 — file the envelope at the exact epoch we
-            // sealed it under, so the server retains it under
-            // that epoch and the subscriber opens it with the
-            // matching seed. `epoch` is the current server epoch
-            // (never a future one), so the server accepts it.
-            client.deliverEnvelope(channelId, pubkeyHex, wire, epoch = epoch.toInt())
-            statusByPk[pubkeyHex] = if (trigger == "auto") "auto" else "delivered"
-        } catch (e: ChannelsApiException) {
-            if (trigger == "manual") error = "Deliver failed: ${e.code} — ${e.detail}"
-            statusByPk[pubkeyHex] = "failed"
-        } catch (e: ChannelsComposerException) {
-            if (trigger == "manual") error = "Seal failed: ${e.message}"
-            statusByPk[pubkeyHex] = "failed"
-        } catch (e: Throwable) {
-            if (trigger == "manual") error = "Error: ${e.message}"
-            statusByPk[pubkeyHex] = "failed"
-        } finally {
-            if (trigger == "manual") busyPk = null
-        }
-    }
-
-    LaunchedEffect(channelId) { refresh() }
-
-    // Auto-fanout polling loop. Cancelled when the
-    // composable leaves the composition. Sequences the
-    // per-subscriber seals — the UniFFI ChannelSigningKey
-    // and ChannelSubscriberKeypair calls hit the Rust
-    // runtime serially anyway, and serial avoids a burst
-    // of N parallel seals on a fresh subscriber storm.
-    LaunchedEffect(channelId) {
-        while (true) {
-            delay(SUBSCRIBERS_POLL_INTERVAL_MS)
-            refresh()
-            val list = subscribers ?: continue
-            for (pk in list) {
-                val st = statusByPk[pk]
-                if (st == null || st == "failed") {
-                    deliverTo(pk, "auto")
-                }
-            }
-        }
-    }
-
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        shape = RoundedCornerShape(8.dp),
-    ) {
-        Column(Modifier.padding(12.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    "Subscribers",
-                    color = MaterialTheme.colorScheme.onSurface,
-                    fontWeight = FontWeight.SemiBold,
-                    fontSize = 15.sp,
-                )
-                Spacer(Modifier.width(6.dp))
-                Text(
-                    "(${subscribers?.size?.toString() ?: "…"})",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontSize = 14.sp,
-                )
-            }
-            error?.let { msg ->
-                Spacer(Modifier.height(6.dp))
-                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.error)) {
+                PostRender.Unreadable, PostRender.OlderKeyWindow -> {
+                    Text("Not available", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
                     Text(
-                        msg,
-                        color = Color.White,
-                        fontSize = 12.sp,
-                        modifier = Modifier.padding(8.dp),
-                    )
-                }
-            }
-            val subs = subscribers
-            when {
-                subs == null -> {
-                    Spacer(Modifier.height(6.dp))
-                    Text(
-                        "Loading subscribers…",
+                        unreadableReasonLine(olderThanKeys = render == PostRender.OlderKeyWindow),
+                        style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontSize = 12.sp,
                     )
                 }
-                subs.isEmpty() -> {
-                    Spacer(Modifier.height(6.dp))
-                    Text(
-                        "No subscribers yet. Anyone with the channel id can open the subscribe screen and register their X25519 public key.",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontSize = 12.sp,
-                    )
-                }
-                else -> {
-                    Spacer(Modifier.height(6.dp))
-                    for (pk in subs) {
-                        SubscriberRow(
-                            pubkeyHex = pk,
-                            busy = busyPk == pk,
-                            status = statusByPk[pk],
-                            onDeliver = {
-                                scope.launch { deliverTo(pk, "manual") }
-                            },
-                        )
-                        Spacer(Modifier.height(6.dp))
-                    }
-                }
+                is PostRender.Plain -> Text(render.value, style = MaterialTheme.typography.bodyLarge)
             }
-        }
-    }
-}
-
-@Composable
-private fun SubscriberRow(
-    pubkeyHex: String,
-    busy: Boolean,
-    status: String?,
-    onDeliver: () -> Unit,
-) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.background),
-        shape = RoundedCornerShape(6.dp),
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 8.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
+            Spacer(Modifier.height(6.dp))
             Text(
-                pubkeyHex,
+                time,
+                style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                fontFamily = FontFamily.Monospace,
-                fontSize = 11.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.align(Alignment.End),
             )
-            Spacer(Modifier.width(6.dp))
-            status?.let { s ->
-                val (label, color) = when (s) {
-                    "delivered" -> "delivered" to MaterialTheme.colorScheme.primary
-                    "auto"      -> "auto-delivered" to MaterialTheme.colorScheme.primary
-                    "failed"    -> "failed" to MaterialTheme.colorScheme.error
-                    else        -> s to MaterialTheme.colorScheme.onSurfaceVariant
-                }
-                Text(
-                    label,
-                    color = color,
-                    fontSize = 11.sp,
-                )
-                Spacer(Modifier.width(6.dp))
-            }
-            Button(
-                onClick = onDeliver,
-                enabled = !busy,
-                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
-                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-            ) {
-                Text(
-                    if (busy) "Sealing…" else "Deliver",
-                    color = Color.White,
-                    fontSize = 11.sp,
-                )
-            }
         }
     }
 }
 
 // ============================================================================
-// ChannelSubscribeScreen — subscriber-side route
-//   Generates (or restores) an X25519 keypair, registers
-//   on the channel, polls every 3 s for a seed envelope,
-//   opens it, then renders decoded posts using the
-//   recovered seed.
+// Subscriber view — register, wait for the channel key, read
 // ============================================================================
 
-private enum class SubscribeBootstrap {
-    Idle, Registering, Polling, Active, ErrorState,
-}
+private enum class SubscribeBootstrap { Registering, Waiting, Active, Failed }
 
-@OptIn(ExperimentalMaterial3Api::class)
+/**
+ * Generates (or restores) this device's reader keypair, registers it on the
+ * channel, catches up on the retained key envelopes (ADR-0031), then renders
+ * the posts decrypted with the key matching each post's window. Unchanged
+ * behaviour; the states read in plain words.
+ */
 @Composable
-private fun ChannelSubscribeScreen(
+private fun SubscriberChannelView(
     channelId: String,
+    description: String,
     state: ChannelsUiState,
     client: ChannelsClient,
-    onBack: () -> Unit,
 ) {
-    val subscriberKeysByChannel by state.subscriberKeysByChannel.collectAsState()
-    // subscribedSeedsByChannel collected to trigger
-    // recomposition when a seed lands for a new epoch; the
-    // helpers below read the latest value off `state` directly
-    // to keep the read-modify-write under the StateFlow update
-    // barrier.
+    // Collected to recompose when a seed lands; the helpers read the latest
+    // value off `state` directly.
     state.subscribedSeedsByChannel.collectAsState()
     val postsByChannel by state.postsByChannel.collectAsState()
-
-    val keys = subscriberKeysByChannel[channelId]
     val posts = postsByChannel[channelId] ?: emptyList()
 
-    var bootstrap by remember { mutableStateOf(SubscribeBootstrap.Idle) }
-    var bootstrapError by remember { mutableStateOf<String?>(null) }
-    val decodedByCursor = remember { mutableStateMapOf<ULong, PostRender>() }
-    val scope = rememberCoroutineScope()
-    var pollJob by remember { mutableStateOf<Job?>(null) }
+    var bootstrap by remember(channelId) { mutableStateOf(SubscribeBootstrap.Registering) }
+    var attempt by remember(channelId) { mutableIntStateOf(0) }
+    val decodedByCursor = remember(channelId) { mutableStateMapOf<ULong, PostRender>() }
 
-    // ADR-0031 — open one epoch's seed envelope into the
-    // per-channel epoch->seed map. `epoch` MUST be the epoch
-    // the publisher sealed the envelope under (the plural
-    // endpoint reports it per entry); a wrong epoch makes the
-    // HPKE open fail (AAD mismatch) and is skipped by the
-    // caller — never a wrong seed.
+    // ADR-0031 — open one epoch's seed envelope into the per-channel
+    // epoch->seed map; a wrong epoch fails the open and is skipped by the
+    // caller, never a wrong seed.
     suspend fun openEnvelopeIntoMap(epoch: UInt, wire: ByteArray) {
         val kp = state.subscriberKeysByChannel.value[channelId]
             ?: throw ChannelsComposerException.Ffi("missing subscriber keypair")
@@ -1217,19 +1099,10 @@ private fun ChannelSubscribeScreen(
         state.setSubscribedSeed(channelId, epoch, recovered)
     }
 
-    // ADR-0031 catch-up + re-sync. Fetch the server's retained
-    // set (up to N=4 epochs) and open each into the epoch->seed
-    // map; fall back to the singular latest-envelope endpoint to
-    // guarantee the current seed is present; and if we still
-    // lack a seed for the current epoch (offline past the
-    // retention window), re-subscribe (idempotent) so the
-    // publisher reseals us on its next fanout. Returns true once
-    // at least one epoch seed is available. Best-effort per
-    // step — a transient failure on one endpoint never aborts
-    // the others.
+    // ADR-0031 catch-up + re-sync: the retained set, the singular latest as a
+    // fallback, and an idempotent re-subscribe when the current key is still
+    // missing. Best-effort per step. True once at least one key is available.
     suspend fun catchUp(pubHex: String): Boolean {
-        // 1. The retained set (plural) — the authoritative
-        //    (epoch, envelope) pairs.
         val retained = try {
             client.fetchEnvelopes(channelId, pubHex)
         } catch (_: Throwable) {
@@ -1242,7 +1115,6 @@ private fun ChannelSubscribeScreen(
                 // Skip a single bad / wrong-epoch envelope.
             }
         }
-
         val currentEpoch = try {
             client.fetchEpoch(channelId)
         } catch (_: Throwable) {
@@ -1250,12 +1122,6 @@ private fun ChannelSubscribeScreen(
         }
         if (currentEpoch != null) {
             state.setEpoch(channelId, currentEpoch)
-            // 2. Singular fallback — guarantees the current
-            //    seed is present even if the plural endpoint is
-            //    unavailable. The latest envelope is the
-            //    highest retained epoch (== current after a
-            //    reseal); a wrong-epoch guess just fails to open
-            //    and is skipped (fail-closed).
             if (state.subscribedSeeds(channelId)[currentEpoch] == null) {
                 val latest = try {
                     client.fetchEnvelope(channelId, pubHex)
@@ -1271,11 +1137,6 @@ private fun ChannelSubscribeScreen(
                     }
                 }
             }
-            // 3. Re-sync — still no seed for the current epoch
-            //    (offline past retention). Re-subscribe so the
-            //    publisher reseals us next fanout; older posts
-            //    stay unreadable (the "older key window"
-            //    placeholder).
             if (state.subscribedSeeds(channelId)[currentEpoch] == null) {
                 try {
                     client.subscribe(channelId, pubHex)
@@ -1295,10 +1156,6 @@ private fun ChannelSubscribeScreen(
             state.setPosts(channelId, page.posts)
             decodedByCursor.clear()
             for (p in page.posts) {
-                // ADR-0031 — decrypt each post with the seed
-                // matching ITS epoch; a post whose epoch is not
-                // in the retained map renders as an "older key
-                // window" placeholder, never force-decrypted.
                 decodedByCursor[p.cursor] = try {
                     when (
                         val r = ChannelsComposer.verifyAndDecryptForEpochs(
@@ -1319,15 +1176,15 @@ private fun ChannelSubscribeScreen(
                 }
             }
         } catch (_: Throwable) {
-            // Status section already shows the bootstrap
-            // state; swallow transient post-list errors.
+            // The status line already shows the bootstrap state.
         }
     }
 
-    // Bootstrap on first composition.
-    LaunchedEffect(channelId) {
+    // Bootstrap on first composition; `attempt` re-runs it after a failure.
+    // The 3 s catch-up loop lives inside this effect, so leaving the screen
+    // cancels it.
+    LaunchedEffect(channelId, attempt) {
         bootstrap = SubscribeBootstrap.Registering
-        bootstrapError = null
         try {
             val kp = state.subscriberKeysByChannel.value[channelId]
                 ?: ChannelsComposer.freshSubscriberKeys().also {
@@ -1336,164 +1193,161 @@ private fun ChannelSubscribeScreen(
             val pubHex = ChannelsComposer.bytesToHex(kp.publicKey)
             client.subscribe(channelId, pubHex)
 
-            // Cached seeds from a previous open? Show posts
-            // immediately, then still catch up in case a
-            // rotation added a newer epoch since.
             if (state.subscribedSeeds(channelId).isNotEmpty()) {
                 bootstrap = SubscribeBootstrap.Active
                 loadAndDecodePosts()
-            }
-
-            bootstrap = if (state.subscribedSeeds(channelId).isNotEmpty()) {
-                SubscribeBootstrap.Active
             } else {
-                SubscribeBootstrap.Polling
+                bootstrap = SubscribeBootstrap.Waiting
             }
-
-            // ADR-0031 — first catch-up: open the retained set
-            // (plural), the singular latest, and re-sync if
-            // needed. Covers the "publisher already fanned out
-            // before this screen opened" case.
             if (catchUp(pubHex)) {
                 bootstrap = SubscribeBootstrap.Active
                 loadAndDecodePosts()
                 return@LaunchedEffect
             }
-
-            // 3-second poll loop — retry catch-up until a seed
-            // arrives.
-            pollJob = scope.launch {
-                while (true) {
-                    delay(3_000L)
-                    try {
-                        if (catchUp(pubHex)) {
-                            bootstrap = SubscribeBootstrap.Active
-                            loadAndDecodePosts()
-                            break
-                        }
-                    } catch (_: Throwable) {
-                        // Transient — keep polling.
+            while (true) {
+                delay(3_000L)
+                try {
+                    if (catchUp(pubHex)) {
+                        bootstrap = SubscribeBootstrap.Active
+                        loadAndDecodePosts()
+                        break
                     }
+                } catch (_: Throwable) {
+                    // Transient — keep polling.
                 }
             }
-        } catch (e: ChannelsApiException) {
-            bootstrapError = "${e.code} — ${e.detail}"
-            bootstrap = SubscribeBootstrap.ErrorState
         } catch (e: Throwable) {
-            bootstrapError = e.message ?: "unknown error"
-            bootstrap = SubscribeBootstrap.ErrorState
+            Log.w(TAG, "subscribe failed", e)
+            bootstrap = SubscribeBootstrap.Failed
         }
     }
 
-    DisposableEffect(channelId) {
-        onDispose { pollJob?.cancel() }
+    val status: (@Composable () -> Unit)? = when (bootstrap) {
+        SubscribeBootstrap.Registering -> {
+            { StatusLine("Subscribing...") }
+        }
+        SubscribeBootstrap.Waiting -> {
+            { StatusLine("Subscribed. Waiting for the channel owner to share the posts.") }
+        }
+        SubscribeBootstrap.Failed -> {
+            {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    ErrorLine("Could not subscribe.")
+                    TextButton(onClick = { attempt += 1 }) { Text("Try again") }
+                }
+            }
+        }
+        SubscribeBootstrap.Active -> null
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("Subscribe", color = MaterialTheme.colorScheme.onSurface) },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = MaterialTheme.colorScheme.onSurface)
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.background,
-                ),
-            )
-        },
-        containerColor = MaterialTheme.colorScheme.background,
-    ) { inner ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(inner)
-                .padding(horizontal = 16.dp)
-                .verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
-        ) {
-            Text(
-                channelId,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                fontFamily = FontFamily.Monospace,
-                fontSize = 12.sp,
-            )
+    PostList(
+        posts = if (bootstrap == SubscribeBootstrap.Active) posts else emptyList(),
+        renderOf = { decodedByCursor[it.cursor] },
+        loading = bootstrap != SubscribeBootstrap.Active,
+        description = description,
+        emptyLine = "No posts yet.",
+        statusLine = status,
+        modifier = Modifier.fillMaxSize(),
+    )
+}
 
-            keys?.let { kp ->
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                    shape = RoundedCornerShape(8.dp),
-                ) {
-                    Column(Modifier.padding(12.dp)) {
-                        Text(
-                            "Your subscriber public key (registered on this channel):",
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            fontSize = 12.sp,
-                        )
-                        Spacer(Modifier.height(4.dp))
-                        Text(
-                            ChannelsComposer.bytesToHex(kp.publicKey),
-                            color = MaterialTheme.colorScheme.onSurface,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 11.sp,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                        )
+@Composable
+private fun StatusLine(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(horizontal = 24.dp),
+    )
+}
+
+// ============================================================================
+// Subscriber key fan-out (owner side) — the headless part of the old panel
+// ============================================================================
+
+/** Fan-out cadence: the owner re-lists subscribers and seals the key for each new one. */
+private const val SUBSCRIBERS_POLL_INTERVAL_MS: Long = 5_000L
+
+internal enum class DeliveryStatus { Sent, Failed }
+
+/** One channel's subscriber fan-out state, shared by the channel view and Manage. */
+internal class SubscriberFanout {
+    var subscribers by mutableStateOf<List<String>?>(null)
+    val statusByPk = mutableStateMapOf<String, DeliveryStatus>()
+}
+
+/**
+ * Process-wide registry so the channel view and the Manage screen (which
+ * replace each other in the composition) share one fan-out record per channel,
+ * and the list can show a subscriber count the owner already learned.
+ */
+internal object SubscriberFanoutRegistry {
+    private val byChannel = mutableStateMapOf<String, SubscriberFanout>()
+
+    fun forChannel(channelId: String): SubscriberFanout =
+        byChannel.getOrPut(channelId) { SubscriberFanout() }
+
+    /** Channel id -> known subscriber count (snapshot-read, so callers recompose). */
+    @Composable
+    fun subscriberCounts(): Map<String, Int> =
+        byChannel.entries.mapNotNull { (id, f) -> f.subscribers?.let { id to it.size } }.toMap()
+}
+
+/**
+ * Seal the current channel key for [pubkeyHex] and file it at the current
+ * epoch (ADR-0031 — never a future one). Returns the resulting status.
+ */
+private suspend fun deliverKeyTo(
+    channelId: String,
+    pubkeyHex: String,
+    state: ChannelsUiState,
+    client: ChannelsClient,
+): DeliveryStatus {
+    val keys = state.keysByChannel.value[channelId] ?: return DeliveryStatus.Failed
+    val parsed = hexToBytesOrNull(pubkeyHex) ?: return DeliveryStatus.Failed
+    return try {
+        // The current server epoch — fetched here when nothing on this screen
+        // has learned it yet, so a delivery is never filed at a guessed 0.
+        val epoch = state.epochByChannel.value[channelId]
+            ?: client.fetchEpoch(channelId).also { state.setEpoch(channelId, it) }
+        val wire = ChannelsComposer.sealSubscriberSeedEnvelope(
+            subscriberPub = parsed,
+            channelIdHex = channelId,
+            epochId = epoch,
+            seed = keys.seed,
+        )
+        client.deliverEnvelope(channelId, pubkeyHex, wire, epoch = epoch.toInt())
+        DeliveryStatus.Sent
+    } catch (e: Throwable) {
+        Log.w(TAG, "key delivery failed", e)
+        DeliveryStatus.Failed
+    }
+}
+
+/**
+ * The owner's fan-out loop: every 5 s re-list the subscribers and seal the
+ * key for each one not yet delivered (or whose delivery failed). Sequential,
+ * cancelled when the hosting screen leaves the composition.
+ */
+@Composable
+private fun SubscriberFanoutEffect(channelId: String, state: ChannelsUiState, client: ChannelsClient) {
+    val fanout = remember(channelId) { SubscriberFanoutRegistry.forChannel(channelId) }
+    LaunchedEffect(channelId) {
+        while (true) {
+            try {
+                fanout.subscribers = client.listSubscribers(channelId)
+            } catch (e: Throwable) {
+                Log.w(TAG, "list subscribers failed", e)
+            }
+            val list = fanout.subscribers
+            if (list != null) {
+                for (pk in list) {
+                    if (fanout.statusByPk[pk] != DeliveryStatus.Sent) {
+                        fanout.statusByPk[pk] = deliverKeyTo(channelId, pk, state, client)
                     }
                 }
             }
-
-            val (statusText, statusColor) = when (bootstrap) {
-                SubscribeBootstrap.Idle, SubscribeBootstrap.Registering ->
-                    "Registering your key on the channel…" to MaterialTheme.colorScheme.onSurfaceVariant
-                SubscribeBootstrap.Polling ->
-                    "Registered. Waiting for the publisher to fan out a seed envelope… (auto-refreshes every 3 s)" to MaterialTheme.colorScheme.onSurfaceVariant
-                SubscribeBootstrap.Active ->
-                    "Seed envelope opened. You can read posts on this channel." to MaterialTheme.colorScheme.primary
-                SubscribeBootstrap.ErrorState ->
-                    (bootstrapError ?: "Unknown error.") to MaterialTheme.colorScheme.error
-            }
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                shape = RoundedCornerShape(8.dp),
-            ) {
-                Text(
-                    statusText,
-                    color = statusColor,
-                    fontSize = 13.sp,
-                    modifier = Modifier.padding(12.dp),
-                )
-            }
-
-            Text(
-                "Posts",
-                color = MaterialTheme.colorScheme.onSurface,
-                fontWeight = FontWeight.SemiBold,
-                fontSize = 16.sp,
-            )
-            when {
-                bootstrap == SubscribeBootstrap.Active && posts.isNotEmpty() -> {
-                    for (post in posts) {
-                        PostRow(post, render = decodedByCursor[post.cursor])
-                    }
-                }
-                bootstrap == SubscribeBootstrap.Active -> Text(
-                    "No posts yet on this channel.",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                bootstrap == SubscribeBootstrap.Polling -> Text(
-                    "Waiting for the publisher to deliver your seed.",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                else -> Text(
-                    "Bootstrapping the subscribe flow…",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Spacer(Modifier.height(16.dp))
+            delay(SUBSCRIBERS_POLL_INTERVAL_MS)
         }
     }
 }
@@ -1509,180 +1363,198 @@ private fun hexToBytesOrNull(hex: String): ByteArray? {
 }
 
 // ============================================================================
-// RotationSection — publisher-side content-key rotation (ADR-0010 / C-54)
-//   Activates the scheduled RotationCron heartbeat for a channel the local
-//   user publishes, plus a manual "Rotate now" control. Both drive the
-//   audited rotate + reseal-subscribers fanout (POST /v1/channels/:id/rotate).
+// Manage (owners): subscribers, co-publishers, keys
 // ============================================================================
 
 /**
- * Publisher-side rotation control. Started only when the shared publisher
- * handle is open (invariant #4 — no rotation without a valid publisher
- * handle + keys); cancelled when the section leaves the composition.
- *
- * The Rust core (`crates/lakko-channels/src/rotation_policy.rs`) owns the
- * *when* via the pure `channelShouldRotate`; [RotationCron] owns the *how*
- * (rotate the MLS epoch → reseal every subscriber → atomic `/rotate` fanout).
- *
- * **Genesis-state seeding is load-bearing.** The default policy is 24 h /
- * 1000 posts, and `channelShouldRotate(default, {0,0}, now)` fires
- * IMMEDIATELY against any real wall-clock now (the Rust doc mandates seeding
- * with `after_rotation(now)` right after creating the group). We therefore
- * seed the heartbeat state as "rotated just now", so an opened screen never
- * triggers a spurious rotation + subscriber-reseal storm. Android has no
- * persistent rotation-state store yet, so within a single session the
- * scheduled trigger stays silent and "Rotate now" is the immediate control;
- * a future persistence layer feeds a real historical last-rotation into
- * `loadState` to drive true scheduled rotation.
+ * The owner's Manage screen. Opens the channel's publisher group once —
+ * rotation and co-publisher management mutate the SAME MLS group, so one
+ * handle serves both (the Rust handle is mutex-guarded; the heartbeat and
+ * the request poll share it serially).
  */
 @Composable
-private fun RotationSection(
-    channelIdHex: String,
+public fun ChannelManageScreen(
+    channelId: String,
+    state: ChannelsUiState,
     client: ChannelsClient,
-    identity: Identity?,
-    publisherGroup: PublisherGroup?,
-    openError: String?,
+    accountIdentitySeed: ByteArray,
+    onBack: () -> Unit,
 ) {
-    // Single cross-platform source of truth for the cadence.
-    val policy = remember { channelRotationPolicyDefault() }
-    var state by remember(channelIdHex) {
-        mutableStateOf(channelRotationStateAfterRotation(System.currentTimeMillis().toULong()))
-    }
-    var busy by remember { mutableStateOf(false) }
-    var status by remember { mutableStateOf<String?>(null) }
-    var error by remember { mutableStateOf<String?>(null) }
-    val scope = rememberCoroutineScope()
+    val channels by state.channels.collectAsState()
+    val channel = channels.firstOrNull { it.id == channelId }
+    val context = LocalContext.current
+    val zone = remember { ZoneId.systemDefault() }
+    val locale = remember { Locale.getDefault() }
 
-    // Periodic rotation heartbeat — armed once the shared publisher handle is
-    // open, cancelled when this section leaves the composition. A no-op tick
-    // (policy says no) costs zero network round-trips.
-    DisposableEffect(identity, publisherGroup) {
-        val id = identity
-        val pg = publisherGroup
-        val job: Job? = if (id != null && pg != null) {
-            RotationCron(
-                publisherGroup = pg,
-                identity = id,
-                channelIdHex = channelIdHex,
-                channelsClient = client,
-                saveState = { next -> state = next },
-                onRotated = { _ -> status = "Keys rotated on schedule." },
-            ).start(
-                scope = scope,
-                policy = policy,
-                loadState = { state },
-                onError = { e -> error = "Scheduled rotation failed: ${e.message}" },
-            )
-        } else {
-            null
+    var pubIdentity by remember(channelId) { mutableStateOf<Identity?>(null) }
+    var pubGroup by remember(channelId) { mutableStateOf<PublisherGroup?>(null) }
+    var openError by remember(channelId) { mutableStateOf<String?>(null) }
+    LaunchedEffect(channelId) {
+        try {
+            val id = Identity.fromSeed(accountIdentitySeed)
+            val pg = CoPublisher.openPublisherGroup(id, channelId)
+            pubIdentity = id
+            pubGroup = pg
+        } catch (e: Throwable) {
+            Log.w(TAG, "open publisher group failed", e)
+            openError = LegacyChannelV1.describe(e) { "Could not open this channel's keys on this device." }
         }
-        onDispose { job?.cancel() }
     }
 
+    // The key fan-out keeps running while Manage is open, so a subscriber
+    // who registers now is served here too.
+    SubscriberFanoutEffect(channelId = channelId, state = state, client = client)
+
+    /** After a rotation or an approve the group's current key changed: refresh
+     *  the composer's copy so the next post seals under the key the
+     *  subscribers were just given. */
+    suspend fun refreshPublisherKey() {
+        val id = pubIdentity ?: return
+        val pg = pubGroup ?: return
+        val current = state.keysByChannel.value[channelId] ?: return
+        try {
+            state.setKeys(channelId, current.copy(seed = pg.channelSeed(id)))
+            state.setEpoch(channelId, client.fetchEpoch(channelId))
+        } catch (e: Throwable) {
+            Log.w(TAG, "publisher key refresh failed", e)
+        }
+    }
+
+    Scaffold(
+        topBar = {
+            ChannelTopBar(
+                title = "Manage",
+                subtitle = channel?.let { channelTitle(it) },
+                onBack = onBack,
+            )
+        },
+    ) { inner ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(inner)
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            openError?.let { ErrorLine(it) }
+            SubscribersCard(channelId = channelId, state = state, client = client)
+            CoPublishersCard(
+                channelId = channelId,
+                client = client,
+                identity = pubIdentity,
+                publisherGroup = pubGroup,
+                onCopy = { copyToClipboard(context, it) },
+                onShare = { launchShareIntent(context, it) },
+                afterApprove = { refreshPublisherKey() },
+            )
+            KeysCard(
+                channelId = channelId,
+                client = client,
+                identity = pubIdentity,
+                publisherGroup = pubGroup,
+                zone = zone,
+                locale = locale,
+                afterRotate = { refreshPublisherKey() },
+            )
+            Spacer(Modifier.height(8.dp))
+        }
+    }
+}
+
+@Composable
+private fun SectionCard(title: String, description: String? = null, content: @Composable () -> Unit) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        shape = RoundedCornerShape(8.dp),
+        shape = MaterialTheme.shapes.medium,
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
     ) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text(
-                "Content-key rotation",
-                color = MaterialTheme.colorScheme.onSurface,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Text(
-                "Rotate the channel key now. Subscribers receive the new key " +
-                    "automatically; posts made before stay readable only for them.",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                fontSize = 12.sp,
-            )
-            Button(
-                onClick = {
-                    val id = identity
-                    val pg = publisherGroup
-                    if (busy || id == null || pg == null) return@Button
-                    busy = true
-                    error = null
-                    status = "Rotating…"
-                    scope.launch {
-                        try {
-                            val cron = RotationCron(
-                                publisherGroup = pg,
-                                identity = id,
-                                channelIdHex = channelIdHex,
-                                channelsClient = client,
-                                saveState = { next -> state = next },
-                            )
-                            // Force via the run-once path: a genesis {0,0} state
-                            // makes channelShouldRotate fire against any real
-                            // wall-clock now. runOnce rotates + reseals every
-                            // subscriber atomically, then returns a fresh
-                            // after_rotation(now) state we adopt as the new
-                            // heartbeat baseline.
-                            val result = cron.runOnce(
-                                policy = policy,
-                                state = ChannelRotationState(
-                                    lastRotationMs = 0uL,
-                                    postsSinceRotation = 0u,
-                                ),
-                                nowMs = System.currentTimeMillis().toULong(),
-                            )
-                            state = result.newState
-                            status = if (result.rotated) {
-                                "Keys rotated."
-                            } else {
-                                "No rotation needed."
-                            }
-                        } catch (e: Throwable) {
-                            error = "Rotate failed: ${e.message}"
-                        } finally {
-                            busy = false
-                        }
-                    }
-                },
-                enabled = !busy && publisherGroup != null,
-                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
-            ) {
-                Text(if (busy) "Rotating…" else "Rotate now", color = Color.White)
+        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            if (description != null) {
+                Text(description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            status?.let { Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp) }
-            (openError ?: error)?.let {
-                Text(it, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
+            content()
+        }
+    }
+}
+
+/** "Subscriber N" rows with their key-delivery state; never a key. */
+@Composable
+private fun SubscribersCard(channelId: String, state: ChannelsUiState, client: ChannelsClient) {
+    val fanout = remember(channelId) { SubscriberFanoutRegistry.forChannel(channelId) }
+    val subs = fanout.subscribers
+    val scope = rememberCoroutineScope()
+    SectionCard(
+        title = subs?.let { "Subscribers (${it.size})" } ?: "Subscribers",
+        description = "Everyone who subscribed to this channel.",
+    ) {
+        when {
+            subs == null -> Text("Loading...", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            subs.isEmpty() -> Text(
+                "No subscribers yet. Share the channel handle so people can find it.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            else -> subs.forEachIndexed { index, pk ->
+                val status = fanout.statusByPk[pk]
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    LakkoAvatar(name = "S ${index + 1}", seed = pk, size = 32.dp)
+                    Spacer(Modifier.width(12.dp))
+                    Text("Subscriber ${index + 1}", style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+                    when (status) {
+                        DeliveryStatus.Sent -> Text(
+                            "Receiving posts",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        DeliveryStatus.Failed -> TextButton(
+                            onClick = {
+                                scope.launch {
+                                    fanout.statusByPk[pk] = deliverKeyTo(channelId, pk, state, client)
+                                }
+                            },
+                        ) { Text("Retry") }
+                        null -> Text(
+                            "Setting up...",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
             }
         }
     }
 }
 
-// ============================================================================
-// CoPublishersPanel — owner-side co-publisher management (ADR-0028 OQ3)
-// ============================================================================
-
 /**
- * Owner-side co-publisher management panel. Holds a long-lived PublisherGroup +
- * Identity (the approve path needs the same handle the poll loop populated the
- * pending set on). Opens both on appear, polls the journal every 5 s, and
- * surfaces create-link + approve/reject. Kotlin mirror of the iOS
- * `CoPublishersPanelView`.
+ * Co-publishers (ADR-0028 OQ3): the invite link with Copy / Share, and the
+ * pending requests with Approve / Reject. Approve is the audited path that
+ * adds the joiner AND reseals the new key to every subscriber.
  */
 @Composable
-private fun CoPublishersPanel(
+private fun CoPublishersCard(
     channelId: String,
     client: ChannelsClient,
     identity: Identity?,
     publisherGroup: PublisherGroup?,
-    openError: String?,
+    onCopy: (String) -> Unit,
+    onShare: (String) -> Unit,
+    afterApprove: suspend () -> Unit,
 ) {
-    var link by remember { mutableStateOf<String?>(null) }
-    var pending by remember { mutableStateOf<List<ByteArray>>(emptyList()) }
+    var link by remember(channelId) { mutableStateOf<String?>(null) }
+    var pending by remember(channelId) { mutableStateOf<List<ByteArray>>(emptyList()) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     val ds = remember { DsClient() }
     val scope = rememberCoroutineScope()
 
-    // Poll the channel's PublisherGroup journal for incoming co-publisher
-    // external-join requests using the SHARED handle the parent owns (see
-    // ChannelDetailScreen). Runs once the handle is open; re-armed if the
-    // handle re-opens.
+    // Poll the publisher group's journal for join requests with the SHARED
+    // handle the screen owns; re-armed if the handle re-opens.
     LaunchedEffect(publisherGroup) {
         val id = identity ?: return@LaunchedEffect
         val pg = publisherGroup ?: return@LaunchedEffect
@@ -1691,145 +1563,236 @@ private fun CoPublishersPanel(
                 CoPublisher.pollJournal(ds, id, pg)
                 pending = CoPublisher.pending(pg)
             } catch (_: Throwable) {
-                // best-effort — keep the last good pending list
+                // Best-effort — keep the last good pending list.
             }
             delay(5_000L)
         }
     }
 
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        shape = RoundedCornerShape(8.dp),
+    SectionCard(
+        title = "Co-publishers",
+        description = "People with the invite link can ask to publish to this channel.",
     ) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text(
-                "Co-publishers",
-                color = MaterialTheme.colorScheme.onSurface,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Text(
-                "Invite another device or person to publish to this channel.",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                fontSize = 12.sp,
-            )
-            Button(
+        val current = link
+        if (current == null) {
+            OutlinedButton(
                 onClick = {
                     val id = identity
                     val pg = publisherGroup
-                    if (busy || id == null || pg == null) return@Button
+                    if (busy || id == null || pg == null) return@OutlinedButton
                     busy = true
                     error = null
                     scope.launch {
                         try {
                             link = CoPublisher.createCoPublisherLink(id, pg)
                         } catch (e: Throwable) {
-                            error = "Could not create the link: ${e.message}"
+                            Log.w(TAG, "create co-publisher link failed", e)
+                            error = "Could not create the link. Try again."
                         } finally {
                             busy = false
                         }
                     }
                 },
                 enabled = !busy && publisherGroup != null,
-                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
-            ) { Text("Create co-publisher link", color = Color.White) }
-
-            link?.let {
-                SelectionContainer {
+            ) { Text("Create invite link") }
+        } else {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Invite link", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
                     Text(
-                        it,
+                        "Anyone with it can request to publish.",
+                        style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 12.sp,
                     )
                 }
-            }
-
-            if (pending.isNotEmpty()) {
-                Text(
-                    "Requests (${pending.size})",
-                    color = MaterialTheme.colorScheme.onSurface,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                for (ref in pending) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            shortHex(ref),
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 12.sp,
-                            modifier = Modifier.weight(1f),
-                        )
-                        TextButton(
-                            onClick = {
-                                val id = identity
-                                val pg = publisherGroup
-                                if (busy || id == null || pg == null) return@TextButton
-                                busy = true
-                                error = null
-                                scope.launch {
-                                    try {
-                                        CoPublisher.approve(ds, client, id, pg, ref, channelId)
-                                        pending = CoPublisher.pending(pg)
-                                    } catch (e: Throwable) {
-                                        error = "Approve failed: ${e.message}"
-                                    } finally {
-                                        busy = false
-                                    }
-                                }
-                            },
-                            enabled = !busy,
-                        ) { Text("Approve", color = MaterialTheme.colorScheme.primary) }
-                        TextButton(
-                            onClick = {
-                                val pg = publisherGroup ?: return@TextButton
-                                if (busy) return@TextButton
-                                error = null
-                                try {
-                                    CoPublisher.reject(pg, ref)
-                                    pending = CoPublisher.pending(pg)
-                                } catch (e: Throwable) {
-                                    error = "Reject failed: ${e.message}"
-                                }
-                            },
-                            enabled = !busy,
-                        ) { Text("Reject", color = MaterialTheme.colorScheme.error) }
-                    }
+                IconButton(onClick = { onCopy(current) }) {
+                    Icon(Icons.Filled.ContentCopy, contentDescription = "Copy link")
+                }
+                IconButton(onClick = { onShare(current) }) {
+                    Icon(Icons.Filled.Share, contentDescription = "Share link")
                 }
             }
+        }
 
-            (openError ?: error)?.let {
-                Text(it, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
+        if (pending.isNotEmpty()) {
+            HorizontalDivider()
+            Text("Requests (${pending.size})", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
+            pending.forEachIndexed { index, ref ->
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                    Text("Request ${index + 1}", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                    TextButton(
+                        onClick = {
+                            val pg = publisherGroup ?: return@TextButton
+                            if (busy) return@TextButton
+                            error = null
+                            try {
+                                CoPublisher.reject(pg, ref)
+                                pending = CoPublisher.pending(pg)
+                            } catch (e: Throwable) {
+                                Log.w(TAG, "reject failed", e)
+                                error = "Could not reject the request. Try again."
+                            }
+                        },
+                        enabled = !busy,
+                    ) { Text("Reject", color = MaterialTheme.colorScheme.error) }
+                    TextButton(
+                        onClick = {
+                            val id = identity
+                            val pg = publisherGroup
+                            if (busy || id == null || pg == null) return@TextButton
+                            busy = true
+                            error = null
+                            scope.launch {
+                                try {
+                                    // The audited approve: adds the joiner and
+                                    // reseals the new key to every subscriber.
+                                    CoPublisher.approve(ds, client, id, pg, ref, channelId)
+                                    pending = CoPublisher.pending(pg)
+                                    afterApprove()
+                                } catch (e: Throwable) {
+                                    Log.w(TAG, "approve failed", e)
+                                    error = "Could not approve the request. Try again."
+                                } finally {
+                                    busy = false
+                                }
+                            }
+                        },
+                        enabled = !busy,
+                    ) { Text("Approve") }
+                }
             }
         }
+        error?.let { ErrorLine(it) }
     }
 }
 
-private fun shortHex(data: ByteArray): String {
-    val sb = StringBuilder()
-    for (i in 0 until minOf(8, data.size)) {
-        sb.append(String.format("%02x", data[i].toInt() and 0xFF))
+/**
+ * Key rotation (ADR-0010 / C-54). The Rust core owns the *when*
+ * (`channelShouldRotate`), [RotationCron] the *how* (rotate the group, reseal
+ * every subscriber, one atomic fan-out). The heartbeat is seeded as "rotated
+ * just now" on open — the policy would otherwise fire immediately against a
+ * fresh state — so within a session the scheduled trigger stays silent and
+ * "Rotate now" is the immediate control; the status line names a time only
+ * for a rotation that happened in this session.
+ */
+@Composable
+private fun KeysCard(
+    channelId: String,
+    client: ChannelsClient,
+    identity: Identity?,
+    publisherGroup: PublisherGroup?,
+    zone: ZoneId,
+    locale: Locale,
+    afterRotate: suspend () -> Unit,
+) {
+    val policy = remember { channelRotationPolicyDefault() }
+    var cronState by remember(channelId) {
+        mutableStateOf(channelRotationStateAfterRotation(System.currentTimeMillis().toULong()))
     }
-    sb.append("…")
-    return sb.toString()
+    var lastRotatedAtMs by remember(channelId) { mutableStateOf<Long?>(null) }
+    var busy by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+
+    // The rotation heartbeat, armed once the publisher handle is open,
+    // cancelled when this card leaves the composition.
+    LaunchedEffect(identity, publisherGroup) {
+        val id = identity ?: return@LaunchedEffect
+        val pg = publisherGroup ?: return@LaunchedEffect
+        val job = RotationCron(
+            publisherGroup = pg,
+            identity = id,
+            channelIdHex = channelId,
+            channelsClient = client,
+            saveState = { next -> cronState = next },
+            onRotated = { _ ->
+                lastRotatedAtMs = System.currentTimeMillis()
+                scope.launch { afterRotate() }
+            },
+        ).start(
+            scope = scope,
+            policy = policy,
+            loadState = { cronState },
+            onError = { e ->
+                Log.w(TAG, "scheduled rotation failed", e)
+                error = "Could not rotate the keys. It will be retried."
+            },
+        )
+        try {
+            kotlinx.coroutines.awaitCancellation()
+        } finally {
+            job.cancel()
+        }
+    }
+
+    SectionCard(
+        title = "Encryption keys",
+        description = "Subscribers receive a new key automatically when it rotates.",
+    ) {
+        Text(
+            rotationStatusLine(lastRotatedAtMs, System.currentTimeMillis(), zone, locale),
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        OutlinedButton(
+            onClick = {
+                val id = identity
+                val pg = publisherGroup
+                if (busy || id == null || pg == null) return@OutlinedButton
+                busy = true
+                error = null
+                scope.launch {
+                    try {
+                        val cron = RotationCron(
+                            publisherGroup = pg,
+                            identity = id,
+                            channelIdHex = channelId,
+                            channelsClient = client,
+                            saveState = { next -> cronState = next },
+                        )
+                        // A genesis {0,0} state makes the policy fire against
+                        // any real wall-clock now; runOnce rotates + reseals
+                        // every subscriber atomically and returns the fresh
+                        // after-rotation state adopted as the new baseline.
+                        val result = cron.runOnce(
+                            policy = policy,
+                            state = ChannelRotationState(lastRotationMs = 0uL, postsSinceRotation = 0u),
+                            nowMs = System.currentTimeMillis().toULong(),
+                        )
+                        cronState = result.newState
+                        if (result.rotated) {
+                            lastRotatedAtMs = System.currentTimeMillis()
+                            afterRotate()
+                        }
+                    } catch (e: Throwable) {
+                        Log.w(TAG, "rotate now failed", e)
+                        error = "Could not rotate the keys. Try again."
+                    } finally {
+                        busy = false
+                    }
+                }
+            },
+            enabled = !busy && publisherGroup != null,
+        ) {
+            Text(if (busy) "Rotating..." else "Rotate now")
+        }
+        error?.let { ErrorLine(it) }
+    }
 }
 
 // ============================================================================
-// JoinCoPublisherScreen — joiner-side route (ADR-0028 OQ3)
+// Join as co-publisher (ADR-0028 OQ3, joiner side)
 // ============================================================================
 
 /**
- * Joiner side: paste a `/g/` co-publisher link, request to join, poll until the
- * owner approves, then mint local publisher keys + open the channel. Kotlin
- * mirror of the web `onJoinAsCoPublisher` flow + the iOS `JoinCoPublisherScreen`.
+ * Paste a co-publisher link, ask to join, wait for the owner's approval, then
+ * mint local publisher keys and open the channel.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun JoinCoPublisherScreen(
+public fun JoinCoPublisherScreen(
     state: ChannelsUiState,
     accountIdentitySeed: ByteArray,
-    onClose: () -> Unit,
-    onJoined: (String) -> Unit,
+    onBack: () -> Unit,
+    onJoined: (channelId: String) -> Unit,
 ) {
     var link by remember { mutableStateOf("") }
     var localName by remember { mutableStateOf("") }
@@ -1839,49 +1802,34 @@ private fun JoinCoPublisherScreen(
     val ds = remember { DsClient() }
     val scope = rememberCoroutineScope()
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("Join as co-publisher", color = MaterialTheme.colorScheme.onSurface) },
-                navigationIcon = {
-                    IconButton(onClick = onClose) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = MaterialTheme.colorScheme.onSurface)
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.background,
-                ),
-            )
-        },
-        containerColor = MaterialTheme.colorScheme.background,
-    ) { inner ->
+    Scaffold(topBar = { ChannelTopBar(title = "Join as co-publisher", onBack = onBack) }) { inner ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(inner)
+                .verticalScroll(rememberScrollState())
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+            Text(
+                "The channel owner shares an invite link. Once they approve your request, this device can publish to the channel.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             OutlinedTextField(
                 value = link,
                 onValueChange = { link = it },
-                label = { Text("Paste a /g/ co-publisher link") },
+                label = { Text("Invite link") },
                 enabled = !busy,
                 modifier = Modifier.fillMaxWidth(),
             )
             OutlinedTextField(
                 value = localName,
                 onValueChange = { localName = it },
-                label = { Text("Local name (optional)") },
+                label = { Text("Name (optional)") },
                 enabled = !busy,
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
-            )
-            Text(
-                "The channel owner shares a co-publisher link. After they approve " +
-                    "your request, this device can publish to the channel.",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                fontSize = 13.sp,
             )
             Button(
                 onClick = {
@@ -1889,14 +1837,12 @@ private fun JoinCoPublisherScreen(
                     if (busy || trimmed.isEmpty()) return@Button
                     busy = true
                     error = null
-                    status = "Requesting…"
+                    status = "Sending your request..."
                     scope.launch {
                         try {
-                            val identity =
-                                uniffi.lakko_ffi_uniffi.Identity.fromSeed(accountIdentitySeed)
-                            val request =
-                                CoPublisher.requestToCoPublish(ds, identity, trimmed)
-                            status = "Waiting for the channel owner to approve…"
+                            val identity = Identity.fromSeed(accountIdentitySeed)
+                            val request = CoPublisher.requestToCoPublish(ds, identity, trimmed)
+                            status = "Waiting for the channel owner to approve..."
                             var keys: ChannelPublisherKeys? = null
                             var attempts = 0
                             while (keys == null && attempts < 60) {
@@ -1906,10 +1852,8 @@ private fun JoinCoPublisherScreen(
                                     request.groupId,
                                     request.joinerKey,
                                     request.channelIdHex,
-                                    // G-29 — reuse the persisted signing seed
-                                    // on a re-poll.
-                                    state.persistedPublisherSigningSeed(
-                                        request.channelIdHex),
+                                    // G-29 — reuse the persisted signing seed on a re-poll.
+                                    state.persistedPublisherSigningSeed(request.channelIdHex),
                                 )
                                 if (keys == null) {
                                     delay(3_000L)
@@ -1918,15 +1862,14 @@ private fun JoinCoPublisherScreen(
                             }
                             val resolved = keys
                             if (resolved == null) {
-                                error = "Timed out waiting for approval — try again " +
-                                    "once the owner has approved."
+                                error = "No approval yet. Try again once the owner has approved."
                                 return@launch
                             }
                             val name = localName.trim()
                             state.addChannel(
                                 ChannelHandle(
                                     id = request.channelIdHex,
-                                    localName = name.ifEmpty { "Co-published channel" },
+                                    localName = name.ifEmpty { "Shared channel" },
                                     localDescription = "",
                                     addedAtMs = System.currentTimeMillis().toULong(),
                                 ),
@@ -1936,7 +1879,8 @@ private fun JoinCoPublisherScreen(
                         } catch (e: LegacyChannelException) {
                             error = e.message
                         } catch (e: Throwable) {
-                            error = "Co-publish failed: ${e.message}"
+                            Log.w(TAG, "co-publish request failed", e)
+                            error = "Could not send the request. Check the link and try again."
                         } finally {
                             busy = false
                             status = null
@@ -1944,20 +1888,11 @@ private fun JoinCoPublisherScreen(
                     }
                 },
                 enabled = !busy && link.trim().isNotEmpty(),
-                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
-            ) { Text(if (busy) "Requesting…" else "Request", color = Color.White) }
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text(if (busy) "Requesting..." else "Request to join") }
 
-            status?.let { Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp) }
-            error?.let { msg ->
-                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.error)) {
-                    Text(
-                        msg,
-                        color = Color.White,
-                        fontSize = 13.sp,
-                        modifier = Modifier.padding(12.dp),
-                    )
-                }
-            }
+            status?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            error?.let { ErrorLine(it) }
         }
     }
 }

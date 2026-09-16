@@ -36,7 +36,7 @@ import NewGroup from "./NewGroup";
 import Contacts from "./Contacts";
 import Settings from "./Settings";
 import Call from "./Call";
-import { ChannelSubscribe, ChannelView, NewChannel } from "./Channels";
+import { ChannelSubscribe, ChannelView, JoinCoPublisher, NewChannel } from "./Channels";
 import ChannelsLayout, { ChannelsIndex } from "./ChannelsLayout";
 import Chat from "./Chat";
 import DevProbe from "./DevProbe";
@@ -152,6 +152,7 @@ export const routes: RouteDefinition[] = [
         children: [
           { path: "/", component: ChannelsIndex },
           { path: "/new", component: NewChannel },
+          { path: "/join", component: JoinCoPublisher },
           // Subscribe route MUST be matched BEFORE the generic `/:id`
           // pattern so `:id` does not swallow the trailing `/subscribe`.
           { path: "/:id/subscribe", component: ChannelSubscribe },

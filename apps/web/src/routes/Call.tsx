@@ -2,40 +2,26 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * `/call/:id` route — full in-call UI (Phase 3c6-web).
+ * The in-call UI (docs/ux/client-redesign.md section 5.7).
  *
- * Layout: active-speaker tile on top (or full-width on
- * portrait), gallery row below, controls bar at the bottom,
- * participant-list drawer on the right (toggleable). Dark
- * theme by default — calls happen at any hour and the dark
- * surface reads more naturally against camera feeds than a
- * light one.
+ * Layout: active-speaker tile on top, gallery row below, a bottom row of
+ * round controls, a participant list or the in-call chat as a right-hand
+ * drawer, the settings sheet over everything. The surface is dark by design
+ * (calls happen at any hour and a dark ground reads better behind camera
+ * feeds): the `.lk-call` root carries the dark half of the shared tokens
+ * (`styles.css`), so this file has no palette of its own and no colour
+ * literal.
  *
- * No real WebRTC integration here — the live media path lives
- * in each platform's WebRTC pod (3a-pod-followup). This route
- * renders **state**: participant tiles, mic / cam / hand
- * toggles, connection-quality glyphs, the lifecycle banner. A
- * mock-data seed runs on mount so the screen has something to
- * render until the pod wires real participants in.
+ * Two modes:
+ *   * Standalone design route (`/call/:id`, no props) — seeds mock
+ *     participants on Join; the reference UI for the design system.
+ *   * Embedded over a live call (`CallHostView`) — `embedded` is set and the
+ *     host drives `callState` from the real session. The screen skips the
+ *     mount-time `reset()` (the host owns lifecycle) and routes end-call +
+ *     the ended-overlay dismissal through `onExit`.
  *
- * Phase-3c6 scope:
- *   - Active speaker promoted to large tile (`activeSpeaker`
- *     memo in call-state).
- *   - Gallery row with all-but-active.
- *   - Controls bar: mic / camera / participant list / raise
- *     hand / screen share / end call.
- *   - Connection-quality dot per tile (green / yellow / red
- *     mapped from the BandwidthController (#39) quality tier).
- *   - Participant-list drawer with mute / hand / quality
- *     glyphs.
- *   - Lifecycle banners: "connecting", "reconnecting...",
- *     "call ended" overlay.
- *
- * Out of scope (separate sprints):
- *   - Real video frames (3a-pod-followup).
- *   - Real screen-share (`getDisplayMedia()` integration).
- *   - In-call chat panel, reactions, closed captions.
- *   - Background blur / virtual backgrounds.
+ * The safety-number pill shows exactly when there IS a number to show
+ * (`calls/safety-pill.ts`), never on a layout flag.
  */
 
 import {
@@ -65,80 +51,40 @@ import { CallSoundController } from "../calls/CallSoundController";
 import { showsSafetyNumber } from "../calls/safety-pill";
 import { paths } from "./paths";
 import { Icon } from "../ui/icons";
+import { initialsOf, toneOf } from "../ui/Avatar";
 
 // ============================================================================
-// Theme tokens (dark)
-// ============================================================================
-
-// The call screen is always dark (video), so these are the design system's
-// dark-theme values as literals rather than the theme-following variables.
-const COLOURS = {
-  background: "#0f1220",
-  surface: "#171b2e",
-  surfaceHover: "#1c2136",
-  border: "#2a3145",
-  textPrimary: "#e6e9f4",
-  textSecondary: "#9aa3bd",
-  accentBlue: "#818cf8",
-  endCallRed: "#dc2626",
-  mutedRed: "#f87171",
-  qualityGreen: "#4ade80",
-  qualityYellow: "#f59e0b",
-  qualityRed: "#f87171",
-} as const;
-
-function colourForQuality(tier: QualityTier): string {
-  switch (qualityColour(tier)) {
-    case "green":
-      return COLOURS.qualityGreen;
-    case "yellow":
-      return COLOURS.qualityYellow;
-    case "red":
-      return COLOURS.qualityRed;
-  }
-}
-
-// ============================================================================
-// QualityDot — small glyph in tile corner + participant list
+// QualityDot — small glyph in a tile corner + the participant list
 // ============================================================================
 
 interface QualityDotProps {
   tier: QualityTier;
-  /** When true, clicking the dot toggles the connection-detail
-   *  popover (used by the top-of-screen indicator). When false
-   *  it's a passive glyph (e.g. inside a participant tile). */
+  /** When true, clicking the dot toggles the connection-detail popover
+   *  (the top-of-screen indicator). When false it is a passive glyph. */
   interactive?: boolean;
 }
 
 const QualityDot: Component<QualityDotProps> = (props) => (
   <span
+    class="lk-call-dot"
+    classList={{ interactive: props.interactive === true }}
+    data-tier={qualityColour(props.tier)}
     role={props.interactive === true ? "button" : undefined}
     aria-label={`Connection quality: ${props.tier}`}
-    title={`Quality: ${props.tier}`}
+    title={`Connection: ${props.tier}`}
     onClick={(e): void => {
       if (props.interactive === true) {
         e.stopPropagation();
         callActions.setQualityPopoverOpen(!callState.qualityPopoverOpen());
       }
     }}
-    style={{
-      display: "inline-block",
-      width: "8px",
-      height: "8px",
-      "border-radius": "50%",
-      "background-color": colourForQuality(props.tier),
-      "box-shadow": `0 0 4px ${colourForQuality(props.tier)}`,
-      cursor: props.interactive === true ? "pointer" : "default",
-    }}
   />
 );
 
 // ============================================================================
-// E2eePill — small indicator that the call is cryptographically
-// established + the short fingerprint the user can verify out-of-
-// band. Lakko's security-UX cornerstone: if this is missing or
-// reads `inactive`, the user knows the connection is not yet
-// authenticated.
+// E2eePill — the safety number the two sides can compare. Shown only when
+// there is a number; while keying is still being established the pill says
+// so rather than claiming protection.
 // ============================================================================
 
 const E2eePill: Component = () => {
@@ -147,56 +93,27 @@ const E2eePill: Component = () => {
     <Show
       when={showsSafetyNumber(e())}
       fallback={
-        <div
-          role="status"
-          title="Encryption negotiating…"
-          style={{
-            display: "inline-flex",
-            "align-items": "center",
-            gap: "6px",
-            padding: "4px 8px",
-            "background-color": COLOURS.surface,
-            color: COLOURS.qualityYellow,
-            "border-radius": "999px",
-            border: `1px solid ${COLOURS.border}`,
-            "font-size": "0.7rem",
-            "font-weight": "600",
-          }}
-        >
+        <div class="lk-call-pill negotiating" role="status" title="Setting up encryption">
           <Icon name="lock" size={14} />
-          <span>…</span>
+          <span>Setting up...</span>
         </div>
       }
     >
       <div
+        class="lk-call-pill secure"
         role="status"
-        title="End-to-end encrypted. Verify the fingerprint with your contact out-of-band."
-        style={{
-          display: "inline-flex",
-          "align-items": "center",
-          gap: "6px",
-          padding: "4px 8px",
-          "background-color": COLOURS.surface,
-          color: COLOURS.qualityGreen,
-          "border-radius": "999px",
-          border: `1px solid ${COLOURS.border}`,
-          "font-size": "0.7rem",
-          "font-weight": "600",
-          "font-family":
-            "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-        }}
+        title="End-to-end encrypted. Compare this safety number with the other side."
       >
         <Icon name="lock" size={14} />
-        <span>{e().shortFingerprint}</span>
+        <span class="lk-call-pill-number">{e().shortFingerprint}</span>
       </div>
     </Show>
   );
 };
 
 // ============================================================================
-// QualityIndicator — top-of-screen quality dot + tappable popover
-// with RTT / bitrate / connection-type stats. Mirror of lakko_me's
-// connectionQualityIndicator.
+// QualityIndicator — top-of-screen quality dot + tappable popover with
+// RTT / bitrate / connection type.
 // ============================================================================
 
 function localQualityTier(): QualityTier {
@@ -212,49 +129,16 @@ function formatBps(bps: number | null): string {
 }
 
 const QualityIndicator: Component = () => (
-  <div
-    style={{
-      position: "relative",
-      display: "inline-flex",
-      "align-items": "center",
-    }}
-  >
+  <div class="lk-call-quality">
     <QualityDot tier={localQualityTier()} interactive={true} />
     <Show when={callState.qualityPopoverOpen()}>
-      <div
-        role="dialog"
-        aria-label="Connection details"
-        style={{
-          position: "absolute",
-          top: "20px",
-          right: "0",
-          "min-width": "180px",
-          "background-color": COLOURS.surface,
-          border: `1px solid ${COLOURS.border}`,
-          "border-radius": "8px",
-          padding: "10px 12px",
-          "font-size": "0.8rem",
-          color: COLOURS.textPrimary,
-          "box-shadow": "0 4px 16px rgba(0,0,0,0.5)",
-          "z-index": "25",
-        }}
-      >
-        <div
-          style={{
-            display: "flex",
-            "justify-content": "space-between",
-            "margin-bottom": "6px",
-            "font-weight": "600",
-            "text-transform": "capitalize",
-          }}
-        >
+      <div class="lk-call-popover" role="dialog" aria-label="Connection details">
+        <div class="lk-call-popover-head">
           <span>{localQualityTier()}</span>
           <span
-            style={{
-              color:
-                callState.connectionDetail().connectionType === "direct"
-                  ? COLOURS.qualityGreen
-                  : COLOURS.qualityYellow,
+            classList={{
+              ok: callState.connectionDetail().connectionType === "direct",
+              warn: callState.connectionDetail().connectionType !== "direct",
             }}
           >
             {callState.connectionDetail().connectionType === "direct"
@@ -264,26 +148,18 @@ const QualityIndicator: Component = () => (
                 : "—"}
           </span>
         </div>
-        <div style={{ color: COLOURS.textSecondary, "line-height": "1.6" }}>
-          <div>
-            RTT:{" "}
-            <span style={{ color: COLOURS.textPrimary }}>
-              {callState.connectionDetail().rttMs !== null
-                ? `${callState.connectionDetail().rttMs} ms`
-                : "—"}
-            </span>
-          </div>
-          <div>
-            ↓{" "}
-            <span style={{ color: COLOURS.textPrimary }}>
-              {formatBps(callState.connectionDetail().downBps)}
-            </span>{" "}
-            &nbsp;↑{" "}
-            <span style={{ color: COLOURS.textPrimary }}>
-              {formatBps(callState.connectionDetail().upBps)}
-            </span>
-          </div>
-        </div>
+        <dl class="lk-call-popover-stats">
+          <dt>Round trip</dt>
+          <dd>
+            {callState.connectionDetail().rttMs !== null
+              ? `${callState.connectionDetail().rttMs} ms`
+              : "—"}
+          </dd>
+          <dt>Down</dt>
+          <dd>{formatBps(callState.connectionDetail().downBps)}</dd>
+          <dt>Up</dt>
+          <dd>{formatBps(callState.connectionDetail().upBps)}</dd>
+        </dl>
       </div>
     </Show>
   </div>
@@ -299,255 +175,115 @@ interface TileProps {
   onPin?: (id: string) => void;
   /** SFU group-call only: resolve this participant to its remote
    *  `MediaStream` (see the `Call` prop of the same name). */
-  remoteStreamFor?:
-    | ((participantId: string) => MediaStream | undefined)
-    | undefined;
-  /** 1×1 P2P only: the local capture `MediaStream`, for the
-   *  self-preview `<video>` on the LOCAL tile (see the `Call` prop). */
+  remoteStreamFor?: ((participantId: string) => MediaStream | undefined) | undefined;
+  /** 1x1 P2P only: the local capture `MediaStream`, for the self-preview
+   *  `<video>` on the LOCAL tile (see the `Call` prop). */
   localStream?: (() => MediaStream | undefined) | undefined;
 }
 
 const ParticipantTile: Component<TileProps> = (props) => {
-  const isPinned = (): boolean =>
-    callState.pinnedId() === props.participant.id;
-  /** The live `MediaStream` for this tile, if any. The local tile reads
-   *  the self-preview capture; a remote tile reads the SFU / P2P remote
-   *  stream. Reading it inside JSX tracks the underlying signals. */
+  const isPinned = (): boolean => callState.pinnedId() === props.participant.id;
+  /** The live `MediaStream` for this tile, if any. The local tile reads the
+   *  self-preview capture; a remote tile reads the SFU / P2P remote stream.
+   *  Reading it inside JSX tracks the underlying signals. */
   const tileStream = (): MediaStream | undefined =>
     props.participant.isLocal
       ? props.localStream?.()
       : props.remoteStreamFor?.(props.participant.id);
+  const name = (): string =>
+    props.participant.displayName || (props.participant.isLocal ? "You" : "Participant");
   return (
     <div
+      class="lk-call-tile"
+      classList={{
+        large: props.large,
+        speaking: props.participant.speaking,
+        pinnable: !props.participant.isLocal && props.onPin !== undefined,
+      }}
+      data-tone={toneOf(props.participant.id)}
       onClick={(): void => {
         if (props.onPin !== undefined && !props.participant.isLocal) {
           props.onPin(isPinned() ? "" : props.participant.id);
         }
       }}
-      style={{
-        position: "relative",
-        "background-color": COLOURS.surface,
-        border: `1px solid ${
-          props.participant.speaking ? COLOURS.accentBlue : COLOURS.border
-        }`,
-        "border-radius": "12px",
-        overflow: "hidden",
-        "aspect-ratio": props.large ? "16 / 9" : "4 / 3",
-        cursor: props.participant.isLocal ? "default" : "pointer",
-        "box-shadow": props.participant.speaking
-          ? `0 0 0 2px ${COLOURS.accentBlue}`
-          : "none",
-        transition: "box-shadow 120ms ease",
-      }}
     >
-      {/* Mock video / avatar surface */}
       <Show
         when={props.participant.camOn}
         fallback={
-          <div
-            style={{
-              position: "absolute",
-              inset: "0",
-              display: "flex",
-              "align-items": "center",
-              "justify-content": "center",
-              "font-size": props.large ? "5rem" : "2.5rem",
-              "font-weight": "600",
-              color: "#a5b4fc",
-              "background-color": "#26295a",
-            }}
-          >
-            {props.participant.displayName.slice(0, 1).toUpperCase() || "?"}
+          <div class="lk-call-tile-avatar" aria-hidden="true">
+            {initialsOf(name())}
           </div>
         }
       >
-        {/* SFU group call: a real <video> bound to the remote
-            MediaStream. Muted — audio plays through the dedicated
-            hidden <audio> sinks (one per stream) so this element
-            never doubles the audio. The 1×1 + mock paths pass no
-            `remoteStreamFor`, so they fall through to the placeholder. */}
+        {/* A real <video> bound to the stream. Muted — audio plays through
+            the dedicated hidden <audio> sinks, so this element never doubles
+            the audio. The mock path passes no stream and falls through to
+            the blank surface. */}
         <Show
           when={tileStream()}
           fallback={
-            <div
-              style={{
-                position: "absolute",
-                inset: "0",
-                "background-image":
-                  "linear-gradient(135deg, #1e1b4b, #171b2e, #0f1220)",
-                display: "flex",
-                "align-items": "center",
-                "justify-content": "center",
-                color: COLOURS.textSecondary,
-                "font-size": "0.85rem",
-              }}
-            >
-              <span style={{ opacity: "0.6" }}>(video)</span>
+            <div class="lk-call-tile-blank" aria-hidden="true">
+              <Icon name="video" size={props.large ? 36 : 24} strokeWidth={1.4} />
             </div>
           }
         >
           {(stream) => (
             <video
+              class="lk-call-tile-video"
+              classList={{ mirrored: props.participant.isLocal }}
               autoplay
               playsinline
               muted
               ref={(el) => {
                 el.srcObject = stream();
               }}
-              style={{
-                position: "absolute",
-                inset: "0",
-                width: "100%",
-                height: "100%",
-                "object-fit": "cover",
-                // The local self-preview is mirrored (front-camera
-                // convention); a remote tile is never mirrored.
-                transform: props.participant.isLocal ? "scaleX(-1)" : "none",
-              }}
             />
           )}
         </Show>
       </Show>
 
-      {/* B2a — mid-call camera-on hint on the LOCAL tile. While the
-          camera is being acquired (getUserMedia + renegotiation in
-          flight) the tile is present but the video track is not live
-          yet, so overlay a spinner + "Starting camera…" so the user
-          knows the black tile is loading, not broken. */}
-      <Show
-        when={
-          props.participant.isLocal &&
-          callState.videoPublishState() === "starting"
-        }
-      >
-        <div
-          role="status"
-          aria-live="polite"
-          style={{
-            position: "absolute",
-            inset: "0",
-            display: "flex",
-            "flex-direction": "column",
-            "align-items": "center",
-            "justify-content": "center",
-            gap: "8px",
-            "background-color": "rgba(0,0,0,0.45)",
-            color: COLOURS.textPrimary,
-            "font-size": props.large ? "0.95rem" : "0.8rem",
-            "z-index": "2",
-          }}
-        >
+      {/* Mid-call camera-on hint on the LOCAL tile: while the camera is
+          being acquired the tile is present but the track is not live, so
+          the black tile reads as loading, not broken. */}
+      <Show when={props.participant.isLocal && callState.videoPublishState() === "starting"}>
+        <div class="lk-call-tile-overlay" role="status" aria-live="polite">
           <Spinner size={props.large ? 30 : 24} />
-          <span>Starting camera…</span>
+          <span>Starting camera...</span>
         </div>
       </Show>
 
-      {/* Large mute overlay — central icon when the remote is
-          muted, so the listener immediately knows their audio
-          input is off (matches lakko_me's `.mute-indicator` on
-          the video tile). Hidden on the local tile (you know
-          you muted yourself). */}
+      {/* Central mute glyph when the remote is muted, so the listener knows
+          their audio input is off. Hidden on the local tile. */}
       <Show when={!props.participant.micOn && !props.participant.isLocal}>
-        <div
-          aria-hidden="true"
-          style={{
-            position: "absolute",
-            top: "50%",
-            left: "50%",
-            transform: "translate(-50%, -50%)",
-            "background-color": "rgba(0,0,0,0.55)",
-            color: COLOURS.mutedRed,
-            "font-size": props.large ? "2rem" : "1.25rem",
-            width: props.large ? "56px" : "36px",
-            height: props.large ? "56px" : "36px",
-            "border-radius": "50%",
-            display: "flex",
-            "align-items": "center",
-            "justify-content": "center",
-            "pointer-events": "none",
-          }}
-        >
-          <Icon name="micOff" size={14} />
+        <div class="lk-call-tile-mute" aria-hidden="true">
+          <Icon name="micOff" size={props.large ? 22 : 16} />
         </div>
       </Show>
 
-      {/* Screen-share badge */}
       <Show when={props.participant.screenSharing}>
-        <div
-          style={{
-            position: "absolute",
-            top: "8px",
-            left: "8px",
-            "background-color": "rgba(0,0,0,0.6)",
-            color: COLOURS.textPrimary,
-            "font-size": "0.7rem",
-            padding: "2px 6px",
-            "border-radius": "6px",
-          }}
-        >
+        <div class="lk-call-badge top-left">
+          <Icon name="monitor" size={14} />
           Sharing
         </div>
       </Show>
 
-      {/* Raise-hand badge */}
       <Show when={props.participant.handRaised}>
-        <div
-          style={{
-            position: "absolute",
-            top: "8px",
-            right: "8px",
-            "background-color": "rgba(0,0,0,0.6)",
-            "font-size": "1rem",
-            padding: "4px 6px",
-            "border-radius": "6px",
-          }}
-        >
+        <div class="lk-call-badge top-right" title="Hand raised" aria-label="Hand raised">
           <Icon name="hand" size={14} />
         </div>
       </Show>
 
-      {/* Bottom strip: name + mute + quality */}
-      <div
-        style={{
-          position: "absolute",
-          left: "0",
-          right: "0",
-          bottom: "0",
-          display: "flex",
-          "align-items": "center",
-          gap: "8px",
-          padding: "8px 10px",
-          "background-color": "rgba(0,0,0,0.45)",
-          color: COLOURS.textPrimary,
-          "font-size": "0.85rem",
-        }}
-      >
+      {/* Bottom strip: name + mute + quality + pin */}
+      <div class="lk-call-tile-strip">
         <Show when={!props.participant.micOn}>
-          <span
-            aria-label="Microphone muted"
-            title="Muted"
-            style={{ color: COLOURS.mutedRed, "font-size": "0.9rem" }}
-          >
+          <span class="lk-call-tile-muted" aria-label="Microphone muted" title="Muted">
             <Icon name="micOff" size={14} />
           </span>
         </Show>
-        <span
-          style={{
-            "white-space": "nowrap",
-            overflow: "hidden",
-            "text-overflow": "ellipsis",
-            flex: "1",
-          }}
-        >
-          {props.participant.displayName ||
-            (props.participant.isLocal ? "You" : "Unknown")}
-        </span>
+        <span class="lk-call-tile-name">{name()}</span>
         <QualityDot tier={props.participant.quality} />
         <Show when={isPinned()}>
-          <span
-            title="Pinned"
-            style={{ color: COLOURS.accentBlue, "font-size": "0.8rem" }}
-          >
+          <span class="lk-call-tile-pin" title="Pinned">
             <Icon name="pin" size={14} />
           </span>
         </Show>
@@ -557,263 +293,106 @@ const ParticipantTile: Component<TileProps> = (props) => {
 };
 
 // ============================================================================
-// PrejoinScreen — camera/mic preview before joining the call.
-// Mirror of `preJoinScreen` from lakko_me.
+// PrejoinScreen — a card with the preview and two toggles.
 // ============================================================================
 
 const PrejoinScreen: Component<{ onJoin: () => void }> = (props) => {
-  const [displayName, setDisplayName] = createSignal("");
-  // Local toggles for camera / mic preview. Once the user
-  // joins, these copy into the participant entry's flags so the
-  // post-join state matches the preview.
+  // Local toggles for camera / mic preview. Once the user joins, these copy
+  // into the participant entry's flags so the post-join state matches.
   const [previewCamOn, setPreviewCamOn] = createSignal(true);
   const [previewMicOn, setPreviewMicOn] = createSignal(true);
 
   return (
-    <div
-      role="region"
-      aria-label="Pre-join screen"
-      style={{
-        position: "fixed",
-        inset: "0",
-        "background-color": COLOURS.background,
-        color: COLOURS.textPrimary,
-        display: "flex",
-        "flex-direction": "column",
-        "align-items": "center",
-        "justify-content": "center",
-        gap: "20px",
-        padding: "24px",
-      }}
-    >
-      <h1 style={{ margin: "0", "font-size": "1.5rem", "font-weight": "600" }}>
-        Ready to join?
-      </h1>
-      <p style={{ margin: "0", color: COLOURS.textSecondary }}>
-        Check your camera and microphone first.
-      </p>
+    <div class="lk-call lk-call-prejoin" role="region" aria-label="Before you join">
+      <div class="lk-call-prejoin-card">
+        <h1>Ready to join?</h1>
+        <p>Check your camera and microphone first.</p>
 
-      {/* Video preview box — same gradient placeholder as the
-          in-call tile until the WebRTC pod (3a-pod-followup)
-          wires a real <video> element. */}
-      <div
-        style={{
-          width: "min(480px, 90vw)",
-          "aspect-ratio": "16 / 9",
-          position: "relative",
-          "background-color": COLOURS.surface,
-          border: `1px solid ${COLOURS.border}`,
-          "border-radius": "12px",
-          overflow: "hidden",
-        }}
-      >
-        <Show
-          when={previewCamOn()}
-          fallback={
-            <div
-              style={{
-                position: "absolute",
-                inset: "0",
-                display: "flex",
-                "align-items": "center",
-                "justify-content": "center",
-                "font-size": "3rem",
-                color: COLOURS.textSecondary,
-              }}
-            >
-              <Icon name="videoOff" size={48} strokeWidth={1.4} />
-            </div>
-          }
-        >
-          <div
-            style={{
-              position: "absolute",
-              inset: "0",
-              "background-image":
-                "linear-gradient(135deg, #1e1b4b, #171b2e, #0f1220)",
-              display: "flex",
-              "align-items": "center",
-              "justify-content": "center",
-              color: COLOURS.textSecondary,
-              "font-size": "0.9rem",
-            }}
+        <div class="lk-call-preview">
+          <Show
+            when={previewCamOn()}
+            fallback={
+              <div class="lk-call-tile-blank" aria-hidden="true">
+                <Icon name="videoOff" size={48} strokeWidth={1.4} />
+              </div>
+            }
           >
-            (camera preview)
-          </div>
-        </Show>
+            <div class="lk-call-tile-blank" aria-hidden="true">
+              <Icon name="video" size={48} strokeWidth={1.4} />
+            </div>
+          </Show>
+        </div>
 
-        {/* Display-name overlay — input over the preview, same
-            layout as lakko_me prejoin. */}
-        <div
-          style={{
-            position: "absolute",
-            left: "0",
-            right: "0",
-            bottom: "0",
-            padding: "10px 12px",
-            "background-color": "rgba(0,0,0,0.5)",
-          }}
-        >
-          <input
-            type="text"
-            value={displayName()}
-            onInput={(e): void => {
-              setDisplayName(e.currentTarget.value);
+        <div class="lk-call-preview-toggles" role="group" aria-label="Devices">
+          <CircleButton
+            label={previewCamOn() ? "Turn off camera" : "Turn on camera"}
+            glyph={<Icon name={previewCamOn() ? "video" : "videoOff"} size={22} />}
+            active={!previewCamOn()}
+            onClick={(): void => {
+              setPreviewCamOn(!previewCamOn());
             }}
-            placeholder="Your name"
-            maxLength={50}
-            autocomplete="name"
-            aria-label="Display name"
-            style={{
-              width: "100%",
-              padding: "8px 12px",
-              "background-color": "rgba(255,255,255,0.08)",
-              color: COLOURS.textPrimary,
-              border: `1px solid ${COLOURS.border}`,
-              "border-radius": "8px",
-              "font-size": "0.95rem",
-              outline: "none",
+          />
+          <CircleButton
+            label={previewMicOn() ? "Mute microphone" : "Unmute microphone"}
+            glyph={<Icon name={previewMicOn() ? "mic" : "micOff"} size={22} />}
+            active={!previewMicOn()}
+            onClick={(): void => {
+              setPreviewMicOn(!previewMicOn());
             }}
           />
         </div>
 
-        {/* Camera / mic toggle overlays — small floating buttons
-            on the preview. */}
-        <div
-          style={{
-            position: "absolute",
-            top: "10px",
-            right: "10px",
-            display: "flex",
-            gap: "8px",
+        <button
+          type="button"
+          class="primary lk-call-join"
+          onClick={(): void => {
+            // Carry the preview toggles into the post-join participant
+            // state, then transition.
+            callActions.setMic(previewMicOn());
+            callActions.setCamera(previewCamOn());
+            callActions.join();
+            props.onJoin();
           }}
         >
-          <button
-            type="button"
-            aria-label={previewCamOn() ? "Turn off camera" : "Turn on camera"}
-            onClick={(): void => {
-              setPreviewCamOn(!previewCamOn());
-            }}
-            style={{
-              width: "36px",
-              height: "36px",
-              "border-radius": "50%",
-              border: "none",
-              cursor: "pointer",
-              "background-color": previewCamOn()
-                ? "rgba(0,0,0,0.55)"
-                : COLOURS.mutedRed,
-              color: COLOURS.textPrimary,
-            }}
-          >
-            <Icon name={previewCamOn() ? "video" : "videoOff"} size={18} />
-          </button>
-          <button
-            type="button"
-            aria-label={
-              previewMicOn() ? "Mute microphone" : "Unmute microphone"
-            }
-            onClick={(): void => {
-              setPreviewMicOn(!previewMicOn());
-            }}
-            style={{
-              width: "36px",
-              height: "36px",
-              "border-radius": "50%",
-              border: "none",
-              cursor: "pointer",
-              "background-color": previewMicOn()
-                ? "rgba(0,0,0,0.55)"
-                : COLOURS.mutedRed,
-              color: COLOURS.textPrimary,
-            }}
-          >
-            <Icon name={previewMicOn() ? "mic" : "micOff"} size={18} />
-          </button>
-        </div>
+          Join
+        </button>
       </div>
-
-      <button
-        type="button"
-        onClick={(): void => {
-          // Carry preview toggles + display name into the
-          // post-join participant state, then transition.
-          callActions.setMic(previewMicOn());
-          callActions.setCamera(previewCamOn());
-          callActions.join();
-          props.onJoin();
-        }}
-        style={{
-          padding: "12px 32px",
-          "background-color": COLOURS.accentBlue,
-          color: COLOURS.textPrimary,
-          border: "none",
-          "border-radius": "10px",
-          "font-size": "1rem",
-          "font-weight": "600",
-          cursor: "pointer",
-          "box-shadow": "0 2px 8px rgba(129, 140, 248, 0.35)",
-        }}
-      >
-        Join
-      </button>
     </div>
   );
 };
 
 // ============================================================================
-// WaitingMessage — overlay shown when the local participant is
-// the only one in the call (no remote yet to render in active
-// speaker / gallery).
+// WaitingMessage — shown while the local participant is alone in the call
 // ============================================================================
 
 const WaitingMessage: Component = () => (
-  <div
-    role="status"
-    aria-live="polite"
-    style={{
-      position: "absolute",
-      top: "50%",
-      left: "50%",
-      transform: "translate(-50%, -50%)",
-      padding: "16px 24px",
-      "background-color": "rgba(23, 27, 46, 0.92)",
-      border: `1px solid ${COLOURS.border}`,
-      "border-radius": "12px",
-      color: COLOURS.textPrimary,
-      "font-size": "0.95rem",
-      "z-index": "5",
-      "text-align": "center",
-    }}
-  >
-    Waiting for participant…
+  <div class="lk-call-waiting" role="status" aria-live="polite">
+    Waiting for others to join...
   </div>
 );
 
 // ============================================================================
-// ControlsBar — bottom action bar
+// ControlsBar — the bottom row of round buttons
 // ============================================================================
 
-/** Indeterminate spinner glyph. Self-contained SVG (SMIL rotation — no
- *  global @keyframes needed), themed from the call screen's COLOURS
- *  vocabulary so it reads on any control-bar surface. */
-const Spinner: Component<{ size?: number; colour?: string }> = (props) => {
+/** Indeterminate spinner glyph. Self-contained SVG (SMIL rotation, no global
+ *  keyframes); takes the surrounding text colour. */
+const Spinner: Component<{ size?: number }> = (props) => {
   const size = (): number => props.size ?? 22;
-  const colour = (): string => props.colour ?? COLOURS.textPrimary;
   return (
     <svg
+      class="lk-spinner"
       width={size()}
       height={size()}
       viewBox="0 0 24 24"
       fill="none"
       aria-hidden="true"
-      style={{ display: "block" }}
     >
       <circle
         cx="12"
         cy="12"
         r="9"
-        stroke={colour()}
+        stroke="currentColor"
         stroke-width="3"
         stroke-linecap="round"
         stroke-dasharray="40 60"
@@ -837,9 +416,8 @@ interface ButtonProps {
   glyph: JSX.Element;
   active: boolean;
   destructive?: boolean;
-  /** Show a spinner in place of the glyph + make the button
-   *  non-interactive — an async action is in flight (e.g. mid-call
-   *  camera acquisition). */
+  /** Show a spinner in place of the glyph + make the button non-interactive
+   *  — an async action is in flight (e.g. mid-call camera acquisition). */
   busy?: boolean;
   /** Dim + disable the button without a spinner. */
   disabled?: boolean;
@@ -851,39 +429,20 @@ const CircleButton: Component<ButtonProps> = (props) => {
   return (
     <button
       type="button"
+      class="lk-call-btn"
+      classList={{
+        active: props.active && props.destructive !== true,
+        destructive: props.destructive === true,
+        busy: props.busy === true,
+      }}
       aria-label={props.label}
+      aria-pressed={props.destructive === true ? undefined : props.active}
       aria-busy={props.busy === true ? "true" : undefined}
       title={props.label}
       disabled={inert()}
       onClick={(): void => {
         if (inert()) return;
         props.onClick();
-      }}
-      style={{
-        width: "52px",
-        height: "52px",
-        "border-radius": "50%",
-        border: "none",
-        cursor: inert() ? "default" : "pointer",
-        // A busy button keeps full opacity (the spinner conveys activity);
-        // a plainly-disabled one dims to signal it is unavailable.
-        opacity: props.disabled === true && props.busy !== true ? "0.55" : "1",
-        display: "flex",
-        "align-items": "center",
-        "justify-content": "center",
-        "font-size": "1.25rem",
-        "background-color":
-          props.destructive === true
-            ? COLOURS.endCallRed
-            : props.active
-              ? COLOURS.accentBlue
-              : COLOURS.surface,
-        color: COLOURS.textPrimary,
-        "box-shadow":
-          props.destructive === true
-            ? "0 2px 8px rgba(220, 38, 38, 0.4)"
-            : "0 1px 3px rgba(0,0,0,0.5)",
-        transition: "background-color 120ms ease",
       }}
     >
       <Show when={props.busy === true} fallback={props.glyph}>
@@ -898,19 +457,7 @@ const ControlsBar: Component = () => {
     callState.participants().find((p) => p.isLocal) ?? null;
 
   return (
-    <div
-      role="toolbar"
-      aria-label="Call controls"
-      style={{
-        display: "flex",
-        gap: "12px",
-        "justify-content": "center",
-        "align-items": "center",
-        padding: "14px 16px",
-        "background-color": COLOURS.surface,
-        "border-top": `1px solid ${COLOURS.border}`,
-      }}
-    >
+    <div class="lk-call-controls" role="toolbar" aria-label="Call controls">
       <CircleButton
         label={local()?.micOn === true ? "Mute microphone" : "Unmute microphone"}
         glyph={<Icon name={local()?.micOn === true ? "mic" : "micOff"} size={22} />}
@@ -920,41 +467,36 @@ const ControlsBar: Component = () => {
       <CircleButton
         label={
           callState.videoPublishState() === "starting"
-            ? "Starting camera…"
+            ? "Starting camera..."
             : local()?.camOn === true
               ? "Stop camera"
               : "Start camera"
         }
         glyph={<Icon name={local()?.camOn === true ? "video" : "videoOff"} size={22} />}
         active={local()?.camOn === false}
-        // B2a — the acquire+renegotiate is async; show a spinner + disable
-        // (prevents a spam-tap while the session in-flight-guards).
+        // The acquire + renegotiate is async; a spinner + disabled prevents a
+        // spam-tap while the session in-flight-guards.
         busy={callState.videoPublishState() === "starting"}
         onClick={(): void => callActions.setCamera(local()?.camOn !== true)}
       />
-      {/* Switch front/back camera — mobile only. Surfaces only
-          when the platform reported ≥ 2 cameras (typically
-          smartphone front + back). On a laptop with a single
-          built-in cam, hidden. Mirror of lakko_me's
-          `switchCameraBtn`. */}
+      {/* Switch front / back camera — surfaces only when the platform
+          reported two or more cameras (a phone). Hidden on a laptop with one
+          built-in camera. */}
       <Show when={callState.hasMultipleCameras() && local()?.camOn === true}>
         <CircleButton
           label="Switch camera"
-          glyph={<Icon name="refresh" size={22} />}
+          glyph={<Icon name="cameraFlip" size={22} />}
           active={false}
           onClick={(): void => {
-            // Cycle to the next video input (front/back on mobile). The
-            // store's `selectedVideoInput` drives the in-call
-            // device-switch effect (Chat.tsx), which calls
+            // Cycle to the next video input. The store's `selectedVideoInput`
+            // drives the in-call device-switch effect, which calls
             // `session.switchVideoInput` + `replaceTrack` (same-kind, no
-            // renegotiation) — so this button reuses the shipped
-            // device-switch path rather than re-capturing here.
+            // renegotiation) — so this reuses the shipped device-switch path
+            // rather than re-capturing here.
             void (async (): Promise<void> => {
               try {
                 const devices = await navigator.mediaDevices.enumerateDevices();
-                const cams = devices.filter(
-                  (d) => d.kind === "videoinput" && d.deviceId.length > 0,
-                );
+                const cams = devices.filter((d) => d.kind === "videoinput" && d.deviceId.length > 0);
                 if (cams.length < 2) return;
                 const current = callState.settings().selectedVideoInput;
                 const idx =
@@ -980,31 +522,19 @@ const ControlsBar: Component = () => {
         label="Participants"
         glyph={<Icon name="contacts" size={22} />}
         active={callState.participantListOpen()}
-        onClick={(): void =>
-          callActions.setParticipantListOpen(!callState.participantListOpen())
-        }
+        onClick={(): void => callActions.setParticipantListOpen(!callState.participantListOpen())}
       />
       <CircleButton
-        label={
-          local()?.handRaised === true ? "Lower hand" : "Raise hand"
-        }
+        label={local()?.handRaised === true ? "Lower hand" : "Raise hand"}
         glyph={<Icon name="hand" size={22} />}
         active={local()?.handRaised === true}
-        onClick={(): void =>
-          callActions.setHandRaised(local()?.handRaised !== true)
-        }
+        onClick={(): void => callActions.setHandRaised(local()?.handRaised !== true)}
       />
       <CircleButton
-        label={
-          local()?.screenSharing === true
-            ? "Stop sharing screen"
-            : "Share screen"
-        }
+        label={local()?.screenSharing === true ? "Stop sharing screen" : "Share screen"}
         glyph={<Icon name="monitor" size={22} />}
         active={local()?.screenSharing === true}
-        onClick={(): void =>
-          callActions.setScreenSharing(local()?.screenSharing !== true)
-        }
+        onClick={(): void => callActions.setScreenSharing(local()?.screenSharing !== true)}
       />
       <ChatToggleButton />
       <CircleButton
@@ -1024,12 +554,10 @@ const ControlsBar: Component = () => {
   );
 };
 
-/** Chat toggle — CircleButton variant with an unread-count
- *  badge in the top-right corner. The badge surfaces only
- *  when there is something to draw the user's attention to
- *  AND the panel itself is closed. */
+/** Chat toggle — a CircleButton with an unread-count badge. The badge
+ *  surfaces only when there is something to read AND the panel is closed. */
 const ChatToggleButton: Component = () => (
-  <div style={{ position: "relative" }}>
+  <div class="lk-call-btn-wrap">
     <CircleButton
       label={
         callState.chatOpen()
@@ -1043,26 +571,7 @@ const ChatToggleButton: Component = () => (
       onClick={(): void => callActions.setChatOpen(!callState.chatOpen())}
     />
     <Show when={callState.chatUnreadCount() > 0 && !callState.chatOpen()}>
-      <span
-        aria-hidden="true"
-        style={{
-          position: "absolute",
-          top: "-2px",
-          right: "-2px",
-          "background-color": COLOURS.endCallRed,
-          color: "#fff",
-          "border-radius": "10px",
-          "min-width": "18px",
-          height: "18px",
-          padding: "0 5px",
-          "font-size": "11px",
-          "font-weight": "700",
-          display: "inline-flex",
-          "align-items": "center",
-          "justify-content": "center",
-          "pointer-events": "none",
-        }}
-      >
+      <span class="lk-call-btn-badge" aria-hidden="true">
         {callState.chatUnreadCount() > 99 ? "99+" : callState.chatUnreadCount()}
       </span>
     </Show>
@@ -1070,37 +579,27 @@ const ChatToggleButton: Component = () => (
 );
 
 // ============================================================================
-// SettingsPanel — gear-menu overlay (S-3-A-settings)
+// SettingsPanel — the settings sheet
 // ============================================================================
 //
-// Centred modal on desktop / right side panel on tablet /
-// bottom-sheet on mobile via a `@media` shorthand on the
-// outer container. Holds three device pickers + five
-// processing toggles. The device pickers list the OS's real
-// capture / playback devices via `refreshCallDevices` (below),
-// pulled when the panel opens and on hot-plug (`devicechange`).
+// Three device pickers + five processing toggles. The device pickers list
+// the OS's real capture / playback devices via `refreshCallDevices`, pulled
+// when the panel opens and on hot-plug (`devicechange`).
 
 /** Enumerate the OS's real capture / playback devices and publish them into
- *  the shared call store so the gear-menu pickers list the user's actual
- *  microphones, cameras, and speakers (replacing the empty placeholder list).
- *  Device labels populate only once `getUserMedia` has been granted (i.e.
- *  during a live call); before that the browser returns stable ids with blank
- *  labels, which the picker renders with a generic fallback. */
+ *  the shared call store so the pickers list the user's actual microphones,
+ *  cameras and speakers. Device labels populate only once `getUserMedia` has
+ *  been granted (during a live call); before that the browser returns stable
+ *  ids with blank labels, which the picker renders with a generic fallback. */
 async function refreshCallDevices(): Promise<void> {
-  const md =
-    typeof navigator !== "undefined" ? navigator.mediaDevices : undefined;
+  const md = typeof navigator !== "undefined" ? navigator.mediaDevices : undefined;
   if (!md?.enumerateDevices) {
     return;
   }
   try {
     const infos = await md.enumerateDevices();
     const devices: CallDevice[] = infos
-      .filter(
-        (d) =>
-          d.kind === "audioinput" ||
-          d.kind === "videoinput" ||
-          d.kind === "audiooutput",
-      )
+      .filter((d) => d.kind === "audioinput" || d.kind === "videoinput" || d.kind === "audiooutput")
       .map((d) => ({
         id: d.deviceId,
         label: d.label,
@@ -1123,8 +622,7 @@ const SettingsPanel: Component = () => {
     void refreshCallDevices();
   });
   onMount(() => {
-    const md =
-      typeof navigator !== "undefined" ? navigator.mediaDevices : undefined;
+    const md = typeof navigator !== "undefined" ? navigator.mediaDevices : undefined;
     if (!md?.addEventListener) {
       return;
     }
@@ -1136,125 +634,82 @@ const SettingsPanel: Component = () => {
   });
   return (
     <Show when={callState.settingsOpen()}>
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-label="Call settings"
-      style={{
-        position: "fixed",
-        inset: "0",
-        "background-color": "rgba(0,0,0,0.55)",
-        "z-index": "10",
-        display: "flex",
-        "align-items": "center",
-        "justify-content": "center",
-        padding: "16px",
-      }}
-      onClick={(e): void => {
-        // Click-out to dismiss — only when the backdrop itself
-        // is the target, not the inner card.
-        if (e.target === e.currentTarget) {
-          callActions.setSettingsOpen(false);
-        }
-      }}
-    >
       <div
-        style={{
-          width: "min(440px, 100%)",
-          "max-height": "min(720px, 90vh)",
-          "overflow-y": "auto",
-          "background-color": COLOURS.surface,
-          color: COLOURS.textPrimary,
-          "border-radius": "12px",
-          padding: "20px 22px",
-          display: "flex",
-          "flex-direction": "column",
-          gap: "18px",
+        class="lk-call-modal-backdrop"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Call settings"
+        onClick={(e): void => {
+          // Click-out to dismiss — only when the backdrop itself is the
+          // target, not the inner card.
+          if (e.target === e.currentTarget) {
+            callActions.setSettingsOpen(false);
+          }
         }}
       >
-        <div
-          style={{
-            display: "flex",
-            "justify-content": "space-between",
-            "align-items": "center",
-          }}
-        >
-          <h2 style={{ margin: "0", "font-size": "18px", "font-weight": "600" }}>
-            Settings
-          </h2>
-          <button
-            type="button"
-            aria-label="Close settings"
-            onClick={(): void => callActions.setSettingsOpen(false)}
-            style={{
-              background: "none",
-              border: "none",
-              color: COLOURS.textSecondary,
-              "font-size": "22px",
-              cursor: "pointer",
-              padding: "4px 8px",
-            }}
-          >
-            ×
-          </button>
+        <div class="lk-call-modal">
+          <div class="lk-call-modal-head">
+            <h2>Settings</h2>
+            <button
+              type="button"
+              class="lk-icon-button"
+              aria-label="Close settings"
+              onClick={(): void => callActions.setSettingsOpen(false)}
+            >
+              <Icon name="close" size={18} />
+            </button>
+          </div>
+
+          <DevicePicker
+            label="Microphone"
+            kind="audioinput"
+            selectedId={callState.settings().selectedAudioInput}
+            onPick={(id): void => callActions.setSelectedAudioInput(id)}
+          />
+          <DevicePicker
+            label="Camera"
+            kind="videoinput"
+            selectedId={callState.settings().selectedVideoInput}
+            onPick={(id): void => callActions.setSelectedVideoInput(id)}
+          />
+          <DevicePicker
+            label="Speaker"
+            kind="audiooutput"
+            selectedId={callState.settings().selectedAudioOutput}
+            onPick={(id): void => callActions.setSelectedAudioOutput(id)}
+          />
+
+          <hr class="lk-call-sep" />
+
+          <SettingsToggle
+            label="Noise suppression"
+            checked={callState.settings().noiseSuppression}
+            onChange={(v): void => callActions.setNoiseSuppression(v)}
+          />
+          <SettingsToggle
+            label="Echo cancellation"
+            checked={callState.settings().echoCancellation}
+            onChange={(v): void => callActions.setEchoCancellation(v)}
+          />
+          <SettingsToggle
+            label="Automatic gain control"
+            checked={callState.settings().autoGain}
+            onChange={(v): void => callActions.setAutoGain(v)}
+          />
+          <SettingsToggle
+            label="Mirror my preview"
+            checked={callState.settings().mirrorLocal}
+            onChange={(v): void => callActions.setMirrorLocal(v)}
+          />
+          <SettingsToggle
+            label="Low-data mode"
+            description="Caps video at 360p. Useful on a metered connection."
+            checked={callState.settings().lowDataMode}
+            onChange={(v): void => callActions.setLowDataMode(v)}
+          />
         </div>
-
-        <DevicePicker
-          label="Microphone"
-          kind="audioinput"
-          selectedId={callState.settings().selectedAudioInput}
-          onPick={(id): void => callActions.setSelectedAudioInput(id)}
-        />
-        <DevicePicker
-          label="Camera"
-          kind="videoinput"
-          selectedId={callState.settings().selectedVideoInput}
-          onPick={(id): void => callActions.setSelectedVideoInput(id)}
-        />
-        <DevicePicker
-          label="Speaker"
-          kind="audiooutput"
-          selectedId={callState.settings().selectedAudioOutput}
-          onPick={(id): void => callActions.setSelectedAudioOutput(id)}
-        />
-
-        <hr
-          style={{
-            border: "none",
-            "border-top": `1px solid ${COLOURS.border}`,
-            margin: "4px 0",
-          }}
-        />
-
-        <SettingsToggle
-          label="Noise suppression"
-          checked={callState.settings().noiseSuppression}
-          onChange={(v): void => callActions.setNoiseSuppression(v)}
-        />
-        <SettingsToggle
-          label="Echo cancellation"
-          checked={callState.settings().echoCancellation}
-          onChange={(v): void => callActions.setEchoCancellation(v)}
-        />
-        <SettingsToggle
-          label="Automatic gain control"
-          checked={callState.settings().autoGain}
-          onChange={(v): void => callActions.setAutoGain(v)}
-        />
-        <SettingsToggle
-          label="Mirror local preview"
-          checked={callState.settings().mirrorLocal}
-          onChange={(v): void => callActions.setMirrorLocal(v)}
-        />
-        <SettingsToggle
-          label="Low-data mode"
-          description="Caps video at 360p — useful on metered mobile connections."
-          checked={callState.settings().lowDataMode}
-          onChange={(v): void => callActions.setLowDataMode(v)}
-        />
       </div>
-    </div>
-  </Show>
+    </Show>
   );
 };
 
@@ -1267,44 +722,23 @@ const DevicePicker: Component<{
   const available = (): CallDevice[] =>
     callState.settings().availableDevices.filter((d) => d.kind === props.kind);
   return (
-    <label
-      style={{
-        display: "flex",
-        "flex-direction": "column",
-        gap: "6px",
-        "font-size": "13px",
-        color: COLOURS.textSecondary,
-      }}
-    >
-      <span style={{ "font-weight": "500", color: COLOURS.textPrimary }}>
-        {props.label}
-      </span>
+    <label class="lk-call-field">
+      {props.label}
       <select
         value={props.selectedId ?? ""}
         onChange={(e): void => {
           const value = e.currentTarget.value;
           props.onPick(value === "" ? null : value);
         }}
-        style={{
-          padding: "8px 10px",
-          "background-color": COLOURS.background,
-          color: COLOURS.textPrimary,
-          border: `1px solid ${COLOURS.border}`,
-          "border-radius": "8px",
-          "font-size": "14px",
-        }}
       >
         <option value="">System default</option>
         <For each={available()}>
-          {(d): JSX.Element => (
-            <option value={d.id}>{d.label || `(${d.kind})`}</option>
-          )}
+          {(d): JSX.Element => <option value={d.id}>{d.label || `(${d.kind})`}</option>}
         </For>
       </select>
       <Show when={available().length === 0}>
-        <span style={{ "font-size": "12px", color: COLOURS.textSecondary }}>
-          No devices reported yet. They appear here once you grant
-          microphone / camera permission.
+        <span class="lk-meta lk-block lk-mt-4">
+          No devices listed yet. They appear once you allow the microphone or camera.
         </span>
       </Show>
     </label>
@@ -1317,28 +751,15 @@ const SettingsToggle: Component<{
   checked: boolean;
   onChange: (value: boolean) => void;
 }> = (props) => (
-  <label
-    style={{
-      display: "flex",
-      "align-items": "flex-start",
-      gap: "10px",
-      cursor: "pointer",
-      "font-size": "14px",
-    }}
-  >
+  <label class="lk-check lk-call-toggle">
     <input
       type="checkbox"
       checked={props.checked}
       onChange={(e): void => props.onChange(e.currentTarget.checked)}
-      style={{ "margin-top": "3px" }}
     />
-    <span style={{ display: "flex", "flex-direction": "column", gap: "2px" }}>
-      <span style={{ color: COLOURS.textPrimary }}>{props.label}</span>
-      <Show when={props.description !== undefined}>
-        <span style={{ "font-size": "12px", color: COLOURS.textSecondary }}>
-          {props.description}
-        </span>
-      </Show>
+    <span class="lk-call-toggle-text">
+      <span>{props.label}</span>
+      <Show when={props.description}>{(d) => <span class="lk-meta">{d()}</span>}</Show>
     </span>
   </label>
 );
@@ -1349,69 +770,25 @@ const SettingsToggle: Component<{
 
 const ParticipantList: Component = () => (
   <Show when={callState.participantListOpen()}>
-    <aside
-      aria-label="Participant list"
-      style={{
-        position: "absolute",
-        right: "0",
-        top: "0",
-        bottom: "0",
-        width: "320px",
-        "background-color": COLOURS.surface,
-        "border-left": `1px solid ${COLOURS.border}`,
-        "overflow-y": "auto",
-        padding: "16px",
-        "z-index": "10",
-      }}
-    >
-      <div
-        style={{
-          display: "flex",
-          "justify-content": "space-between",
-          "align-items": "center",
-          "margin-bottom": "12px",
-        }}
-      >
-        <h2
-          style={{
-            margin: "0",
-            "font-size": "1rem",
-            color: COLOURS.textPrimary,
-          }}
-        >
-          Participants ({callState.participants().length})
-        </h2>
+    <aside class="lk-call-drawer" aria-label="Participants">
+      <div class="lk-call-drawer-head">
+        <h2>Participants ({callState.participants().length})</h2>
         <button
           type="button"
-          aria-label="Close participant list"
+          class="lk-icon-button"
+          aria-label="Close participants"
           onClick={(): void => callActions.setParticipantListOpen(false)}
-          style={{
-            background: "none",
-            border: "none",
-            color: COLOURS.textSecondary,
-            cursor: "pointer",
-            "font-size": "1.25rem",
-          }}
         >
           <Icon name="close" size={18} />
         </button>
       </div>
-      <ul style={{ "list-style": "none", margin: "0", padding: "0" }}>
+      <ul class="lk-call-people">
         <For each={callState.participants()}>
           {(p) => (
-            <li
-              style={{
-                display: "flex",
-                "align-items": "center",
-                gap: "10px",
-                padding: "10px 8px",
-                "border-bottom": `1px solid ${COLOURS.border}`,
-                color: COLOURS.textPrimary,
-              }}
-            >
+            <li class="lk-call-person">
               <QualityDot tier={p.quality} />
-              <span style={{ flex: "1" }}>
-                {p.displayName || (p.isLocal ? "You" : "Unknown")}
+              <span class="lk-call-person-name">
+                {p.displayName || (p.isLocal ? "You" : "Participant")}
               </span>
               <Show when={p.handRaised}>
                 <span title="Hand raised" aria-label="Hand raised">
@@ -1419,11 +796,7 @@ const ParticipantList: Component = () => (
                 </span>
               </Show>
               <Show when={!p.micOn}>
-                <span
-                  title="Muted"
-                  aria-label="Muted"
-                  style={{ color: COLOURS.mutedRed }}
-                >
+                <span class="lk-call-tile-muted" title="Muted" aria-label="Muted">
                   <Icon name="micOff" size={14} />
                 </span>
               </Show>
@@ -1441,47 +814,25 @@ const ParticipantList: Component = () => (
 );
 
 // ============================================================================
-// Banner — connecting / reconnecting / ended overlays
+// PhaseBanner — connecting / reconnecting / ended
 // ============================================================================
 
 const PhaseBanner: Component = () => (
   <Show when={callState.phase().kind !== "connected"}>
-    <div
-      role="status"
-      style={{
-        position: "absolute",
-        top: "12px",
-        left: "50%",
-        transform: "translateX(-50%)",
-        "background-color":
-          callState.phase().kind === "reconnecting"
-            ? COLOURS.qualityYellow
-            : callState.phase().kind === "ended"
-              ? COLOURS.endCallRed
-              : COLOURS.accentBlue,
-        color: "#0f1220",
-        padding: "6px 14px",
-        "border-radius": "6px",
-        "font-size": "0.85rem",
-        "font-weight": "600",
-        "z-index": "20",
-      }}
-    >
+    <div class="lk-call-phase" data-kind={callState.phase().kind} role="status">
       {phaseText(callState.phase())}
     </div>
   </Show>
 );
 
-function phaseText(
-  p: ReturnType<typeof callState.phase>,
-): string {
+function phaseText(p: ReturnType<typeof callState.phase>): string {
   switch (p.kind) {
     case "prejoin":
       return "";
     case "connecting":
-      return "Connecting…";
+      return "Connecting...";
     case "reconnecting":
-      return `Reconnecting — ${p.reason}`;
+      return `Reconnecting. ${p.reason}`;
     case "ended":
       return "Call ended";
     case "connected":
@@ -1490,7 +841,7 @@ function phaseText(
 }
 
 // ============================================================================
-// CallEndedOverlay — dim + auto-navigate after 3s
+// CallEndedOverlay — dim + hand back after 3 s
 // ============================================================================
 
 const CallEndedOverlay: Component<{ onDismiss: () => void }> = (props) => {
@@ -1505,36 +856,19 @@ const CallEndedOverlay: Component<{ onDismiss: () => void }> = (props) => {
   });
 
   return (
-    <div
-      style={{
-        position: "absolute",
-        inset: "0",
-        "background-color": "rgba(15, 18, 32, 0.88)",
-        "z-index": "30",
-        display: "flex",
-        "flex-direction": "column",
-        "align-items": "center",
-        "justify-content": "center",
-        color: COLOURS.textPrimary,
-        gap: "12px",
-      }}
-    >
-      <h1 style={{ margin: "0", "font-size": "2rem" }}>Call ended</h1>
-      <p style={{ margin: "0", color: COLOURS.textSecondary }}>
-        Returning to your chats…
-      </p>
+    <div class="lk-call-ended">
+      <h1>Call ended</h1>
+      <p>Returning to your chats...</p>
     </div>
   );
 };
 
 // ============================================================================
-// ChatPanel — in-call chat (S-3-A-chat)
+// ChatPanel — in-call chat
 // ============================================================================
 //
-// Right-rail panel on desktop (320 px), full-height. Transport
-// is text-only; emoji, attachments, and reactions are scoped
-// out of this sprint. System events (peer joined / left) are
-// rendered inline as grey centered lines.
+// Right-hand drawer, full height. Text only; system events (peer joined /
+// left) render inline as muted centred lines.
 
 const ChatPanel: Component = () => {
   let scrollRef: HTMLDivElement | undefined;
@@ -1554,8 +888,7 @@ const ChatPanel: Component = () => {
   // Auto-focus the compose box when the panel opens.
   createEffect((): void => {
     if (callState.chatOpen() && inputRef !== undefined) {
-      // Delay one tick — the input is being mounted in the
-      // same microtask.
+      // Delay one tick — the input is being mounted in the same microtask.
       queueMicrotask((): void => inputRef?.focus());
     }
   });
@@ -1566,81 +899,25 @@ const ChatPanel: Component = () => {
 
   return (
     <Show when={callState.chatOpen()}>
-      <aside
-        aria-label="Call chat"
-        style={{
-          position: "absolute",
-          right: "0",
-          top: "0",
-          bottom: "0",
-          width: "320px",
-          "background-color": COLOURS.surface,
-          "border-left": `1px solid ${COLOURS.border}`,
-          display: "flex",
-          "flex-direction": "column",
-          "z-index": "10",
-        }}
-      >
-        <header
-          style={{
-            display: "flex",
-            "align-items": "center",
-            "justify-content": "space-between",
-            padding: "14px 16px",
-            "border-bottom": `1px solid ${COLOURS.border}`,
-          }}
-        >
-          <span
-            style={{
-              "font-weight": "600",
-              "font-size": "15px",
-              color: COLOURS.textPrimary,
-            }}
-          >
-            Chat
-          </span>
+      <aside class="lk-call-drawer lk-call-chat" aria-label="Call chat">
+        <header class="lk-call-drawer-head">
+          <h2>Chat</h2>
           <button
             type="button"
+            class="lk-icon-button"
             aria-label="Close chat"
             onClick={(): void => callActions.setChatOpen(false)}
-            style={{
-              background: "none",
-              border: "none",
-              color: COLOURS.textSecondary,
-              "font-size": "20px",
-              cursor: "pointer",
-              padding: "2px 6px",
-            }}
           >
-            ×
+            <Icon name="close" size={18} />
           </button>
         </header>
 
-        <div
-          ref={scrollRef}
-          style={{
-            flex: "1",
-            "overflow-y": "auto",
-            padding: "12px 14px",
-            display: "flex",
-            "flex-direction": "column",
-            gap: "10px",
-          }}
-        >
+        <div class="lk-call-chat-log" ref={scrollRef}>
           <Show
             when={callState.chatMessages().length > 0}
             fallback={
-              <div
-                style={{
-                  color: COLOURS.textSecondary,
-                  "font-size": "13px",
-                  "text-align": "center",
-                  "padding-top": "32px",
-                  "line-height": "1.5",
-                }}
-              >
-                No messages yet. Anything you send is end-to-end encrypted
-                inside this call's MLS group — the server cannot read it.
+              <div class="lk-call-chat-empty">
+                No messages yet. Messages here are end-to-end encrypted.
               </div>
             }
           >
@@ -1651,12 +928,7 @@ const ChatPanel: Component = () => {
         </div>
 
         <form
-          style={{
-            display: "flex",
-            gap: "8px",
-            padding: "10px 12px",
-            "border-top": `1px solid ${COLOURS.border}`,
-          }}
+          class="lk-composer lk-call-chat-form"
           onSubmit={(e): void => {
             e.preventDefault();
             submit();
@@ -1664,44 +936,22 @@ const ChatPanel: Component = () => {
         >
           <input
             ref={inputRef}
+            class="lk-composer-input"
             type="text"
-            placeholder="Send a message"
-            aria-label="Compose chat message"
+            placeholder="Message"
+            aria-label="Message"
+            autocomplete="off"
             value={callState.composeText()}
-            onInput={(e): void =>
-              callActions.setComposeText(e.currentTarget.value)
-            }
-            style={{
-              flex: "1",
-              padding: "8px 10px",
-              "background-color": COLOURS.background,
-              color: COLOURS.textPrimary,
-              border: `1px solid ${COLOURS.border}`,
-              "border-radius": "8px",
-              "font-size": "14px",
-            }}
+            onInput={(e): void => callActions.setComposeText(e.currentTarget.value)}
           />
           <button
             type="submit"
+            class="lk-icon-button lk-send"
             disabled={callState.composeText().trim().length === 0}
-            aria-label="Send chat message"
-            style={{
-              padding: "8px 14px",
-              "background-color": COLOURS.accentBlue,
-              color: "#fff",
-              border: "none",
-              "border-radius": "8px",
-              cursor:
-                callState.composeText().trim().length === 0
-                  ? "not-allowed"
-                  : "pointer",
-              opacity:
-                callState.composeText().trim().length === 0 ? "0.5" : "1",
-              "font-size": "14px",
-              "font-weight": "600",
-            }}
+            aria-label="Send"
+            title="Send"
           >
-            Send
+            <Icon name="send" size={20} />
           </button>
         </form>
       </aside>
@@ -1718,82 +968,37 @@ const ChatMessageRow: Component<{ msg: ChatMessage }> = (props) => {
     return `${hh}:${mm}`;
   };
   return (
-    <Show
-      when={!isSystem()}
-      fallback={
-        <div
-          style={{
-            color: COLOURS.textSecondary,
-            "font-size": "12px",
-            "text-align": "center",
-            "font-style": "italic",
-          }}
-        >
-          {props.msg.text}
-        </div>
-      }
-    >
-      <div
-        style={{
-          display: "flex",
-          "flex-direction": "column",
-          gap: "2px",
-        }}
-      >
-        <div
-          style={{
-            display: "flex",
-            gap: "8px",
-            "align-items": "baseline",
-            "font-size": "12px",
-            color: COLOURS.textSecondary,
-          }}
-        >
-          <span style={{ color: COLOURS.accentBlue, "font-weight": "600" }}>
-            {props.msg.senderName}
-          </span>
+    <Show when={!isSystem()} fallback={<div class="lk-call-msg-sys">{props.msg.text}</div>}>
+      <div class="lk-call-msg">
+        <div class="lk-call-msg-meta">
+          <span class="lk-call-msg-sender">{props.msg.senderName}</span>
           <span>{time()}</span>
         </div>
-        <div
-          style={{
-            color: COLOURS.textPrimary,
-            "font-size": "14px",
-            "line-height": "1.4",
-            "word-break": "break-word",
-          }}
-        >
-          {props.msg.text}
-        </div>
+        <div class="lk-call-msg-text">{props.msg.text}</div>
       </div>
     </Show>
   );
 };
 
 // ============================================================================
-// Mock data — seeds the screen with placeholder participants until
-// the WebRTC pod (3a-pod-followup) wires real ones in.
+// Mock data — seeds the standalone design route with placeholder participants
 // ============================================================================
 
 function seedMockParticipants(): void {
-  // Mock E2EE — once the WebRTC pod (3a-pod-followup) wires the
-  // real CallKey, it calls callActions.setE2ee with the actual
-  // BLAKE3 fingerprint of the seed.
+  // Mock safety number and connection metrics — the live paths write real
+  // ones through the same actions.
   callActions.setE2ee({
     active: true,
     shortFingerprint: "3F7A B2C1 9E0D",
   });
-  // Mock connection metrics — quality sampler feeds real numbers
-  // post-pod-landing.
   callActions.setConnectionDetail({
     rttMs: 45,
     downBps: 720_000,
     upBps: 380_000,
     connectionType: "direct",
   });
-  // Mobile probe — production code calls
-  // `navigator.mediaDevices.enumerateDevices()` and counts how
-  // many videoinput kinds came back. Hard-coded false here so
-  // the desktop preview doesn't show the switch-camera button.
+  // Hard-coded false so the desktop preview does not show the switch-camera
+  // button.
   callActions.setHasMultipleCameras(false);
   callActions.setParticipants([
     {
@@ -1841,8 +1046,7 @@ function seedMockParticipants(): void {
       screenSharing: false,
     },
   ]);
-  // Synthesise the "connected" transition the way the WebRTC pod
-  // will once it lands — mock answers after a short delay.
+  // Synthesise the "connected" transition after a short delay.
   window.setTimeout((): void => {
     callActions.setPhase({ kind: "connected" });
   }, 600);
@@ -1852,69 +1056,48 @@ function seedMockParticipants(): void {
 // Top-level route
 // ============================================================================
 
-/**
- * In-call screen.
- *
- * Two modes:
- *   * Standalone design route (`/call/:id`, no props) — seeds mock
- *     participants on Join; the reference UI for the design system.
- *   * Embedded over a live chat (G3-3-web-session-bind) — `embedded`
- *     is set and the parent (Chat.tsx) drives `callState` from the
- *     real `CallSession`. In this mode the screen skips the
- *     mount-time `reset()` (the parent owns lifecycle), routes
- *     end-call + the ended-overlay dismissal through `onExit`
- *     instead of navigating home, and hides the text E2EE pill
- *     (the 1×1 web path is P2P DTLS-SRTP, not SFrame — the pill
- *     would mislead, and a text chip during the call is poor UX).
- */
 const Call: Component<{
   embedded?: boolean;
   onExit?: () => void;
-  /** SFU group-call only: resolve a roster participant id to its live
-   *  remote `MediaStream` so the tile can render real video. Omitted on
-   *  the 1×1 and mock paths (tiles fall back to the avatar / placeholder). */
-  remoteStreamFor?:
-    | ((participantId: string) => MediaStream | undefined)
-    | undefined;
-  /** 1×1 P2P only: the local capture `MediaStream`, for the LOCAL
-   *  tile's self-preview `<video>`. Omitted on the SFU / mock paths. */
+  /** SFU group-call only: resolve a roster participant id to its live remote
+   *  `MediaStream` so the tile can render real video. Omitted on the 1x1 and
+   *  mock paths (tiles fall back to the avatar / blank surface). */
+  remoteStreamFor?: ((participantId: string) => MediaStream | undefined) | undefined;
+  /** 1x1 P2P only: the local capture `MediaStream`, for the LOCAL tile's
+   *  self-preview `<video>`. Omitted on the SFU / mock paths. */
   localStream?: (() => MediaStream | undefined) | undefined;
 }> = (props) => {
   const navigate = useNavigate();
 
-  // Sound cues — one controller per Call mount; disposed on
-  // unmount so cached <audio> elements + their decoders are
-  // released cleanly.
+  // Sound cues — one controller per Call mount; disposed on unmount so cached
+  // <audio> elements + their decoders are released cleanly.
   const sounds = new CallSoundController();
 
   onMount(() => {
-    // Embedded mode: the parent already drove `callState` to a
-    // live phase before mounting us — resetting would wipe it.
+    // Embedded mode: the host already drove `callState` to a live phase
+    // before mounting us — resetting would wipe it.
     if (props.embedded !== true) {
       callActions.reset();
-      // Note: `reset()` leaves us in `prejoin` phase. The mock
-      // participants + E2EE state get seeded only after the user
-      // clicks "Join" on the prejoin screen (handled by
-      // `seedMockParticipants` inside the onJoin callback below).
+      // `reset()` leaves us in `prejoin`. The mock participants + safety
+      // number get seeded only after the user clicks Join.
     }
   });
   onCleanup(() => {
     sounds.dispose();
-    // Embedded mode: the parent owns the call lifecycle and resets
-    // `callState` when the session reaches `done`.
+    // Embedded mode: the host owns the call lifecycle and resets `callState`
+    // when the session reaches `done`.
     if (props.embedded !== true) {
       callActions.reset();
     }
   });
 
-  // Phase → sound mapping. Mirrors the same trigger map on
-  // iOS / Android so the user-facing audio is identical
-  // across platforms.
-  //   prejoin     → silence
-  //   connecting  → ringback-outgoing loop ("we are calling")
-  //   connected   → stop ringback, play join one-shot
-  //   reconnecting→ stop everything (visual banner conveys it)
-  //   ended       → stop everything, play leave one-shot
+  // Phase -> sound mapping. Mirrors the same trigger map on iOS / Android so
+  // the user-facing audio is identical across platforms.
+  //   prejoin      -> silence
+  //   connecting   -> ringback-outgoing loop ("we are calling")
+  //   connected    -> stop ringback, play join one-shot
+  //   reconnecting -> stop everything (the banner conveys it)
+  //   ended        -> stop everything, play leave one-shot
   createEffect(() => {
     const kind = callState.phase().kind;
     switch (kind) {
@@ -1938,12 +1121,9 @@ const Call: Component<{
     }
   });
 
-  // Peer-arrival / peer-departure cues + chat system events.
-  // Track the remote participant count + the id set; on each
-  // delta fire the right audio cue AND post a system event
-  // into the chat ("Alice joined", "Bob left"). Local
-  // participant is excluded because they aren't a "peer"
-  // from the user's perspective.
+  // Peer-arrival / peer-departure cues + chat system events. Track the
+  // remote id set; on each delta fire the right cue AND post a system event
+  // into the chat. The local participant is excluded.
   let lastRemoteIds: ReadonlyArray<string> = [];
   createEffect(() => {
     const remote = callState.participants().filter((p) => !p.isLocal);
@@ -1964,30 +1144,17 @@ const Call: Component<{
         if (!remoteById.has(prevId)) {
           sounds.playOnce("leave");
           callActions.addSystemEvent(`A participant left the call`);
-          // Display name has already been dropped from state by
-          // the time we observe the deletion; the WebRTC pod
-          // will preserve the last-known name in a future
-          // refinement (out of scope for S-3-A-chat).
+          // The display name has already been dropped from state by the
+          // time we observe the deletion.
         }
       }
     }
     lastRemoteIds = remoteIds;
   });
 
-  // Compute whether we're alone in the call (no remote yet).
-  // The WaitingMessage overlay fires off this.
-  const isAlone = (): boolean =>
-    callState.participants().filter((p) => !p.isLocal).length === 0;
-
-  // Auto-navigate back after the "Call ended" overlay's 3s
-  // timer fires.
-  createEffect(() => {
-    if (callState.phase().kind === "ended") {
-      // Effect runs once on transition — the overlay's own
-      // onCleanup handles its setTimeout, this just wires the
-      // navigation hook.
-    }
-  });
+  // Whether we are alone in the call (no remote yet). The waiting line
+  // fires off this.
+  const isAlone = (): boolean => callState.participants().filter((p) => !p.isLocal).length === 0;
 
   return (
     <Show
@@ -1995,8 +1162,7 @@ const Call: Component<{
       fallback={
         <PrejoinScreen
           onJoin={(): void => {
-            // Synthesise the "connected" transition the way
-            // the WebRTC pod will once it lands.
+            // Synthesise the "connected" transition on the design route.
             seedMockParticipants();
             window.setTimeout((): void => {
               callActions.setPhase({ kind: "connected" });
@@ -2005,58 +1171,24 @@ const Call: Component<{
         />
       }
     >
-      <div
-        style={{
-          position: "fixed",
-          inset: "0",
-          "background-color": COLOURS.background,
-          color: COLOURS.textPrimary,
-          display: "flex",
-          "flex-direction": "column",
-        }}
-      >
+      <div class="lk-call">
         <PhaseBanner />
 
-        {/* Top status bar — E2EE indicator (left) +
-            connection-quality dot with popover (right). The
-            phase banner floats over the centre. */}
-        <header
-          style={{
-            display: "flex",
-            "justify-content": "space-between",
-            "align-items": "center",
-            padding: "10px 14px",
-            "background-color": COLOURS.surface,
-            "border-bottom": `1px solid ${COLOURS.border}`,
-            "z-index": "5",
-          }}
-        >
-          {/* The pill gates on whether there IS a safety number, not on
-              which surface is asking — see calls/safety-pill.ts. It used to
-              also require `props.embedded !== true`, which hid it on every
-              live call, group calls included, because `Chat.tsx` always
-              mounts this embedded. */}
+        {/* Top status bar — the safety-number pill (left) + the connection
+            quality dot with its popover (right). The phase banner floats
+            over the centre. */}
+        <header class="lk-call-head">
           <E2eePill />
           <QualityIndicator />
         </header>
 
         <main
+          class="lk-call-main"
           onClick={(): void => {
-            // Tap anywhere on the main area → close the quality
-            // popover. Standard "tap-outside-to-close" UX for
-            // floating panels.
+            // Tap anywhere on the main area closes the quality popover.
             if (callState.qualityPopoverOpen()) {
               callActions.setQualityPopoverOpen(false);
             }
-          }}
-          style={{
-            flex: "1",
-            position: "relative",
-            display: "flex",
-            "flex-direction": "column",
-            gap: "12px",
-            padding: "16px",
-            "overflow-y": "auto",
           }}
         >
           <Show when={isAlone() && callState.phase().kind === "connected"}>
@@ -2064,46 +1196,26 @@ const Call: Component<{
           </Show>
 
           <Show when={activeSpeaker() !== null}>
-            <div
-              style={{
-                "max-width": "1080px",
-                margin: "0 auto",
-                width: "100%",
-              }}
-            >
+            <div class="lk-call-stage">
               <ParticipantTile
                 participant={activeSpeaker() as Participant}
                 large={true}
-                onPin={(id): void =>
-                  callActions.pin(id === "" ? null : id)
-                }
+                onPin={(id): void => callActions.pin(id === "" ? null : id)}
                 remoteStreamFor={props.remoteStreamFor}
                 localStream={props.localStream}
               />
             </div>
           </Show>
 
-          <div
-            style={{
-              display: "grid",
-              "grid-template-columns":
-                "repeat(auto-fill, minmax(180px, 1fr))",
-              gap: "10px",
-              "max-width": "1080px",
-              margin: "0 auto",
-              width: "100%",
-            }}
-          >
+          <div class="lk-call-gallery">
             <For each={galleryParticipants()}>
               {(p) => (
                 <ParticipantTile
                   participant={p}
                   large={false}
-                  onPin={(id): void =>
-                    callActions.pin(id === "" ? null : id)
-                  }
+                  onPin={(id): void => callActions.pin(id === "" ? null : id)}
                   remoteStreamFor={props.remoteStreamFor}
-                localStream={props.localStream}
+                  localStream={props.localStream}
                 />
               )}
             </For>
@@ -2118,9 +1230,9 @@ const Call: Component<{
         <Show when={callState.phase().kind === "ended"}>
           <CallEndedOverlay
             onDismiss={(): void => {
-              // Embedded: hand control back to the parent (Chat
-              // tears the overlay down + resets state). Standalone
-              // design route: navigate home as before.
+              // Embedded: hand control back to the host (which tears the
+              // overlay down + resets state). Standalone design route:
+              // navigate home as before.
               if (props.embedded === true) {
                 props.onExit?.();
               } else {

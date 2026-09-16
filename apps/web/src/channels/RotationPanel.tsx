@@ -1,0 +1,175 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+/**
+ * Scheduled content-key rotation (ADR-0010 / C-54), on the owner's Manage
+ * screen: one plain status line and a "Refresh now" button. Drives the
+ * `RotationCron` heartbeat while mounted, over the SHARED PublisherGroup
+ * handle `ManagePanel` opened.
+ *
+ * The *scheduled* half of rotation (the membership-change half advances on
+ * every MLS epoch bump). The pure `channelShouldRotate` policy (default 24 h
+ * / 1000 posts) decides *when*; `runRotationOnce` / `startRotationCron` do
+ * *how*: advance the shared PublisherGroup epoch, derive the new seed, and
+ * reseal it to every subscriber via the staged + atomic fanout (ADR-0030).
+ *
+ * **Genesis-seed, not {0,0}.** `channelShouldRotate(default, {0,0}, now)`
+ * fires immediately against real wall-clock. Seeding the heartbeat with a
+ * `{0,0}` state would rotate + reseal every subscriber the instant the
+ * screen opens, so the first open seeds `channelRotationStateAfterRotation(now)`
+ * ("just rotated"). The "Refresh now" button deliberately forces a rotation
+ * by feeding a fresh `channelRotationStateNew()` through `runRotationOnce`,
+ * then adopts the returned state as the new baseline (via the context's
+ * `saveState`, which both paths share).
+ *
+ * **Fail-closed (invariant #4).** A rotation that fails part-way never
+ * exposes plaintext or a bad key: the reseal batch is atomic server-side, a
+ * single seal failure aborts the whole batch, and a failed fanout only
+ * leaves subscribers unable to read the *next* post until the next
+ * successful reseal.
+ */
+import { createSignal, onCleanup, onMount, Show, type JSX } from "solid-js";
+
+import { relativeTimeLabel } from "./relative-time";
+import {
+  runRotationOnce,
+  startRotationCron,
+  type RotationContext,
+  type RotationCronHandle,
+} from "./rotation-cron";
+import {
+  loadRotationState,
+  saveRotationState,
+  type ChannelRotationState,
+} from "./rotation-state-store";
+import type { WasmIdentity } from "./composer";
+import type { ChannelRotationPolicy, PublisherGroupHandle } from "./publisher-group-handle";
+import { loadWasm } from "../wasm";
+import { Icon } from "../ui/icons";
+
+export function RotationPanel(props: {
+  readonly channelIdHex: string;
+  readonly publisherGroup: PublisherGroupHandle;
+  readonly identity: WasmIdentity;
+}): JSX.Element {
+  const [status, setStatus] = createSignal("Loading...");
+  const [busy, setBusy] = createSignal(false);
+  const [error, setError] = createSignal<string | null>(null);
+
+  let cron: RotationCronHandle | null = null;
+  let policy: ChannelRotationPolicy | null = null;
+
+  /** A fresh rotation context bound to the SHARED handle. Both the
+   *  heartbeat and the button call this so their `saveState` writes land
+   *  in the same localStorage key. */
+  function context(): RotationContext {
+    return {
+      publisherGroup: props.publisherGroup,
+      identity: props.identity,
+      channelIdHex: props.channelIdHex,
+      saveState: (next: ChannelRotationState): void => {
+        saveRotationState(props.channelIdHex, next);
+      },
+      onRotated: (): void => {
+        refreshStatus();
+      },
+    };
+  }
+
+  /** Load the persisted state, or genesis-seed `after_rotation(now)` on
+   *  first open so the heartbeat does not fire an immediate rotation. */
+  async function loadOrSeedState(): Promise<ChannelRotationState> {
+    const existing = loadRotationState(props.channelIdHex);
+    if (existing !== null) return existing;
+    const wasm = await loadWasm();
+    const seeded = wasm.channelRotationStateAfterRotation(BigInt(Date.now()));
+    saveRotationState(props.channelIdHex, seeded);
+    return seeded;
+  }
+
+  function refreshStatus(): void {
+    const state = loadRotationState(props.channelIdHex);
+    if (state === null || state.lastRotationMs <= 0n) {
+      setStatus("Not refreshed yet.");
+      return;
+    }
+    setStatus(`Refreshed ${relativeTimeLabel(state.lastRotationMs)}.`);
+  }
+
+  /** Force a rotation regardless of the schedule. */
+  async function onRotateNow(): Promise<void> {
+    if (busy()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const wasm = await loadWasm();
+      const forcePolicy = policy ?? wasm.channelRotationPolicyDefault();
+      await runRotationOnce(context(), forcePolicy, wasm.channelRotationStateNew());
+      refreshStatus();
+    } catch (err) {
+      setError(`Could not refresh. Try again in a moment. (${String(err)})`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  onMount(() => {
+    void (async (): Promise<void> => {
+      const wasm = await loadWasm();
+      const defaultPolicy = wasm.channelRotationPolicyDefault();
+      policy = defaultPolicy;
+      await loadOrSeedState();
+      refreshStatus();
+      cron = startRotationCron({
+        context: context(),
+        policy: defaultPolicy,
+        loadState: (): Promise<ChannelRotationState> => loadOrSeedState(),
+        onError: (err: unknown): void => {
+          setError(`Could not check the channel's protection: ${String(err)}`);
+        },
+      });
+    })();
+  });
+
+  onCleanup(() => {
+    cron?.stop();
+    cron = null;
+  });
+
+  return (
+    <section class="lk-card">
+      <h2>Protection</h2>
+      <p class="lk-card-desc">
+        Lakko refreshes the channel's protection on its own. Refresh it now if you think a
+        subscriber's device was compromised.
+      </p>
+      <div class="lk-card-row">
+        <span class="lk-card-row-icon">
+          <Icon name="shield" size={18} />
+        </span>
+        <div class="lk-card-row-body">
+          <span class="lk-card-row-sub" role="status">
+            {status()}
+          </span>
+        </div>
+        <button
+          type="button"
+          class="small lk-card-row-action"
+          disabled={busy()}
+          onClick={(): void => {
+            void onRotateNow();
+          }}
+        >
+          {busy() ? "Refreshing..." : "Refresh now"}
+        </button>
+      </div>
+      <Show when={error()}>
+        {(msg) => (
+          <div class="lk-alert danger" role="alert">
+            {msg()}
+          </div>
+        )}
+      </Show>
+    </section>
+  );
+}

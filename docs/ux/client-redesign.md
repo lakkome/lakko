@@ -3,7 +3,7 @@
 
 # UX spec: client redesign (web, iOS, Android)
 
-Status: proposed, 2026-09-16. Written after the first native live run, which the
+Status: built, phases A to E landed 2026-09-16; kept as the reference for the client shape. Written after the first native live run, which the
 maintainer stopped: the clients do not look or behave like one modern messenger.
 This spec is the contract every client is rebuilt against. It defines the
 navigation model, the visual system, the per-screen shape and the copy rules.
@@ -83,6 +83,20 @@ flow, so the row is web-only. Screenshots: iOS Welcome on a spare simulator
 and the web screens; Android's anonymous screens were not captured (the
 only emulator holds the test account and the disk had no room for a second
 one).
+
+Phase E landed on all three the same day: Channels in the list vocabulary
+(avatar, name, handle, subscriber count when known, last post time, search,
+a compose menu), posts as cards with a chat-shaped publish composer and a
+Subscribe action for readers, a Manage screen for owners (subscribers as
+"Subscriber N", co-publisher requests, an invite-link row, one plain line
+of key-rotation status), the internal channel routes moved onto the app
+shell on Android, and the call surfaces on the dark half of the tokens with
+56 px round controls and a prejoin card; the second palettes are gone on
+every client. A channel post carries no author on the wire, so no author
+line exists. Known and unchanged: the channel list is in-memory on every
+client and empties on relaunch; hand-raise and screen-share stay mock-backed.
+Every phase of section 8 is now built; what remains is the per-row
+verification in docs/PRODUCT-READINESS.md, which is the product truth.
 
 ## 1. What is wrong today
 

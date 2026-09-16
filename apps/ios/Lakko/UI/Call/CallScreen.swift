@@ -58,13 +58,13 @@ private struct E2eePill: View {
             Image(systemName: "lock.fill")
                 .font(.caption2)
             Text(displayText)
-                .font(.system(.caption2, design: .monospaced))
+                .font(.system(.caption2, design: verified ? .monospaced : .default))
                 .fontWeight(.semibold)
         }
         .foregroundColor(verified ? Color.lakkoSuccess : Color.lakkoWarning)
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
-        .background(Color.lakkoSurface)
+        .background(Color.lakkoSurfaceSunken)
         .overlay(
             Capsule().stroke(Color.lakkoBorder, lineWidth: 1)
         )
@@ -80,7 +80,7 @@ private struct E2eePill: View {
         if state.active, let fp = state.shortFingerprint {
             return fp
         }
-        return "…"
+        return "Securing..."
     }
 
     /// Green (verified-comparable) only when keying is real AND a safety
@@ -123,7 +123,7 @@ private struct QualityIndicator: View {
             }
             Divider().background(Color.lakkoBorder)
             HStack(spacing: 4) {
-                Text("RTT:").foregroundColor(Color.lakkoTextMuted)
+                Text("Latency").foregroundColor(Color.lakkoTextMuted)
                 Text(state.connectionDetail.rttMs.map { "\($0) ms" } ?? "—")
             }
             HStack(spacing: 6) {
@@ -139,7 +139,7 @@ private struct QualityIndicator: View {
             RoundedRectangle(cornerRadius: 8).stroke(Color.lakkoBorder, lineWidth: 1)
         )
         .clipShape(RoundedRectangle(cornerRadius: 8))
-        .shadow(color: .black.opacity(0.5), radius: 8, y: 2)
+        .shadow(color: Color.lakkoBackground.opacity(0.5), radius: 8, y: 2)
         .frame(minWidth: 180, alignment: .leading)
     }
 
@@ -188,13 +188,13 @@ private struct ParticipantTile: View {
                     ProgressView()
                         .progressViewStyle(.circular)
                         .tint(Color.lakkoText)
-                    Text("Starting camera…")
+                    Text("Starting camera...")
                         .font(.caption)
                         .foregroundColor(Color.lakkoText)
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
-                .background(Color.black.opacity(0.55))
+                .background(Color.lakkoBackground.opacity(0.55))
                 .clipShape(Capsule())
             }
             // Large mute overlay (centre) for muted remotes.
@@ -203,7 +203,7 @@ private struct ParticipantTile: View {
                     .font(large ? .title : .body)
                     .foregroundColor(Color.lakkoDanger)
                     .padding(large ? 16 : 10)
-                    .background(Color.black.opacity(0.55))
+                    .background(Color.lakkoBackground.opacity(0.55))
                     .clipShape(Circle())
             }
             // Top-left screen-share badge.
@@ -214,7 +214,7 @@ private struct ParticipantTile: View {
                             .font(.caption2)
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
-                            .background(Color.black.opacity(0.6))
+                            .background(Color.lakkoBackground.opacity(0.6))
                             .clipShape(RoundedRectangle(cornerRadius: 6))
                             .foregroundColor(Color.lakkoText)
                         Spacer()
@@ -231,7 +231,7 @@ private struct ParticipantTile: View {
                         Image(systemName: "hand.raised.fill")
                             .font(.body)
                             .padding(4)
-                            .background(Color.black.opacity(0.6))
+                            .background(Color.lakkoBackground.opacity(0.6))
                             .clipShape(RoundedRectangle(cornerRadius: 6))
                     }
                     Spacer()
@@ -266,7 +266,7 @@ private struct ParticipantTile: View {
                 .foregroundColor(Color.lakkoText)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 8)
-                .background(Color.black.opacity(0.45))
+                .background(Color.lakkoBackground.opacity(0.45))
             }
         }
         .aspectRatio(large ? 16.0 / 9.0 : 4.0 / 3.0, contentMode: .fit)
@@ -334,8 +334,8 @@ private struct ParticipantTile: View {
             } else {
                 Color.lakkoSurfaceSunken
                 .overlay(
-                    Text("(video)")
-                        .font(.caption)
+                    Image(systemName: "video.fill")
+                        .font(.title3)
                         .foregroundColor(Color.lakkoTextMuted.opacity(0.6))
                 )
             }
@@ -361,6 +361,45 @@ private struct ParticipantTile: View {
 }
 
 // MARK: - ControlsBar
+
+/// The 56 pt round control face (UX spec section 5.7): elevated surface at
+/// rest, accent when the control is active, danger for End call. The glyph
+/// takes the accent foreground on a filled face so it reads on both.
+private struct CircleFace: View {
+    let systemImage: String
+    let active: Bool
+    var destructive: Bool = false
+    var busy: Bool = false
+
+    static let size: CGFloat = 56
+
+    var body: some View {
+        Group {
+            if busy {
+                ProgressView()
+                    .progressViewStyle(.circular)
+                    .tint(glyph)
+            } else {
+                Image(systemName: systemImage)
+                    .font(.title3)
+                    .foregroundColor(glyph)
+            }
+        }
+        .frame(width: Self.size, height: Self.size)
+        .background(background)
+        .clipShape(Circle())
+    }
+
+    private var background: Color {
+        if destructive { return Color.lakkoDanger }
+        if active { return Color.lakkoAccent }
+        return Color.lakkoSurface
+    }
+
+    private var glyph: Color {
+        (destructive || active) ? Color.lakkoAccentForeground : Color.lakkoText
+    }
+}
 
 private struct CircleButton: View {
     let label: String
@@ -391,35 +430,16 @@ private struct CircleButton: View {
 
     var body: some View {
         Button(action: onTap) {
-            Group {
-                if busy {
-                    ProgressView()
-                        .progressViewStyle(.circular)
-                        .tint(Color.lakkoText)
-                } else {
-                    Image(systemName: systemImage)
-                        .font(.body)
-                        .foregroundColor(Color.lakkoText)
-                }
-            }
-            .frame(width: 52, height: 52)
-            .background(bg)
-            .clipShape(Circle())
-            .shadow(
-                color: destructive
-                    ? Color.lakkoDanger.opacity(0.5)
-                    : .black.opacity(0.4),
-                radius: 4
+            CircleFace(
+                systemImage: systemImage,
+                active: active,
+                destructive: destructive,
+                busy: busy
             )
         }
+        .buttonStyle(.plain)
         .disabled(busy)
         .accessibilityLabel(busy ? "\(label), starting" : label)
-    }
-
-    private var bg: Color {
-        if destructive { return Color.lakkoDanger }
-        if active { return Color.lakkoAccent }
-        return Color.lakkoSurface
     }
 }
 
@@ -444,7 +464,7 @@ private struct ChatToggleButton: View {
             if state.chatUnreadCount > 0 && !state.chatOpen {
                 Text(state.chatUnreadCount > 99 ? "99+" : "\(state.chatUnreadCount)")
                     .font(.system(size: 11, weight: .bold))
-                    .foregroundColor(.white)
+                    .foregroundColor(Color.lakkoAccentForeground)
                     .padding(.horizontal, 5)
                     .frame(minWidth: 18, minHeight: 18)
                     .background(Capsule().fill(Color.lakkoDanger))
@@ -473,74 +493,180 @@ private struct ControlsBar: View {
     }
 
     var body: some View {
-        HStack(spacing: 12) {
-            CircleButton(
-                label: local?.micOn == true ? "Mute microphone" : "Unmute microphone",
-                systemImage: local?.micOn == true ? "mic.fill" : "mic.slash.fill",
-                active: local?.micOn == false,
-                onTap: { onSetMic(!(local?.micOn ?? true)) }
-            )
-            CircleButton(
-                label: local?.camOn == true ? "Stop camera" : "Start camera",
-                systemImage: local?.camOn == true ? "video.fill" : "video.slash.fill",
-                active: local?.camOn == false,
-                // B2a — while the mid-call camera acquire is in flight the
-                // button shows a spinner + is disabled (the session already
-                // in-flight-guards the acquire; this is the visual half).
-                busy: state.videoPublishState == .starting,
-                onTap: { onSetCamera(!(local?.camOn ?? true)) }
-            )
-            if state.hasMultipleCameras && local?.camOn == true {
-                CircleButton(
-                    label: "Switch camera",
-                    systemImage: "arrow.triangle.2.circlepath.camera",
-                    active: false,
-                    onTap: { /* WebRTC pod owns facingMode toggle (3a-pod-followup) */ }
-                )
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 12) {
+                micButton
+                cameraButton
+                switchCameraButton
+                participantsButton
+                raiseHandButton
+                screenShareButton
+                ChatToggleButton(state: state)
+                settingsButton
+                endCallButton
             }
-            CircleButton(
-                label: "Participants",
-                systemImage: "person.3.fill",
-                active: state.participantListOpen,
-                onTap: { state.setParticipantListOpen(!state.participantListOpen) }
-            )
-            CircleButton(
-                label: local?.handRaised == true ? "Lower hand" : "Raise hand",
-                systemImage: "hand.raised.fill",
-                active: local?.handRaised == true,
-                onTap: { state.setHandRaised(!(local?.handRaised ?? false)) }
-            )
-            CircleButton(
-                label: local?.screenSharing == true
-                    ? "Stop sharing screen" : "Share screen",
-                systemImage: "rectangle.on.rectangle",
-                active: local?.screenSharing == true,
-                onTap: { state.setScreenSharing(!(local?.screenSharing ?? false)) }
-            )
-            ChatToggleButton(state: state)
-            CircleButton(
-                label: "Settings",
-                systemImage: "gearshape.fill",
-                active: state.settingsOpen,
-                onTap: { state.setSettingsOpen(!state.settingsOpen) }
-            )
-            CircleButton(
-                label: "End call",
-                systemImage: "phone.down.fill",
-                active: false,
-                destructive: true,
-                onTap: onEndCall
-            )
+            HStack(spacing: 12) {
+                micButton
+                cameraButton
+                participantsButton
+                ChatToggleButton(state: state)
+                moreMenu
+                endCallButton
+            }
+            HStack(spacing: 10) {
+                micButton
+                cameraButton
+                moreMenu
+                endCallButton
+            }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 14)
-        .background(Color.lakkoSurface)
+        .frame(maxWidth: .infinity)
+        .background(Color.lakkoSurfaceSunken)
         .overlay(
             Rectangle()
                 .frame(height: 1)
                 .foregroundColor(Color.lakkoBorder),
             alignment: .top
         )
+    }
+
+    private var micButton: some View {
+        CircleButton(
+            label: local?.micOn == true ? "Mute microphone" : "Unmute microphone",
+            systemImage: local?.micOn == true ? "mic.fill" : "mic.slash.fill",
+            active: local?.micOn == false,
+            onTap: { onSetMic(!(local?.micOn ?? true)) }
+        )
+    }
+
+    private var cameraButton: some View {
+        CircleButton(
+            label: local?.camOn == true ? "Stop camera" : "Start camera",
+            systemImage: local?.camOn == true ? "video.fill" : "video.slash.fill",
+            active: local?.camOn == false,
+            // B2a — while the mid-call camera acquire is in flight the
+            // button shows a spinner + is disabled (the session already
+            // in-flight-guards the acquire; this is the visual half).
+            busy: state.videoPublishState == .starting,
+            onTap: { onSetCamera(!(local?.camOn ?? true)) }
+        )
+    }
+
+    private var canSwitchCamera: Bool {
+        state.hasMultipleCameras && local?.camOn == true
+    }
+
+    @ViewBuilder
+    private var switchCameraButton: some View {
+        if canSwitchCamera {
+            CircleButton(
+                label: "Switch camera",
+                systemImage: "arrow.triangle.2.circlepath.camera",
+                active: false,
+                onTap: { /* WebRTC pod owns facingMode toggle (3a-pod-followup) */ }
+            )
+        }
+    }
+
+    private var participantsButton: some View {
+        CircleButton(
+            label: "Participants",
+            systemImage: "person.3.fill",
+            active: state.participantListOpen,
+            onTap: { state.setParticipantListOpen(!state.participantListOpen) }
+        )
+    }
+
+    private var raiseHandButton: some View {
+        CircleButton(
+            label: local?.handRaised == true ? "Lower hand" : "Raise hand",
+            systemImage: "hand.raised.fill",
+            active: local?.handRaised == true,
+            onTap: { state.setHandRaised(!(local?.handRaised ?? false)) }
+        )
+    }
+
+    private var screenShareButton: some View {
+        CircleButton(
+            label: local?.screenSharing == true
+                ? "Stop sharing screen" : "Share screen",
+            systemImage: "rectangle.on.rectangle",
+            active: local?.screenSharing == true,
+            onTap: { state.setScreenSharing(!(local?.screenSharing ?? false)) }
+        )
+    }
+
+    private var settingsButton: some View {
+        CircleButton(
+            label: "Settings",
+            systemImage: "gearshape.fill",
+            active: state.settingsOpen,
+            onTap: { state.setSettingsOpen(!state.settingsOpen) }
+        )
+    }
+
+    private var endCallButton: some View {
+        CircleButton(
+            label: "End call",
+            systemImage: "phone.down.fill",
+            active: false,
+            destructive: true,
+            onTap: onEndCall
+        )
+    }
+
+    /// The controls that do not fit a phone-width row. Same actions, same
+    /// state; only the placement differs from the wide layout.
+    private var moreMenu: some View {
+        Menu {
+            Button {
+                state.setParticipantListOpen(!state.participantListOpen)
+            } label: {
+                Label("Participants", systemImage: "person.3")
+            }
+            Button {
+                state.setChatOpen(!state.chatOpen)
+            } label: {
+                Label(
+                    state.chatUnreadCount > 0
+                        ? "Chat (\(state.chatUnreadCount) unread)" : "Chat",
+                    systemImage: "bubble.left.and.bubble.right")
+            }
+            Button {
+                state.setHandRaised(!(local?.handRaised ?? false))
+            } label: {
+                Label(
+                    local?.handRaised == true ? "Lower hand" : "Raise hand",
+                    systemImage: "hand.raised")
+            }
+            Button {
+                state.setScreenSharing(!(local?.screenSharing ?? false))
+            } label: {
+                Label(
+                    local?.screenSharing == true ? "Stop sharing screen" : "Share screen",
+                    systemImage: "rectangle.on.rectangle")
+            }
+            if canSwitchCamera {
+                Button {
+                    /* WebRTC pod owns facingMode toggle (3a-pod-followup) */
+                } label: {
+                    Label("Switch camera", systemImage: "arrow.triangle.2.circlepath.camera")
+                }
+            }
+            Button {
+                state.setSettingsOpen(!state.settingsOpen)
+            } label: {
+                Label("Settings", systemImage: "gearshape")
+            }
+        } label: {
+            CircleFace(
+                systemImage: "ellipsis",
+                active: local?.handRaised == true || local?.screenSharing == true
+            )
+        }
+        .accessibilityLabel("More controls")
     }
 }
 
@@ -619,141 +745,107 @@ private struct PrejoinView: View {
     /// on the standalone design route (no session to abandon).
     var onCancel: (() -> Void)?
 
-    @State private var displayName: String = ""
     @State private var camOn: Bool = true
     @State private var micOn: Bool = true
 
     var body: some View {
         ZStack {
             Color.lakkoBackground.ignoresSafeArea()
-            VStack(spacing: 20) {
-                Text("Join Call")
-                    .font(.title2)
-                    .fontWeight(.semibold)
-                    .foregroundColor(Color.lakkoText)
-                Text("Set up your camera and microphone")
-                    .font(.subheadline)
-                    .foregroundColor(Color.lakkoTextMuted)
-
-                // Video preview box with overlays.
-                ZStack {
-                    if camOn {
-                        // G3-1-video-ui-screen — same posture as
-                        // the in-call self-tile: when the host
-                        // has already armed the camera via
-                        // `CallSession.startLocalCameraCapture`
-                        // (rare on the prejoin path — production
-                        // typically waits until the user taps
-                        // "Join" — but the testbed + the
-                        // accept-with-video flow both arm it
-                        // here), render the live preview.
-                        // Otherwise fall through to the
-                        // legacy gradient placeholder.
-                        if let track = state.localVideoTrack {
-                            LocalVideoPreviewView(
-                                track: track,
-                                mirrored: state.settings.mirrorLocal,
-                                contentMode: .scaleAspectFill
-                            )
-                        } else {
-                            Color.lakkoSurfaceSunken
-                            .overlay(
-                                Text("(camera preview)")
-                                    .font(.subheadline)
-                                    .foregroundColor(Color.lakkoTextMuted)
-                            )
-                        }
-                    } else {
-                        ZStack {
-                            Color.lakkoSurface
-                            Image(systemName: "video.slash.fill")
-                                .font(.largeTitle)
-                                .foregroundColor(Color.lakkoTextMuted)
-                        }
-                    }
-
-                    // Cam / mic toggle overlays.
-                    VStack {
-                        HStack {
-                            Spacer()
-                            HStack(spacing: 8) {
-                                Button(action: { camOn.toggle() }) {
-                                    Image(systemName: camOn ? "video.fill" : "video.slash.fill")
-                                        .foregroundColor(Color.lakkoText)
-                                        .frame(width: 36, height: 36)
-                                        .background(
-                                            camOn ? Color.black.opacity(0.55)
-                                                  : Color.lakkoDanger
-                                        )
-                                        .clipShape(Circle())
-                                }
-                                .accessibilityLabel(camOn ? "Turn off camera" : "Turn on camera")
-                                Button(action: { micOn.toggle() }) {
-                                    Image(systemName: micOn ? "mic.fill" : "mic.slash.fill")
-                                        .foregroundColor(Color.lakkoText)
-                                        .frame(width: 36, height: 36)
-                                        .background(
-                                            micOn ? Color.black.opacity(0.55)
-                                                  : Color.lakkoDanger
-                                        )
-                                        .clipShape(Circle())
-                                }
-                                .accessibilityLabel(micOn ? "Mute microphone" : "Unmute microphone")
-                            }
-                            .padding(10)
-                        }
-                        Spacer()
-                    }
-
-                    // Display name input at the bottom.
-                    VStack {
-                        Spacer()
-                        TextField("", text: $displayName, prompt:
-                            Text("Your name")
-                                .foregroundColor(Color.lakkoTextMuted)
-                        )
-                        .textInputAutocapitalization(.words)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .foregroundColor(Color.lakkoText)
-                        .background(Color.white.opacity(0.08))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8)
-                                .stroke(Color.lakkoBorder, lineWidth: 1)
-                        )
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                        .padding(12)
-                        .background(Color.black.opacity(0.45))
-                    }
-                }
-                .aspectRatio(16.0 / 9.0, contentMode: .fit)
-                .clipShape(RoundedRectangle(cornerRadius: 12))
-                .frame(maxWidth: 480)
-
-                Button(action: { onJoin(displayName, micOn, camOn) }) {
-                    Text("Join")
-                        .font(.headline)
-                        .foregroundColor(Color.lakkoText)
-                        .padding(.horizontal, 32)
-                        .padding(.vertical, 12)
-                        .background(Color.lakkoAccent)
-                        .clipShape(RoundedRectangle(cornerRadius: 10))
-                        .shadow(color: Color.lakkoAccent.opacity(0.4), radius: 4, y: 2)
-                }
-                .accessibilityLabel("Join the call")
-
-                if let onCancel = onCancel {
-                    Button(action: onCancel) {
-                        Text("Cancel")
+            ScrollView {
+                // One card (design system section 3): the preview, two
+                // toggles, Join. The name field is gone — the roster name
+                // comes from the contact, not from a prompt here.
+                VStack(spacing: 20) {
+                    VStack(spacing: 4) {
+                        Text("Join call")
+                            .font(.title2)
+                            .fontWeight(.semibold)
+                            .foregroundColor(Color.lakkoText)
+                        Text("Check your camera and microphone")
                             .font(.subheadline)
                             .foregroundColor(Color.lakkoTextMuted)
-                            .padding(.horizontal, 24)
-                            .padding(.vertical, 10)
                     }
-                    .accessibilityLabel("Cancel the call")
+
+                    preview
+                        .aspectRatio(16.0 / 9.0, contentMode: .fit)
+                        .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.card, style: .continuous))
+
+                    VStack(spacing: 0) {
+                        Toggle(isOn: $camOn) {
+                            Label("Camera", systemImage: camOn ? "video.fill" : "video.slash.fill")
+                                .foregroundColor(Color.lakkoText)
+                        }
+                        .padding(.vertical, 10)
+                        Divider().overlay(Color.lakkoBorder)
+                        Toggle(isOn: $micOn) {
+                            Label("Microphone", systemImage: micOn ? "mic.fill" : "mic.slash.fill")
+                                .foregroundColor(Color.lakkoText)
+                        }
+                        .padding(.vertical, 10)
+                    }
+                    .tint(Color.lakkoAccent)
+
+                    Button(action: { onJoin("", micOn, camOn) }) {
+                        Text("Join")
+                            .font(.headline)
+                            .foregroundColor(Color.lakkoAccentForeground)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 12)
+                            .background(Color.lakkoAccent)
+                            .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.control, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Join the call")
+
+                    if let onCancel = onCancel {
+                        Button(action: onCancel) {
+                            Text("Cancel")
+                                .font(.subheadline)
+                                .foregroundColor(Color.lakkoTextMuted)
+                                .padding(.vertical, 6)
+                        }
+                        .accessibilityLabel("Cancel the call")
+                    }
+                }
+                .padding(20)
+                .background(Color.lakkoSurface)
+                .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.card, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: LakkoRadius.card, style: .continuous)
+                        .stroke(Color.lakkoBorder, lineWidth: 1)
+                )
+                .frame(maxWidth: 480)
+                .padding(24)
+            }
+        }
+    }
+
+    /// G3-1-video-ui-screen — same posture as the in-call self-tile: when
+    /// the host has already armed the camera via
+    /// `CallSession.startLocalCameraCapture` (rare on the prejoin path —
+    /// production typically waits until the user taps Join — but the
+    /// testbed + the accept-with-video flow both arm it here), render the
+    /// live preview. Otherwise a placeholder on the sunken surface.
+    @ViewBuilder
+    private var preview: some View {
+        if camOn, let track = state.localVideoTrack {
+            LocalVideoPreviewView(
+                track: track,
+                mirrored: state.settings.mirrorLocal,
+                contentMode: .scaleAspectFill
+            )
+        } else {
+            ZStack {
+                Color.lakkoSurfaceSunken
+                VStack(spacing: 8) {
+                    Image(systemName: camOn ? "video.fill" : "video.slash.fill")
+                        .font(.largeTitle)
+                        .foregroundColor(Color.lakkoTextMuted)
+                    Text(camOn ? "Your camera starts when you join" : "Camera off")
+                        .font(.footnote)
+                        .foregroundColor(Color.lakkoTextMuted)
                 }
             }
-            .padding(24)
         }
     }
 }
@@ -769,7 +861,7 @@ private struct PhaseBanner: View {
                 Text(info.text)
                     .font(.caption)
                     .fontWeight(.semibold)
-                    .foregroundColor(.black.opacity(0.9))
+                    .foregroundColor(Color.lakkoAccentForeground)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 6)
                     .background(info.colour)
@@ -783,9 +875,9 @@ private struct PhaseBanner: View {
         case .prejoin, .connected:
             return nil
         case .connecting:
-            return ("Connecting…", Color.lakkoAccent)
+            return ("Connecting...", Color.lakkoAccent)
         case .reconnecting(let reason):
-            return ("Reconnecting — \(reason)", Color.lakkoWarning)
+            return ("Reconnecting... \(reason)", Color.lakkoWarning)
         case .ended:
             return ("Call ended", Color.lakkoDanger)
         }
@@ -796,7 +888,7 @@ private struct PhaseBanner: View {
 
 private struct WaitingMessageOverlay: View {
     var body: some View {
-        Text("Waiting for participant…")
+        Text("Waiting for others to join...")
             .font(.subheadline)
             .foregroundColor(Color.lakkoText)
             .padding(.horizontal, 24)
@@ -824,7 +916,7 @@ private struct CallEndedOverlay: View {
                     .font(.largeTitle)
                     .fontWeight(.semibold)
                     .foregroundColor(Color.lakkoText)
-                Text("Returning to your chats…")
+                Text("Returning to your chats...")
                     .foregroundColor(Color.lakkoTextMuted)
             }
         }
@@ -1372,12 +1464,12 @@ private struct ChatSheet: View {
                     Button(action: send) {
                         Text("Send")
                             .font(.system(size: 14, weight: .semibold))
-                            .foregroundColor(.white)
+                            .foregroundColor(canSend ? Color.lakkoAccentForeground : Color.lakkoTextMuted)
                             .padding(.horizontal, 14)
                             .padding(.vertical, 8)
                             .background(
-                                RoundedRectangle(cornerRadius: 8)
-                                    .fill(canSend ? Color.lakkoAccent : Color.lakkoSurface)
+                                RoundedRectangle(cornerRadius: LakkoRadius.control)
+                                    .fill(canSend ? Color.lakkoAccent : Color.lakkoSurfaceSunken)
                             )
                     }
                     .disabled(!canSend)

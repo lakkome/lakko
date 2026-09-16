@@ -83,7 +83,13 @@ import me.lakko.app.ui.auth.SignupViewModel
 import me.lakko.app.ui.chat.ChatListScreen
 import me.lakko.app.ui.chat.ChatScreen
 import me.lakko.app.ui.chat.ChatViewModel
-import me.lakko.app.ui.channels.ChannelsRootScreen
+import me.lakko.app.ui.channels.ChannelDetailScreen
+import me.lakko.app.ui.channels.ChannelManageScreen
+import me.lakko.app.ui.channels.ChannelSubscribeScreen
+import me.lakko.app.ui.channels.ChannelsListScreen
+import me.lakko.app.ui.channels.JoinCoPublisherScreen
+import me.lakko.app.ui.channels.NewChannelScreen
+import me.lakko.app.ui.channels.rememberChannelsUiState
 import me.lakko.app.ui.contacts.ContactsScreen
 import me.lakko.app.ui.contacts.ContactsViewModel
 import me.lakko.app.ui.contacts.InviteLandingScreen
@@ -702,6 +708,11 @@ private fun SessionRoot(
     }
 
     val navController = rememberNavController()
+    // Shared by every Channels destination (the list, a channel, its subscribe
+    // route, Manage, New channel, Join as co-publisher): one local channels
+    // state (Keystore-backed key persistence) and one REST client.
+    val channelsState = rememberChannelsUiState()
+    val channelsClient = remember { me.lakko.app.channels.ChannelsClient() }
 
     // The app-level receive loop: every group long-polled while the app is in
     // the foreground, WHATEVER screen is showing. Call signaling (the 1x1 call
@@ -932,15 +943,97 @@ private fun SessionRoot(
                         deviceGroupSync = deviceGroupSync,
                     )
                 }
+                // Channels (ADR-0010) — docs/ux/client-redesign.md section 5.4.
+                // The list is the tab; the channel view, its subscribe route,
+                // the owner's Manage screen, New channel and Join as
+                // co-publisher are pushed destinations of this host. The
+                // AccountIdentity (phrase) seed (ADR-0017) comes from the live
+                // IdentitySecrets so a publisher can rebuild its group.
                 composable(Routes.CHANNELS) {
-                    // Phase 4 (ADR-0010) — broadcast channels. Threads the
-                    // AccountIdentity (phrase) seed (ADR-0017) from the live
-                    // IdentitySecrets so a publisher can rebuild its group.
+                    ChannelsListScreen(
+                        state = channelsState,
+                        onCreate = { navController.navigate(Routes.CHANNEL_NEW) },
+                        onOpen = { id -> navController.navigate(Routes.channel(id)) },
+                        onJoin = { navController.navigate(Routes.CHANNEL_JOIN) },
+                        onFindSubscribe = { id, handle -> navController.navigate(Routes.channelSubscribe(id, handle)) },
+                    )
+                }
+                composable(Routes.CHANNEL_NEW) {
                     val secrets = identitySecrets
                     if (secrets != null) {
-                        ChannelsRootScreen(
+                        NewChannelScreen(
+                            state = channelsState,
+                            client = channelsClient,
                             accountIdentitySeed = secrets.accountIdentitySeed,
                             sessionToken = secrets.sessionToken,
+                            onBack = { navController.popBackStack() },
+                            onCreated = { id ->
+                                navController.navigate(Routes.channel(id)) {
+                                    popUpTo(Routes.CHANNELS)
+                                }
+                            },
+                        )
+                    } else {
+                        LoadingScreen()
+                    }
+                }
+                composable(Routes.CHANNEL_JOIN) {
+                    val secrets = identitySecrets
+                    if (secrets != null) {
+                        JoinCoPublisherScreen(
+                            state = channelsState,
+                            accountIdentitySeed = secrets.accountIdentitySeed,
+                            onBack = { navController.popBackStack() },
+                            onJoined = { id ->
+                                navController.navigate(Routes.channel(id)) {
+                                    popUpTo(Routes.CHANNELS)
+                                }
+                            },
+                        )
+                    } else {
+                        LoadingScreen()
+                    }
+                }
+                composable(Routes.CHANNEL) { entry ->
+                    val id = entry.arguments?.getString("channelId") ?: return@composable
+                    ChannelDetailScreen(
+                        channelId = id,
+                        state = channelsState,
+                        client = channelsClient,
+                        onBack = { navController.popBackStack() },
+                        onSubscribe = { navController.navigate(Routes.channelSubscribe(id, handle = null)) },
+                        onManage = { navController.navigate(Routes.channelManage(id)) },
+                    )
+                }
+                composable(
+                    Routes.CHANNEL_SUBSCRIBE,
+                    arguments = listOf(
+                        androidx.navigation.navArgument("handle") {
+                            type = androidx.navigation.NavType.StringType
+                            nullable = true
+                            defaultValue = null
+                        },
+                    ),
+                ) { entry ->
+                    val id = entry.arguments?.getString("channelId") ?: return@composable
+                    ChannelSubscribeScreen(
+                        channelId = id,
+                        state = channelsState,
+                        client = channelsClient,
+                        handle = entry.arguments?.getString("handle")?.takeIf { it.isNotEmpty() },
+                        onBack = { navController.popBackStack() },
+                    )
+                }
+                composable(Routes.CHANNEL_MANAGE) { entry ->
+                    val id = entry.arguments?.getString("channelId") ?: return@composable
+                    val secrets = identitySecrets
+                    if (secrets != null) {
+                        ChannelManageScreen(
+                            channelId = id,
+                            state = channelsState,
+                            client = channelsClient,
+                            accountIdentitySeed = secrets.accountIdentitySeed,
+                            onBack = { navController.popBackStack() },
                         )
                     } else {
                         LoadingScreen()
@@ -1220,6 +1313,16 @@ private object Routes {
     fun chat(groupIdHex: String): String = "chat/$groupIdHex"
     const val NEW_CHAT = "new_chat"
     const val NEW_GROUP = "new_group"
+    const val CHANNEL_NEW = "channel_new"
+    const val CHANNEL_JOIN = "channel_join"
+    /** A channel; `channelId` is the 32-char hex id (URL-safe by construction). */
+    const val CHANNEL = "channel/{channelId}"
+    fun channel(channelId: String): String = "channel/$channelId"
+    const val CHANNEL_SUBSCRIBE = "channel/{channelId}/subscribe?handle={handle}"
+    fun channelSubscribe(channelId: String, handle: String?): String =
+        "channel/$channelId/subscribe?handle=${android.net.Uri.encode(handle.orEmpty())}"
+    const val CHANNEL_MANAGE = "channel/{channelId}/manage"
+    fun channelManage(channelId: String): String = "channel/$channelId/manage"
     const val PROFILE = "settings/profile"
     const val PASSKEYS = "settings/passkeys"
     const val DEVICES = "settings/devices"

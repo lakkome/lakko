@@ -104,12 +104,12 @@ import { paths } from "../routes/paths";
 import {
   callActions,
   callState as callUi,
-  qualityColour,
   type Participant,
   type QualityTier,
 } from "../state/call-state";
 import { loadWasm } from "../wasm";
 import Call from "../routes/Call";
+import { Icon } from "../ui/icons";
 import type { ParsedCallSignaling } from "../../wasm/lakko_ffi_wasm";
 import {
   CallSession,
@@ -1572,16 +1572,6 @@ export function CallHostView(): JSX.Element {
     return s === "outgoing" || s === "connecting" || s === "connected" || s === "ending";
   };
 
-  const buttonStyle = {
-    background: "var(--surface-elevated)",
-    color: "var(--surface-fg)",
-    border: "none",
-    padding: "0.5rem 0.9rem",
-    "border-radius": "var(--radius-sm)",
-    "font-weight": "600",
-    cursor: "pointer",
-  } as const;
-
   return (
     <>
       {/* Stable slot for the whole call, so remote audio does not cut out when
@@ -1591,56 +1581,27 @@ export function CallHostView(): JSX.Element {
       </Show>
 
       <Show when={host.state() === "ringing"}>
-        <div
-          role="alertdialog"
-          aria-label="Incoming call"
-          style={{
-            position: "fixed",
-            top: "1rem",
-            left: "50%",
-            transform: "translateX(-50%)",
-            "z-index": 1100,
-            "max-width": "calc(100vw - 2rem)",
-            padding: "0.75rem 1rem",
-            background: "var(--accent)",
-            color: "var(--accent-fg)",
-            "border-radius": "var(--radius-md)",
-            "box-shadow": "0 4px 16px rgba(0, 0, 0, 0.25)",
-            display: "flex",
-            "align-items": "center",
-            gap: "1rem",
-            "flex-wrap": "wrap",
-          }}
-        >
-          <div>
-            <strong>Incoming call from {internals.nameFor(host.callGroupIdB64())}</strong>
-            <div style={{ "font-size": "0.85rem", "margin-top": "0.2rem" }}>
-              {internals.remoteWantsVideo() ? "Video call" : "Audio call"} · end-to-end encrypted
-              P2P (DTLS-SRTP)
-            </div>
+        <div class="lk-call-incoming" role="alertdialog" aria-label="Incoming call">
+          <span class="lk-call-incoming-icon" aria-hidden="true">
+            <Icon name={internals.remoteWantsVideo() ? "video" : "phone"} size={20} />
+          </span>
+          <div class="lk-call-incoming-text">
+            <strong>{internals.nameFor(host.callGroupIdB64())}</strong>
+            <span>{internals.remoteWantsVideo() ? "Incoming video call" : "Incoming call"}</span>
           </div>
-          <div style={{ display: "flex", gap: "0.4rem" }}>
-            <button type="button" style={buttonStyle} onClick={() => void internals.accept(false)}>
-              Accept
+          <div class="lk-call-incoming-actions">
+            <button type="button" class="ghost" onClick={() => void internals.decline()}>
+              Decline
             </button>
             <Show when={internals.remoteWantsVideo()}>
-              <button type="button" style={buttonStyle} onClick={() => void internals.accept(true)}>
-                Accept with video
+              <button type="button" onClick={() => void internals.accept(true)}>
+                <Icon name="video" size={18} />
+                Video
               </button>
             </Show>
-            <button
-              type="button"
-              onClick={() => void internals.decline()}
-              style={{
-                background: "transparent",
-                color: "var(--accent-fg)",
-                border: "1px solid var(--accent-fg)",
-                padding: "0.5rem 0.9rem",
-                "border-radius": "var(--radius-sm)",
-                cursor: "pointer",
-              }}
-            >
-              Decline
+            <button type="button" class="primary" onClick={() => void internals.accept(false)}>
+              <Icon name="phone" size={18} />
+              Accept
             </button>
           </div>
         </div>
@@ -1739,60 +1700,29 @@ function LinkCallNoticeView(): JSX.Element {
     return linkCallNotice(slot?.phase ?? null, internals.linkViewShown(), slot?.errorMessage ?? null);
   });
 
-  const buttonStyle = {
-    background: "var(--surface-elevated)",
-    color: "var(--surface-fg)",
-    border: "none",
-    padding: "0.5rem 0.9rem",
-    "border-radius": "var(--radius-sm)",
-    "font-weight": "600",
-    cursor: "pointer",
-    "text-decoration": "none",
-  } as const;
-
   return (
     <Show when={notice()}>
       {(n) => (
-        <div
-          role="status"
-          aria-label="Call from a link"
-          style={{
-            position: "fixed",
-            bottom: "1rem",
-            left: "50%",
-            transform: "translateX(-50%)",
-            "z-index": 1100,
-            "max-width": "calc(100vw - 2rem)",
-            padding: "0.75rem 1rem",
-            background: "var(--surface-elevated)",
-            color: "var(--surface-fg)",
-            border: "1px solid var(--surface-border)",
-            "border-radius": "var(--radius-md)",
-            "box-shadow": "0 4px 16px rgba(0, 0, 0, 0.25)",
-            display: "flex",
-            "align-items": "center",
-            gap: "1rem",
-            "flex-wrap": "wrap",
-          }}
-        >
-          <span>{n().text}</span>
-          <div style={{ display: "flex", gap: "0.4rem", "flex-wrap": "wrap" }}>
+        <div class="lk-call-incoming bottom" role="status" aria-label="Call from a link">
+          <span class="lk-call-incoming-icon" aria-hidden="true">
+            <Icon name="link" size={20} />
+          </span>
+          <div class="lk-call-incoming-text">
+            <span>{n().text}</span>
+          </div>
+          <div class="lk-call-incoming-actions">
             <Show when={n().actions.includes("open")}>
-              <A href={host.linkCall()?.routePath ?? "/"} style={buttonStyle}>
+              <A href={host.linkCall()?.routePath ?? "/"} class="lk-button-link">
                 Open
               </A>
             </Show>
             <Show when={n().actions.includes("cancel")}>
-              <button type="button" style={buttonStyle} onClick={() => host.leaveLinkCall()}>
+              <button type="button" class="ghost" onClick={() => host.leaveLinkCall()}>
                 Cancel
               </button>
             </Show>
             <Show when={n().actions.includes("dismiss")}>
-              <button
-                type="button"
-                style={buttonStyle}
-                onClick={() => host.dismissLinkCallOutcome()}
-              >
+              <button type="button" class="ghost" onClick={() => host.dismissLinkCallOutcome()}>
                 Dismiss
               </button>
             </Show>
@@ -1871,108 +1801,57 @@ function GroupCallBanner(): JSX.Element {
     }
   }
 
-  const buttonStyle = {
-    background: "var(--surface-elevated)",
-    color: "var(--surface-fg)",
-    border: "none",
-    padding: "0.5rem 0.9rem",
-    "border-radius": "var(--radius-sm)",
-    "font-weight": "600",
-    cursor: "pointer",
-  } as const;
-
   return (
     <Show when={banner()}>
       {(ref) => (
-        <div
-          role="status"
-          aria-label="Group call in progress"
-          style={{
-            position: "fixed",
-            top: "1rem",
-            left: "50%",
-            transform: "translateX(-50%)",
-            "z-index": 1100,
-            "max-width": "calc(100vw - 2rem)",
-            padding: "0.75rem 1rem",
-            background: "var(--accent)",
-            color: "var(--accent-fg)",
-            "border-radius": "var(--radius-md)",
-            "box-shadow": "0 4px 16px rgba(0, 0, 0, 0.25)",
-            display: "flex",
-            "align-items": "center",
-            gap: "1rem",
-            "flex-wrap": "wrap",
-          }}
-        >
-          <div>
+        <div class="lk-call-incoming" role="status" aria-label="Group call in progress">
+          <span class="lk-call-incoming-icon" aria-hidden="true">
+            <Icon name="groups" size={20} />
+          </span>
+          <div class="lk-call-incoming-text">
             <strong>Group call in {internals.nameFor(ref().groupIdB64)}</strong>
-            <div style={{ "font-size": "0.85rem", "margin-top": "0.2rem" }}>
-              End-to-end encrypted
-            </div>
+            <span>End-to-end encrypted</span>
             <Show when={failure()?.callIdHex === ref().callIdHex ? failure()?.message : undefined}>
               {(message) => (
-                <div role="alert" style={{ "font-size": "0.85rem", "margin-top": "0.2rem" }}>
+                <span class="lk-call-incoming-error" role="alert">
                   {message()}
-                </div>
+                </span>
               )}
             </Show>
           </div>
-          <div style={{ display: "flex", gap: "0.4rem", "flex-wrap": "wrap" }}>
+          <div class="lk-call-incoming-actions">
             <button
               type="button"
-              style={buttonStyle}
-              disabled={joining()}
-              onClick={() => void join(false)}
-            >
-              Join
-            </button>
-            <button
-              type="button"
-              style={buttonStyle}
-              disabled={joining()}
-              onClick={() => void join(true)}
-            >
-              Join with video
-            </button>
-            <A
-              href={paths.chat(base64UrlEncodeNoPad(base64Decode(ref().groupIdB64)))}
-              style={{ ...buttonStyle, "text-decoration": "none" }}
-            >
-              Open chat
-            </A>
-            <button
-              type="button"
+              class="ghost"
               onClick={() => {
                 setFailure(null);
                 internals.dismissGroupCall(ref().callIdHex);
               }}
-              style={{
-                background: "transparent",
-                color: "var(--accent-fg)",
-                border: "1px solid var(--accent-fg)",
-                padding: "0.5rem 0.9rem",
-                "border-radius": "var(--radius-sm)",
-                cursor: "pointer",
-              }}
             >
               Dismiss
+            </button>
+            <A
+              href={paths.chat(base64UrlEncodeNoPad(base64Decode(ref().groupIdB64)))}
+              class="lk-button-link"
+            >
+              Open chat
+            </A>
+            <button type="button" disabled={joining()} onClick={() => void join(true)}>
+              <Icon name="video" size={18} />
+              Video
+            </button>
+            <button
+              type="button"
+              class="primary"
+              disabled={joining()}
+              onClick={() => void join(false)}
+            >
+              <Icon name="phone" size={18} />
+              Join
             </button>
           </div>
         </div>
       )}
     </Show>
   );
-}
-
-/** Dot colour for a quality tier, for compact in-chat readouts. */
-export function qualityDotColour(tier: QualityTier): string {
-  switch (qualityColour(tier)) {
-    case "green":
-      return "#22c55e";
-    case "yellow":
-      return "#eab308";
-    case "red":
-      return "#ef4444";
-  }
 }

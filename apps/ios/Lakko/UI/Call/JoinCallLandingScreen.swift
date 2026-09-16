@@ -372,7 +372,7 @@ public struct JoinCallLandingScreen: View {
                     if let error = viewModel.guestNameError {
                         Text(error)
                             .font(.footnote)
-                            .foregroundStyle(.red)
+                            .foregroundStyle(Color.lakkoDanger)
                     }
                 }
             }
@@ -413,11 +413,11 @@ public struct JoinCallLandingScreen: View {
                 .multilineTextAlignment(.center)
             Button("End current call") { viewModel.endCurrentCall() }
                 .buttonStyle(.borderedProminent)
-                .tint(.red)
+                .tint(Color.lakkoDanger)
             closeButton
         case .error(let message):
-            Text("Failed: \(message)")
-                .foregroundStyle(.red)
+            Text(message)
+                .foregroundStyle(Color.lakkoDanger)
                 .multilineTextAlignment(.center)
             Button("Try again") { viewModel.tryAgain() }
                 .buttonStyle(.bordered)

@@ -26,6 +26,11 @@ public final class ChannelsUiState: ObservableObject {
     /// Per-channel server epoch cache.
     @Published public private(set) var epochByChannel: [String: UInt32] = [:]
 
+    /// Per-channel subscriber count as last read from the server (the
+    /// owner's manage screen and the list refresh fill it). `nil` until
+    /// known; shown on the channel row, never persisted.
+    @Published public private(set) var subscriberCountByChannel: [String: Int] = [:]
+
     /// Per-channel publisher keys (local-only). The `signingKeySeed` half is
     /// persisted in the hardware-backed Keychain
     /// (``ChannelPublisherKeyStore``, G-29) via ``persistPublisherSigningSeeds``
@@ -112,6 +117,7 @@ public final class ChannelsUiState: ObservableObject {
         channels.removeAll { $0.id == channelId }
         postsByChannel[channelId] = nil
         epochByChannel[channelId] = nil
+        subscriberCountByChannel[channelId] = nil
         keysByChannel[channelId] = nil
         // Deliberately KEEP this channel's publish counter (in-memory + at
         // rest): un-publishing does NOT destroy the MLS PublisherGroup content
@@ -129,7 +135,8 @@ public final class ChannelsUiState: ObservableObject {
     public func updateLocalMeta(
         channelId: String,
         localName: String? = nil,
-        localDescription: String? = nil
+        localDescription: String? = nil,
+        handle: String? = nil
     ) {
         guard let idx = channels.firstIndex(where: { $0.id == channelId })
         else { return }
@@ -138,8 +145,16 @@ public final class ChannelsUiState: ObservableObject {
             id: old.id,
             localName: localName ?? old.localName,
             localDescription: localDescription ?? old.localDescription,
-            addedAtMs: old.addedAtMs
+            addedAtMs: old.addedAtMs,
+            handle: handle ?? old.handle
         )
+    }
+
+    /// Cache the subscriber count the manage screen or the list refresh
+    /// last read for `channelId`, so the channel row can show it. UI
+    /// bookkeeping only: in memory, never persisted.
+    public func setSubscriberCount(channelId: String, count: Int) {
+        subscriberCountByChannel[channelId] = count
     }
 
     public func setPosts(channelId: String, posts: [PostView]) {
@@ -236,6 +251,7 @@ public final class ChannelsUiState: ObservableObject {
         channels = []
         postsByChannel = [:]
         epochByChannel = [:]
+        subscriberCountByChannel = [:]
         keysByChannel = [:]
         counterByChannel = [:]
         subscriberKeysByChannel = [:]
@@ -441,16 +457,22 @@ public struct ChannelHandle: Equatable, Sendable, Identifiable {
     /// Unix milliseconds — when the user added this
     /// channel to their local list.
     public let addedAtMs: UInt64
+    /// The `@handle` this device knows for the channel (claimed on create,
+    /// or the one it was found by), without the leading `@`. Empty when
+    /// unknown. Local-only, like the name.
+    public let handle: String
 
     public init(
         id: String,
         localName: String,
         localDescription: String,
-        addedAtMs: UInt64
+        addedAtMs: UInt64,
+        handle: String = ""
     ) {
         self.id = id
         self.localName = localName
         self.localDescription = localDescription
         self.addedAtMs = addedAtMs
+        self.handle = handle
     }
 }

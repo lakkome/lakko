@@ -414,4 +414,7 @@ public data class ChannelHandle(
     public val localDescription: String,
     /** Unix milliseconds. */
     public val addedAtMs: ULong,
+    /** The public `@handle` this device registered for the channel, or ""
+     *  when none was claimed (local display only; the wire form is the id). */
+    public val handle: String = "",
 )

@@ -55,6 +55,10 @@ export interface ChannelHandle {
   /** Unix milliseconds — when the user added this channel
    *  to their local list. */
   readonly addedAtMs: number;
+  /** The `@handle` (without the at-sign) the channel was
+   *  created or found under, when there is one. Display
+   *  only; the id stays the wire form. */
+  readonly localHandle?: string;
 }
 
 /** One post in the cursor-paginated fetch response. */

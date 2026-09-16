@@ -1,0 +1,71 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+/**
+ * The row model for the channel list pane (docs/ux/client-redesign.md
+ * section 5.4): the same vocabulary as a chat row. Pure, so the rules for
+ * the title, the handle line and the time label can be asserted without a
+ * component.
+ */
+
+import { formatListTime } from "../chat/list-time";
+
+/** What the row model needs to know about one channel. */
+export interface ChannelRowInput {
+  readonly id: string;
+  /** The locally stored name; empty when the user never set one. */
+  readonly localName: string;
+  /** The `@handle` the channel was created or found under, if any. */
+  readonly localHandle?: string | undefined;
+  /** `true` when this device holds publisher keys for the channel. */
+  readonly isOwner: boolean;
+  /** The subscriber count, when the device has fetched it. */
+  readonly subscriberCount: number | null;
+  /** The server stamp of the newest cached post, if any. */
+  readonly lastPostMs: number | null;
+}
+
+/** What the row renders. */
+export interface ChannelRowModel {
+  readonly title: string;
+  /** "@handle", or "" when the channel has none. */
+  readonly handle: string;
+  /** The second line: the handle, the subscriber count, or the role. */
+  readonly subtitle: string;
+  /** The last post's time in the chat-list form, or "" when unknown. */
+  readonly time: string;
+}
+
+/** Canonical "@handle" form: one leading at-sign, trimmed, or "". */
+export function displayHandle(raw: string | undefined): string {
+  const h = (raw ?? "").trim().replace(/^@+/, "");
+  return h.length === 0 ? "" : `@${h}`;
+}
+
+/** "1 subscriber" / "12 subscribers". */
+export function subscriberCountLabel(n: number): string {
+  return `${n} ${n === 1 ? "subscriber" : "subscribers"}`;
+}
+
+/** Build the row. `now` is the clock the time label is relative to. */
+export function channelRowModel(input: ChannelRowInput, now: Date = new Date()): ChannelRowModel {
+  const handle = displayHandle(input.localHandle);
+  const name = input.localName.trim();
+  const title = name.length > 0 ? name : handle.length > 0 ? handle.slice(1) : "Channel";
+  const parts: string[] = [];
+  if (handle.length > 0) parts.push(handle);
+  if (input.subscriberCount !== null) parts.push(subscriberCountLabel(input.subscriberCount));
+  if (parts.length === 0) parts.push(input.isOwner ? "Your channel" : "Subscribed");
+  const time =
+    input.lastPostMs === null ? "" : formatListTime(new Date(input.lastPostMs).toISOString(), now);
+  return { title, handle, subtitle: parts.join(" · "), time };
+}
+
+/** Case-insensitive match on the title and the handle. */
+export function channelRowMatches(model: ChannelRowModel, query: string): boolean {
+  const q = query.trim().toLowerCase().replace(/^@/, "");
+  if (q.length === 0) return true;
+  return (
+    model.title.toLowerCase().includes(q) || model.handle.toLowerCase().replace(/^@/, "").includes(q)
+  );
+}

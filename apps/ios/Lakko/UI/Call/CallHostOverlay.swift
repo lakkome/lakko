@@ -151,45 +151,61 @@ private struct IncomingCallBanner: View {
     let onDecline: () -> Void
 
     private var headline: String {
-        let what = video ? "video call" : "call"
-        if let callerName { return "\(callerName) — incoming \(what)" }
-        return "Incoming \(what)"
+        if let callerName { return "\(callerName) is calling" }
+        return "Incoming call"
+    }
+
+    /// The kind of call, then the one security word that is true here: the
+    /// native 1x1 path refuses to connect unless its media keying is armed.
+    private var detail: String {
+        video ? "Video call. End-to-end encrypted." : "Voice call. End-to-end encrypted."
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(headline)
-                    .font(.headline)
-                    .foregroundStyle(.white)
-                    .lineLimit(2)
-                Text("End-to-end encrypted")
-                    .font(.caption2)
-                    .foregroundStyle(.white.opacity(0.85))
+        // The banner component (design system section 3): the elevated
+        // surface, a hairline below, an icon, one sentence, the actions.
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: video ? "video.fill" : "phone.fill")
+                    .foregroundStyle(Color.lakkoAccent)
+                    .padding(.top, 2)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(headline)
+                        .font(.headline)
+                        .foregroundStyle(Color.lakkoText)
+                        .lineLimit(2)
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(Color.lakkoTextMuted)
+                }
             }
             .accessibilityElement(children: .combine)
             HStack(spacing: 8) {
-                Button("Accept", action: onAccept)
-                    .buttonStyle(.borderedProminent)
-                    .tint(.white)
-                    .foregroundStyle(.green)
-                    .accessibilityLabel("Accept with audio")
+                Button(action: onAccept) {
+                    Label("Accept", systemImage: "phone.fill")
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(Color.lakkoSuccess)
+                .accessibilityLabel("Accept with audio")
                 Button(action: onAcceptWithVideo) {
                     Label("Video", systemImage: "video.fill")
                 }
                 .buttonStyle(.bordered)
-                .tint(.white)
+                .tint(Color.lakkoAccent)
                 .accessibilityLabel("Accept with video")
                 Spacer()
                 Button("Decline", role: .destructive, action: onDecline)
                     .buttonStyle(.bordered)
-                    .tint(.white)
+                    .tint(Color.lakkoDanger)
             }
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.vertical, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.orange)
+        .background(Color.lakkoSurface)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Color.lakkoBorder).frame(height: 1)
+        }
     }
 }
 
@@ -203,35 +219,42 @@ private struct LinkCallNoticeBanner: View {
     let onDismiss: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(notice.text)
-                .font(.headline)
-                .foregroundStyle(.white)
-                .lineLimit(3)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "link")
+                    .foregroundStyle(Color.lakkoAccent)
+                    .padding(.top, 2)
+                Text(notice.text)
+                    .font(.headline)
+                    .foregroundStyle(Color.lakkoText)
+                    .lineLimit(3)
+            }
             HStack(spacing: 8) {
                 if notice.actions.contains(.open) {
                     Button("Open", action: onOpen)
                         .buttonStyle(.borderedProminent)
-                        .tint(.white)
-                        .foregroundStyle(Color.lakkoAccent)
+                        .tint(Color.lakkoAccent)
                 }
                 Spacer()
                 if notice.actions.contains(.cancel) {
                     Button("Cancel", role: .destructive, action: onCancel)
                         .buttonStyle(.bordered)
-                        .tint(.white)
+                        .tint(Color.lakkoDanger)
                 }
                 if notice.actions.contains(.dismiss) {
                     Button("Dismiss", action: onDismiss)
                         .buttonStyle(.bordered)
-                        .tint(.white)
+                        .tint(Color.lakkoAccent)
                 }
             }
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.vertical, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.lakkoAccent)
+        .background(Color.lakkoSurface)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Color.lakkoBorder).frame(height: 1)
+        }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Call from a link")
     }
