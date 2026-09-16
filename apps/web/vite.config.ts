@@ -4,6 +4,7 @@
 import { defineConfig } from "vite";
 import solid from "vite-plugin-solid";
 import wasm from "vite-plugin-wasm";
+import pkg from "./package.json";
 
 // `vite-plugin-wasm` lets us `import` the wasm-pack output as a
 // regular ES module — Vite handles the WebAssembly.instantiate dance
@@ -12,6 +13,13 @@ import wasm from "vite-plugin-wasm";
 // `vite-plugin-solid` is the Solid.js JSX transform.
 export default defineConfig({
   plugins: [solid(), wasm()],
+
+  // Settings > About reads the package version through this constant
+  // (`src/ui/app-version.ts`); `VITE_APP_VERSION` from the environment wins
+  // when a release build sets it.
+  define: {
+    __LAKKO_PKG_VERSION__: JSON.stringify(pkg.version),
+  },
 
   // The SFrame transform runs inside a module worker
   // (`src/calls/sframe-transform-worker.ts`) that imports the same

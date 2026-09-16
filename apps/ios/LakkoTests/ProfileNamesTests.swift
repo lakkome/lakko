@@ -101,18 +101,32 @@ final class ProfileNamesTests: XCTestCase {
     }
 
     func testPrecedenceTable() {
-        // rename > profile name > verified username > fingerprint
+        // rename > profile name > verified username > neutral placeholder
         XCTAssertEqual(resolve(rename: "Mum", name: "Alice", username: "alice", verification: .verified).name, "Mum")
         XCTAssertEqual(resolve(name: "Alice", username: "alice", verification: .verified).name, "Alice")
         XCTAssertEqual(resolve(username: "alice", verification: .verified).name, "@alice")
-        XCTAssertEqual(resolve().name, "a1b2 c3d4")
-        XCTAssertEqual(resolve().source, .fingerprint)
+        XCTAssertEqual(resolve().name, "Member")
+        XCTAssertEqual(resolve().source, .placeholder)
+        XCTAssertTrue(resolve().isPlaceholder)
+        XCTAssertFalse(resolve(name: "Alice").isPlaceholder)
+    }
+
+    func testTheFingerprintIsNeverANameButStaysReachable() {
+        // UX spec section 2, principle 4: no hex key as a label anywhere.
+        let unknown = resolve()
+        XCTAssertEqual(unknown.name, "Member")
+        XCTAssertEqual(unknown.listLabel, "Member")
+        XCTAssertEqual(unknown.requestSenderLabel, "Someone")
+        XCTAssertEqual(unknown.fingerprint, "a1b2 c3d4", "the safety-number surface still gets the key")
+        // A person with a name never gets the request placeholder.
+        XCTAssertEqual(resolve(name: "Alice").requestSenderLabel, "Alice")
+        XCTAssertEqual(resolve(username: "alice", verification: .verified).requestSenderLabel, "@alice")
     }
 
     func testAnUnverifiedUsernameIsNeverShown() {
         for verification: UsernameVerificationStateView? in [nil, .refused] {
             let r = resolve(username: "pavel", verification: verification)
-            XCTAssertEqual(r.name, "a1b2 c3d4", "an unverified claim falls through to the fingerprint")
+            XCTAssertEqual(r.name, "Member", "an unverified claim falls through to the placeholder")
             XCTAssertNil(r.verifiedUsername)
             XCTAssertNil(r.usernameLine)
             XCTAssertFalse(r.listLabel.contains("@"))
@@ -123,7 +137,7 @@ final class ProfileNamesTests: XCTestCase {
     }
 
     func testTheFingerprintNeverCarriesAnAt() {
-        XCTAssertFalse(resolve().name.contains("@"))
+        XCTAssertFalse(resolve().fingerprint.contains("@"))
         XCTAssertEqual(displayFingerprint(Data([0x00, 0x0f, 0xf0, 0xff, 0x12])), "000f f0ff")
     }
 
@@ -587,7 +601,9 @@ final class ProfileDirectoryTests: XCTestCase {
     func testAReceivedProfileNamesThePersonAndItsUsernameAppearsOnlyAfterVerifying() async {
         let key = Data(repeating: 0x33, count: 32)
         let (directory, verifier) = makeDirectory { _ in .signatureKey(key) }
-        XCTAssertEqual(directory.resolve(signatureKey: key).name, "3333 3333")
+        let unknown = directory.resolve(signatureKey: key)
+        XCTAssertEqual(unknown.name, "Member", "nothing known yet: the neutral placeholder, never the key")
+        XCTAssertEqual(unknown.fingerprint, "3333 3333")
 
         let before = directory.revision
         directory.acceptReceived(
@@ -611,7 +627,8 @@ final class ProfileDirectoryTests: XCTestCase {
             signatureKeyB64: base64Encode(key))
         await verifier.verify(signatureKeyB64: base64Encode(key), username: "pavel")
         let resolved = directory.resolve(signatureKey: key)
-        XCTAssertEqual(resolved.name, "3333 3333")
+        XCTAssertEqual(resolved.name, "Member")
+        XCTAssertTrue(resolved.isPlaceholder)
         XCTAssertFalse(resolved.listLabel.contains("pavel"))
         XCTAssertTrue(resolved.usernameNotVerified)
     }

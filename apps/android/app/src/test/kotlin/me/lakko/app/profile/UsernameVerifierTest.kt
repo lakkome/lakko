@@ -127,8 +127,10 @@ class UsernameVerifierTest {
             passesRule = passesRule,
         )
         directory.onProfileReceived(keyB64, PeerProfile(null, "alice", 1uL))
-        // No resolver attached yet: the claim stays hidden.
-        assertEquals("0707 0707", directory.resolve(keyB64).primary)
+        // No resolver attached yet: the claim stays hidden and the label is the
+        // neutral placeholder (the fingerprint is never a name).
+        assertEquals("Member", directory.resolve(keyB64).primary)
+        assertEquals("0707 0707", directory.resolve(keyB64).fingerprint)
         directory.attachUsernameResolver { UsernameResolution.Found(keyB64) }
         assertEquals("@alice", directory.resolve(keyB64).primary)
     }

@@ -897,7 +897,15 @@ export class ContactsClient {
       if (account !== null) return account;
       throw ContactsError.noIdentitySecrets();
     }
-    return this.resolveIdentity(secrets);
+    // Never fall back to `resolveIdentity`: since ADR-0050 the canonical
+    // identity is this DEVICE's leaf identity, and a contact request signed
+    // with it names the device key as `from_pubkey`, so the acceptor routes
+    // its ContactAck to the device mailbox, where only Welcomes are read.
+    // Seen live on 2026-09-16 (web request, Android accept, no contact on
+    // web). The account identity is always derivable from the phrase seed.
+    if (secrets === null) throw ContactsError.noIdentitySecrets();
+    const wasm = await loadWasm();
+    return wasm.Identity.fromSeed(secrets.accountIdentitySeed);
   }
 
   /** ADR-0050 — this account's OTHER devices' KeyPackages, so a group this
@@ -1990,6 +1998,33 @@ export class ContactsClient {
     for (const message of raw.messages) {
       cursor = message.id;
       const env = parseEnvelope(message.payload);
+      if (env.kind === KIND_CONTACT_ACK) {
+        // A ContactAck routed by the requester's device key (a sender that
+        // signed its request with the device identity) lands here; it is a
+        // verified accept all the same, so it is dispatched like the account
+        // mailbox does rather than silently skipped.
+        let ack;
+        try {
+          ack = wasm.ContactAck.decodeAndVerify(env.body);
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("ContactAck verify failed", message.id, err);
+          continue;
+        }
+        events.push({
+          kind: "contact-ack",
+          ack: {
+            messageId: message.id,
+            accepterPubkey: ack.accepterPubkey,
+            accepterAccountId: ack.accepterAccountId,
+            accepterX25519Pubkey: ack.accepterX25519Pubkey,
+            ackToPseudonym: ack.ackToPseudonym,
+            acceptedAtMs: ack.acceptedAtMs,
+            createdAt: message.createdAt,
+          },
+        });
+        continue;
+      }
       if (env.kind !== KIND_WELCOME) continue;
       events.push({
         kind: "welcome",

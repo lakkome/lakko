@@ -11,7 +11,8 @@ import org.junit.Test
 
 /**
  * ADR-0048 §5 / UX §3 — the one resolver's precedence table:
- * local rename -> profile name -> VERIFIED @username -> fingerprint without `@`.
+ * local rename -> profile name -> VERIFIED @username -> a neutral placeholder.
+ * The fingerprint is never a name; it stays on a separate accessor.
  */
 class DisplayNameResolverTest {
 
@@ -44,20 +45,32 @@ class DisplayNameResolverTest {
             "@alice",
             resolve(profile = profile(null, "alice"), verification = UsernameVerification.VERIFIED).primary,
         )
-        // 4. fingerprint, without `@`.
+        // 4. the neutral placeholder; the fingerprint only on its own accessor.
         val bare = resolve()
-        assertEquals("a1b2 c3d4", bare.primary)
-        assertTrue(bare.isFingerprint)
+        assertEquals("Member", bare.primary)
+        assertTrue(bare.isPlaceholder)
         assertFalse(bare.primary.contains("@"))
+        assertEquals("a1b2 c3d4", bare.fingerprint)
+        assertFalse(bare.listLabel.contains("a1b2"))
+    }
+
+    @Test
+    fun `the fingerprint accessor is stable and never carries an at sign`() {
+        val named = resolve(profile = profile("Alice Petrova", "alice"), verification = UsernameVerification.VERIFIED)
+        assertEquals("a1b2 c3d4", named.fingerprint)
+        assertFalse(named.isPlaceholder)
+        assertEquals("a1b2 c3d4", fingerprintLabel(key))
+        assertEquals("", fingerprintLabel(ByteArray(0)))
     }
 
     @Test
     fun `an unverified or failed username is never shown`() {
         for (v in listOf(null, UsernameVerification.FAILED)) {
             val r = resolve(profile = profile(null, "pavel"), verification = v)
-            assertEquals("a1b2 c3d4", r.primary)
+            assertEquals("Member", r.primary)
+            assertTrue(r.isPlaceholder)
             assertNull(r.verifiedUsername)
-            assertEquals("a1b2 c3d4", r.listLabel)
+            assertEquals("Member", r.listLabel)
             assertFalse(r.listLabel.contains("pavel"))
         }
     }
@@ -76,7 +89,11 @@ class DisplayNameResolverTest {
         val onlyUser = resolve(profile = profile(null, "alice"), verification = UsernameVerification.VERIFIED)
         assertEquals("@alice", onlyUser.listLabel)
         assertEquals("Alice Petrova · @alice wants to connect", requestCardTitle(r))
-        assertEquals("a1b2 c3d4 wants to connect", requestCardTitle(resolve()))
+        assertEquals("@alice wants to connect", requestCardTitle(onlyUser))
+        // A request from someone nothing is known about says so, never a key.
+        assertEquals("Someone wants to connect", requestCardTitle(resolve()))
+        assertEquals("Someone", requestSenderLabel(resolve()))
+        assertEquals("Alice Petrova · @alice", requestSenderLabel(r))
     }
 
     @Test

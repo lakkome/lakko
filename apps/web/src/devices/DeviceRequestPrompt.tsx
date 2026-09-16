@@ -155,17 +155,17 @@ export function DeviceRequestPrompt(): JSX.Element {
       <Show when={pending() !== null}>
         <div class="lk-modal-backdrop" role="presentation">
           <div class="lk-modal" role="dialog" aria-modal="true" aria-labelledby="lk-devreq-title">
-            <h2 id="lk-devreq-title">New sign-in request</h2>
-            <p>Someone is signing in to your account on a new device.</p>
-            <p class="form-info" style={{ "margin-bottom": "4px" }}>Comparison code</p>
+            <h2 id="lk-devreq-title">Is this you?</h2>
+            <p>A new device is asking to join your account. It shows a code.</p>
+            <p class="form-info" style={{ "margin-bottom": "4px" }}>Code on the new device</p>
             <div class="lk-sas-code">{pending()?.code}</div>
-            <p>Does the new device show the same code?</p>
+            <p>Confirm only if the new device shows exactly this code.</p>
             <div class="lk-actions">
               <button type="button" disabled={busy() !== null} onClick={() => void decline()}>
                 It is not me
               </button>
               <button class="primary" type="button" disabled={busy() !== null} onClick={() => void confirmRequest()}>
-                {busy() === "confirming" ? "Adding the device…" : "Confirm"}
+                {busy() === "confirming" ? "Adding the device..." : "Yes, add it"}
               </button>
             </div>
           </div>

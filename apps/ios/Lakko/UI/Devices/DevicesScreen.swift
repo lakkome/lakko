@@ -33,28 +33,29 @@ public struct DevicesScreen: View {
     }
 
     public var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                if let session = DeviceSession.current(authRepository) {
-                    DevicesListView(
-                        accountIdBytes: session.accountIdBytes,
-                        accountIdB64: session.accountIdB64,
-                        sessionToken: session.sessionToken,
-                        onDeviceRemoved: onDeviceRemoved
-                    )
+        List {
+            if let session = DeviceSession.current(authRepository) {
+                DevicesListView(
+                    accountIdBytes: session.accountIdBytes,
+                    accountIdB64: session.accountIdB64,
+                    sessionToken: session.sessionToken,
+                    onDeviceRemoved: onDeviceRemoved
+                )
+                Section {
                     Button(action: onAddDevice) {
                         Label("Add a device", systemImage: "plus")
-                            .frame(maxWidth: .infinity)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-                } else {
+                } footer: {
+                    Text("Show a code on the new device and scan it here, or the other way round.")
+                }
+            } else {
+                Section {
                     Text("Sign in first to manage devices.")
-                        .foregroundStyle(.red)
+                        .foregroundStyle(Color.lakkoDanger)
                 }
             }
-            .padding(16)
         }
+        .listStyle(.insetGrouped)
         .navigationTitle("Devices")
         .navigationBarTitleDisplayMode(.inline)
     }
@@ -88,13 +89,13 @@ struct DeviceSession {
 // MARK: - Add a device (pairing flow)
 
 /// Settings > Devices > Add a device: this device either shows its pairing
-/// code (it is the new device) or scans the other device's code (it is the
-/// already-linked one). Two flows, one segmented switch.
+/// code (it is the new device, it joins) or scans the other device's code (it
+/// is the already-linked one, it admits). Two flows, one segmented switch.
 ///
-///   1. **Show code** — joining side. Generates the pairing material via
+///   1. **Show a code** — joining side. Generates the pairing material via
 ///      ``PairingOrchestrator/prepareJoinFlow``, renders the QR with
 ///      ``QrImageView``, waits for the other device, runs `accept` on receipt.
-///   2. **Scan code** — scanner side. Opens the camera via ``QrScannerView``,
+///   2. **Scan a code** — scanner side. Opens the camera via ``QrScannerView``,
 ///      decodes the first QR, drives ``PairingOrchestrator/runScanFlow``.
 struct AddDeviceScreen: View {
     @ObservedObject var authRepository: AuthRepository
@@ -109,8 +110,16 @@ struct AddDeviceScreen: View {
         var id: String { rawValue }
         var label: String {
             switch self {
-            case .show: return "This is the new device"
-            case .scan: return "Scan the new device"
+            case .show: return "Show a code"
+            case .scan: return "Scan a code"
+            }
+        }
+
+        /// One line under the switch saying which device this is.
+        var explanation: String {
+            switch self {
+            case .show: return "This is the new device: it joins your account once another device scans its code."
+            case .scan: return "This device is already signed in: it scans the new device's code and lets it in."
             }
         }
     }
@@ -130,6 +139,9 @@ struct AddDeviceScreen: View {
                         }
                     }
                     .pickerStyle(.segmented)
+                    Text(side.explanation)
+                        .font(.footnote)
+                        .foregroundStyle(Color.lakkoTextMuted)
 
                     switch side {
                     case .show:
@@ -160,10 +172,20 @@ struct AddDeviceScreen: View {
 
 // MARK: - Recovery factors
 
-/// Settings > Recovery: the authenticator app and the email or phone number
-/// that can restore ACCESS to the account (ADR-0018 factors (c) and (d)).
+/// Settings > Recovery (UX spec section 5.5): the recovery phrase status,
+/// then the authenticator app and the email or phone number that can restore
+/// ACCESS to the account (ADR-0018 factors (c) and (d)). The three-word vault
+/// (ADR-0049) is web-only so far and has no row here.
 struct RecoveryFactorsScreen: View {
     @ObservedObject var authRepository: AuthRepository
+
+    /// Whether this device keeps a copy of the recovery phrase (the backup
+    /// flow stores it in the Keychain). A read, never a reveal: no screen
+    /// shows the phrase after signup.
+    private var phraseStoredHere: Bool {
+        guard case .session(let account) = authRepository.state else { return false }
+        return ((try? PhraseStore().getPhrase(accountIdB64: account.accountIdB64)) ?? nil) != nil
+    }
 
     var body: some View {
         ScrollView {
@@ -175,6 +197,22 @@ struct RecoveryFactorsScreen: View {
                 )
                 .font(.footnote)
                 .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 12) {
+                    Label("Recovery phrase", systemImage: "key")
+                        .font(.headline)
+                    HStack(spacing: 8) {
+                        Image(systemName: phraseStoredHere ? "checkmark.circle.fill" : "exclamationmark.circle")
+                            .foregroundStyle(phraseStoredHere ? Color.lakkoSuccess : Color.lakkoWarning)
+                        Text(phraseStoredHere
+                             ? "Saved on this device."
+                             : "Not saved on this device. Keep your written copy safe.")
+                            .font(.body)
+                    }
+                    Text("The 24 words you wrote down at signup restore your identity, contacts and messages on a new device.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                Divider()
                 if let session = DeviceSession.current(authRepository) {
                     VStack(alignment: .leading, spacing: 12) {
                         Label("Authenticator app", systemImage: "lock.rotation")
@@ -509,11 +547,7 @@ private struct DevicesListView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Removing a device signs it out of your account; it can no longer read anything sent afterwards.")
-            .font(.footnote)
-            .foregroundStyle(.secondary)
-
+        Section {
             switch state {
             case .loading:
                 ProgressView("Loading...")
@@ -521,18 +555,16 @@ private struct DevicesListView: View {
                 // A device has no human label yet (no platform, model or
                 // user-set name reaches the client), so the row says
                 // "This device" / "Device N" rather than showing its key.
+                // The record carries no added date either, so none is shown.
                 ForEach(Array(devices.enumerated()), id: \.element.id) { index, device in
                     HStack(spacing: 12) {
                         Image(systemName: device.isSelf ? "iphone" : "laptopcomputer.and.iphone")
                             .foregroundStyle(Color.lakkoTextMuted)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(device.isSelf ? "This device" : "Device \(index + 1)")
-                                .font(.body)
-                        }
+                        Text(DeviceRowPresentation.title(isSelf: device.isSelf, position: index + 1))
+                            .font(.body)
+                            .foregroundStyle(Color.lakkoText)
                         Spacer()
-                        if device.isSelf {
-                            EmptyView()
-                        } else {
+                        if !device.isSelf {
                             Button(role: .destructive) {
                                 Task { await remove(leafIndex: device.leafIndex) }
                             } label: {
@@ -547,18 +579,23 @@ private struct DevicesListView: View {
                             .controlSize(.small)
                         }
                     }
-                    .padding(.vertical, 4)
-                    Divider()
+                    .padding(.vertical, 2)
                 }
 
             case .error(let message):
                 VStack(alignment: .leading, spacing: 8) {
                     Label(message, systemImage: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.red)
+                        .foregroundStyle(Color.lakkoDanger)
                         .font(.footnote)
                     Button("Try again") { refresh() }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
                 }
             }
+        } header: {
+            Text("Your devices")
+        } footer: {
+            Text("Removing a device signs it out of your account; it can no longer read anything sent afterwards.")
         }
         .onAppear { refresh() }
     }

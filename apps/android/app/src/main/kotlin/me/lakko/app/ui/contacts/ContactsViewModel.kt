@@ -85,6 +85,7 @@ public class ContactsViewModel(
             introInput = ui.introInput,
             sending = ui.sending,
             sendError = ui.sendError,
+            sendSucceeded = ui.sendSucceeded,
             pending = repoState.pending,
             accepted = repoState.accepted,
             sent = repoState.sent,
@@ -145,11 +146,12 @@ public class ContactsViewModel(
                     introMessage = snapshot.introInput,
                 )
                 // Success — clear the form so the user can
-                // queue another one.
+                // queue another one; the sheet reads the flag to close.
                 mutableUi.update {
                     it.copy(
                         sending = false,
                         sendError = null,
+                        sendSucceeded = true,
                         usernameInput = "",
                         introInput = "",
                     )
@@ -184,6 +186,22 @@ public class ContactsViewModel(
                 }
             }
         }
+    }
+
+    /** The add-by-username sheet acknowledged the success (it closed). */
+    public fun consumeSendSuccess() {
+        mutableUi.update { if (it.sendSucceeded) it.copy(sendSucceeded = false) else it }
+    }
+
+    /** The add-by-username sheet was dismissed: drop a stale error so the
+     *  next opening starts clean; the typed values are kept. */
+    public fun onDismissAddSheet() {
+        mutableUi.update { it.copy(sendError = null, sendSucceeded = false) }
+    }
+
+    /** Remove an accepted contact from this device (UX 5.3). Local only. */
+    public fun onRemoveContactClicked(messageId: Long) {
+        repo.removeContact(messageId)
     }
 
     public fun onRefreshClicked() {
@@ -559,6 +577,9 @@ public class ContactsViewModel(
         val introInput: String = "",
         val sending: Boolean = false,
         val sendError: String? = null,
+        /** Set once a request was sent; the sheet closes on it and calls
+         *  [consumeSendSuccess]. */
+        val sendSucceeded: Boolean = false,
         val generatingInvite: Boolean = false,
         val inviteError: String? = null,
         /** Phase 1.18d2b-list — server-authoritative active-
@@ -585,6 +606,8 @@ public data class ContactsUiState(
     val introInput: String,
     val sending: Boolean,
     val sendError: String?,
+    /** A request was just sent; consumed by the add sheet. */
+    val sendSucceeded: Boolean = false,
     val pending: List<me.lakko.app.contacts.IncomingContactRequest>,
     val accepted: List<me.lakko.app.contacts.AcceptedContact>,
     val sent: List<me.lakko.app.contacts.SentContactRequest>,

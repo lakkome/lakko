@@ -275,7 +275,7 @@ private class RealThrowawayGroup(
         return try {
             val member = group.members().firstOrNull { it.leafIndex == leaf } ?: return null
             val resolved = lookup.resolve(java.util.Base64.getEncoder().encodeToString(member.signaturePublicKey))
-            resolved.primary.takeIf { !resolved.isFingerprint }
+            resolved.primary.takeIf { !resolved.isPlaceholder }
         } catch (_: Throwable) {
             null
         }

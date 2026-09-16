@@ -514,7 +514,7 @@ public final class ChatListViewModel: ObservableObject {
             .filter { $0.leafIndex != own }
             .map { member in
                 let resolved = ProfileDirectory.shared.resolve(signatureKey: member.signaturePublicKey)
-                return resolved.source == .fingerprint ? nil : resolved.name
+                return resolved.isPlaceholder ? nil : resolved.name
             }
     }
 

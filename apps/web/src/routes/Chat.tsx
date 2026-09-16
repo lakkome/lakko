@@ -42,7 +42,7 @@ import {
   Show,
   type JSX,
 } from "solid-js";
-import { A, useNavigate, useParams } from "@solidjs/router";
+import { A, useNavigate, useParams, useSearchParams } from "@solidjs/router";
 import { useAuth } from "../auth/AuthContext";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
 import { groupIdHex as hexOf } from "../devices/sync/state";
@@ -754,6 +754,21 @@ function ChatView(props: {
         return;
     }
   }
+
+  // A contact detail's Call / Video buttons open this chat with `?call=audio`
+  // or `?call=video` (docs/ux/client-redesign.md section 5.3): the same header
+  // buttons, pressed once the chat can offer a call. The parameter is dropped
+  // from the URL first, so a reload or Back does not place a second call.
+  const [searchParams, setSearchParams] = useSearchParams<{ call?: string }>();
+  let autoCallHandled = false;
+  createEffect(() => {
+    const wanted = searchParams.call;
+    if (autoCallHandled || (wanted !== "audio" && wanted !== "video")) return;
+    if (callAffordance() === "hidden") return;
+    autoCallHandled = true;
+    setSearchParams({ call: undefined }, { replace: true });
+    onCallButton(wanted === "video");
+  });
 
   // Phase 2a3e2b-web: cross-device draft synchronisation.
   //

@@ -42,6 +42,9 @@ public final class ContactsViewModel: ObservableObject {
     /// Contacts screen; cleared once the user dismisses or
     /// generates another one.
     @Published public var lastGeneratedInvite: GeneratedInvite?
+    /// Bumped once per successful ``onSendClicked()``; the add-by-username
+    /// sheet dismisses on it (UX spec section 5.3).
+    @Published public private(set) var sendSucceededCount: Int = 0
 
     // MARK: - Mirror of the repository's state
 
@@ -117,6 +120,7 @@ public final class ContactsViewModel: ObservableObject {
                 sendError = nil
                 usernameInput = ""
                 introInput = ""
+                sendSucceededCount += 1
             } catch let refused as SupersessionRefused {
                 // KT-log S4 — the peer's AccountIdentity key changed and
                 // could not be authorised by a supersession proof
@@ -247,6 +251,42 @@ public final class ContactsViewModel: ObservableObject {
         repository.declineContactRequest(messageId: messageId)
     }
 
+    // MARK: - Contact detail (UX spec section 5.3)
+
+    /// The accepted contact behind a detail screen, or `nil` once it is gone.
+    public func contact(messageId: Int64) -> AcceptedContact? {
+        repositoryState.accepted.first { $0.request.messageId == messageId }
+    }
+
+    /// The 1x1 chat with this contact: the one the accept flow created, else
+    /// the two-person chat whose other member holds the contact's key (the
+    /// case where the OTHER side accepted and the Welcome created the chat
+    /// here). A read over the live rosters, no state change.
+    public func chatGroupIdHex(for contact: AcceptedContact) -> String? {
+        if let known = contact.groupIdHex { return known }
+        guard let chatRepository else { return nil }
+        let key = contact.request.fromPubkey
+        return chatRepository.knownGroupIdHexes.first {
+            chatRepository.oneToOnePeerSignatureKey(groupIdHex: $0) == key
+        }
+    }
+
+    /// Whether the call buttons on a contact detail can act: a chat exists and
+    /// this device's membership in it has not ended (the same gate the chat
+    /// header applies to its own call buttons).
+    public func canCall(groupIdHex: String) -> Bool {
+        guard let chatRepository else { return false }
+        let thread = chatRepository.state.threads.first { $0.groupIdHex == groupIdHex }
+        return !(thread?.membershipEnded ?? false)
+    }
+
+    /// The safety number between this account and the contact (the existing
+    /// ``ContactsRepository/safetyNumber(against:)``), or `nil` when the
+    /// session cannot compute it (no identity secrets).
+    public func safetyNumber(for contact: AcceptedContact) -> String? {
+        try? repository.safetyNumber(against: contact.request.fromPubkey)
+    }
+
     /// Set (or clear, when blank) the user-chosen display name for an
     /// accepted contact (ADR-0021 follow-up). The repository persists the
     /// change and the group-call roster picks it up on the next call.
@@ -269,6 +309,10 @@ public final class ContactsViewModel: ObservableObject {
                 generatingInvite = false
                 inviteError = nil
                 lastGeneratedInvite = invite
+                // The sheet lists the server-side set; pull it so the new
+                // link shows with its server row rather than only the
+                // session copy.
+                await loadActiveInvites()
             } catch let err as ContactsError {
                 generatingInvite = false
                 inviteError = userFacing(err)

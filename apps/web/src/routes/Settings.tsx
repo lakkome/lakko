@@ -2,11 +2,12 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * `/settings/:section?` — Profile · Security · Appearance · Media · Account
- * (docs/ux/client-redesign.md section 5.5). A section list on the left, the
- * section on the right; a narrow screen shows one of the two. `/settings`
- * lands on Profile. `recovery` (authenticator, email or phone) is a page
- * under Security rather than a section of its own.
+ * `/settings/:section?` — Profile · Security · Appearance · Media · About ·
+ * Account (docs/ux/client-redesign.md section 5.5). A section list on the
+ * left, the section on the right; a narrow screen shows one of the two.
+ * `/settings` lands on Profile. `recovery` (authenticator, email or phone) is
+ * a page under Security rather than a section of its own. Account is last:
+ * it holds the export and the danger zone.
  */
 import { Show, type JSX } from "solid-js";
 import { A, useParams } from "@solidjs/router";
@@ -17,13 +18,14 @@ import { AccountCard, ExportDataCard } from "../auth/AccountSections";
 import { ContactEnrollView, TotpEnrollView } from "../auth/RecoveryFactors";
 import { autoplayVideoNotes, setAutoplayVideoNotes } from "../media/media-prefs";
 import { useProfiles } from "../profile/ProfileContext";
+import { appLicense, appVersion } from "../ui/app-version";
 import { Avatar } from "../ui/Avatar";
 import { Icon, type IconName } from "../ui/icons";
 import { setTheme, useTheme, type Theme } from "../ui/theme";
 import Profile from "./Profile";
 import { paths } from "./paths";
 
-type Section = "profile" | "security" | "appearance" | "media" | "account";
+type Section = "profile" | "security" | "appearance" | "media" | "about" | "account";
 type Page = Section | "recovery";
 
 const SECTIONS: ReadonlyArray<{ id: Section; label: string; icon: IconName }> = [
@@ -31,6 +33,7 @@ const SECTIONS: ReadonlyArray<{ id: Section; label: string; icon: IconName }> = 
   { id: "security", label: "Security", icon: "shield" },
   { id: "appearance", label: "Appearance", icon: "palette" },
   { id: "media", label: "Media", icon: "video" },
+  { id: "about", label: "About", icon: "info" },
   { id: "account", label: "Account", icon: "logout" },
 ];
 
@@ -113,6 +116,9 @@ export default function Settings(): JSX.Element {
           </Show>
           <Show when={shown() === "media"}>
             <MediaSection />
+          </Show>
+          <Show when={shown() === "about"}>
+            <AboutSection />
           </Show>
           <Show when={shown() === "account"}>
             <div class="lk-page-head">
@@ -236,6 +242,52 @@ function AppearanceSection(): JSX.Element {
               {o.label}
             </label>
           ))}
+        </div>
+      </section>
+    </>
+  );
+}
+
+function AboutSection(): JSX.Element {
+  return (
+    <>
+      <div class="lk-page-head">
+        <h1>About</h1>
+        <p>Lakko on the web.</p>
+      </div>
+      <section class="lk-card">
+        <div class="lk-card-row">
+          <span class="lk-card-row-icon">
+            <Icon name="info" size={18} />
+          </span>
+          <div class="lk-card-row-body">
+            <span class="lk-card-row-title">Version</span>
+            <span class="lk-card-row-sub">{appVersion()}</span>
+          </div>
+        </div>
+        <div class="lk-card-row">
+          <span class="lk-card-row-icon">
+            <Icon name="db" size={18} />
+          </span>
+          <div class="lk-card-row-body">
+            <span class="lk-card-row-title">Licence</span>
+            <span class="lk-card-row-sub">
+              {appLicense}. The source code is free to read, use and improve.
+            </span>
+          </div>
+        </div>
+        <div class="lk-card-row">
+          <span class="lk-card-row-icon">
+            <Icon name="lock" size={18} />
+          </span>
+          <div class="lk-card-row-body">
+            <span class="lk-card-row-title">How Lakko protects you</span>
+            <span class="lk-card-row-sub">
+              Messages, calls and contact requests are end-to-end encrypted: only the people in a
+              conversation can read them, never Lakko's servers. Your password never leaves your
+              device, and each contact has a safety number you can compare in person.
+            </span>
+          </div>
         </div>
       </section>
     </>

@@ -1,0 +1,98 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+import { describe, expect, it } from "vitest";
+
+import {
+  compareContactLabels,
+  groupByLetter,
+  letterOf,
+  matchesContactQuery,
+  OTHER_LETTER,
+  sortIncomingRequests,
+  upsertSentRequest,
+  waitingSentRequests,
+} from "./contact-list-model";
+
+describe("letterOf", () => {
+  it("takes the first letter, upper-cased, ignoring a leading @", () => {
+    expect(letterOf("anna")).toBe("A");
+    expect(letterOf("@boris")).toBe("B");
+    expect(letterOf("  ольга")).toBe("О");
+    expect(letterOf("émile")).toBe("É");
+  });
+
+  it("files digits, punctuation and empty labels under #", () => {
+    expect(letterOf("42")).toBe(OTHER_LETTER);
+    expect(letterOf("_x")).toBe(OTHER_LETTER);
+    expect(letterOf("")).toBe(OTHER_LETTER);
+    expect(letterOf("@")).toBe(OTHER_LETTER);
+  });
+});
+
+describe("groupByLetter", () => {
+  const labels = ["zoe", "Anna", "@anton", "42", "Émile", "bob", "_tmp"];
+
+  it("sorts case- and accent-insensitively and puts # last", () => {
+    const groups = groupByLetter(labels, (l) => l);
+    expect(groups.map((g) => g.letter)).toEqual(["A", "B", "É", "Z", OTHER_LETTER]);
+    expect(groups[0]?.items).toEqual(["Anna", "@anton"]);
+    // The order inside "#" is the collator's (punctuation vs digits); only
+    // membership and the position of the group are the rule.
+    expect([...(groups[groups.length - 1]?.items ?? [])].sort()).toEqual(["42", "_tmp"]);
+  });
+
+  it("keeps the input untouched and returns nothing for nothing", () => {
+    const input = ["b", "a"];
+    groupByLetter(input, (l) => l);
+    expect(input).toEqual(["b", "a"]);
+    expect(groupByLetter([], (l: string) => l)).toEqual([]);
+  });
+
+  it("orders numbers naturally", () => {
+    expect(compareContactLabels("device 2", "device 10")).toBeLessThan(0);
+  });
+});
+
+describe("matchesContactQuery", () => {
+  it("matches name or username, ignoring case and @", () => {
+    expect(matchesContactQuery("AN", "Anna", "@anna")).toBe(true);
+    expect(matchesContactQuery("@ann", "Somebody", "@anna")).toBe(true);
+    expect(matchesContactQuery("zz", "Anna", "@anna")).toBe(false);
+    expect(matchesContactQuery("x", "Anna", null)).toBe(false);
+  });
+
+  it("matches everything on an empty query", () => {
+    expect(matchesContactQuery("  ", "Anna", null)).toBe(true);
+  });
+});
+
+describe("sortIncomingRequests", () => {
+  it("puts the newest delivery first", () => {
+    const sorted = sortIncomingRequests([{ messageId: 3 }, { messageId: 9 }, { messageId: 1 }]);
+    expect(sorted.map((r) => r.messageId)).toEqual([9, 3, 1]);
+  });
+});
+
+describe("sent requests", () => {
+  const a = { recipientUsername: "anna", recipientAccountIdHex: "aa", sentAtMs: 100 };
+  const b = { recipientUsername: "bob", recipientAccountIdHex: "bb", sentAtMs: 200 };
+
+  it("keeps one record per recipient, the newest send winning", () => {
+    const again = { ...a, sentAtMs: 300 };
+    const list = upsertSentRequest(upsertSentRequest([a], b), again);
+    expect(list).toHaveLength(2);
+    expect(list.find((r) => r.recipientAccountIdHex === "aa")?.sentAtMs).toBe(300);
+  });
+
+  it("drops a request once its recipient is an accepted contact", () => {
+    expect(waitingSentRequests([a, b], new Set(["aa"]))).toEqual([b]);
+  });
+
+  it("lists the waiting ones newest first", () => {
+    expect(waitingSentRequests([a, b], new Set()).map((r) => r.recipientUsername)).toEqual([
+      "bob",
+      "anna",
+    ]);
+  });
+});

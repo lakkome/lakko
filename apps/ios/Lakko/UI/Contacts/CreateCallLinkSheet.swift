@@ -256,31 +256,23 @@ struct CreateCallLinkSheet: View {
                 .font(.body)
                 .foregroundStyle(.secondary)
 
-            Text(url)
-                .font(.system(.body, design: .monospaced))
-                .textSelection(.enabled)
-                .padding(12)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color(.secondarySystemBackground))
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-
-            HStack(spacing: 12) {
-                Button {
-                    UIPasteboard.general.string = url
-                } label: {
-                    Label("Copy", systemImage: "doc.on.doc")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.large)
-
-                ShareLink(item: url) {
-                    Label("Share", systemImage: "square.and.arrow.up")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.large)
-            }
+            // The same link row the invite-links sheet uses (UX spec section
+            // 5.3): a title, what the link allows, Copy and Share. Never the
+            // raw URL in a text field.
+            LinkActionsRow(
+                title: viewModel.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? "Call link" : viewModel.label.trimmingCharacters(in: .whitespacesAndNewlines),
+                details: [
+                    "\(CallLinkForm.title(viewModel.media)) call",
+                    "Expires after \(CallLinkForm.title(viewModel.expiry).lowercased()) · "
+                        + "\(CallLinkForm.title(viewModel.maxUses).lowercased()) use"
+                        + (viewModel.maxUses == .single ? "" : "s"),
+                ],
+                url: url
+            )
+            .padding(12)
+            .background(Color.lakkoSurfaceSunken)
+            .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.card))
 
             Button {
                 onStartCall(url)

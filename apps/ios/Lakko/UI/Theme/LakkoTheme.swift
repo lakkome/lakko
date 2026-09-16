@@ -98,6 +98,9 @@ struct InitialsAvatar: View {
     var size: CGFloat = 40
     /// `true` renders the group glyph instead of initials.
     var isGroup: Bool = false
+    /// An SF Symbol drawn when the name yields no initials (a person nothing
+    /// is known about), e.g. `person.fill`. `nil` leaves the circle blank.
+    var placeholderSymbol: String? = nil
 
     var body: some View {
         let tint = Self.tint(for: identity ?? name)
@@ -106,6 +109,10 @@ struct InitialsAvatar: View {
             if isGroup && initials.isEmpty {
                 Image(systemName: "person.3.fill")
                     .font(.system(size: size * 0.38, weight: .semibold))
+                    .foregroundStyle(tint.foreground)
+            } else if initials.isEmpty, let placeholderSymbol {
+                Image(systemName: placeholderSymbol)
+                    .font(.system(size: size * 0.42, weight: .semibold))
                     .foregroundStyle(tint.foreground)
             } else {
                 Text(initials)

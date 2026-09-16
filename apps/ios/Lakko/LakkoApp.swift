@@ -489,6 +489,11 @@ enum TabRoute: Hashable {
     case newChat
     /// The contact picker behind Groups > New group (see ``ContactPickerScreen``).
     case newGroup
+    /// A contact's detail (UX spec section 5.3), keyed on the accepted
+    /// request's mailbox id — the same key the contacts list uses.
+    case contactDetail(messageId: Int64)
+    /// The safety number with that contact, pushed from the detail.
+    case safetyNumber(messageId: Int64)
     case profile
     case passkeys
     case devices
@@ -648,11 +653,8 @@ private struct SessionRoot: View, Equatable {
             .tag(SessionTab.channels)
 
             NavigationStack(path: $contactsPath) {
-                ContactsScreen(
-                    viewModel: contactsVM,
-                    onOpenChat: { contactsPath.append(.chat(groupIdHex: $0)) }
-                )
-                .navigationDestination(for: TabRoute.self) { routeView($0, tab: .contacts) }
+                ContactsScreen(viewModel: contactsVM)
+                    .navigationDestination(for: TabRoute.self) { routeView($0, tab: .contacts) }
             }
             .tabItem { Label("Contacts", systemImage: "person.crop.circle") }
             .tag(SessionTab.contacts)
@@ -660,6 +662,7 @@ private struct SessionRoot: View, Equatable {
             NavigationStack(path: $settingsPath) {
                 SettingsScreen(
                     account: account,
+                    authRepository: authRepository,
                     onOpen: { settingsPath.append($0) },
                     onLogout: authRepository.logout,
                     onForgetDevice: forgetDevice
@@ -777,6 +780,21 @@ private struct SessionRoot: View, Equatable {
                     replaceTop(route, with: .chat(groupIdHex: groupIdHex), in: tab)
                 }
             )
+        case .contactDetail(let messageId):
+            ContactDetailScreen(
+                viewModel: contactsVM,
+                messageId: messageId,
+                onOpenChat: { groupIdHex in push(.chat(groupIdHex: groupIdHex), on: tab) },
+                onCall: { groupIdHex, _ in
+                    // The 1x1 entry point the chat header uses: the host
+                    // builds the session without dialing and the prejoin
+                    // offers the camera toggle, so Call and Video land on the
+                    // same prejoin (the header's video button does the same).
+                    services.callHost.startOutgoingCall(groupIdHex: groupIdHex)
+                }
+            )
+        case .safetyNumber(let messageId):
+            SafetyNumberScreen(viewModel: contactsVM, messageId: messageId)
         case .profile:
             // ADR-0048 — Settings -> Profile. A saved name is
             // published into every group this device is in.

@@ -13,7 +13,12 @@ package me.lakko.app.profile
  *  1. a name the viewer gave the contact themselves (local rename);
  *  2. the person's own profile name;
  *  3. the person's VERIFIED `@username`;
- *  4. the key fingerprint, WITHOUT `@` (`a1b2 c3d4`).
+ *  4. a neutral placeholder ([PLACEHOLDER_MEMBER]); a request card says
+ *     [PLACEHOLDER_SOMEONE] instead.
+ *
+ * The key fingerprint is NEVER a name (docs/ux/client-redesign.md section 2,
+ * principle 4). It stays available on [ResolvedName.fingerprint] for the
+ * safety-number and debug surfaces only.
  *
  * ## A username is shown only when verified
  *
@@ -48,21 +53,30 @@ public data class PeerProfile(
     val updatedAtMs: ULong,
 )
 
+/** The roster / sender label for a person nothing is known about. */
+public const val PLACEHOLDER_MEMBER: String = "Member"
+
+/** The request-card label for a person nothing is known about. */
+public const val PLACEHOLDER_SOMEONE: String = "Someone"
+
 /** Everything a surface needs to label one person. */
 public data class ResolvedName(
-    /** The label to show: rename, profile name, `@username`, or fingerprint. */
+    /** The label to show: rename, profile name, `@username`, or
+     *  [PLACEHOLDER_MEMBER] when nothing is known. */
     val primary: String,
     /** The verified username (no `@`), or `null` when none is verified. */
     val verifiedUsername: String?,
-    /** `true` when [primary] is the fingerprint (render it as a key). */
-    val isFingerprint: Boolean,
+    /** `true` when [primary] is the neutral placeholder — nothing is known
+     *  about this person beyond their key. */
+    val isPlaceholder: Boolean,
     /** Contact detail only: the person's own profile name when a local rename
      *  overrides it ("Their name: X"). */
     val theirName: String?,
     /** Contact detail only: a username was claimed and verification FAILED
      *  ("Username not verified"). Never set while verification is pending. */
     val usernameNotVerified: Boolean,
-    /** The fingerprint, always available for detail views. */
+    /** The key fingerprint (`a1b2 c3d4`). Never shown as a name; for the
+     *  safety-number and debug surfaces. */
     val fingerprint: String,
 ) {
     /**
@@ -105,11 +119,11 @@ public fun resolveName(
     val verification = claimed?.let(verificationOf)
     val verified = claimed?.takeIf { verification == UsernameVerification.VERIFIED }
     val fingerprint = fingerprintLabel(signatureKey)
-    val primary = rename ?: profileName ?: verified?.let { "@$it" } ?: fingerprint
+    val primary = rename ?: profileName ?: verified?.let { "@$it" } ?: PLACEHOLDER_MEMBER
     return ResolvedName(
         primary = primary,
         verifiedUsername = verified,
-        isFingerprint = rename == null && profileName == null && verified == null,
+        isPlaceholder = rename == null && profileName == null && verified == null,
         theirName = if (rename != null && profileName != null && profileName != rename) {
             profileName
         } else {
@@ -120,6 +134,11 @@ public fun resolveName(
     )
 }
 
+/** The label for the sender of a request: the list label, or
+ *  [PLACEHOLDER_SOMEONE] when nothing is known about them. */
+public fun requestSenderLabel(name: ResolvedName): String =
+    if (name.isPlaceholder) PLACEHOLDER_SOMEONE else name.listLabel
+
 /** The incoming request card title (UX §5): `Alice Petrova · @alice wants to
- *  connect`, or `@alice` / the fingerprint when that is all there is. */
-public fun requestCardTitle(name: ResolvedName): String = "${name.listLabel} wants to connect"
+ *  connect`, `@alice wants to connect`, or `Someone wants to connect`. */
+public fun requestCardTitle(name: ResolvedName): String = "${requestSenderLabel(name)} wants to connect"

@@ -652,6 +652,10 @@ private fun SessionRoot(
         // the message-log parse, the DeviceGroup restore. The shell now draws
         // first and these populate it; `bootstrap` hops onto the repository's
         // own dispatcher, the two stores below are hopped here.
+        // The stranger-inbox cursor + pending list are per account: load them
+        // now so the Contacts tab shows the saved requests before its first
+        // poll, which then resumes from the saved cursor.
+        contactsRepository.bindInbox(secrets.accountId)
         chatRepository.bootstrap(secrets)
         // ADR-0048 — make sure this account's own profile exists and states
         // its current username (normalised; `null` for a guest). Republished
@@ -935,11 +939,43 @@ private fun SessionRoot(
                     )
                     ContactsScreen(
                         viewModel = contactsVm,
+                        onOpenContact = { key -> navController.navigate(Routes.contact(key)) },
                         onOpenChat = { hex -> navController.navigate(Routes.chat(hex)) },
                         // ADR-0032 — "Start call" on a created call link opens the
                         // same `/c/` landing a tapped link does; AppRoot presents it
                         // over the session.
                         onStartCallLink = { slug -> inviteIntake.publishCallJoin(slug) },
+                    )
+                }
+                composable(Routes.CONTACT_DETAIL) { entry ->
+                    val key = entry.arguments?.getString("key") ?: return@composable
+                    val contactsVm: ContactsViewModel = viewModel(
+                        factory = singletonViewModelFactory {
+                            ContactsViewModel(repo = contactsRepository, chatRepo = chatRepository)
+                        },
+                    )
+                    // The same just-in-time permission gate every call entry
+                    // point uses; the 1x1 call is prepared in the app-level host
+                    // (prejoin first), exactly as the chat header does it.
+                    val callPermissions = me.lakko.app.ui.call.rememberCallPermissionGate()
+                    me.lakko.app.ui.contacts.ContactDetailScreen(
+                        contactKey = key,
+                        contactsRepository = contactsRepository,
+                        viewModel = contactsVm,
+                        onBack = { navController.popBackStack() },
+                        onOpenChat = { hex -> navController.navigate(Routes.chat(hex)) },
+                        onStartCall = { hex, video ->
+                            callPermissions.request(video = video) { callHost.startOutgoing(hex) }
+                        },
+                        onVerifySafetyNumber = { k -> navController.navigate(Routes.safetyNumber(k)) },
+                    )
+                }
+                composable(Routes.SAFETY_NUMBER) { entry ->
+                    val key = entry.arguments?.getString("key") ?: return@composable
+                    me.lakko.app.ui.contacts.SafetyNumberScreen(
+                        contactKey = key,
+                        contactsRepository = contactsRepository,
+                        onBack = { navController.popBackStack() },
                     )
                 }
                 composable(Routes.SETTINGS) {
@@ -953,6 +989,7 @@ private fun SessionRoot(
                         onOpenProfile = { navController.navigate(Routes.PROFILE) },
                         onOpenPasskeys = { navController.navigate(Routes.PASSKEYS) },
                         onOpenDevices = { navController.navigate(Routes.DEVICES) },
+                        onOpenRecovery = { navController.navigate(Routes.RECOVERY) },
                         onOpenAntiCensorship = { navController.navigate(Routes.ANTI_CENSORSHIP) },
                         onLogout = logout,
                         onForgetDevice = forgetDevice,
@@ -1076,7 +1113,24 @@ private fun SessionRoot(
                     DevicesScreen(
                         authRepository = authRepository,
                         onBack = { navController.popBackStack() },
+                        onAddDevice = { navController.navigate(Routes.DEVICES_ADD) },
                         chatRepository = chatRepository,
+                    )
+                }
+                composable(Routes.DEVICES_ADD) {
+                    // ADR-0050 — the scan side admits the new device to every chat
+                    // (`chatRepository.requestAdmitDevice`) inside the screen, as
+                    // before the redesign.
+                    me.lakko.app.ui.devices.AddDeviceScreen(
+                        authRepository = authRepository,
+                        onBack = { navController.popBackStack() },
+                        chatRepository = chatRepository,
+                    )
+                }
+                composable(Routes.RECOVERY) {
+                    me.lakko.app.ui.settings.RecoveryScreen(
+                        authRepository = authRepository,
+                        onBack = { navController.popBackStack() },
                     )
                 }
                 composable(Routes.ANTI_CENSORSHIP) {
@@ -1151,7 +1205,14 @@ private object Routes {
     const val PROFILE = "settings/profile"
     const val PASSKEYS = "settings/passkeys"
     const val DEVICES = "settings/devices"
+    const val DEVICES_ADD = "settings/devices/add"
+    const val RECOVERY = "settings/recovery"
     const val ANTI_CENSORSHIP = "settings/anti_censorship"
+    /** The contact detail; `key` is the base64url signature key (URL-safe by construction). */
+    const val CONTACT_DETAIL = "contact/{key}"
+    fun contact(key: String): String = "contact/$key"
+    const val SAFETY_NUMBER = "contact/{key}/safety"
+    fun safetyNumber(key: String): String = "contact/$key/safety"
     const val INVITE = "invite/{slug}"
     fun invite(slug: String): String = "invite/${android.net.Uri.encode(slug)}"
     const val GROUP_JOIN = "group_join/{slug}"

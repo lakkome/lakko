@@ -2572,3 +2572,128 @@ button.lk-reaction {
   height: 32px;
   font-size: 13px;
 }
+
+/* ------------------------------------------------- contacts (section 5.3) */
+
+/* Letter headers over the alphabetical contact list. */
+.lk-letter {
+  padding: 10px 20px 2px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--surface-muted);
+}
+/* The collapsed "Sent" group under Requests. */
+.lk-section-toggle {
+  min-height: 32px;
+  padding: 0 12px;
+  margin: 2px 8px;
+  border: none;
+  background: transparent;
+  color: var(--surface-muted);
+  font-size: 13px;
+  font-weight: 500;
+  justify-content: flex-start;
+  gap: 6px;
+}
+.lk-section-toggle svg {
+  transition: transform 120ms ease;
+}
+.lk-section-toggle svg.open {
+  transform: rotate(90deg);
+}
+.lk-request-row {
+  align-items: flex-start;
+}
+.lk-request-intro {
+  font-size: 13px;
+  color: var(--surface-fg);
+  white-space: normal;
+  margin-top: 2px;
+}
+
+/* Contact detail: 72px avatar, name, @username, then the action tiles. */
+.lk-contact-detail {
+  max-width: 560px;
+}
+.lk-contact-head {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  text-align: center;
+}
+.lk-contact-head .lk-avatar.xl {
+  width: 72px;
+  height: 72px;
+  font-size: 26px;
+  margin-bottom: 6px;
+}
+.lk-contact-head h1 {
+  margin: 0;
+}
+.lk-contact-username {
+  font-size: 15px;
+  color: var(--surface-muted);
+}
+.lk-detail-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.lk-action-tile {
+  flex-direction: column;
+  gap: 6px;
+  min-height: 64px;
+  padding: 10px 8px;
+  border-radius: var(--radius-md);
+  color: var(--accent);
+  font-size: 13px;
+}
+.lk-action-tile:hover:not(:disabled) {
+  background: var(--accent-soft);
+}
+.lk-action-tile:disabled {
+  color: var(--surface-muted);
+}
+
+/* The safety number: five-digit groups, large and monospace. */
+.lk-safety-number {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 14px 12px;
+  background: var(--surface-sunken);
+  border-radius: var(--radius-sm);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 20px;
+  line-height: 28px;
+  letter-spacing: 0.06em;
+  text-align: center;
+  user-select: all;
+}
+.lk-safety-row {
+  display: flex;
+  justify-content: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+/* Invite links: a title line over each link row. */
+.lk-invite-list {
+  gap: 12px;
+}
+.lk-invite-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.lk-invite-title {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.lk-invite-title strong {
+  font-size: 15px;
+  font-weight: 500;
+}

@@ -12,7 +12,12 @@ import Foundation
 ///   1. a name the viewer gave this contact themselves (local rename),
 ///   2. the person's profile display name,
 ///   3. the person's VERIFIED `@username`,
-///   4. the key fingerprint, WITHOUT `@`.
+///   4. a neutral placeholder (``ResolvedDisplayName/placeholderMember``); a
+///      request row says ``ResolvedDisplayName/placeholderSomeone`` instead.
+///
+/// The key fingerprint is NEVER a name (docs/ux/client-redesign.md section 2,
+/// principle 4). It stays reachable on ``ResolvedDisplayName/fingerprint`` for
+/// the safety-number and debug surfaces only.
 ///
 /// A username is part of the result only when verified. An unverified claim is
 /// not greyed out or question-marked; it is simply absent, because a displayed
@@ -23,15 +28,23 @@ public struct ResolvedDisplayName: Equatable, Sendable {
         case localRename
         case profileName
         case verifiedUsername
-        case fingerprint
+        /// Nothing is known about this person beyond their key; ``name`` is
+        /// the neutral placeholder.
+        case placeholder
     }
+
+    /// The roster / sender label for a person nothing is known about.
+    public static let placeholderMember = "Member"
+    /// The request-row label for a person nothing is known about.
+    public static let placeholderSomeone = "Someone"
 
     /// The name to show. Chat bubbles and call tiles show only this.
     public let name: String
     public let source: Source
     /// The verified username in canonical form (no `@`), or `nil`.
     public let verifiedUsername: String?
-    /// The short key fingerprint, `a1b2 c3d4`.
+    /// The short key fingerprint, `a1b2 c3d4`. Never shown as a name; for the
+    /// safety-number and debug surfaces.
     public let fingerprint: String
     /// The person's own profile name when a local rename overrides it — the
     /// contact detail's `Their name: …` line.
@@ -54,6 +67,15 @@ public struct ResolvedDisplayName: Equatable, Sendable {
     public var usernameLine: String? {
         guard let username = verifiedUsername, source != .verifiedUsername else { return nil }
         return "@\(username)"
+    }
+
+    /// `true` when ``name`` is the neutral placeholder.
+    public var isPlaceholder: Bool { source == .placeholder }
+
+    /// The label for the sender of a request: the list label, or
+    /// ``placeholderSomeone`` when nothing is known about them.
+    public var requestSenderLabel: String {
+        isPlaceholder ? Self.placeholderSomeone : listLabel
     }
 }
 
@@ -89,8 +111,8 @@ public func resolveDisplayName(
         name = "@\(verifiedUsername)"
         source = .verifiedUsername
     } else {
-        name = fingerprint
-        source = .fingerprint
+        name = ResolvedDisplayName.placeholderMember
+        source = .placeholder
     }
     return ResolvedDisplayName(
         name: name,
@@ -117,9 +139,9 @@ extension UsernameVerificationStateView {
     }
 }
 
-/// The short key fingerprint shown when nothing better is known: the first
-/// four bytes as lowercase hex in two groups, `a1b2 c3d4`. Deliberately no
-/// `@` — it is not a username and must not read like one.
+/// The short key fingerprint, the first four bytes as lowercase hex in two
+/// groups, `a1b2 c3d4`. For the safety-number and debug surfaces; never a
+/// name. Deliberately no `@` — it is not a username and must not read like one.
 public func displayFingerprint(_ signatureKey: Data) -> String {
     let hex = signatureKey.prefix(4).map { String(format: "%02x", $0) }.joined()
     guard hex.count > 4 else { return hex }

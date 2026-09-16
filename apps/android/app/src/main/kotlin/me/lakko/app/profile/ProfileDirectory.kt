@@ -188,7 +188,7 @@ public class ProfileDirectory internal constructor(
 /**
  * READ-ONLY name lookup for the push background-decrypt path (C-59): loads the
  * persisted stores once and resolves, with no write, no verification and no
- * network. A name the app has not already learned resolves to the fingerprint.
+ * network. A name the app has not already learned resolves to the placeholder.
  */
 public class ProfileNameSnapshot private constructor(
     private val profiles: Map<String, PeerProfile>,
@@ -212,8 +212,9 @@ public class ProfileNameSnapshot private constructor(
         )
     }
 
-    /** `true` when the viewer knows SOMETHING better than a fingerprint. */
-    public fun isKnown(signatureKeyB64: String): Boolean = !resolve(signatureKeyB64).isFingerprint
+    /** `true` when the viewer knows SOMETHING about this person (a rename, a
+     *  profile name or a verified username). */
+    public fun isKnown(signatureKeyB64: String): Boolean = !resolve(signatureKeyB64).isPlaceholder
 
     public companion object {
         /** Load a snapshot. Never writes. */

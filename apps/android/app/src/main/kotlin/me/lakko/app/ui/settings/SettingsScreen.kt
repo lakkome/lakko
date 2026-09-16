@@ -18,8 +18,11 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.DeleteForever
 import androidx.compose.material.icons.filled.Devices
+import androidx.compose.material.icons.filled.Gavel
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.Shield
@@ -53,12 +56,13 @@ import me.lakko.app.ui.theme.ThemeMode
 import me.lakko.app.ui.theme.ThemePreference
 
 /**
- * The Settings tab — docs/ux/client-redesign.md section 5.5 (Phase A shape).
+ * The Settings tab — docs/ux/client-redesign.md section 5.5.
  *
- * Header with the avatar, the name and the username; rows for the existing
- * screens (Profile, Passkeys, Devices, Anti-censorship); Appearance and Media
- * inline; Log out and Forget this device at the bottom, behind the
- * confirmations the flows already had.
+ * Header with the avatar, the name and the username; Account, Security
+ * (Passkeys, Devices, Recovery), Appearance and Media inline, Network, About
+ * (version, licence) and the Danger zone at the bottom: Log out and Forget
+ * this device behind the confirmations the flows already had. There is no
+ * Delete account row: the client has no account-deletion call yet.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -68,6 +72,7 @@ public fun SettingsScreen(
     onOpenProfile: () -> Unit,
     onOpenPasskeys: () -> Unit,
     onOpenDevices: () -> Unit,
+    onOpenRecovery: () -> Unit,
     onOpenAntiCensorship: () -> Unit,
     onLogout: () -> Unit,
     onForgetDevice: () -> Unit,
@@ -118,6 +123,12 @@ public fun SettingsScreen(
             SectionLabel("Security")
             SettingsRow("Passkeys", Icons.Filled.Key, onOpenPasskeys)
             SettingsRow("Devices", Icons.Filled.Devices, onOpenDevices)
+            SettingsRow(
+                "Recovery",
+                Icons.Filled.Restore,
+                onOpenRecovery,
+                supporting = "Recovery phrase, authenticator, email or phone",
+            )
 
             SectionLabel("Appearance")
             Row(
@@ -173,8 +184,17 @@ public fun SettingsScreen(
             SectionLabel("Network")
             SettingsRow("Anti-censorship", Icons.Filled.Shield, onOpenAntiCensorship)
 
+            SectionLabel("About")
+            InfoRow(
+                title = "Version",
+                value = "${me.lakko.app.BuildConfig.VERSION_NAME} (${me.lakko.app.BuildConfig.VERSION_CODE})",
+                icon = Icons.Filled.Info,
+            )
+            InfoRow(title = "Licence", value = "AGPL-3.0-or-later", icon = Icons.Filled.Gavel)
+
             Spacer(Modifier.height(16.dp))
             HorizontalDivider()
+            SectionLabel("Danger zone", danger = true)
             SettingsRow(
                 title = "Log out",
                 icon = Icons.AutoMirrored.Filled.Logout,
@@ -228,12 +248,23 @@ public fun SettingsScreen(
 }
 
 @Composable
-private fun SectionLabel(text: String) {
+private fun SectionLabel(text: String, danger: Boolean = false) {
     Text(
         text = text,
         style = MaterialTheme.typography.labelLarge,
-        color = MaterialTheme.colorScheme.primary,
+        color = if (danger) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
         modifier = Modifier.padding(start = 16.dp, top = 16.dp, bottom = 4.dp),
+    )
+}
+
+/** A read-only row (About): title on the left, value as the supporting line. */
+@Composable
+private fun InfoRow(title: String, value: String, icon: ImageVector) {
+    ListItem(
+        headlineContent = { Text(title) },
+        supportingContent = { Text(value) },
+        leadingContent = { Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant) },
+        colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.background),
     )
 }
 

@@ -54,6 +54,22 @@ Still open: the native QR pairing and re-admission were not run on a device
 (no camera on the simulator or emulator, no camera-free path on the
 natives); iOS still decrypts and persists on the main actor inside the poll.
 
+Phase C landed on all three the same day: the Contacts tab as a searchable
+list with a Requests section, a collapsed Sent group and letter sections,
+an add menu (username, invite link, call link; no contact QR flow exists on
+any client), invite links as rows with Copy / Share / Revoke, a contact
+detail with Message / Call / Video, Verify safety number, Rename and Remove
+(Remove is Android and web only; iOS has no remove-contact operation), a
+Recovery screen and an About section in Settings, a device list with one
+Add-a-device flow, and a neutral "Member" / "Someone" label instead of a key
+fingerprint. The live pass through the new screens exposed three contact
+defects that predate the redesign (recorded in docs/PRODUCT-READINESS.md):
+the web signed requests with the device identity when a route lacked the
+account provider, iOS discarded acknowledgements, and both natives kept the
+inbox cursor in memory only. Still open after Phase C: "Mark as verified"
+(no store), a delete-account action on Android, device added dates, the
+"Message" action label wrapping on the Android detail.
+
 ## 1. What is wrong today
 
 Findings from a code inventory of the three clients (2026-09-16).

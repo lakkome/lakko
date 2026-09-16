@@ -125,8 +125,8 @@ export default function Devices(): JSX.Element {
                     </button>
                   </div>
                   <p class="lk-meta" style={{ margin: 0 }}>
-                    A device without a camera can ask instead: its request appears here as
-                    "Is this you?" with a code to compare.
+                    No camera on either device? Sign in on the new one and choose "Another
+                    device": an "Is this you?" prompt with a code to compare appears here.
                   </p>
                 </Match>
                 <Match when={add() === "show"}>
@@ -286,7 +286,8 @@ function DevicesListView(props: {
     <div class="lk-stack" style={{ gap: "8px" }}>
       <h2>Your devices</h2>
       <p class="lk-card-desc">
-        A removed device loses access to your messages from that moment on.
+        A removed device loses access to your messages from that moment on. Removing one may
+        ask for your passkey.
       </p>
       <Switch>
         <Match when={state().kind === "loading"}>

@@ -23,7 +23,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -481,7 +480,7 @@ fun JoinCallScreen(
             else -> {
                 val decoded = ui.decoded!!
                 // ADR-0048 — the host through the one resolver: a name when this
-                // device knows one, else the fingerprint without `@`.
+                // device knows one, else a neutral placeholder.
                 val appContext = androidx.compose.ui.platform.LocalContext.current.applicationContext
                 val host = androidx.compose.runtime.remember(decoded.ownerSignatureKey) {
                     me.lakko.app.profile.ProfileDirectory.get(appContext).resolve(decoded.ownerSignatureKey)
@@ -489,7 +488,6 @@ fun JoinCallScreen(
                 Text(
                     text = "Host: ${host.listLabel}",
                     style = MaterialTheme.typography.bodyMedium,
-                    fontFamily = if (host.isFingerprint) FontFamily.Monospace else FontFamily.Default,
                 )
                 ui.busyMessage?.let { message ->
                     Text(text = message, color = MaterialTheme.colorScheme.error)

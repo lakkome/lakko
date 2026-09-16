@@ -1161,6 +1161,10 @@ public final class AuthRepository: ObservableObject {
             // the people it talked to, and the username verdicts. Same
             // clean-wipe rationale.
             ProfileDirectory.shared.forget(accountIdB64: cached.accountIdB64)
+            // The account's stranger-inbox cursor + pending requests. Same
+            // clean-wipe rationale; the live `ContactsRepository` unbinds on
+            // the `identitySecrets = nil` below, so nothing re-writes the row.
+            ContactsInboxStore().clear(accountIdB64: cached.accountIdB64)
         }
         sessionStore.clear()
         identitySecrets = nil

@@ -8,6 +8,7 @@ import android.content.pm.PackageManager
 import android.util.Base64
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,21 +17,28 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.PhoneAndroid
+import androidx.compose.material.icons.filled.QrCode
+import androidx.compose.material.icons.filled.QrCodeScanner
+import androidx.compose.material.icons.filled.Devices
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.ListItem
+import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.TabRow
-import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -47,22 +55,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
-import androidx.compose.material3.SegmentedButton
-import androidx.compose.material3.SegmentedButtonDefaults
-import androidx.compose.material3.SingleChoiceSegmentedButtonRow
-import androidx.compose.ui.text.input.KeyboardCapitalization
 import me.lakko.app.auth.AuthClient
 import me.lakko.app.auth.AuthRepository
 import me.lakko.app.auth.AuthState
-import me.lakko.app.auth.ContactKind
-import me.lakko.app.auth.isPlausibleContact
 import me.lakko.app.devices.DeviceRemoval
 import me.lakko.app.devices.PairingOrchestrator
 import me.lakko.app.devices.WelcomeCourier
@@ -71,48 +71,34 @@ import me.lakko.app.webauthn.WebauthnHttpError
 import me.lakko.app.webauthn.actionHashForRemoveDevice
 
 /**
- * `DevicesScreen` — multi-device management surface
- * (Phase 2a3b4 Android).
+ * Settings > Security > Devices — docs/ux/client-redesign.md section 5.5.
  *
- * Mirror of:
- *
- *   * `apps/web/src/routes/Devices.tsx`
- *   * `apps/ios/Lakko/UI/Devices/DevicesScreen.swift`
- *
- * One screen, two flows picked via a [TabRow]:
- *
- *   1. **Pair this device** — joining side. Generates an
- *      ephemeral DeviceIdentity-derived KeyPackage + rendezvous
- *      pseudonym via [PairingOrchestrator.prepareJoinFlow],
- *      renders the pairing QR with [QrImageComposable],
- *      long-polls the DS mailbox for the Welcome, runs
- *      `accept` on receipt.
- *   2. **Add a device** — scanner side. Opens the camera via
- *      [QrScannerComposable], decodes the first QR, base64url-
- *      decodes the text payload, drives
- *      [PairingOrchestrator.runScanFlow].
- *
- * Both flows pull `accountIdBytes` + `accountIdB64` from the
- * injected [AuthRepository]; the screen renders an "auth
- * required" stub when the session isn't ready.
+ * The list of this account's devices ("This device" for the local one,
+ * otherwise "Device N": the device record carries no name, platform or added
+ * date yet) with a Remove action behind a confirmation and the existing
+ * passkey-gated removal (G-13, ADR-0014 / ADR-0015), and one "Add a device"
+ * button that opens [AddDeviceScreen]. The former five-way tab row is gone:
+ * the authenticator and email-or-phone enrolments live under Settings >
+ * Recovery.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 public fun DevicesScreen(
     authRepository: AuthRepository,
     onBack: () -> Unit,
-    /** ADR-0050 — the chat side of a pairing (admit the new device to every
-     *  chat) and of a removal (retire its leaf from every chat). `null` in
-     *  previews / tests. */
+    onAddDevice: () -> Unit,
+    /** ADR-0050 — the chat side of a removal (retire its leaf from every
+     *  chat). `null` in previews / tests. */
     chatRepository: me.lakko.app.chat.ChatRepository? = null,
+    modifier: Modifier = Modifier,
 ) {
     val authState by authRepository.state.collectAsStateWithLifecycle()
     val identitySecrets by authRepository.identitySecrets.collectAsStateWithLifecycle()
-
     val account = (authState as? AuthState.Session)?.account
     val secrets = identitySecrets
 
     Scaffold(
+        modifier = modifier,
         topBar = {
             TopAppBar(
                 title = { Text("Devices") },
@@ -128,14 +114,14 @@ public fun DevicesScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
+                .verticalScroll(rememberScrollState()),
         ) {
             Text(
                 "Use Lakko on more than one device. Linking is end-to-end " +
                     "encrypted; Lakko's servers cannot read it.",
-                style = MaterialTheme.typography.bodySmall,
+                style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
             )
 
             if (account == null || secrets == null) {
@@ -143,70 +129,150 @@ public fun DevicesScreen(
                     "Sign in first to manage devices.",
                     color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(16.dp),
                 )
                 return@Column
             }
 
-            var tab by remember { mutableStateOf(0) }
-            TabRow(selectedTabIndex = tab) {
-                Tab(
-                    selected = tab == 0,
-                    onClick = { tab = 0 },
-                    text = { Text("Your devices") },
-                )
-                Tab(
-                    selected = tab == 1,
-                    onClick = { tab = 1 },
-                    text = { Text("Pair this device") },
-                )
-                Tab(
-                    selected = tab == 2,
-                    onClick = { tab = 2 },
-                    text = { Text("Add a device") },
-                )
-                Tab(
-                    selected = tab == 3,
-                    onClick = { tab = 3 },
-                    text = { Text("Authenticator") },
-                )
-                Tab(
-                    selected = tab == 4,
-                    onClick = { tab = 4 },
-                    text = { Text("Email or phone") },
-                )
-            }
+            DevicesList(
+                accountIdBytes = secrets.accountId,
+                accountIdB64 = account.accountIdB64,
+                sessionToken = secrets.sessionToken,
+                chatRepository = chatRepository,
+            )
 
-            when (tab) {
-                0 -> DevicesListTab(
+            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+            Button(
+                onClick = onAddDevice,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+            ) {
+                Icon(Icons.Filled.Add, contentDescription = null)
+                Text("  Add a device")
+            }
+            Text(
+                "A removed device loses access to your messages.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(16.dp),
+            )
+        }
+    }
+}
+
+/** Which side of the pairing this phone plays. */
+private enum class AddDeviceMode { Show, Scan }
+
+/**
+ * Settings > Devices > Add a device — two options: "Show a code" (this phone
+ * is the new device; another signed-in device scans it) and "Scan a code"
+ * (this phone admits a new device by scanning the code it shows). Each opens
+ * the unchanged pairing flow of [PairingOrchestrator].
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+public fun AddDeviceScreen(
+    authRepository: AuthRepository,
+    onBack: () -> Unit,
+    /** ADR-0050 — admit the new device to every chat after a scan. */
+    chatRepository: me.lakko.app.chat.ChatRepository? = null,
+    modifier: Modifier = Modifier,
+) {
+    val authState by authRepository.state.collectAsStateWithLifecycle()
+    val identitySecrets by authRepository.identitySecrets.collectAsStateWithLifecycle()
+    val account = (authState as? AuthState.Session)?.account
+    val secrets = identitySecrets
+    var mode: AddDeviceMode? by remember { mutableStateOf(null) }
+
+    Scaffold(
+        modifier = modifier,
+        topBar = {
+            TopAppBar(
+                title = {
+                    Text(
+                        when (mode) {
+                            null -> "Add a device"
+                            AddDeviceMode.Show -> "Show a code"
+                            AddDeviceMode.Scan -> "Scan a code"
+                        },
+                    )
+                },
+                navigationIcon = {
+                    IconButton(onClick = { if (mode == null) onBack() else mode = null }) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                },
+            )
+        },
+    ) { padding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            if (account == null || secrets == null) {
+                Text(
+                    "Sign in first to add a device.",
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                return@Column
+            }
+            when (mode) {
+                null -> {
+                    OptionRow(
+                        title = "Show a code",
+                        supporting = "This is the new device. Another phone or computer that is already signed in scans the code.",
+                        icon = Icons.Filled.QrCode,
+                        onClick = { mode = AddDeviceMode.Show },
+                    )
+                    OptionRow(
+                        title = "Scan a code",
+                        supporting = "Add a new device by scanning the code it shows.",
+                        icon = Icons.Filled.QrCodeScanner,
+                        onClick = { mode = AddDeviceMode.Scan },
+                    )
+                }
+                AddDeviceMode.Show -> PairSection(
                     accountIdBytes = secrets.accountId,
                     accountIdB64 = account.accountIdB64,
-                    sessionToken = secrets.sessionToken,
-                    chatRepository = chatRepository,
                 )
-                1 -> PairTab(
-                    accountIdBytes = secrets.accountId,
-                    accountIdB64 = account.accountIdB64,
-                )
-                2 -> ScanTab(
+                AddDeviceMode.Scan -> ScanSection(
                     accountIdBytes = secrets.accountId,
                     accountIdB64 = account.accountIdB64,
                     accountIdentitySeed = secrets.accountIdentitySeed,
                     sessionToken = secrets.sessionToken,
                     chatRepository = chatRepository,
                 )
-                3 -> TotpEnrollTab(
-                    sessionToken = secrets.sessionToken,
-                )
-                else -> ContactEnrollTab(
-                    sessionToken = secrets.sessionToken,
-                )
             }
         }
     }
 }
 
+@Composable
+private fun OptionRow(
+    title: String,
+    supporting: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    onClick: () -> Unit,
+) {
+    ListItem(
+        headlineContent = { Text(title, fontWeight = FontWeight.Medium) },
+        supportingContent = { Text(supporting) },
+        leadingContent = { Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
+        colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.surface),
+        modifier = Modifier
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(onClick = onClick),
+    )
+}
+
 // =============================================================================
-// Pair tab — joining device side
+// Show a code — this phone is the new device
 // =============================================================================
 
 private sealed interface PairUi {
@@ -226,7 +292,7 @@ private sealed interface PairUi {
 }
 
 @Composable
-private fun PairTab(
+private fun PairSection(
     accountIdBytes: ByteArray,
     accountIdB64: String,
 ) {
@@ -250,8 +316,8 @@ private fun PairTab(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text(
-            "Show this QR code to a device that is already signed in. " +
-                "Scanning it links this device to your account.",
+            "Show this code to a phone or computer that is already signed in " +
+                "to your account. Scanning it links this device.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -308,7 +374,7 @@ private fun PairTab(
                 },
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text("Show pairing code")
+                Text("Show code")
             }
 
             PairUi.Preparing -> Row(
@@ -329,7 +395,7 @@ private fun PairTab(
                     size = 240.dp,
                 )
                 Text(
-                    "Waiting for the other device to scan this code…",
+                    "Waiting for the other device to scan this code...",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -378,7 +444,7 @@ private fun PairTab(
 }
 
 // =============================================================================
-// Scan tab — scanner device side
+// Scan a code — this phone admits the new device
 // =============================================================================
 
 private sealed interface ScanUi {
@@ -406,7 +472,7 @@ private sealed interface ScanUi {
 }
 
 @Composable
-private fun ScanTab(
+private fun ScanSection(
     accountIdBytes: ByteArray,
     accountIdB64: String,
     accountIdentitySeed: ByteArray,
@@ -437,8 +503,8 @@ private fun ScanTab(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text(
-            "Aim your camera at the QR code your new device is showing. " +
-                "The pairing completes within a couple of seconds.",
+            "Point the camera at the code your new device is showing. " +
+                "Linking takes a couple of seconds.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -461,8 +527,8 @@ private fun ScanTab(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Text(
-                    "Lakko needs camera access to scan the pairing QR. " +
-                        "Open Android settings to grant the permission.",
+                    "Lakko needs the camera to scan the code. " +
+                        "Allow camera access in Android settings, then try again.",
                     color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.bodyMedium,
                 )
@@ -499,8 +565,8 @@ private fun ScanTab(
                                 // different one, so the camera can pan straight
                                 // onto the real code with no re-mount (G-29).
                                 scanHint =
-                                    "That code isn't a Lakko pairing QR. Point " +
-                                    "the camera at the QR on your other device."
+                                    "That is not a Lakko device code. Point " +
+                                    "the camera at the code on your other device."
                                 return@QrScannerComposable
                             }
                             // ADR-0018 / lakko-security finding #1 —
@@ -540,10 +606,9 @@ private fun ScanTab(
                     fontWeight = FontWeight.SemiBold,
                 )
                 Text(
-                    "This gives the scanned device FULL access to your " +
-                        "account: your messages, your contacts, and your " +
-                        "secure identity. Only continue if the QR code is " +
-                        "on YOUR OWN new device.",
+                    "The scanned device gets full access to your account: " +
+                        "your messages, your contacts and your identity. " +
+                        "Only continue if the code is on your own new device.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -601,7 +666,7 @@ private fun ScanTab(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 CircularProgressIndicator()
-                Text("Adding the device…")
+                Text("Adding the device...")
             }
 
             ScanUi.Done -> Text(
@@ -643,7 +708,7 @@ private fun base64UrlDecodeNoPad(text: String): ByteArray? {
 }
 
 // =============================================================================
-// Your devices (list + remove) tab
+// The device list (list + remove)
 // =============================================================================
 
 private sealed interface DevicesListUi {
@@ -652,8 +717,13 @@ private sealed interface DevicesListUi {
     data class Error(val message: String) : DevicesListUi
 }
 
+/** The row label: "This device" for the local one, else "Device N" by list
+ *  order (no name, platform or added date is recorded yet). */
+internal fun deviceRowLabel(isSelf: Boolean, index: Int): String =
+    if (isSelf) "This device" else "Device ${index + 1}"
+
 @Composable
-private fun DevicesListTab(
+private fun DevicesList(
     accountIdBytes: ByteArray,
     accountIdB64: String,
     sessionToken: String?,
@@ -663,6 +733,7 @@ private fun DevicesListTab(
     val scope = rememberCoroutineScope()
     var state: DevicesListUi by remember { mutableStateOf(DevicesListUi.Loading) }
     var removingLeaf: UInt? by remember { mutableStateOf(null) }
+    var confirming: Pair<DeviceRemoval.DeviceListItem, String>? by remember { mutableStateOf(null) }
 
     fun refresh() {
         state = DevicesListUi.Loading
@@ -674,619 +745,138 @@ private fun DevicesListTab(
             )
             state = DevicesListUi.Ready(list.devices)
         } catch (cause: Throwable) {
-            state = DevicesListUi.Error(cause.message ?: "Failed to load devices")
+            state = DevicesListUi.Error(cause.message ?: "Could not load your devices.")
         }
     }
 
     LaunchedEffect(Unit) { refresh() }
 
-    Column(
-        modifier = Modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        Text(
-            "The devices linked to your account. A removed device loses " +
-                "access to your messages.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-
-        when (val s = state) {
-            DevicesListUi.Loading -> Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                CircularProgressIndicator()
-                Text("Loading devices…")
-            }
-
-            is DevicesListUi.Ready -> {
-                s.devices.forEachIndexed { index, device ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            // No device name or platform is recorded yet, so
-                            // the label is neutral: "Device N" by order added.
-                            Text(
-                                if (device.isSelf) "This device" else "Device ${index + 1}",
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = FontWeight.Medium,
+    fun remove(device: DeviceRemoval.DeviceListItem) {
+        val leaf = device.leafIndex
+        val signaturePublicKey = device.signaturePublicKey
+        removingLeaf = leaf
+        scope.launch {
+            try {
+                // G-13 (ADR-0014): gate the eviction on a fresh passkey gesture
+                // cryptographically bound to the removed leaf, but only if the
+                // account actually has a passkey. Accounts without one (a 404
+                // from the ceremony start) fall through on session-token auth
+                // alone. A cancelled gesture or any other failure aborts the
+                // removal (fail-closed).
+                // G-13 (ADR-0015): the ceremony yields an attestation bound to the
+                // removed leaf; it rides with the Remove commit so peers verify it.
+                var attestation: ByteArray? = null
+                if (sessionToken != null) {
+                    WebauthnClient().use { wc ->
+                        wc.setSessionToken(sessionToken)
+                        try {
+                            val actionHashB64 = actionHashForRemoveDevice(signaturePublicKey)
+                            val result = wc.assertAction(
+                                context = context,
+                                actionHashB64 = actionHashB64,
                             )
+                            attestation = base64UrlDecodeNoPad(result.attestationB64)
+                        } catch (e: WebauthnHttpError) {
+                            if (e.status != 404) throw e
                         }
-                        if (device.isSelf) {
-                            Text(
-                                "—",
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        } else {
-                            OutlinedButton(
-                                onClick = {
-                                    val leaf = device.leafIndex
-                                    val signaturePublicKey = device.signaturePublicKey
-                                    removingLeaf = leaf
-                                    scope.launch {
-                                        try {
-                                            // G-13 (ADR-0014): gate the eviction on a
-                                            // fresh passkey gesture cryptographically
-                                            // bound to the removed leaf — but only if the
-                                            // account actually has a passkey. OPAQUE-only
-                                            // accounts (no passkey) fall through on
-                                            // session-token auth alone: a 404 from the
-                                            // ceremony start signals "no credentials". A
-                                            // user-cancelled gesture or any other failure
-                                            // aborts the removal (fail-closed).
-                                            // G-13 (ADR-0015): the ceremony yields an
-                                            // attestation bound to the removed leaf; carry it
-                                            // with the Remove commit so peers verify it.
-                                            var attestation: ByteArray? = null
-                                            if (sessionToken != null) {
-                                                WebauthnClient().use { wc ->
-                                                    wc.setSessionToken(sessionToken)
-                                                    try {
-                                                        val actionHashB64 =
-                                                            actionHashForRemoveDevice(
-                                                                signaturePublicKey,
-                                                            )
-                                                        val result = wc.assertAction(
-                                                            context = context,
-                                                            actionHashB64 = actionHashB64,
-                                                        )
-                                                        attestation = base64UrlDecodeNoPad(
-                                                            result.attestationB64,
-                                                        )
-                                                    } catch (e: WebauthnHttpError) {
-                                                        if (e.status != 404) throw e
-                                                    }
-                                                }
-                                            }
+                    }
+                }
 
-                                            DeviceRemoval.removeDeviceAt(
-                                                context = context,
-                                                accountIdBytes = accountIdBytes,
-                                                accountIdB64 = accountIdB64,
-                                                leafIndex = leaf,
-                                                attestation = attestation,
-                                            )
-                                            // ADR-0050 section 2.10 — out of every
-                                            // chat and out of the directory.
-                                            chatRepository?.requestRetireDevice(signaturePublicKey)
-                                            removingLeaf = null
-                                            refresh()
-                                        } catch (cause: Throwable) {
-                                            removingLeaf = null
-                                            state = DevicesListUi.Error(
-                                                cause.message ?: "Failed to remove device",
-                                            )
-                                        }
-                                    }
-                                },
+                DeviceRemoval.removeDeviceAt(
+                    context = context,
+                    accountIdBytes = accountIdBytes,
+                    accountIdB64 = accountIdB64,
+                    leafIndex = leaf,
+                    attestation = attestation,
+                )
+                // ADR-0050 section 2.10 — out of every chat and out of the
+                // directory.
+                chatRepository?.requestRetireDevice(signaturePublicKey)
+                removingLeaf = null
+                refresh()
+            } catch (cause: Throwable) {
+                removingLeaf = null
+                state = DevicesListUi.Error(cause.message ?: "Could not remove the device.")
+            }
+        }
+    }
+
+    when (val s = state) {
+        DevicesListUi.Loading -> Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.padding(16.dp),
+        ) {
+            CircularProgressIndicator()
+            Text("Loading...")
+        }
+
+        is DevicesListUi.Ready -> {
+            s.devices.forEachIndexed { index, device ->
+                val label = deviceRowLabel(device.isSelf, index)
+                ListItem(
+                    headlineContent = { Text(label, fontWeight = FontWeight.Medium) },
+                    supportingContent = if (device.isSelf) {
+                        { Text("Signed in here") }
+                    } else {
+                        null
+                    },
+                    leadingContent = {
+                        Icon(
+                            if (device.isSelf) Icons.Filled.PhoneAndroid else Icons.Filled.Devices,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    },
+                    trailingContent = if (device.isSelf) {
+                        null
+                    } else {
+                        {
+                            TextButton(
+                                onClick = { confirming = device to label },
                                 enabled = removingLeaf == null,
                             ) {
                                 Text(
-                                    if (removingLeaf == device.leafIndex) "Removing…" else "Remove",
+                                    if (removingLeaf == device.leafIndex) "Removing..." else "Remove",
+                                    color = MaterialTheme.colorScheme.error,
                                 )
-                            }
-                        }
-                    }
-                }
-            }
-
-            is DevicesListUi.Error -> Column(
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Text(
-                    s.message,
-                    color = MaterialTheme.colorScheme.error,
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-                OutlinedButton(onClick = { refresh() }) {
-                    Text("Try again")
-                }
-            }
-        }
-    }
-}
-
-private fun hexPrefix(bytes: ByteArray, n: Int): String {
-    val take = minOf(n, bytes.size)
-    val sb = StringBuilder(take * 2)
-    for (i in 0 until take) {
-        val v = bytes[i].toInt() and 0xFF
-        sb.append(HEX_CHARS[v ushr 4])
-        sb.append(HEX_CHARS[v and 0x0F])
-    }
-    return sb.toString()
-}
-
-private const val HEX_CHARS: String = "0123456789abcdef"
-
-// ---- Authenticator (TOTP) enrollment — ADR-0018 factor (c) -------
-
-/** UI state machine for [TotpEnrollTab]. */
-private sealed interface TotpUi {
-    data object Idle : TotpUi
-    data object Starting : TotpUi
-    data class Confirm(
-        val otpauthUri: String,
-        val secretB32: String,
-        val code: String,
-        val busy: Boolean,
-        val error: String?,
-    ) : TotpUi
-    data object Done : TotpUi
-    data object AlreadyEnabled : TotpUi
-    data object Unavailable : TotpUi
-    data class Error(val message: String) : TotpUi
-}
-
-/**
- * Enroll an authenticator app as an ACCESS-recovery factor:
- * `/totp/enroll/start` renders the `otpauth://` QR (RAW TEXT —
- * authenticator apps parse the URI straight out of the QR) + the
- * manual-entry secret; `/totp/enroll/finish` confirms with a live
- * 6-digit code. Mirror of the web `TotpEnrollView`.
- *
- * There is no server "status" endpoint — the Enable button renders
- * by default and a 409 from either call flips the card to "already
- * enabled" (honest lazy state derivation, same as web).
- */
-@Composable
-private fun TotpEnrollTab(sessionToken: String) {
-    val scope = rememberCoroutineScope()
-    var ui: TotpUi by remember { mutableStateOf(TotpUi.Idle) }
-
-    Column(
-        modifier = Modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        Text(
-            "Add an authenticator app (TOTP) as a recovery factor. " +
-                "If you lose this device, a 6-digit code recovers " +
-                "ACCESS to your account; your identity then restores " +
-                "from the recovery phrase or another device.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-
-        when (val s = ui) {
-            TotpUi.Idle -> Button(
-                onClick = {
-                    ui = TotpUi.Starting
-                    scope.launch {
-                        ui = try {
-                            val res = AuthClient().use { client ->
-                                client.totpEnrollStart(sessionToken)
-                            }
-                            TotpUi.Confirm(
-                                otpauthUri = res.otpauthUri,
-                                secretB32 = res.secretB32,
-                                code = "",
-                                busy = false,
-                                error = null,
-                            )
-                        } catch (err: me.lakko.app.auth.AuthHttpError) {
-                            when (err.status) {
-                                409 -> TotpUi.AlreadyEnabled
-                                503 -> TotpUi.Unavailable
-                                else -> TotpUi.Error(
-                                    err.message ?: "Enrollment failed (${err.status}).",
-                                )
-                            }
-                        } catch (err: Throwable) {
-                            TotpUi.Error(err.message ?: "Enrollment failed")
-                        }
-                    }
-                },
-            ) { Text("Enable authenticator") }
-
-            TotpUi.Starting -> CircularProgressIndicator()
-
-            is TotpUi.Confirm -> {
-                Text(
-                    "Scan this QR with your authenticator app (or type " +
-                        "the secret), then enter the current 6-digit code " +
-                        "to confirm.",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                QrTextImageComposable(text = s.otpauthUri)
-                Text(
-                    "Secret: ${s.secretB32}",
-                    style = MaterialTheme.typography.bodySmall,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                OutlinedTextField(
-                    value = s.code,
-                    onValueChange = { v -> ui = s.copy(code = v, error = null) },
-                    label = { Text("6-digit code") },
-                    singleLine = true,
-                    enabled = !s.busy,
-                    keyboardOptions = KeyboardOptions(
-                        keyboardType = KeyboardType.Number,
-                        imeAction = ImeAction.Done,
-                    ),
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                if (s.error != null) {
-                    Text(
-                        s.error,
-                        color = MaterialTheme.colorScheme.error,
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
-                Button(
-                    onClick = {
-                        val normalized = me.lakko.app.auth.normalizeTotpCode(s.code)
-                        if (normalized == null) {
-                            ui = s.copy(
-                                error = "Enter the 6-digit code from the app.",
-                            )
-                            return@Button
-                        }
-                        ui = s.copy(busy = true, error = null)
-                        scope.launch {
-                            ui = try {
-                                AuthClient().use { client ->
-                                    client.totpEnrollFinish(sessionToken, normalized)
-                                }
-                                TotpUi.Done
-                            } catch (err: me.lakko.app.auth.AuthHttpError) {
-                                when (err.status) {
-                                    401 -> s.copy(
-                                        busy = false,
-                                        error = "Wrong code — check the app and try again.",
-                                    )
-                                    409 -> TotpUi.AlreadyEnabled
-                                    else -> TotpUi.Error(
-                                        err.message ?: "Confirmation failed (${err.status}).",
-                                    )
-                                }
-                            } catch (err: Throwable) {
-                                TotpUi.Error(err.message ?: "Confirmation failed")
                             }
                         }
                     },
-                    enabled = !s.busy,
-                ) { Text(if (s.busy) "Confirming…" else "Confirm") }
+                    colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.background),
+                )
             }
+        }
 
-            TotpUi.Done -> Text(
-                "Authenticator enabled. A 6-digit code can now recover " +
-                    "access to this account.",
-                color = MaterialTheme.colorScheme.primary,
-                style = MaterialTheme.typography.bodyMedium,
-                fontWeight = FontWeight.SemiBold,
-            )
-
-            TotpUi.AlreadyEnabled -> Text(
-                "An authenticator is already enabled on this account.",
-                style = MaterialTheme.typography.bodyMedium,
-            )
-
-            TotpUi.Unavailable -> Text(
-                "Authenticator enrollment is not available on this server.",
-                style = MaterialTheme.typography.bodyMedium,
+        is DevicesListUi.Error -> Column(
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.padding(16.dp),
+        ) {
+            Text(
+                s.message,
                 color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodyMedium,
             )
-
-            is TotpUi.Error -> Column(
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Text(
-                    s.message,
-                    color = MaterialTheme.colorScheme.error,
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                Button(onClick = { ui = TotpUi.Idle }) { Text("Try again") }
-            }
+            OutlinedButton(onClick = { refresh() }) { Text("Try again") }
         }
     }
-}
 
-// ---- Email / phone OTP enrollment — ADR-0018 factor (d) ----------
-
-/** UI state machine for [ContactEnrollTab]. */
-private sealed interface ContactUi {
-    /** Collecting the kind + contact; not yet sent. */
-    data class Idle(
-        val kind: Int,
-        val contact: String,
-        val error: String?,
-    ) : ContactUi
-    data object Starting : ContactUi
-    /** A code was sent; collecting the confirm code. The kind +
-     *  contact are carried so the finish targets the exact pair. */
-    data class Confirm(
-        val kind: Int,
-        val contact: String,
-        val code: String,
-        val busy: Boolean,
-        val error: String?,
-    ) : ContactUi
-    data object Done : ContactUi
-    data object AlreadyEnabled : ContactUi
-    data object Unavailable : ContactUi
-    data class Error(val message: String) : ContactUi
-}
-
-/**
- * Enroll a phone / email as an ACCESS-recovery factor (ADR-0018
- * factor (d)): `/recovery-contact/enroll/start` sends a 6-digit code
- * to the contact, `/recovery-contact/enroll/finish` confirms it with
- * the code. Mirror of the web `ContactEnrollView`.
- *
- * There is no server "status" endpoint — the form renders by default
- * and a 409 from either call flips the card to "already enabled"
- * (honest lazy state derivation, same as the TOTP tab and web);
- * a 503 means the factor is disabled server-side.
- */
-@Composable
-private fun ContactEnrollTab(sessionToken: String) {
-    val scope = rememberCoroutineScope()
-    var ui: ContactUi by remember {
-        mutableStateOf(
-            ContactUi.Idle(kind = ContactKind.EMAIL, contact = "", error = null),
+    confirming?.let { (device, label) ->
+        AlertDialog(
+            onDismissRequest = { confirming = null },
+            title = { Text("Remove $label?") },
+            text = { Text("This device will lose access to your messages. You may be asked for your passkey.") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirming = null
+                        remove(device)
+                    },
+                ) { Text("Remove", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirming = null }) { Text("Cancel") }
+            },
         )
-    }
-
-    Column(
-        modifier = Modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        Text(
-            "Add a phone or email as a recovery factor. If you lose " +
-                "this device, a one-time code sent to it recovers " +
-                "ACCESS to your account; your identity then restores " +
-                "from the recovery phrase or another device. The server " +
-                "never stores the phone / email in plaintext — only a " +
-                "keyed hash.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-
-        when (val s = ui) {
-            is ContactUi.Idle -> {
-                // Kind toggle: Email / SMS.
-                SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                    SegmentedButton(
-                        selected = s.kind == ContactKind.EMAIL,
-                        onClick = { ui = s.copy(kind = ContactKind.EMAIL, error = null) },
-                        shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
-                    ) { Text("Email") }
-                    SegmentedButton(
-                        selected = s.kind == ContactKind.PHONE,
-                        onClick = { ui = s.copy(kind = ContactKind.PHONE, error = null) },
-                        shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
-                    ) { Text("SMS") }
-                }
-                OutlinedTextField(
-                    value = s.contact,
-                    onValueChange = { v -> ui = s.copy(contact = v, error = null) },
-                    label = {
-                        Text(
-                            if (s.kind == ContactKind.EMAIL) {
-                                "Email address"
-                            } else {
-                                "Phone number"
-                            },
-                        )
-                    },
-                    placeholder = {
-                        Text(
-                            if (s.kind == ContactKind.EMAIL) {
-                                "alice@example.com"
-                            } else {
-                                "+15551234567"
-                            },
-                        )
-                    },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(
-                        capitalization = KeyboardCapitalization.None,
-                        autoCorrect = false,
-                        keyboardType = if (s.kind == ContactKind.EMAIL) {
-                            KeyboardType.Email
-                        } else {
-                            KeyboardType.Phone
-                        },
-                        imeAction = ImeAction.Done,
-                    ),
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                if (s.error != null) {
-                    Text(
-                        s.error,
-                        color = MaterialTheme.colorScheme.error,
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
-                Button(
-                    onClick = {
-                        // Light client-side shape check — saves a PoW
-                        // solve on an obviously-malformed contact. The
-                        // server is authoritative.
-                        if (!isPlausibleContact(s.kind, s.contact)) {
-                            ui = s.copy(
-                                error = if (s.kind == ContactKind.EMAIL) {
-                                    "Enter a valid email address."
-                                } else {
-                                    "Enter a phone number in international " +
-                                        "format (e.g. +15551234567)."
-                                },
-                            )
-                            return@Button
-                        }
-                        val kind = s.kind
-                        val contact = s.contact
-                        ui = ContactUi.Starting
-                        scope.launch {
-                            ui = try {
-                                AuthClient().use { client ->
-                                    client.recoveryContactEnrollStart(
-                                        sessionToken,
-                                        kind,
-                                        contact,
-                                    )
-                                }
-                                ContactUi.Confirm(
-                                    kind = kind,
-                                    contact = contact,
-                                    code = "",
-                                    busy = false,
-                                    error = null,
-                                )
-                            } catch (err: me.lakko.app.auth.AuthHttpError) {
-                                when (err.status) {
-                                    409 -> ContactUi.AlreadyEnabled
-                                    503 -> ContactUi.Unavailable
-                                    400 -> ContactUi.Idle(
-                                        kind = kind,
-                                        contact = contact,
-                                        error = "That contact looks malformed. " +
-                                            "Check it and retry.",
-                                    )
-                                    else -> ContactUi.Error(
-                                        err.message
-                                            ?: "Enrollment failed (${err.status}).",
-                                    )
-                                }
-                            } catch (err: Throwable) {
-                                ContactUi.Error(err.message ?: "Enrollment failed")
-                            }
-                        }
-                    },
-                ) { Text("Send code") }
-            }
-
-            ContactUi.Starting -> CircularProgressIndicator()
-
-            is ContactUi.Confirm -> {
-                Text(
-                    "Enter the 6-digit code we sent to " +
-                        (if (s.kind == ContactKind.EMAIL) "your email." else "your phone.") +
-                        " to confirm.",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                OutlinedTextField(
-                    value = s.code,
-                    onValueChange = { v -> ui = s.copy(code = v, error = null) },
-                    label = { Text("6-digit code") },
-                    placeholder = { Text("123456") },
-                    singleLine = true,
-                    enabled = !s.busy,
-                    keyboardOptions = KeyboardOptions(
-                        keyboardType = KeyboardType.Number,
-                        imeAction = ImeAction.Done,
-                    ),
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                if (s.error != null) {
-                    Text(
-                        s.error,
-                        color = MaterialTheme.colorScheme.error,
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
-                Button(
-                    onClick = {
-                        val normalized = me.lakko.app.auth.normalizeTotpCode(s.code)
-                        if (normalized == null) {
-                            ui = s.copy(error = "Enter the 6-digit code we sent.")
-                            return@Button
-                        }
-                        ui = s.copy(busy = true, error = null)
-                        scope.launch {
-                            ui = try {
-                                AuthClient().use { client ->
-                                    client.recoveryContactEnrollFinish(
-                                        sessionToken,
-                                        s.kind,
-                                        normalized,
-                                    )
-                                }
-                                ContactUi.Done
-                            } catch (err: me.lakko.app.auth.AuthHttpError) {
-                                when (err.status) {
-                                    401 -> s.copy(
-                                        busy = false,
-                                        error = "Wrong or expired code — check " +
-                                            "the code we sent and try again.",
-                                    )
-                                    409 -> ContactUi.AlreadyEnabled
-                                    else -> ContactUi.Error(
-                                        err.message
-                                            ?: "Confirmation failed (${err.status}).",
-                                    )
-                                }
-                            } catch (err: Throwable) {
-                                ContactUi.Error(err.message ?: "Confirmation failed")
-                            }
-                        }
-                    },
-                    enabled = !s.busy,
-                ) { Text(if (s.busy) "Confirming…" else "Confirm") }
-            }
-
-            ContactUi.Done -> Text(
-                "Recovery contact enabled. A one-time code can now " +
-                    "recover access to this account.",
-                color = MaterialTheme.colorScheme.primary,
-                style = MaterialTheme.typography.bodyMedium,
-                fontWeight = FontWeight.SemiBold,
-            )
-
-            ContactUi.AlreadyEnabled -> Text(
-                "A recovery contact is already enabled on this account.",
-                style = MaterialTheme.typography.bodyMedium,
-            )
-
-            ContactUi.Unavailable -> Text(
-                "Email / phone recovery is not available on this server.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.error,
-            )
-
-            is ContactUi.Error -> Column(
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Text(
-                    s.message,
-                    color = MaterialTheme.colorScheme.error,
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                Button(
-                    onClick = {
-                        ui = ContactUi.Idle(
-                            kind = ContactKind.EMAIL,
-                            contact = "",
-                            error = null,
-                        )
-                    },
-                ) { Text("Try again") }
-            }
-        }
     }
 }
