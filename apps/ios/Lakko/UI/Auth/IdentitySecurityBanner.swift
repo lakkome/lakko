@@ -17,30 +17,33 @@ public struct IdentitySecurityBanner: View {
 
     public var body: some View {
         HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "exclamationmark.shield")
+                .font(.body)
+                .foregroundStyle(Color.lakkoDanger)
             VStack(alignment: .leading, spacing: 4) {
-                Text("Your account's secure identity was changed.")
-                    .font(.subheadline)
-                    .fontWeight(.semibold)
+                Text("Your account's security code changed.")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Color.lakkoText)
                 Text(
-                    "Someone published a different identity key for this " +
-                    "account. If this was you (you reset your identity on " +
-                    "another device), you can dismiss this. If it was NOT " +
-                    "you, your account may be compromised — re-verify your " +
-                    "safety number with your contacts out of band, and " +
-                    "rotate your password / passkeys."
+                    "If you started over on another device, dismiss this. " +
+                    "If you did not, change your password and passkeys and " +
+                    "verify your safety number with your contacts in person."
                 )
                 .font(.footnote)
+                .foregroundStyle(Color.lakkoTextMuted)
             }
             Spacer(minLength: 8)
             Button("Dismiss", action: onDismiss)
-                .font(.footnote)
+                .font(.footnote.weight(.medium))
+                .foregroundStyle(Color.lakkoAccent)
         }
         .padding(12)
-        .background(Color.red.opacity(0.15))
+        .background(Color.lakkoSurfaceSunken)
         .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(Color.red.opacity(0.5), lineWidth: 1)
+            RoundedRectangle(cornerRadius: LakkoRadius.control)
+                .stroke(Color.lakkoDanger.opacity(0.5), lineWidth: 1)
         )
+        .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.control))
         .padding(8)
     }
 }

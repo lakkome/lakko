@@ -2,29 +2,22 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0017 lost-everything fallback — phrase-save screen.
+ * The phrase-save screen for a freshly minted identity, rendered whenever the
+ * auth state is `save-fresh-phrase`: after the ADR-0017 lost-everything
+ * fallback (`mintFreshIdentity` has published the new identity and parked
+ * the completion context), and after an ADR-0032 guest signup (no username,
+ * nothing replaced). It shows the new 24 words, takes the acknowledgement,
+ * then lands the session via `confirmFreshPhraseSaved`.
  *
- * Rendered whenever the auth state is `save-fresh-phrase`: the user
- * recovered ACCESS via an ADR-0018 factor, had NO recovery phrase and
- * NO other device, and explicitly chose to create a brand-new secure
- * identity from the `RestoreIdentityPrompt`. `mintFreshIdentity` has
- * already minted + published the new AccountIdentity (WITHOUT a
- * supersession proof — none is mintable, since there is no old seed)
- * and parked the completion context. This screen shows the freshly
- * minted 24-word recovery phrase so the user can save it, gated behind
- * an explicit "I have written this down" acknowledgement, then lands
- * the session via `confirmFreshPhraseSaved`.
- *
- * The grid + acknowledge gate mirror the signup-time
- * `RecoveryPhrasePanel` (`routes/Signup.tsx`) — same shape, so the two
- * phrase-display surfaces stay visually consistent. The phrase is read
- * back from `pendingFreshPhrase` (exposed via the `save-fresh-phrase`
- * state on the auth API); it lives in memory only and is gone once the
+ * Same grid and vocabulary as the signup phrase screen; the phrase is read
+ * from `auth.freshPhrase()`, lives in memory only and is gone once the
  * session lands.
  */
-import { createSignal, For, Show, type JSX } from "solid-js";
+import { createSignal, Show, type JSX } from "solid-js";
 import { useAuth } from "./AuthContext";
 import { AuthLayout } from "../ui/AuthLayout";
+import { PhraseGrid } from "../ui/PhraseGrid";
+import { phraseWords } from "./phrase-confirm";
 
 export default function SaveFreshPhrasePrompt(): JSX.Element {
   const auth = useAuth();
@@ -40,18 +33,14 @@ export default function SaveFreshPhrasePrompt(): JSX.Element {
     const s = auth.state();
     return s.kind === "save-fresh-phrase" ? s.account.username : "";
   };
-  const words = (): string[] =>
-    phrase()
-      .split(/\s+/)
-      .filter((w) => w !== "");
+  const words = (): string[] => phraseWords(phrase());
 
   async function onDone(): Promise<void> {
     setError(null);
     setBusy(true);
     try {
       await auth.confirmFreshPhraseSaved();
-      // No navigation needed — the state flips to `session` and the
-      // surrounding guard re-renders the protected content.
+      // No navigation: the state flips to `session` and the guard re-renders.
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -61,86 +50,64 @@ export default function SaveFreshPhrasePrompt(): JSX.Element {
 
   return (
     <AuthLayout>
-        {/* ADR-0032 guest signup lands here too (no username, and nothing was
-            replaced) — the "new identity / contacts re-verify" copy below is
-            only true for the ADR-0017 lost-everything path. */}
-        <Show
-          when={username() !== ""}
-          fallback={
-            <>
-              <h1>Save your recovery phrase</h1>
-              <p class="auth-lede">
-                Your account was created without a password. These 24 words are
-                the <strong>only way</strong> to get back into it on another
-                device or after clearing this browser. Write them down on paper,
-                in order. Do not screenshot them. Do not store them in plain
-                text. We cannot show them to you again.
-              </p>
-            </>
-          }
-        >
-          <h1>Save your new recovery phrase</h1>
-          <p class="auth-lede">
-            You created a brand-new secure identity for{" "}
-            <strong>@{username()}</strong>. These 24 words are the{" "}
-            <strong>only way</strong> to recover this new identity if you
-            lose access again. Write them down on paper, in order. Do not
-            screenshot them. Do not store them in plain text. We cannot
-            show them to you again.
-          </p>
-          <p
-            style={{
-              color: "var(--surface-muted)",
-              "font-size": "0.9rem",
-              "margin-top": 0,
-            }}
-          >
-            Your existing contacts will see a changed identity key with no
-            proof and will need to verify you again before you can message
-            securely.
-          </p>
-        </Show>
+      <Show
+        when={username() !== ""}
+        fallback={
+          <>
+            <h1>Save your recovery phrase</h1>
+            <p class="lk-auth-lede">
+              Your account was created without a password. These 24 words are the only way
+              back into it on another device or after clearing this browser. Write them
+              down in order and keep them somewhere safe.
+            </p>
+          </>
+        }
+      >
+        <h1>Save your new recovery phrase</h1>
+        <p class="lk-auth-lede">
+          You created a new identity for <strong>@{username()}</strong>. These 24 words are
+          the only way to recover it if you lose access again. Write them down in order
+          and keep them somewhere safe.
+        </p>
+        <p class="form-info">
+          Your contacts will see that your safety number changed and will need to verify
+          you again before messaging you securely.
+        </p>
+      </Show>
 
-        <ol
-          class="lk-phrase"
-        >
-          <For each={words()}>{(w) => <li>{w}</li>}</For>
-        </ol>
+      <PhraseGrid words={words} />
+      <p class="form-info">
+        Do not keep them as a screenshot or in a plain text file. Lakko cannot show them
+        again.
+      </p>
 
-        <label
-          style={{
-            display: "flex",
-            "align-items": "flex-start",
-            gap: "0.5rem",
-            "margin-bottom": "1rem",
-          }}
-        >
-          <input
-            type="checkbox"
-            checked={acknowledged()}
-            onChange={(e) => setAcknowledged(e.currentTarget.checked)}
-            disabled={busy()}
-            style={{ "margin-top": "0.25rem", width: "auto" }}
-          />
-          <span>
-            I have written down my new 24-word recovery phrase. I
-            understand that losing it means losing access to this
-            identity.
-          </span>
-        </label>
+      <label class="lk-check">
+        <input
+          type="checkbox"
+          checked={acknowledged()}
+          onChange={(e) => setAcknowledged(e.currentTarget.checked)}
+          disabled={busy()}
+        />
+        <span>
+          I have written down these 24 words and understand that losing them means losing
+          access to this account.
+        </span>
+      </label>
 
-        <Show when={error() !== null}>
-          <div class="form-error">{error()}</div>
-        </Show>
+      <Show when={error() !== null}>
+        <div class="form-error" role="alert">
+          {error()}
+        </div>
+      </Show>
 
-        <button
-          class="primary"
-          type="button"
-          disabled={!acknowledged() || busy()}
-          onClick={() => void onDone()}
-        >
-          {busy() ? "Finishing…" : "Done"}
-        </button>
+      <button
+        class="primary"
+        type="button"
+        disabled={!acknowledged() || busy()}
+        onClick={() => void onDone()}
+      >
+        {busy() ? "Finishing..." : "Done"}
+      </button>
     </AuthLayout>
   );
 }

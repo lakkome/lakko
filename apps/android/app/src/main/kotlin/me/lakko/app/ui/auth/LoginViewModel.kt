@@ -102,7 +102,7 @@ public class LoginViewModel(
                 mutableState.update {
                     it.copy(
                         busy = false,
-                        error = "Network error. Check your connection and try again.",
+                        error = "No connection. Check your network and try again.",
                     )
                 }
             } catch (_: DiscoveryNetworkError) {
@@ -111,7 +111,7 @@ public class LoginViewModel(
                 mutableState.update {
                     it.copy(
                         busy = false,
-                        error = "Network error. Check your connection and try again.",
+                        error = "No connection. Check your network and try again.",
                     )
                 }
             } catch (err: DiscoveryHttpError) {
@@ -119,15 +119,15 @@ public class LoginViewModel(
                     it.copy(
                         busy = false,
                         error = when (err.status) {
-                            429 -> "Too many attempts. Please wait a moment and retry."
-                            in 500..599 -> "Server error. Please try again shortly."
-                            else -> "Login failed (${err.status})."
+                            429 -> "Too many attempts. Wait a moment, then try again."
+                            in 500..599 -> "Something went wrong on our side. Try again in a moment."
+                            else -> "Could not log in. Try again."
                         },
                     )
                 }
             } catch (err: Throwable) {
                 mutableState.update {
-                    it.copy(busy = false, error = err.message ?: "Login failed.")
+                    it.copy(busy = false, error = err.message ?: "Could not log in. Try again.")
                 }
             } finally {
                 passwordBytes.fill(0)
@@ -153,7 +153,7 @@ public class LoginViewModel(
                 mutableState.update { it.copy(busy = false, error = null) }
             } catch (err: AuthClientArgError) {
                 mutableState.update {
-                    it.copy(busy = false, error = err.message ?: "Passkey sign-in failed.")
+                    it.copy(busy = false, error = err.message ?: "Could not log in with the passkey. Try your password.")
                 }
             } catch (err: AuthHttpError) {
                 mutableState.update {
@@ -163,14 +163,14 @@ public class LoginViewModel(
                 mutableState.update {
                     it.copy(
                         busy = false,
-                        error = "Network error. Check your connection and try again.",
+                        error = "No connection. Check your network and try again.",
                     )
                 }
             } catch (err: Throwable) {
                 mutableState.update {
                     it.copy(
                         busy = false,
-                        error = err.message ?: "Passkey sign-in failed.",
+                        error = err.message ?: "Could not log in with the passkey. Try your password.",
                     )
                 }
             }
@@ -184,10 +184,10 @@ public class LoginViewModel(
      *  account existence). */
     private fun userFacingHttpError(err: AuthHttpError): String =
         when (err.status) {
-            401 -> "Invalid credentials."
-            429 -> "Too many attempts. Please wait a moment and retry."
-            in 500..599 -> "Server error. Please try again shortly."
-            else -> err.message ?: "Login failed (${err.status})."
+            401 -> "Wrong username or password. Check both and try again."
+            429 -> "Too many attempts. Wait a moment, then try again."
+            in 500..599 -> "Something went wrong on our side. Try again in a moment."
+            else -> "Could not log in. Try again."
         }
 }
 

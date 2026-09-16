@@ -29,16 +29,10 @@ import me.lakko.app.profile.usernameFieldError
  * State + dispatcher for the [SignupScreen].
  *
  * Mirror of `apps/web/src/routes/Signup.tsx`'s `createSignal`
- * collection — same fields, same transitions, same two-stage
- * shape (`Form` → `Phrase`).
- *
- * The two-stage local state machine is intentional. Splitting
- * signup from "save your recovery phrase" guarantees the user
- * sees the 24 words exactly once and explicitly acknowledges
- * having written them down before navigating into the
- * authenticated app. Re-display is impossible by construction —
- * the [Stage.Phrase] state holds the only in-memory reference
- * and is dropped on acknowledgement.
+ * collection. The form is the only stage here: on success the
+ * recovery phrase goes to [parkRecoveryPhrase] and the guided
+ * phrase screen ([RecoveryPhraseOnboarding]) shows it exactly once
+ * before the session is usable.
  */
 public class SignupViewModel(
     private val repo: AuthRepository,
@@ -51,6 +45,11 @@ public class SignupViewModel(
     /** Persist this account's own profile once signup has created it. No-op
      *  by default (tests); `MainActivity` writes the [OwnProfileStore]. */
     private val saveOwnProfile: (accountId: ByteArray, profile: OwnProfile) -> Unit = { _, _ -> },
+    /** Hand the just-minted recovery phrase to the guided phrase step. Sign-up
+     *  lands the session inside the repository, which replaces this screen, so
+     *  the phrase is parked for the app root to show (see [SignupPhraseGate]).
+     *  No-op by default (tests). */
+    private val parkRecoveryPhrase: (String) -> Unit = {},
 ) : ViewModel() {
 
     private val mutableState: MutableStateFlow<SignupUiState> =
@@ -89,16 +88,11 @@ public class SignupViewModel(
         mutableState.update { it.copy(confirm = value) }
     }
 
-    public fun onAcknowledgeChange(checked: Boolean) {
-        mutableState.update { it.copy(acknowledged = checked) }
-    }
-
     /**
      * Submit the signup form.
      *
      * Validates locally (password length, confirm match), drives
-     * [AuthRepository.signup], transitions the stage to
-     * [Stage.Phrase] on success. Errors surface in the UI as
+     * [AuthRepository.signup], parks the recovery phrase on success. Errors surface in the UI as
      * inline form messages. The password fields are cleared on
      * success so the textfields don't keep the bytes alive longer
      * than necessary — same posture as the web side.
@@ -127,14 +121,14 @@ public class SignupViewModel(
         val confirm = snapshot.confirm
         if (pwd != confirm) {
             mutableState.update {
-                it.copy(error = "Passwords do not match.")
+                it.copy(error = "The passwords do not match. Type the same password twice.")
             }
             return
         }
         if (pwd.length < MIN_PASSWORD_LEN) {
             mutableState.update {
                 it.copy(
-                    error = "Password must be at least $MIN_PASSWORD_LEN characters.",
+                    error = "Use at least $MIN_PASSWORD_LEN characters for the password.",
                 )
             }
             return
@@ -163,6 +157,8 @@ public class SignupViewModel(
                         // best-effort
                     }
                 }
+                // The guided phrase step renders above the session from here.
+                parkRecoveryPhrase(outcome.recoveryPhrase)
                 mutableState.update {
                     it.copy(
                         busy = false,
@@ -173,7 +169,6 @@ public class SignupViewModel(
                         // the textfield buffers.
                         password = "",
                         confirm = "",
-                        stage = Stage.Phrase(outcome.recoveryPhrase),
                     )
                 }
             } catch (err: AuthClientArgError) {
@@ -194,7 +189,7 @@ public class SignupViewModel(
                 mutableState.update {
                     it.copy(
                         busy = false,
-                        error = "Network error. Check your connection and try again.",
+                        error = "No connection. Check your network and try again.",
                     )
                 }
             } catch (_: DiscoveryNetworkError) {
@@ -203,7 +198,7 @@ public class SignupViewModel(
                 mutableState.update {
                     it.copy(
                         busy = false,
-                        error = "Network error. Check your connection and try again.",
+                        error = "No connection. Check your network and try again.",
                     )
                 }
             } catch (err: DiscoveryHttpError) {
@@ -212,7 +207,7 @@ public class SignupViewModel(
                 }
             } catch (err: Throwable) {
                 mutableState.update {
-                    it.copy(busy = false, error = err.message ?: "Signup failed.")
+                    it.copy(busy = false, error = err.message ?: "Could not create the account. Try again.")
                 }
             } finally {
                 // Wipe the local bytes copy. The repo also wiped
@@ -222,20 +217,6 @@ public class SignupViewModel(
         }
     }
 
-    /**
-     * Called when the user has confirmed they wrote the recovery
-     * phrase down. Drops the in-memory phrase reference + signals
-     * the screen to navigate forward. The auth state was already
-     * flipped to [me.lakko.app.auth.AuthState.Session] inside
-     * [AuthRepository.signup]; the Activity-level router will
-     * snap to the home screen automatically once we clear the
-     * local stage.
-     */
-    public fun onAcknowledge() {
-        mutableState.update {
-            it.copy(stage = Stage.Form, acknowledged = false)
-        }
-    }
 
     /** Map a server-side HTTP error to a user-facing message.
      *  Today's auth service distinguishes a couple of cases by
@@ -244,10 +225,10 @@ public class SignupViewModel(
      *  401) stay generic on purpose. */
     private fun userFacingHttpError(err: AuthHttpError): String =
         when (err.status) {
-            409 -> "An account with that username already exists."
-            429 -> "Too many requests. Please wait a moment and retry."
-            in 500..599 -> "Server error. Please try again shortly."
-            else -> err.message ?: "Signup failed (${err.status})."
+            409 -> "That username is taken. Choose another one."
+            429 -> "Too many attempts. Wait a moment, then try again."
+            in 500..599 -> "Something went wrong on our side. Try again in a moment."
+            else -> "Could not create the account. Try again."
         }
 
     /** Discovery failures other than a taken name (which the repository
@@ -255,9 +236,9 @@ public class SignupViewModel(
      *  publish at signup. */
     private fun userFacingDiscoveryError(err: DiscoveryHttpError): String =
         when (err.status) {
-            429 -> "Too many requests. Please wait a moment and retry."
-            in 500..599 -> "Server error. Please try again shortly."
-            else -> "Signup failed (${err.status})."
+            429 -> "Too many attempts. Wait a moment, then try again."
+            in 500..599 -> "Something went wrong on our side. Try again in a moment."
+            else -> "Could not create the account. Try again."
         }
 
     public companion object {
@@ -287,16 +268,4 @@ public data class SignupUiState(
     val confirm: String = "",
     val busy: Boolean = false,
     val error: String? = null,
-    /** Two-stage local FSM — see [Stage]. */
-    val stage: Stage = Stage.Form,
-    /** "I have written the words down" checkbox state.
-     *  Re-armed on every transition into the phrase stage. */
-    val acknowledged: Boolean = false,
 )
-
-/** Two-stage signup state machine. [Form] collects the username
- *  + password; [Phrase] displays the BIP39 mnemonic post-signup. */
-public sealed interface Stage {
-    public data object Form : Stage
-    public data class Phrase(val phrase: String) : Stage
-}

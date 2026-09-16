@@ -8,7 +8,9 @@
  * and 21), autocompletes from the BIP39 English list, refuses a word that is
  * not in it (red outline, and the caller's Continue stays disabled), and a
  * paste of the whole 24-word phrase into any field fills the three positions
- * from it. The value is the three words in field order.
+ * from it, unless `allowPhrasePaste` is false (the signup check, where the
+ * words must come from the user's notes). The value is the three words in
+ * field order.
  */
 import { Index, type JSX } from "solid-js";
 import { BIP39_ENGLISH, isBip39Word } from "../recovery/bip39-words";
@@ -18,6 +20,8 @@ export function WordSlots(props: {
   value: () => readonly string[];
   setValue: (v: string[]) => void;
   disabled?: () => boolean;
+  /** Fill the slots from a pasted 24-word phrase (default true). */
+  allowPhrasePaste?: boolean;
 }): JSX.Element {
   const inputs: HTMLInputElement[] = [];
   const words = (): string[] => {
@@ -36,6 +40,7 @@ export function WordSlots(props: {
     el?.select();
   };
   const onPaste = (e: ClipboardEvent): void => {
+    if (props.allowPhrasePaste === false) return;
     const parts = (e.clipboardData?.getData("text") ?? "")
       .toLowerCase()
       .split(/[^a-z]+/)

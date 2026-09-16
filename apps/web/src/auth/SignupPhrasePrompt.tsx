@@ -2,29 +2,45 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * The post-signup "Save your recovery phrase" screen.
+ * The post-signup "Save your recovery phrase" screen, as a guided flow
+ * (docs/ux/client-redesign.md section 5.6):
  *
- * It lived inside `routes/Signup.tsx` as the form's second stage, and was
- * never seen: signup lands the session before it returns the phrase, and the
- * `<RequireAnonymous>` guard around `/signup` navigated home on that
- * transition, unmounting the page before the stage switched. The phrase is
- * shown once and cannot be shown again, so every new account was left without
- * the only thing that recovers it on another device (ADR-0017).
+ *   1. the 24 numbered words in two columns, Copy, a short explanation, the
+ *      three-word note (ADR-0049) when the vault enrolled, and the social
+ *      recovery shares behind "More options";
+ *   2. a check: three words at random positions, typed back from the notes,
+ *      plus the acknowledgement, before Done.
  *
- * It is now rendered by the route GUARDS, from `auth.signupPhrase()`, for as
- * long as that phrase is unacknowledged — whichever route the user is on, and
- * again after a reload. The decision lives in `auth/phrase-gate.ts`. The screen
- * itself is unchanged: the 24 words, the "I have written it down" gate, and the
- * optional 3-of-5 social-recovery split.
+ * It is rendered by the route GUARDS, from `auth.signupPhrase()`, for as long
+ * as that phrase is unacknowledged, whichever route the user is on and again
+ * after a reload; the decision lives in `auth/phrase-gate.ts`. The picker and
+ * the checker live in `phrase-confirm.ts`.
  */
 import { createSignal, For, Show, type JSX } from "solid-js";
 import { useAuth } from "./AuthContext";
 import { AuthLayout } from "../ui/AuthLayout";
+import { PhraseGrid } from "../ui/PhraseGrid";
+import { WordSlots } from "../ui/WordSlots";
+import {
+  confirmationComplete,
+  confirmationErrorMessage,
+  confirmationMismatches,
+  phraseWords,
+  pickConfirmationPositions,
+} from "./phrase-confirm";
 import {
   DEFAULT_SHARE_COUNT,
   DEFAULT_THRESHOLD,
   splitMnemonic,
 } from "../recovery/shamir";
+
+type Step = "show" | "confirm";
+
+/** "5, 14 and 21" */
+function listPositions(positions: readonly number[]): string {
+  if (positions.length <= 1) return positions.join("");
+  return `${positions.slice(0, -1).join(", ")} and ${positions[positions.length - 1]}`;
+}
 
 /**
  * Render the pending signup phrase. Acknowledging it clears the phrase; the
@@ -33,116 +49,129 @@ import {
  */
 export default function SignupPhrasePrompt(): JSX.Element {
   const auth = useAuth();
+  const words = (): string[] => phraseWords(auth.signupPhrase() ?? "");
+  const [step, setStep] = createSignal<Step>("show");
+  const [positions, setPositions] = createSignal<number[]>([]);
+  const [typed, setTyped] = createSignal<string[]>(["", "", ""]);
   const [acknowledged, setAcknowledged] = createSignal(false);
+  const [error, setError] = createSignal<string | null>(null);
+
+  function toConfirm(): void {
+    setPositions(pickConfirmationPositions(words().length));
+    setTyped(["", "", ""]);
+    setError(null);
+    setStep("confirm");
+  }
+
+  function toWords(): void {
+    setError(null);
+    setStep("show");
+  }
+
+  function onDone(e: SubmitEvent): void {
+    e.preventDefault();
+    const misses = confirmationMismatches(words(), positions(), typed());
+    if (misses.length > 0) {
+      setError(confirmationErrorMessage(misses));
+      setTyped(["", "", ""]);
+      return;
+    }
+    auth.acknowledgeSignupPhrase();
+  }
+
   return (
     <AuthLayout>
-        <RecoveryPhrasePanel
-          phrase={auth.signupPhrase() ?? ""}
-          vaultPositions={auth.signupVaultPositions}
-          acknowledged={acknowledged}
-          setAcknowledged={setAcknowledged}
-          onAcknowledge={() => auth.acknowledgeSignupPhrase()}
-        />
+      <Show
+        when={step() === "confirm"}
+        fallback={
+          <>
+            <h1>Save your recovery phrase</h1>
+            <p class="lk-auth-step">Step 1 of 2</p>
+            <p class="lk-auth-lede">
+              These 24 words are the only way back into your account if you lose
+              your password and your devices. Write them down in order and keep
+              them somewhere safe.
+            </p>
+            <PhraseGrid words={words} highlight={() => auth.signupVaultPositions() ?? []} />
+            <p class="form-info">
+              Do not keep them as a screenshot or in a plain text file. Lakko
+              cannot show them again.
+            </p>
+            <Show when={auth.signupVaultPositions()}>
+              {(picked) => (
+                <p class="form-info">
+                  On a new device you will usually be asked for just three of these,
+                  words {listPositions(picked())}. Keep the whole list anyway: it is
+                  the only way back if that shortcut is ever switched off.
+                </p>
+              )}
+            </Show>
+            <details class="lk-disclosure">
+              <summary>More options</summary>
+              <div class="lk-disclosure-body">
+                <SocialRecoveryPanel phrase={auth.signupPhrase() ?? ""} />
+              </div>
+            </details>
+            <button class="primary" type="button" onClick={toConfirm}>
+              I have written them down
+            </button>
+          </>
+        }
+      >
+        <h1>Check your notes</h1>
+        <p class="lk-auth-step">Step 2 of 2</p>
+        <p class="lk-auth-lede">
+          Type words {listPositions(positions())} from what you wrote down.
+        </p>
+        <form onSubmit={onDone}>
+          <WordSlots
+            positions={positions}
+            value={typed}
+            setValue={setTyped}
+            allowPhrasePaste={false}
+          />
+          <Show when={error() !== null}>
+            <div class="form-error" role="alert">
+              {error()}
+            </div>
+          </Show>
+          <label class="lk-check">
+            <input
+              type="checkbox"
+              checked={acknowledged()}
+              onChange={(e) => setAcknowledged(e.currentTarget.checked)}
+            />
+            <span>
+              I understand that losing these words means losing access to this
+              account.
+            </span>
+          </label>
+          <button
+            class="primary"
+            type="submit"
+            disabled={!acknowledged() || !confirmationComplete(positions(), typed())}
+          >
+            Done
+          </button>
+          <button type="button" class="ghost" onClick={toWords}>
+            Back to the words
+          </button>
+        </form>
+      </Show>
     </AuthLayout>
   );
 }
 
 // ----------------------------------------------------------------------
-// Recovery phrase display
-// ----------------------------------------------------------------------
-
-interface PhrasePanelProps {
-  readonly phrase: string;
-  /** ADR-0049: the three positions the word vault enrolled, once known. */
-  readonly vaultPositions: () => number[] | null;
-  readonly acknowledged: () => boolean;
-  readonly setAcknowledged: (v: boolean) => void;
-  readonly onAcknowledge: () => void;
-}
-
-function RecoveryPhrasePanel(props: PhrasePanelProps): JSX.Element {
-  const words = (): string[] => props.phrase.split(/\s+/).filter((w) => w !== "");
-  return (
-    <>
-      <h1>Save your recovery phrase</h1>
-      <p class="auth-lede">
-        These 24 words are the <strong>only way</strong> to recover
-        your account if you forget your password. Write them down
-        on paper, in order. Do not screenshot them. Do not store
-        them in plain text. We cannot show them to you again.
-      </p>
-
-      <ol
-        class="lk-phrase"
-      >
-        {words().map((w, i) => (
-          <li classList={{ "lk-phrase-pick": props.vaultPositions()?.includes(i + 1) === true }}>
-            <span>{w}</span>
-          </li>
-        ))}
-      </ol>
-      <Show when={props.vaultPositions() !== null}>
-        <p class="form-info">
-          On a new device you will normally be asked for just three of these:
-          words {props.vaultPositions()?.join(", ")}. Keep the whole list safe
-          anyway; it is the only way back if the shortcut is ever switched off.
-        </p>
-      </Show>
-
-      <label
-        style={{
-          display: "flex",
-          "align-items": "flex-start",
-          gap: "0.5rem",
-          "margin-bottom": "1rem",
-        }}
-      >
-        <input
-          type="checkbox"
-          checked={props.acknowledged()}
-          onChange={(e) => props.setAcknowledged(e.currentTarget.checked)}
-          style={{ "margin-top": "0.25rem", width: "auto" }}
-        />
-        <span>
-          I have written down my 24-word recovery phrase. I
-          understand that losing it means losing access to this
-          account.
-        </span>
-      </label>
-
-      <SocialRecoveryPanel phrase={props.phrase} />
-
-      <button
-        class="primary"
-        type="button"
-        disabled={!props.acknowledged()}
-        onClick={props.onAcknowledge}
-      >
-        Done
-      </button>
-    </>
-  );
-}
-
-// ----------------------------------------------------------------------
-// Phase 1.21c — optional Shamir 3-of-5 social-recovery shares
+// Social recovery shares (3 of 5)
 // ----------------------------------------------------------------------
 
 /**
- * Optional sub-panel inside the post-signup recovery-phrase
- * screen. Lets the user split the 24-word mnemonic into 5
- * shares (any 3 reconstruct) for distribution to guardians.
- *
- * Collapsed by default — the canonical "write 24 words on
- * paper" flow stays the prominent path. Power users who want
- * a social fallback expand the panel, copy each share, and
- * give one to each guardian. The user acknowledgement above
- * (the "I have written down" checkbox) gates the Done button
- * regardless; social shares are a complement to the
- * paper-phrase backup, not a replacement.
+ * Splits the phrase into 5 shares, any 3 of which rebuild it, for people the
+ * user trusts. Behind "More options": the paper phrase stays the main path,
+ * and the shares complement it rather than replace it.
  */
 function SocialRecoveryPanel(props: { phrase: string }): JSX.Element {
-  const [open, setOpen] = createSignal(false);
   const [busy, setBusy] = createSignal(false);
   const [shares, setShares] = createSignal<string[]>([]);
   const [error, setError] = createSignal<string | null>(null);
@@ -152,12 +181,7 @@ function SocialRecoveryPanel(props: { phrase: string }): JSX.Element {
     setBusy(true);
     setError(null);
     try {
-      const out = await splitMnemonic(
-        props.phrase,
-        DEFAULT_THRESHOLD,
-        DEFAULT_SHARE_COUNT,
-      );
-      setShares(out);
+      setShares(await splitMnemonic(props.phrase, DEFAULT_THRESHOLD, DEFAULT_SHARE_COUNT));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -169,137 +193,53 @@ function SocialRecoveryPanel(props: { phrase: string }): JSX.Element {
     try {
       await navigator.clipboard.writeText(value);
       setCopiedIndex(idx);
-      // Reset the "copied" flag after a short delay so a
-      // subsequent copy on the same chip surfaces a fresh
-      // confirmation.
       setTimeout(() => setCopiedIndex((cur) => (cur === idx ? null : cur)), 1500);
     } catch {
-      setError("Clipboard write blocked — copy manually.");
+      setError("Could not copy. Select the share and copy it by hand.");
     }
   }
 
   return (
-    <details
-      open={open()}
-      onToggle={(e) => setOpen(e.currentTarget.open)}
-      style={{
-        "margin-bottom": "1rem",
-        padding: "0.5rem 0.75rem",
-        border: "1px solid var(--surface-border)",
-        "border-radius": "var(--radius-sm)",
-        background: "var(--surface-elevated)",
-      }}
-    >
-      <summary
-        style={{
-          cursor: "pointer",
-          "font-size": "0.9rem",
-        }}
-      >
-        Optional: split into 3-of-5 social-recovery shares
-      </summary>
-      <p
-        style={{
-          color: "var(--surface-muted)",
-          "font-size": "0.85rem",
-          margin: "0.5rem 0",
-        }}
-      >
-        Generate 5 share strings; any 3 reconstruct your
-        recovery phrase. Distribute one to each trusted
-        guardian (family, friends, a safe deposit box). No
-        single guardian alone — or any two colluding — can
-        recover your account; you can lose contact with two
-        guardians and still recover.
+    <>
+      <h3>Social recovery shares</h3>
+      <p>
+        Split the phrase into {DEFAULT_SHARE_COUNT} shares for people you trust.
+        Any {DEFAULT_THRESHOLD} of them rebuild it; fewer reveal nothing. Give
+        each person one share.
       </p>
       <Show
         when={shares().length > 0}
         fallback={
-          <button
-            type="button"
-            onClick={() => {
-              void onGenerate();
-            }}
-            disabled={busy()}
-            style={{ "font-size": "0.85rem" }}
-          >
-            {busy() ? "Generating…" : `Generate ${DEFAULT_SHARE_COUNT} shares`}
-          </button>
+          <div class="lk-actions">
+            <button type="button" class="small" onClick={() => void onGenerate()} disabled={busy()}>
+              {busy() ? "Generating..." : `Generate ${DEFAULT_SHARE_COUNT} shares`}
+            </button>
+          </div>
         }
       >
-        <ol
-          style={{
-            display: "flex",
-            "flex-direction": "column",
-            gap: "0.4rem",
-            padding: 0,
-            margin: "0 0 0.5rem 0",
-            "list-style": "none",
-          }}
-        >
+        <ol class="lk-list tight">
           <For each={shares()}>
             {(share, i) => (
-              <li
-                style={{
-                  display: "flex",
-                  "align-items": "center",
-                  gap: "0.5rem",
-                  padding: "0.4rem 0.5rem",
-                  background: "var(--surface-bg)",
-                  "border-radius": "var(--radius-sm)",
-                }}
-              >
-                <strong style={{ "min-width": "1.5rem", "font-family": "ui-monospace" }}>
-                  #{i() + 1}
-                </strong>
-                <code
-                  style={{
-                    flex: 1,
-                    "font-size": "0.75rem",
-                    overflow: "hidden",
-                    "text-overflow": "ellipsis",
-                    "white-space": "nowrap",
-                  }}
-                  title={share}
-                >
+              <li class="lk-share-row">
+                <span class="lk-share-num">{i() + 1}</span>
+                <code class="lk-ellipsis" title={share}>
                   {share}
                 </code>
-                <button
-                  type="button"
-                  onClick={() => {
-                    void onCopy(i(), share);
-                  }}
-                  style={{
-                    "font-size": "0.75rem",
-                    padding: "0.2rem 0.5rem",
-                  }}
-                >
+                <button type="button" class="small" onClick={() => void onCopy(i(), share)}>
                   {copiedIndex() === i() ? "Copied" : "Copy"}
                 </button>
               </li>
             )}
           </For>
         </ol>
-        <p
-          style={{
-            color: "var(--surface-muted)",
-            "font-size": "0.8rem",
-            margin: "0.25rem 0 0",
-          }}
-        >
-          Distribute one share to each of {DEFAULT_SHARE_COUNT}{" "}
-          trusted guardians. Recover via /recover → Recovery
-          shares with any {DEFAULT_THRESHOLD}.
+        <p>
+          To use them later, choose Social recovery shares on the recovery
+          screen and paste any {DEFAULT_THRESHOLD}.
         </p>
       </Show>
       <Show when={error() !== null}>
-        <div
-          class="form-error"
-          style={{ "margin-top": "0.5rem", "font-size": "0.85rem" }}
-        >
-          {error()}
-        </div>
+        <div class="form-error">{error()}</div>
       </Show>
-    </details>
+    </>
   );
 }

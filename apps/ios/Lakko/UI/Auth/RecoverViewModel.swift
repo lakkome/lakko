@@ -135,18 +135,18 @@ public final class RecoverViewModel: ObservableObject {
         guard !busy else { return } // ignore double-tap
 
         if password != confirm {
-            error = "Passwords do not match."
+            error = "The passwords do not match. Type the same password twice."
             return
         }
         if password.count < Self.minPasswordLength {
-            error = "Password must be at least \(Self.minPasswordLength) characters."
+            error = "Use at least \(Self.minPasswordLength) characters for the new password."
             return
         }
         // ADR-0017 — on a fresh device (no cached account) the username
         // is required to resolve the account_id via discovery.
         let trimmedUsername = username.trimmingCharacters(in: .whitespacesAndNewlines)
         if cachedUsername == nil && trimmedUsername.isEmpty {
-            error = "Enter your username so we can find your account."
+            error = "Enter your username so Lakko can find your account."
             return
         }
 
@@ -160,23 +160,23 @@ public final class RecoverViewModel: ObservableObject {
             // ADR-0018 — the AnotherDevice mode never reaches the
             // OPAQUE submit: the RestoreViaDevicePanel drives
             // completeFromDeviceRestore directly. Defensive no-op.
-            error = "Use the QR flow above to restore."
+            error = "Show the QR code to your other device to continue."
             return
         case .totp:
             // ADR-0018 factor (c) — the Authenticator mode submits
             // via `submitTotp` (no new password on that path).
             // Defensive no-op.
-            error = "Use the authenticator-code form."
+            error = "Enter the code from your authenticator app."
             return
         case .contact:
             // ADR-0018 factor (d) — the Email/SMS mode submits via
             // `sendContactCode` / `submitContactCode` (no new password
             // on that path). Defensive no-op.
-            error = "Use the email / SMS code form."
+            error = "Request a code by email or text message first."
             return
         case .phrase:
             if phrase.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                error = "Recovery phrase must be non-empty."
+                error = "Enter all 24 words of your recovery phrase."
                 return
             }
             phraseSnapshot = phrase
@@ -186,7 +186,7 @@ public final class RecoverViewModel: ObservableObject {
                 .map { $0.trimmingCharacters(in: .whitespaces) }
                 .filter { !$0.isEmpty }
             if lines.count < 2 {
-                error = "At least 2 shares required (Lakko default is 3-of-5)."
+                error = "Enter at least three shares, one per line."
                 return
             }
             do {
@@ -195,7 +195,7 @@ public final class RecoverViewModel: ObservableObject {
                 )
             } catch {
                 self.error = (error as? LocalizedError)?.errorDescription
-                    ?? "Couldn't combine shares."
+                    ?? "These shares do not fit together. Check each one and try again."
                 return
             }
         }
@@ -236,7 +236,7 @@ public final class RecoverViewModel: ObservableObject {
                 // surface).
                 if case .Mnemonic = err {
                     busy = false
-                    error = "Invalid recovery phrase. Check the spelling and order of all 24 words."
+                    error = "That is not a valid recovery phrase. Check the spelling and order of the 24 words."
                 } else {
                     busy = false
                     self.error = err.localizedDescription
@@ -247,7 +247,7 @@ public final class RecoverViewModel: ObservableObject {
             } catch {
                 busy = false
                 self.error = (error as? LocalizedError)?.errorDescription
-                    ?? "Recovery failed."
+                    ?? "Could not recover the account. Try again."
             }
         }
     }
@@ -366,7 +366,7 @@ public final class RecoverViewModel: ObservableObject {
             } catch {
                 busy = false
                 self.error = (error as? LocalizedError)?.errorDescription
-                    ?? "Recovery failed."
+                    ?? "Could not recover the account. Try again."
             }
         }
     }
@@ -382,18 +382,18 @@ public final class RecoverViewModel: ObservableObject {
         case .http(let status, _, _):
             switch status {
             case 401:
-                return "Wrong or expired code."
+                return "That code is wrong or has expired. Enter the current code."
             case 429:
-                return "Too many attempts — wait 15 minutes."
+                return "Too many attempts. Wait 15 minutes, then try again."
             case 503:
-                return "Authenticator recovery is not available on this server."
+                return "Recovery with an authenticator app is not available right now. Try another method."
             case 500...599:
-                return "Server error. Please try again shortly."
+                return "Lakko is having trouble right now. Try again in a moment."
             default:
-                return "Recovery failed (\(status))."
+                return "Could not recover the account. Try again."
             }
         case .network:
-            return "Network error. Check your connection and try again."
+            return "No connection. Check your network and try again."
         }
     }
 
@@ -475,7 +475,7 @@ public final class RecoverViewModel: ObservableObject {
             } catch {
                 busy = false
                 self.error = (error as? LocalizedError)?.errorDescription
-                    ?? "Recovery failed."
+                    ?? "Could not recover the account. Try again."
             }
         }
     }
@@ -491,20 +491,20 @@ public final class RecoverViewModel: ObservableObject {
         case .http(let status, _, _):
             switch status {
             case 400:
-                return "That contact looks malformed. Check it and try again."
+                return "That email or phone number does not look right. Check it and try again."
             case 401:
-                return "Wrong or expired code. Check the code we sent and try again."
+                return "That code is wrong or has expired. Check the code you received and try again."
             case 429:
-                return "Too many attempts — wait, then request a fresh code."
+                return "Too many attempts. Wait a moment, then request a new code."
             case 503:
-                return "Email / SMS recovery is not available on this server."
+                return "Recovery by email or text message is not available right now. Try another method."
             case 500...599:
-                return "Server error. Please try again shortly."
+                return "Lakko is having trouble right now. Try again in a moment."
             default:
-                return "Recovery failed (\(status))."
+                return "Could not recover the account. Try again."
             }
         case .network:
-            return "Network error. Check your connection and try again."
+            return "No connection. Check your network and try again."
         }
     }
 
@@ -522,16 +522,16 @@ public final class RecoverViewModel: ObservableObject {
         case .http(let status, _, _):
             switch status {
             case 401:
-                return "Invalid recovery phrase."
+                return "That recovery phrase does not match this account. Check the words and try again."
             case 429:
-                return "Too many attempts. Please wait a moment and retry."
+                return "Too many attempts. Wait a moment, then try again."
             case 500...599:
-                return "Server error. Please try again shortly."
+                return "Lakko is having trouble right now. Try again in a moment."
             default:
-                return "Recovery failed (\(status))."
+                return "Could not recover the account. Try again."
             }
         case .network:
-            return "Network error. Check your connection and try again."
+            return "No connection. Check your network and try again."
         }
     }
 

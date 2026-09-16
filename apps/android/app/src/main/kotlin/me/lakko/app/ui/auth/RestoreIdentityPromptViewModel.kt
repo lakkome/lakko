@@ -61,7 +61,7 @@ public class RestoreIdentityPromptViewModel(
         if (snapshot.busy) return
         if (snapshot.phrase.isBlank()) {
             mutableState.update {
-                it.copy(error = "Recovery phrase must be non-empty.")
+                it.copy(error = "Enter all 24 words first.")
             }
             return
         }
@@ -78,9 +78,8 @@ public class RestoreIdentityPromptViewModel(
                 mutableState.update {
                     it.copy(
                         busy = false,
-                        error = "That recovery phrase doesn't match this " +
-                            "account's identity. Check the phrase, or pair " +
-                            "an existing device instead.",
+                        error = "These words belong to a different account. " +
+                            "Check them, or use another device instead.",
                     )
                 }
             } catch (err: IdentityVerificationUnavailable) {
@@ -88,14 +87,14 @@ public class RestoreIdentityPromptViewModel(
                     it.copy(
                         busy = false,
                         error = err.message
-                            ?: "Could not verify your recovery phrase. Try again.",
+                            ?: "Could not check the phrase right now. Try again.",
                     )
                 }
             } catch (_: FfiException.Mnemonic) {
                 mutableState.update {
                     it.copy(
                         busy = false,
-                        error = "Invalid recovery phrase. Check the spelling " +
+                        error = "That is not a valid phrase. Check the spelling " +
                             "and order of all 24 words.",
                     )
                 }
@@ -107,7 +106,7 @@ public class RestoreIdentityPromptViewModel(
                 mutableState.update {
                     it.copy(
                         busy = false,
-                        error = err.message ?: "Could not restore your identity.",
+                        error = err.message ?: "Could not restore your identity. Try again.",
                     )
                 }
             }
@@ -153,7 +152,7 @@ public class RestoreIdentityPromptViewModel(
                 mutableState.update {
                     it.copy(
                         busy = false,
-                        error = err.message ?: "Could not create a new identity.",
+                        error = err.message ?: "Could not create a new identity. Try again.",
                     )
                 }
             }

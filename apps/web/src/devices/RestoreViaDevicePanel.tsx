@@ -195,9 +195,8 @@ export default function RestoreViaDevicePanel(props: {
               setState({
                 kind: "error",
                 message:
-                  "The other device completed the pairing but sent no " +
-                  "identity payload. Make sure it runs the latest Lakko " +
-                  "version, or use your recovery phrase instead.",
+                  "The other device confirmed but did not send your identity. " +
+                  "Update Lakko on it and try again, or use your recovery phrase.",
               });
               return;
             }
@@ -208,7 +207,7 @@ export default function RestoreViaDevicePanel(props: {
             flow.dispose();
             setState({
               kind: "error",
-              message: "Timed out waiting for the other device. Try again.",
+              message: "The other device did not answer in time. Try again.",
             });
           } else {
             flow.dispose();
@@ -261,7 +260,7 @@ export default function RestoreViaDevicePanel(props: {
           </button>
         </Match>
         <Match when={state().kind === "preparing"}>
-          <p>Preparing pairing material…</p>
+          <p class="lk-muted">Preparing...</p>
         </Match>
         <Match when={state().kind === "waiting"}>
           <div style={{ "text-align": "center", padding: "1rem 0" }}>
@@ -282,10 +281,10 @@ export default function RestoreViaDevicePanel(props: {
             </Show>
             <canvas ref={(el) => setCanvasRef(el)} hidden={code() !== null && !showQr()} />
             <Show when={code() === null || showQr()}>
-              <p style={{ color: "var(--surface-muted)" }}>
-              On your other device, open Devices → Add a device and
-              scan this code…
-            </p>
+              <p class="lk-muted">
+                On your other device, open Settings, then Devices, then Add a device, and
+                scan this code.
+              </p>
             </Show>
             <button type="button" onClick={cancel}>
               Cancel
@@ -293,10 +292,10 @@ export default function RestoreViaDevicePanel(props: {
           </div>
         </Match>
         <Match when={state().kind === "joining"}>
-          <p>Transferring your identity…</p>
+          <p class="lk-muted">Transferring...</p>
         </Match>
         <Match when={state().kind === "done"}>
-          <p class="form-info">Restored. Welcome back.</p>
+          <p class="form-info">Restored.</p>
         </Match>
         <Match when={state().kind === "error"}>
           {(_) => {

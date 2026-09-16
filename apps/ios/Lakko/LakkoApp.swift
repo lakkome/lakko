@@ -16,8 +16,9 @@ import SwiftUI
 ///
 ///   * ``AuthState/loading``  — invisible in practice (rehydrate
 ///     is synchronous), kept for symmetry with the web side.
-///   * ``AuthState/anon(cachedUsername:)`` — ``AnonRoot`` with a
-///     local `Signup` / `Login` / `Recover` toggle.
+///   * ``AuthState/anon(cachedUsername:)`` — ``AnonRoot``, a
+///     `NavigationStack` rooted at the Welcome screen with Log in, Create
+///     account and Recover pushed on it.
 ///   * ``AuthState/session(_:)`` — ``SessionRoot`` (the tab shell).
 @main
 struct LakkoApp: App {
@@ -269,6 +270,14 @@ struct AppRoot: View, Equatable {
     /// published ``UpdateBannerDecision``.
     @StateObject private var releaseChecker = ReleaseUpdateChecker.shared
 
+    /// The recovery phrase a sign-up just generated, until the user has
+    /// confirmed three of its words (UX spec section 5.6). Sign-up lands the
+    /// session inside the repository call, which replaces ``AnonRoot`` at
+    /// the next render, so the phrase step is shown from here, over the
+    /// session, rather than from the sign-up screen. Held in memory only and
+    /// dropped on confirm.
+    @State private var pendingSignupPhrase: String?
+
     init(services: AppServices) {
         self.services = services
         self._authRepository = ObservedObject(wrappedValue: services.authRepository)
@@ -377,7 +386,8 @@ struct AppRoot: View, Equatable {
                 } else {
                     AnonRoot(
                         repository: authRepository,
-                        cachedUsername: cachedUsername
+                        cachedUsername: cachedUsername,
+                        onSignupPhrase: { pendingSignupPhrase = $0 }
                     )
                 }
             }
@@ -400,6 +410,16 @@ struct AppRoot: View, Equatable {
                 services.groupCallHost.reset()
                 services.linkCallHost.reset()
             }
+
+        case .session(let account) where pendingSignupPhrase != nil:
+            // The sign-up phrase step: the session is live, but the user has
+            // not yet confirmed the phrase. Nothing else of the session
+            // mounts until they have.
+            SignupPhraseScreen(
+                phrase: pendingSignupPhrase ?? "",
+                onDone: { pendingSignupPhrase = nil }
+            )
+            .id(account.accountIdB64)
 
         case .session(let account):
             VStack(spacing: 0) {
@@ -997,37 +1017,33 @@ final class ForegroundReceiveHolder: ObservableObject {
     }
 }
 
-/// Anonymous-state router — three destinations (Signup / Login /
-/// Recover) selected via a local `@State` toggle. SwiftUI
-/// `NavigationStack` would also work but adds a navigation bar +
-/// stack-based back-button affordance we don't want during auth
-/// (the back button on an OPAQUE flow would let the user park
-/// halfway through a signup; the explicit "Already have an
-/// account?" link is the only entry / exit we want surfaced).
+/// Anonymous-state router (UX spec section 5.6): a `NavigationStack`
+/// rooted at ``WelcomeScreen``, with Log in, Create account and Recover
+/// pushed on it so the system back button and edge swipe work everywhere.
+/// A returning device (a cached username) starts on Log in with Welcome
+/// underneath.
 ///
-/// Mirror of `apps/android`'s `AnonRoot` from 1.15d6 + the web's
-/// `routes.tsx` `Anon` group.
+/// Mirror of `apps/android`'s `AnonRoot` + the web's `routes.tsx` `Anon`
+/// group.
 private struct AnonRoot: View {
-    /// All three VMs are owned via `@StateObject` so they survive
+    /// The three VMs are owned via `@StateObject` so they survive
     /// view-tree rebuilds (which happen any time the outer
-    /// ``AuthRepository`` publishes — e.g. when ``AuthState`` flips
-    /// from `.loading` to `.anon`). Constructing the VMs inside the
-    /// switch cases would orphan in-flight async Tasks the moment
-    /// SwiftUI re-runs `body`; the `@StateObject` pattern pins them
-    /// to the lifetime of `AnonRoot`.
+    /// ``AuthRepository`` publishes). Constructing them inside the
+    /// destinations would orphan in-flight async Tasks the moment SwiftUI
+    /// re-runs `body`.
     @StateObject private var signupVM: SignupViewModel
     @StateObject private var loginVM: LoginViewModel
     @StateObject private var recoverVM: RecoverViewModel
 
-    @State private var destination: AnonDestination
+    @State private var path: [AnonRoute]
 
-    init(repository: AuthRepository, cachedUsername: String?) {
-        // `StateObject(wrappedValue:)` accepts an autoclosure that
-        // SwiftUI evaluates exactly once on first body evaluation.
-        // The `_property = StateObject(...)` access shape is the
-        // canonical way to seed a property wrapper from an init.
+    init(
+        repository: AuthRepository,
+        cachedUsername: String?,
+        onSignupPhrase: @escaping (String) -> Void
+    ) {
         self._signupVM = StateObject(
-            wrappedValue: SignupViewModel(repository: repository)
+            wrappedValue: SignupViewModel(repository: repository, onPhraseReady: onSignupPhrase)
         )
         self._loginVM = StateObject(
             wrappedValue: LoginViewModel(
@@ -1041,49 +1057,44 @@ private struct AnonRoot: View {
                 cachedUsername: cachedUsername
             )
         )
-        // Default destination keyed on cache: a returning user
-        // (cachedUsername non-nil) lands on Login; a fresh device
-        // lands on Signup. Same posture as Android + web.
-        self._destination = State(
-            initialValue: cachedUsername == nil ? .signup : .login
-        )
+        // A returning user lands on Log in; a fresh device on Welcome.
+        self._path = State(initialValue: cachedUsername == nil ? [] : [.login])
     }
 
     var body: some View {
-        switch destination {
-        case .signup:
-            SignupScreen(
-                viewModel: signupVM,
-                onAuthenticated: {
-                    // No-op — the auth state flip already drives the
-                    // outer router to swap to the tab shell. The
-                    // signup VM uses this hook for the
-                    // recovery-phrase acknowledgement gate; once the
-                    // user acknowledges, the `.session` value is
-                    // already live.
-                },
-                onNavigateToLogin: { destination = .login }
+        NavigationStack(path: $path) {
+            WelcomeScreen(
+                onCreateAccount: { path = [.signup] },
+                onLogIn: { path = [.login] }
             )
-        case .login:
-            LoginScreen(
-                viewModel: loginVM,
-                onNavigateToSignup: { destination = .signup },
-                onNavigateToRecover: { destination = .recover }
-            )
-        case .recover:
-            RecoverScreen(
-                viewModel: recoverVM,
-                onNavigateToLogin: { destination = .login },
-                onNavigateToSignup: { destination = .signup }
-            )
+            .navigationDestination(for: AnonRoute.self) { route in
+                switch route {
+                case .signup:
+                    SignupScreen(
+                        viewModel: signupVM,
+                        onNavigateToLogin: { path = [.login] }
+                    )
+                case .login:
+                    LoginScreen(
+                        viewModel: loginVM,
+                        onNavigateToSignup: { path = [.signup] },
+                        onNavigateToRecover: { path.append(.recover) }
+                    )
+                case .recover:
+                    RecoverScreen(
+                        viewModel: recoverVM,
+                        onNavigateToLogin: { path = [.login] },
+                        onNavigateToSignup: { path = [.signup] }
+                    )
+                }
+            }
         }
+        .tint(Color.lakkoAccent)
     }
 }
 
-/// Three anon destinations. SwiftUI `NavigationStack` lands later
-/// when the authenticated surface needs more than one route
-/// (1.14e+); the local toggle is enough for the OPAQUE-auth phase.
-private enum AnonDestination {
+/// The screens the anonymous stack can push over Welcome.
+private enum AnonRoute: Hashable {
     case signup
     case login
     case recover

@@ -70,6 +70,20 @@ inbox cursor in memory only. Still open after Phase C: "Mark as verified"
 (no store), a delete-account action on Android, device added dates, the
 "Message" action label wrapping on the Android detail.
 
+Phase D landed on all three the same day: a Welcome screen on the natives
+(web keeps the login card as its entry), log in with a password toggle, a
+passkey button and a plain-language "How Lakko protects your password"
+disclosure, sign-up with a guided phrase step (numbered two-column grid,
+Copy, a three-word check at random positions before Continue, social
+recovery behind More options), recovery methods as rows, and the restore
+prompt on the tokens. Both native agents found and fixed the same defect:
+the phrase screen after sign-up was unreachable because the session state
+replaced the anonymous root first. Three-word recovery has no native client
+flow, so the row is web-only. Screenshots: iOS Welcome on a spare simulator
+and the web screens; Android's anonymous screens were not captured (the
+only emulator holds the test account and the disk had no room for a second
+one).
+
 ## 1. What is wrong today
 
 Findings from a code inventory of the three clients (2026-09-16).

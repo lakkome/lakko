@@ -3,61 +3,36 @@
 
 package me.lakko.app.ui.auth
 
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Devices
+import androidx.compose.material.icons.automirrored.filled.Notes
+import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.input.KeyboardCapitalization
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import me.lakko.app.auth.base64Decode
 
+/** The ways to bring the identity onto this phone, as the prompt lists them. */
+private enum class RestoreWay { Phrase, AnotherDevice, Neither }
+
 /**
- * ADR-0017 fresh-device fail-safe prompt — mirror of
- * `apps/web/src/auth/RestoreIdentityPrompt.tsx`.
- *
- * Rendered when the auth state is
- * [me.lakko.app.auth.AuthState.NeedsRecoveryPhrase]: the user
- * authenticated successfully (password / passkey) but this device has
- * no cached AccountIdentity (phrase) seed, so we cannot rebuild the
- * canonical identity. We MUST NOT derive it from the export key (wrong
- * identity now) nor silently mint a fresh one (breaks every contact's
- * pin) — so we ask for the recovery phrase. On submit
- * [RestoreIdentityPromptViewModel] drives
- * [me.lakko.app.auth.AuthRepository.provideRecoveryPhrase], which
- * HARD-BLOCK verifies the phrase against the published identity bundle
- * before finishing the session.
- *
- * [onSignOut] lets the user back out (e.g. they typed the wrong
- * account) — it routes to the host's logout, returning to the Anon
- * flow.
+ * ADR-0017 fresh-device prompt: the user is logged in but this phone holds
+ * no identity yet. A list of ways (recovery phrase, another device, neither)
+ * pushes the matching form; the phrase form is the entry grid with paste.
+ * [RestoreIdentityPromptViewModel] keeps every behaviour: the phrase is
+ * checked against the published identity before the session opens, and
+ * "neither" creates a new identity behind an explicit warning.
  */
 @Composable
 public fun RestoreIdentityPrompt(
@@ -68,178 +43,102 @@ public fun RestoreIdentityPrompt(
     modifier: Modifier = Modifier,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
-    // ADR-0018 factor (a): phrase entry OR restore from another
-    // device. Local UI-only toggle (no persisted state).
-    var viaDevice by remember { mutableStateOf(false) }
+    var way by rememberSaveable { mutableStateOf<RestoreWay?>(null) }
 
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(24.dp),
-    ) {
-        Text(
-            text = "Restore your identity",
-            style = MaterialTheme.typography.headlineMedium,
-        )
-        Spacer(Modifier.height(8.dp))
-        Text(
-            text = "New device — enter your recovery phrase or pair an " +
-                "existing device to restore your secure identity. We " +
-                "verify it against your published identity before " +
-                "continuing, so your contacts keep trusting you without " +
-                "re-verifying.",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Spacer(Modifier.height(4.dp))
-        Text(
-            text = "Signed in as @$username",
-            style = MaterialTheme.typography.bodyMedium,
-        )
-        Spacer(Modifier.height(12.dp))
+    BackHandler(enabled = way != null && !state.busy) { way = null }
 
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            FilterChip(
-                selected = !viaDevice,
-                onClick = { viaDevice = false },
-                label = { Text("Recovery phrase") },
+    when (way) {
+        null -> AuthScaffold(title = "Restore your identity", onBack = null, modifier = modifier) {
+            Lead(
+                "You are logged in as @$username, but this phone does not have your " +
+                    "identity yet. Choose how to bring it over.",
             )
-            FilterChip(
-                selected = viaDevice,
-                onClick = { viaDevice = true },
-                label = { Text("Another device") },
+            Spacer(Modifier.height(16.dp))
+            MethodRow(
+                icon = Icons.AutoMirrored.Filled.Notes,
+                title = "Recovery phrase",
+                subtitle = "Type or paste the 24 words you saved",
+                onClick = { way = RestoreWay.Phrase },
             )
+            MethodRow(
+                icon = Icons.Filled.Devices,
+                title = "Another device",
+                subtitle = "Scan a code with a phone or computer that is still signed in",
+                onClick = { way = RestoreWay.AnotherDevice },
+            )
+            MethodRow(
+                icon = Icons.Outlined.ErrorOutline,
+                title = "I don't have either",
+                subtitle = "Start with a new identity",
+                onClick = { way = RestoreWay.Neither },
+            )
+            FormError(state.error)
+            Spacer(Modifier.height(24.dp))
+            FooterLink(prompt = "Not your account?", action = "Log out", onClick = onSignOut, enabled = !state.busy)
         }
-        Spacer(Modifier.height(12.dp))
 
-        if (viaDevice) {
+        RestoreWay.Phrase -> AuthScaffold(
+            title = "Recovery phrase",
+            onBack = { if (!state.busy) way = null },
+            modifier = modifier,
+        ) {
+            Lead("Enter the 24 words in order. Lakko checks them against your account before continuing.")
+            Spacer(Modifier.height(16.dp))
+            RecoveryPhraseEntryGrid(
+                phrase = state.phrase,
+                onPhraseChange = viewModel::onPhraseChange,
+                enabled = !state.busy,
+                onDone = viewModel::onSubmit,
+            )
+            FormError(state.error)
+            Spacer(Modifier.height(24.dp))
+            BusyButton(
+                label = "Restore",
+                busy = state.busy,
+                busyLabel = "Checking...",
+                onClick = viewModel::onSubmit,
+            )
+            Spacer(Modifier.height(16.dp))
+        }
+
+        RestoreWay.AnotherDevice -> AuthScaffold(
+            title = "Another device",
+            onBack = { if (!state.busy) way = null },
+            modifier = modifier,
+        ) {
             me.lakko.app.ui.devices.RestoreViaDevicePanel(
                 accountIdBytes = base64Decode(accountIdB64),
                 accountIdB64 = accountIdB64,
-                onRecovered = { outcome ->
-                    viewModel.completeFromPairing(outcome)
-                },
+                onRecovered = { outcome -> viewModel.completeFromPairing(outcome) },
             )
-        } else {
-            OutlinedTextField(
-                value = state.phrase,
-                onValueChange = viewModel::onPhraseChange,
-                label = { Text("Recovery phrase (24 words)") },
-                placeholder = { Text("abandon abandon abandon … art") },
-                singleLine = false,
-                enabled = !state.busy,
-                keyboardOptions = KeyboardOptions(
-                    // The BIP39 wordlist is lowercase; autocorrect would
-                    // helpfully rewrite valid words — disable both.
-                    capitalization = KeyboardCapitalization.None,
-                    autoCorrect = false,
-                    keyboardType = KeyboardType.Ascii,
-                    imeAction = ImeAction.Done,
-                ),
-                textStyle = MaterialTheme.typography.bodyMedium.copy(
-                    fontFamily = FontFamily.Monospace,
-                ),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 120.dp),
-            )
-
-            if (state.error != null) {
-                Spacer(Modifier.height(12.dp))
-                Text(
-                    text = state.error!!,
-                    color = MaterialTheme.colorScheme.error,
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-            }
-
-            Spacer(Modifier.height(24.dp))
-
-            Button(
-                onClick = viewModel::onSubmit,
-                enabled = !state.busy,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                if (state.busy) {
-                    CircularProgressIndicator(
-                        modifier = Modifier
-                            .height(20.dp)
-                            .width(20.dp),
-                        strokeWidth = 2.dp,
-                        color = MaterialTheme.colorScheme.onPrimary,
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Text("Verifying…")
-                } else {
-                    Text("Restore identity")
-                }
-            }
+            Spacer(Modifier.height(16.dp))
         }
 
-        Spacer(Modifier.height(16.dp))
-
-        // ADR-0017 lost-everything fallback — an explicit escape hatch for a
-        // user with NO phrase and NO other device. Collapsed behind a
-        // warning; the button is intentionally not the primary action.
-        var showFresh by remember { mutableStateOf(false) }
-        Text(
-            text = if (showFresh) {
-                "I don't have my recovery phrase or another device ▾"
-            } else {
-                "I don't have my recovery phrase or another device ▸"
-            },
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.primary,
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable(enabled = !state.busy) { showFresh = !showFresh },
-        )
-        if (showFresh) {
-            Spacer(Modifier.height(8.dp))
-            Text(
-                text = "This creates a brand-new secure identity for your " +
-                    "account. Your existing contacts will have to verify you " +
-                    "again, any encrypted history on your lost device stays " +
-                    "inaccessible, and you'll get a new recovery phrase to " +
-                    "save. Only do this if you truly cannot recover any other " +
-                    "way.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+        RestoreWay.Neither -> AuthScaffold(
+            title = "Start with a new identity",
+            onBack = { if (!state.busy) way = null },
+            modifier = modifier,
+        ) {
+            Lead(
+                "Without the phrase or another device, your old identity cannot be " +
+                    "brought back. Lakko can create a new one for this account.",
             )
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(12.dp))
+            Lead(
+                "People you already talk to will be asked to verify you again, " +
+                    "messages on your lost devices stay out of reach, and you will get " +
+                    "a new recovery phrase to save.",
+            )
+            FormError(state.error)
+            Spacer(Modifier.height(24.dp))
             OutlinedButton(
                 onClick = viewModel::startFresh,
                 enabled = !state.busy,
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text("Create a new identity")
+                Text(if (state.busy) "Creating..." else "Create a new identity")
             }
-        }
-
-        Spacer(Modifier.height(16.dp))
-
-        Row(
-            horizontalArrangement = Arrangement.Center,
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Text(
-                text = "Not your account? ",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Text(
-                text = "Sign out",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier
-                    .padding(start = 4.dp)
-                    .clickable(enabled = !state.busy, onClick = onSignOut),
-            )
+            Spacer(Modifier.height(16.dp))
         }
     }
 }

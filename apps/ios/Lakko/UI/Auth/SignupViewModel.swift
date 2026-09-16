@@ -48,8 +48,16 @@ public final class SignupViewModel: ObservableObject {
 
     private let repository: AuthRepository
 
-    public init(repository: AuthRepository) {
+    /// Called once with the 24-word phrase right after a successful sign-up.
+    /// The repository lands the session inside `signup`, which replaces the
+    /// anonymous stack (and this view model's screen) at the next render, so
+    /// the phrase step cannot live here; the app root receives it through
+    /// this hook and shows ``SignupPhraseScreen`` over the session.
+    public var onPhraseReady: ((String) -> Void)?
+
+    public init(repository: AuthRepository, onPhraseReady: ((String) -> Void)? = nil) {
         self.repository = repository
+        self.onPhraseReady = onPhraseReady
     }
 
     // MARK: - Submit
@@ -70,7 +78,7 @@ public final class SignupViewModel: ObservableObject {
         // here, before anything reaches the auth service.
         switch checkUsername(username) {
         case .empty:
-            error = "Type a username first."
+            error = "Choose a username first."
             return
         case .invalid(let reason):
             error = reason.message
@@ -83,11 +91,11 @@ public final class SignupViewModel: ObservableObject {
             return
         }
         if password != confirm {
-            error = "Passwords do not match."
+            error = "The passwords do not match. Type the same password twice."
             return
         }
         if password.count < Self.minPasswordLength {
-            error = "Password must be at least \(Self.minPasswordLength) characters."
+            error = "Use at least \(Self.minPasswordLength) characters for the password."
             return
         }
 
@@ -116,7 +124,12 @@ public final class SignupViewModel: ObservableObject {
                 password = ""
                 confirm = ""
                 saveDisplayName(displayNameSnapshot)
-                stage = .phrase(outcome.recoveryPhrase)
+                if let onPhraseReady {
+                    // The owner shows the phrase step; keep no second copy here.
+                    onPhraseReady(outcome.recoveryPhrase)
+                } else {
+                    stage = .phrase(outcome.recoveryPhrase)
+                }
             } catch let err as AuthClientError {
                 busy = false
                 error = userFacing(err)
@@ -126,7 +139,7 @@ public final class SignupViewModel: ObservableObject {
             } catch {
                 busy = false
                 self.error = (error as? LocalizedError)?.errorDescription
-                    ?? "Signup failed."
+                    ?? "Could not create the account. Try again."
             }
         }
     }
@@ -190,16 +203,16 @@ public final class SignupViewModel: ObservableObject {
         case .http(let status, _, _):
             switch status {
             case 409:
-                return "An account with that username already exists."
+                return "That username is taken. Choose another one."
             case 429:
-                return "Too many requests. Please wait a moment and retry."
+                return "Too many attempts. Wait a moment, then try again."
             case 500...599:
-                return "Server error. Please try again shortly."
+                return "Lakko is having trouble right now. Try again in a moment."
             default:
-                return "Signup failed (\(status))."
+                return "Could not create the account. Try again."
             }
         case .network:
-            return "Network error. Check your connection and try again."
+            return "No connection. Check your network and try again."
         }
     }
 

@@ -82,7 +82,7 @@ public final class LoginViewModel: ObservableObject {
             } catch {
                 busy = false
                 self.error = (error as? LocalizedError)?.errorDescription
-                    ?? "Login failed."
+                    ?? "Could not log in. Try again."
             }
         }
     }
@@ -111,7 +111,7 @@ public final class LoginViewModel: ObservableObject {
             } catch {
                 busy = false
                 self.error = (error as? LocalizedError)?.errorDescription
-                    ?? "Passkey sign-in failed."
+                    ?? "Could not log in with the passkey. Try your password instead."
             }
         }
     }
@@ -130,16 +130,16 @@ public final class LoginViewModel: ObservableObject {
         case .http(let status, _, _):
             switch status {
             case 401:
-                return "Invalid credentials."
+                return "Wrong username or password. Check them and try again."
             case 429:
-                return "Too many attempts. Please wait a moment and retry."
+                return "Too many attempts. Wait a moment, then try again."
             case 500...599:
-                return "Server error. Please try again shortly."
+                return "Lakko is having trouble right now. Try again in a moment."
             default:
-                return "Login failed (\(status))."
+                return "Could not log in. Try again."
             }
         case .network:
-            return "Network error. Check your connection and try again."
+            return "No connection. Check your network and try again."
         }
     }
 }

@@ -14,7 +14,7 @@ struct UsernameRuleHint: View {
         if let message = checkUsername(input).inlineMessage {
             Text(message)
                 .font(.footnote)
-                .foregroundStyle(.red)
+                .foregroundStyle(Color.lakkoDanger)
                 .accessibilityLabel("Username: \(message)")
         }
     }

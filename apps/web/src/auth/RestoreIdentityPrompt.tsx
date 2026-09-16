@@ -2,32 +2,31 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0017 fresh-device fail-safe screen.
+ * ADR-0017 fresh-device screen, rendered whenever the auth state is
+ * `needs-recovery-phrase`: the user is logged in (password, passkey or a
+ * recovery code) on a device that has no cached identity seed. The identity
+ * is never derived from the password and never silently re-minted (either
+ * would break every contact's pin); it comes from one of three places:
  *
- * Rendered whenever the auth state is `needs-recovery-phrase`: the
- * user authenticated successfully (password or passkey ACCESS) on a
- * device that has NO cached AccountIdentity (phrase) seed, so the
- * canonical identity cannot be rebuilt. Per ADR-0017 we MUST NOT
- * derive the identity from the OPAQUE export key (that is the wrong
- * identity now that the identity is phrase-seeded) nor silently mint
- * a fresh one (that would break every contact's pin). Two completion
- * routes:
+ *   - three words of the recovery phrase (ADR-0049), opened into the full
+ *     phrase and handed to `provideRecoveryPhrase`;
+ *   - the full phrase, `provideRecoveryPhrase` (verified against the
+ *     published identity, fail-closed);
+ *   - another device that is still logged in (ADR-0018 factor (a)), which
+ *     transfers the seed end-to-end encrypted; `completeFromPairing` runs
+ *     the same verification.
  *
- *   * **Recovery phrase** — the user types the 24 words;
- *     `provideRecoveryPhrase` derives the BIP39 seed, verifies it
- *     against the published bundle (fail-closed on mismatch), caches
- *     it, and completes the session.
- *   * **Another device** (ADR-0018 factor (a), path (a)) — the user
- *     shows a pairing QR to an already-signed-in device, which
- *     transfers the seed (plus a fresh access grant) over the E2EE
- *     rendezvous channel; `completeFromPairing` runs the SAME
- *     fail-closed verification before caching anything.
+ * The lost-everything fallback (`mintFreshIdentity`) sits behind a warning
+ * at the bottom; it is the one path that publishes a new identity.
  */
 import { createSignal, Match, onMount, Show, Switch, type JSX } from "solid-js";
 import { useAuth } from "./AuthContext";
 import { AuthLayout } from "../ui/AuthLayout";
+import { MethodHead, MethodList } from "../ui/MethodList";
 import { PhraseInput } from "../ui/PhraseInput";
 import { WordSlots } from "../ui/WordSlots";
+import { RESTORE_IDENTITY_METHODS, recoverMethod, type RecoverMethodId } from "./recover/methods";
+import { listPositions } from "./recover/WordsRecover";
 import {
   WORD_VAULT_DESTRUCTION_CAP,
   wordVaultErrorMessage,
@@ -45,11 +44,9 @@ import RestoreViaDevicePanel, {
   type DeviceRestoreFlowHandle,
 } from "../devices/RestoreViaDevicePanel";
 
-type Mode = "words" | "phrase" | "device";
-
 export default function RestoreIdentityPrompt(): JSX.Element {
   const auth = useAuth();
-  const [mode, setMode] = createSignal<Mode>("words");
+  const [method, setMethod] = createSignal<RecoverMethodId | null>(null);
   const [phrase, setPhrase] = createSignal("");
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
@@ -58,16 +55,17 @@ export default function RestoreIdentityPrompt(): JSX.Element {
   const [challengeError, setChallengeError] = createSignal<string | null>(null);
   const [words, setWords] = createSignal<string[]>(["", "", ""]);
   const [misses, setMisses] = createSignal(0);
+  const [wordsOff, setWordsOff] = createSignal(false);
   const triesLeft = (): number => WORD_VAULT_DESTRUCTION_CAP - misses();
-  const wordsUnavailable = (): boolean => misses() >= WORD_VAULT_DESTRUCTION_CAP;
+  const wordsUnavailable = (): boolean => wordsOff() || misses() >= WORD_VAULT_DESTRUCTION_CAP;
+
+  const methods = (): typeof RESTORE_IDENTITY_METHODS =>
+    RESTORE_IDENTITY_METHODS.filter((m) => m.id !== "words" || !wordsUnavailable());
 
   const account = (): { username: string; accountIdB64: string } | null => {
     const s = auth.state();
     return s.kind === "needs-recovery-phrase"
-      ? {
-          username: s.account.username,
-          accountIdB64: s.account.accountId,
-        }
+      ? { username: s.account.username, accountIdB64: s.account.accountId }
       : null;
   };
 
@@ -79,9 +77,14 @@ export default function RestoreIdentityPrompt(): JSX.Element {
       .then((c) => setChallenge(c))
       .catch((err: unknown) => {
         setChallengeError(wordVaultErrorMessage(err, null));
-        if (err instanceof AuthHttpError && err.status === 503) setMode("phrase");
+        if (err instanceof AuthHttpError && err.status === 503) setWordsOff(true);
       });
   });
+
+  function pick(id: RecoverMethodId): void {
+    setError(null);
+    setMethod(id);
+  }
 
   async function onSubmitWords(e: SubmitEvent): Promise<void> {
     e.preventDefault();
@@ -99,12 +102,14 @@ export default function RestoreIdentityPrompt(): JSX.Element {
         const next = misses() + 1;
         setMisses(next);
         setWords(["", "", ""]);
-        setError(
-          next >= WORD_VAULT_DESTRUCTION_CAP
-            ? "The three-word shortcut is no longer available for this account. Use another device or your full 24-word phrase."
-            : wordVaultErrorMessage(err, WORD_VAULT_DESTRUCTION_CAP - next),
-        );
-        if (next >= WORD_VAULT_DESTRUCTION_CAP) setMode("phrase");
+        if (next >= WORD_VAULT_DESTRUCTION_CAP) {
+          setError(
+            "The three-word shortcut is now switched off for this account. Use another device or your full recovery phrase.",
+          );
+          setMethod("phrase");
+        } else {
+          setError(wordVaultErrorMessage(err, WORD_VAULT_DESTRUCTION_CAP - next));
+        }
       } else {
         setError(wordVaultErrorMessage(err, null));
       }
@@ -120,8 +125,7 @@ export default function RestoreIdentityPrompt(): JSX.Element {
     try {
       await auth.provideRecoveryPhrase(phrase());
       setPhrase("");
-      // No navigation needed — the state flips to `session` and the
-      // surrounding guard re-renders the protected content.
+      // No navigation: the state flips to `session` and the guard re-renders.
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -129,20 +133,15 @@ export default function RestoreIdentityPrompt(): JSX.Element {
     }
   }
 
-  // ADR-0018 factor (a), path (a) — restore the identity from another
-  // signed-in device. When this browser already has a device key (a
-  // password/passkey session ran here before), use the standard
-  // authenticated join flow. On a FRESH browser with no device key yet
-  // (e.g. ACCESS came via the ADR-0018 TOTP / phone-OTP factor, which
-  // does not derive one until the identity is acquired), fall back to the
-  // ANONYMOUS join flow: it mints an ephemeral per-device seed in memory,
-  // so it needs no pre-existing device key. Either way the transferred
-  // phrase seed + session land via `completeFromPairing`, which caches the
-  // seed and bootstraps a device key from it.
+  // ADR-0018 factor (a), path (a). A browser that already holds a device key
+  // (a password or passkey login ran here before) uses the authenticated join
+  // flow; a fresh browser (access came from a recovery code) uses the
+  // anonymous one, which mints an in-memory device seed. Either way the seed
+  // and the session land via `completeFromPairing`.
   async function prepareDeviceFlow(): Promise<DeviceRestoreFlowHandle> {
     const acct = account();
     if (acct === null) {
-      throw new Error("no pending identity recovery — sign in first");
+      throw new Error("Nothing to restore. Log in first.");
     }
     const accountIdBytes = base64Decode(acct.accountIdB64);
     const deviceKey = await getDeviceKey(acct.accountIdB64);
@@ -182,159 +181,132 @@ export default function RestoreIdentityPrompt(): JSX.Element {
 
   return (
     <AuthLayout>
-        <h1>Restore your identity</h1>
-        <p class="auth-lede">
-          You are signed in as <strong>@{account()?.username ?? ""}</strong> on
-          a new device. The key your contacts trust is restored from three
-          words of your recovery phrase, from a device that is still signed
-          in, or from the full phrase.
-        </p>
-        <div role="tablist" class="lk-actions">
-          <Show when={!wordsUnavailable()}>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={mode() === "words"}
-              class={mode() === "words" ? "primary" : ""}
-              disabled={busy()}
-              onClick={() => {
-                setError(null);
-                setMode("words");
-              }}
-            >
-              Three words
-            </button>
-          </Show>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={mode() === "phrase"}
-            class={mode() === "phrase" ? "primary" : ""}
-            disabled={busy()}
-            onClick={() => {
-              setError(null);
-              setMode("phrase");
-            }}
-          >
-            All 24 words
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={mode() === "device"}
-            class={mode() === "device" ? "primary" : ""}
-            disabled={busy()}
-            onClick={() => {
-              setError(null);
-              setMode("device");
-            }}
-          >
-            Another device
-          </button>
-        </div>
-        <Switch>
-          <Match when={mode() === "words"}>
-            <form onSubmit={onSubmitWords}>
-              <Show
-                when={challenge() !== null}
-                fallback={
-                  <p class="form-info">
-                    {challengeError() ?? "Fetching which words to type…"}
+      <Show
+        when={method()}
+        fallback={
+          <>
+            <h1>Restore your identity</h1>
+            <p class="lk-auth-lede">
+              You are logged in as <strong>@{account()?.username ?? ""}</strong> on a new
+              device. To keep the contacts who already trust you, restore your identity
+              {wordsUnavailable()
+                ? " with your recovery phrase, or from a device that is still logged in."
+                : " with three words, your recovery phrase, or from a device that is still logged in."}
+            </p>
+            <MethodList methods={methods} onPick={pick} disabled={busy} />
+            <Show when={challengeError() !== null && !wordsUnavailable()}>
+              <p class="form-error">{challengeError()}</p>
+            </Show>
+          </>
+        }
+      >
+        {(picked) => (
+          <>
+            <MethodHead
+              method={() => recoverMethod(picked())}
+              onBack={() => setMethod(null)}
+              disabled={busy}
+            />
+            <Switch>
+              <Match when={picked() === "words"}>
+                <form onSubmit={onSubmitWords}>
+                  <Show
+                    when={challenge()}
+                    fallback={
+                      <p class="form-info">{challengeError() ?? "Loading..."}</p>
+                    }
+                  >
+                    {(c) => (
+                      <>
+                        <p class="lk-muted">
+                          Type words <strong>{listPositions(c().positions)}</strong> of your
+                          recovery phrase.
+                        </p>
+                        <WordSlots
+                          positions={() => c().positions}
+                          value={words}
+                          setValue={setWords}
+                          disabled={busy}
+                        />
+                      </>
+                    )}
+                  </Show>
+                  <Show when={error() !== null}>
+                    <div class="form-error" role="alert">
+                      {error()}
+                    </div>
+                  </Show>
+                  <button
+                    class="primary"
+                    type="submit"
+                    disabled={busy() || challenge() === null || !wordsAreAnswerable(words())}
+                  >
+                    {busy() ? "Checking..." : "Continue"}
+                  </button>
+                  <Show when={misses() > 0 && !wordsUnavailable()}>
+                    <p class="form-info">{triesLeft()} tries left.</p>
+                  </Show>
+                </form>
+              </Match>
+              <Match when={picked() === "device"}>
+                <div class="lk-stack">
+                  <p class="lk-muted">
+                    A device that is still logged in shows a prompt; confirm it there and
+                    compare the code. The transfer is end-to-end encrypted; Lakko's servers
+                    cannot read it. No camera needed; a QR code is there if you prefer.
                   </p>
-                }
-              >
-                <p style={{ color: "var(--surface-muted)", "margin-top": 0 }}>
-                  Type words <strong>{challenge()?.positions.join(", ")}</strong>{" "}
-                  of your recovery phrase.
-                </p>
-                <WordSlots
-                  positions={() => challenge()?.positions ?? []}
-                  value={words}
-                  setValue={setWords}
-                  disabled={busy}
-                />
-              </Show>
-              <Show when={error() !== null}>
-                <div class="form-error">{error()}</div>
-              </Show>
-              <button
-                class="primary"
-                type="submit"
-                disabled={busy() || challenge() === null || !wordsAreAnswerable(words())}
-              >
-                {busy() ? "Checking…" : "Continue"}
-              </button>
-              <Show when={misses() > 0 && !wordsUnavailable()}>
-                <p class="form-info">{triesLeft()} tries left.</p>
-              </Show>
-            </form>
-          </Match>
-          <Match when={mode() === "device"}>
-            <div>
-              <p style={{ color: "var(--surface-muted)" }}>
-                Restore from a device that is still signed in: it shows a
-                confirmation prompt, you compare the code, and it transfers
-                your identity end-to-end encrypted. The server never sees
-                it. No camera needed; a QR code is there if you prefer.
-              </p>
-              <RestoreViaDevicePanel
-                prepare={prepareDeviceFlow}
-                requestAccount={() => {
-                  const acct = account();
-                  return acct === null ? null : base64Decode(acct.accountIdB64);
-                }}
-                onRestored={async (outcome) => {
-                  await auth.completeFromPairing(
-                    outcome.phraseSeed,
-                    outcome.sessionToken ?? undefined,
-                    outcome.sessionExpiresAtMs ?? undefined,
-                  );
-                }}
-                disabled={busy()}
-              />
-            </div>
-          </Match>
-          <Match when={mode() === "phrase"}>
-            <form onSubmit={onSubmit}>
-              <PhraseInput value={phrase} setValue={setPhrase} disabled={busy} />
-              <Show when={error() !== null}>
-                <div class="form-error">{error()}</div>
-              </Show>
-              <button class="primary" type="submit" disabled={busy()}>
-                {busy() ? "Restoring…" : "Restore identity"}
-              </button>
-            </form>
-          </Match>
-        </Switch>
-        <LostEverythingPanel busy={busy()} />
-        <p class="form-footer">
-          <button
-            type="button"
-            disabled={busy()}
-            onClick={() => void auth.logout()}
-          >
-            Sign out
-          </button>
-        </p>
+                  <RestoreViaDevicePanel
+                    prepare={prepareDeviceFlow}
+                    requestAccount={() => {
+                      const acct = account();
+                      return acct === null ? null : base64Decode(acct.accountIdB64);
+                    }}
+                    onRestored={async (outcome) => {
+                      await auth.completeFromPairing(
+                        outcome.phraseSeed,
+                        outcome.sessionToken ?? undefined,
+                        outcome.sessionExpiresAtMs ?? undefined,
+                      );
+                    }}
+                    disabled={busy()}
+                  />
+                </div>
+              </Match>
+              <Match when={picked() === "phrase"}>
+                <form onSubmit={onSubmit}>
+                  <PhraseInput value={phrase} setValue={setPhrase} disabled={busy} />
+                  <Show when={error() !== null}>
+                    <div class="form-error" role="alert">
+                      {error()}
+                    </div>
+                  </Show>
+                  <button class="primary" type="submit" disabled={busy()}>
+                    {busy() ? "Restoring..." : "Restore"}
+                  </button>
+                </form>
+              </Match>
+            </Switch>
+          </>
+        )}
+      </Show>
+      <LostEverythingPanel busy={busy()} />
+      <p class="lk-auth-foot">
+        <button type="button" class="ghost small" disabled={busy()} onClick={() => void auth.logout()}>
+          Log out
+        </button>
+      </p>
     </AuthLayout>
   );
 }
 
 /**
- * ADR-0017 lost-everything fallback entry point.
- *
- * The THIRD restore option, below recovery-phrase + another-device:
- * for a user who recovered ACCESS via a factor (TOTP / phone-OTP) but
- * has NEITHER their recovery phrase NOR another signed-in device.
- * Without this they are stuck. This is the ONLY sanctioned path that
- * publishes a CHANGED AccountIdentity key WITHOUT a supersession proof
- * — so it is deliberately NOT the default action: collapsed by default
- * behind a clear warning, and the "Create a new identity" button is a
- * plain (non-primary) destructive-ish action the user must opt into.
+ * ADR-0017 lost-everything fallback: for a user who got back in with a
+ * recovery code but has neither the phrase nor another device. The only
+ * path that publishes a changed identity, so it is collapsed behind a
+ * warning and its button is not the primary action.
  */
 function LostEverythingPanel(props: { busy: boolean }): JSX.Element {
   const auth = useAuth();
-  const [open, setOpen] = createSignal(false);
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
 
@@ -342,11 +314,8 @@ function LostEverythingPanel(props: { busy: boolean }): JSX.Element {
     setError(null);
     setBusy(true);
     try {
-      // Mints + publishes the new identity (without a proof — none is
-      // mintable) and flips the state to `save-fresh-phrase`, which
-      // the guard renders as the phrase-save screen. We discard the
-      // returned phrase here — the save screen reads it back from
-      // `auth.freshPhrase()`.
+      // Mints and publishes the new identity and flips the state to
+      // `save-fresh-phrase`, which the guard renders as the phrase screen.
       await auth.mintFreshIdentity();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -356,49 +325,29 @@ function LostEverythingPanel(props: { busy: boolean }): JSX.Element {
   }
 
   return (
-    <details
-      open={open()}
-      onToggle={(e) => setOpen(e.currentTarget.open)}
-      style={{
-        "margin-top": "1rem",
-        padding: "0.5rem 0.75rem",
-        border: "1px solid var(--surface-border)",
-        "border-radius": "var(--radius-sm)",
-        background: "var(--surface-elevated)",
-      }}
-    >
-      <summary style={{ cursor: "pointer", "font-size": "0.9rem" }}>
-        I don't have my recovery phrase or another device
-      </summary>
-      <div
-        role="alert"
-        style={{
-          margin: "0.75rem 0",
-          padding: "0.6rem 0.75rem",
-          border: "1px solid var(--danger, #b00020)",
-          "border-radius": "var(--radius-sm)",
-          background: "var(--surface-bg)",
-          "font-size": "0.85rem",
-        }}
-      >
-        <strong>This creates a brand-new secure identity for your
-        account.</strong>{" "}
-        Your existing contacts will have to verify you again, any
-        encrypted history on your lost device stays inaccessible, and
-        you'll get a new recovery phrase to save. Only do this if you
-        have genuinely lost both your recovery phrase and every other
-        device.
+    <details class="lk-disclosure">
+      <summary>I have neither my recovery phrase nor another device</summary>
+      <div class="lk-disclosure-body">
+        <div class="lk-alert danger" role="alert">
+          This creates a new identity for your account. Your contacts will need to verify
+          you again, messages on your lost device stay unreadable, and you get a new
+          recovery phrase to save. Only do this if you have lost both your recovery phrase
+          and every other device.
+        </div>
+        <Show when={error() !== null}>
+          <div class="form-error">{error()}</div>
+        </Show>
+        <div class="lk-actions">
+          <button
+            type="button"
+            class="danger"
+            disabled={busy() || props.busy}
+            onClick={() => void onCreate()}
+          >
+            {busy() ? "Creating a new identity..." : "Create a new identity"}
+          </button>
+        </div>
       </div>
-      <Show when={error() !== null}>
-        <div class="form-error">{error()}</div>
-      </Show>
-      <button
-        type="button"
-        disabled={busy() || props.busy}
-        onClick={() => void onCreate()}
-      >
-        {busy() ? "Creating new identity…" : "Create a new identity"}
-      </button>
     </details>
   );
 }

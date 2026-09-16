@@ -3,199 +3,132 @@
 
 import SwiftUI
 
-/// ADR-0017 fresh-device fail-safe screen.
-///
-/// Mirror of `apps/web/src/auth/RestoreIdentityPrompt.tsx`.
-///
-/// Rendered whenever the auth state is
-/// ``AuthState/needsRecoveryPhrase(_:)``: the user authenticated
-/// successfully (password or passkey ACCESS) on a device that has NO
-/// cached AccountIdentity (phrase) seed, so the canonical identity
-/// cannot be rebuilt. Per ADR-0017 we MUST NOT derive the identity
-/// from the OPAQUE export key (the wrong identity now that the
-/// identity is phrase-seeded) nor silently mint a fresh one (which
-/// would break every contact's pin). Instead the user supplies their
-/// recovery phrase; ``AuthRepository/provideRecoveryPhrase(mnemonicPhrase:)``
-/// derives the BIP39 seed, verifies it against the published bundle
-/// (fail-closed on mismatch / fetch failure), caches it, and
-/// completes the session.
-///
-/// Pairing an existing device over the E2EE channel (ADR-0018) is the
-/// other acquisition route and is surfaced as a hint here, but the
-/// phrase-entry path is what this screen wires.
+/// ADR-0017 fresh-device state (``AuthState/needsRecoveryPhrase(_:)``):
+/// the user signed in on a device that holds no copy of their identity, so
+/// the messages cannot be read yet. Two ways forward, the recovery phrase
+/// or a device that is still signed in, and one escape hatch for a user
+/// who has neither. The verification itself is
+/// ``AuthRepository/provideRecoveryPhrase(mnemonicPhrase:)``, unchanged.
 public struct RestoreIdentityPromptScreen: View {
 
     @ObservedObject public var viewModel: RestoreIdentityPromptViewModel
 
-    /// ADR-0018 factor (a): phrase entry OR restore from another
-    /// device. Local UI-only toggle (no persisted state) — mirror of
-    /// the Android `RestoreIdentityPrompt` FilterChip pair.
-    @State private var viaDevice: Bool = false
+    private enum Method: Hashable { case phrase, device }
+
+    @State private var method: Method = .phrase
+    @State private var showingStartOver = false
 
     public init(viewModel: RestoreIdentityPromptViewModel) {
         self.viewModel = viewModel
     }
 
     public var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                Text("Restore your secure identity")
-                    .font(.largeTitle)
-                    .fontWeight(.semibold)
+        AuthScreen {
+            AuthTitle(
+                title: "Restore your account on this device",
+                subtitle: "You are signed in as @\(viewModel.username). To read your messages here, enter your recovery phrase or confirm from a device that is still signed in.")
 
-                Text(
-                    "New device — enter your recovery phrase or pair an " +
-                    "existing device to restore your secure identity for " +
-                    "@\(viewModel.username). Your password got you in, but " +
-                    "your long-term identity (the key your contacts trust) " +
-                    "lives in your 24-word recovery phrase."
-                )
-                .font(.body)
-                .foregroundStyle(.secondary)
+            Picker("Restore with", selection: $method) {
+                Text("Recovery phrase").tag(Method.phrase)
+                Text("Another device").tag(Method.device)
+            }
+            .pickerStyle(.segmented)
+            .disabled(viewModel.busy)
 
-                Picker("Restore mode", selection: $viaDevice) {
-                    Text("Recovery phrase").tag(false)
-                    Text("Another device").tag(true)
+            switch method {
+            case .phrase:
+                PhraseEntryGrid(phrase: $viewModel.phrase, disabled: viewModel.busy)
+
+                if let error = viewModel.error {
+                    AuthHint(text: error, isError: true)
                 }
-                .pickerStyle(.segmented)
+
+                AuthPrimaryButton(
+                    title: "Restore",
+                    busy: viewModel.busy,
+                    busyTitle: "Restoring...",
+                    action: viewModel.onSubmit
+                )
+
+            case .device:
+                if let accountIdBytes = viewModel.accountIdBytes {
+                    RestoreViaDevicePanel(
+                        accountIdBytes: accountIdBytes,
+                        accountIdB64: viewModel.accountIdB64,
+                        onRecovered: { outcome in
+                            try await viewModel.completeFromPairing(outcome: outcome)
+                        }
+                    )
+                    .padding(16)
+                    .background(Color.lakkoSurface)
+                    .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.card))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: LakkoRadius.card)
+                            .stroke(Color.lakkoBorder, lineWidth: 1)
+                    )
+                } else {
+                    AuthHint(
+                        text: "Something is wrong with the account saved on this device. Log out and log in again, or use your recovery phrase.",
+                        isError: true)
+                }
+            }
+
+            // ADR-0017 lost-everything fallback: not a primary action, and
+            // spelled out before the button.
+            VStack(alignment: .leading, spacing: 12) {
+                Button {
+                    withAnimation { showingStartOver.toggle() }
+                } label: {
+                    HStack(spacing: 6) {
+                        Text("I don't have either")
+                            .font(.footnote.weight(.medium))
+                        Image(systemName: showingStartOver ? "chevron.up" : "chevron.down")
+                            .font(.caption.weight(.semibold))
+                    }
+                    .foregroundStyle(Color.lakkoAccent)
+                }
+                .buttonStyle(.plain)
                 .disabled(viewModel.busy)
 
-                if viaDevice {
-                    viaDevicePanel
-                } else {
-                    Text("Recovery phrase (24 words)")
-                        .font(.headline)
-
-                    phraseEditor
-
-                    if let error = viewModel.error {
-                        Text(error)
-                            .font(.body)
-                            .foregroundStyle(.red)
-                    }
-
-                    Button(action: viewModel.onSubmit) {
-                        HStack {
-                            if viewModel.busy {
-                                ProgressView()
-                                    .controlSize(.small)
-                                    .progressViewStyle(.circular)
-                                    .tint(.white)
-                                Text("Restoring…")
-                            } else {
-                                Text("Restore identity")
-                            }
-                        }
-                        .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-                    .disabled(viewModel.busy)
-
-                    Text(
-                        "Don't have your phrase? Switch to \"Another " +
-                        "device\" above to carry your identity across " +
-                        "from a signed-in device, or sign out and start " +
-                        "a new account."
-                    )
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                }
-
-                // ADR-0017 lost-everything fallback — an explicit escape
-                // hatch for a user with NO phrase and NO other device.
-                // Collapsed behind a warning; the button is intentionally
-                // not the primary action.
-                DisclosureGroup(
-                    "I don't have my recovery phrase or another device"
-                ) {
-                    VStack(alignment: .leading, spacing: 8) {
+                if showingStartOver {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Start over with a new identity")
+                            .font(.body.weight(.medium))
+                            .foregroundStyle(Color.lakkoText)
                         Text(
-                            "This creates a brand-new secure identity for your " +
-                            "account. Your existing contacts will have to verify " +
-                            "you again, any encrypted history on your lost device " +
-                            "stays inaccessible, and you'll get a new recovery " +
-                            "phrase to save. Only do this if you truly cannot " +
-                            "recover any other way."
+                            "Your messages on the lost device stay out of reach, your contacts will be asked to verify you again, and you get a new recovery phrase to save. Only do this if nothing else works."
                         )
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-
+                        .font(.subheadline)
+                        .foregroundStyle(Color.lakkoTextMuted)
                         Button(action: viewModel.startFresh) {
-                            Text("Create a new identity")
-                                .frame(maxWidth: .infinity)
+                            Text("Start over")
+                                .font(.body.weight(.medium))
+                                .foregroundStyle(Color.lakkoDanger)
+                                .frame(maxWidth: .infinity, minHeight: 44)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: LakkoRadius.control)
+                                        .stroke(Color.lakkoDanger, lineWidth: 1)
+                                )
                         }
-                        .buttonStyle(.bordered)
+                        .buttonStyle(.plain)
                         .disabled(viewModel.busy)
                     }
-                    .padding(.top, 4)
-                }
-                .disabled(viewModel.busy)
-
-                HStack {
-                    Spacer()
-                    Button(action: viewModel.onSignOut) {
-                        Text("Sign out")
-                            .font(.footnote)
-                    }
-                    .disabled(viewModel.busy)
-                    Spacer()
+                    .padding(16)
+                    .background(Color.lakkoSurface)
+                    .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.card))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: LakkoRadius.card)
+                            .stroke(Color.lakkoBorder, lineWidth: 1)
+                    )
                 }
             }
-            .padding(24)
-        }
-    }
+            .padding(.top, 8)
 
-    /// ADR-0018 factor (a), path (a) — the QR-join flow with the
-    /// recovery payload opted in; completion routes through
-    /// ``RestoreIdentityPromptViewModel/completeFromPairing(outcome:)``.
-    @ViewBuilder
-    private var viaDevicePanel: some View {
-        if let accountIdBytes = viewModel.accountIdBytes {
-            RestoreViaDevicePanel(
-                accountIdBytes: accountIdBytes,
-                accountIdB64: viewModel.accountIdB64,
-                onRecovered: { outcome in
-                    try await viewModel.completeFromPairing(outcome: outcome)
-                }
-            )
-        } else {
-            Text(
-                "The stored account id is malformed. Sign out and sign " +
-                "in again, or restore with your recovery phrase."
-            )
-            .font(.footnote)
-            .foregroundStyle(.red)
+            AuthLinkRow(title: "Log out", disabled: viewModel.busy, action: viewModel.onSignOut)
         }
-    }
-
-    /// Multi-line phrase editor with a manual placeholder overlay —
-    /// same shape `RecoverScreen` uses. Autocorrect / autocapitalise
-    /// are off: autocorrect on a wordlist phrase would helpfully
-    /// rewrite valid BIP39 words into adjacent dictionary entries.
-    private var phraseEditor: some View {
-        ZStack(alignment: .topLeading) {
-            if viewModel.phrase.isEmpty {
-                Text("abandon abandon abandon … art")
-                    .font(.system(.body, design: .monospaced))
-                    .foregroundStyle(.tertiary)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 8)
-                    .allowsHitTesting(false)
-            }
-            TextEditor(text: $viewModel.phrase)
-                .font(.system(.body, design: .monospaced))
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled(true)
-                .scrollContentBackground(.hidden)
-                .disabled(viewModel.busy)
-                .frame(minHeight: 120)
+        .onChange(of: method) { _, _ in
+            // A stale error from the other method should not linger.
+            viewModel.clearError()
         }
-        .background(Color(.secondarySystemBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(Color(.separator), lineWidth: 1)
-        )
     }
 }

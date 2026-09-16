@@ -79,7 +79,7 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
     public func onSubmit() {
         guard !busy else { return } // ignore double-tap
         if phrase.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            error = "Recovery phrase must be non-empty."
+            error = "Enter all 24 words of your recovery phrase."
             return
         }
         busy = true
@@ -98,8 +98,7 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
                 // bad-checksum collapse into one message by design.
                 busy = false
                 if case .Mnemonic = err {
-                    error = "Invalid recovery phrase. Check the spelling " +
-                        "and order of all 24 words."
+                    error = "That is not a valid recovery phrase. Check the spelling and order of the 24 words."
                 } else {
                     error = err.localizedDescription
                 }
@@ -111,11 +110,11 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
                 error = err.errorDescription
             } catch let err as AuthClientError {
                 busy = false
-                error = (err as LocalizedError).errorDescription ?? "Restore failed."
+                error = (err as LocalizedError).errorDescription ?? "Could not restore the account. Try again."
             } catch {
                 busy = false
                 self.error = (error as? LocalizedError)?.errorDescription
-                    ?? "Restore failed."
+                    ?? "Could not restore the account. Try again."
             }
         }
     }
@@ -138,7 +137,7 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
             } catch {
                 busy = false
                 self.error = (error as? LocalizedError)?.errorDescription
-                    ?? "Could not create a new identity."
+                    ?? "Could not start over. Try again."
             }
         }
     }
@@ -147,5 +146,10 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
     /// phrase). Returns to the anon surface.
     public func onSignOut() {
         repository.logout()
+    }
+
+    /// Drop a stale inline error (the screen switches method).
+    public func clearError() {
+        error = nil
     }
 }

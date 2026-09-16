@@ -20,10 +20,9 @@
  * route — the anonymous guard used to navigate home on the very transition
  * that produced the phrase, so it was never seen.
  *
- * The guards read the real auth state behind `useAuth()` —
- * `AuthContext` runs OPAQUE-PAKE round-trips (1.16c) and rehydrates
- * persisted sessions on mount, so the guards see a genuine
- * `loading` / `anon` / `session` value.
+ * The guards read the real auth state behind `useAuth()`, which rehydrates
+ * a persisted session on mount, so they see a genuine `loading` / `anon` /
+ * `session` value.
  */
 import { Match, Show, Switch, type JSX } from "solid-js";
 import { Navigate, useLocation } from "@solidjs/router";
@@ -62,29 +61,13 @@ function IdentitySecurityBanner(): JSX.Element {
   const auth = useAuth();
   return (
     <Show when={auth.identityAlert() !== null}>
-      <div
-        role="alert"
-        style={{
-          background: "var(--danger-bg, #3a1414)",
-          color: "var(--danger-fg, #ffb4b4)",
-          border: "1px solid var(--danger-border, #c0392b)",
-          "border-radius": "8px",
-          padding: "0.75rem 1rem",
-          margin: "0.5rem",
-          display: "flex",
-          gap: "0.75rem",
-          "align-items": "flex-start",
-        }}
-      >
-        <div style={{ flex: "1" }}>
-          <strong>Your account's secure identity was changed.</strong>{" "}
-          Someone published a different identity key for this account. If
-          this was you (you reset your identity on another device), you can
-          dismiss this. If it was NOT you, your account may be compromised —
-          re-verify your safety number with your contacts out of band, and
-          rotate your password / passkeys.
+      <div class="lk-alert danger lk-identity-alert" role="alert">
+        <div class="lk-fill">
+          <strong>Your account's security key was changed.</strong> If that was you, on
+          another device, dismiss this. If it was not, verify your safety numbers with
+          your contacts and change your password and passkeys.
         </div>
-        <button type="button" onClick={() => auth.dismissIdentityAlert()}>
+        <button type="button" class="small" onClick={() => auth.dismissIdentityAlert()}>
           Dismiss
         </button>
       </div>
@@ -124,7 +107,7 @@ function GuardFallback(props: { view: GuardView }): JSX.Element {
   return (
     <Switch>
       <Match when={props.view === "loading"}>
-        <p style={{ padding: "1.5rem" }}>Restoring session…</p>
+        <p class="lk-muted" style={{ padding: "24px" }}>Loading...</p>
       </Match>
       <Match when={props.view === "restore-identity"}>
         <RestoreIdentityPrompt />

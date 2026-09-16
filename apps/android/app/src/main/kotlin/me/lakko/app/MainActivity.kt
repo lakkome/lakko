@@ -105,7 +105,8 @@ import me.lakko.app.updates.UpdateBannerDecision
  * Phase 1.15f4c — drives the **signup-or-login-or-home-or-
  * contacts-or-chats-or-chat** flow:
  *
- *   * `Anon` → [LoginScreen] / [SignupScreen] / [RecoverScreen].
+ *   * `Anon` → [me.lakko.app.ui.auth.WelcomeScreen], with [LoginScreen] /
+ *     [SignupScreen] / [RecoverScreen] pushed from it.
  *   * `Session` → the tabbed shell (Chats / Groups / Channels / Contacts /
  *     Settings) with [ChatScreen] pushed per groupIdHex.
  *
@@ -435,6 +436,9 @@ private fun AppRoot(
     LaunchedEffect(state is AuthState.Session) {
         if (state !is AuthState.Session) {
             deviceGroupSync.clear()
+            // A phrase can only be parked by a sign-up that landed a session;
+            // leaving the session drops it (it is never shown twice).
+            me.lakko.app.ui.auth.SignupPhraseGate.clear()
         }
     }
 
@@ -464,6 +468,20 @@ private fun AppRoot(
             SaveFreshPhraseRoot(repository = authRepository)
         }
         is AuthState.Session -> {
+            // Sign-up lands the session the moment the account exists; the
+            // recovery phrase it produced is shown (and confirmed) here,
+            // before the app, from the in-memory gate.
+            val parkedPhrase by me.lakko.app.ui.auth.SignupPhraseGate.phrase.collectAsState()
+            val phraseToSave = parkedPhrase
+            if (phraseToSave != null) {
+                InsetRoot {
+                    me.lakko.app.ui.auth.RecoveryPhraseOnboarding(
+                        phrase = phraseToSave,
+                        onDone = { me.lakko.app.ui.auth.SignupPhraseGate.clear() },
+                    )
+                }
+                return
+            }
             // ADR-0017 defence-in-depth — surface the identity-changed
             // security alert above the session content.
             val identityAlert by authRepository.identityAlert.collectAsState()
@@ -1257,9 +1275,11 @@ private fun InsetRoot(content: @Composable () -> Unit) {
 }
 
 /**
- * Anon-state subgraph — picks Login, Signup, or Recover. The
- * default destination is keyed on [cachedUsername]. All three
- * screens carry footer links to switch between them.
+ * Signed-out subgraph (docs/ux/client-redesign.md section 5.6): Welcome is
+ * the start destination; Log in, Create account and Recover are pushed from
+ * it inside their own `NavHost`, so the top-app-bar arrow and system back
+ * both pop. [cachedUsername] pre-fills the log-in form and scopes Recover to
+ * the account this phone knows.
  */
 @Composable
 private fun AnonRoot(
@@ -1267,15 +1287,16 @@ private fun AnonRoot(
     cachedUsername: String?,
 ) {
     val appContext = LocalContext.current.applicationContext
-    var destination by remember(cachedUsername) {
-        mutableStateOf(
-            if (cachedUsername != null) AnonDestination.Login
-            else AnonDestination.Signup,
-        )
-    }
+    val nav = rememberNavController()
 
-    when (destination) {
-        AnonDestination.Login -> {
+    NavHost(navController = nav, startDestination = AnonRoutes.WELCOME) {
+        composable(AnonRoutes.WELCOME) {
+            me.lakko.app.ui.auth.WelcomeScreen(
+                onCreateAccount = { nav.navigate(AnonRoutes.SIGNUP) { launchSingleTop = true } },
+                onLogIn = { nav.navigate(AnonRoutes.LOGIN) { launchSingleTop = true } },
+            )
+        }
+        composable(AnonRoutes.LOGIN) {
             val loginVm: LoginViewModel = viewModel(
                 key = "login-${cachedUsername ?: ""}",
                 factory = singletonViewModelFactory {
@@ -1284,11 +1305,11 @@ private fun AnonRoot(
             )
             LoginScreen(
                 viewModel = loginVm,
-                onNavigateToSignup = { destination = AnonDestination.Signup },
-                onNavigateToRecover = { destination = AnonDestination.Recover },
+                onBack = { nav.popBackStack() },
+                onNavigateToRecover = { nav.navigate(AnonRoutes.RECOVER) { launchSingleTop = true } },
             )
         }
-        AnonDestination.Signup -> {
+        composable(AnonRoutes.SIGNUP) {
             val signupVm: SignupViewModel = viewModel(
                 factory = singletonViewModelFactory {
                     SignupViewModel(
@@ -1298,16 +1319,18 @@ private fun AnonRoot(
                         saveOwnProfile = { accountId, profile ->
                             me.lakko.app.profile.OwnProfileStore.save(appContext, accountId, profile)
                         },
+                        // The guided phrase step renders above the session
+                        // (AppRoot reads the gate) once sign-up lands it.
+                        parkRecoveryPhrase = { me.lakko.app.ui.auth.SignupPhraseGate.park(it) },
                     )
                 },
             )
             SignupScreen(
                 viewModel = signupVm,
-                onAuthenticated = {},
-                onNavigateToLogin = { destination = AnonDestination.Login },
+                onBack = { nav.popBackStack() },
             )
         }
-        AnonDestination.Recover -> {
+        composable(AnonRoutes.RECOVER) {
             val recoverVm: RecoverViewModel = viewModel(
                 key = "recover-${cachedUsername ?: ""}",
                 factory = singletonViewModelFactory {
@@ -1316,17 +1339,17 @@ private fun AnonRoot(
             )
             RecoverScreen(
                 viewModel = recoverVm,
-                onNavigateToLogin = { destination = AnonDestination.Login },
-                onNavigateToSignup = { destination = AnonDestination.Signup },
+                onBack = { nav.popBackStack() },
             )
         }
     }
 }
 
-private enum class AnonDestination {
-    Login,
-    Signup,
-    Recover,
+private object AnonRoutes {
+    const val WELCOME = "welcome"
+    const val LOGIN = "login"
+    const val SIGNUP = "signup"
+    const val RECOVER = "recover"
 }
 
 /**

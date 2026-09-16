@@ -1003,8 +1003,14 @@ a.lk-row.active {
   font-weight: 700;
   margin: 0;
 }
-.auth-card .auth-lede {
+.auth-card .lk-auth-lede {
   margin: -12px 0 0;
+  color: var(--surface-muted);
+  text-wrap: pretty;
+}
+.auth-card .lk-auth-step {
+  margin: -12px 0 0;
+  font-size: 13px;
   color: var(--surface-muted);
 }
 .auth-card form {
@@ -1016,30 +1022,270 @@ a.lk-row.active {
   min-height: 44px;
   margin-top: 4px;
 }
-.auth-card .form-footer {
+.auth-card .lk-auth-foot {
   margin: 0;
   font-size: 14px;
   color: var(--surface-muted);
 }
-.auth-card .form-footer + .form-footer {
+.auth-card .lk-auth-foot + .lk-auth-foot {
   margin-top: -10px;
 }
-/* The 24-word recovery phrase. */
-.lk-phrase {
+.auth-card .form-error[role="alert"] {
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--danger-soft);
+}
+
+/* Password input with a show / hide toggle. */
+.lk-password {
+  position: relative;
+  margin-top: 6px;
+}
+.lk-password > input {
+  padding-right: 44px;
+  font-weight: 400;
+}
+.lk-password > .lk-icon-button {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 32px;
+  height: 32px;
+}
+
+/* The 24-word recovery phrase, read-only: two columns of numbered words on
+   the sunken surface, 1..12 down the left and 13..24 down the right. */
+.lk-phrase-block {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.lk-phrase-cols {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 6px 20px;
-  padding: 14px 14px 14px 40px;
-  margin: 0;
+  gap: 0 20px;
+  padding: 14px 16px;
   background: var(--surface-sunken);
   border-radius: var(--radius-md);
+}
+.lk-phrase-cols ol {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.lk-phrase-cols li {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 15px;
-  line-height: 22px;
+  line-height: 24px;
 }
-.lk-phrase li::marker {
-  color: var(--surface-muted);
+.lk-phrase-num {
+  flex: 0 0 22px;
+  text-align: right;
   font-size: 12px;
+  color: var(--surface-muted);
+  font-variant-numeric: tabular-nums;
+}
+.lk-phrase-word {
+  overflow-wrap: anywhere;
+  border-radius: 4px;
+  padding: 0 6px;
+  margin-left: -6px;
+}
+.lk-phrase-cols li.pick .lk-phrase-word {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* A checkbox with its sentence. */
+.lk-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 20px;
+}
+.lk-check > input[type="checkbox"] {
+  margin: 3px 0 0;
+  flex: 0 0 auto;
+}
+
+/* A collapsed section: a summary line, the body underneath. */
+.lk-disclosure {
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius-md);
+  background: var(--surface-elevated);
+  padding: 0 14px;
+}
+.lk-disclosure > summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 0;
+  font-size: 14px;
+  font-weight: 500;
+}
+.lk-disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+.lk-disclosure > summary::after {
+  content: "";
+  margin-left: auto;
+  width: 8px;
+  height: 8px;
+  border-right: 1.8px solid var(--surface-muted);
+  border-bottom: 1.8px solid var(--surface-muted);
+  transform: rotate(45deg);
+  transition: transform 120ms ease;
+}
+.lk-disclosure[open] > summary::after {
+  transform: rotate(-135deg);
+}
+.lk-disclosure[open] > summary {
+  border-bottom: 1px solid var(--surface-border);
+}
+.lk-disclosure-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 0 14px;
+  font-size: 14px;
+  line-height: 20px;
+}
+.lk-disclosure-body > p {
+  margin: 0;
+  color: var(--surface-muted);
+  text-wrap: pretty;
+}
+/* The link-styled variant: a small accent line, no frame. */
+.lk-disclosure.link {
+  border: none;
+  background: transparent;
+  padding: 0;
+}
+.lk-disclosure.link > summary {
+  padding: 0;
+  font-size: 13px;
+  color: var(--accent);
+}
+.lk-disclosure.link > summary::after {
+  display: none;
+}
+.lk-disclosure.link > summary:hover {
+  text-decoration: underline;
+}
+.lk-disclosure.link[open] > summary {
+  border-bottom: none;
+  margin-bottom: 8px;
+}
+.lk-disclosure.link > .lk-disclosure-body {
+  padding: 0;
+}
+
+/* Ways to recover: tappable rows, then the chosen method under a heading
+   that leads back. */
+.lk-method-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.lk-method-row {
+  width: 100%;
+  min-height: 60px;
+  padding: 8px 12px;
+  gap: 12px;
+  justify-content: flex-start;
+  text-align: left;
+  white-space: normal;
+  font-weight: 400;
+  border-radius: var(--radius-md);
+}
+.lk-method-row > .lk-card-row-icon {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.lk-method-row > svg:last-child {
+  color: var(--surface-faint);
+}
+.lk-method-row-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.lk-method-row-title {
+  font-size: 15px;
+  font-weight: 500;
+}
+.lk-method-row-sub {
+  font-size: 13px;
+  color: var(--surface-muted);
+}
+.lk-identity-alert {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  margin: 8px;
+}
+.lk-code-input,
+.lk-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.lk-code-input {
+  letter-spacing: 0.25em;
+}
+.lk-share-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.lk-share-row > code {
+  flex: 1;
+  font-size: 12px;
+}
+.lk-share-num {
+  flex: 0 0 18px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--surface-muted);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.lk-disclosure-body > h3 {
+  margin: 0;
+}
+.lk-method-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: -8px;
+}
+.lk-method-head > h2 {
+  margin: 0;
+  min-width: 0;
+}
+.lk-method-head > .lk-card-row-icon {
+  width: 32px;
+  height: 32px;
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 
 /* Public landings (/i/, /g/, /c/): the logo, then one card. */
@@ -1301,12 +1547,16 @@ a.ghost.small.lk-wide-only {
 }
 .lk-phrase-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 6px;
-  padding: 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: repeat(12, auto);
+  grid-auto-flow: column;
+  gap: 6px 12px;
+  padding: 12px;
   margin: 0;
   list-style: none;
   counter-reset: lk-word;
+  background: var(--surface-sunken);
+  border-radius: var(--radius-md);
 }
 .lk-phrase-grid li {
   position: relative;
@@ -1320,8 +1570,9 @@ a.ghost.small.lk-wide-only {
   transform: translateY(-50%);
   width: 26px;
   text-align: right;
-  font-size: 11px;
-  color: var(--surface-faint);
+  font-size: 12px;
+  color: var(--surface-muted);
+  font-variant-numeric: tabular-nums;
   pointer-events: none;
 }
 .lk-phrase-grid input {
@@ -1414,15 +1665,14 @@ a.ghost.small.lk-wide-only {
   max-width: min(560px, calc(100% - 32px));
   z-index: 60;
 }
-.lk-phrase li.lk-phrase-pick > span {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-  border-radius: 4px;
-  background: var(--accent-soft);
-}
-@media (max-width: 520px) {
+@media (max-width: 360px) {
   .lk-phrase-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: none;
+    grid-auto-flow: row;
+  }
+  .lk-phrase-cols {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 

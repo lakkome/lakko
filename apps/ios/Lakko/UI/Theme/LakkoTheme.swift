@@ -187,3 +187,20 @@ extension Color {
         })
     }
 }
+
+// MARK: - Brand
+
+/// The brand gradient (design system section 1): dark indigo to light
+/// indigo, the same in both schemes. It appears on the logo tile only,
+/// never on a page, card, button or bubble.
+enum LakkoBrand {
+    static let gradientStart = Color(light: 0x312E81, dark: 0x312E81)
+    static let gradientEnd = Color(light: 0x818CF8, dark: 0x818CF8)
+
+    static var gradient: LinearGradient {
+        LinearGradient(
+            colors: [gradientStart, gradientEnd],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing)
+    }
+}

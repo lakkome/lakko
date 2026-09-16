@@ -2,26 +2,29 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * Login route — drives a real OPAQUE-PAKE round-trip through
- * `AuthContext.login`. Servers: `lakko-svc-auth` (OPAQUE) +
- * `lakko-svc-discovery` (username → account_id resolution),
- * via Vite's `/api/auth/*` and `/api/discovery/*` dev proxies.
+ * Login route (docs/ux/client-redesign.md section 5.6): username, password
+ * with a show / hide toggle, Log in, "Use passkey", "Forgot password?" and
+ * one small link that explains how the password is protected. The screen
+ * says nothing about how the login works.
  *
- * 1.16d2 lifted the single-device limitation: the form now
- * resolves the typed username via `/discovery/lookup` when the
- * local cache misses, so a fresh browser can log in to any
- * account whose username is registered. Cache hits (re-login on
- * the same device) skip the lookup round-trip.
+ * The form drives `AuthContext.login`, which resolves the typed username
+ * through the directory when the local cache misses, so a fresh browser can
+ * log in to any registered account. Errors are mapped to screen copy at the
+ * edge (`auth-error-copy.ts`), which keeps the context's enumeration-safe
+ * collapse: an unknown username and a wrong password read the same.
  */
 import { createSignal, Show, type JSX } from "solid-js";
 import { A, useLocation, useNavigate } from "@solidjs/router";
 import { paths } from "./paths";
 import { useAuth } from "../auth/AuthContext";
+import { loginErrorMessage, passkeyErrorMessage } from "../auth/auth-error-copy";
+import { PasswordExplainer } from "../auth/PasswordExplainer";
 import { readReturnUrl } from "../auth/return-url";
 import { WebauthnClient } from "../auth/webauthn-client";
 import { UsernameHint } from "../profile/UsernameHint";
 import { requireValidUsername } from "../profile/username-field";
 import { AuthLayout } from "../ui/AuthLayout";
+import { PasswordField } from "../ui/PasswordField";
 import { Icon } from "../ui/icons";
 
 export default function Login(): JSX.Element {
@@ -29,11 +32,8 @@ export default function Login(): JSX.Element {
   const navigate = useNavigate();
   const location = useLocation();
 
-  // Pre-fill from the device-cached username (1.16c3b) as a
-  // convenience. The form accepts arbitrary usernames — 1.16d2
-  // wired cross-device discovery, so `AuthContext.login` resolves
-  // any registered username via `/discovery/lookup` on a cache
-  // miss. The prefill is just the last account seen on this device.
+  // Pre-filled with the last account seen on this device; any registered
+  // username is accepted.
   const cached = (): string => {
     const s = auth.state();
     return s.kind === "anon" && s.cachedUsername !== undefined
@@ -48,7 +48,7 @@ export default function Login(): JSX.Element {
   async function onSubmit(e: SubmitEvent): Promise<void> {
     e.preventDefault();
     setError(null);
-    // ADR-0048 §4 — a name that fails the username rule is never looked up.
+    // ADR-0048 section 4: a name that fails the username rule is never looked up.
     let canonical: string;
     try {
       canonical = await requireValidUsername(username());
@@ -59,15 +59,11 @@ export default function Login(): JSX.Element {
     setBusy(true);
     try {
       await auth.login(canonical, password());
-      // 1.18e — honour `?return=<path>` from the URL so an anon
-      // visitor who clicked "Log in" from the invite landing
-      // (`/i/:slug`) lands back there after auth. Validated
-      // path-only by `readReturnUrl`; falls back to `/` when
-      // the param is absent, malformed, or an open-redirect
-      // attempt.
+      // `?return=<path>` from an invite landing is honoured; validated
+      // path-only by `readReturnUrl`, `/` otherwise.
       navigate(readReturnUrl(location), { replace: true });
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(loginErrorMessage(err));
     } finally {
       setBusy(false);
     }
@@ -80,20 +76,15 @@ export default function Login(): JSX.Element {
       await auth.loginWithPasskey(username());
       navigate(readReturnUrl(location), { replace: true });
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(passkeyErrorMessage(err));
     } finally {
       setBusy(false);
     }
   }
 
-  // 2a2c2 — show the passkey affordance only when the browser
-  // supports WebAuthn AND the user has logged in here before
-  // (the export-key cache is populated). The "logged in here
-  // before" check is a coarse heuristic — we use the cached
-  // (accountId, username) marker that the prior signup / login
-  // / recover would have written to localStorage. A real cache
-  // miss (key store cleared, ciphertext tampered) surfaces
-  // later as a clean error message from `loginWithPasskey`.
+  // The passkey button shows when the browser supports it AND an account has
+  // logged in here before (the cached username is the marker). A real cache
+  // miss surfaces later as a clean sentence from `loginWithPasskey`.
   const passkeyAvailable = (): boolean => {
     if (!WebauthnClient.isWebauthnAvailable()) return false;
     const s = auth.state();
@@ -102,54 +93,57 @@ export default function Login(): JSX.Element {
 
   return (
     <AuthLayout>
-        <h1>Welcome back</h1>
-        <p class="auth-lede">Log in to continue.</p>
-        <form onSubmit={onSubmit}>
-          <label>
-            Username
-            <input
-              type="text"
-              autocomplete="username"
-              required
-              value={username()}
-              onInput={(e) => setUsername(e.currentTarget.value)}
-              disabled={busy()}
-            />
-          </label>
-          <UsernameHint value={username} />
-          <label>
-            Password
-            <input
-              type="password"
-              autocomplete="current-password"
-              required
-              value={password()}
-              onInput={(e) => setPassword(e.currentTarget.value)}
-              disabled={busy()}
-            />
-          </label>
-          {error() !== null && <div class="form-error">{error()}</div>}
-          <button class="primary" type="submit" disabled={busy()}>
-            {busy() ? "Logging in…" : "Log in"}
-          </button>
-        </form>
-        <Show when={passkeyAvailable()}>
-          <button
-            type="button"
+      <h1>Welcome back</h1>
+      <p class="lk-auth-lede">Log in to continue.</p>
+      <form onSubmit={onSubmit}>
+        <label>
+          Username
+          <input
+            type="text"
+            autocomplete="username"
+            autocapitalize="none"
+            spellcheck={false}
+            required
+            value={username()}
+            onInput={(e) => setUsername(e.currentTarget.value)}
             disabled={busy()}
-            onClick={() => void onPasskeyLogin()}
-            style={{ "margin-top": "-6px" }}
-          >
-            <Icon name="key" size={18} />
-            Log in with a passkey
-          </button>
+          />
+        </label>
+        <UsernameHint value={username} />
+        <PasswordField
+          label="Password"
+          autocomplete="current-password"
+          value={password}
+          setValue={setPassword}
+          disabled={busy}
+        />
+        <Show when={error() !== null}>
+          <div class="form-error" role="alert">
+            {error()}
+          </div>
         </Show>
-        <p class="form-footer">
-          New to Lakko? <A href={paths.signup}>Create an account</A>
-        </p>
-        <p class="form-footer">
-          Forgot your password? <A href={paths.recover}>Use your recovery phrase</A>
-        </p>
+        <button class="primary" type="submit" disabled={busy()}>
+          {busy() ? "Logging in..." : "Log in"}
+        </button>
+      </form>
+      <Show when={passkeyAvailable()}>
+        <button
+          type="button"
+          disabled={busy()}
+          onClick={() => void onPasskeyLogin()}
+          style={{ "margin-top": "-8px" }}
+        >
+          <Icon name="key" size={18} />
+          Use passkey
+        </button>
+      </Show>
+      <p class="lk-auth-foot">
+        <A href={paths.recover}>Forgot password?</A>
+      </p>
+      <p class="lk-auth-foot">
+        New to Lakko? <A href={paths.signup}>Create account</A>
+      </p>
+      <PasswordExplainer />
     </AuthLayout>
   );
 }
