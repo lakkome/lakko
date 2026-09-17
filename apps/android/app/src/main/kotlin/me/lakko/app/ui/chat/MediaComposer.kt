@@ -112,7 +112,11 @@ import me.lakko.app.media.RecordedTake
 import me.lakko.app.media.RecorderThread
 import me.lakko.app.media.SentTakeOutcome
 import me.lakko.app.media.sentTakeOutcome
+import me.lakko.app.media.CameraLens
+import me.lakko.app.media.VideoNoteOutcome
 import me.lakko.app.media.VideoNoteRecorder
+import me.lakko.app.media.VideoStartFailure
+import me.lakko.app.media.videoNoteFinishOutcome
 import me.lakko.app.media.VoiceRecorder
 import me.lakko.app.media.capFor
 import me.lakko.app.media.formatClock
@@ -126,12 +130,18 @@ private const val TAG = "LakkoRecordController"
 private const val TICK_MS = 100L
 private const val NOTICE_MS = 2_500L
 
+/** A failure hint stays up longer: it explains why a take that looked like it
+ *  was recording produced nothing. */
+private const val FAILURE_NOTICE_MS = 5_000L
+
 /** UX spec §2 / §3 / §6 copy. */
 internal object RecordCopy {
     const val HOLD_TO_RECORD = "Hold to record"
     const val CANCELLED = "Cancelled"
     const val NO_CAMERA = "No camera found"
     const val START_FAILED = "Couldn't start recording"
+    const val FLIP_FAILED = "Couldn't switch camera"
+    const val STARTING_CAMERA = "Starting camera"
     const val IN_CALL = "Unavailable during a call"
     const val SLIDE_TO_CANCEL = "Slide to cancel"
     const val DENIED_MIC = "Lakko needs microphone access to record voice messages"
@@ -169,7 +179,13 @@ internal class RecordController(
         private set
     var mode by mutableStateOf(hub.prefs.recordMode)
         private set
-    var frontFacing by mutableStateOf(true)
+    /** `true` while a video-note take is actually recording (the camera is
+     *  bound and CameraX accepted the recording); `false` while it starts. */
+    var videoLive by mutableStateOf(false)
+        private set
+
+    /** A locked video note can switch to another built-in camera. */
+    var canFlip by mutableStateOf(false)
         private set
 
     private var inCallState by mutableStateOf(false)
@@ -189,7 +205,14 @@ internal class RecordController(
             }
         }
 
-    private val cameraPresent: Boolean = VideoNoteRecorder.hasAnyCamera(context)
+    /** The package manager's view; CameraX may still report fewer cameras. */
+    private val cameraFeature: Boolean = VideoNoteRecorder.hasAnyCamera(context)
+
+    /** What CameraX reported, once asked: `null` while unknown. */
+    private var cameraLenses: Set<CameraLens>? = null
+    private var cameraProbe: Job? = null
+    private val cameraPresent: Boolean
+        get() = cameraFeature && cameraLenses?.isNotEmpty() != false
     internal var requestPermissions: ((Array<String>) -> Unit)? = null
 
     private var voice: VoiceRecorder? = null
@@ -203,9 +226,33 @@ internal class RecordController(
     private var noticeJob: Job? = null
     private var startJob: Job? = null
     private var captureStartedAt: Long = 0L
+    /** When the video-note start began, for [videoNoteFinishOutcome]. */
+    private var videoStartRequestedAt: Long = 0L
+    private var videoStartFailure: VideoStartFailure? = null
 
     init {
         if (mode == CaptureKind.VIDEO_NOTE && !cameraPresent) mode = CaptureKind.VOICE
+        if (mode == CaptureKind.VIDEO_NOTE) probeCameras()
+    }
+
+    /**
+     * §3 "No camera present" — ask CameraX which cameras it can bind, so a
+     * device where it lists none leaves camera mode before a hold rather than
+     * showing a recording UI with no camera behind it. Also warms the CameraX
+     * provider, so the first hold binds sooner.
+     */
+    private fun probeCameras() {
+        if (cameraLenses != null || cameraProbe?.isActive == true || !cameraFeature) return
+        cameraProbe = scope.launch {
+            val provider = VideoNoteRecorder.obtainProvider(context) ?: return@launch
+            val lenses = VideoNoteRecorder.cameraInfos(provider).keys
+            cameraLenses = lenses
+            if (lenses.isEmpty() && mode == CaptureKind.VIDEO_NOTE && state is RecState.Idle) {
+                Log.w(TAG, "no camera reported; leaving camera mode")
+                mode = CaptureKind.VOICE
+                hub.prefs.recordMode = mode
+            }
+        }
     }
 
     private fun now(): Long = SystemClock.elapsedRealtime()
@@ -215,7 +262,17 @@ internal class RecordController(
 
     fun press(pointer: PointerKind, xDp: Float, yDp: Float) {
         if (disabledReason != null) return
+        if (refuseVideoWithoutCamera()) return
         dispatch(RecEvent.Press(mode, pointer, xDp, yDp, now(), permissionHint(mode)))
+    }
+
+    /** Camera mode on a device known to have no camera: say so, record nothing. */
+    private fun refuseVideoWithoutCamera(): Boolean {
+        if (mode != CaptureKind.VIDEO_NOTE || state !is RecState.Idle || cameraPresent) return false
+        mode = CaptureKind.VOICE
+        hub.prefs.recordMode = mode
+        showFailure(RecordCopy.NO_CAMERA)
+        return true
     }
 
     fun move(xDp: Float, yDp: Float) = dispatch(RecEvent.Move(xDp, yDp))
@@ -230,6 +287,7 @@ internal class RecordController(
     /** TalkBack / switch access: a single activation starts a LOCKED take. */
     fun activate() {
         if (disabledReason != null) return
+        if (refuseVideoWithoutCamera()) return
         dispatch(RecEvent.Activate(mode, now(), permissionHint(mode)))
     }
 
@@ -247,7 +305,8 @@ internal class RecordController(
 
     fun flipCamera() {
         val v = video ?: return
-        if (v.flip()) frontFacing = v.frontFacing
+        if (!v.flip()) showNotice(RecordCopy.FLIP_FAILED)
+        canFlip = v.canFlip
     }
 
     fun attachPreview(view: PreviewView?) {
@@ -330,24 +389,30 @@ internal class RecordController(
     private fun toggleMode() {
         if (mode == CaptureKind.VOICE) {
             if (!cameraPresent) {
-                showNotice(RecordCopy.NO_CAMERA)
+                showFailure(RecordCopy.NO_CAMERA)
                 return
             }
             mode = CaptureKind.VIDEO_NOTE
+            probeCameras()
         } else {
             mode = CaptureKind.VOICE
         }
         hub.prefs.recordMode = mode
     }
 
-    private fun showNotice(text: String) {
+    private fun showNotice(text: String, durationMs: Long = NOTICE_MS) {
         notice = text
         noticeJob?.cancel()
         noticeJob = scope.launch {
-            delay(NOTICE_MS)
+            delay(durationMs)
             notice = null
         }
     }
+
+    private fun showFailure(text: String) = showNotice(text, FAILURE_NOTICE_MS)
+
+    private fun videoFailureCopy(failure: VideoStartFailure): String =
+        if (failure == VideoStartFailure.NO_CAMERA) RecordCopy.NO_CAMERA else RecordCopy.START_FAILED
 
     private fun startCapture(kind: CaptureKind) {
         elapsedMs = 0L
@@ -386,7 +451,10 @@ internal class RecordController(
         } else {
             val rec = VideoNoteRecorder(context, lifecycleOwner)
             video = rec
-            frontFacing = rec.frontFacing
+            videoLive = false
+            canFlip = false
+            videoStartFailure = null
+            videoStartRequestedAt = now()
             startTick()
             startJob = scope.launch {
                 // The round preview composes once the state is Recording /
@@ -396,15 +464,44 @@ internal class RecordController(
                     previewView
                 }
                 if (!isCapturing(state) || video !== rec) return@launch
-                val file = hub.newEntryFile("take-${UUID.randomUUID()}", "video-note-$stamp.mp4")
-                val ok = view != null && file != null && rec.bind(view) &&
-                    rec.start(file) { scope.launch { dispatch(RecEvent.CaptureFailed) } }
-                if (!ok) {
-                    Log.w(TAG, "video note capture did not start")
-                    showNotice(RecordCopy.START_FAILED)
+                val bound = if (view == null) {
+                    VideoNoteRecorder.BindResult.FAILED
+                } else {
+                    rec.bind(view)
+                }
+                if (!isCapturing(state) || video !== rec) return@launch
+                if (bound == VideoNoteRecorder.BindResult.BOUND) {
+                    cameraLenses = rec.availableLenses
+                } else if (bound == VideoNoteRecorder.BindResult.NO_CAMERA) {
+                    cameraLenses = emptySet()
+                }
+                val failure = when (bound) {
+                    VideoNoteRecorder.BindResult.NO_CAMERA -> VideoStartFailure.NO_CAMERA
+                    VideoNoteRecorder.BindResult.FAILED -> VideoStartFailure.FAILED
+                    VideoNoteRecorder.BindResult.BOUND -> {
+                        val file = hub.newEntryFile("take-${UUID.randomUUID()}", "video-note-$stamp.mp4")
+                        val started = file != null && rec.start(file) {
+                            scope.launch {
+                                if (video !== rec) return@launch
+                                Log.w(TAG, "video note recording failed")
+                                showFailure(RecordCopy.START_FAILED)
+                                dispatch(RecEvent.CaptureFailed)
+                            }
+                        }
+                        if (started) null else VideoStartFailure.FAILED
+                    }
+                }
+                if (failure != null) {
+                    // Never leave a recording UI up with no camera behind it:
+                    // say why, release the camera, return to the composer.
+                    Log.w(TAG, "video note capture did not start: $failure")
+                    videoStartFailure = failure
+                    showFailure(videoFailureCopy(failure))
                     dispatch(RecEvent.CaptureFailed)
                 } else {
                     captureStartedAt = now()
+                    videoLive = true
+                    canFlip = rec.canFlip
                 }
             }
         }
@@ -417,7 +514,8 @@ internal class RecordController(
                 delay(TICK_MS)
                 val kind = currentKind() ?: break
                 val v = voice
-                val starting = v != null && voiceStart?.isCompleted != true
+                val starting = (v != null && voiceStart?.isCompleted != true) ||
+                    (video != null && !videoLive)
                 elapsedMs = if (starting) 0L else now() - captureStartedAt
                 if (v != null && !starting) {
                     level = withContext(RecorderThread.dispatcher) { v.sampleLevel() }.toFloat()
@@ -439,10 +537,16 @@ internal class RecordController(
         val v = voice
         val vStart = voiceStart
         val vn = video
+        val videoWasLive = videoLive
+        val videoFailure = videoStartFailure
         voice = null
         voiceStart = null
         video = null
+        videoLive = false
+        canFlip = false
+        videoStartFailure = null
         val elapsed = now() - captureStartedAt
+        val sinceVideoStart = now() - videoStartRequestedAt
         when (disposition) {
             FinishDisposition.DISCARD -> {
                 if (v != null) {
@@ -484,6 +588,26 @@ internal class RecordController(
                             RecorderThread.scope.launch { d.await().take?.file?.delete() }
                         }
                         throw e
+                    }
+                    if (vn != null) {
+                        val outcome = videoNoteFinishOutcome(
+                            takeDurationMs = take?.durationMs,
+                            startFailure = videoFailure,
+                            recording = videoWasLive,
+                            recordedMs = elapsed,
+                            sinceStartMs = sinceVideoStart,
+                        )
+                        if (outcome != VideoNoteOutcome.USABLE) {
+                            Log.w(TAG, "video note take ended without a clip: $outcome")
+                            deleteOffMain(take?.file)
+                            when (outcome) {
+                                VideoNoteOutcome.HOLD_TO_RECORD -> showNotice(RecordCopy.HOLD_TO_RECORD)
+                                VideoNoteOutcome.NO_CAMERA -> showFailure(RecordCopy.NO_CAMERA)
+                                else -> showFailure(RecordCopy.START_FAILED)
+                            }
+                            if (disposition == FinishDisposition.PREVIEW) dispatch(RecEvent.PreviewFailed)
+                            return@launch
+                        }
                     }
                     if (disposition == FinishDisposition.PREVIEW) {
                         if (take == null) {
@@ -532,6 +656,8 @@ internal class RecordController(
         video?.release()
         voice = null
         video = null
+        videoLive = false
+        cameraProbe?.cancel()
         preview?.file?.delete()
         preview = null
         state = RecState.Idle
@@ -696,7 +822,7 @@ internal fun RecordingBar(controller: RecordController, modifier: Modifier = Mod
                 style = MaterialTheme.typography.bodyMedium,
             )
             Spacer(Modifier.weight(1f))
-            if (s.kind == CaptureKind.VIDEO_NOTE) {
+            if (s.kind == CaptureKind.VIDEO_NOTE && controller.canFlip) {
                 IconButton(onClick = controller::flipCamera) {
                     Icon(Icons.Filled.Cameraswitch, contentDescription = "Flip camera")
                 }
@@ -868,12 +994,24 @@ internal fun VideoNoteOverlay(controller: RecordController, modifier: Modifier =
                         },
                         modifier = Modifier.size(260.dp).clip(CircleShape),
                     )
-                    CircularProgressIndicator(
-                        progress = { (controller.elapsedMs.toFloat() / cap).coerceIn(0f, 1f) },
-                        modifier = Modifier.size(276.dp),
-                        strokeWidth = 4.dp,
-                        color = MaterialTheme.colorScheme.error,
-                    )
+                    if (controller.videoLive) {
+                        CircularProgressIndicator(
+                            progress = { (controller.elapsedMs.toFloat() / cap).coerceIn(0f, 1f) },
+                            modifier = Modifier.size(276.dp),
+                            strokeWidth = 4.dp,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    } else {
+                        // The camera is still coming up: no progress ring and
+                        // no running counter until the recording really runs.
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(276.dp).semantics {
+                                contentDescription = RecordCopy.STARTING_CAMERA
+                            },
+                            strokeWidth = 4.dp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
             }
             if (s is RecState.Recording) {

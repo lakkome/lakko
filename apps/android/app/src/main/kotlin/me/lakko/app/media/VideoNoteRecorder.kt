@@ -11,6 +11,7 @@ import android.media.MediaMetadataRetriever
 import android.util.Log
 import android.util.Rational
 import android.view.Surface
+import androidx.camera.core.CameraInfo
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.MirrorMode
 import androidx.camera.core.Preview
@@ -33,6 +34,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.ByteArrayOutputStream
 import java.io.File
 import kotlin.coroutines.resume
@@ -48,6 +50,9 @@ import kotlin.coroutines.resume
  *     This is the documented CameraX mechanism; it has not been observed on a
  *     device in this change (nothing ran on one), which the receiving side
  *     tolerates: the bubble draws the clip through a circle either way.
+ *   * **Camera choice.** The front camera, else the back camera, else any
+ *     camera ([chooseVideoNoteLens]); [bind] reports `NO_CAMERA` only when
+ *     CameraX lists none, so a device with a single rear camera records.
  *   * **Flip while locked.** The recording is started as a PERSISTENT
  *     recording (CameraX 1.4), which keeps running when `VideoCapture` is
  *     rebound to the other camera. Without it, a flip would finalize the take.
@@ -78,14 +83,36 @@ public class VideoNoteRecorder(
     private var finalized: CompletableDeferred<Boolean>? = null
     private var previewView: PreviewView? = null
 
-    public var frontFacing: Boolean = true
+    /** The lens bound right now, or `null` before a successful bind. */
+    public var lens: CameraLens? = null
         private set
 
-    /** Bind the camera to [view] and prepare the recorder. */
-    public suspend fun bind(view: PreviewView): Boolean {
+    /** The lenses CameraX reported at the last [bind]. */
+    public var availableLenses: Set<CameraLens> = emptySet()
+        private set
+
+    /** The outcome of [bind]. */
+    public enum class BindResult { BOUND, NO_CAMERA, FAILED }
+
+    /**
+     * Bind a camera to [view] and prepare the recorder: the front camera when
+     * there is one, else the back camera, else any camera
+     * ([chooseVideoNoteLens]).
+     */
+    public suspend fun bind(view: PreviewView): BindResult {
         previewView = view
-        val p = obtainProvider() ?: return false
+        val p = obtainProvider(context) ?: return if (hasAnyCamera(context)) {
+            BindResult.FAILED
+        } else {
+            BindResult.NO_CAMERA
+        }
         provider = p
+        val infos = cameraInfos(p)
+        availableLenses = infos.keys
+        val chosen = chooseVideoNoteLens(infos.keys) ?: run {
+            Log.w(TAG, "no camera available to bind")
+            return BindResult.NO_CAMERA
+        }
         if (preview == null) {
             preview = Preview.Builder().build()
         }
@@ -103,25 +130,27 @@ public class VideoNoteRecorder(
                 .build()
         }
         preview?.setSurfaceProvider(view.surfaceProvider)
-        return rebind(p)
+        return if (rebind(p, chosen)) BindResult.BOUND else BindResult.FAILED
     }
 
-    private fun rebind(p: ProcessCameraProvider): Boolean {
+    private fun rebind(p: ProcessCameraProvider, target: CameraLens): Boolean {
         val pv = preview ?: return false
         val vc = capture ?: return false
-        val selector = if (frontFacing) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
         return try {
-            if (!p.hasCamera(selector)) return false
+            val info = cameraInfos(p)[target] ?: return false
             val group = UseCaseGroup.Builder()
                 .setViewPort(ViewPort.Builder(Rational(1, 1), Surface.ROTATION_0).build())
                 .addUseCase(pv)
                 .addUseCase(vc)
                 .build()
             p.unbindAll()
-            p.bindToLifecycle(lifecycleOwner, selector, group)
+            p.bindToLifecycle(lifecycleOwner, info.cameraSelector, group)
+            lens = target
             true
         } catch (e: Exception) {
             Log.w(TAG, "camera bind failed: ${e.javaClass.simpleName}")
+            runCatching { p.unbindAll() }
+            lens = null
             false
         }
     }
@@ -154,13 +183,17 @@ public class VideoNoteRecorder(
         }
     }
 
+    /** `true` when there is another built-in lens to flip to. */
+    public val canFlip: Boolean
+        get() = lens?.let { flipTarget(availableLenses, it) } != null
+
     /** Switch between the front and back camera; a running recording goes on. */
     public fun flip(): Boolean {
         val p = provider ?: return false
-        frontFacing = !frontFacing
-        if (rebind(p)) return true
-        frontFacing = !frontFacing
-        rebind(p)
+        val current = lens ?: return false
+        val target = flipTarget(availableLenses, current) ?: return false
+        if (rebind(p, target)) return true
+        rebind(p, current)
         return false
     }
 
@@ -228,17 +261,6 @@ public class VideoNoteRecorder(
         previewView = null
     }
 
-    private suspend fun obtainProvider(): ProcessCameraProvider? =
-        suspendCancellableCoroutine { cont ->
-            val future = ProcessCameraProvider.getInstance(context)
-            future.addListener(
-                {
-                    cont.resume(runCatching { future.get() }.getOrNull())
-                },
-                ContextCompat.getMainExecutor(context),
-            )
-        }
-
     public companion object {
         private const val TAG = "LakkoVideoNoteRecorder"
         public const val VIDEO_NOTE_MIME: String = "video/mp4"
@@ -249,8 +271,53 @@ public class VideoNoteRecorder(
         /** Poster side, in px — the bubble is about 240 dp. */
         public const val POSTER_SIDE: Int = 240
 
+        /** A CameraX provider that has not come up in this long is treated as
+         *  failed: the take must not sit in a recording UI with no camera. */
+        private const val PROVIDER_TIMEOUT_MS = 6_000L
+
         public fun hasAnyCamera(context: Context): Boolean =
             context.packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY)
+
+        /**
+         * The process CameraX provider, or `null` when initialization failed
+         * or did not finish within [PROVIDER_TIMEOUT_MS]. CameraX initializes
+         * once per process; calling this early (when the composer enters
+         * camera mode) warms it so a hold finds it ready.
+         */
+        public suspend fun obtainProvider(context: Context): ProcessCameraProvider? =
+            withTimeoutOrNull(PROVIDER_TIMEOUT_MS) {
+                suspendCancellableCoroutine { cont ->
+                    val future = ProcessCameraProvider.getInstance(context)
+                    future.addListener(
+                        {
+                            val result = runCatching { future.get() }
+                            result.exceptionOrNull()?.let {
+                                Log.w(TAG, "camera provider unavailable: ${it.javaClass.simpleName}")
+                            }
+                            cont.resume(result.getOrNull())
+                        },
+                        ContextCompat.getMainExecutor(context),
+                    )
+                }
+            }
+
+        /** The cameras CameraX can bind, one per facing (the first wins). */
+        public fun cameraInfos(p: ProcessCameraProvider): Map<CameraLens, CameraInfo> {
+            val infos = runCatching { p.availableCameraInfos }.getOrElse {
+                Log.w(TAG, "camera enumeration failed: ${it.javaClass.simpleName}")
+                emptyList()
+            }
+            val out = LinkedHashMap<CameraLens, CameraInfo>()
+            for (info in infos) {
+                val facing = when (runCatching { info.lensFacing }.getOrNull()) {
+                    CameraSelector.LENS_FACING_FRONT -> CameraLens.FRONT
+                    CameraSelector.LENS_FACING_BACK -> CameraLens.BACK
+                    else -> CameraLens.OTHER
+                }
+                out.putIfAbsent(facing, info)
+            }
+            return out
+        }
 
         /** First frame as a JPEG of at most [POSTER_MAX_BYTES] bytes. */
         internal fun posterFrom(retriever: MediaMetadataRetriever): PosterFrame? {
