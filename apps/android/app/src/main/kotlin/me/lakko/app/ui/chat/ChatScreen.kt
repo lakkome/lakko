@@ -181,12 +181,12 @@ public fun ChatScreen(
     // once per composition; the UI marks which reaction chips we contributed
     // (and can toggle off). Never our leaf — see `AuthorIdentity.kt`.
     val ownIdentity = remember(state.groupIdHex) { viewModel.ownChatIdentity() }
-    // ADR-0024 — the live roster's other members, re-sampled when the
-    // membership / read-watermark map shifts. The Bubble's "Read" tick needs
-    // every other member's watermark `>=` the message's id.
-    val otherMembers = remember(state.groupIdHex, state.readUpToByMember) {
-        viewModel.otherChatIdentities()
-    }
+    // ADR-0024 — the live roster's other members. The Bubble's "Read" tick
+    // needs every other member's watermark `>=` the message's id, and the
+    // header counts them. Collected from the view model, which re-reads the
+    // roster after every repository emission: keying a `remember` on the
+    // read-watermark map missed a roster that grew with no receipt arriving.
+    val otherMembers by viewModel.otherMemberIdentities.collectAsStateWithLifecycle()
     // ADR-0048 — resolved names update in place when a profile arrives or a
     // username verifies. The header of a two-member chat names the other
     // person; a group keeps its label, and its incoming bubbles carry author

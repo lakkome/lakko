@@ -224,6 +224,7 @@ public class ChatViewModel(
         viewModelScope.launch {
             repo.state.collect { repoState ->
                 derived.value = buildState(repoState, composer.value)
+                mutableOtherMemberIdentities.value = otherChatIdentities()
                 // ADR-0045 UX §6.2 — re-read the core's own membership
                 // predicate after every repository emission. Nothing in the
                 // receive path announces the transition
@@ -405,6 +406,21 @@ public class ChatViewModel(
 
     /** Live MLS roster for this group at the current epoch. */
     public val members: StateFlow<List<GroupMember>> = mutableMembers.asStateFlow()
+
+    /**
+     * The other people in this chat, re-read after every repository emission.
+     *
+     * The header's "N members" and the Read tick both need the live roster, and
+     * a membership change arrives without anything the screen already watches
+     * changing: a creator's own proposal is swept at the tail of a poll, so the
+     * group grew while the header kept "2 members" until the chat was reopened
+     * (seen live on 2026-09-17). A `StateFlow` drops equal sets, so the screen
+     * recomposes only when the roster actually changed.
+     */
+    private val mutableOtherMemberIdentities: MutableStateFlow<Set<me.lakko.app.chat.MemberIdentity>> =
+        MutableStateFlow(emptySet())
+    public val otherMemberIdentities: StateFlow<Set<me.lakko.app.chat.MemberIdentity>> =
+        mutableOtherMemberIdentities.asStateFlow()
 
     private val mutableMembersPanelOpen: MutableStateFlow<Boolean> =
         MutableStateFlow(false)
